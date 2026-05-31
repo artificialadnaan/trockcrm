@@ -13,10 +13,14 @@ const ROLE_DEFAULT_SCOPE: Record<PipelineRole, PipelineScope> = {
   admin: "mine",
 };
 
+// Team scope is parked (PR #512) and not configured anywhere, so it is not an allowed scope
+// -- a stage-route bookmark like /deals/stages/X?scope=team coerces to the role default
+// (mine) and redirects, matching the list/board pages that dropped the Team pill (D-12b).
+// PipelineScope keeps "team" in the union for coercion inputs; do not change the type.
 const ROLE_ALLOWED_SCOPES: Record<PipelineRole, readonly PipelineScope[]> = {
-  rep: ["mine", "team", "all"],
-  director: ["mine", "team", "all"],
-  admin: ["mine", "team", "all"],
+  rep: ["mine", "all"],
+  director: ["mine", "all"],
+  admin: ["mine", "all"],
 };
 
 function coerceScope(value: string | null): PipelineScope | null {

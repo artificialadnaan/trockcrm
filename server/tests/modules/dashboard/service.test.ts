@@ -579,9 +579,11 @@ describe("Dashboard Service", () => {
       const result = await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
       const repCardsQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
 
-      expect(repCardsQueryText).not.toContain("and u.role = 'rep'");
       expect(repCardsQueryText).toContain("deal_owners");
-      expect(repCardsQueryText).toContain("u.role = 'rep' or owner_rows.rep_id is not null");
+      // D-5: the rep branch is office-scoped, but the locked owner branch is preserved un-gated
+      // so deal-owning directors/admins (and cross-office owners) still appear in the roster.
+      expect(repCardsQueryText).toContain("u.role = 'rep' and u.office_id =");
+      expect(repCardsQueryText).toContain("or owner_rows.rep_id is not null");
       expect(result.repCards.map((row) => row.repName)).toEqual(["Alex Rep", "Brett Bell", "Adnaan Iqbal"]);
       expect(result.repCards.find((row) => row.repName === "Brett Bell")).toMatchObject({
         activeDeals: 3,
@@ -644,9 +646,11 @@ describe("Dashboard Service", () => {
         .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
         .find((text: string) => text.includes("qualified_leads") && text.includes("deal_owners"));
 
-      expect(funnelQueryText).not.toContain("and u.role = 'rep'");
       expect(funnelQueryText).toContain("deal_owners");
-      expect(funnelQueryText).toContain("u.role = 'rep' or owner_rows.rep_id is not null");
+      // D-5: rep branch office-scoped; locked owner branch preserved un-gated so deal-owning
+      // directors/admins still appear.
+      expect(funnelQueryText).toContain("u.role = 'rep' and u.office_id =");
+      expect(funnelQueryText).toContain("or owner_rows.rep_id is not null");
       expect(result.repFunnelRows.map((row) => row.repName)).toEqual([
         "Alex Rep",
         "James Helms",
@@ -1416,8 +1420,13 @@ describe("Dashboard Service", () => {
 
       expect(rosterQuery, "rep-performance roster query").toBeDefined();
       expect(funnelQuery, "director funnel rep-rows query").toBeDefined();
-      expect(rosterQuery).toContain("u.office_id =");
-      expect(funnelQuery).toContain("u.office_id =");
+      // The office filter gates ONLY the rep branch, so foreign-office reps are excluded...
+      expect(rosterQuery).toContain("u.role = 'rep' and u.office_id =");
+      expect(funnelQuery).toContain("u.role = 'rep' and u.office_id =");
+      // ...while the locked owner-row requirement survives, so a cross-office deal owner who
+      // owns a deal in THIS office is still kept (not dropped by a blanket office predicate).
+      expect(rosterQuery).toContain("owner_rows.rep_id is not null");
+      expect(funnelQuery).toContain("owner_rows.rep_id is not null");
     });
 
     it("does not read admin-configured stale thresholds for stale lead watchlists", async () => {

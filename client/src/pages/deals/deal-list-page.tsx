@@ -685,7 +685,11 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
   const { assignees } = useTaskAssignees();
-  const selectedRepId = searchParams.get("assignedRepId") || "__all__";
+  // When a parked ?scope=team bookmark is coerced to mine, drop any stale owner filter from
+  // the URL too -- otherwise the Mine board (the viewer's deals) is intersected with another
+  // rep's owner filter and renders empty instead of the intended Mine view (D-12b).
+  const selectedRepId =
+    requestedScope === "team" ? "__all__" : searchParams.get("assignedRepId") || "__all__";
   const selectedRepFilter = selectedRepId === "__all__" ? undefined : selectedRepId;
   const selectedRepLabel =
     selectedRepId === "__all__"

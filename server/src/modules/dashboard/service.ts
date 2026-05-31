@@ -910,13 +910,16 @@ async function getDirectorFunnelSummary(
       LEFT JOIN lead_counts lc ON lc.rep_id = u.id
       LEFT JOIN deal_counts dc ON dc.rep_id = u.id
       WHERE u.is_active = true
-        -- D-5: office-scope the funnel roster (users is global/public), matching the rep-card
-        -- roster and the Source-B snapshot read so foreign-office reps do not leak in.
-        ${officeId ? sql`AND u.office_id = ${officeId}` : sql``}
         -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
         -- funnel roster too, matching the rep-card roster.
         AND COALESCE(u.is_test_data, false) = false
-        AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
+        -- D-5: office-scope ONLY the rep branch (users is global/public), matching the rep-card
+        -- roster + Source-B read, while preserving the locked owner-row requirement (a deal
+        -- owner in THIS office is kept even if their primary users.office_id differs).
+        AND (
+          (u.role = 'rep'${officeId ? sql` AND u.office_id = ${officeId}` : sql``})
+          OR owner_rows.rep_id IS NOT NULL
+        )
       ORDER BY
         (
           COALESCE(lc.leads, 0) +
@@ -2819,17 +2822,20 @@ async function buildRepPerformanceCards(
     LEFT JOIN rep_wins rw ON rw.rep_id = u.id
     LEFT JOIN rep_activities ra ON ra.rep_id = u.id
     WHERE u.is_active = true
-      -- D-5: users is a GLOBAL (public) table, so without this predicate the roster admits
-      -- reps from EVERY office. Scope to the active office, matching the Source-B snapshot
-      -- read (getRepPerformanceSnapshots) and materializer, so foreign-office reps no longer
-      -- leak in (Source A drifted by omitting it). The locked owner-row requirement below is
-      -- preserved -- it is now correctly bounded to this office's deal owners.
-      ${officeId ? sql`AND u.office_id = ${officeId}` : sql``}
       -- P2-8: exclude smoke-test accounts + the flagged duplicate human row from the rep
       -- roster. Test DEALS are already excluded from Won (deals.is_test_data), so this
       -- changes only WHO appears, never the Won total.
       AND COALESCE(u.is_test_data, false) = false
-      AND (u.role = 'rep' OR owner_rows.rep_id IS NOT NULL)
+      -- D-5: users is a GLOBAL (public) table, so an unscoped role='rep' branch admits reps
+      -- from EVERY office. Office-scope ONLY the rep branch (matching the Source-B snapshot
+      -- read + materializer) so foreign-office reps no longer leak in -- without weakening the
+      -- locked requirement to keep anyone who has owned a deal in THIS office. owner_rows is
+      -- built from this tenant's deals, so a multi-office / transferred owner whose primary
+      -- users.office_id differs is still preserved via the owner branch.
+      AND (
+        (u.role = 'rep'${officeId ? sql` AND u.office_id = ${officeId}` : sql``})
+        OR owner_rows.rep_id IS NOT NULL
+      )
     ORDER BY pipeline_value DESC
   `);
   const staleLeadCounts = await getStaleLeadCountsByRep(tenantDb);

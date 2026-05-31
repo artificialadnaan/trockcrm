@@ -1132,6 +1132,14 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
   });
 
+  it("drops a stale owner filter when a team bookmark is coerced to mine (D-12b)", () => {
+    renderPage("/deals?scope=team&assignedRepId=rep-2", "director");
+
+    // Coerced to mine AND the owner filter cleared (6th arg undefined), so the Mine board is
+    // not intersected with rep-2's deals into an empty result.
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined, {});
+  });
+
   it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/deals?scope=all", "rep");
 
