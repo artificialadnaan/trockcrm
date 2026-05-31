@@ -83,18 +83,20 @@ describe("LeadsListSection — shared FilterBar on the leads list (Wave 1)", () 
     expect(buttons.find((b) => b.textContent?.trim() === "Active")).toBeUndefined(); // deal status absent
   });
 
-  it("maps URL filters to useLeads via the lead adapter (lead status + outcome date), inheriting page scope", async () => {
-    await render("/leads?status=converted&dateFrom=2026-05-01&dateTo=2026-05-31&assignedRepId=__unassigned__&sortBy=created_at&sortDir=desc");
+  it("maps the NAMESPACED (ll_*) URL filters to useLeads via the lead adapter, inheriting page scope; ignores bare board params", async () => {
+    // ll_* = the list's own namespace; a bare `search` is the BOARD's and must NOT reach the list.
+    await render("/leads?ll_status=converted&ll_dateFrom=2026-05-01&ll_dateTo=2026-05-31&ll_assignedRepId=rep-1&ll_sortBy=created_at&ll_sortDir=desc&search=board");
     const call = lastLeadsCall();
     expect(call).toMatchObject({
       status: "converted",
       dateFrom: "2026-05-01",
       dateTo: "2026-05-31",
-      assignedRepId: "__unassigned__",
+      assignedRepId: "rep-1",
       sortBy: "created_at",
       sortDir: "desc",
       scope: "all", // inherited from the page (bar doesn't own scope here)
     });
+    expect(call.search).toBeUndefined(); // the board's bare ?search is NOT read by the namespaced list
   });
 
   it("renders the outcome-aware displayDate in the Date column (filter-axis == display-axis)", async () => {
