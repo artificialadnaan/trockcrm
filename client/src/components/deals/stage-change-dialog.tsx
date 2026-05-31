@@ -85,6 +85,58 @@ export function getStageRequirementAction(
   return null;
 }
 
+type StageGateMissing =
+  | { fields?: string[]; documents?: string[]; approvals?: string[] }
+  | null
+  | undefined;
+
+/**
+ * True when the ONLY thing blocking the gate is a missing `expectedCloseDate` field -- no other
+ * missing fields, documents, or approvals, and not a backward move, and not from the `close_out`
+ * stage. In that case the inline date prompt alone can clear the gate (the server re-validates with
+ * the pending date), so the dialog must not redirect to the overview OR demand a director override
+ * reason.
+ *
+ * The `close_out` exclusion is load-bearing: the server stage-gate's close-out-checklist rule
+ * (validateStageGate Rule 2) can require a director override on a `close_out -> won` move WITHOUT
+ * surfacing anything in `missingRequirements`. That override source is invisible here, and the inline
+ * date does NOT clear it -- so skipping the override there would let the dialog send no reason and get
+ * a hard 400 (OVERRIDE_REQUIRED) from the server. From `close_out` we conservatively keep requiring
+ * the override reason.
+ */
+export function isExpectedCloseDateSoleGateBlocker(
+  missingRequirements: StageGateMissing,
+  isBackwardMove: boolean | undefined,
+  currentStageSlug: string | null | undefined
+): boolean {
+  const fields = missingRequirements?.fields ?? [];
+  return (
+    fields.length === 1 &&
+    fields.includes("expectedCloseDate") &&
+    (missingRequirements?.documents?.length ?? 0) === 0 &&
+    (missingRequirements?.approvals?.length ?? 0) === 0 &&
+    !isBackwardMove &&
+    currentStageSlug !== "close_out"
+  );
+}
+
+/**
+ * True when the inline expected-close-date alone resolves the gate: it's the sole blocker AND the rep
+ * has supplied a usable (today-or-future) value. When true the POST re-validates with the pending date
+ * and the server no longer requires an override -- so the override-reason requirement (computed by the
+ * preflight before this inline value existed) must be skipped, and the footer button unblocked.
+ */
+export function isGateResolvedByInlineCloseDate(
+  missingRequirements: StageGateMissing,
+  isBackwardMove: boolean | undefined,
+  currentStageSlug: string | null | undefined,
+  expectedCloseDate: string,
+  today: string
+): boolean {
+  const dateUsable = expectedCloseDate !== "" && expectedCloseDate >= today;
+  return isExpectedCloseDateSoleGateBlocker(missingRequirements, isBackwardMove, currentStageSlug) && dateUsable;
+}
+
 interface StageChangeDialogProps {
   deal: {
     id: string;
@@ -145,6 +197,24 @@ export function StageChangeDialog({
   const [lostCompetitor, setLostCompetitor] = useState("");
   const [expectedCloseDate, setExpectedCloseDate] = useState("");
 
+  // Derived gate state -- the single source of truth for both submit-time validation and the footer
+  // button. Inline expected-close-date prompt: when the only thing the gate is missing is
+  // expectedCloseDate, let the rep set a usable (today-or-future) date here and advance in one action.
+  const todayDateStr = businessTodayDateStr();
+  const needsExpectedCloseDate = (preflight?.missingRequirements?.fields ?? []).includes("expectedCloseDate");
+  const onlyExpectedCloseDateMissing = isExpectedCloseDateSoleGateBlocker(
+    preflight?.missingRequirements,
+    preflight?.isBackwardMove,
+    preflight?.currentStage?.slug
+  );
+  const unblockedByExpectedCloseDate = isGateResolvedByInlineCloseDate(
+    preflight?.missingRequirements,
+    preflight?.isBackwardMove,
+    preflight?.currentStage?.slug,
+    expectedCloseDate,
+    todayDateStr
+  );
+
   // Run preflight check on mount
   useEffect(() => {
     if (!open) return;
@@ -179,23 +249,23 @@ export function StageChangeDialog({
         }
       }
 
-      // Validate override reason
-      if (preflight.requiresOverride && !overrideReason.trim()) {
+      // Validate override reason -- but skip it when the inline expected-close-date alone resolves the
+      // gate: the POST re-validates with that pending date and the server no longer requires an override
+      // (preflight.requiresOverride was computed before this inline value existed).
+      if (preflight.requiresOverride && !unblockedByExpectedCloseDate && !overrideReason.trim()) {
         setError("Please provide a reason for the override.");
         setSubmitting(false);
         return;
       }
 
       // Require a usable (today-or-future) expected close date when the gate needs it.
-      const needsEcd = (preflight.missingRequirements?.fields ?? []).includes("expectedCloseDate");
-      if (needsEcd) {
-        const todayStr = businessTodayDateStr();
+      if (needsExpectedCloseDate) {
         if (!expectedCloseDate) {
           setError("Please set an expected close date to advance.");
           setSubmitting(false);
           return;
         }
-        if (expectedCloseDate < todayStr) {
+        if (expectedCloseDate < todayDateStr) {
           setError("Expected close date must be today or later.");
           setSubmitting(false);
           return;
@@ -203,11 +273,12 @@ export function StageChangeDialog({
       }
 
       await changeDealStage(deal.id, targetStageId, {
-        overrideReason: preflight.requiresOverride ? overrideReason : undefined,
+        overrideReason:
+          preflight.requiresOverride && !unblockedByExpectedCloseDate ? overrideReason : undefined,
         lostReasonId: isLostTransition ? lostReasonId : undefined,
         lostNotes: isLostTransition ? lostNotes : undefined,
         lostCompetitor: isLostTransition ? lostCompetitor || undefined : undefined,
-        expectedCloseDate: needsEcd ? expectedCloseDate : undefined,
+        expectedCloseDate: needsExpectedCloseDate ? expectedCloseDate : undefined,
       });
 
       onSuccess();
@@ -253,20 +324,6 @@ export function StageChangeDialog({
         );
 
   const handleOpenChange = shouldForceCompletion ? () => {} : onOpenChange;
-  // Inline expected-close-date prompt: when the only thing the gate is missing is expectedCloseDate,
-  // let the rep set a usable (today-or-future) date here and advance in one action instead of being
-  // redirected to the deal overview.
-  const missingReqs = preflight?.missingRequirements;
-  const needsExpectedCloseDate = (missingReqs?.fields ?? []).includes("expectedCloseDate");
-  const onlyExpectedCloseDateMissing =
-    needsExpectedCloseDate &&
-    (missingReqs?.fields?.length ?? 0) === 1 &&
-    (missingReqs?.documents?.length ?? 0) === 0 &&
-    (missingReqs?.approvals?.length ?? 0) === 0 &&
-    !preflight?.isBackwardMove;
-  const todayDateStr = businessTodayDateStr();
-  const expectedCloseDateValid = expectedCloseDate !== "" && expectedCloseDate >= todayDateStr;
-  const unblockedByExpectedCloseDate = onlyExpectedCloseDateMissing && expectedCloseDateValid;
   const effectiveBlocked = isBlocked && !unblockedByExpectedCloseDate;
   const requirementAction = onlyExpectedCloseDateMissing
     ? null

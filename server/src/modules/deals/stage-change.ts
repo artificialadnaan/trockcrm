@@ -277,6 +277,9 @@ export async function changeDealStage(
   const targetRequiresExpectedCloseDate = (gateResult.effectiveChecklist?.fields ?? []).some(
     (checklistField) => checklistField.key === "expectedCloseDate"
   );
+  // Captured only when the inline date is actually persisted below, so the audit trail records the
+  // forecast change next to the stage move (NULL when the inline path doesn't touch the date).
+  let expectedCloseDateAuditChange: { from: string | null; to: string | null } | null = null;
   if (
     input.expectedCloseDate !== undefined &&
     targetRequiresExpectedCloseDate &&
@@ -287,6 +290,13 @@ export async function changeDealStage(
     // This stops an unrelated stage move (or a stale/empty payload) from overwriting or clearing a
     // deal's forecast date through this path; other forecast edits go via the deal-update endpoint.
     dealUpdates.expectedCloseDate = input.expectedCloseDate;
+    const previousExpectedCloseDate = deal.expectedCloseDate ?? null;
+    const nextExpectedCloseDate = input.expectedCloseDate ?? null;
+    // Mirror the normal deal-update audit path, which skips unchanged fields: only record the change
+    // when the value actually moved (never a no-op {from: X, to: X} entry).
+    if (previousExpectedCloseDate !== nextExpectedCloseDate) {
+      expectedCloseDateAuditChange = { from: previousExpectedCloseDate, to: nextExpectedCloseDate };
+    }
   }
   const shouldResetBidBoardOwnership =
     inferredOwnership.isBidBoardOwned &&
@@ -400,6 +410,9 @@ export async function changeDealStage(
           from: currentStage.name ?? currentStage.slug,
           to: targetStage.name ?? targetStage.slug,
         },
+        // Record the inline forecast-date change too, mirroring the normal deal-update audit path, so a
+        // close-date set/change made during a stage advance isn't invisible in the trail.
+        ...(expectedCloseDateAuditChange ? { expectedCloseDate: expectedCloseDateAuditChange } : {}),
       },
       metadata: {
         overrideReason: overrideReason ?? null,
