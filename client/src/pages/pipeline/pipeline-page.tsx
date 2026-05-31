@@ -16,6 +16,7 @@ import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-f
 import { DealsListSection } from "@/components/deals/deals-list-section";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
 import { KanbanDealCard, getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
+import { PipelineStageSummary } from "@/components/deals/pipeline-stage-summary";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -549,6 +550,31 @@ export function PipelinePage() {
 
   const refreshedLabel = formatRefreshedLabel(lastRefreshed, now);
 
+  // Mobile board summary (md:hidden): which stage, if any, is the SOLE active list filter — so its
+  // chip can highlight. A multi-stage `stageIds` (set from the FilterBar's stage multi-select) maps
+  // to no single highlighted chip, which is correct.
+  const activeSummaryStageId = (() => {
+    const raw = searchParams.get("stageIds");
+    if (!raw) return null;
+    const ids = raw.split(",").filter(Boolean);
+    return ids.length === 1 ? ids[0] : null;
+  })();
+  // Tapping a summary chip filters the deals list below to that stage by writing the FilterBar's
+  // URL-backed `stageIds` (the bar re-derives from the URL — see use-filter-state); tapping the
+  // active chip again clears it back to the board's default stage scope. Drop `page` so the list
+  // does not stay on a now-out-of-range page (mirrors updateScope), and `replace` to match the
+  // bar's own filter-write history semantics.
+  const handleSelectSummaryStage = (stageId: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (activeSummaryStageId === stageId) {
+      next.delete("stageIds");
+    } else {
+      next.set("stageIds", stageId);
+    }
+    next.delete("page");
+    setSearchParams(next, { replace: true });
+  };
+
   return (
     <div className="-m-4 space-y-5 bg-[#f5f6f8] p-4 md:-m-6 md:p-6">
       <header className="flex items-center justify-between gap-4 rounded-lg border border-gray-200 bg-white px-6 py-5">
@@ -595,7 +621,10 @@ export function PipelinePage() {
         </div>
       </header>
 
-      <section className="relative flex h-[min(72vh,56rem)] min-h-[42rem] flex-col overflow-hidden rounded-lg border border-gray-200 bg-white">
+      {/* The full drag-and-drop board is desktop-only. On phones it is replaced by the compact
+          PipelineStageSummary below (drag-across-stages is unusable on a phone; the board's value
+          there is the at-a-glance breakdown). `hidden ... md:flex` keeps >=md byte-identical. */}
+      <section className="relative hidden h-[min(72vh,56rem)] min-h-[42rem] flex-col overflow-hidden rounded-lg border border-gray-200 bg-white md:flex">
         <div
           ref={topScrollRef}
           onScroll={handleTopScroll}
@@ -650,6 +679,12 @@ export function PipelinePage() {
           </DndContext>
         </div>
       </section>
+
+      <PipelineStageSummary
+        columns={columns}
+        activeStageId={activeSummaryStageId}
+        onSelectStage={handleSelectSummaryStage}
+      />
 
       <footer className="rounded-lg border border-gray-200 bg-white px-6 py-3">
         <dl className="flex items-center gap-8">
