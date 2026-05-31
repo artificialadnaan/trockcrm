@@ -80,7 +80,8 @@ async function previewSchema(client: pg.Client, schema: string): Promise<Cluster
   const companyRows = await client.query(
     `SELECT id::text AS id, name, address, city, state, zip, phone, website, domain,
             hubspot_id AS "hubspotId", hubspot_company_id AS "hubspotCompanyId",
-            procore_id AS "procoreId", industry::text AS industry, region, created_at AS "createdAt",
+            procore_id AS "procoreId", industry::text AS industry, region, category::text AS category,
+            created_at AS "createdAt",
             (SELECT count(*)::int FROM ${q(schema)}.deals d WHERE d.company_id = c.id) AS "dealCount",
             (SELECT count(*)::int FROM ${q(schema)}.contacts ct WHERE ct.company_id = c.id) AS "contactCount"
      FROM ${q(schema)}.companies c

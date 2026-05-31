@@ -298,6 +298,24 @@ describe("classifyNameCluster (clearly_safe vs review)", () => {
     ]);
     expect(r.classification).toBe("clearly_safe");
   });
+
+  it("review when external ids (HubSpot/Procore) diverge", () => {
+    const r = classifyNameCluster([
+      member({ website: "acme.com", hubspotCompanyId: "100" }),
+      member({ website: "acme.com", hubspotCompanyId: "200" }),
+    ]);
+    expect(r.classification).toBe("review");
+    expect(r.reasons).toContain("divergent_external_id");
+  });
+
+  it("review when directory categories differ (client vs vendor)", () => {
+    const r = classifyNameCluster([
+      member({ website: "acme.com", category: "client" }),
+      member({ website: "acme.com", category: "vendor" }),
+    ]);
+    expect(r.classification).toBe("review");
+    expect(r.reasons).toContain("divergent_category");
+  });
 });
 
 describe("planFieldReconciliation", () => {
@@ -401,6 +419,33 @@ describe("mergeDirectoryEntities (company) -- full re-point + audit capture", ()
     const { updates } = await runMerge();
     const reconcile = updates.find((u) => u.table === "companies" && "address" in u.values);
     expect(reconcile?.values.address).toBe("60 Columbus Circle");
+  });
+
+  it("records ONLY reconciliation fields actually written (concurrent fill -> not in audit)", async () => {
+    // companies UPDATE ... WHERE field IS NULL matches no row (filled concurrently)
+    // -> returning [] -> the field must not be recorded as reconciled.
+    const winnerRow = companyRow({ id: "W", name: "Mack Real Estate Group", website: "mackregroup.com" });
+    const loserRow = companyRow({
+      id: "L",
+      name: "Mack Real Estate Group",
+      website: "https://mackregroup.com/",
+      address: "60 Columbus Circle",
+      city: "New York",
+      state: "NY",
+      zip: "10023",
+    });
+    const rec = recordingDb(winnerRow, loserRow, { companies: [] });
+    await mergeDirectoryEntities(rec.db as never, "company", "W", "L", {
+      mode: "manual",
+      confidenceScore: 1,
+      matchReasons: ["name_match"],
+    });
+    const audit = rec.inserts.find((i) => i.table === "directory_merge_audit");
+    const fc = audit!.values.fieldChanges as Record<string, unknown>;
+    expect(Object.keys(fc.reconciled as Record<string, unknown>)).toHaveLength(0);
+    expect(Object.keys(fc.winnerBefore as Record<string, unknown>)).toHaveLength(0);
+    // moved rows are still captured for the actual re-points
+    expect((fc.movedRows as Record<string, string[]>).deals).toBeDefined();
   });
 
   it("soft-deactivates the loser and stamps merged_into (never deletes)", async () => {

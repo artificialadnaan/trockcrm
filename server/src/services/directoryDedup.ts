@@ -161,6 +161,7 @@ export interface CompanyMergeMember {
   procoreId: string | null;
   industry: string | null;
   region: string | null;
+  category?: string | null;
   createdAt: string | Date | null;
   dealCount: number;
   contactCount: number;
@@ -290,6 +291,25 @@ export function classifyNameCluster(members: CompanyMergeMember[]): ClusterClass
     (m) => hasText(m.zip) && ZIP_PLACEHOLDERS.has(m.zip!.trim().toLowerCase())
   );
   if (hasPlaceholderZip) reasons.push("placeholder_zip");
+
+  // Conflicting external system ids (HubSpot/Procore) across members suggest
+  // distinct source records -- and a merge would strand the loser's id on the
+  // now-inactive row (association lookups only consider active companies). Each id
+  // type is checked separately so a member's own HubSpot-vs-Procore ids don't clash.
+  for (const idField of ["hubspotCompanyId", "hubspotId", "procoreId"] as const) {
+    const ids = new Set(
+      members.map((m) => m[idField]).filter((v) => hasText(v as string | null)).map((v) => String(v).trim().toLowerCase())
+    );
+    if (ids.size > 1) {
+      reasons.push("divergent_external_id");
+      break;
+    }
+  }
+
+  // Different directory categories (e.g. client vs vendor/subcontractor) mean the
+  // rows are not the same kind of entity -- never auto-safe.
+  const categories = new Set(members.map((m) => m.category).filter((v) => hasText(v ?? null)));
+  if (categories.size > 1) reasons.push("divergent_category");
 
   return { classification: reasons.length > 0 ? "review" : "clearly_safe", reasons };
 }
@@ -627,6 +647,7 @@ function toMergeMember(row: Record<string, any>): CompanyMergeMember {
     procoreId: row.procoreId ?? null,
     industry: row.industry ?? null,
     region: row.region ?? null,
+    category: row.category ?? null,
     createdAt: row.createdAt ?? null,
     dealCount: 0,
     contactCount: 0,
@@ -766,13 +787,23 @@ export async function mergeDirectoryEntities(
     const reconciliation = planFieldReconciliation(toMergeMember(winnerRow as any), [
       toMergeMember(loserRow as any),
     ]);
+    // Record ONLY the fields actually written. A guarded UPDATE that matched no
+    // row (the field was filled concurrently) must not appear in the audit, or
+    // un-merge would later try to restore a value the merge never set.
+    const appliedReconciled: Record<string, string | null> = {};
+    const appliedWinnerBefore: Record<string, string | null> = {};
     for (const [field, value] of Object.entries(reconciliation.updates)) {
       const column = (companies as any)[field];
       if (!column) continue;
-      await tenantDb
+      const written = await (tenantDb as any)
         .update(companies)
-        .set({ [field]: value } as any)
-        .where(and(eq(companies.id, winnerId), sql`${column} IS NULL`));
+        .set({ [field]: value })
+        .where(and(eq(companies.id, winnerId), sql`${column} IS NULL`))
+        .returning({ id: companies.id });
+      if (written.length > 0) {
+        appliedReconciled[field] = value;
+        appliedWinnerBefore[field] = reconciliation.winnerBefore[field] ?? null;
+      }
     }
 
     // Loser is soft-deactivated and stamped with merged_into -- NEVER deleted.
@@ -793,8 +824,8 @@ export async function mergeDirectoryEntities(
       loserIsActive: false,
       winnerId,
       movedRows,
-      reconciled: reconciliation.updates,
-      winnerBefore: reconciliation.winnerBefore,
+      reconciled: appliedReconciled,
+      winnerBefore: appliedWinnerBefore,
     };
   } else {
     await tenantDb
