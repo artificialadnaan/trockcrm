@@ -915,6 +915,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       : selectedPeriod
         ? getDashboardPeriodLabel(selectedPeriod)
         : "All time";
+  // D-14: the "Won" sibling KPI card is windowed by this page's ?period, so on a
+  // current-state drill-down with no period it shows an unlabeled LIFETIME Won total
+  // (the $22.6M "All time" vs $3.9M "QTD" swing). Show it only where Won is the
+  // relevant metric — the Won drill-down — and the base deals list; drop it on the
+  // active-pipeline / at-risk / other non-Won drill-downs (a Won total beside
+  // at-risk deals is clutter). This avoids the swing WITHOUT propagating the period
+  // into those drill-downs (which would wrongly filter their current-state lists by
+  // updated_at and hide the stalest deals).
+  const showWonKpiCard = dashboardView.filter === null || dashboardView.filter === "won";
   const drilldownBaseFilters = useMemo(() => {
     if (dashboardView.filter !== "won") return dashboardView.listBaseFilters;
 
@@ -1046,7 +1055,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       </section>
 
       <>
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className={`grid gap-4 ${showWonKpiCard ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
         <MetricCard
           eyebrow="Active pipeline"
           value={USD_COMPACT(totalValue)}
@@ -1057,16 +1066,18 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
           to={activePipelineDestination}
           ariaLabel="View active pipeline deals"
         />
-        <MetricCard
-          eyebrow="Won"
-          value={USD_COMPACT(wonValue)}
-          badge="Bid Board"
-          caption={wonCaption}
-          tone="blue"
-          accent="blue"
-          to={wonDestination}
-          ariaLabel="View won deals"
-        />
+        {showWonKpiCard ? (
+          <MetricCard
+            eyebrow="Won"
+            value={USD_COMPACT(wonValue)}
+            badge="Bid Board"
+            caption={wonCaption}
+            tone="blue"
+            accent="blue"
+            to={wonDestination}
+            ariaLabel="View won deals"
+          />
+        ) : null}
         <MetricCard
           eyebrow="At risk"
           value={String(unsearchedOverSlaCount)}

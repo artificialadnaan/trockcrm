@@ -1215,6 +1215,25 @@ describe("DealListPage", () => {
     expect(html).toContain("View at-risk deals");
   });
 
+  it("suppresses the Won KPI card on the at-risk drill-down (D-14: no swinging lifetime Won total beside at-risk deals)", () => {
+    const html = renderPage("/deals?scope=all&filter=at_risk", "director");
+    // The Won sibling card (and its unlabeled lifetime total) is gone on a
+    // current-state drill-down; the relevant KPI cards remain.
+    expect(html).not.toContain("View won deals");
+    expect(html).toContain("View active pipeline deals");
+    expect(html).toContain("View at-risk deals");
+  });
+
+  it("suppresses the Won KPI card on the active-pipeline drill-down", () => {
+    expect(renderPage("/deals?scope=all&filter=active_pipeline", "director")).not.toContain("View won deals");
+    expect(renderPage("/deals?scope=all&filter=active", "director")).not.toContain("View won deals");
+  });
+
+  it("keeps the Won KPI card on the Won drill-down and the base deals list (regression guard)", () => {
+    expect(renderPage("/deals?scope=all&filter=won", "director")).toContain("View won deals");
+    expect(renderPage("/deals?scope=all", "director")).toContain("View won deals");
+  });
+
   it("preserves won terminal query params on the Won KPI drilldown link", () => {
     const html = renderPage("/deals?scope=all&period=last_month&won_preset=30&won_since=2026-04-01&won_until=2026-04-30", "director");
 
