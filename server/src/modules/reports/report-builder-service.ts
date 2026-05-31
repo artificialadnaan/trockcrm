@@ -7,6 +7,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveWonDealValueSql,
   aliasedReportableDealFilterSql,
   aliasedWonHsClosedWonDateSql,
 } from "../shared/deal-value-sql.js";
@@ -139,8 +140,10 @@ function dimensionSql(dimension: ReportDimension, dateFieldSql: ReturnType<typeo
   }
 }
 
-function measureSql(measure: ReportMeasure) {
-  const value = dealValueSql();
+// Decision 1: a Won-scoped report passes the CANONICAL awarded-first Won value
+// (aliasedEffectiveWonDealValueSql) here, so its total_value/avg_value reconcile to the Won card
+// (getWonCloseSummary sums the same). A non-Won report keeps the best-estimate-first open value.
+function measureSql(measure: ReportMeasure, value: ReturnType<typeof sql>) {
   switch (measure) {
     case "deal_count":
       return sql`COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int`;
@@ -196,16 +199,17 @@ function textArrayFilter(values: string[]) {
   return sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
 }
 
-function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof sql>, wonScoped = false) {
+function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof sql>, applyWonGuard = false) {
   const filters = input.filters ?? {};
   const clauses: ReturnType<typeof sql>[] = [
     sql`d.is_active = true`,
     sql`COALESCE(d.is_test_data, false) = false`,
     aliasedReportableDealFilterSql("d"),
   ];
-  // Won-scoped reports window on won_closed_date; require it usable so the totals reconcile to the
-  // canonical Won card (a Won-stage deal with no usable won date is not won-in-period).
-  if (wonScoped) clauses.push(aliasedHasUsableWonDateSql("d"));
+  // Period-bounded Won reports require a usable won date so a Won-stage deal with no won date isn't
+  // placed in a window/bucket. All-time Won reports omit this guard (see runReportBuilder) so those
+  // deals still count — matching the canonical helper's all-time behavior.
+  if (applyWonGuard) clauses.push(aliasedHasUsableWonDateSql("d"));
   const repId = effectiveReportRepId(input);
   if (repId) clauses.push(sql`d.assigned_rep_id = ${repId}`);
 
@@ -253,17 +257,28 @@ export async function runReportBuilder(
     throw new AppError(400, `Invalid filter: ${invalidFilters.join(", ")}`);
   }
 
-  // Decision 1: a Won-stage-only cohort forces the period axis onto the canonical won_closed_date,
-  // overriding the user's selected date field, so Won count/value are never on a non-Won basis.
+  // Decision 1: a Won-stage-only cohort forces both the period AXIS and the VALUE basis onto canon.
+  //  - AXIS: the canonical won_closed_date (overriding the user's date field), so Won count/value
+  //    are windowed/bucketed by the won date.
+  //  - VALUE: the canonical awarded-first effective Won value (the same getWonCloseSummary sums),
+  //    so total_value/avg_value RECONCILE to the Won card — not the best-estimate-first open value.
   const wonScoped = isWonScopedReport(filters);
   const dateFieldSql = wonScoped ? aliasedWonHsClosedWonDateSql("d") : DATE_FIELDS[dateField];
+  const measureValueSql = wonScoped ? aliasedEffectiveWonDealValueSql("d") : dealValueSql();
+  // The usable-won-date guard drops null-won-date deals — correct ONLY for period-bounded Won
+  // queries (a deal with no won date can't be placed in a window/bucket). All-time Won reports
+  // (no from/to and no month/week time-bucket) must still COUNT those deals, mirroring the canonical
+  // helper's "all-time queries omit the guard" rule — so don't over-drop and undercount.
+  const periodBounded =
+    Boolean(filters.from) || Boolean(filters.to) || dimensions.some((d) => d === "month" || d === "week");
+  const applyWonGuard = wonScoped && periodBounded;
   const dimensionEntries = dimensions.map((dimension) => ({
     key: dimension,
     expression: dimensionSql(dimension, dateFieldSql),
   }));
   const measureEntries = measures.map((measure) => ({
     key: measure,
-    expression: measureSql(measure),
+    expression: measureSql(measure, measureValueSql),
   }));
 
   const selectList = sql.join(
@@ -274,7 +289,7 @@ export async function runReportBuilder(
     sql`, `
   );
   const groupBy = sql.join(dimensionEntries.map((entry) => entry.expression), sql`, `);
-  const whereClause = buildFilters(input, dateFieldSql, wonScoped);
+  const whereClause = buildFilters(input, dateFieldSql, applyWonGuard);
 
   const result = await tenantDb.execute(sql`
     SELECT ${selectList}
