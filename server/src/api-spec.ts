@@ -1945,6 +1945,7 @@ export const apiSpec = {
                   phone: { type: "string" },
                   website: { type: "string" },
                   notes: { type: "string" },
+                  skipDedupCheck: { type: "boolean", description: "Skip duplicate detection — use when user confirms after seeing a duplicate-name warning." },
                 },
                 required: ["name"],
               },
@@ -1957,6 +1958,36 @@ export const apiSpec = {
             content: {
               "application/json": {
                 schema: { type: "object", properties: { company: { $ref: "#/components/schemas/Company" } } },
+              },
+            },
+          },
+          200: {
+            description: "Duplicate-name warning — company NOT created. Re-submit with skipDedupCheck=true to force.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    company: { type: "null" },
+                    dedupWarning: { type: "boolean", example: true },
+                    suggestions: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          id: { type: "string", format: "uuid" },
+                          name: { type: "string" },
+                          address: { type: "string", nullable: true },
+                          city: { type: "string", nullable: true },
+                          state: { type: "string", nullable: true },
+                          zip: { type: "string", nullable: true },
+                          dealCount: { type: "integer" },
+                          matchReason: { type: "string" },
+                        },
+                      },
+                    },
+                  },
+                },
               },
             },
           },

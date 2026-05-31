@@ -11,7 +11,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { OwnerLabel } from "@/components/shared/owner-label";
-import { createCompany, searchCompanies } from "@/hooks/use-companies";
+import { createCompany, searchCompanies, type CompanyDedupSuggestion } from "@/hooks/use-companies";
+import { CompanyDedupWarning } from "@/components/companies/company-dedup-warning";
 
 const COMPANY_CATEGORY_LABELS: Record<string, string> = {
   client: "Client",
@@ -45,7 +46,9 @@ async function submitInlineCompanyCreate(input: {
   name: string;
   category: string;
   officeId?: string | null;
+  skipDedupCheck?: boolean;
   onCreated: (company: { id: string; name: string }) => void;
+  onDuplicates: (suggestions: CompanyDedupSuggestion[]) => void;
   onError: (message: string | null) => void;
   onCreating: (value: boolean) => void;
 }) {
@@ -61,10 +64,19 @@ async function submitInlineCompanyCreate(input: {
       {
         name: input.name.trim(),
         category: input.category || null,
+        skipDedupCheck: input.skipDedupCheck,
       },
       { officeId: input.officeId }
     );
-    input.onCreated(result.company);
+    // Likely duplicate (no hard block) — surface the matches so the rep can pick
+    // the existing company instead of minting another duplicate.
+    if (result.dedupWarning && result.suggestions && result.suggestions.length > 0) {
+      input.onDuplicates(result.suggestions);
+      return;
+    }
+    if (result.company) {
+      input.onCreated(result.company);
+    }
   } catch (err: unknown) {
     input.onError(err instanceof Error ? err.message : "Failed to create company");
   } finally {
@@ -85,6 +97,7 @@ export function CompanySelector({ value, onChange, required, officeId, showOwner
   const [newCategory, setNewCategory] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [dedupSuggestions, setDedupSuggestions] = useState<CompanyDedupSuggestion[] | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Initialize display name from value prop
@@ -179,24 +192,42 @@ export function CompanySelector({ value, onChange, required, officeId, showOwner
     onChange(company.id);
   };
 
-  const handleCreateSubmit = async () => {
+  const handleCreateSubmit = async (skipDedupCheck = false) => {
     await submitInlineCompanyCreate({
       name: newName,
       category: newCategory,
       officeId,
+      skipDedupCheck,
       onError: setCreateError,
       onCreating: setCreating,
+      onDuplicates: setDedupSuggestions,
       onCreated: (company) => {
         setSelectedCompanyId(company.id);
         setSelectedName(company.name);
         setSelectedOwner(null);
         setShowInlineForm(false);
+        setDedupSuggestions(null);
         setNewName("");
         setNewCategory("");
         setOpen(false);
         onChange(company.id);
       },
     });
+  };
+
+  const handleUseExistingDuplicate = (companyId: string, companyName: string) => {
+    // Show the name immediately, but DON'T pin selectedCompanyId here: a dedup
+    // suggestion carries no owner, so we let the value-sync effect fetch the company
+    // once the parent sets value=companyId — that resolves the owner label. Pinning
+    // the id would make that effect skip (id === value) and render "Unassigned".
+    setSelectedName(companyName);
+    setSelectedOwner(null);
+    setDedupSuggestions(null);
+    setShowInlineForm(false);
+    setNewName("");
+    setNewCategory("");
+    setOpen(false);
+    onChange(companyId);
   };
 
   const handleInlineCreateKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -234,7 +265,7 @@ export function CompanySelector({ value, onChange, required, officeId, showOwner
       </Button>
 
       {/* Dropdown */}
-      {open && !showInlineForm && (
+      {open && !showInlineForm && !dedupSuggestions && (
         <div className="absolute z-50 mt-1 w-full bg-background border rounded-md shadow-md">
           <div className="p-2 border-b">
             <Input
@@ -293,7 +324,7 @@ export function CompanySelector({ value, onChange, required, officeId, showOwner
       )}
 
       {/* Inline create form */}
-      {open && showInlineForm && (
+      {open && showInlineForm && !dedupSuggestions && (
         <div className="absolute z-50 mt-1 w-full bg-background border rounded-md shadow-md p-3 space-y-3">
           <p className="text-sm font-medium">New Company</p>
           {createError && (
@@ -345,6 +376,24 @@ export function CompanySelector({ value, onChange, required, officeId, showOwner
               </Button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Possible-duplicate warning (no hard block) */}
+      {open && dedupSuggestions && (
+        <div className="absolute z-50 mt-1 w-full bg-background border rounded-md shadow-md p-3">
+          <CompanyDedupWarning
+            suggestions={dedupSuggestions}
+            onUseExisting={(companyId) => {
+              const match = dedupSuggestions.find((s) => s.id === companyId);
+              handleUseExistingDuplicate(companyId, match?.name ?? "");
+            }}
+            onCreateAnyway={() => {
+              setDedupSuggestions(null);
+              void handleCreateSubmit(true);
+            }}
+            onCancel={() => setDedupSuggestions(null)}
+          />
         </div>
       )}
     </div>

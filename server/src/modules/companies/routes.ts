@@ -59,11 +59,22 @@ router.get("/:id", async (req, res, next) => {
 // POST /companies
 router.post("/", async (req, res, next) => {
   try {
-    const { name, category, address, city, state, zip, phone, website, notes } = req.body;
+    const { name, category, address, city, state, zip, phone, website, notes, skipDedupCheck } = req.body;
     if (!name) throw new AppError(400, "Company name is required");
-    const company = await createCompany(req.tenantDb!, {
-      name, category: category || "other", address, city, state, zip, phone, website, notes,
-    });
+    const { company, dedupResult } = await createCompany(
+      req.tenantDb!,
+      { name, category: category || "other", address, city, state, zip, phone, website, notes },
+      skipDedupCheck === true
+    );
+
+    // Likely duplicate found (no hard block): return the matches so the client can
+    // warn and let the rep pick the existing company or create anyway.
+    if (!company && dedupResult) {
+      await req.commitTransaction!();
+      res.status(200).json({ company: null, dedupWarning: true, suggestions: dedupResult.suggestions });
+      return;
+    }
+
     await req.commitTransaction!();
     res.status(201).json({ company });
   } catch (err) { next(err); }

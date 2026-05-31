@@ -1,8 +1,9 @@
-import { eq, and, ilike, asc, desc, count, sql, getTableColumns } from "drizzle-orm";
+import { eq, and, ilike, asc, desc, count, inArray, sql, getTableColumns } from "drizzle-orm";
 import { companies, contacts, deals, users } from "@trock-crm/shared/schema";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildCompanySearchCondition } from "../search/unified-search.js";
+import { normalizeDirectoryName } from "../../services/directoryDedup.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateWithForecastSql,
@@ -139,6 +140,103 @@ export async function getCompanyById(tenantDb: TenantDb, id: string) {
   return rows[0] ?? null;
 }
 
+export interface CompanyDedupSuggestion {
+  id: string;
+  name: string;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  dealCount: number;
+  matchReason: string;
+}
+
+export interface CompanyDedupResult {
+  suggestions: CompanyDedupSuggestion[];
+}
+
+/**
+ * Find ACTIVE companies that duplicate `name`, using the #538 merge tool's
+ * NAME-ALONE match model (normalizeDirectoryName — case/suffix/punctuation
+ * insensitive). That is the rule that catches the real deal-bearing duplicates:
+ * the prod dups were created with NULL addresses, so an exact name+address rule
+ * MISSES them (see .audit/company-dedup-discovery.md). WARN only — this never
+ * blocks creation, it just surfaces the matches so the rep can pick the existing
+ * company instead of minting another duplicate.
+ */
+export async function checkCompanyDuplicates(
+  tenantDb: TenantDb,
+  input: { name: string }
+): Promise<CompanyDedupResult> {
+  const normalizedTarget = normalizeDirectoryName(input.name);
+  if (!normalizedTarget) return { suggestions: [] };
+
+  // Suffix-stripping has no faithful SQL equivalent, so match in JS with the SAME
+  // helper the merge tool uses (zero drift between detect-on-create and merge).
+  // Company creation is a rare, deliberate action — scanning the active companies
+  // here is cheap relative to the cost of a missed duplicate.
+  const candidates = await tenantDb
+    .select({
+      id: companies.id,
+      name: companies.name,
+      address: companies.address,
+      city: companies.city,
+      state: companies.state,
+      zip: companies.zip,
+    })
+    .from(companies)
+    .where(eq(companies.isActive, true));
+
+  const matches = candidates.filter(
+    (c) => normalizeDirectoryName(c.name) === normalizedTarget
+  );
+  if (matches.length === 0) return { suggestions: [] };
+
+  // Enrich ONLY the matched companies with their active deal count, so the rep
+  // can pick the canonical record (the exact failure mode #538 cleaned up: deals
+  // split across duplicates). Bounded to the handful of matches — cheap.
+  const matchedIds = matches.map((m) => m.id);
+  const dealCounts = await tenantDb
+    .select({ companyId: deals.companyId, count: count() })
+    .from(deals)
+    .where(and(inArray(deals.companyId, matchedIds), eq(deals.isActive, true)))
+    .groupBy(deals.companyId);
+  const dealCountByCompany = new Map<string, number>(
+    dealCounts.map((d) => [d.companyId as string, Number(d.count)])
+  );
+
+  const inputRawLower = input.name.trim().toLowerCase();
+  const suggestions: CompanyDedupSuggestion[] = matches.map((m) => ({
+    id: m.id,
+    name: m.name,
+    address: m.address ?? null,
+    city: m.city ?? null,
+    state: m.state ?? null,
+    zip: m.zip ?? null,
+    dealCount: dealCountByCompany.get(m.id) ?? 0,
+    matchReason:
+      m.name.trim().toLowerCase() === inputRawLower
+        ? "Exact name match"
+        : "Possible duplicate (same name, ignoring case/suffix)",
+  }));
+
+  // Most useful first: exact-name matches, then the record carrying the most deals.
+  suggestions.sort((a, b) => {
+    const aExact = a.matchReason === "Exact name match" ? 1 : 0;
+    const bExact = b.matchReason === "Exact name match" ? 1 : 0;
+    if (aExact !== bExact) return bExact - aExact;
+    return b.dealCount - a.dealCount;
+  });
+
+  return { suggestions };
+}
+
+/**
+ * Create a company. Runs checkCompanyDuplicates first (NAME-alone) unless
+ * skipDedupCheck is true. On a duplicate-name match it does NOT insert and
+ * returns { company: null, dedupResult } so the caller can WARN and let the rep
+ * choose "use existing" or "create anyway" (re-call with skipDedupCheck=true).
+ */
 export async function createCompany(
   tenantDb: TenantDb,
   data: {
@@ -151,8 +249,24 @@ export async function createCompany(
     phone?: string;
     website?: string;
     notes?: string;
+  },
+  skipDedupCheck = false
+): Promise<{ company: typeof companies.$inferSelect | null; dedupResult?: CompanyDedupResult }> {
+  if (!skipDedupCheck) {
+    // Serialize the check+insert for the same normalized name so two concurrent
+    // creates can't both pass the (read-then-write) dedup check and each insert a
+    // duplicate. Transaction-scoped advisory lock keyed on the SAME normalized name
+    // the match uses; auto-released at commit. No-op when the name normalizes to empty.
+    const normalized = normalizeDirectoryName(data.name);
+    if (normalized) {
+      await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${normalized}))`);
+    }
+    const dedupResult = await checkCompanyDuplicates(tenantDb, { name: data.name });
+    if (dedupResult.suggestions.length > 0) {
+      return { company: null, dedupResult };
+    }
   }
-) {
+
   const slug = await uniqueSlug(tenantDb, slugify(data.name));
   const rows = await tenantDb
     .insert(companies)
@@ -169,7 +283,7 @@ export async function createCompany(
       notes: data.notes,
     })
     .returning();
-  return rows[0];
+  return { company: rows[0] };
 }
 
 export async function updateCompany(
