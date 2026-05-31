@@ -190,7 +190,8 @@ describe("searchPhotoUploadTargets ORDER BY", () => {
     // "jane smith" is a prefix of neither first_name nor last_name alone, so the
     // concatenated full name needs its own exact-rank CASE — otherwise an exact
     // full-name hit collapses to the flat any-match tier (1) and can be truncated.
-    const concatThen3 = /concat\([^)]*first_name[^)]*last_name\) ilike \$\d+[^)]*?then 3/;
+    // (The concat closes with `"...last_name")`, then ` ilike $N escape ... then 3`.)
+    const concatThen3 = /concat\([^)]*first_name[^)]*last_name[^)]*\) ilike \$\d+ escape[^)]*then 3/;
     expect(leadOrder!).toMatch(concatThen3);
     expect(dealOrder!).toMatch(concatThen3);
   });
