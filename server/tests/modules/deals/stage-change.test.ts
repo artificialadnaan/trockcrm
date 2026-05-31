@@ -1,7 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { auditLog, dealApprovals, deals, dealStageHistory, jobQueue, tasks } from "@trock-crm/shared/schema";
 
-vi.mock("../../../src/modules/deals/stage-gate.js", () => ({
+// Stub only the DB-hitting validateStageGate; keep the real (pure) isStageRequiredFieldSatisfied so
+// the persist-scoping logic is exercised against actual usable-date semantics, not a re-implementation.
+vi.mock("../../../src/modules/deals/stage-gate.js", async (importActual) => ({
+  ...(await importActual<typeof import("../../../src/modules/deals/stage-gate.js")>()),
   validateStageGate: vi.fn(),
 }));
 
@@ -35,6 +38,16 @@ const pipelineService = await import("../../../src/modules/pipeline/service.js")
 const { inferDealBidBoardOwnership } = await import("../../../src/modules/deals/workflow-backfill.js");
 const { BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE } = await import("../../../src/modules/deals/service.js");
 
+// A date safely in the future relative to "now" in any timezone. The persist path checks the inline
+// value is today-or-future via the REAL businessToday() (America/Chicago) inside
+// isStageRequiredFieldSatisfied, so a hard-coded calendar date would silently stop being "future" and
+// break the test purely because time advanced. Deriving it from the current day keeps it usable forever.
+function relativeFutureBusinessDate(daysAhead = 365): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + daysAhead);
+  return d.toISOString().slice(0, 10);
+}
+
 type FakeDeal = {
   id: string;
   name: string;
@@ -52,6 +65,7 @@ type FakeDeal = {
   readOnlySyncedAt: Date | null;
   bidBoardProjectNumber: string | null;
   actualCloseDate: string | null;
+  expectedCloseDate?: string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
   lostCompetitor: string | null;
@@ -314,6 +328,182 @@ describe("changeDealStage", () => {
 
     expect(tenantDb.state.deals[0]?.stageId).toBe("stage-opportunity");
     expect(tenantDb.state.stageHistory).toHaveLength(0);
+  });
+
+  it("applies an incoming expectedCloseDate: passes it to the gate as a pending value and persists it with the move", async () => {
+    const futureDate = relativeFutureBusinessDate();
+    const tenantDb = createTenantDb({ stageId: "stage-a", ddEstimate: null, bidEstimate: null });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-b", name: "Estimating", slug: "estimating", isTerminal: false, isActivePipeline: true, displayOrder: 3 },
+      currentStage: { id: "stage-a", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      // target stage requires expectedCloseDate -> the inline date is persistable
+      effectiveChecklist: { fields: [{ key: "expectedCloseDate", label: "Expected Close Date", satisfied: true, source: "stage" }], attachments: [], approvals: [] },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+      expectedCloseDate: futureDate,
+    });
+
+    // the gate considered the about-to-be-persisted date (so the advance succeeds in one action)
+    expect(vi.mocked(validateStageGate)).toHaveBeenCalledWith(
+      tenantDb,
+      "deal-1",
+      "stage-b",
+      "director",
+      "user-1",
+      { expectedCloseDate: futureDate }
+    );
+    // and the date is persisted with the move
+    expect(tenantDb.state.deals[0]?.expectedCloseDate).toBe(futureDate);
+  });
+
+  it("audits the inline expectedCloseDate change when it is persisted (not only the stage move)", async () => {
+    const futureDate = relativeFutureBusinessDate();
+    const tenantDb = createTenantDb({ stageId: "stage-a", ddEstimate: null, bidEstimate: null, expectedCloseDate: null });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-b", name: "Estimating", slug: "estimating", isTerminal: false, isActivePipeline: true, displayOrder: 3 },
+      currentStage: { id: "stage-a", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      effectiveChecklist: { fields: [{ key: "expectedCloseDate", label: "Expected Close Date", satisfied: true, source: "stage" }], attachments: [], approvals: [] },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+      expectedCloseDate: futureDate,
+      auditContext: {
+        actor: { type: "user", userId: "director-1", name: "Director User", role: "director" },
+      },
+    });
+
+    // The date is persisted AND the audit trail records the forecast change next to the stage move,
+    // so reviewers can see who set the close target through this inline path -- not just a stage flip.
+    expect(tenantDb.state.deals[0]?.expectedCloseDate).toBe(futureDate);
+    expect(tenantDb.state.auditLog).toHaveLength(1);
+    expect(tenantDb.state.auditLog[0]?.fieldChangesJsonb).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: "stageId" }),
+        expect.objectContaining({ key: "expectedCloseDate", transition: "set", toDisplay: expect.any(String) }),
+      ])
+    );
+  });
+
+  it("does NOT audit expectedCloseDate when the inline date is not persisted (target stage doesn't require it)", async () => {
+    const tenantDb = createTenantDb({ stageId: "stage-a", ddEstimate: null, bidEstimate: null, expectedCloseDate: "2027-03-15" });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-b", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      currentStage: { id: "stage-a", name: "Sales Validation", slug: "sales_validation", isTerminal: false, isActivePipeline: true, displayOrder: 0 },
+      effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+      expectedCloseDate: relativeFutureBusinessDate(),
+      auditContext: {
+        actor: { type: "user", userId: "director-1", name: "Director User", role: "director" },
+      },
+    });
+
+    // forecast untouched, so the audit must not claim a close-date change.
+    expect(tenantDb.state.deals[0]?.expectedCloseDate).toBe("2027-03-15");
+    const changes = tenantDb.state.auditLog[0]?.fieldChangesJsonb as Array<{ key: string }>;
+    expect(changes.some((c) => c.key === "expectedCloseDate")).toBe(false);
+  });
+
+  it("records a 'changed' audit transition when the inline date overwrites a stale (past) forecast date", async () => {
+    const futureDate = relativeFutureBusinessDate();
+    // A stale PAST forecast date is reachable from the UI (it makes expectedCloseDate "missing"/unusable,
+    // so the dialog re-prompts) -> the inline date overwrites it, and the audit should show from->to.
+    const tenantDb = createTenantDb({ stageId: "stage-a", ddEstimate: null, bidEstimate: null, expectedCloseDate: "2020-01-01" });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-b", name: "Estimating", slug: "estimating", isTerminal: false, isActivePipeline: true, displayOrder: 3 },
+      currentStage: { id: "stage-a", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      effectiveChecklist: { fields: [{ key: "expectedCloseDate", label: "Expected Close Date", satisfied: true, source: "stage" }], attachments: [], approvals: [] },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+      expectedCloseDate: futureDate,
+      auditContext: { actor: { type: "user", userId: "director-1", name: "Director User", role: "director" } },
+    });
+
+    expect(tenantDb.state.deals[0]?.expectedCloseDate).toBe(futureDate);
+    const changes = tenantDb.state.auditLog[0]?.fieldChangesJsonb as Array<{ key: string; transition: string; fromDisplay: string | null }>;
+    const ecd = changes.find((c) => c.key === "expectedCloseDate");
+    expect(ecd?.transition).toBe("changed");
+    expect(ecd?.fromDisplay).toBeTruthy();
+  });
+
+  it("does NOT record an expectedCloseDate audit entry when the inline value equals the existing date (no-op, mirrors the normal deal-update path)", async () => {
+    const futureDate = relativeFutureBusinessDate();
+    const tenantDb = createTenantDb({ stageId: "stage-a", ddEstimate: null, bidEstimate: null, expectedCloseDate: futureDate });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-b", name: "Estimating", slug: "estimating", isTerminal: false, isActivePipeline: true, displayOrder: 3 },
+      currentStage: { id: "stage-a", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      effectiveChecklist: { fields: [{ key: "expectedCloseDate", label: "Expected Close Date", satisfied: true, source: "stage" }], attachments: [], approvals: [] },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+      expectedCloseDate: futureDate,
+      auditContext: { actor: { type: "user", userId: "director-1", name: "Director User", role: "director" } },
+    });
+
+    const changes = tenantDb.state.auditLog[0]?.fieldChangesJsonb as Array<{ key: string }>;
+    expect(changes.some((c) => c.key === "expectedCloseDate")).toBe(false);
+  });
+
+  it("ignores an incoming expectedCloseDate when the target stage does NOT require it (no forecast overwrite)", async () => {
+    const tenantDb = createTenantDb({ stageId: "stage-a", ddEstimate: null, bidEstimate: null, expectedCloseDate: "2027-03-15" });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-b", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      currentStage: { id: "stage-a", name: "Sales Validation", slug: "sales_validation", isTerminal: false, isActivePipeline: true, displayOrder: 0 },
+      // target stage does NOT list expectedCloseDate as required
+      effectiveChecklist: { fields: [], attachments: [], approvals: [] },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-b",
+      userId: "user-1",
+      userRole: "director",
+      expectedCloseDate: "2026-12-01",
+    });
+
+    // the existing forecast date is untouched -- a stale/unrelated payload can't overwrite it here
+    expect(tenantDb.state.deals[0]?.expectedCloseDate).toBe("2027-03-15");
   });
 
   it("sets the skip flag before the stage UPDATE and clears it after the history insert (de-dupes the DB backstop trigger)", async () => {
