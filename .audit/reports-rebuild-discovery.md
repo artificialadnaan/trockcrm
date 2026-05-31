@@ -255,3 +255,64 @@ REPORT B (per-rep Monday): closed = getCanonicalRepWonSummary(rep); sent = stage
     canonical source via Section 2 / workflow-map sec B; flag any sample that diverges.
   - Resolve the 5 open decisions (Section 7).
   - Then (separate task, on approval) build Report A + Report B on canonical sources. Build nothing now.
+
+================================================================================
+## 9. POST-DECISION INVESTIGATION (2026-05-30) -- decisions resolved + projection hygiene + date seam
+
+DECISIONS (from product owner):
+  1. DEPARTMENT = functional pipeline NOW (estimating->sent->won->collected); architect so a
+     geographic office/region cut can be layered in later.
+  2. COLLECTED = DEFERRED. Build estimated/sent/won this week now; render Collected as a clearly
+     marked placeholder (NOT a zero-filled column), wired later when the finance source is decided.
+  3. PROJECTION = read deals.expected_close_date (per below), and report the hygiene gap.
+
+PROJECTION HYGIENE -- expected_close_date is POPULATED BUT NOT MAINTAINED (prod office_dallas, open deals):
+  - Populated 73.7% (235/319). BUT 94% of those are PAST-dated (220/235). Only 15 of 319 open deals
+    (4.7%) are FUTURE-dated: 30d=12, 30-60d=2, 60-90d=0, >90d=1.
+  - Not maintained: 188 deals edited >30d AFTER the date already passed (touched, not updated);
+    220 stale-dated deals were active in the last 30 days. Systemic across reps (top reps by volume
+    have ~0-7 future-dated of 40-83 open).
+  => Reading expected_close_date today yields a ~14-deal projection across the whole 90-day horizon
+     -- effectively empty. The projection will be hollow until the INPUT side is fixed.
+
+INPUT-PATH AUDIT (why it is stale):
+  - Editable <input type=date> on create AND edit (deal-form.tsx:564-573), but OPTIONAL, unmarked,
+    buried last in the Deal Information card; only a non-blocking "in the past" warning (:195-206).
+  - Lead->deal CONVERSION (the primary create path) neither prompts nor inherits it
+    (lead-convert-dialog.tsx:32; leads table has no such column) -> converted deals start NULL.
+  - STAGE-CHANGE ignores it entirely (stage-change.ts never reads/sets/prompts expected_close_date)
+    -- the single most natural maintenance moment does nothing.
+  - The "missing field" nudge (post-conversion-enrichment.ts) is computed but NO client consumes it;
+    the rep-facing cleanup queue omits expected_close_date entirely.
+  - Provenance: current values are HubSpot import-origin (refresh-from-hubspot.ts maps closedate ->
+    expected_close_date) and that script OVERWRITES rep edits on a real run (proposes a change
+    whenever CRM != HubSpot, :326-335) -- though it is dry-run-by-default + manual, not on cron.
+  - A config lever EXISTS but is not active: pipeline_stage_config.required_fields + stage-gate
+    machinery (stage-gate.ts:299-306) + a registered label (:74) can REQUIRE expected_close_date to
+    enter a stage; no migration/seed activates it.
+
+INPUT-SIDE FIX OPTIONS (leverage order; for the owner to decide -- build nothing yet):
+  1. Require via STAGE GATE at a chosen stage (LOWEST effort -- machinery + label already exist;
+     add "expected_close_date" to that stage's required_fields config/seed).
+  2. Prompt/require on STAGE-CHANGE (highest leverage; needs StageChangeInput + stage UI changes).
+  3. Prompt on CONVERSION (add a field to lead-convert-dialog; service already accepts it).
+  4. Surface the existing enrichment nudge / add an expected_close_date reason to the cleanup queue.
+  5. Make the HubSpot sync null-only-fill so it cannot clobber rep edits (else 1-4 are undermined).
+  RECOMMENDATION: at minimum (1) or (2), plus (5); otherwise the field stays set-once and goes stale.
+
+CANONICAL DATE SEAM ("buildDealOutcomeDateScope") -- coordination note:
+  - buildDealOutcomeDateScope does NOT exist in code (GREY's planned/aspirational symbol; confirmed
+    not a symbol anywhere). Do not wait on it to build.
+  - The REAL canonical seam TODAY is per-metric:
+      WON  -> aliasedWonHsClosedWonDateSql (deals/service.ts:970) = won_closed_date, consumed by
+              getWonCloseSummary (dashboard/service.ts:2238) + getCanonicalRepWonSummary (:2287).
+              Reports call THESE; never re-derive Won.
+      SENT/ESTIMATED -> no helper; key off deal_stage_history.created_at transitions into the target
+              stage slugs (reference join: analytics-tier4-service.ts:647-656). ESTIMATED has no true
+              event-date column (WEAK) -- the only dated proxy is stage-entry into an estimating stage.
+      PROJECTED -> deals.expected_close_date ALONE (no COALESCE fallback; the perf-tier2 monthly join
+              COALESCE at :871 contaminates -- do not copy it).
+  - When GREY's buildDealOutcomeDateScope lands it should WRAP these (a {from,to,column} bundle per
+    outcome) and for WON MUST delegate to aliasedWonHsClosedWonDateSql (resolve to won_closed_date),
+    not redefine the column. Plan: build on the existing per-metric seams now; swap to GREY's bundle
+    when it lands (1-line change at the date-scope call site).
