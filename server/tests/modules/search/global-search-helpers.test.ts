@@ -6,6 +6,7 @@ import {
   compareHits,
   deriveDealStatus,
   mergeAndLimit,
+  mergeWithOfficeCap,
   scoreMatch,
 } from "../../../src/modules/search/global-search-helpers.js";
 
@@ -73,6 +74,52 @@ describe("compareHits / mergeAndLimit", () => {
     const result = mergeAndLimit([{ rank: 1 }, { rank: 2 }], 25);
     expect(result.total).toBe(2);
     expect(result.truncated).toBe(false);
+  });
+});
+
+describe("mergeWithOfficeCap (cross-office fair merge + backfill)", () => {
+  it("BACKFILLS to the limit when matches are concentrated in one office (the starvation fix)", () => {
+    // 30 hits, all in one office; cap 5, limit 25. The fairness pass alone would return only 5;
+    // the backfill must fill the page from that same office's leftovers.
+    const hits = Array.from({ length: 30 }, (_, i) => ({ id: `a${i}`, rank: i, status: "active" as const, officeSlug: "a" }));
+    const result = mergeWithOfficeCap(hits, 25, 5);
+    expect(result.hits).toHaveLength(25); // NOT 5
+    expect(result.total).toBe(30);
+    expect(result.truncated).toBe(true);
+    expect(result.hits[0]?.rank).toBe(29); // best rank still first
+  });
+
+  it("caps a big office in the fairness pass so a contended page still represents others", () => {
+    // Office "a" holds the top 20 ranks, office "b" the next 20. cap 13, limit 25.
+    const a = Array.from({ length: 20 }, (_, i) => ({ id: `a${i}`, rank: 200 - i, status: "active" as const, officeSlug: "a" }));
+    const b = Array.from({ length: 20 }, (_, i) => ({ id: `b${i}`, rank: 100 - i, status: "active" as const, officeSlug: "b" }));
+    const result = mergeWithOfficeCap([...a, ...b], 25, 13);
+    expect(result.hits).toHaveLength(25);
+    const fromA = result.hits.filter((h) => h.officeSlug === "a").length;
+    const fromB = result.hits.filter((h) => h.officeSlug === "b").length;
+    expect(fromA).toBeLessThanOrEqual(13); // the cap held: "a" did not take all 20
+    expect(fromB).toBeGreaterThan(5); // "b" got real representation (plain top-25 would give it 5)
+  });
+
+  it("returns every hit (no truncation) when the total is under the limit, even with a cap", () => {
+    const hits = [
+      { id: "a", rank: 9, status: "active" as const, officeSlug: "x" },
+      { id: "b", rank: 8, status: "active" as const, officeSlug: "x" },
+      { id: "c", rank: 7, status: "active" as const, officeSlug: "y" },
+    ];
+    const result = mergeWithOfficeCap(hits, 25, 5);
+    expect(result.hits).toHaveLength(3);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("keeps active-first ordering after the backfill", () => {
+    const hits = [
+      { id: "won", rank: 999, status: "won" as const, officeSlug: "a" },
+      { id: "active-lo", rank: 1, status: "active" as const, officeSlug: "a" },
+      { id: "active-hi", rank: 50, status: "active" as const, officeSlug: "b" },
+    ];
+    const result = mergeWithOfficeCap(hits, 25, 5);
+    expect(result.hits.map((h) => h.id)).toEqual(["active-hi", "active-lo", "won"]);
   });
 });
 

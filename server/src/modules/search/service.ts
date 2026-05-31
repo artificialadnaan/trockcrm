@@ -14,7 +14,7 @@ import {
   escapeLikePattern,
 } from "./unified-search.js";
 import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
-import { capPerOffice, deriveDealStatus, mergeAndLimit, scoreMatch, type DealLifecycle } from "./global-search-helpers.js";
+import { capPerOffice, deriveDealStatus, mergeAndLimit, mergeWithOfficeCap, scoreMatch, type DealLifecycle } from "./global-search-helpers.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -196,13 +196,24 @@ async function runEntitySearches(
   return { deals: dealHits, contacts: contactHits, files: fileHits, companies: companyHits, leads: leadHits, properties: propertyHits };
 }
 
-function assembleResponse(query: string, groups: Record<SearchType, SearchResult[]>, limit: number): SearchResponse {
-  const dealHits = mergeAndLimit(groups.deals, limit).hits;
-  const contactHits = mergeAndLimit(groups.contacts, limit).hits;
-  const fileHits = mergeAndLimit(groups.files, limit).hits;
-  const companyHits = mergeAndLimit(groups.companies, limit).hits;
-  const leadHits = mergeAndLimit(groups.leads, limit).hits;
-  const propertyHits = mergeAndLimit(groups.properties, limit).hits;
+function assembleResponse(
+  query: string,
+  groups: Record<SearchType, SearchResult[]>,
+  limit: number,
+  perOfficeCap?: number,
+): SearchResponse {
+  // Single office (perOfficeCap undefined) -> plain top-N. Cross-office -> fair cap + backfill so
+  // a big office can't monopolize the page yet the page still fills when matches concentrate.
+  const merge = (group: SearchResult[]): SearchResult[] =>
+    perOfficeCap != null
+      ? mergeWithOfficeCap(group, limit, perOfficeCap).hits
+      : mergeAndLimit(group, limit).hits;
+  const dealHits = merge(groups.deals);
+  const contactHits = merge(groups.contacts);
+  const fileHits = merge(groups.files);
+  const companyHits = merge(groups.companies);
+  const leadHits = merge(groups.leads);
+  const propertyHits = merge(groups.properties);
   return {
     deals: dealHits,
     contacts: contactHits,
@@ -263,8 +274,10 @@ async function crossOfficeSearch(
     return emptyResponse(sanitized);
   }
 
-  // Anti-crowd-out: take only the top capPerOffice rows per office BEFORE merging, so a big
-  // office cannot starve a small one; then merge + re-rank globally to the per-entity limit.
+  // Anti-crowd-out WITH backfill: fetch the FULL per-entity limit from each office (so backfill
+  // material exists), then at merge time take a fair per-office slice first and fill the rest from
+  // the globally-ranked leftovers. Fetching only the cap per office (the old approach) starved the
+  // page whenever matches were concentrated in fewer offices than the cap assumed.
   const perOfficeCap = capPerOffice(PER_ENTITY_LIMIT, accessibleOffices.length);
   const merged: Record<SearchType, SearchResult[]> = {
     deals: [], contacts: [], files: [], companies: [], leads: [], properties: [],
@@ -277,7 +290,7 @@ async function crossOfficeSearch(
         const schemaName = `office_${office.slug}`;
         await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
         const officeDb = drizzle(client, { schema: undefined as any });
-        const groups = await runEntitySearches(officeDb as any, sanitized, types, perOfficeCap);
+        const groups = await runEntitySearches(officeDb as any, sanitized, types, PER_ENTITY_LIMIT);
         for (const key of Object.keys(merged) as SearchType[]) {
           merged[key].push(
             ...groups[key].map((item) => ({
@@ -296,12 +309,14 @@ async function crossOfficeSearch(
     }),
   );
 
-  return assembleResponse(sanitized, merged, PER_ENTITY_LIMIT);
+  return assembleResponse(sanitized, merged, PER_ENTITY_LIMIT, perOfficeCap);
 }
 
 // Relevance score for ORDER BY: exact match on any column (3) > prefix (2) > other/related (1).
 // Applied BEFORE the per-entity LIMIT so a strong older match is never dropped for newer weak ones.
-function relevanceOrder(query: string, columns: Column[]): SQL<number> {
+// Accepts raw SQL expressions as well as columns, so a derived match the builder uses (e.g. a
+// CONCAT full-name) can be ranked the same as a plain column.
+function relevanceOrder(query: string, columns: Array<Column | SQL>): SQL<number> {
   const prefix = `${escapeLikePattern(query.trim())}%`;
   const exact = query.trim().toLowerCase();
   const exactChecks = sql.join(columns.map((c) => sql`lower(coalesce(${c}, '')) = ${exact}`), sql` OR `);
@@ -347,7 +362,10 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
     // (mergeAndLimit applies the same active-first comparator after merge.)
     .orderBy(
       asc(sql<number>`CASE WHEN ${inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])} THEN 2 WHEN ${deals.onHold} THEN 1 ELSE 0 END`),
-      desc(relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber])),
+      // Rank over every own field the builder matches (numbers + address/city/state + bid-board
+      // customer), not just name/number, so an exact city/customer hit can't be dropped before the
+      // limit by newer weaker matches. (Related company/contact/owner matches stay tier 1 / score 0.)
+      desc(relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber, deals.description, deals.propertyAddress, deals.propertyCity, deals.propertyState, deals.bidBoardCustomerName])),
       desc(deals.updatedAt),
     )
     .limit(limit);
@@ -382,11 +400,25 @@ async function searchContacts(tenantDb: TenantDb, query: string, limit: number):
       lastName: contacts.lastName,
       email: contacts.email,
       phone: contacts.phone,
+      mobile: contacts.mobile,
+      jobTitle: contacts.jobTitle,
+      city: contacts.city,
       companyName: contacts.companyName,
     })
     .from(contacts)
     .where(and(buildContactSearchCondition(query), eq(contacts.isActive, true)))
-    .orderBy(desc(relevanceOrder(query, [contacts.firstName, contacts.lastName, contacts.email, contacts.companyName])), desc(contacts.updatedAt))
+    // Rank over EVERY field the builder matches (name parts/email/company + phone/mobile/jobTitle/city
+    // AND the derived full-name CONCAT), not just name/email/company: otherwise a phone-fragment, city,
+    // or two-word full-name query with >limit matches lets newer weak matches fill the limit and drops
+    // an older exact hit before it's returned. The CONCAT mirrors the builder's full-name match path.
+    .orderBy(
+      desc(relevanceOrder(query, [
+        contacts.firstName, contacts.lastName, contacts.email, contacts.companyName,
+        contacts.phone, contacts.mobile, contacts.jobTitle, contacts.city,
+        sql`(coalesce(${contacts.firstName}, '') || ' ' || coalesce(${contacts.lastName}, ''))`,
+      ])),
+      desc(contacts.updatedAt),
+    )
     .limit(limit);
 
   return rows.map((r): SearchResult => {
@@ -398,7 +430,9 @@ async function searchContacts(tenantDb: TenantDb, query: string, limit: number):
       secondaryLabel: r.email ?? r.phone ?? "",
       tertiaryLabel: r.companyName ?? undefined,
       deepLink: `/contacts/${r.id}`,
-      rank: scoreMatch(query, name, r.email, r.companyName),
+      // Score over the same matched fields so the cross-office merge re-rank keeps a city/phone-only
+      // match ordered sensibly rather than at score 0.
+      rank: scoreMatch(query, name, r.email, r.companyName, r.phone, r.mobile, r.jobTitle, r.city),
     };
   });
 }
@@ -416,10 +450,10 @@ async function searchCompanies(tenantDb: TenantDb, query: string, limit: number)
     })
     .from(companies)
     .where(and(buildCompanySearchCondition(query), eq(companies.isActive, true)))
-    // Rank/order over the SAME fields the builder matches, so an exact domain/address hit isn't
-    // pushed out of the cap by weaker name/city matches.
+    // Rank/order over the SAME own fields the builder matches (incl. city/state), so an exact
+    // domain/address/city hit isn't pushed out of the limit by weaker name matches.
     .orderBy(
-      desc(relevanceOrder(query, [companies.name, companies.domain, companies.website, companies.address])),
+      desc(relevanceOrder(query, [companies.name, companies.domain, companies.website, companies.address, companies.city, companies.state])),
       desc(companies.updatedAt),
     )
     .limit(limit);
@@ -435,11 +469,23 @@ async function searchCompanies(tenantDb: TenantDb, query: string, limit: number)
 }
 
 async function searchLeads(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+  // Findable set = active OR a terminal lead state (converted/disqualified). BOTH terminal states
+  // set is_active=false -- conversion (leads/conversion-service) sets status='converted', and
+  // disqualifying (leads/service updateLead: isActive = status==='open') sets status='disqualified'
+  // -- so an is_active-only filter would silently hide every closed lead, including the builder's
+  // converted-deal-number match path. Mirrors deals surfacing BOTH won AND lost: terminal leads are
+  // findable + MARKED (status shown in the label). Admin soft-delete leaves status='open', so it is
+  // never matched here and stays hidden.
   const rows = await tenantDb
     .select({ id: leads.id, name: leads.name, status: leads.status })
     .from(leads)
-    .where(and(buildLeadSearchCondition(query), eq(leads.isActive, true)))
-    .orderBy(desc(relevanceOrder(query, [leads.name])), desc(leads.updatedAt))
+    .where(and(buildLeadSearchCondition(query), or(eq(leads.isActive, true), inArray(leads.status, ["converted", "disqualified"]))))
+    // Rank over the lead's own matched text columns (not just name) so an exact source/description
+    // hit isn't pushed past the limit by newer weaker name matches.
+    .orderBy(
+      desc(relevanceOrder(query, [leads.name, leads.source, leads.sourceDetail, leads.description])),
+      desc(leads.updatedAt),
+    )
     .limit(limit);
 
   return rows.map((r): SearchResult => ({
@@ -463,7 +509,12 @@ async function searchProperties(tenantDb: TenantDb, query: string, limit: number
     })
     .from(properties)
     .where(and(buildPropertySearchCondition(query), eq(properties.isActive, true)))
-    .orderBy(desc(relevanceOrder(query, [properties.name, properties.address, properties.city])), desc(properties.updatedAt))
+    // Rank over every own field the builder matches (incl. state/zip) so an exact zip/state hit
+    // isn't dropped before the limit by weaker name/city matches.
+    .orderBy(
+      desc(relevanceOrder(query, [properties.name, properties.address, properties.city, properties.state, properties.zip])),
+      desc(properties.updatedAt),
+    )
     .limit(limit);
 
   return rows.map((r): SearchResult => {

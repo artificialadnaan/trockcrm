@@ -79,6 +79,18 @@ export function SearchPage() {
   const { addRecent } = useRecentSearches();
   const trackedQueryIdsRef = useRef<Set<string>>(new Set());
 
+  // Single source of truth for whether the AI summary card is shown. The /search/ai route only
+  // searches deals/contacts/files, so for a company/lead/property-only query it would render a
+  // "No CRM matches" card directly above the Accounts/Leads/Properties cards this page renders --
+  // a visible contradiction. Show it only when the AI path actually found something. Both the JSX
+  // gate AND the impression-tracking effect use this, so we never log a "served" impression for a
+  // card the user never saw (which would skew admin AI-Ops served/conversion metrics). Expanding
+  // the AI route to the new entity types is a separate follow-up.
+  const aiCardVisible =
+    !!aiResults?.summary &&
+    query.length >= 2 &&
+    ((aiResults?.structured?.total ?? 0) > 0 || (aiResults?.evidence?.length ?? 0) > 0);
+
   useEffect(() => {
     if (initialQ) {
       setQuery(initialQ);
@@ -97,6 +109,8 @@ export function SearchPage() {
 
   useEffect(() => {
     if (!aiResults?.queryId || aiResults.queryId === "00000000-0000-0000-0000-000000000000") return;
+    // Only an impression for a card the user actually sees -- keeps served/conversion metrics honest.
+    if (!aiCardVisible) return;
     if (trackedQueryIdsRef.current.has(aiResults.queryId)) return;
 
     trackedQueryIdsRef.current.add(aiResults.queryId);
@@ -116,7 +130,7 @@ export function SearchPage() {
     }).catch(() => {
       trackedQueryIdsRef.current.delete(aiResults.queryId);
     });
-  }, [aiResults]);
+  }, [aiResults, aiCardVisible]);
 
   const sections: Array<{ key: "deals" | "contacts" | "files" | "companies" | "leads" | "properties"; label: string }> = [
     { key: "deals", label: "Deals" },
@@ -191,7 +205,8 @@ export function SearchPage() {
         <div className="text-center text-gray-400 py-12">Searching...</div>
       )}
 
-      {aiResults?.summary && query.length >= 2 && (
+      {/* Gate documented at the aiCardVisible definition above (no-contradiction + honest metrics). */}
+      {aiCardVisible && (
         <Card className="border-border/80">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">

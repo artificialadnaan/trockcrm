@@ -86,3 +86,45 @@ export function mergeAndLimit<T extends RankableHit>(
   const sorted = [...hits].sort(compareHits).slice(0, perEntityLimit);
   return { hits: sorted, total, truncated: total > perEntityLimit };
 }
+
+/**
+ * Cross-office fair merge WITH backfill. The plain cap (capPerOffice) prevents one big office
+ * from monopolizing the page, but applied alone it STARVES the page when matches are concentrated
+ * in fewer offices than the cap assumed (e.g. 10 offices -> cap 5, but only one office matches ->
+ * just 5 rows even though 20 more valid hits exist). So:
+ *   1. Fairness pass: take up to perOfficeCap of each office's best hits (active-first, then rank).
+ *   2. Backfill pass: if the page is still short, fill the remaining slots from the leftover hits
+ *      (still globally ranked), so a page is never left under-filled while real matches exist.
+ * Callers must fetch >= perEntityLimit per office so the backfill material actually exists.
+ */
+export function mergeWithOfficeCap<T extends RankableHit & { officeSlug?: string }>(
+  hits: T[],
+  perEntityLimit: number,
+  perOfficeCap: number
+): { hits: T[]; total: number; truncated: boolean } {
+  const total = hits.length;
+  const sorted = [...hits].sort(compareHits);
+  const taken: T[] = [];
+  const overflow: T[] = [];
+  const perOffice = new Map<string, number>();
+
+  for (const hit of sorted) {
+    if (taken.length >= perEntityLimit) break; // page already filled by the fairness pass
+    const key = hit.officeSlug ?? "";
+    const used = perOffice.get(key) ?? 0;
+    if (used < perOfficeCap) {
+      taken.push(hit);
+      perOffice.set(key, used + 1);
+    } else {
+      overflow.push(hit);
+    }
+  }
+
+  // Backfill from the globally-ranked leftovers when the fairness cap left the page short.
+  for (const hit of overflow) {
+    if (taken.length >= perEntityLimit) break;
+    taken.push(hit);
+  }
+
+  return { hits: taken.sort(compareHits), total, truncated: total > taken.length };
+}
