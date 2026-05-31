@@ -39,6 +39,15 @@ export interface Company {
   updatedAt: string;
 }
 
+/** Verification-status filter values — the DB enum IN FULL (the reject flow writes `rejected`). NOTE:
+ *  the `Company.companyVerificationStatus` field above omits `rejected`; the FILTER offers all four
+ *  because the server filters the full DB enum (Wave 2 contract round 2). */
+export type CompanyVerificationStatus = "pending" | "verified" | "rejected" | "not_required";
+
+/** Companies-list sort allow-list keys — MUST match BLUE's server allow-list (server hardcodes
+ *  `name ASC` today; Wave 2 adds these). */
+export type CompanyListSortKey = "last_activity_at" | "created_at" | "name";
+
 export interface CompanyFilters {
   search?: string;
   category?: string;
@@ -46,6 +55,17 @@ export interface CompanyFilters {
   ownerScope?: "mine";
   page?: number;
   limit?: number;
+  // --- Wave 2 FilterBar params (forwarded to GET /api/companies; BLUE implements the predicates) ---
+  /** owner_id eq, or the `__unassigned__` sentinel BLUE maps to `owner_id IS NULL`. */
+  assignedRepId?: string;
+  /** `company_verification_status` filter (the contracted `status` query param). */
+  status?: CompanyVerificationStatus;
+  /** `COALESCE(last_activity_at, created_at)` window. */
+  dateFrom?: string;
+  dateTo?: string;
+  /** Sort allow-list `last_activity_at | created_at | name`. */
+  sortBy?: CompanyListSortKey;
+  sortDir?: "asc" | "desc";
 }
 
 export interface Pagination {
@@ -80,6 +100,14 @@ export function useCompanies(filters: CompanyFilters = {}) {
       if (filters.category) params.set("category", filters.category);
       if (filters.industry) params.set("industry", filters.industry);
       if (filters.ownerScope === "mine") params.set("ownerScope", "mine");
+      // Wave 2 FilterBar params — forwarded verbatim; BLUE implements the predicates. Sent only when
+      // set, so absent = no filter (and the server safely ignores any it does not yet handle).
+      if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
+      if (filters.status) params.set("status", filters.status);
+      if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
+      if (filters.dateTo) params.set("dateTo", filters.dateTo);
+      if (filters.sortBy) params.set("sortBy", filters.sortBy);
+      if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
 
@@ -106,7 +134,20 @@ export function useCompanies(filters: CompanyFilters = {}) {
         setLoading(false);
       }
     }
-  }, [filters.search, filters.category, filters.industry, filters.ownerScope, filters.page, filters.limit]);
+  }, [
+    filters.search,
+    filters.category,
+    filters.industry,
+    filters.ownerScope,
+    filters.assignedRepId,
+    filters.status,
+    filters.dateFrom,
+    filters.dateTo,
+    filters.sortBy,
+    filters.sortDir,
+    filters.page,
+    filters.limit,
+  ]);
 
   useEffect(() => {
     fetchCompanies();

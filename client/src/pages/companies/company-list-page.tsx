@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
@@ -17,6 +17,15 @@ import { useOwnerAssignees } from "@/hooks/use-owner-assignees";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { assignCompanyOwnerToMe, reassignCompanyOwner, useCompanies, type Company } from "@/hooks/use-companies";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
+import { FilterBar, type FilterBarOptions, type FilterDimension } from "@/components/filters/filter-bar";
+import { useFilterState } from "@/components/filters/use-filter-state";
+import type { FilterBarValue } from "@/components/filters/filterbar-params";
+import {
+  COMPANY_LIST_SORT_OPTIONS,
+  COMPANY_VERIFICATION_STATUS_OPTIONS,
+  filterBarValueToCompanyFilters,
+  getCompanyDisplayDate,
+} from "@/components/companies/companies-filterbar-adapter";
 import { cn } from "@/lib/utils";
 
 const INDUSTRY_OPTIONS = [
@@ -31,6 +40,16 @@ const OWNER_SCOPE_OPTIONS = [
   { value: "all", label: "All" },
   { value: "mine", label: "Mine" },
 ] as const;
+
+// Wave 2 FilterBar (companies): Owner + Date + Sort + Status (verification). Search stays the page's own
+// debounced, local-state input — the companies list has a HARD no-blank / no-URL-on-type requirement
+// (#520, enforced by company-list-page.search-ux.test.tsx), which the bar's URL-backed `search` dimension
+// would break. Industry + the mine/all owner scope also stay page controls (Industry -> the generic enum
+// dimension is deferred to Wave 2.5). Render order is fixed by the bar: Date, Owner, Status, Sort.
+const COMPANY_FILTER_DIMENSIONS: FilterDimension[] = ["rep", "date", "sort", "status"];
+// Namespace this surface's FilterBar params (per the Wave 2 mount plan). Bare would also be collision-free
+// (the companies route has no co-mounted board), but a prefix keeps the params self-describing + future-proof.
+const COMPANIES_FILTER_PREFIX = "co_";
 
 function numeric(value: string | number | null | undefined) {
   return Number(value ?? 0);
@@ -119,7 +138,7 @@ export function CompanyCard({
       <div className="mt-2 flex items-center justify-between gap-2">
         <span className="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-400">Last activity</span>
         <span className={cn("text-xs font-bold", stale ? "text-brand-red" : "text-slate-600")}>
-          {formatLastActivity(company.lastActivityAt)}
+          {formatLastActivity(getCompanyDisplayDate(company))}
         </span>
       </div>
       <div className="mt-3 flex flex-col gap-2">
@@ -135,15 +154,48 @@ export function CompanyListPage() {
   const { user } = useAuth();
   const { assignees, loading: assigneesLoading } = useTaskAssignees();
   const { assignees: ownerAssignees, loading: ownerAssigneesLoading } = useOwnerAssignees();
+  const { filters, setFilters, resetFilters } = useFilterState(COMPANIES_FILTER_PREFIX);
   const [search, setSearch] = useState("");
   const [industry, setIndustry] = useState<(typeof INDUSTRY_OPTIONS)[number]["value"]>("all");
-  const [ownerScope, setOwnerScope] = useState<(typeof OWNER_SCOPE_OPTIONS)[number]["value"]>("all");
   const [page, setPage] = useState(1);
 
+  // A bar filter change (Owner/Date/Sort/Status, or the page's mine/all scope writing the URL `scope`)
+  // resets to page 1 — mirroring the search/industry page controls.
+  const handleFilterChange = useCallback(
+    (patch: Partial<FilterBarValue>) => {
+      setFilters(patch);
+      setPage(1);
+    },
+    [setFilters]
+  );
+  const handleResetFilters = useCallback(() => {
+    resetFilters();
+    setIndustry("all");
+    setPage(1);
+  }, [resetFilters]);
+
+  const ownerOptions = useMemo(
+    () => ownerAssignees.map((owner) => ({ value: owner.id, label: owner.displayName })),
+    [ownerAssignees]
+  );
+  const companyFilterBarOptions = useMemo<FilterBarOptions>(
+    () => ({
+      reps: ownerOptions,
+      sortOptions: COMPANY_LIST_SORT_OPTIONS,
+      statusOptions: COMPANY_VERIFICATION_STATUS_OPTIONS,
+      allowUnassigned: true,
+      repLabel: "Owner",
+    }),
+    [ownerOptions]
+  );
+  // The mine/all scope is inherited via the URL `scope` (not a bar dimension); only "mine" maps to
+  // ownerScope (adapter). Defaults to "all" (the companies default), not the bar's "mine".
+  const ownerScopeValue = filters.scope === "mine" ? "mine" : "all";
+
   const { companies: rawCompanies, pagination, loading, error, refetch } = useCompanies({
+    ...filterBarValueToCompanyFilters(filters),
     search: search || undefined,
     industry: industry === "all" ? undefined : industry,
-    ownerScope: ownerScope === "mine" ? "mine" : undefined,
     page,
     limit: 50,
   });
@@ -182,43 +234,56 @@ export function CompanyListPage() {
 
       <Card className="border-slate-200 bg-white shadow-none">
         <CardContent className="space-y-4 p-4">
-          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
-              <SearchInput
-                value={search}
-                onChange={(value) => {
-                  setSearch(value);
-                  setPage(1);
-                }}
-                placeholder="Search accounts, cities, domains..."
-                aria-label="Search accounts"
-                className="min-w-[240px] flex-1"
-                inputClassName="h-9 border-slate-200"
-              />
-              <ScopeToggle
-                options={INDUSTRY_OPTIONS}
-                value={industry}
-                onChange={(value) => {
-                  setIndustry(value);
-                  setPage(1);
-                }}
-                ariaLabel="Industry filter"
-                size="touch"
-              />
-              <ScopeToggle
-                options={OWNER_SCOPE_OPTIONS}
-                value={ownerScope}
-                onChange={(value) => {
-                  setOwnerScope(value);
-                  setPage(1);
-                }}
-                ariaLabel="Ownership filter"
-                size="touch"
-              />
+          <div className="space-y-3">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
+                <SearchInput
+                  value={search}
+                  onChange={(value) => {
+                    setSearch(value);
+                    setPage(1);
+                  }}
+                  placeholder="Search accounts, cities, domains..."
+                  aria-label="Search accounts"
+                  className="min-w-[240px] flex-1"
+                  inputClassName="h-9 border-slate-200"
+                />
+                <ScopeToggle
+                  options={INDUSTRY_OPTIONS}
+                  value={industry}
+                  onChange={(value) => {
+                    setIndustry(value);
+                    setPage(1);
+                  }}
+                  ariaLabel="Industry filter"
+                  size="touch"
+                />
+                <ScopeToggle
+                  options={OWNER_SCOPE_OPTIONS}
+                  value={ownerScopeValue}
+                  onChange={(value) => handleFilterChange({ scope: value === "mine" ? "mine" : undefined })}
+                  ariaLabel="Ownership filter"
+                  size="touch"
+                />
+              </div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
+                {isInitialLoading ? "Loading accounts" : `${pagination.total} results${isRefreshing ? " · Updating..." : ""}`}
+              </p>
             </div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
-              {isInitialLoading ? "Loading accounts" : `${pagination.total} results${isRefreshing ? " · Updating..." : ""}`}
-            </p>
+            {/* Wave 2 shared FilterBar: Owner + Date + Sort + Status (verification). Search/Industry/scope
+                stay page controls above (see COMPANY_FILTER_DIMENSIONS). */}
+            <FilterBar
+              dimensions={COMPANY_FILTER_DIMENSIONS}
+              options={companyFilterBarOptions}
+              value={filters}
+              onChange={handleFilterChange}
+              onReset={handleResetFilters}
+              // Companies have no Won/Lost or open-stage semantics; `true` suppresses the deal-specific
+              // "Won/Lost & activity · open stages show current state" note the shared date control shows
+              // when false (the axis is COALESCE(last_activity_at, created_at) per the contract).
+              // TODO(RED): a per-surface date-note opt-out so non-deal mounts need not lean on this flag.
+              stageEntryDateEnabled
+            />
           </div>
 
           {error ? (
@@ -308,7 +373,7 @@ export function CompanyListPage() {
                       <TableCell className="text-right font-black tabular-nums text-slate-950">{USD(numeric(company.pipelineValue))}</TableCell>
                       <TableCell>
                         <span className={cn("text-xs font-bold", stale ? "text-brand-red" : "text-slate-600")}>
-                          {formatLastActivity(company.lastActivityAt)}
+                          {formatLastActivity(getCompanyDisplayDate(company))}
                         </span>
                       </TableCell>
                       <TableCell>

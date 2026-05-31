@@ -486,4 +486,23 @@ describe("CompanyListPage", () => {
       await cleanup();
     }
   });
+
+  it("mounts the Wave 2 FilterBar (Owner/Date/Sort/Status) with the deal-specific date note suppressed", async () => {
+    const { container, cleanup } = await renderPageDom();
+    try {
+      expect(container.querySelector('[aria-label="Filters"]')).not.toBeNull();
+      // Owner dimension = the rep dimension relabeled (repLabel="Owner") -> "Owner filter" + "All owners".
+      const ownerControl = container.querySelector('[aria-label="Owner filter"]');
+      expect(ownerControl).not.toBeNull();
+      expect(ownerControl?.textContent).toContain("All owners");
+      // Verification Status + Sort dimensions present; Clear action present.
+      expect(container.querySelector('[aria-label="Status filter"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Sort filter"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Clear filters"]')).not.toBeNull();
+      // The deal-only "Won/Lost & activity" date note is suppressed on companies (stageEntryDateEnabled).
+      expect(container.querySelector('[data-testid="date-scope-note"]')).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
 });

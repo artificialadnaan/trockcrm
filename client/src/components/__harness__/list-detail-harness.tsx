@@ -11,6 +11,14 @@ import {
 } from "@/components/deals/pipeline-stage-summary";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
+import { FilterBar, type FilterDimension } from "@/components/filters/filter-bar";
+import type { FilterBarValue } from "@/components/filters/filterbar-params";
+import type { FilterSelectOption } from "@/components/filters/filter-select";
+import { SearchInput } from "@/components/ui/search-input";
+import {
+  COMPANY_LIST_SORT_OPTIONS,
+  COMPANY_VERIFICATION_STATUS_OPTIONS,
+} from "@/components/companies/companies-filterbar-adapter";
 import { cn } from "@/lib/utils";
 
 // Dev-only preview for the Contacts/Companies/Properties list+detail mobile pass.
@@ -311,8 +319,93 @@ function PipelineChromeDemo({ before = false }: { before?: boolean }) {
   );
 }
 
+// Owner options the real mount feeds from useOwnerAssignees -> the bar's `reps`.
+const harnessOwnerReps: FilterSelectOption[] = [
+  { value: "u1", label: "Alicia Adams" },
+  { value: "u2", label: "Riley Rep" },
+  { value: "u3", label: "Dana Director" },
+];
+const HARNESS_INDUSTRY_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "general_contractor", label: "GC" },
+  { value: "property_owner", label: "Owner" },
+  { value: "property_management", label: "Mgmt" },
+  { value: "insurance_restoration", label: "Restoration" },
+] as const;
+const HARNESS_OWNER_SCOPE_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "mine", label: "Mine" },
+] as const;
+const HARNESS_COMPANY_DIMENSIONS: FilterDimension[] = ["rep", "date", "sort", "status"];
+
+/**
+ * Structural mock of the Companies list chrome with the Wave 2 FilterBar mounted (the REAL <FilterBar>,
+ * mock data, no API/auth). Mirrors company-list-page.tsx: the page keeps its own debounced search +
+ * Industry + mine/all scope controls; the bar adds Owner (repLabel) + Date + Sort + Status
+ * (verification). The deal-specific date note is suppressed (stageEntryDateEnabled), matching the mount.
+ */
+function CompaniesFilterBarDemo() {
+  const [value, setValue] = useState<FilterBarValue>({});
+  const [industry, setIndustry] = useState<string>("all");
+  const ownerScope = value.scope === "mine" ? "mine" : "all";
+  return (
+    <div className="space-y-3 rounded-xl border border-emerald-200 bg-white p-3">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:items-center">
+          <SearchInput
+            value={value.search ?? ""}
+            onChange={() => {}}
+            placeholder="Search accounts, cities, domains..."
+            aria-label="Search accounts"
+            className="min-w-[240px] flex-1"
+            inputClassName="h-9 border-slate-200"
+          />
+          <ScopeToggle
+            options={HARNESS_INDUSTRY_OPTIONS}
+            value={industry}
+            onChange={setIndustry}
+            ariaLabel="Industry filter"
+            size="touch"
+          />
+          <ScopeToggle
+            options={HARNESS_OWNER_SCOPE_OPTIONS}
+            value={ownerScope}
+            onChange={(next) => setValue((prev) => ({ ...prev, scope: next === "mine" ? "mine" : undefined }))}
+            ariaLabel="Ownership filter"
+            size="touch"
+          />
+        </div>
+        <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">128 results</p>
+      </div>
+      <FilterBar
+        dimensions={HARNESS_COMPANY_DIMENSIONS}
+        options={{
+          reps: harnessOwnerReps,
+          sortOptions: COMPANY_LIST_SORT_OPTIONS,
+          statusOptions: COMPANY_VERIFICATION_STATUS_OPTIONS,
+          allowUnassigned: true,
+          repLabel: "Owner",
+        }}
+        value={value}
+        onChange={(patch) => setValue((prev) => ({ ...prev, ...patch }))}
+        onReset={() => {
+          setValue({});
+          setIndustry("all");
+        }}
+        stageEntryDateEnabled
+      />
+      <div className="space-y-2">
+        {harnessCompanies.slice(0, 2).map((company) => (
+          <CompanyCard key={company.id} company={company} ownerSlot={<MockOwnerControl />} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ListDetailHarness() {
   return (
+    <>
     <div className="mx-auto max-w-md space-y-8 bg-[#F5F4F2] p-4 pb-12">
       <header>
         <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">List + detail mobile pass</p>
@@ -457,5 +550,20 @@ export function ListDetailHarness() {
         </div>
       </Section>
     </div>
+
+    {/* Wider container so the desktop layout is faithful at a ≥md viewport (the mobile sections above
+        stay capped at max-w-md). At 390px this still renders the mobile wrap. */}
+    <div className="mx-auto max-w-5xl space-y-3 bg-[#F5F4F2] px-4 pb-16" data-testid="companies-filterbar-demo">
+      <Section title="Companies list — Wave 2 FilterBar (Owner · Date · Sort · Status)">
+        <p className="text-xs text-slate-500">
+          The shared <code>&lt;FilterBar&gt;</code> mounted on the companies list: Owner (relabeled from
+          Rep) · Date · Sort · Status (verification — Pending/Verified/Rejected/Not required). Search,
+          Industry, and the mine/all owner scope stay page controls (search is the existing debounced,
+          local, no-URL input). Resize to ≥768px for the desktop row.
+        </p>
+        <CompaniesFilterBarDemo />
+      </Section>
+    </div>
+    </>
   );
 }

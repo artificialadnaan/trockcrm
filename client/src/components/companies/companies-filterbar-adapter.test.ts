@@ -87,10 +87,8 @@ describe("filterBarValueToCompanyFilters (FilterBar URL value -> useCompanies Co
 });
 
 describe("status -> status (verification; emitted under the contracted `status` param)", () => {
-  // On main `FilterBarValue.status` is the deal-status union; RED's #577 widens the shared `status`
-  // param to a multi-domain free string. These cast the literal to exercise the verification mapping
-  // that widened param enables (the cast becomes a no-op once RED lands).
-  const withStatus = (status: string): FilterBarValue => ({ status } as unknown as FilterBarValue);
+  // The shared `status` is a multi-domain free string (#584), so verification values assign directly.
+  const withStatus = (status: string): FilterBarValue => ({ status });
 
   it("maps each verification status under `status` (incl. 'rejected' per contract round 2)", () => {
     expect(filterBarValueToCompanyFilters(withStatus("pending"))).toEqual({ status: "pending" });
