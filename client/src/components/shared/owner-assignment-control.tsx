@@ -87,7 +87,7 @@ export function OwnerAssignmentControl({
             );
           }}
         >
-          <SelectTrigger className="h-8 border-slate-200 bg-slate-50 text-xs" aria-label="Reassign owner">
+          <SelectTrigger className="h-8 min-h-[44px] md:min-h-0 border-slate-200 bg-slate-50 text-xs" aria-label="Reassign owner">
             <span className="truncate">{currentOwnerLabel}</span>
           </SelectTrigger>
           <SelectContent>
@@ -113,7 +113,7 @@ export function OwnerAssignmentControl({
       type="button"
       variant="outline"
       size="sm"
-      className="h-7 w-fit px-2 text-[11px]"
+      className="h-7 min-h-[44px] md:min-h-0 w-fit px-2 text-[11px]"
       disabled={saving}
       onClick={(event) => {
         event.stopPropagation();

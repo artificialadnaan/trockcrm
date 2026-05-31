@@ -140,7 +140,7 @@ export function EmailList({
             <Button
               variant="outline"
               size="sm"
-              className="min-h-[44px] md:h-7"
+              className="min-h-[44px] md:min-h-0"
               disabled={pagination.page <= 1}
               onClick={() => onPageChange(pagination.page - 1)}
             >
@@ -149,7 +149,7 @@ export function EmailList({
             <Button
               variant="outline"
               size="sm"
-              className="min-h-[44px] md:h-7"
+              className="min-h-[44px] md:min-h-0"
               disabled={pagination.page >= pagination.totalPages}
               onClick={() => onPageChange(pagination.page + 1)}
             >

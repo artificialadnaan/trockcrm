@@ -215,7 +215,7 @@ export function ContactDetailPage() {
       actionsSlot={
         <>
           <TaskCreateDialog defaultContactId={contact.id} onCreated={() => {}} />
-          <Button variant="outline" size="sm" className="min-h-[44px] md:h-7" nativeButton={false} render={<Link to={`/contacts/${contact.id}/edit`} />}>
+          <Button variant="outline" size="sm" className="min-h-[44px] md:min-h-0" nativeButton={false} render={<Link to={`/contacts/${contact.id}/edit`} />}>
             <Edit className="h-4 w-4" />
             Edit
           </Button>

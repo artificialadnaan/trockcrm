@@ -214,12 +214,12 @@ export function ContactListPage() {
               <Button
                 variant="outline"
                 size="sm"
-                className="h-11 md:h-7"
+                className="min-h-[44px] md:min-h-0"
                 onClick={() => setFilters({ sortBy: "last_touch_at", sortDir: "desc" })}
               >
                 Last touch
               </Button>
-              <Button variant="ghost" size="sm" className="h-11 md:h-7" onClick={resetFilters}>
+              <Button variant="ghost" size="sm" className="min-h-[44px] md:min-h-0" onClick={resetFilters}>
                 Clear
               </Button>
             </div>
