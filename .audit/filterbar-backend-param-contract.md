@@ -53,7 +53,12 @@ window depend on `stage_entered_at`, reliable only post-#535. They are gated on
 ## The date model is outcome-aware (canonical, platform-wide)
 
 One `date_from`/`date_to` window, three axes by row outcome:
-- Won rows  -> won/signed date (COALESCE(contract_signed_at::date, contract_signed_date))
+- Won rows  -> CANONICAL won-close date = aliasedWonHsClosedWonDateSql (the app-owned
+  deals.won_closed_date column). The date-scope IMPORTS this exact helper from the
+  shared leaf (server/src/modules/shared/deal-value-sql.ts) -- the SAME one
+  getWonCloseSummary / the board / the Won drill-down use -- so it can never diverge
+  from the protected 191/$9,778,045.90 basis. (Both Won and Lost stage-id sets must
+  resolve; if either is missing the date predicate is skipped, never widened.)
 - Lost rows -> lost_at date
 - Open rows -> stage_entry date (flag-gated)
 

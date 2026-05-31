@@ -158,7 +158,7 @@ describe("getDeals — FilterBar wiring", () => {
 
       const sql = mainWhere(capturedWheres);
       expect(sql).toContain("stage_id");
-      expect(sql).toContain("contract_signed");
+      expect(sql).toContain("won_closed_date");
       expect(sql).toContain("lost_at");
       // Flag OFF → open rows are NOT bounded by stage entry (current-state).
       expect(sql).not.toContain("stage_entered_at");

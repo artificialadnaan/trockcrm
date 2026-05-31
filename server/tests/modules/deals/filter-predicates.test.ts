@@ -169,7 +169,7 @@ describe("outcome-aware date predicate (delegates to the shared model)", () => {
   });
   it("windows Won rows on the won date and Lost rows on the lost date", () => {
     const sql = text(buildOutcomeAwareDatePredicate({ dateFrom: "2026-01-01", dateTo: "2026-03-31" }, { ...dateCtx, stageEntryDateEnabled: false }));
-    expect(sql).toContain("contract_signed");
+    expect(sql).toContain("won_closed_date");
     expect(sql).toContain("lost_at");
     expect(sql).toContain("stage_id");
   });

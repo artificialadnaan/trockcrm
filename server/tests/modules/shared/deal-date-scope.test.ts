@@ -4,7 +4,9 @@ import type { SQL } from "drizzle-orm";
 
 /**
  * The canonical platform-wide deal date-scoping model (shared, adopted by every
- * list surface). Won->won date, Lost->lost date, open->stage entry (flag-gated).
+ * list surface). Won -> the canonical won_closed_date basis, Lost -> lost_at,
+ * open -> stage entry (flag-gated). Won/Lost classification by stage-id set;
+ * partial classification (only one set) skips the predicate to avoid widening.
  */
 
 import {
@@ -23,15 +25,13 @@ describe("buildDealOutcomeDateScope", () => {
     expect(buildDealOutcomeDateScope({ from: "", to: "" }, ctx)).toBeUndefined();
   });
 
-  it("windows Won rows on the CANONICAL won-close date (basis), Lost rows on lost_at", () => {
+  it("windows Won rows on the canonical won_closed_date basis, Lost rows on lost_at", () => {
     const sql = render(buildDealOutcomeDateScope({ from: "2026-01-01", to: "2026-03-31" }, ctx));
-    // Canonical Won basis = COALESCE(NULLIF(hs_closed_won_date,'')::date,
-    // contract_signed_at::date, contract_signed_date) — the SAME chain the getDeals
-    // Won drill-down / getWonCloseSummary use. The hs_closed_won_date PRIMARY is
-    // what makes it canonical (a bare contract_signed COALESCE diverged from basis).
-    expect(sql).toContain("hs_closed_won_date");
-    expect(sql).toContain("contract_signed_at");
-    expect(sql).toContain("contract_signed_date");
+    // Won basis = deals.won_closed_date (the SAME helper getWonCloseSummary uses),
+    // NOT the raw hs_closed_won_date JSON or contract_signed_*.
+    expect(sql).toContain("won_closed_date");
+    expect(sql).not.toContain("hs_closed_won_date");
+    expect(sql).not.toContain("contract_signed");
     expect(sql).toContain("lost_at");
     expect(sql).toContain("stage_id"); // classified by stage-id membership
   });
@@ -52,30 +52,30 @@ describe("buildDealOutcomeDateScope", () => {
     expect(sql).toContain("stage_entered_at");
   });
 
-  it("degrades gracefully (returns undefined, skips the predicate) when NO won/lost stages resolve", () => {
-    // Both sets empty is a pipeline_stage_config misconfig. Rather than 500 a
-    // date-filtered endpoint, the function skips the date predicate so the caller
-    // omits it and still returns rows (Codex #546 — graceful-empty guarantee).
+  it("degrades gracefully (returns undefined, skips the predicate) when BOTH won/lost stages are empty", () => {
     expect(
       buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: [], lostStageIds: [] })
     ).toBeUndefined();
   });
 
-  it("still classifies correctly when only ONE outcome class resolves (partial config)", () => {
-    const sql = render(buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: ["won-1"], lostStageIds: [] }));
-    expect(sql).toContain("stage_id");
-    expect(sql).not.toContain("in ()");
+  it("also skips (returns undefined) under PARTIAL classification, so a missing class can't widen via the open branch", () => {
+    // lost empty -> lostMatch=false -> real Lost rows would fold into openMatch and
+    // (flag off) be included regardless of lost_at. Requiring both classes avoids
+    // that widening (Codex #546).
+    expect(
+      buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: ["won-1"], lostStageIds: [] })
+    ).toBeUndefined();
+    expect(
+      buildDealOutcomeDateScope({ from: "2026-01-01" }, { wonStageIds: [], lostStageIds: ["lost-1"] })
+    ).toBeUndefined();
   });
 
   it("supports an aliased deals table for raw-SQL surfaces (board/reports reuse)", () => {
     const sql = render(
-      buildDealOutcomeDateScope(
-        { from: "2026-01-01" },
-        { ...ctx, columns: aliasedDealDateScopeColumns("d") }
-      )
+      buildDealOutcomeDateScope({ from: "2026-01-01" }, { ...ctx, columns: aliasedDealDateScopeColumns("d") })
     );
     expect(sql).toContain("d.stage_id");
-    expect(sql).toContain("d.contract_signed_at"); // canonical won axis on the alias
+    expect(sql).toContain("d.won_closed_date"); // canonical won axis on the alias
     expect(sql).toContain("d.lost_at");
   });
 });
@@ -84,21 +84,16 @@ describe("dealDisplayDateExpr (display-axis companion to the filter)", () => {
   it("emits a CASE selecting the canonical won date for Won, lost date for Lost, stage entry otherwise", () => {
     const sql = render(dealDisplayDateExpr(ctx));
     expect(sql).toContain("case");
-    expect(sql).toContain("hs_closed_won_date"); // canonical won axis (basis)
+    expect(sql).toContain("won_closed_date"); // canonical won axis (basis)
     expect(sql).toContain("lost_at"); // lost axis
     expect(sql).toContain("stage_entered_at"); // open axis (ELSE)
     expect(sql).toContain("stage_id"); // classified by the same stage-id sets
   });
 
   it("uses the SAME date columns as the filter, so display-axis == filter-axis (no divergence)", () => {
-    // Both helpers are fed the identical ctx/columns -> they reference the same
-    // date columns. This is the structural guarantee behind filter == display.
-    // The filter only references the open stage-entry column when the flag is on
-    // (off = open rows are current-state), so assert against the flag-on filter
-    // for the stage-entry axis; won/lost are always present in both.
     const display = render(dealDisplayDateExpr(ctx));
     const filter = render(buildDealOutcomeDateScope({ from: "2026-01-01" }, { ...ctx, stageEntryDateEnabled: true }));
-    for (const axis of ["hs_closed_won_date", "lost_at", "stage_entered_at"]) {
+    for (const axis of ["won_closed_date", "lost_at", "stage_entered_at"]) {
       expect(display).toContain(axis);
       expect(filter).toContain(axis);
     }
@@ -110,7 +105,7 @@ describe("dealDisplayDateExpr (display-axis companion to the filter)", () => {
 
   it("supports an aliased deals table for raw-SQL surfaces", () => {
     const sql = render(dealDisplayDateExpr({ ...ctx, columns: aliasedDealDateScopeColumns("d") }));
-    expect(sql).toContain("d.contract_signed_at");
+    expect(sql).toContain("d.won_closed_date");
     expect(sql).toContain("d.lost_at");
     expect(sql).toContain("d.stage_entered_at");
   });
