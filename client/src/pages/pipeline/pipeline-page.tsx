@@ -37,6 +37,27 @@ import type { Deal } from "@/hooks/use-deals";
 import type { PipelineScope } from "@/lib/pipeline-scope";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 import { derivePipelineBoardView } from "./pipeline-board-view";
+import { useSalesReps } from "@/hooks/use-sales-reps";
+import { useRegions, useProjectTypes } from "@/hooks/use-pipeline-config";
+import { DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
+import type { FilterDimension } from "@/components/filters/filter-bar";
+
+// Slice 7 proving ground: the deals list under the kanban gets the richest shared FilterBar set.
+// (Stalled is gated off until FEATURE_STAGE_ENTRY_DATE; the bar hides it while stageEntryDateEnabled
+// is false. Scope is inherited from the page's scope toggle, not duplicated in the bar.)
+const DEAL_LIST_FILTERBAR_DIMENSIONS: FilterDimension[] = [
+  "search",
+  "date",
+  "stage",
+  "sort",
+  "rep",
+  "status",
+  "workflow",
+  "region",
+  "projectType",
+  "value",
+  "stalled",
+];
 
 // Re-exports kept for test compatibility (pipeline-page.test.ts imports these
 // helpers; they live in the shared deals-list-section module now).
@@ -315,6 +336,10 @@ export function PipelinePage() {
   const [pendingMove, setPendingMove] = useState<PendingPipelineMove | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [now, setNow] = useState<Date>(new Date());
+  // Option sources for the shared FilterBar on the deals list below the board (Slice 7).
+  const { salesReps } = useSalesReps();
+  const { regions } = useRegions();
+  const { projectTypes } = useProjectTypes();
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
     readTerminalDateFiltersFromSearchParams(searchParams)
   );
@@ -623,17 +648,28 @@ export function PipelinePage() {
         </dl>
       </footer>
 
+      {/* Slice 7 proving ground: the deals list under the kanban, driven by the shared URL-backed
+          FilterBar. NOTE: CSV export is intentionally omitted here for now — the legacy export path
+          builds its query from the old created/updated axis + local state, so it would not reflect
+          the FilterBar's outcome-aware filters. FilterBar-aware export is a fast-follow (and is also
+          gated on BLUE's #546 backend predicates, like the rest of the new dimensions). */}
       <DealsListSection
         scope={scope}
-        enableDateFilter
-        enableExport
-        excludeStageSlugs={showDd ? [] : ["dd", "due_diligence"]}
-        visibleStages={columns.map((column) => ({
-          id: column.stage.id,
-          slug: column.stage.slug,
-          name: column.stage.name,
-          isTerminal: column.stage.isTerminal,
-        }))}
+        filterBar={{
+          dimensions: DEAL_LIST_FILTERBAR_DIMENSIONS,
+          options: {
+            reps: salesReps.map((rep) => ({ value: rep.id, label: rep.displayName })),
+            regions: regions.map((region) => ({ value: region.id, label: region.name })),
+            projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
+            stages: columns
+              .filter((column) => showDd || !["dd", "due_diligence"].includes(column.stage.slug))
+              .map((column) => ({ value: column.stage.id, label: column.stage.name })),
+            sortOptions: DEAL_LIST_SORT_OPTIONS,
+          },
+          // Open-stage entered date + Stalled stay gated until FEATURE_STAGE_ENTRY_DATE; the bar
+          // labels the date honestly and hides Stalled while this is false.
+          stageEntryDateEnabled: false,
+        }}
       />
 
       {stageChangeOpen && pendingMove && (
