@@ -59,6 +59,7 @@ import {
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
 } from "../shared/deal-value-sql.js";
+import { dealDateScopeColumns, dealDisplayDateExpr } from "../shared/deal-date-scope.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
 import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import {
@@ -1627,6 +1628,25 @@ export async function getDeals(
       ...getTableColumns(deals),
       companyName: companies.name,
       stageSlug: pipelineStageConfig.slug,
+      // Outcome-aware display date (filter-axis == display-axis): when an
+      // outcome dimension is in play we've already resolved the Won/Lost stage
+      // sets (needsStageClassification above), so each row's displayed date is
+      // the SAME axis the date filter windows on — Won -> won_closed_date,
+      // Lost -> lost_at, open -> stage_entered_at — built from the IDENTICAL
+      // classification, so the displayed and filtered axes cannot diverge.
+      // When no outcome dimension is set the ids are empty, so we emit NULL
+      // rather than a misclassifying CASE (every row would resolve to the open
+      // axis); the client (#554 getDealDisplayDate) then falls back to its
+      // close-date chain. This also keeps a plain list free of the extra
+      // listDealStages() resolution cost.
+      displayDate: needsStageClassification
+        ? dealDisplayDateExpr({
+            wonStageIds,
+            lostStageIds,
+            stageEntryDateEnabled,
+            columns: dealDateScopeColumns(),
+          })
+        : sql<string | null>`NULL`,
     })
     .from(deals)
     .leftJoin(companies, eq(companies.id, deals.companyId))
