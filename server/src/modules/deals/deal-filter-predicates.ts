@@ -165,7 +165,7 @@ export function aliasedEffectiveStageAgeDaysSql(alias: string): SQL {
  * stages, best-estimate otherwise), the same number the list displays and sorts
  * by (sort == filter == display, D-1). Uses ctx.wonStageIds for classification.
  */
-export function buildValueRangePredicate(input: DealFilterBarInput, ctx: DealFilterContext): SQL | undefined {
+export function buildValueRangePredicate(input: DealFilterBarInput, ctx: DealFilterContext = {}): SQL | undefined {
   const min = finiteNumber(input.valueMin);
   const max = finiteNumber(input.valueMax);
   if (min === undefined && max === undefined) return undefined;
@@ -182,7 +182,7 @@ export function buildValueRangePredicate(input: DealFilterBarInput, ctx: DealFil
  */
 export function buildStalledPredicate(
   input: DealFilterBarInput,
-  ctx: DealFilterContext
+  ctx: DealFilterContext = {}
 ): SQL | undefined {
   if (!ctx.stageEntryDateEnabled) return undefined;
   const min = finiteNumber(input.minAgeDays);
@@ -204,7 +204,7 @@ export function buildStalledPredicate(
  */
 export function buildOutcomeAwareDatePredicate(
   input: DealFilterBarInput,
-  ctx: DealFilterContext
+  ctx: DealFilterContext = {}
 ): SQL | undefined {
   return buildDealOutcomeDateScope({ from: input.dateFrom, to: input.dateTo }, ctx);
 }

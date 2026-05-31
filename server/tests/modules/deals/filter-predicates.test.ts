@@ -114,6 +114,10 @@ describe("value-range predicate (stage-aware effective value == sort == display)
     expect(buildValueRangePredicate({}, openCtx)).toBeUndefined();
     expect(buildValueRangePredicate({ valueMin: NaN, valueMax: NaN }, openCtx)).toBeUndefined();
   });
+  it("does not throw when called without a ctx (ctx is optional with a safe default — Codex #546)", () => {
+    expect(() => buildValueRangePredicate({ valueMin: 100000 })).not.toThrow();
+    expect(text(buildValueRangePredicate({ valueMin: 100000 }))).toContain("bid_estimate"); // open chain
+  });
   it("BETWEEN both bounds, on the on-hold-zeroed best-estimate chain (no won classification)", () => {
     const sql = text(buildValueRangePredicate({ valueMin: 100000, valueMax: 500000 }, openCtx));
     expect(sql).toContain("between");
