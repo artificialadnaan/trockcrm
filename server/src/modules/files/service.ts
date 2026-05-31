@@ -912,21 +912,21 @@ export function buildPhotoTargetDealSearchCondition(search: string): SQL {
 }
 
 /**
- * SQL relevance score for a row: 3 = exact match on a ranked identifying column,
- * 2 = prefix match on a ranked column, 1 = matches the search on ANY searched
- * column (the full WHERE predicate), 0 = no match. `rankColumns` are the columns
- * a user types to identify a specific record (name, company, property name and
- * site ADDRESS, contact name, deal number) — so a prefix match on the site
- * address outranks a mere substring mention in source/description, instead of
- * both collapsing to the flat any-match tier. `matchCondition` is the same
- * predicate used in WHERE, so a row matched only by a coarse/free-text column
- * (city, state, source, description, stage) still scores 1 (not 0). Computed in
- * SQL and carried on each row so both the per-type LIMIT and the cross-type merge
- * keep the most relevant rows, not just the most recent. See
- * .audit/trockcam-leads-photos.md (root cause G3).
+ * SQL relevance score for a row: 3 = exact match on a ranked identifying
+ * expression, 2 = prefix match on a ranked expression, 1 = matches the search on
+ * ANY searched column (the full WHERE predicate), 0 = no match. `rankExpressions`
+ * are the columns/expressions a user types to identify a specific record (name,
+ * company, property name and site ADDRESS, contact first/last AND full name, deal
+ * number) — so a prefix match on the site address or an exact full contact name
+ * outranks a mere substring mention in source/description, instead of collapsing
+ * to the flat any-match tier. `matchCondition` is the same predicate used in
+ * WHERE, so a row matched only by a coarse/free-text column (city, state, source,
+ * description, stage) still scores 1 (not 0). Computed in SQL and carried on each
+ * row so both the per-type LIMIT and the cross-type merge keep the most relevant
+ * rows, not just the most recent. See .audit/trockcam-leads-photos.md (root cause G3).
  */
 function photoTargetSqlRelevance(
-  rankColumns: AnyColumn[],
+  rankExpressions: (AnyColumn | SQL)[],
   matchCondition: SQL,
   search: string
 ): SQL<number> {
@@ -935,15 +935,18 @@ function photoTargetSqlRelevance(
   const escaped = escapeLikePattern(trimmed);
   const exact = escaped;
   const prefix = `${escaped}%`;
-  const ranks = rankColumns.map(
-    (column) => sql`(CASE
-      WHEN ${column} ILIKE ${exact} ESCAPE '\\' THEN 3
-      WHEN ${column} ILIKE ${prefix} ESCAPE '\\' THEN 2
+  const ranks = rankExpressions.map(
+    (expression) => sql`(CASE
+      WHEN ${expression} ILIKE ${exact} ESCAPE '\\' THEN 3
+      WHEN ${expression} ILIKE ${prefix} ESCAPE '\\' THEN 2
       ELSE 0 END)`
   );
   const anyMatch = sql`(CASE WHEN ${matchCondition} THEN 1 ELSE 0 END)`;
   return sql<number>`GREATEST(${sql.join([...ranks, anyMatch], sql`, `)})`;
 }
+
+/** Ranked expression for a contact's full name, so "Jane Smith" exact-matches. */
+const contactFullNameRank = sql`CONCAT(${contacts.firstName}, ' ', ${contacts.lastName})`;
 
 /**
  * Order scored targets by SQL-computed relevance, then by recency. Relevance is
@@ -999,7 +1002,7 @@ export async function searchPhotoUploadTargets(
   // address match outranks a weak source/description mention before truncation.
   const leadRelevance = leadSearch
     ? photoTargetSqlRelevance(
-        [leads.name, companies.name, properties.name, properties.address, contacts.firstName, contacts.lastName],
+        [leads.name, companies.name, properties.name, properties.address, contacts.firstName, contacts.lastName, contactFullNameRank],
         leadSearch,
         trimmed
       )
@@ -1015,6 +1018,7 @@ export async function searchPhotoUploadTargets(
           deals.propertyAddress,
           contacts.firstName,
           contacts.lastName,
+          contactFullNameRank,
         ],
         dealSearch,
         trimmed

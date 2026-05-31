@@ -176,4 +176,22 @@ describe("searchPhotoUploadTargets ORDER BY", () => {
     // collapse address, city, source, etc. all to 1). [^)] keeps it in one CASE.
     expect(leadOrder!).toMatch(/"properties"\."address" ilike \$\d+[^)]*?then 3/);
   });
+
+  it("ranks a full contact-name (CONCAT) match by exact/prefix tier, for leads and deals", async () => {
+    const { db, orderByCalls } = makeOrderByCapturingDb();
+
+    await searchPhotoUploadTargets(db as never, { search: "jane smith" });
+
+    const joined = orderByCalls.map((c) => c.join(" "));
+    const leadOrder = joined.find((t) => t.includes('"leads"."updated_at"'));
+    const dealOrder = joined.find((t) => t.includes('"deals"."updated_at"'));
+    expect(leadOrder).toBeDefined();
+    expect(dealOrder).toBeDefined();
+    // "jane smith" is a prefix of neither first_name nor last_name alone, so the
+    // concatenated full name needs its own exact-rank CASE — otherwise an exact
+    // full-name hit collapses to the flat any-match tier (1) and can be truncated.
+    const concatThen3 = /concat\([^)]*first_name[^)]*last_name\) ilike \$\d+[^)]*?then 3/;
+    expect(leadOrder!).toMatch(concatThen3);
+    expect(dealOrder!).toMatch(concatThen3);
+  });
 });
