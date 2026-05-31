@@ -138,6 +138,28 @@ describe("mergeFilterParams (URL patch: preserve non-FilterBar params + page-res
     expect(next.get("dateTo")).toBe("2026-04-15");
     expect(next.get("datePreset")).toBe("custom");
   });
+
+  it("re-resolves a named preset's STALE bounds on an unrelated patch, so a bookmarked/shared URL self-heals (Codex)", () => {
+    const now = new Date(2026, 4, 31); // 2026-05-31, local
+    // a URL saved long ago: relative preset + frozen bounds from then
+    const prev = new URLSearchParams("datePreset=30&dateFrom=2026-01-01&dateTo=2026-01-31&search=old");
+    const next = mergeFilterParams(prev, { search: "new" }, now);
+    const fresh = resolveDateWindow({ preset: "30" }, now);
+    expect(next.get("dateFrom")).toBe(fresh.dateFrom); // today-anchored, NOT the frozen bound
+    expect(next.get("dateTo")).toBe(fresh.dateTo);
+    expect(next.get("dateFrom")).not.toBe("2026-01-01");
+    expect(next.get("datePreset")).toBe("30");
+    expect(next.get("search")).toBe("new");
+  });
+
+  it("leaves a custom window's explicit bounds untouched (only NAMED presets re-resolve)", () => {
+    const now = new Date(2026, 4, 31);
+    const prev = new URLSearchParams("datePreset=custom&dateFrom=2026-04-01&dateTo=2026-04-15");
+    const next = mergeFilterParams(prev, { search: "x" }, now);
+    expect(next.get("dateFrom")).toBe("2026-04-01");
+    expect(next.get("dateTo")).toBe("2026-04-15");
+    expect(next.get("datePreset")).toBe("custom");
+  });
 });
 
 describe("clearFilterParams", () => {

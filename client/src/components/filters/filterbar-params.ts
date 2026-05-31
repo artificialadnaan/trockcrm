@@ -1,6 +1,8 @@
 // FilterBar value <-> URL query serde. Param names/values match BLUE's backend contract (PR #546)
 // EXACTLY so the deals list emits what getDeals consumes. The URL is the source of truth (Slice 7).
 
+import { withResolvedDateWindow } from "./filterbar-date";
+
 export const UNASSIGNED = "__unassigned__";
 export type DealStatusFilter = "active" | "on_hold" | "inactive" | "any";
 
@@ -84,8 +86,16 @@ const FILTERBAR_PARAM_KEYS = [
 /** Apply a partial patch to the FilterBar params on a URL, preserving any non-FilterBar params.
  *  Page-resets to 1 (omitted) on any change that doesn't explicitly set `page` (mirrors
  *  useContactFilters). Returns a new URLSearchParams. */
-export function mergeFilterParams(prev: URLSearchParams, patch: Partial<FilterBarValue>): URLSearchParams {
-  const next: FilterBarValue = { ...deserializeFilters(prev), ...patch };
+export function mergeFilterParams(
+  prev: URLSearchParams,
+  patch: Partial<FilterBarValue>,
+  now = new Date()
+): URLSearchParams {
+  // Re-resolve the existing params' NAMED date preset before merging, so a relative preset's stale
+  // bounds (from a bookmarked/shared URL saved earlier) self-heal to today's window on ANY edit —
+  // instead of being re-serialized stale on an unrelated change like typing in Search (Codex). The
+  // patch still wins (a date-control change overrides); custom/unknown presets keep their bounds.
+  const next: FilterBarValue = { ...withResolvedDateWindow(deserializeFilters(prev), now), ...patch };
   if (patch.page === undefined) delete next.page;
   const fbParams = serializeFilters(next);
   const result = new URLSearchParams(prev);
