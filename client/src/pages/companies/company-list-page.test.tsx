@@ -391,6 +391,9 @@ describe("CompanyListPage", () => {
       expect(nextButton?.className).toContain("bg-primary");
       expect(nextButton?.className).toContain("text-primary-foreground");
       expect(nextButton?.className).not.toContain("bg-background");
+      // Touch sizing: 44px (size-11) on phones, reverting to the compact size-8 at md.
+      expect(previousButton?.className).toContain("size-11");
+      expect(previousButton?.className).toContain("md:size-8");
     } finally {
       await cleanup();
     }
@@ -457,6 +460,28 @@ describe("CompanyListPage", () => {
       expect(nextButton?.className).toContain("disabled:border-muted-foreground/20");
       expect(nextButton?.className).toContain("disabled:bg-muted");
       expect(nextButton?.className).toContain("disabled:text-muted-foreground");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("stacks the table into a md:hidden company card list with touch-sized filters", async () => {
+    const { container, cleanup } = await renderPageDom();
+    try {
+      // Desktop keeps the full 8-col table, gated behind hidden md:block.
+      const tableWrap = container.querySelector("div.hidden.md\\:block");
+      expect(tableWrap?.querySelector("table")).toBeTruthy();
+      // A md:hidden card list carries the same companies + stats on phones.
+      const cards = container.querySelector('[data-testid="company-cards"]');
+      expect(cards).not.toBeNull();
+      expect(cards?.className).toContain("md:hidden");
+      expect(cards?.textContent).toContain("T Rock Owner Group");
+      expect(cards?.textContent).toContain("$750,000");
+      // Card name is a real link to the company (stretched-link pattern).
+      expect(cards?.querySelector('a[href="/companies/company-1"]')).toBeTruthy();
+      // Industry filter pills opt into the 44px touch size (reverts at md).
+      const industryFilter = container.querySelector('[aria-label="Industry filter"]');
+      expect(industryFilter?.querySelector("button")?.className).toContain("min-h-[44px]");
     } finally {
       await cleanup();
     }

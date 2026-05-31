@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useMemo, useState, type ReactNode } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
@@ -57,6 +57,77 @@ function isStale(value: string | null | undefined) {
 
 function companyLocation(company: Company) {
   return [company.city, company.state].filter(Boolean).join(", ");
+}
+
+function CompanyStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <dt className="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-400">{label}</dt>
+      <dd className="font-black tabular-nums text-slate-950">{value}</dd>
+    </div>
+  );
+}
+
+/**
+ * Mobile (<md) card representation of a company row. Desktop keeps the table at
+ * >=md; this is the stack-to-card fallback so phones get no horizontal-scroll
+ * wall. Stretched-link pattern: the name <Link> covers the whole card (`after:
+ * absolute after:inset-0`); only the interactive owner control is raised (`z-10`)
+ * so it stays tappable while the rest of the card navigates to the company.
+ */
+export function CompanyCard({
+  company,
+  ownerSlot,
+}: {
+  company: Company;
+  ownerSlot?: ReactNode;
+}) {
+  const stale = isStale(company.lastActivityAt);
+  const location = companyLocation(company);
+  const activeDeals = company.activeDealsCount ?? company.dealCount;
+  return (
+    <div className="relative rounded-xl border border-slate-200 bg-white p-3">
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-xs font-black text-white">
+          {initials(company.name)}
+        </span>
+        <div className="min-w-0 flex-1">
+          <Link
+            to={`/companies/${company.id}`}
+            className="block truncate text-sm font-black uppercase text-slate-950 after:absolute after:inset-0"
+          >
+            {company.name}
+          </Link>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+            {location ? <span>{location}</span> : null}
+            {company.domain ? (
+              <span className="inline-flex items-center gap-1 font-mono">
+                <Globe2 className="h-3 w-3" />
+                {company.domain}
+              </span>
+            ) : null}
+          </div>
+        </div>
+        <ArrowUpRight className="h-4 w-4 shrink-0 text-slate-400" />
+      </div>
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+        <CompanyStat label="Properties" value={String(company.propertiesCount ?? 0)} />
+        <CompanyStat label="Contacts" value={String(company.contactsCount ?? company.contactCount ?? 0)} />
+        <CompanyStat label="Active deals" value={`${activeDeals}/${company.dealCount}`} />
+        <CompanyStat label="Pipeline" value={USD(numeric(company.pipelineValue))} />
+      </dl>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <span className="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-400">Last activity</span>
+        <span className={cn("text-xs font-bold", stale ? "text-brand-red" : "text-slate-600")}>
+          {formatLastActivity(company.lastActivityAt)}
+        </span>
+      </div>
+      <div className="mt-3 flex flex-col gap-2">
+        <OwnerLabel ownerId={company.ownerUserId} ownerName={company.ownerUserName} />
+        {ownerSlot ? <div className="relative z-10">{ownerSlot}</div> : null}
+      </div>
+    </div>
+  );
 }
 
 export function CompanyListPage() {
@@ -132,6 +203,7 @@ export function CompanyListPage() {
                   setPage(1);
                 }}
                 ariaLabel="Industry filter"
+                size="touch"
               />
               <ScopeToggle
                 options={OWNER_SCOPE_OPTIONS}
@@ -141,6 +213,7 @@ export function CompanyListPage() {
                   setPage(1);
                 }}
                 ariaLabel="Ownership filter"
+                size="touch"
               />
             </div>
             <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
@@ -165,7 +238,9 @@ export function CompanyListPage() {
               <p className="mt-1 text-sm text-slate-500">Clear the search or switch the filters.</p>
             </div>
           ) : (
-            <Table>
+            <>
+            {/* >=md keeps the full table; phones get the stacked card list (md:hidden) below. */}
+            <div className="hidden md:block"><Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Company</TableHead>
@@ -243,7 +318,30 @@ export function CompanyListPage() {
                   );
                 })}
               </TableBody>
-            </Table>
+            </Table></div>
+            <div className="space-y-2 md:hidden" data-testid="company-cards">
+              {companies.map((company) => (
+                <CompanyCard
+                  key={company.id}
+                  company={company}
+                  ownerSlot={
+                    <OwnerAssignmentControl
+                      ownerUserId={company.ownerUserId}
+                      currentUser={user}
+                      assignees={assignees}
+                      ownerReassignAssignees={ownerAssignees}
+                      assigneesLoading={assigneesLoading}
+                      ownerReassignAssigneesLoading={ownerAssigneesLoading}
+                      entityLabel="company"
+                      onAssignToMe={() => assignCompanyOwnerToMe(company.id)}
+                      onReassign={(ownerUserId) => reassignCompanyOwner(company.id, ownerUserId)}
+                      onAssigned={refetch}
+                    />
+                  }
+                />
+              ))}
+            </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -257,7 +355,7 @@ export function CompanyListPage() {
             <Button
               variant="outline"
               size="icon"
-              className={listPaginationIconButtonClassName}
+              className={cn(listPaginationIconButtonClassName, "size-11 md:size-8")}
               disabled={pagination.page <= 1}
               onClick={() => setPage((value) => Math.max(1, value - 1))}
               aria-label="Previous companies page"
@@ -267,7 +365,7 @@ export function CompanyListPage() {
             <Button
               variant="outline"
               size="icon"
-              className={listPaginationIconButtonClassName}
+              className={cn(listPaginationIconButtonClassName, "size-11 md:size-8")}
               disabled={pagination.page >= pagination.totalPages}
               onClick={() => setPage((value) => Math.min(pagination.totalPages, value + 1))}
               aria-label="Next companies page"
