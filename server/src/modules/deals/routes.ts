@@ -2284,8 +2284,7 @@ router.post("/:id/estimating/manual-rows/:recommendationId/promote-local-catalog
 
 router.get("/:id/estimating", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
     const workflow = await getEstimatingWorkflowState(
       req.tenantDb! as any,
       req.params.id,
@@ -2303,8 +2302,7 @@ router.get("/:id/estimating", async (req, res, next) => {
 
 router.get("/:id/estimating/market-context", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
 
     const marketContext = await getDealEffectiveMarketContext(req.tenantDb! as any, req.params.id);
     await req.commitTransaction!();
@@ -2316,8 +2314,7 @@ router.get("/:id/estimating/market-context", async (req, res, next) => {
 
 router.get("/:id/estimating/markets", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
 
     const markets = await listEstimateMarkets(req.tenantDb! as any);
     await req.commitTransaction!();
@@ -2861,9 +2858,8 @@ router.patch(
 // GET /api/deals/:id/approvals — list approvals for a deal
 router.get("/:id/approvals", async (req, res, next) => {
   try {
-    // RBAC: verify user has access to this deal
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    // Office-level read: any rep in the deal's office may view its approvals.
+    await assertDealRouteAccess(req, req.params.id);
 
     const approvals = await req.tenantDb!
       .select()
@@ -2881,8 +2877,7 @@ router.get("/:id/approvals", async (req, res, next) => {
 // GET /api/deals/:id/contacts — contacts associated with a deal
 router.get("/:id/contacts", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
 
     const associations = await getContactsForDeal(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
@@ -2933,8 +2928,7 @@ router.delete("/:id", async (req, res, next) => {
 // GET /api/deals/:id/team
 router.get("/:id/team", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
 
     const members = await getTeamMembers(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
@@ -2947,8 +2941,7 @@ router.get("/:id/team", async (req, res, next) => {
 // GET /api/deals/:id/team/assignable-users
 router.get("/:id/team/assignable-users", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
     const rows = (await listUsers(officeId)) as Array<{
@@ -3031,8 +3024,7 @@ router.delete("/:id/team/:memberId", async (req, res, next) => {
 // GET /api/deals/:id/estimates
 router.get("/:id/estimates", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
 
     const estimate = await getEstimate(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
@@ -3193,8 +3185,7 @@ router.delete("/:id/estimates/items/:itemId", async (req, res, next) => {
 // GET /api/deals/:id/punch-list
 router.get("/:id/punch-list", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
 
     const result = await getPunchList(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
@@ -3272,8 +3263,7 @@ router.post("/:id/punch-list/:itemId/complete", async (req, res, next) => {
 // GET /api/deals/:id/timers
 router.get("/:id/timers", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
 
     const result = await getTimers(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
@@ -3335,8 +3325,7 @@ router.patch("/:id/timers/:timerId", async (req, res, next) => {
 // GET /api/deals/:id/closeout
 router.get("/:id/closeout", async (req, res, next) => {
   try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
+    await assertDealRouteAccess(req, req.params.id);
 
     const result = await getCloseoutChecklist(req.tenantDb!, req.params.id);
     await req.commitTransaction!();

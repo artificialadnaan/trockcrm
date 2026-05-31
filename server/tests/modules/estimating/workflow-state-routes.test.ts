@@ -13,6 +13,16 @@ const dealsServiceMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/modules/deals/service.js", () => dealsServiceMocks);
 
+// Per-deal sub-resource GET routes (incl. the estimating shell/market reads) now gate on the
+// office-level collaborator check rather than the owner-only getDealById loader. Mock it so these
+// reads resolve for the test viewer (matching routes-scope.test.ts).
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: vi.fn(),
+  assertDealOwnerAccess: vi.fn(),
+  getCollaborativeReadRole: vi.fn((role: string) => role),
+  normalizeCollaborativeScope: vi.fn((_role: string, scope: "mine" | "team" | "all" | undefined) => scope ?? "mine"),
+}));
+
 const estimatingServiceMocks = vi.hoisted(() => ({
   buildEstimatingCopilotContext: vi.fn(),
   answerEstimatingCopilotQuestion: vi.fn(),
