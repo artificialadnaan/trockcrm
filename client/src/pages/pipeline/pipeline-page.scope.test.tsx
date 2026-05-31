@@ -118,4 +118,14 @@ describe("PipelinePage embedded deals list scope", () => {
     expect(mocks.apiMock).toHaveBeenCalledWith(expect.stringContaining("scope=mine"));
     expect(props.scope).toBe("mine");
   });
+
+  it("sizes the header scope toggle for touch on phones (reverts at md)", async () => {
+    await renderPipeline("/pipeline?scope=mine");
+
+    const toggle = container?.querySelector('[aria-label="Pipeline scope"]');
+    expect(toggle).not.toBeNull();
+    const button = toggle?.querySelector("button");
+    expect(button?.className).toContain("min-h-[44px]");
+    expect(button?.className).toContain("md:min-h-0");
+  });
 });

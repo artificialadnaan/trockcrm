@@ -234,7 +234,7 @@ function DealsListPagination({
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
           className={cn(
-            "inline-flex h-9 w-9 items-center justify-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed",
+            "inline-flex h-11 w-11 items-center justify-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed md:h-9 md:w-9",
             listPaginationIconButtonClassName
           )}
         >
@@ -246,7 +246,7 @@ function DealsListPagination({
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
           className={cn(
-            "inline-flex h-9 w-9 items-center justify-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed",
+            "inline-flex h-11 w-11 items-center justify-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 disabled:cursor-not-allowed md:h-9 md:w-9",
             listPaginationIconButtonClassName
           )}
         >

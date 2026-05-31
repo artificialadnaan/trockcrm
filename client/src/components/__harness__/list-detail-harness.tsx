@@ -9,6 +9,9 @@ import {
   PipelineStageSummary,
   type PipelineStageSummaryColumn,
 } from "@/components/deals/pipeline-stage-summary";
+import { ScopeToggle } from "@/components/shared/scope-toggle";
+import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
+import { cn } from "@/lib/utils";
 
 // Dev-only preview for the Contacts/Companies/Properties list+detail mobile pass.
 // Real presentational components, mock data, no backend / no auth. Served by vite
@@ -223,6 +226,91 @@ function PipelineSummaryDemo() {
   );
 }
 
+// Static stand-in for the Show-DD switch (RED's #554, page-inline) — visual only.
+function ShowDdStub() {
+  return (
+    <div className="flex items-center gap-2 rounded-sm border border-gray-200 px-3 py-1.5">
+      <span className="select-none text-xs text-gray-600">Show DD stages</span>
+      <span className="relative inline-flex h-4 w-7 items-center rounded-full bg-gray-300">
+        <span className="inline-block h-3 w-3 translate-x-0.5 rounded-full bg-white" />
+      </span>
+    </div>
+  );
+}
+
+// Page-chrome preview (PR2): header/footer are page-inline, so this mirrors their exact responsive
+// classNames (real ScopeToggle, real pager classes). At the harness's 390px width the `md:` classes
+// are inactive, so it renders the mobile branch. `before` uses the old no-wrap/compact classes.
+function PipelineChromeDemo({ before = false }: { before?: boolean }) {
+  const [scope, setScope] = useState<string>("mine");
+  const scopeOptions = [
+    { value: "mine", label: "Mine" },
+    { value: "all", label: "All" },
+  ];
+  return (
+    <div className="space-y-3">
+      <header
+        className={
+          before
+            ? "flex items-center justify-between gap-4 rounded-lg border border-gray-200 bg-white px-6 py-5"
+            : "flex flex-col gap-3 rounded-lg border border-gray-200 bg-white px-4 py-4 md:flex-row md:items-center md:justify-between md:gap-4 md:px-6 md:py-5"
+        }
+      >
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold text-gray-900">Deal Pipeline</h1>
+          <p className="mt-0.5 text-xs text-gray-500">128 deals · $14.2M total</p>
+        </div>
+        <div className={before ? "flex items-center gap-4" : "flex flex-wrap items-center gap-4"}>
+          <ScopeToggle
+            options={scopeOptions}
+            value={scope}
+            onChange={(v) => setScope(v as string)}
+            ariaLabel="Pipeline scope"
+            size={before ? "sm" : "touch"}
+          />
+          <ShowDdStub />
+        </div>
+      </header>
+
+      <footer className={before ? "rounded-lg border border-gray-200 bg-white px-6 py-3" : "rounded-lg border border-gray-200 bg-white px-4 py-3 md:px-6"}>
+        <dl className={before ? "flex items-center gap-8" : "flex flex-wrap items-center gap-x-8 gap-y-2"}>
+          {[
+            { label: "Active", value: "128" },
+            { label: "Avg velocity", value: "34", suffix: "days" },
+            { label: "Success", value: "67%" },
+          ].map((stat) => (
+            <div key={stat.label} className="flex items-baseline gap-2">
+              <dt className="text-xs uppercase tracking-wide text-gray-500">{stat.label}</dt>
+              <dd className="text-base font-semibold tabular-nums text-gray-900">
+                {stat.value}
+                {stat.suffix ? <span className="ml-1 text-xs font-normal text-gray-500">{stat.suffix}</span> : null}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </footer>
+
+      <div className="flex items-center justify-end gap-2 rounded-lg border border-gray-200 bg-white px-4 py-3">
+        <span className="mr-auto text-xs text-slate-500">Deal-list pager</span>
+        {["‹", "›"].map((glyph, i) => (
+          <button
+            key={i}
+            type="button"
+            className={cn(
+              before
+                ? "inline-flex h-9 w-9 items-center justify-center rounded-full border transition-colors"
+                : "inline-flex h-11 w-11 items-center justify-center rounded-full border transition-colors md:h-9 md:w-9",
+              listPaginationIconButtonClassName
+            )}
+          >
+            <span aria-hidden="true">{glyph}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ListDetailHarness() {
   return (
     <div className="mx-auto max-w-md space-y-8 bg-[#F5F4F2] p-4 pb-12">
@@ -344,6 +432,27 @@ export function ListDetailHarness() {
               Tappable per-stage chips (name · count · value) → filter the list below; the responsive deal list leads.
             </p>
             <PipelineSummaryDemo />
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Pipeline page chrome — header stacks, footer wraps, touch targets (<md)">
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-red-600">Before</p>
+          <div className="rounded-xl border border-dashed border-red-200 bg-white p-2">
+            <p className="mb-2 text-xs text-slate-500">
+              Single-row header (no wrap, <code>px-6</code>) squeezes the controls; footer stats overflow; pager chevrons are 36px.
+            </p>
+            <PipelineChromeDemo before />
+          </div>
+        </div>
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-emerald-600">After</p>
+          <div className="rounded-xl border border-emerald-200 bg-white p-2">
+            <p className="mb-2 text-xs text-slate-500">
+              Title stacks above touch-sized controls (ScopeToggle 44px), footer stats wrap, pager chevrons are 44px. ≥md reverts.
+            </p>
+            <PipelineChromeDemo />
           </div>
         </div>
       </Section>
