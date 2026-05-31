@@ -4,6 +4,7 @@ import { Link, useLocation } from "react-router-dom";
 import { useMondayShowcase } from "@/hooks/use-reports";
 import { PROJECTION_BAND_LABEL, type EvidenceRequest, type MondayShowcaseData } from "./monday-showcase/types";
 import { DrillProvider, DrillNumber, EvidenceDrawer, usd, int, BAND_BAR, Sparkline, DRILL_UNDERLINE } from "./evidence-kit";
+import { DEFAULT_WEEK_MODE, type WeekMode } from "./week-mode";
 
 // A·1 Forecast Confidence Board -- the forward projection ladder made TRUSTWORTHY by the N/M honesty
 // (how much of the open book even has a maintained close date) shown next to the Won actuals. Pure
@@ -125,7 +126,7 @@ function Board({ data }: { data: MondayShowcaseData }) {
 }
 
 export function ForecastConfidencePage() {
-  const [mode, setMode] = useState<"to_date" | "completed">("to_date");
+  const [mode, setMode] = useState<WeekMode>(DEFAULT_WEEK_MODE);
   const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
   const { data, loading, error } = useMondayShowcase(mode);
 

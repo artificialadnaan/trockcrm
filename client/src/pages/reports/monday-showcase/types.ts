@@ -98,6 +98,10 @@ export interface EvidenceRecord {
   stageLabel: string;
   value: number | null;
   cohortDate: string | null;
+  companyName: string | null;
+  region: string | null;
+  dealType: string | null;
+  daysInStage: number | null;
 }
 
 export interface EvidenceTotal {

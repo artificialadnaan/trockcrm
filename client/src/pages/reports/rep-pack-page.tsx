@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { useRepPack } from "@/hooks/use-reports";
 import { PROJECTION_BAND_LABEL, type EvidenceRequest, type RepShowcaseRow, type ShowcaseWeek } from "./monday-showcase/types";
 import { DrillProvider, DrillNumber, EvidenceDrawer, usd, int, BAND_BAR, ACCENT, DRILL_UNDERLINE, type AccentKey } from "./evidence-kit";
+import { DEFAULT_WEEK_MODE, type WeekMode } from "./week-mode";
 
 // B·1 Rep 1:1 Pack -- one rep across the board, reconciling to the office numbers (their slice is lifted
 // from the canonical showcase payload), plus their own 8-week trend. Every figure drills to the records.
@@ -122,15 +123,26 @@ function Pack({ rep, trend, mode }: { rep: RepShowcaseRow; trend: ShowcaseWeek[]
 }
 
 export function RepPackPage() {
-  const [mode, setMode] = useState<"to_date" | "completed">("to_date");
+  const [mode, setMode] = useState<WeekMode>(DEFAULT_WEEK_MODE);
   const [repId, setRepId] = useState<string | undefined>(undefined);
   const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
   const { data, loading, error } = useRepPack(repId, mode);
-  // Show the user's pick when it's a real option; otherwise the rep the server actually resolved (e.g.
-  // after a fallback when the picked rep has no activity this period) -- so the <select> never goes blank.
-  const currentRepId = data
-    ? (repId && data.allReps.some((r) => r.repId === repId) ? repId : data.rep.repId ?? "")
-    : "";
+  // The rep actually shown: the user's pick when it's a known option, else the server-resolved rep. Build
+  // the <select> so the shown rep is ALWAYS one of the options — including the typed-but-currently-
+  // unreachable null/Unassigned bucket the server could in principle resolve to — so the control can never
+  // render a blank value with no matching <option>. A sentinel encodes the null bucket as an option value.
+  const UNASSIGNED = "__unassigned__";
+  const selVal = (id: string | null) => id ?? UNASSIGNED;
+  const shownRep = data
+    ? ((repId ? data.allReps.find((r) => r.repId === repId) : undefined) ??
+      { repId: data.rep.repId, repName: data.rep.repName })
+    : null;
+  const repOptions =
+    data && shownRep
+      ? data.allReps.some((r) => r.repId === shownRep.repId)
+        ? data.allReps
+        : [{ repId: shownRep.repId, repName: shownRep.repName }, ...data.allReps]
+      : [];
 
   return (
     <div className="space-y-4 p-4">
@@ -154,12 +166,12 @@ export function RepPackPage() {
             <div className="flex items-center gap-2">
               <span className="text-xs font-medium text-slate-500">Rep</span>
               <select
-                value={currentRepId}
-                onChange={(e) => setRepId(e.target.value)}
+                value={shownRep ? selVal(shownRep.repId) : ""}
+                onChange={(e) => setRepId(e.target.value === UNASSIGNED ? undefined : e.target.value)}
                 className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm font-medium"
               >
-                {data.allReps.map((r) => (
-                  <option key={r.repId} value={r.repId}>{r.repName}</option>
+                {repOptions.map((r) => (
+                  <option key={selVal(r.repId)} value={selVal(r.repId)}>{r.repName}</option>
                 ))}
               </select>
               {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}

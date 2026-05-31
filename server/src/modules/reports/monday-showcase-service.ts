@@ -623,6 +623,14 @@ export interface EvidenceRecord {
   value: number | null;
   /** the canonical date this record sits on for THIS metric's cohort (close date / entry date / etc). */
   cohortDate: string | null;
+  /** account / company name behind the record (null when none linked). */
+  companyName: string | null;
+  /** region label -- company region, else the deal's region_config name (null when neither). */
+  region: string | null;
+  /** deal / project type (null when unset). */
+  dealType: string | null;
+  /** whole days the record has sat in its CURRENT stage (null when no stage-entry date). */
+  daysInStage: number | null;
 }
 
 export interface EvidenceTotal {
@@ -660,7 +668,13 @@ function repScopeSql(alias: string, repId?: string | null): SQL {
   return sql` AND ${sql.raw(alias)}.assigned_rep_id = ${repId}::uuid`;
 }
 
-/** Shared deal-row projection for evidence: same columns the FilterBar list shows, plus the cohort $/date. */
+/**
+ * Shared deal-row projection for evidence: deal identity + owner/stage/value/cohort-date PLUS the
+ * actionable drill columns a director acts on -- company/account, region, deal type, and days-in-stage.
+ * Company + region come from additive LEFT JOINs (companies c, region_config rc) the callers add; both are
+ * FK->PK 1:1, so they never change the cohort row set -- COUNT(rows) and SUM(value) stay exactly the
+ * aggregate's, and the reconciliation guarantee holds.
+ */
 function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
   return sql`
     d.id AS id,
@@ -670,7 +684,11 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
     COALESCE(u.display_name, '') AS rep_name,
     COALESCE(psc.name, '') AS stage_label,
     COALESCE(${valueSql}, 0)::numeric AS value,
-    (${sql.raw(cohortDateExpr)})::date AS cohort_date
+    (${sql.raw(cohortDateExpr)})::date AS cohort_date,
+    COALESCE(c.name, '') AS company_name,
+    COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), '') AS region,
+    COALESCE(NULLIF(ptc.name, ''), NULLIF(d.project_type, ''), '') AS deal_type,
+    ((now() AT TIME ZONE 'America/Chicago')::date - (d.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
   `;
 }
 
@@ -685,6 +703,9 @@ export function buildWonEvidenceSql(from: string, to: string, repId?: string | n
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedActiveDealCountFilterSql("d")}
       AND psc.slug IN (${slugInList(WON_STAGE_SLUGS)})
@@ -720,6 +741,9 @@ export function buildStageEntryEvidenceSql(
     ) entered ON entered.deal_id = d.id
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}${repScopeSql("d", repId)}
     ORDER BY value DESC, d.name
@@ -740,6 +764,9 @@ export function buildProjectionEvidenceSql(repId?: string | null, band?: Project
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}
       AND d.is_active = true
@@ -763,10 +790,16 @@ export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string):
            COALESCE(u.display_name, '') AS rep_name,
            COALESCE(psc.name, '') AS stage_label,
            NULL::numeric AS value,
-           l.created_at::date AS cohort_date
+           l.created_at::date AS cohort_date,
+           COALESCE(c.name, '') AS company_name,
+           COALESCE(NULLIF(c.region, ''), '') AS region,
+           COALESCE(NULLIF(ptc.name, ''), NULLIF(l.project_type, ''), '') AS deal_type,
+           ((now() AT TIME ZONE 'America/Chicago')::date - (l.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
     FROM ${leads} l
     JOIN ${pipelineStageConfig} psc ON psc.id = l.stage_id
     LEFT JOIN ${users} u ON u.id = l.assigned_rep_id
+    LEFT JOIN companies c ON c.id = l.company_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = l.project_type_id
     WHERE l.is_active = true
       AND l.status = 'open'
       AND COALESCE(l.is_test_data, false) = false
@@ -813,6 +846,10 @@ interface EvidenceRow {
   stage_label: string;
   value: unknown;
   cohort_date: unknown;
+  company_name: string | null;
+  region: string | null;
+  deal_type: string | null;
+  days_in_stage: unknown;
 }
 
 /**
@@ -864,6 +901,10 @@ export async function getMondayShowcaseEvidence(
     stageLabel: r.stage_label,
     value: hasValue ? num(r.value) : null,
     cohortDate: r.cohort_date == null ? null : String(r.cohort_date).slice(0, 10),
+    companyName: r.company_name ? String(r.company_name) : null,
+    region: r.region ? String(r.region) : null,
+    dealType: r.deal_type ? String(r.deal_type) : null,
+    daysInStage: r.days_in_stage == null ? null : Number(r.days_in_stage),
   }));
 
   const total: EvidenceTotal = {

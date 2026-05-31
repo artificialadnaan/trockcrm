@@ -98,7 +98,7 @@ export function VariantA1Funnel({ data }: { data: MondayShowcaseData }) {
                 tile
               ) : (
                 <DrillNumber
-                  request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — this week` }}
+                  request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — ${weekWord(data.period.mode)}` }}
                   className="block"
                 >
                   {tile}
@@ -115,6 +115,10 @@ export function VariantA1Funnel({ data }: { data: MondayShowcaseData }) {
     </div>
   );
 }
+
+// First load now defaults to "last full week" (completed), so any "this week" copy must follow the mode —
+// otherwise last week's numbers render labelled "this week" until the user notices the toggle.
+const weekWord = (mode: MondayShowcaseData["period"]["mode"]) => (mode === "to_date" ? "this week" : "last week");
 
 export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
   const spikeIndex = data.weeklyTrend.slice(-8).findIndex((w) => w.spikeExcluded);
@@ -147,7 +151,7 @@ export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
         ) : (
           <DrillNumber
             key={d.key}
-            request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — this week` }}
+            request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — ${weekWord(data.period.mode)}` }}
             className="block text-left"
           >
             {inner}
@@ -188,8 +192,8 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
                 <span className="text-sm font-semibold text-slate-700">{lane.label}</span>
               </div>
               <span className="text-xs text-slate-400">
-                this week{" "}
-                <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — this week` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
+                {weekWord(data.period.mode)}{" "}
+                <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — ${weekWord(data.period.mode)}` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
                   {int(current)}
                 </DrillNumber>{" "}
                 · 8wk avg <span className="tabular-nums">{avg.toFixed(1)}</span>{" "}
@@ -223,7 +227,7 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
 // ---------------- Exec hero (split-out tile) ----------------
 
 export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
-  const periodLabel = data.period.mode === "to_date" ? "this week" : "last week";
+  const periodLabel = weekWord(data.period.mode);
   const tiles: Array<{ label: string; metric: EvidenceMetric; accent: AccentKey; value: { count: number; value: { amount: number; basisLabel: string } } }> = [
     { label: "Won", metric: "won", accent: "won", value: data.execHero.won },
     { label: "Sent", metric: "sent", accent: "sent", value: data.execHero.sent },
@@ -312,12 +316,16 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
       sort === "closed" ? r.closed.value.amount : sort === "projected" ? repProjectedTotal(r) : sort === "sent" ? r.sentThisWeek.count : repLeadTotal(r);
     return [...data.reps].sort((a, b) => val(b) - val(a));
   }, [data.reps, sort]);
+  // Footer totals read the CANONICAL office aggregates from the payload — the SAME server numbers each
+  // footer drill opens (Won/Sent/projection are office-scoped). The per-rep rows need not partition the
+  // office exactly (e.g. unassigned wins may be absent from the rep rows), so summing the rows could differ
+  // from the office aggregate. Reading the office figures here makes footer === drawer by construction.
   const totals = {
-    closed: data.reps.reduce((s, r) => s + r.closed.value.amount, 0),
-    closedCount: data.reps.reduce((s, r) => s + r.closed.count, 0),
-    projected: data.reps.reduce((s, r) => s + repProjectedTotal(r), 0),
-    sent: data.reps.reduce((s, r) => s + r.sentThisWeek.count, 0),
-    leads: data.reps.reduce((s, r) => s + repLeadTotal(r), 0),
+    closed: data.execHero.won.value.amount, // office Won $ (getWonCloseSummary) — what the Won-office drill opens
+    closedCount: data.execHero.won.count,
+    projected: data.officeProjection.bands.reduce((s, b) => s + b.count, 0), // office projection ladder
+    sent: data.execHero.sent.count, // office Sent
+    leads: data.reps.reduce((s, r) => s + repLeadTotal(r), 0), // office leads = every rep bucket incl. Unassigned
   };
   const Th = ({ k, children }: { k: SortKey; children: ReactNode }) => (
     <th
@@ -395,7 +403,7 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
           </tr>
         </tfoot>
       </table>
-      <p className="px-3 py-2 text-xs text-slate-400">TOTAL Closed $ ties to the canonical office Won aggregate. Click a column header to re-rank; click any number for its records.</p>
+      <p className="px-3 py-2 text-xs text-slate-400">Footer totals are the canonical office aggregates — the exact numbers each TOTAL drills into — so the rep rows above need not sum to them when there is unassigned activity. Click a column header to re-rank; click any number for its records.</p>
     </div>
   );
 }
@@ -437,8 +445,9 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
         <span className="font-semibold">Office forecast coverage:</span> {data.officeProjection.coverageCaption}
       </div>
       {data.reps.map((rep) => {
-        // per-rung "X of Y dated": the rung's count is the dated subset; Y is the rep's open-deal M.
-        const m = rep.projection.coverage.m;
+        // Each rung's count is the dated subset in that horizon; the coverage (how much of the rep's open
+        // book has a maintained close date) is stated ONCE below the ladder, not repeated per rung — so the
+        // denominator can't be misread as a per-rung total when scanning the four rungs.
         return (
           <div key={rep.repId ?? "unassigned"} className="rounded-xl border border-slate-200 bg-white p-3.5">
             <div className="mb-2 flex items-baseline justify-between">
@@ -465,12 +474,13 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                     </div>
                     <div className="mt-0.5 text-sm font-bold tabular-nums text-slate-800">{usd(b.value)}</div>
                     <div className="mt-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-500">
-                      {int(b.count)} of {int(m)} dated
+                      {int(b.count)} dated
                     </div>
                   </div>
                 </DrillNumber>
               ))}
             </div>
+            <p className="mt-2 text-[10px] text-slate-400">{rep.projection.coverageCaption}</p>
           </div>
         );
       })}
