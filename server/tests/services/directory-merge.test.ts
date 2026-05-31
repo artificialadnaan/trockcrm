@@ -270,6 +270,15 @@ describe("classifyNameCluster (clearly_safe vs review)", () => {
     expect(r.classification).toBe("review");
     expect(r.reasons).toContain("placeholder_zip");
   });
+
+  it("review when the domain field diverges even with no website set", () => {
+    const r = classifyNameCluster([
+      member({ website: null, domain: "acme.com" }),
+      member({ website: null, domain: "acme-corp.net" }),
+    ]);
+    expect(r.classification).toBe("review");
+    expect(r.reasons).toContain("divergent_website");
+  });
 });
 
 describe("planFieldReconciliation", () => {
@@ -292,6 +301,16 @@ describe("planFieldReconciliation", () => {
     const plan = planFieldReconciliation(winner, losers);
     expect(plan.updates.website).toBeUndefined();
     expect(plan.updates.address).toBeUndefined();
+  });
+
+  it("does NOT stitch an address onto a winner that already has a partial one", () => {
+    // Winner has a city but no street -> must not borrow the loser's street.
+    const winner = member({ id: "a", address: null, city: "Dallas", state: "TX", zip: null });
+    const losers = [member({ id: "b", address: "60 Columbus Circle", city: "New York", state: "NY", zip: "10023" })];
+    const plan = planFieldReconciliation(winner, losers);
+    expect(plan.updates.address).toBeUndefined();
+    expect(plan.updates.city).toBeUndefined();
+    expect(plan.updates.zip).toBeUndefined();
   });
 
   it("fills scalar fields (phone, hubspot ids) from the first loser that has them", () => {
@@ -393,17 +412,23 @@ describe("mergeDirectoryEntities (company) -- full re-point + audit capture", ()
 function recordingUnmergeDb(
   auditRow: Record<string, unknown>,
   winnerRow: Record<string, unknown>,
-  loserRow: Record<string, unknown>
+  loserRow: Record<string, unknown>,
+  existingReversal: Array<Record<string, unknown>> = []
 ) {
   const updates: Array<{ table: string; values: Record<string, unknown> }> = [];
   const inserts: Array<{ table: string; values: Record<string, unknown> }> = [];
   let companyFetch = 0;
+  let auditFetch = 0;
   const db = {
     select: () => ({
       from: (table: unknown) => ({
         where: () => ({
           limit: (_n: number) => {
-            if (table === directoryMergeAudit) return Promise.resolve([auditRow]);
+            if (table === directoryMergeAudit) {
+              // 1st fetch = load the audit; 2nd = the already-reversed existence check.
+              auditFetch += 1;
+              return Promise.resolve(auditFetch === 1 ? [auditRow] : existingReversal);
+            }
             if (table === companies) {
               companyFetch += 1;
               return Promise.resolve([companyFetch === 1 ? winnerRow : loserRow]);
@@ -508,6 +533,17 @@ describe("unmergeDirectoryEntities -- exact reversal", () => {
 
   it("rejects un-merge of a non-merge (reversal) audit row", async () => {
     const { db } = recordingUnmergeDb({ ...auditRow, mode: "unmerge" }, winnerRow, loserRow);
+    await expect(unmergeDirectoryEntities(db as never, "audit-1")).rejects.toThrow();
+  });
+
+  it("rejects a legacy audit that has no captured moved rows", async () => {
+    const legacy = { ...auditRow, fieldChanges: { loserIsActive: false, winnerId: "W" } };
+    const { db } = recordingUnmergeDb(legacy, winnerRow, loserRow);
+    await expect(unmergeDirectoryEntities(db as never, "audit-1")).rejects.toThrow();
+  });
+
+  it("rejects reversing a merge that has already been reversed", async () => {
+    const { db } = recordingUnmergeDb(auditRow, winnerRow, loserRow, [{ id: "reversal-1" }]);
     await expect(unmergeDirectoryEntities(db as never, "audit-1")).rejects.toThrow();
   });
 });

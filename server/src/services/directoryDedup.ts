@@ -266,8 +266,13 @@ export interface ClusterClassification {
 export function classifyNameCluster(members: CompanyMergeMember[]): ClusterClassification {
   const reasons: string[] = [];
 
-  const websites = new Set(members.map((m) => normalizeWebsiteDomain(m.website)).filter(Boolean));
-  if (websites.size > 1) reasons.push("divergent_website");
+  // Web-identity signal = normalized website, falling back to the domain field
+  // (the duplicate detector treats domain ?? website as the company domain), so a
+  // divergent domain is flagged even when neither row has a website.
+  const webIdentities = new Set(
+    members.map((m) => normalizeWebsiteDomain(m.website) ?? normalizeWebsiteDomain(m.domain)).filter(Boolean)
+  );
+  if (webIdentities.size > 1) reasons.push("divergent_website");
 
   const phones = new Set(members.map((m) => normalizePhoneDigits(m.phone)).filter(Boolean));
   if (phones.size > 1) reasons.push("divergent_phone");
@@ -303,13 +308,19 @@ export function planFieldReconciliation(
   const winnerBefore: Record<string, string | null> = {};
   const ordered = [...losers].sort(compareMergeRank);
 
-  if (!hasText(winner.address)) {
-    const src = ordered.find((l) => hasText(l.address));
+  // Address is an atomic unit: copy it from the single best loser ONLY when the
+  // winner has NO address component at all. Never stitch (e.g. a loser's street
+  // onto a city the winner already has) and never overwrite a partial winner.
+  const winnerHasAddress =
+    hasText(winner.address) || hasText(winner.city) || hasText(winner.state) || hasText(winner.zip);
+  if (!winnerHasAddress) {
+    const src = ordered.find(
+      (l) => hasText(l.address) || hasText(l.city) || hasText(l.state) || hasText(l.zip)
+    );
     if (src) {
       for (const field of ["address", "city", "state", "zip"] as const) {
-        const value = src[field];
-        if (!hasText(winner[field]) && hasText(value)) {
-          updates[field] = value;
+        if (hasText(src[field])) {
+          updates[field] = src[field];
           winnerBefore[field] = winner[field] ?? null;
         }
       }
@@ -858,14 +869,33 @@ export async function unmergeDirectoryEntities(tenantDb: TenantDb, auditId: stri
   if ((audit as any).mode !== "auto" && (audit as any).mode !== "manual") {
     throw new AppError(400, "Audit row is not a reversible company merge");
   }
-
-  const winnerId = (audit as any).winnerId as string;
-  const loserId = (audit as any).loserId as string;
+  // Legacy audits (pre reversible-merge) carry no captured moved rows -- reversing
+  // one would reactivate the loser without re-pointing anything. Reject them.
   const fieldChanges = ((audit as any).fieldChanges ?? {}) as {
     movedRows?: Record<string, string[]>;
     winnerBefore?: Record<string, string | null>;
     reconciled?: Record<string, string | null>;
   };
+  if (!fieldChanges.movedRows) {
+    throw new AppError(400, "Audit predates reversible merges (no captured moved rows)");
+  }
+  // Refuse to reverse a merge that has already been reversed once.
+  const [existingReversal] = await tenantDb
+    .select()
+    .from(directoryMergeAudit)
+    .where(
+      and(
+        eq(directoryMergeAudit.mode, "unmerge"),
+        sql`${directoryMergeAudit.fieldChanges} ->> 'reversedAuditId' = ${auditId}`
+      )
+    )
+    .limit(1);
+  if (existingReversal) {
+    throw new AppError(409, "This merge has already been reversed");
+  }
+
+  const winnerId = (audit as any).winnerId as string;
+  const loserId = (audit as any).loserId as string;
   const movedRows = fieldChanges.movedRows ?? {};
   const winnerBefore = fieldChanges.winnerBefore ?? {};
   const reconciled = fieldChanges.reconciled ?? {};
