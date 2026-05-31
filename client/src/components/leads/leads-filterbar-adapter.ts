@@ -1,5 +1,5 @@
 import type { LeadFilters, LeadRecord } from "@/hooks/use-leads";
-import type { FilterBarValue } from "@/components/filters/filterbar-params";
+import { UNASSIGNED, type FilterBarValue } from "@/components/filters/filterbar-params";
 import type { FilterBarSortOption } from "@/components/filters/filter-bar";
 import type { FilterSelectOption } from "@/components/filters/filter-select";
 
@@ -29,7 +29,10 @@ export function filterBarValueToLeadFilters(value: FilterBarValue): Partial<Lead
   const filters: Partial<LeadFilters> = {};
   if (value.search) filters.search = value.search;
   if (value.stageIds && value.stageIds.length > 0) filters.stageIds = value.stageIds;
-  if (value.assignedRepId) filters.assignedRepId = value.assignedRepId; // forward __unassigned__ verbatim
+  // Leads.assignedRepId is a non-null UUID — there is no "unassigned" lead bucket and the backend
+  // compares the value directly, so the __unassigned__ sentinel would error/no-match. Drop it (Codex
+  // #577 P1); the Unassigned OPTION is also suppressed for the leads Rep control via allowUnassigned.
+  if (value.assignedRepId && value.assignedRepId !== UNASSIGNED) filters.assignedRepId = value.assignedRepId;
   if (value.projectTypeId) filters.projectTypeId = value.projectTypeId;
   // Narrow to LEAD statuses so a stray deal status (active/on_hold/inactive) can't become an invalid
   // lead filter. The union check also narrows the type for assignment (no cast).

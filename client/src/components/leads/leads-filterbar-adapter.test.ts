@@ -39,8 +39,10 @@ describe("filterBarValueToLeadFilters (FilterBar URL value -> useLeads LeadFilte
     });
   });
 
-  it("forwards the __unassigned__ rep sentinel verbatim (backend maps it to IS NULL)", () => {
-    expect(filterBarValueToLeadFilters({ assignedRepId: "__unassigned__" })).toEqual({ assignedRepId: "__unassigned__" });
+  it("DROPS the __unassigned__ sentinel for leads (leads.assignedRepId is non-null — no unassigned bucket, the backend would error/no-match)", () => {
+    expect("assignedRepId" in filterBarValueToLeadFilters({ assignedRepId: "__unassigned__" })).toBe(false);
+    // a real rep id still forwards
+    expect(filterBarValueToLeadFilters({ assignedRepId: "rep-1" })).toEqual({ assignedRepId: "rep-1" });
   });
 
   it("accepts only LEAD statuses (open/converted/disqualified) — drops a deal status or 'any'", () => {

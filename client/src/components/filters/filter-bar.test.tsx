@@ -56,7 +56,7 @@ describe("FilterBar", () => {
 
   function render(
     dimensions: FilterDimension[],
-    extra: Partial<{ value: FilterBarValue; onChange: (p: Partial<FilterBarValue>) => void; onReset: () => void; stageEntryDateEnabled: boolean }> = {}
+    extra: Partial<{ value: FilterBarValue; onChange: (p: Partial<FilterBarValue>) => void; onReset: () => void; stageEntryDateEnabled: boolean; options: FilterBarOptions }> = {}
   ) {
     act(() => {
       root?.render(
@@ -65,12 +65,14 @@ describe("FilterBar", () => {
           value={extra.value ?? {}}
           onChange={extra.onChange ?? (() => {})}
           onReset={extra.onReset ?? (() => {})}
-          options={OPTIONS}
+          options={extra.options ?? OPTIONS}
           stageEntryDateEnabled={extra.stageEntryDateEnabled}
         />
       );
     });
   }
+  const optionLabels = () =>
+    Array.from(document.querySelectorAll('[role="option"]')).map((el) => el.textContent?.trim());
   const q = (sel: string) => container.querySelector<HTMLElement>(sel);
 
   it("renders only the configured dimensions", () => {
@@ -129,6 +131,20 @@ describe("FilterBar", () => {
     const checkbox = document.querySelector<HTMLInputElement>('input[type="checkbox"][value="won"]');
     act(() => checkbox?.click());
     expect(onChange).toHaveBeenCalledWith({ stageIds: ["won"] });
+  });
+
+  it("offers an Unassigned option on Rep by default (deals — nullable FK)", () => {
+    render(["rep"]);
+    act(() => q('button[aria-label="Rep filter"]')?.click());
+    expect(optionLabels()).toContain("Unassigned");
+  });
+
+  it("omits the Unassigned option on Rep when allowUnassigned is false (leads — non-null FK; Codex #577)", () => {
+    render(["rep"], { options: { ...OPTIONS, allowUnassigned: false } });
+    act(() => q('button[aria-label="Rep filter"]')?.click());
+    const labels = optionLabels();
+    expect(labels).not.toContain("Unassigned");
+    expect(labels).toContain("Kevin Scott"); // real reps still offered
   });
 
   it("calls onReset from the Clear button", () => {

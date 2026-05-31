@@ -444,6 +444,8 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
               .map((column) => ({ value: column.stage.id, label: column.stage.name })),
             sortOptions: LEAD_LIST_SORT_OPTIONS,
             statusOptions: LEAD_STATUS_OPTIONS,
+            // Leads are always assigned (non-null assignedRepId) — no "Unassigned" bucket (Codex #577 P1).
+            allowUnassigned: false,
           },
         }}
       />
