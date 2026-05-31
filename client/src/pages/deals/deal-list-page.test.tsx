@@ -1500,6 +1500,21 @@ describe("DealListPage", () => {
     expect(props.baseFilters?.assignedRepId).toBe("rep-1");
   });
 
+  it("waits for stage metadata before mounting the drill-down bar — no all-deals flash (Codex P2)", () => {
+    mocks.usePipelineStagesMock.mockReturnValue({ stages: [] }); // not loaded yet
+    renderPage("/deals?filter=won&scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { filterBar?: unknown };
+    expect(props.filterBar).toBeUndefined(); // legacy mode (which gates the query on stage loading) until stages arrive
+  });
+
+  it("carries the drill-down's intended default sort into the bar (Codex P2)", () => {
+    renderPage("/deals?filter=won&scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+      filterBar?: { defaultSort?: { key: string; dir: string } };
+    };
+    expect(props.filterBar?.defaultSort).toEqual({ key: "contract_signed_date", dir: "desc" }); // the Won view's order
+  });
+
   it("uses the Won terminal filter caption ahead of the page period and falls back correctly", () => {
     const htmlWithTerminalFilter = renderPage("/deals?scope=all&period=last_month&won_preset=30", "director");
     const htmlWithPeriodOnly = renderPage("/deals?scope=all&period=last_month", "director");

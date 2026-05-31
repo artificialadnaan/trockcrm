@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
-import { DealsListSection } from "./deals-list-section";
+import { DealsListSection, shouldResetNamespacedPage } from "./deals-list-section";
 import type { FilterDimension, FilterBarOptions } from "@/components/filters/filter-bar";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -417,5 +417,57 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
       await renderFB("/deals?dateFrom=2026-05-01", {}, FB_PROP);
       expect(lastDealsCall().dateFrom).toBe("2026-05-01");
     });
+  });
+
+  // Codex P2s: FilterBar mode must preserve two legacy behaviors the drill-down mounts rely on.
+  describe("drill-down defaults (Codex P2)", () => {
+    it("applies filterBar.defaultSort when the URL carries no sort (the view's intended order)", async () => {
+      await renderFB("/deals", {}, { ...FB_PROP, defaultSort: { key: "contract_signed_date", dir: "desc" } });
+      const call = lastDealsCall();
+      expect(call.sortBy).toBe("contract_signed_date");
+      expect(call.sortDir).toBe("desc");
+    });
+
+    it("lets an explicit URL sort override filterBar.defaultSort", async () => {
+      await renderFB("/deals?sortBy=created_at&sortDir=asc", {}, { ...FB_PROP, defaultSort: { key: "contract_signed_date", dir: "desc" } });
+      const call = lastDealsCall();
+      expect(call.sortBy).toBe("created_at");
+      expect(call.sortDir).toBe("asc");
+    });
+
+    it("keeps the baseFilters date window a FLOOR — a broader bar date can't widen past it", async () => {
+      await renderFB(
+        "/deals?dateFrom=2026-04-01&dateTo=2026-06-30",
+        { baseFilters: { dateFrom: "2026-05-01", dateTo: "2026-05-31" } }
+      );
+      const call = lastDealsCall();
+      expect(call.dateFrom).toBe("2026-05-01"); // floor start held (bar's earlier 04-01 clamped up)
+      expect(call.dateTo).toBe("2026-05-31"); // floor end held (bar's later 06-30 clamped down)
+    });
+
+    it("lets a narrower bar date intersect within the floor", async () => {
+      await renderFB(
+        "/deals?dateFrom=2026-05-10&dateTo=2026-05-20",
+        { baseFilters: { dateFrom: "2026-05-01", dateTo: "2026-05-31" } }
+      );
+      const call = lastDealsCall();
+      expect(call.dateFrom).toBe("2026-05-10");
+      expect(call.dateTo).toBe("2026-05-20");
+    });
+  });
+});
+
+describe("shouldResetNamespacedPage (fb_ page reset on host change — Codex P2)", () => {
+  it("does NOT reset on first observation (a bookmarked fb_page>1 loads intact)", () => {
+    expect(shouldResetNamespacedPage(null, "mine|{}", 5)).toBe(false);
+  });
+  it("does NOT reset when the host key is unchanged", () => {
+    expect(shouldResetNamespacedPage("mine|{}", "mine|{}", 5)).toBe(false);
+  });
+  it("resets when the host key changes and the page is past 1", () => {
+    expect(shouldResetNamespacedPage("mine|{a:1}", "all|{a:1}", 5)).toBe(true);
+  });
+  it("does NOT reset when already on page 1", () => {
+    expect(shouldResetNamespacedPage("mine|{}", "all|{}", 1)).toBe(false);
   });
 });

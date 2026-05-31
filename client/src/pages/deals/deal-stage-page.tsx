@@ -72,6 +72,9 @@ export function DealStagePage() {
           defaultStageIds: [stage.id],
           terminalStageIds: isTerminalStage(stage.slug) ? [stage.id] : [],
           paramPrefix: DRILLDOWN_FILTERBAR_PARAM_PREFIX,
+          // Default the list to days-in-stage (oldest entry first) — the stage drill-down's age focus —
+          // when the bar carries no explicit sort.
+          defaultSort: { key: "stage_entered_at", dir: "asc" },
         }}
       />
     </PipelineStagePageHeader>

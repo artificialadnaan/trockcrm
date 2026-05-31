@@ -1001,17 +1001,35 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   // (which drives getDeals) can't back it — both return undefined here and keep today's behavior.
   const drilldownFilterBar = useMemo(() => {
     if (dashboardView.filter === null || isAtRiskDrilldown) return undefined;
-    return buildDrilldownListFilterBar({
-      visibleStages: (drilldownVisibleStages ?? []).map((stage) => ({
-        id: stage.id,
-        slug: stage.slug,
-        name: stage.name,
-      })),
-      isTerminalSlug: isTerminalStage,
-      regions,
-      projectTypes,
-    });
-  }, [dashboardView.filter, isAtRiskDrilldown, drilldownVisibleStages, regions, projectTypes]);
+    // Codex P2: wait for stage metadata before mounting the bar. FilterBar mode queries unconditionally,
+    // so with stages still [] the first request would carry no stage constraint and briefly show all
+    // active deals (wrong cohort on e.g. a Won / Opportunities drill-down) before refetching. Until then
+    // the section stays in legacy mode, which gates the query on stage loading.
+    if (stages.length === 0) return undefined;
+    return {
+      ...buildDrilldownListFilterBar({
+        visibleStages: (drilldownVisibleStages ?? []).map((stage) => ({
+          id: stage.id,
+          slug: stage.slug,
+          name: stage.name,
+        })),
+        isTerminalSlug: isTerminalStage,
+        regions,
+        projectTypes,
+      }),
+      // Codex P2: preserve the drill-down's intended order in FilterBar mode (URL-backed sort would
+      // otherwise fall to the server default created_at desc for a default/bookmarked view).
+      defaultSort: dashboardView.listInitialSort,
+    };
+  }, [
+    dashboardView.filter,
+    dashboardView.listInitialSort,
+    isAtRiskDrilldown,
+    drilldownVisibleStages,
+    regions,
+    projectTypes,
+    stages.length,
+  ]);
   // In FilterBar mode the list args spread baseFilters then the bar value; they do NOT read
   // lockedOwnerId (that feeds only the legacy path). So fold the page's rep select into baseFilters,
   // else the drill-down list would ignore the selected rep and diverge from the board above. The
