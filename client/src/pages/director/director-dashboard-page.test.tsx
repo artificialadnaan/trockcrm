@@ -778,6 +778,24 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain('href="/director/rep/rep-2?preset=qtd"');
   });
 
+  it("renders a mobile card stack alongside the desktop table without a hover-gated breakdown link", () => {
+    const html = renderPageHtml();
+
+    // Desktop: the 980px table is preserved but hidden below md.
+    expect(html).toContain('data-testid="director-leaderboard"');
+    expect(html).toContain("min-w-[980px]");
+    expect(html).toContain("hidden overflow-x-auto md:block");
+
+    // Mobile: the same reps stacked into cards (shown only below md).
+    expect(html).toContain('data-testid="director-leaderboard-cards"');
+    expect(html).toContain('data-testid="rep-card-rep-1"');
+    // The card breakdown link is always visible on touch (no opacity-0 hover gate).
+    const cardLinkIndex = html.indexOf('data-testid="rep-card-link-rep-1"');
+    expect(cardLinkIndex).toBeGreaterThan(-1);
+    const cardLinkTag = html.slice(html.lastIndexOf("<a", cardLinkIndex), cardLinkIndex);
+    expect(cardLinkTag).not.toContain("opacity-0");
+  });
+
   it("renders strategic alerts and AI coaching panels from real hook data", () => {
     const html = renderPageHtml();
 

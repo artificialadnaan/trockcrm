@@ -112,6 +112,11 @@ const SharedPrimitivesHarness = lazy(() =>
     default: module.SharedPrimitivesHarness,
   }))
 );
+const MobileUiHarness = lazy(() =>
+  import("@/components/__harness__/mobile-ui-harness").then((module) => ({
+    default: module.MobileUiHarness,
+  }))
+);
 
 const enableSharedPrimitivesHarness = import.meta.env.DEV;
 
@@ -126,6 +131,9 @@ function AuthGate({ children }: { children: ReactNode }) {
   const location = useLocation();
 
   if (location.pathname.startsWith("/p/")) return <>{children}</>;
+  // Dev-only component harnesses render standalone mock data (no session); the
+  // routes themselves are import.meta.env.DEV-gated and absent from prod builds.
+  if (import.meta.env.DEV && location.pathname.startsWith("/__harness__/")) return <>{children}</>;
 
   if (loading) {
     return (
@@ -198,6 +206,9 @@ export function App() {
             <Route path="/p/:token" element={<PublicPhotoViewerPage />} />
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route path="/onboarding-required" element={<OnboardingRequiredPage />} />
+            {enableSharedPrimitivesHarness ? (
+              <Route path="/__harness__/mobile-ui" element={<MobileUiHarness />} />
+            ) : null}
             <Route element={<AppShell />}>
               <Route path="/" element={<HomeDashboardPage />} />
               <Route path="/dashboard" element={<HomeDashboardPage />} />

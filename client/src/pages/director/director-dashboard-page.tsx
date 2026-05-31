@@ -257,6 +257,99 @@ function DistributionBar({ row }: { row?: { leads: number; qualifiedLeads: numbe
   );
 }
 
+export type RepPerfView = {
+  repId: string;
+  repName: string;
+  detailPath: string;
+  region: string;
+  needsHelp: boolean;
+  closed: number | null;
+  closedDeals: number | null;
+  pipelineValue: number;
+  activeDeals: number;
+  winRate: number | null;
+  winDelta: number | null;
+  atRisk: number;
+  activity: ActivityLevel;
+  distribution?: { leads: number; qualifiedLeads: number; opportunities: number; estimating: number };
+  sparkline: number[];
+};
+
+// Mobile mirror of one Sales Force Performance table row. The 980px table is a
+// horizontal-scroll wall on phones, so <md we stack the same data into cards and
+// expose the per-rep breakdown link without the table's hover-only affordance.
+export function RepPerfCard({ view }: { view: RepPerfView }) {
+  const { activity } = view;
+  return (
+    <div className="border-t border-gray-100 p-4 first:border-t-0" data-testid={`rep-card-${view.repId}`}>
+      <Link
+        to={view.detailPath}
+        aria-label={`Open ${view.repName} breakdown`}
+        className="flex min-h-[44px] items-center justify-between gap-3"
+        data-testid={`rep-card-link-${view.repId}`}
+      >
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#CC0000] text-[11px] font-black text-white">
+            {getInitials(view.repName)}
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="truncate font-bold text-gray-950">{view.repName}</span>
+              {view.needsHelp && (
+                <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide ${activity.label === "Low" ? "bg-[#CC0000] text-white" : "bg-red-100 text-red-700"}`}>
+                  {activity.label === "Low" ? "Needs help" : "Review"}
+                </span>
+              )}
+            </div>
+            <p className="truncate text-xs text-gray-500">{view.region}</p>
+          </div>
+        </div>
+        <ChevronRight className="h-5 w-5 shrink-0 text-gray-400" />
+      </Link>
+
+      <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Closed</p>
+          <p className="font-black text-gray-950">{view.closed === null ? "--" : formatCurrency(view.closed)}</p>
+          <p className="text-xs text-gray-500">{view.closedDeals === null ? "pending" : `${view.closedDeals} won`}</p>
+        </div>
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Pipeline</p>
+          <p className="font-black text-gray-950">{formatCurrency(view.pipelineValue)}</p>
+          <p className="text-xs text-gray-500">{view.activeDeals} deals</p>
+        </div>
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Win rate</p>
+          <p className="font-black text-gray-950">{view.winRate === null ? "--" : formatPercent(view.winRate)}</p>
+          {formatDelta(view.winDelta, "pp")}
+        </div>
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">At risk</p>
+          <div className="mt-0.5">
+            {view.atRisk > 0 ? (
+              <span className="rounded-full bg-red-100 px-2.5 py-1 text-xs font-black text-red-700">{view.atRisk}</span>
+            ) : (
+              <span className="text-gray-400">--</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <span className="inline-flex items-center gap-2 rounded-full bg-gray-100 px-2.5 py-1 text-xs font-bold text-gray-700">
+          <span className={`h-2 w-2 rounded-full ${activity.dot}`} />
+          {activity.label}
+        </span>
+        <MiniSparkline values={view.sparkline} />
+      </div>
+
+      <div className="mt-3">
+        <DistributionBar row={view.distribution} />
+      </div>
+    </div>
+  );
+}
+
 function KpiCard({
   label,
   value,
@@ -514,6 +607,36 @@ export function DirectorDashboardPage() {
   const wonCloses = recentCloses.filter((close) => close.outcome === "won").length;
   const lostCloses = recentCloses.filter((close) => close.outcome === "lost").length;
   const repRows = [...data.repCards].sort((a, b) => b.pipelineValue - a.pipelineValue);
+  // Single per-rep derivation shared by the desktop table and the mobile cards so
+  // the two presentations can never drift.
+  const buildRepView = (rep: RepPerformanceCard): RepPerfView => {
+    const snapshot = perfRowsByRep.get(rep.repId);
+    const perfRep = perfRepsByRep.get(rep.repId);
+    const winRate = hasPerformanceData ? snapshot?.winRate ?? rep.winRate : null;
+    const winDelta = hasPerformanceData && winRate !== null
+      ? snapshot?.previous ? winRate - snapshot.previous.winRate : perfRep?.change.winRate ?? null
+      : null;
+    const activity = getActivityLevel(rep.activityScore);
+    const atRisk = engineAtRiskCountByRep.get(rep.repId) ?? 0;
+    return {
+      repId: rep.repId,
+      repName: rep.repName,
+      detailPath: buildRepDetailPath(rep.repId, preset),
+      region: hasPerformanceData ? snapshot?.region ?? "Region unavailable" : "Performance pending",
+      needsHelp: atRisk > 0 || activity.label === "Low",
+      closed: rep.closedValue ?? null,
+      closedDeals: rep.winsCount ?? null,
+      pipelineValue: rep.pipelineValue,
+      activeDeals: rep.activeDeals,
+      winRate,
+      winDelta,
+      atRisk,
+      activity,
+      distribution: funnelByRep.get(rep.repId),
+      sparkline: snapshot?.sparkline8w ?? [],
+    };
+  };
+  const repViews = repRows.map(buildRepView);
   const periodLabel = PERIOD_LABELS[renderedPreset];
   const activityPeriodLabel = PERIOD_ACTIVITY_LABELS[renderedPreset];
   const scopeSummary = data.scopeSummary ?? {
@@ -569,7 +692,7 @@ export function DirectorDashboardPage() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Dashboard scope" />
+          <ScopeToggle options={SCOPE_OPTIONS} value={scope} onChange={updateScope} ariaLabel="Dashboard scope" size="touch" />
           <div className="flex flex-wrap items-center gap-1 rounded-full bg-gray-200 px-1.5 py-1.5">
             {PRESETS.map((item) => (
               <button
@@ -577,7 +700,7 @@ export function DirectorDashboardPage() {
                 data-testid={`preset-${item.value}`}
                 type="button"
                 onClick={() => setPreset(item.value)}
-                className={`rounded-full px-3 py-1 text-xs font-black transition-colors ${
+                className={`rounded-full font-black transition-colors min-h-[44px] px-4 py-2.5 text-sm md:min-h-0 md:px-3 md:py-1 md:text-xs ${
                   preset === item.value ? "bg-[#CC0000] text-white shadow-sm" : "text-gray-600 hover:text-gray-950"
                 }`}
               >
@@ -593,7 +716,7 @@ export function DirectorDashboardPage() {
               void refetch();
               void refetchPerformance();
             }}
-            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm hover:text-gray-950"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm hover:text-gray-950 md:h-9 md:w-9"
           >
             <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
           </button>
@@ -606,7 +729,7 @@ export function DirectorDashboardPage() {
                 aria-label={action.label}
                 title={action.title}
                 onClick={() => navigate(action.to)}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm hover:text-gray-950"
+                className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-500 shadow-sm hover:text-gray-950 md:h-9 md:w-9"
               >
                 <Icon className="h-4 w-4" />
               </button>
@@ -746,14 +869,14 @@ export function DirectorDashboardPage() {
               type="button"
               data-testid="export-sales-force-csv"
               onClick={exportSalesForceCsv}
-              className="inline-flex items-center gap-2 rounded-full border border-gray-200 px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-gray-600 hover:text-gray-950"
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-full border border-gray-200 px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-gray-600 hover:text-gray-950 md:min-h-0"
             >
               <Download className="h-3.5 w-3.5" />
               Export
             </button>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="hidden overflow-x-auto md:block">
             <table className="w-full min-w-[980px] text-sm" data-testid="director-leaderboard">
               <thead>
                 <tr className="bg-gray-100 text-[10px] font-black uppercase tracking-widest text-gray-500">
@@ -775,86 +898,70 @@ export function DirectorDashboardPage() {
                     </td>
                   </tr>
                 )}
-                {repRows.map((rep) => {
-                  const snapshot = perfRowsByRep.get(rep.repId);
-                  const perfRep = perfRepsByRep.get(rep.repId);
-                  // Wave 1 (P0-1): canonical per-rep Won from the director payload
-                  // (reconciles with the Closed card); replaces the stale snapshot value.
-                  const closed: number | null = rep.closedValue ?? null;
-                  const closedDeals: number | null = rep.winsCount ?? null;
-                  const winRate = hasPerformanceData ? snapshot?.winRate ?? rep.winRate : null;
-                  const winDelta = hasPerformanceData && winRate !== null
-                    ? snapshot?.previous ? winRate - snapshot.previous.winRate : perfRep?.change.winRate ?? null
-                    : null;
-                  const atRisk = engineAtRiskCountByRep.get(rep.repId) ?? 0;
-                  const activity = getActivityLevel(rep.activityScore);
-                  const needsHelp = atRisk > 0 || activity.label === "Low";
-
-                  return (
-                    <tr key={rep.repId} className="group border-t border-gray-100 hover:bg-gray-50">
-                      <td className="px-5 py-4">
-                        <div className="flex items-center gap-3">
-                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#CC0000] text-[11px] font-black text-white">
-                            {getInitials(rep.repName)}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <Link to={buildRepDetailPath(rep.repId, preset)} className="font-bold text-gray-950 hover:text-[#CC0000]" data-testid={`rep-link-${rep.repId}`}>
-                                {rep.repName}
-                              </Link>
-                              {needsHelp && (
-                                <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide ${activity.label === "Low" ? "bg-[#CC0000] text-white" : "bg-red-100 text-red-700"}`}>
-                                  {activity.label === "Low" ? "Needs help" : "Review"}
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-xs text-gray-500">{hasPerformanceData ? snapshot?.region ?? "Region unavailable" : "Performance pending"}</p>
-                          </div>
+                {repViews.map((view) => (
+                  <tr key={view.repId} className="group border-t border-gray-100 hover:bg-gray-50">
+                    <td className="px-5 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#CC0000] text-[11px] font-black text-white">
+                          {getInitials(view.repName)}
                         </div>
-                      </td>
-                      <td className="px-4 py-4 text-right">
-                        <p className="font-black text-gray-950">{closed === null ? "--" : formatCurrency(closed)}</p>
-                        <p className="text-xs text-gray-500">{closedDeals === null ? "pending" : `${closedDeals} won`}</p>
-                      </td>
-                      <td className="px-4 py-4 text-right">
-                        <p className="font-black text-gray-950">{formatCurrency(rep.pipelineValue)}</p>
-                        <p className="text-xs text-gray-500">{rep.activeDeals} deals</p>
-                      </td>
-                      <td className="px-4 py-4">
-                        <DistributionBar row={funnelByRep.get(rep.repId)} />
-                      </td>
-                      <td className="px-4 py-4 text-right">
-                        <p className="font-black text-gray-950">{winRate === null ? "--" : formatPercent(winRate)}</p>
-                        {formatDelta(winDelta, "pp")}
-                      </td>
-                      <td className="px-4 py-4 text-center">
-                        {atRisk > 0 ? (
-                          <span className="rounded-full bg-red-100 px-2.5 py-1 text-xs font-black text-red-700">{atRisk}</span>
-                        ) : (
-                          <span className="text-gray-400">--</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-4">
-                        <span className="inline-flex items-center gap-2 rounded-full bg-gray-100 px-2.5 py-1 text-xs font-bold text-gray-700">
-                          <span className={`h-2 w-2 rounded-full ${activity.dot}`} />
-                          {activity.label}
-                        </span>
-                      </td>
-                      <td className="px-5 py-4">
-                        <div className="flex items-center justify-end gap-2">
-                          <MiniSparkline values={snapshot?.sparkline8w ?? []} />
-                          <Link
-                            to={buildRepDetailPath(rep.repId, preset)}
-                            aria-label={`Open ${rep.repName} breakdown`}
-                            className="text-gray-300 opacity-0 transition-opacity group-hover:opacity-100"
-                          >
-                            <ChevronRight className="h-4 w-4" />
-                          </Link>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <Link to={view.detailPath} className="font-bold text-gray-950 hover:text-[#CC0000]" data-testid={`rep-link-${view.repId}`}>
+                              {view.repName}
+                            </Link>
+                            {view.needsHelp && (
+                              <span className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide ${view.activity.label === "Low" ? "bg-[#CC0000] text-white" : "bg-red-100 text-red-700"}`}>
+                                {view.activity.label === "Low" ? "Needs help" : "Review"}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-gray-500">{view.region}</p>
                         </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 text-right">
+                      <p className="font-black text-gray-950">{view.closed === null ? "--" : formatCurrency(view.closed)}</p>
+                      <p className="text-xs text-gray-500">{view.closedDeals === null ? "pending" : `${view.closedDeals} won`}</p>
+                    </td>
+                    <td className="px-4 py-4 text-right">
+                      <p className="font-black text-gray-950">{formatCurrency(view.pipelineValue)}</p>
+                      <p className="text-xs text-gray-500">{view.activeDeals} deals</p>
+                    </td>
+                    <td className="px-4 py-4">
+                      <DistributionBar row={view.distribution} />
+                    </td>
+                    <td className="px-4 py-4 text-right">
+                      <p className="font-black text-gray-950">{view.winRate === null ? "--" : formatPercent(view.winRate)}</p>
+                      {formatDelta(view.winDelta, "pp")}
+                    </td>
+                    <td className="px-4 py-4 text-center">
+                      {view.atRisk > 0 ? (
+                        <span className="rounded-full bg-red-100 px-2.5 py-1 text-xs font-black text-red-700">{view.atRisk}</span>
+                      ) : (
+                        <span className="text-gray-400">--</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-4">
+                      <span className="inline-flex items-center gap-2 rounded-full bg-gray-100 px-2.5 py-1 text-xs font-bold text-gray-700">
+                        <span className={`h-2 w-2 rounded-full ${view.activity.dot}`} />
+                        {view.activity.label}
+                      </span>
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="flex items-center justify-end gap-2">
+                        <MiniSparkline values={view.sparkline} />
+                        <Link
+                          to={view.detailPath}
+                          aria-label={`Open ${view.repName} breakdown`}
+                          className="text-gray-300 opacity-0 transition-opacity group-hover:opacity-100"
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </Link>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
                 {hasUnassignedWon && (
                   <tr className="border-t border-gray-100 bg-gray-50/60" data-testid="rep-row-unassigned">
                     <td className="px-5 py-4">
@@ -880,6 +987,30 @@ export function DirectorDashboardPage() {
                 )}
               </tbody>
             </table>
+          </div>
+
+          <div className="md:hidden" data-testid="director-leaderboard-cards">
+            {repViews.length === 0 ? (
+              <p className="px-5 py-10 text-center text-sm text-gray-400">No active reps found.</p>
+            ) : (
+              repViews.map((view) => <RepPerfCard key={view.repId} view={view} />)
+            )}
+            {hasUnassignedWon && (
+              <div className="border-t border-gray-100 p-4" data-testid="rep-card-unassigned">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gray-300 text-[11px] font-black text-gray-700">--</div>
+                  <div className="min-w-0">
+                    <p className="font-bold text-gray-600">Unassigned</p>
+                    <p className="text-xs text-gray-400">Won without a rostered rep</p>
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-gray-400">Closed</p>
+                  <p className="font-black text-gray-950">{formatCurrency(unassignedClosedValue)}</p>
+                  <p className="text-xs text-gray-500">{unassignedWins} won</p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
