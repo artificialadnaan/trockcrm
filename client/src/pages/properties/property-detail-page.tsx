@@ -282,7 +282,7 @@ export function PropertyDetailPage() {
         <>
           <Link
             to={`/properties/${property.id}/edit`}
-            className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+            className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-h-[44px] md:min-h-0")}
           >
             <Edit className="h-4 w-4" />
             Edit
@@ -292,7 +292,7 @@ export function PropertyDetailPage() {
               href={companyCamUrl}
               target="_blank"
               rel="noreferrer"
-              className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-h-[44px] md:min-h-0")}
             >
               <Camera className="h-4 w-4" />
               CompanyCam
@@ -300,7 +300,7 @@ export function PropertyDetailPage() {
           ) : null}
           <Link
             to={`/leads/new?${newLeadParams.toString()}`}
-            className={cn(buttonVariants({ size: "sm" }), "bg-brand-red text-white hover:bg-brand-red/90")}
+            className={cn(buttonVariants({ size: "sm" }), "min-h-[44px] md:min-h-0 bg-brand-red text-white hover:bg-brand-red/90")}
           >
             <Plus className="h-4 w-4" />
             New lead
@@ -310,7 +310,7 @@ export function PropertyDetailPage() {
               render={
                 <button
                   type="button"
-                  className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                  className="flex h-11 w-11 md:h-7 md:w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
                   aria-label="More property actions"
                 >
                   <MoreHorizontal className="h-4 w-4" />

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { ArrowUpRight, Building2, Camera, ChevronLeft, ChevronRight, MapPin, Search } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
@@ -63,6 +63,60 @@ function isStale(value: string | null | undefined) {
 
 function propertyArea(property: PropertySurface) {
   return property.roofArea ?? property.unitCount ?? 0;
+}
+
+function PropertyStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <dt className="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-400">{label}</dt>
+      <dd className="font-black tabular-nums text-slate-950">{value}</dd>
+    </div>
+  );
+}
+
+/**
+ * Mobile (<md) card representation of a property row. Desktop keeps the table at
+ * >=md; this is the stack-to-card fallback so phones get no horizontal-scroll wall.
+ * The row has no interactive children (it only navigates), so the whole card is a
+ * single <Link> — simplest and keyboard-accessible, no stretched-link needed.
+ */
+export function PropertyCard({ property }: { property: PropertySurface }) {
+  const engagement = property.engagementStatus ?? "no_engagement";
+  const stale = isStale(property.lastActivityAt);
+  const area = propertyArea(property);
+  return (
+    <Link to={`/properties/${property.id}`} className="block rounded-xl border border-slate-200 bg-white p-3">
+      <div className="flex items-start gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-white">
+          {property.photosCount ? <Camera className="h-5 w-5" /> : <Building2 className="h-5 w-5" />}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-black uppercase text-slate-950">{property.name || formatPropertyLabel(property)}</p>
+          <p className="mt-1 truncate text-xs text-slate-500">{formatPropertyLabel(property)}</p>
+          <p className="mt-1 truncate text-xs font-semibold text-slate-600">{property.companyName ?? "Unassigned"}</p>
+        </div>
+        <ArrowUpRight className="h-4 w-4 shrink-0 text-slate-400" />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
+          {property.type ? TYPE_LABELS[property.type] ?? property.type : "Unclassified"}
+        </span>
+        <span className={cn("rounded-full px-2.5 py-1 text-xs font-black ring-1", ENGAGEMENT_CLASSES[engagement])}>
+          {ENGAGEMENT_LABELS[engagement]}
+        </span>
+      </div>
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+        <PropertyStat label="Sq ft" value={area ? NUMBER_COMPACT(area) : "None"} />
+        <PropertyStat label="Linked value" value={USD(numeric(property.linkedValue ?? property.activePipelineValue))} />
+      </dl>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <span className="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-400">Last touch</span>
+        <span className={cn("text-xs font-bold", stale ? "text-brand-red" : "text-slate-600")}>
+          {formatLastActivity(property.lastActivityAt)}
+        </span>
+      </div>
+    </Link>
+  );
 }
 
 export function PropertyListPage() {
@@ -138,6 +192,7 @@ export function PropertyListPage() {
                   setPage(1);
                 }}
                 ariaLabel="Property type filter"
+                size="touch"
               />
             </div>
             <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
@@ -162,7 +217,9 @@ export function PropertyListPage() {
               <p className="mt-1 text-sm text-slate-500">Clear the search or switch the type filter.</p>
             </div>
           ) : (
-            <Table>
+            <>
+            {/* >=md keeps the full table; phones get the stacked card list (md:hidden) below. */}
+            <div className="hidden md:block"><Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Property</TableHead>
@@ -224,7 +281,13 @@ export function PropertyListPage() {
                   );
                 })}
               </TableBody>
-            </Table>
+            </Table></div>
+            <div className="space-y-2 md:hidden" data-testid="property-cards">
+              {pageItems.map((property) => (
+                <PropertyCard key={property.id} property={property} />
+              ))}
+            </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -238,7 +301,7 @@ export function PropertyListPage() {
             <Button
               variant="outline"
               size="icon"
-              className={listPaginationIconButtonClassName}
+              className={cn(listPaginationIconButtonClassName, "size-11 md:size-8")}
               disabled={currentPage <= 1}
               onClick={() => setPage((value) => Math.max(1, value - 1))}
               aria-label="Previous properties page"
@@ -248,7 +311,7 @@ export function PropertyListPage() {
             <Button
               variant="outline"
               size="icon"
-              className={listPaginationIconButtonClassName}
+              className={cn(listPaginationIconButtonClassName, "size-11 md:size-8")}
               disabled={currentPage >= totalPages}
               onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
               aria-label="Next properties page"
