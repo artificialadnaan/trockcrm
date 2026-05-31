@@ -103,21 +103,14 @@ describe("globalSearch — unified composition + additions (single office, rep)"
   });
 });
 
-describe("globalSearch — rep visibility (no cross-rep leak)", () => {
-  it("restricts a rep's deal + lead search to their own assigned records", async () => {
+describe("globalSearch — rep visibility is office-level (no per-rep restriction)", () => {
+  it("does NOT add a per-rep assigned_rep_id restriction for a rep (office scoping + collaboration access is the boundary)", async () => {
     const wheres: unknown[] = [];
     const db = capturingDb([[], [], [], [], []], wheres); // deals, contacts, companies, leads, properties
     await globalSearch(db as any, "acme", undefined, "rep", "rep-1");
     const whereText = wheres.map(extractSqlText).join(" | ");
-    // The rep-restriction param appears only in the deals/leads assigned_rep_id = $rep clause.
-    expect(whereText).toContain("rep-1");
-  });
-
-  it("does NOT add a rep restriction when no user id is in play (e.g. unscoped/privileged path)", async () => {
-    const wheres: unknown[] = [];
-    const db = capturingDb([[], [], [], [], []], wheres);
-    await globalSearch(db as any, "acme"); // no role/user -> single office, no rep filter
-    const whereText = wheres.map(extractSqlText).join(" | ");
+    // The rep's id is never threaded into a WHERE filter -- they see their whole office's records
+    // (matching the collaborative detail path), bounded by the office-scoped tenantDb.
     expect(whereText).not.toContain("rep-1");
   });
 });
