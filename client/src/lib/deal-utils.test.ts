@@ -3,12 +3,39 @@ import {
   bestEstimate,
   bestEstimateCaptionLabel,
   formatDealDisplayNumber,
+  formatShortDate,
   isHubspotImportedDealNumber,
   isLostBidDeal,
+  parseDisplayDate,
   resolveBestEstimate,
   resolveDealValueKind,
   sanitizeHubspotDealIdentifiers,
 } from "./deal-utils";
+
+describe("parseDisplayDate / formatShortDate — date-only values render their literal day (no UTC-midnight off-by-one)", () => {
+  it("parses a bare date (YYYY-MM-DD) at LOCAL midnight of that calendar day — TZ-independent, no shift", () => {
+    // new Date('2026-01-14') is UTC midnight, which is the PREVIOUS day west of UTC (the bug:
+    // Rise Spring Point's stored won_closed_date Jan 14 displayed as 'Jan 13' in Central).
+    const d = parseDisplayDate("2026-01-14");
+    expect(d.getFullYear()).toBe(2026);
+    expect(d.getMonth()).toBe(0); // January
+    expect(d.getDate()).toBe(14); // the literal day — not 13
+  });
+
+  it("displays the stored won_closed_date (Jan 14) as Jan 14, not a day early", () => {
+    expect(formatShortDate("2026-01-14")).toBe("Jan 14, 2026");
+  });
+
+  it("leaves a full timestamp as a real instant (only date-only strings are anchored)", () => {
+    const iso = "2026-01-14T18:30:00.000Z";
+    expect(parseDisplayDate(iso).getTime()).toBe(new Date(iso).getTime());
+  });
+
+  it("returns empty for nullish input (unchanged)", () => {
+    expect(formatShortDate(null)).toBe("");
+    expect(formatShortDate(undefined)).toBe("");
+  });
+});
 
 describe("isHubspotImportedDealNumber", () => {
   it("flags HS- prefixed dealNumbers as HubSpot-imported", () => {
