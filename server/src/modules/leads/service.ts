@@ -169,6 +169,7 @@ export interface UpdateLeadInput {
 interface LeadServiceDependencies {
   getAllStages: (workflowFamily?: WorkflowFamily) => Promise<Array<{
     id: string;
+    name?: string;
     slug: string;
     displayOrder: number;
     isTerminal: boolean;
@@ -545,7 +546,7 @@ async function decorateLeads(
   // owns the getAllStages dependency). listLeads returns rows in their actual (possibly alias) stage, so
   // a canonical-only client map renders "—" for alias-stage leads; this resolves the real name (Codex
   // #577 P2). Optional — omitted callers leave stageName null.
-  leadStageNameById?: Map<string, string>
+  leadStageNameById?: Map<string, string | null>
 ) {
   if (rows.length === 0) {
     return [];
@@ -1503,7 +1504,9 @@ export function createLeadService(
         ? await query.limit(Math.min(Math.max(filters.limit, 1), LEADS_LIST_MAX_ROWS))
         : await query;
 
-    const leadStageNameById = new Map((await deps.getAllStages("lead")).map((stage) => [stage.id, stage.name]));
+    const leadStageNameById = new Map(
+      (await deps.getAllStages("lead")).map((stage) => [stage.id, stage.name ?? null] as [string, string | null])
+    );
     return decorateLeads(tenantDb, rows, leadStageNameById);
   }
 
