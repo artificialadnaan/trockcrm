@@ -118,15 +118,16 @@ export function SearchPage() {
     });
   }, [aiResults]);
 
-  const sections: Array<{ key: "deals" | "contacts" | "files"; label: string }> = [
+  const sections: Array<{ key: "deals" | "contacts" | "files" | "companies" | "leads" | "properties"; label: string }> = [
     { key: "deals", label: "Deals" },
+    { key: "companies", label: "Accounts" },
     { key: "contacts", label: "Contacts" },
+    { key: "leads", label: "Leads" },
+    { key: "properties", label: "Properties" },
     { key: "files", label: "Files" },
   ];
-  // This page renders deals/contacts/files only (companies/leads/properties surface in the
-  // command palette). Gate the empty/results state on what is actually rendered, NOT results.total
-  // (which now also counts the new entity types) -- otherwise a new-entity-only match would
-  // suppress "No results" yet render nothing.
+  // Gate the empty/results state on what is actually rendered (the section keys above), not
+  // results.total, so the count and the rendered groups can never disagree.
   const renderedTotal = sections.reduce((sum, { key }) => sum + (results?.[key]?.length ?? 0), 0);
   const intentLabel = aiResults?.intent ? aiResults.intent.replace(/_/g, " ") : null;
 
