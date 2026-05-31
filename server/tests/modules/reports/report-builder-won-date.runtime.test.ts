@@ -119,6 +119,17 @@ describe("report-builder Won reports reconcile to the Won card", () => {
     expect(result.notes?.[0]).not.toMatch(/totals reconcile to the won card/i);
   });
 
+  it("full Won scope narrowed by another filter (rep) does not promise card reconciliation", async () => {
+    const result = await runReportBuilder(tdb, {
+      ...admin,
+      dimensions: ["rep"],
+      measures: ["total_value"],
+      filters: { stage: ALL_WON, rep: [REP] }, // all Won stages, but a rep narrowing the card doesn't apply
+    });
+    expect(result.notes?.[0]).toMatch(/narrower|will not match/i);
+    expect(result.notes?.[0]).not.toMatch(/totals reconcile to the won card/i);
+  });
+
   it("non-Won report keeps the user's date axis (created_at)", async () => {
     const result = await runReportBuilder(tdb, {
       ...admin,

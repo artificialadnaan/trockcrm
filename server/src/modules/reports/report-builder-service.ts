@@ -289,6 +289,15 @@ export async function runReportBuilder(
   const periodBounded =
     Boolean(filters.from) || Boolean(filters.to) || dimensions.some((d) => d === "month" || d === "week");
   const applyWonGuard = wonScoped && periodBounded;
+  // The report only reconciles to the (unscoped) Won card when its WHOLE scope matches the card's:
+  // every Won slug AND no narrowing the card doesn't apply (source/region/deal_type or a rep scope).
+  // Otherwise it's a legitimate subset and must NOT claim card reconciliation.
+  const otherNarrowing =
+    Boolean(effectiveReportRepId(input)) ||
+    listFilter(filters.source).length > 0 ||
+    listFilter(filters.region).length > 0 ||
+    listFilter(filters.deal_type).length > 0;
+  const reconcilesToCard = fullWonScope && !otherNarrowing;
   const dimensionEntries = dimensions.map((dimension) => ({
     key: dimension,
     expression: dimensionSql(dimension, dateFieldSql),
@@ -325,9 +334,9 @@ export async function runReportBuilder(
   }.`;
   const notes = wonScoped
     ? [
-        fullWonScope
+        reconcilesToCard
           ? `${axisNote} Totals reconcile to the Won card.`
-          : `${axisNote} NOTE: only a SUBSET of Won stages is selected, so these totals cover that subset and will NOT match the full Won card (which sums every Won stage).`,
+          : `${axisNote} NOTE: this report is narrower than the Won card (a subset of Won stages and/or filters the card doesn't apply, e.g. source/region/deal type/rep), so its totals will NOT match the full Won card.`,
       ]
     : [];
   return {
