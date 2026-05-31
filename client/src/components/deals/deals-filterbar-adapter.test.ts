@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   applyBoardVisibilityDefaults,
+  DRILLDOWN_FILTERBAR_PARAM_PREFIX,
   filterBarValueToDealFilters,
   getBoardVisibleStageScope,
   getDealDisplayDate,
+  getDrilldownFilterBarDimensions,
 } from "./deals-filterbar-adapter";
 import type { FilterBarValue } from "@/components/filters/filterbar-params";
 
@@ -212,5 +214,71 @@ describe("getDealDisplayDate (filter-axis == display-axis: prefer the server's o
   it("returns null when no date axis is available", () => {
     expect(getDealDisplayDate({ displayDate: null, actualCloseDate: null, expectedCloseDate: null })).toBeNull();
     expect(getDealDisplayDate({})).toBeNull();
+  });
+});
+
+// Director/stage drill-down FilterBar mounts (e.g. /deals/stages/<id>, the /deals Won/Active/At-risk
+// drill-downs). These surfaces already carry their own URL state (scope, period, filter, page, the
+// page-owned rep select), so the bar mounts under a param NAMESPACE so its keys never collide.
+describe("DRILLDOWN_FILTERBAR_PARAM_PREFIX (namespace for drill-down/stage bar mounts)", () => {
+  it("is a non-empty prefix ending in a separator so bar keys never alias a bare drill-down param", () => {
+    // The bare drill-down params (scope, period, filter, page, assignedRepId) are un-prefixed; the bar
+    // serializes its keys as `${prefix}${key}` (e.g. fb_stageIds, fb_page) so the two URL spaces are disjoint.
+    expect(DRILLDOWN_FILTERBAR_PARAM_PREFIX.length).toBeGreaterThan(0);
+    expect(DRILLDOWN_FILTERBAR_PARAM_PREFIX.endsWith("_")).toBe(true);
+  });
+
+  it("namespaces the bar's `page` away from the stage drill-down's own `page` param", () => {
+    // deal-stage-page.tsx drives pagination via a bare ?page; the bar also has a `page` key. With the
+    // prefix the bar's page becomes fb_page, so paging the bar can't clobber the stage page's paging.
+    expect(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}page`).not.toBe("page");
+  });
+});
+
+describe("getDrilldownFilterBarDimensions (per-surface dimension set)", () => {
+  it("defaults (dashboard drill-down) to the full set MINUS scope (page toggle) and rep (page/board select)", () => {
+    expect(getDrilldownFilterBarDimensions()).toEqual([
+      "search",
+      "date",
+      "stage",
+      "sort",
+      "status",
+      "workflow",
+      "region",
+      "projectType",
+      "value",
+      "stalled",
+    ]);
+  });
+
+  it("never includes scope on any surface (scope stays the page's own toggle, not a bar dimension)", () => {
+    for (const opts of [{}, { ownRep: true }, { pinnedStage: true }, { pinnedStage: true, ownRep: true }]) {
+      expect(getDrilldownFilterBarDimensions(opts)).not.toContain("scope");
+    }
+  });
+
+  it("adds rep right after sort when the bar OWNS rep (stage page folds in its bespoke rep select)", () => {
+    const dims = getDrilldownFilterBarDimensions({ ownRep: true });
+    expect(dims).toContain("rep");
+    expect(dims.indexOf("rep")).toBe(dims.indexOf("sort") + 1);
+  });
+
+  it("drops the stage multi-select when the surface PINS a stage (the /deals/stages/<id> route fixes it)", () => {
+    expect(getDrilldownFilterBarDimensions({ pinnedStage: true })).not.toContain("stage");
+  });
+
+  it("the stage-page set (pinned stage + bar-owned rep) is the full dim row minus the stage picker", () => {
+    expect(getDrilldownFilterBarDimensions({ pinnedStage: true, ownRep: true })).toEqual([
+      "search",
+      "date",
+      "sort",
+      "rep",
+      "status",
+      "workflow",
+      "region",
+      "projectType",
+      "value",
+      "stalled",
+    ]);
   });
 });

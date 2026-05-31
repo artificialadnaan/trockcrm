@@ -1,6 +1,6 @@
 import type { Deal, DealFilters } from "@/hooks/use-deals";
 import type { FilterBarValue } from "@/components/filters/filterbar-params";
-import type { FilterBarSortOption } from "@/components/filters/filter-bar";
+import type { FilterBarSortOption, FilterDimension } from "@/components/filters/filter-bar";
 
 /**
  * The deals-list Sort allow-list (contract §4). Shared by every deals FilterBar surface (proving
@@ -15,6 +15,53 @@ export const DEAL_LIST_SORT_OPTIONS: FilterBarSortOption[] = [
   { label: "Value (high → low)", sortBy: "awarded_amount", sortDir: "desc" },
   { label: "Days in stage", sortBy: "stage_entered_at", sortDir: "asc" },
 ];
+
+/**
+ * URL param namespace for the shared FilterBar when it mounts on a surface that already owns URL state
+ * — the director/stage drill-downs (/deals/stages/<id>) and the /deals dashboard drill-downs (Won /
+ * Active / At-risk). Those surfaces carry BARE params (scope, period, filter, page, assignedRepId);
+ * the bar serializes its keys as `${prefix}${key}` (fb_stageIds, fb_dateFrom, fb_page, …) so the two
+ * URL spaces stay disjoint and toggling a bar control can't clobber the host's scope / period / page.
+ * Threaded into useFilterState(prefix) at the mount — gated on the #577 namespace primitive landing on main.
+ */
+export const DRILLDOWN_FILTERBAR_PARAM_PREFIX = "fb_";
+
+/** Canonical render order for the deals FilterBar dimensions (the pipeline list's row). Per-surface
+ *  sets are this order, filtered — never re-sorted — so every deals bar reads left-to-right the same. */
+const DRILLDOWN_DIMENSION_ORDER: FilterDimension[] = [
+  "search",
+  "date",
+  "stage",
+  "sort",
+  "rep",
+  "status",
+  "workflow",
+  "region",
+  "projectType",
+  "value",
+  "stalled",
+];
+
+/**
+ * The FilterBar dimensions for a director/stage drill-down mount. Starts from the canonical deals row
+ * and drops what the host surface already owns:
+ *  - `scope` is never a drill-down bar dimension — every drill-down keeps its own scope toggle
+ *    (mine / all), so it is absent from DRILLDOWN_DIMENSION_ORDER entirely;
+ *  - `rep` appears only when the bar OWNS rep (`ownRep`) — the /deals/stages/<id> page folds its
+ *    bespoke admin rep select into the bar; the /deals dashboard drill-downs keep their page-level rep
+ *    select (it filters the board AND the embedded list together), so the bar omits rep there;
+ *  - `stage` is dropped when the surface PINS a single stage (`pinnedStage`) — the stage drill-down's
+ *    route already fixes the stage, so a stage multi-select would let the user escape the route's stage.
+ */
+export function getDrilldownFilterBarDimensions(
+  opts: { pinnedStage?: boolean; ownRep?: boolean } = {}
+): FilterDimension[] {
+  return DRILLDOWN_DIMENSION_ORDER.filter((dimension) => {
+    if (dimension === "rep") return opts.ownRep === true;
+    if (dimension === "stage") return opts.pinnedStage !== true;
+    return true;
+  });
+}
 
 /**
  * Map a FilterBar URL value into the DealFilters shape useDeals/getDeals consume.
