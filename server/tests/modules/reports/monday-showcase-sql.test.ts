@@ -7,6 +7,7 @@ import {
   buildLeadStatusSql,
 } from "../../../src/modules/reports/monday-showcase-service.js";
 import { SENT_STAGE_SLUGS, ESTIMATED_STAGE_SLUGS } from "../../../src/modules/reports/foundations.js";
+import { aliasedReportableDealFilterSql } from "../../../src/modules/shared/deal-value-sql.js";
 
 // Walk a drizzle SQL object to plain text (incl. raw chunks + param values) so we can assert the
 // F1-F5 foundations are actually composed into each query, with no DB.
@@ -61,6 +62,15 @@ describe("Monday showcase SQL builders compose F1-F5", () => {
     expect(text).toContain("DISTINCT");
     expect(text).toContain(ESTIMATED_STAGE_SLUGS[0]);
     expect(text).toContain(SENT_STAGE_SLUGS[0]);
+  });
+
+  it("weekly trend applies the SAME reportable-deal filter as the cohorts (no on-hold / non-reportable drift)", () => {
+    const filterText = extractSqlText(aliasedReportableDealFilterSql("d"));
+    const trend = extractSqlText(buildWeeklyCohortTrendSql("2026-04-05", "2026-05-30"));
+    const cohort = extractSqlText(buildStageEntryCohortSql(SENT_STAGE_SLUGS, "2026-05-24", "2026-05-30"));
+    expect(filterText.length).toBeGreaterThan(0);
+    expect(cohort).toContain(filterText); // cohort already filtered
+    expect(trend).toContain(filterText); // trend now matches the cohort basis
   });
 
   it("lead status: active (open) leads grouped by stage, per rep", () => {

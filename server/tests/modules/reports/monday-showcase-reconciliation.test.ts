@@ -139,4 +139,26 @@ describe("Monday showcase cross-variant reconciliation", () => {
     expect(data.reps.map((r) => r.repId)).toEqual(["rep-a", "rep-b", null]);
     expect(data.reps.find((r) => r.repId === null)?.repName).toBe("Unassigned");
   });
+
+  it("includes a rep with activity but ZERO wins (union-seeded), so per-rep views and B2 totals don't drop them", () => {
+    const input = makeInput();
+    // rep-c has sent + projection + lead-status this period but is NOT in repWon (no wins).
+    input.sent.byRep.set("rep-c", { count: 3, value: 400_000 });
+    input.repProjection.set(
+      "rep-c",
+      repProj(2, 40, [["0_30", 1, 100_000], ["31_60", 1, 100_000], ["61_90", 0, 0], ["beyond_90", 0, 0]])
+    );
+    input.leadStatus.set("rep-c", [{ stageLabel: "Qualified Lead", count: 5 }]);
+    input.repNames.set("rep-c", "Casey Rep");
+
+    const d = assembleMondayShowcase(input);
+    const repC = d.reps.find((r) => r.repId === "rep-c");
+    expect(repC).toBeDefined();
+    expect(repC!.repName).toBe("Casey Rep");
+    expect(repC!.closed.count).toBe(0); // zero wins -> still present, just no Closed
+    expect(repC!.sentThisWeek.count).toBe(3);
+    expect(repC!.projection.coverage).toEqual({ n: 2, m: 40 });
+    // Won still reconciles (a zero-win rep contributes 0 to the office Won total).
+    expect(d.reps.reduce((s, r) => s + r.closed.count, 0)).toBe(OFFICE_WON.count);
+  });
 });

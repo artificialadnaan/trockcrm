@@ -257,17 +257,28 @@ export function assembleMondayShowcase(input: AssembleInput): MondayShowcaseData
     estimated: { count: input.estimated.count, value: estimatedValue },
   };
 
-  const reps: RepShowcaseRow[] = input.repWon
-    .map((rw): RepShowcaseRow => {
-      const repProj = input.repProjection.get(rw.repId);
-      const repSent = input.sent.byRep.get(rw.repId) ?? { count: 0, value: 0 };
+  // Seed the rep rows from the UNION of all per-rep activity (won ∪ sent ∪ projection ∪ lead-status) --
+  // NOT just wins -- so an active rep with zero wins this period still appears in B1/B3/B4 and B2's
+  // totals (sent / projected / active leads) reconcile to the office totals. Closed defaults to 0.
+  const repWonById = new Map(input.repWon.map((rw) => [rw.repId, rw]));
+  const activeRepIds = new Set<string | null>([
+    ...input.repWon.map((rw) => rw.repId),
+    ...input.sent.byRep.keys(),
+    ...input.repProjection.keys(),
+    ...input.leadStatus.keys(),
+  ]);
+  const reps: RepShowcaseRow[] = [...activeRepIds]
+    .map((repId): RepShowcaseRow => {
+      const rw = repWonById.get(repId);
+      const repProj = input.repProjection.get(repId);
+      const repSent = input.sent.byRep.get(repId) ?? { count: 0, value: 0 };
       return {
-        repId: rw.repId,
-        repName: input.repNames.get(rw.repId) ?? (rw.repId ? "Unknown rep" : "Unassigned"),
-        closed: { count: rw.count, value: { amount: rw.value, basisLabel: WON_BASIS_LABEL } },
+        repId,
+        repName: input.repNames.get(repId) ?? (repId ? "Unknown rep" : "Unassigned"),
+        closed: { count: rw?.count ?? 0, value: { amount: rw?.value ?? 0, basisLabel: WON_BASIS_LABEL } },
         projection: repProj ? ladderFrom(repProj) : emptyLadder(),
         sentThisWeek: { count: repSent.count, value: { amount: repSent.value, basisLabel: OPEN_BASIS_LABEL } },
-        leadStatus: input.leadStatus.get(rw.repId) ?? [],
+        leadStatus: input.leadStatus.get(repId) ?? [],
       };
     })
     .sort((a, b) => b.closed.value.amount - a.closed.value.amount);
@@ -376,6 +387,7 @@ export function buildWeeklyCohortTrendSql(fromWeekStart: string, toDate: string)
     JOIN ${pipelineStageConfig} psc ON psc.id = dsh.to_stage_id
     JOIN ${deals} d ON d.id = dsh.deal_id
     WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
       AND ${ctDateInWindowSql("dsh.created_at", fromWeekStart, toDate)}
     GROUP BY ${weekStart}
     ORDER BY ${weekStart}
