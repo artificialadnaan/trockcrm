@@ -122,6 +122,8 @@ vi.mock("@/hooks/use-deals", () => ({
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: mocks.usePipelineStagesMock,
+  useRegions: () => ({ regions: [] }),
+  useProjectTypes: () => ({ projectTypes: [] }),
 }));
 
 vi.mock("@/hooks/use-task-assignees", () => ({
@@ -1215,20 +1217,41 @@ describe("DealListPage", () => {
     // Team is not an offered scope (D-12b).
     expect(html).not.toContain(">Team</button>");
   });
-  it("embeds a scoped paginated exportable deal list below the kanban without date filters", () => {
+  it("mounts the shared FilterBar (dl_-namespaced) on the BASE deal list, inheriting scope; Rep/Scope omitted", () => {
     renderPage("/deals?scope=mine", "director");
 
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         workflowFamily: "deal",
-        scope: "mine",
+        scope: "mine", // inherited from the page toggle
         enableExport: true,
-        enableDateFilter: false,
-        showFilterButton: true,
-        pageSize: 20,
-        searchPlaceholder: "Search deals or accounts",
+        filterBar: expect.objectContaining({
+          paramPrefix: "dl_", // namespaced so the list can't collide with the header's bare params
+          dimensions: expect.arrayContaining(["search", "date", "stage", "sort", "status", "value", "stalled"]),
+        }),
       })
     );
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { dimensions: string[] };
+      enableDateFilter?: boolean;
+    };
+    // Rep + Scope are owned by the header and inherited — NOT rendered in the list's bar.
+    expect(props.filterBar.dimensions).not.toContain("rep");
+    expect(props.filterBar.dimensions).not.toContain("scope");
+    // The legacy inline filter row is gone (FilterBar mode supersedes it).
+    expect(props.enableDateFilter).toBeUndefined();
+  });
+
+  it("keeps the LEGACY list (no FilterBar) on drill-down views — those stay YELLOW's surface", () => {
+    renderPage("/deals?filter=won&scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar?: unknown;
+      enableDateFilter?: boolean;
+      hideOwnerFilter?: boolean;
+    };
+    expect(props.filterBar).toBeUndefined(); // drill-downs render the legacy list, untouched
+    expect(props.enableDateFilter).toBe(false);
+    expect(props.hideOwnerFilter).toBe(true);
   });
 
   it("builds clickable KPI drilldown paths with preserved scope and period", () => {

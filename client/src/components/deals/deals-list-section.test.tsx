@@ -395,6 +395,29 @@ describe("DealsListSection", () => {
     }
   });
 
+  it("threads filterBar.paramPrefix so the list reads dl_* params, not the page's bare board params", async () => {
+    // The /deals base list shares its URL with the dashboard's bare ?assignedRepId/?scope/etc.; a dl_
+    // prefix namespaces the list's FilterBar so it can't collide with (or mutate) those page controls.
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root!: Root;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={["/deals?dl_search=fromlist&search=fromboard"]}>
+          <DealsListSection
+            workflowFamily="deal"
+            filterBar={{ dimensions: ["search", "stage", "sort"], paramPrefix: "dl_" }}
+          />
+        </MemoryRouter>
+      );
+    });
+    const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall.search).toBe("fromlist"); // the dl_-namespaced value, not the bare board ?search
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("keeps a user-selected sort across rerenders when drill-down props are omitted", async () => {
     const { container, rerender, cleanup } = await renderDom();
     try {

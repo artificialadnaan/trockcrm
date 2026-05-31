@@ -108,6 +108,13 @@ interface DealsListSectionProps {
      */
     defaultStageIds?: string[];
     terminalStageIds?: string[];
+    /**
+     * Namespace this list's FilterBar URL params (e.g. "dl_"). Default "" (bare) — the pipeline mount
+     * owns its whole URL. A surface whose list shares a URL with sibling controls (e.g. the /deals base
+     * list under the dashboard's bare ?assignedRepId/?scope/?period) passes a prefix so the list's
+     * filters never collide with (or mutate) those page controls — the ll_/dl_ pattern (Codex #577).
+     */
+    paramPrefix?: string;
   };
 }
 
@@ -599,7 +606,7 @@ export function DealsListSection({
   const navigate = useNavigate();
   // Slice 7: opt-in URL-backed filter state. useFilterState is always called (hooks can't be
   // conditional); its value only drives the query/UI when filterBarMode is on.
-  const { filters: urlFilters, setFilters, resetFilters } = useFilterState();
+  const { filters: urlFilters, setFilters, resetFilters } = useFilterState(filterBar?.paramPrefix ?? "");
   const filterBarMode = Boolean(filterBar);
   // D-15: legacy "outcome" axis — the rep drill-down feeds an externalDateRange that
   // must narrow the canonical outcome window (dateFrom/dateTo) and DISPLAY the same

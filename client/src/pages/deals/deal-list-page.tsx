@@ -8,9 +8,15 @@ import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
-import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { usePipelineStages, useRegions, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
+import {
+  getBoardVisibleStageScope,
+  isBoardVisibleStage,
+  DEAL_LIST_SORT_OPTIONS,
+} from "@/components/deals/deals-filterbar-adapter";
+import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
 import { getEffectiveDealValue } from "@trock-crm/shared/types";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
@@ -209,6 +215,24 @@ function normalizeDashboardDealFilter(filterParam: string | null | undefined): D
       return null;
   }
 }
+
+// The /deals BASE-view list mounts the SAME shared FilterBar as /pipeline's working list, MINUS the
+// Rep + Scope dimensions: the dashboard header owns those (they also drive the KPI cards + read-only
+// board), and the list inherits them — Rep via baseFilters, Scope via the page toggle. So the base list
+// becomes identical to /pipeline's, while the cards/board/header stay untouched (Adnaan, signed off).
+// Namespaced `dl_` so the list's params can't collide with the header's bare ?assignedRepId/?scope/etc.
+const DEALS_BASE_LIST_FILTERBAR_DIMENSIONS: FilterDimension[] = [
+  "search",
+  "date",
+  "stage",
+  "sort",
+  "status",
+  "workflow",
+  "region",
+  "projectType",
+  "value",
+  "stalled",
+];
 
 export function getDashboardDealListView(input: {
   filterParam: string | null | undefined;
@@ -735,6 +759,9 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
   const { assignees } = useTaskAssignees();
+  // Option sources for the base-view list FilterBar (Rep is omitted — the header owns it).
+  const { regions } = useRegions();
+  const { projectTypes } = useProjectTypes();
   // When a parked ?scope=team bookmark is coerced to mine, drop any stale owner filter from
   // the URL too -- otherwise the Mine board (the viewer's deals) is intersected with another
   // rep's owner filter and renders empty instead of the intended Mine view (D-12b).
@@ -815,6 +842,18 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const boardColumns = useMemo(
     () => buildCanonicalDealBoardColumns(board?.columns, stages),
     [board?.columns, stages]
+  );
+  // Base-list board-mirror scope: the /deals board always includes DD (useDealBoard includeDd=true),
+  // so showDd=true — the list defaults to the full visible-column set and lets terminal deals through,
+  // exactly like the board it sits under (mirrors the /pipeline mount).
+  const dealsBaseListStageScope = useMemo(
+    () =>
+      getBoardVisibleStageScope(
+        boardColumns.map((column) => ({ id: column.stage.id, slug: column.stage.slug })),
+        true,
+        isTerminalOutcomeSlug
+      ),
+    [boardColumns]
   );
   const columns = useMemo(
     () => {
@@ -1272,6 +1311,40 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
             <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
               <div className="text-sm font-semibold text-slate-500">Loading SLA drill-down...</div>
             </section>
+          ) : dashboardView.filter === null ? (
+            // BASE /deals view: the SAME shared FilterBar as /pipeline's working list (signed-off shape).
+            // Inherits Scope (page toggle) + Rep (header → baseFilters); the header's Estimate-Sent stays
+            // a cards/board control and is intentionally NOT layered here (decoupled — the list's date
+            // axis is the FilterBar's outcome-aware Date). dl_-namespaced so list filters never collide
+            // with the header's bare ?assignedRepId/?scope/?period. Drill-downs keep the legacy list below
+            // (YELLOW's surface, untouched). Cards + read-only board above are unchanged.
+            <DealsListSection
+              workflowFamily="deal"
+              scope={scope}
+              enableExport
+              pageSize={20}
+              title={dashboardView.title}
+              subtitle={dashboardView.subtitle}
+              eyebrow={dashboardView.eyebrow}
+              baseFilters={selectedRepFilter ? { assignedRepId: selectedRepFilter } : undefined}
+              filterBar={{
+                dimensions: DEALS_BASE_LIST_FILTERBAR_DIMENSIONS,
+                paramPrefix: "dl_",
+                options: {
+                  regions: regions.map((region) => ({ value: region.id, label: region.name })),
+                  projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
+                  stages: boardColumns
+                    .filter((column) => isBoardVisibleStage(column.stage.slug, true))
+                    .map((column) => ({ value: column.stage.id, label: column.stage.name })),
+                  sortOptions: DEAL_LIST_SORT_OPTIONS,
+                },
+                // ENABLE_STAGE_ENTRY_DATE_FILTER is on in prod (matches /pipeline): open rows are
+                // date-windowed, so Stalled is offered and the date axis is labeled outcome-aware.
+                stageEntryDateEnabled: true,
+                defaultStageIds: dealsBaseListStageScope.defaultStageIds,
+                terminalStageIds: dealsBaseListStageScope.terminalStageIds,
+              }}
+            />
           ) : (
             <DealsListSection
               workflowFamily="deal"
