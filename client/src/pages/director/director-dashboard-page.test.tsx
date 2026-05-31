@@ -46,6 +46,18 @@ vi.mock("@/components/charts/chart-colors", () => ({
   formatCurrency: (value: number) => `$${value.toLocaleString()}`,
 }));
 
+// The page renders currency via deal-utils' SAFE formatCurrencyCompact (NaN-safe -> "--"). Mock it to a
+// predictable comma format (matching the old chart-colors mock) so value assertions stay stable, while
+// preserving the null/NaN -> "--" guard so the $NaN fix is still exercised.
+vi.mock("@/lib/deal-utils", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/deal-utils")>()),
+  formatCurrencyCompact: (value: string | number | null | undefined) => {
+    if (value == null) return "--";
+    const num = typeof value === "string" ? parseFloat(value) : value;
+    return Number.isNaN(num) ? "--" : `$${num.toLocaleString()}`;
+  },
+}));
+
 vi.mock("@/components/charts/win-rate-trend-chart", () => ({
   WinRateTrendChart: () => <div>Win Trend</div>,
 }));
@@ -637,10 +649,13 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain('href="/reports/performance/rep-activity?range=qtd"');
   });
 
-  it("routes the Closing KPI to closed won deals for the active period", () => {
+  it("routes the Won KPI to closed won deals for the active period", () => {
     const html = renderPageHtml();
 
-    expect(html).toContain("Closing");
+    // Honest label (#4): the tile counts already-won closes + links to the Won drill-down, so it reads
+    // "Won" not "Closing" (which implied closing-soon).
+    expect(html).toContain("Won");
+    expect(html).not.toContain("Closing");
     expect(html).toContain("1 this quarter");
     expect(html).toContain('aria-label="View recent closed deals"');
     expect(html).toContain('href="/deals?filter=won&amp;period=qtd&amp;scope=all"');
@@ -693,7 +708,7 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("$360,000 / $8,250,000");
     expect(html).toContain("8 weeks remaining");
     expect(html).toContain("Pace");
-    expect(html).toContain("Closing");
+    expect(html).toContain("Won"); // #4: the forecast "Closing" tile relabeled to the honest "Won"
     expect(html).toContain("1 this quarter");
     expect(html).toContain("121 this quarter");
     expect(html).toContain("Won");
@@ -906,6 +921,45 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("AtRisk Deal 8");
     const renderedRiskLinks = (html.match(/href="\/deals\/risk-\d+"/g) ?? []).length;
     expect(renderedRiskLinks).toBe(8);
+  });
+
+  it("reads the At-risk KPI number from the same list as its caption, not the scopeSummary aggregate (#3)", () => {
+    const base = mocks.useDirectorDashboardMock().data;
+    const riskTemplate = {
+      repId: "rep-1",
+      repName: "Avery Rep",
+      stageName: "Estimating",
+      mirroredStageStatus: "blocked",
+      workflowRoute: "service" as const,
+      regionClassification: "Dallas, TX",
+      dealValue: 100000,
+      daysInStage: 30,
+      staleThresholdDays: 14,
+    };
+    const threeAtRisk = Array.from({ length: 3 }, (_, index) => ({
+      ...riskTemplate,
+      dealId: `risk-${index + 1}`,
+      dealName: `AtRisk Deal ${index + 1}`,
+    }));
+    mocks.useDirectorDashboardMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: mocks.dashboardRefetchMock,
+      lastFetchedAt: "2026-05-08T11:57:00Z",
+      data: {
+        ...base,
+        staleDeals: [],
+        atRiskDeals: threeAtRisk, // 3 flagged deals are rendered + drilled-into...
+        scopeSummary: { ...base.scopeSummary, atRisk: { count: 1, totalValue: 999 } }, // ...but the SQL aggregate disagrees (1)
+      },
+    });
+
+    const html = renderPageHtml("/?scope=all");
+    // The big number reads atRiskDeals.length (3) — matching the caption, the rendered list, and the
+    // drill-down — instead of the scopeSummary.atRisk.count (1) that visibly disagreed with the caption.
+    expect(html).toMatch(/At risk<\/p><p class="mt-3 text-5xl[^"]*">3<\/p>/);
+    expect(html).toContain("3 flagged deals across");
+    expect(html).not.toMatch(/At risk<\/p><p class="mt-3 text-5xl[^"]*">1<\/p>/);
   });
 
   it("renders activity pulse and recent closes panels", () => {
