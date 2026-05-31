@@ -479,9 +479,30 @@ describe("CompanyListPage", () => {
       expect(cards?.textContent).toContain("$750,000");
       // Card name is a real link to the company (stretched-link pattern).
       expect(cards?.querySelector('a[href="/companies/company-1"]')).toBeTruthy();
-      // Industry filter pills opt into the 44px touch size (reverts at md).
-      const industryFilter = container.querySelector('[aria-label="Industry filter"]');
-      expect(industryFilter?.querySelector("button")?.className).toContain("min-h-[44px]");
+      // The mine/all Ownership pills opt into the 44px touch size (reverts at md).
+      const ownershipFilter = container.querySelector('[aria-label="Ownership filter"]');
+      expect(ownershipFilter?.querySelector("button")?.className).toContain("min-h-[44px]");
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("mounts the Wave 2 FilterBar (Owner/Date/Sort) — no Status, no Industry row", async () => {
+    const { container, cleanup } = await renderPageDom();
+    try {
+      expect(container.querySelector('[aria-label="Filters"]')).not.toBeNull();
+      // Owner dimension = the rep dimension relabeled (repLabel="Owner") -> "Owner filter" + "All owners".
+      const ownerControl = container.querySelector('[aria-label="Owner filter"]');
+      expect(ownerControl).not.toBeNull();
+      expect(ownerControl?.textContent).toContain("All owners");
+      // Date + Sort dimensions present; Clear action present.
+      expect(container.querySelector('[aria-label="Sort filter"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Clear filters"]')).not.toBeNull();
+      // Status dimension dropped (product) and the old Industry button row removed.
+      expect(container.querySelector('[aria-label="Status filter"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Industry filter"]')).toBeNull();
+      // The deal-only "Won/Lost & activity" date note is suppressed on companies (stageEntryDateEnabled).
+      expect(container.querySelector('[data-testid="date-scope-note"]')).toBeNull();
     } finally {
       await cleanup();
     }
