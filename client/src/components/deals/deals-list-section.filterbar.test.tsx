@@ -331,4 +331,33 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
     expect(new URLSearchParams(currentSearch).get("scope")).toBe("all");
     expect(new URLSearchParams(currentSearch).get("status")).toBeNull();
   });
+
+  it("Export fetches the SAME #546 filters the list shows (canonical axis), not the legacy export axis", async () => {
+    const realCreate = (URL as { createObjectURL?: unknown }).createObjectURL;
+    const realRevoke = (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+    (URL as unknown as { createObjectURL: () => string }).createObjectURL = () => "blob:x";
+    (URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => {};
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    // useDeals is mocked, so the list never hits the api mock — every api call here IS the export.
+    mocks.apiMock.mockResolvedValue({ deals: [makeDeal()], pagination: { totalPages: 1 } });
+
+    await renderFB("/deals?status=on_hold&dateFrom=2026-05-01&dateTo=2026-05-31", { enableExport: true }, FB_PROP_BOARD);
+    const exportBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Export");
+    expect(exportBtn).toBeTruthy();
+    await act(async () => {
+      exportBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const exportUrl = mocks.apiMock.mock.calls.map((c) => String(c[0])).find((u) => u.includes("limit=500"));
+    expect(exportUrl).toBeTruthy(); // export paginates with the export page size
+    expect(exportUrl).toContain("status=on_hold");
+    expect(exportUrl).toContain("dateFrom=2026-05-01");
+    expect(exportUrl).toContain("page=1");
+    expect(exportUrl).not.toContain("isActive="); // status owns lifecycle; no legacy axis
+    expect(exportUrl).not.toContain("createdFrom");
+
+    clickSpy.mockRestore();
+    (URL as { createObjectURL?: unknown }).createObjectURL = realCreate;
+    (URL as { revokeObjectURL?: unknown }).revokeObjectURL = realRevoke;
+  });
 });

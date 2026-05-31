@@ -674,12 +674,12 @@ export function PipelinePage() {
       </footer>
 
       {/* Slice 7 proving ground: the deals list under the kanban, driven by the shared URL-backed
-          FilterBar. NOTE: CSV export is intentionally omitted here for now — the legacy export path
-          builds its query from the old created/updated axis + local state, so it would not reflect
-          the FilterBar's outcome-aware filters. FilterBar-aware export is a fast-follow (and is also
-          gated on BLUE's #546 backend predicates, like the rest of the new dimensions). */}
+          FilterBar. CSV export is FilterBar-aware (fast-follow): in filterBar mode it exports the same
+          #546 filters the list shows + the canonical displayDate axis (see DealsListSection.exportCsv /
+          fetchAllDealsForFilters), not the legacy created/updated export axis. */}
       <DealsListSection
         scope={scope}
+        enableExport
         filterBar={{
           dimensions: DEAL_LIST_FILTERBAR_DIMENSIONS,
           options: {
