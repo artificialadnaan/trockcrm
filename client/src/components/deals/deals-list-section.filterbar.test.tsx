@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useSearchParams } from "react-router-dom";
 import { DealsListSection } from "./deals-list-section";
 import type { FilterDimension, FilterBarOptions } from "@/components/filters/filter-bar";
 
@@ -113,6 +113,14 @@ const FB_PROP_BOARD = {
 
 const lastDealsCall = () => mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
 
+// Capture the live URL search string so tests can assert what the FilterBar writes/preserves.
+let currentSearch = "";
+function LocationSpy() {
+  const [params] = useSearchParams();
+  currentSearch = params.toString();
+  return null;
+}
+
 let container: HTMLDivElement;
 let root: Root | null;
 
@@ -121,10 +129,12 @@ async function renderFB(
   extraProps: Parameters<typeof DealsListSection>[0] = {},
   filterBar: NonNullable<Parameters<typeof DealsListSection>[0]["filterBar"]> = FB_PROP
 ) {
+  currentSearch = "";
   await act(async () => {
     root = createRoot(container);
     root.render(
       <MemoryRouter initialEntries={[url]}>
+        <LocationSpy />
         <DealsListSection filterBar={filterBar} {...extraProps} />
       </MemoryRouter>
     );
@@ -245,8 +255,31 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
   });
 
   it("inherits the page-level scope when the URL carries none", async () => {
-    await renderFB("/deals", { scope: "team" });
-    expect(lastDealsCall().scope).toBe("team");
+    await renderFB("/deals", { scope: "all" });
+    expect(lastDealsCall().scope).toBe("all");
+  });
+
+  it("ignores a bookmarked ?scope=team and uses the page's normalized scope — the list must not disagree with the board (Codex)", async () => {
+    // PipelinePage coerces ?scope=team -> mine for the board (Team retired) and passes the normalized
+    // scope PROP. This mount renders no scope control, so the list must NOT read the raw URL scope —
+    // else it fetches team-scoped rows while the board + toggle show Mine.
+    await renderFB("/deals?scope=team", { scope: "mine" }, FB_PROP_BOARD);
+    expect(lastDealsCall().scope).toBe("mine");
+  });
+
+  it("does read scope from the URL when the bar OWNS the scope dimension (other surfaces)", async () => {
+    await renderFB("/deals?scope=all", { scope: "mine" }, {
+      ...FB_PROP_BOARD,
+      dimensions: [...FB_DIMENSIONS, "scope"],
+    });
+    expect(lastDealsCall().scope).toBe("all");
+  });
+
+  it("Q2: a stale DD stageId left in the URL is dropped once the board hides DD (Codex)", async () => {
+    // FB_PROP_BOARD's visible columns are stage-opportunity + stage-won (DD hidden). A bookmarked URL
+    // still carries the DD selection; the list must not keep querying the now-hidden DD stage.
+    await renderFB("/deals?stageIds=stage-dd,stage-opportunity", {}, FB_PROP_BOARD);
+    expect(lastDealsCall().stageIds).toEqual(["stage-opportunity"]);
   });
 
   it("routes table-header sorts through the URL (not dead local state) in FilterBar mode", async () => {
@@ -282,16 +315,20 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
     expect(lastDealsCall().stageIds).toEqual(["stage-opportunity"]);
   });
 
-  it("preserves the page-owned scope param on Clear (scope is inherited, not a list dimension here)", async () => {
-    await renderFB("/deals?scope=all&status=on_hold");
-    expect(lastDealsCall().scope).toBe("all");
+  it("Clear resets list dimensions but preserves the board-owned scope URL param (scope is inherited, not a list dimension here)", async () => {
+    await renderFB("/deals?scope=all&status=on_hold", { scope: "all" });
+    expect(lastDealsCall().scope).toBe("all"); // query scope follows the page prop
+    expect(new URLSearchParams(currentSearch).get("status")).toBe("on_hold");
     const clearBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Clear filters"]');
     expect(clearBtn).toBeTruthy();
     await act(async () => {
       clearBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     const call = lastDealsCall();
-    expect(call.scope).toBe("all"); // board scope survives the list reset
     expect(call.status).toBeUndefined(); // list dimension cleared
+    expect(call.scope).toBe("all"); // query scope still follows the prop
+    // the board's scope param survives in the URL, so the board's scope toggle keeps its state
+    expect(new URLSearchParams(currentSearch).get("scope")).toBe("all");
+    expect(new URLSearchParams(currentSearch).get("status")).toBeNull();
   });
 });

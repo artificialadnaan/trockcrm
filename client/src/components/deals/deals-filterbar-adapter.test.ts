@@ -112,6 +112,22 @@ describe("applyBoardVisibilityDefaults (the under-kanban list mirrors the board 
     expect(result.inactiveStageIds).toEqual(["s-won", "s-lost"]);
   });
 
+  it("intersects an explicit selection with the board's visible stages — a hidden stage (DD after Show-DD off) cannot linger in the list query (Q2 / Codex)", () => {
+    // board.defaultStageIds omits the DD id (Show-DD is OFF); the URL still carries a stale DD selection
+    const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ stageIds: ["s-dd", "s-est"] }), board);
+    expect(result.stageIds).toEqual(["s-est"]); // s-dd dropped — it is no longer a visible board column
+  });
+
+  it("falls back to the board's full visible set when every explicit pick is now hidden", () => {
+    const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ stageIds: ["s-dd"] }), board);
+    expect(result.stageIds).toEqual(["s-opp", "s-est", "s-won", "s-lost"]); // never query a hidden stage
+  });
+
+  it("does NOT intersect when no board context is given (generic mounts keep the explicit selection as-is)", () => {
+    const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ stageIds: ["s-dd", "s-est"] }), {});
+    expect(result.stageIds).toEqual(["s-dd", "s-est"]);
+  });
+
   it("yields to an explicit Status — it owns is_active/on_hold server-side, so isActive is NOT forced", () => {
     const active = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ status: "active" }), board);
     expect(active.status).toBe("active");

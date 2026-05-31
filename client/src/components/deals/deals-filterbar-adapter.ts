@@ -84,9 +84,15 @@ export function applyBoardVisibilityDefaults(
   board: BoardVisibility
 ): Partial<DealFilters> {
   const next: Partial<DealFilters> = { ...filters };
-  const hasExplicitStages = Array.isArray(next.stageIds) && next.stageIds.length > 0;
-  if (!hasExplicitStages && board.defaultStageIds && board.defaultStageIds.length > 0) {
-    next.stageIds = board.defaultStageIds;
+  const visible = board.defaultStageIds;
+  if (visible && visible.length > 0) {
+    // Intersect the user's explicit stage picks with the board's currently-visible columns, so a stage
+    // the board has hidden (e.g. a DD selection left in the URL after Show-DD is toggled off) cannot
+    // linger in the list query (Q2). With no pick — or once every pick is hidden — mirror the board's
+    // full visible column set rather than querying nothing or a hidden stage.
+    const explicit = Array.isArray(next.stageIds) ? next.stageIds : [];
+    const intersected = explicit.filter((id) => visible.includes(id));
+    next.stageIds = intersected.length > 0 ? intersected : visible;
   }
   const hasExplicitStatus = next.status !== undefined;
   if (!hasExplicitStatus && board.terminalStageIds && board.terminalStageIds.length > 0) {

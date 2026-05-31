@@ -509,6 +509,11 @@ export function DealsListSection({
   // conditional); its value only drives the query/UI when filterBarMode is on.
   const { filters: urlFilters, setFilters, resetFilters } = useFilterState();
   const filterBarMode = Boolean(filterBar);
+  // Scope is read from the URL ONLY when this surface actually renders a scope control (the bar owns
+  // the "scope" dimension). At the pipeline mount the page owns scope (its toggle), so the list must
+  // inherit the page's NORMALIZED scope prop — not a raw, possibly-stale ?scope from the URL (e.g. a
+  // bookmarked ?scope=team the board has coerced to mine). Otherwise the list and board disagree.
+  const filterBarOwnsScope = filterBar?.dimensions.includes("scope") ?? false;
   const [search, setSearch] = useState("");
   const [stageSlugs, setStageSlugs] = useState<string[]>(initialStageSlugs);
   const [ownerId, setOwnerId] = useState(lockedOwnerId ?? "__all__");
@@ -623,7 +628,7 @@ export function DealsListSection({
       defaultStageIds: filterBar?.defaultStageIds,
       terminalStageIds: filterBar?.terminalStageIds,
     }),
-    scope: urlFilters.scope ?? scope,
+    scope: filterBarOwnsScope ? urlFilters.scope ?? scope : scope,
     page: currentPage,
     limit: pageSize,
   };
@@ -930,7 +935,7 @@ export function DealsListSection({
             onChange={setFilters}
             // Preserve any param the bar inherits but does not render (e.g. the board-owned `scope`
             // on the pipeline page) so Clear resets only this list's dimensions, not the kanban.
-            onReset={() => resetFilters(filterBar.dimensions.includes("scope") ? [] : ["scope"])}
+            onReset={() => resetFilters(filterBarOwnsScope ? [] : ["scope"])}
             stageEntryDateEnabled={filterBar.stageEntryDateEnabled}
           />
         </div>
