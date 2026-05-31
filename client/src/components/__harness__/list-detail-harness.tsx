@@ -3,6 +3,8 @@ import { ContactCard } from "@/pages/contacts/contact-list-page";
 import type { Contact } from "@/hooks/use-contacts";
 import { CompanyCard } from "@/pages/companies/company-list-page";
 import type { Company } from "@/hooks/use-companies";
+import { PropertyCard } from "@/pages/properties/property-list-page";
+import type { PropertySurface } from "@/hooks/use-properties";
 
 // Dev-only preview for the Contacts/Companies/Properties list+detail mobile pass.
 // Real presentational components, mock data, no backend / no auth. Served by vite
@@ -141,6 +143,61 @@ const harnessCompanies: Company[] = [
   }),
 ];
 
+function mockProperty(overrides: Partial<PropertySurface>): PropertySurface {
+  return {
+    id: "p1",
+    name: "Dallas HQ",
+    address: "123 Main St",
+    city: "Dallas",
+    state: "TX",
+    zip: "75201",
+    companyName: "Alpha Roofing",
+    type: "industrial",
+    roofArea: 125000,
+    linkedValue: "300000",
+    activePipelineValue: "300000",
+    engagementStatus: "won",
+    photosCount: 2,
+    leadCount: 2,
+    dealCount: 3,
+    lastActivityAt: "2026-04-11T09:00:00.000Z",
+    ...overrides,
+  } as unknown as PropertySurface;
+}
+
+const harnessProperties: PropertySurface[] = [
+  mockProperty({}),
+  mockProperty({
+    id: "p2",
+    name: "Northgate Retail Center",
+    address: "55 Loop Rd",
+    city: "Fort Worth",
+    companyName: "Northgate Facilities",
+    type: "retail",
+    roofArea: 48000,
+    linkedValue: "0",
+    activePipelineValue: "0",
+    engagementStatus: "active_lead",
+    photosCount: 0,
+    lastActivityAt: "2025-12-02T09:00:00.000Z",
+  }),
+  mockProperty({
+    id: "p3",
+    name: "",
+    address: "900 Industrial Blvd",
+    city: "Arlington",
+    companyName: null,
+    type: null,
+    roofArea: null,
+    unitCount: null,
+    linkedValue: "0",
+    activePipelineValue: "0",
+    engagementStatus: "no_engagement",
+    photosCount: 0,
+    lastActivityAt: null,
+  }),
+];
+
 export function ListDetailHarness() {
   return (
     <div className="mx-auto max-w-md space-y-8 bg-[#F5F4F2] p-4 pb-12">
@@ -201,6 +258,35 @@ export function ListDetailHarness() {
           <div className="space-y-2 rounded-xl border border-emerald-200 bg-white p-2">
             {harnessCompanies.map((company) => (
               <CompanyCard key={company.id} company={company} ownerSlot={<MockOwnerControl />} />
+            ))}
+          </div>
+        </div>
+      </Section>
+
+      <Section title="Properties list — table stacks to cards (<md)">
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-red-600">Before</p>
+          <div className="rounded-xl border border-dashed border-red-200 bg-white p-2">
+            <p className="mb-2 text-xs text-slate-500">8-column table → horizontal scroll wall at 390px (drag sideways):</p>
+            <div className="overflow-x-auto">
+              <div className="flex w-[820px] items-center gap-6 whitespace-nowrap border-b border-slate-200 pb-2 text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
+                <span>Property</span>
+                <span>Type</span>
+                <span>Owner company</span>
+                <span>Sq ft</span>
+                <span>Engagement</span>
+                <span>Linked value</span>
+                <span>Last touch</span>
+                <span>›</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-emerald-600">After</p>
+          <div className="space-y-2 rounded-xl border border-emerald-200 bg-white p-2">
+            {harnessProperties.map((property) => (
+              <PropertyCard key={property.id} property={property} />
             ))}
           </div>
         </div>

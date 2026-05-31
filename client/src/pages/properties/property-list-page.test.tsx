@@ -102,6 +102,28 @@ describe("PropertyListPage", () => {
     expect(html).toContain("Won project");
   });
 
+  it("stacks the table into a md:hidden property card list with a touch-sized type filter", async () => {
+    const { container, cleanup } = await renderPageDom();
+    try {
+      // Desktop keeps the full 8-col table, gated behind hidden md:block.
+      const tableWrap = container.querySelector("div.hidden.md\\:block");
+      expect(tableWrap?.querySelector("table")).toBeTruthy();
+      // A md:hidden card list carries the same properties on phones.
+      const cards = container.querySelector('[data-testid="property-cards"]');
+      expect(cards).not.toBeNull();
+      expect(cards?.className).toContain("md:hidden");
+      expect(cards?.textContent).toContain("Dallas HQ");
+      expect(cards?.textContent).toContain("Won project");
+      // The whole card is a single link to the property (no nested interactive children).
+      expect(cards?.querySelector('a[href="/properties/property-1"]')).toBeTruthy();
+      // Type filter pills opt into the 44px touch size (reverts at md).
+      const typeFilter = container.querySelector('[aria-label="Property type filter"]');
+      expect(typeFilter?.querySelector("button")?.className).toContain("min-h-[44px]");
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("uses active non-held deal counts for active opportunity totals paired with linked pipeline value", () => {
     mocks.usePropertiesMock.mockReturnValue({
       properties: [
@@ -186,6 +208,9 @@ describe("PropertyListPage", () => {
       expect(nextButton?.className).toContain("bg-primary");
       expect(nextButton?.className).toContain("text-primary-foreground");
       expect(nextButton?.className).not.toContain("bg-background");
+      // Touch sizing: 44px (size-11) on phones, reverting to the compact size-8 at md.
+      expect(previousButton?.className).toContain("size-11");
+      expect(previousButton?.className).toContain("md:size-8");
     } finally {
       await cleanup();
     }
