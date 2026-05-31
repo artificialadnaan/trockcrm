@@ -6,6 +6,7 @@ import {
   aliasedDealBestEstimateWithForecastSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveWonDealValueSql,
+  aliasedWonHsClosedWonDateSql,
 } from "../shared/deal-value-sql.js";
 import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
@@ -130,12 +131,20 @@ function buildLeadOwnerIdentitySql(filters: Pick<SalesReportFilters, "ownerIds" 
   return sql`(${sql.join(clauses, sql` OR `)})`;
 }
 
-function terminalOutcomeDateSql() {
+export function terminalOutcomeDateSql() {
+  // Terminal outcome date, split by outcome. The WON (ELSE) arm is migrated to the canonical
+  // app-owned deals.won_closed_date column (the protected 191 / $9,778,045.90 basis) — the old
+  // COALESCE(contract_signed_at, actual_close_date, stage_entered_at, updated_at) tail counted
+  // touched-in-period (updated_at) and reseed-contaminated (actual_close_date) deals as won-in-
+  // period. Because the CASE already separates LOST from WON by slug, this is a clean Won-only
+  // swap: won deals window/bucket by won_closed_date, the win/loss summary's lost count stays on
+  // its own arm (no denominator shift). The LOST arm (actual_close_date / stage_entered_at) is
+  // intentionally LEFT untouched — migrating it to lost_at is a separate Lost-unification pass.
   return sql`
     CASE
       WHEN p.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
         THEN COALESCE(d.actual_close_date::timestamptz, d.stage_entered_at)
-      ELSE COALESCE(d.contract_signed_at, d.actual_close_date::timestamptz, d.stage_entered_at, d.updated_at)
+      ELSE ${aliasedWonHsClosedWonDateSql("d")}::timestamptz
     END
   `;
 }
@@ -670,7 +679,7 @@ export async function getClosedWonRevenueReport(
         d.name AS "dealName",
         COALESCE(u.display_name, 'Unassigned') AS "ownerName",
         ${aliasedEffectiveWonDealValueSql("d")} AS value,
-        COALESCE(d.contract_signed_at::date, d.actual_close_date, d.stage_entered_at::date, d.updated_at::date)::text AS "wonAt"
+        ${aliasedWonHsClosedWonDateSql("d")}::date::text AS "wonAt"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
