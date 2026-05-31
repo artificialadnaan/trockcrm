@@ -39,6 +39,16 @@ export function filterBarValueToDealFilters(value: FilterBarValue): Partial<Deal
   if (value.valueMax !== undefined) filters.valueMax = value.valueMax;
   if (value.minAgeDays !== undefined) filters.minAgeDays = value.minAgeDays;
   if (value.maxAgeDays !== undefined) filters.maxAgeDays = value.maxAgeDays;
+  // A shown Stalled (days-in-stage) control must actually filter even when the server flag
+  // ENABLE_STAGE_ENTRY_DATE_FILTER is off (e.g. a flag rollback). The server gates the stalled
+  // predicate on stageEntryDateEnabled = (flag || stageEntryDateWindow) (service.ts getDeals +
+  // deal-filter-predicates.buildStalledPredicate), so forcing the per-request window whenever an
+  // age bound is active honors minAgeDays/maxAgeDays regardless of the flag — removing the
+  // visible-but-inert state (Codex #580). With no dateFrom/dateTo this only enables the predicate;
+  // it does not date-narrow open rows.
+  if (value.minAgeDays !== undefined || value.maxAgeDays !== undefined) {
+    filters.stageEntryDateWindow = true;
+  }
   if (value.dateFrom) filters.dateFrom = value.dateFrom;
   if (value.dateTo) filters.dateTo = value.dateTo;
   if (value.sortBy) filters.sortBy = value.sortBy;
