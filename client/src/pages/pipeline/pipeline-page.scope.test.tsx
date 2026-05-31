@@ -27,6 +27,19 @@ vi.mock("@/components/deals/deals-list-section", () => ({
   },
 }));
 
+// PipelinePage reads the FilterBar option sources directly (Slice 7). Stub them so they don't run
+// their real fetch against the generic api mock above (which returns a non-array and would crash the
+// hierarchy builder). The embedded DealsListSection is mocked, so the option values are irrelevant here.
+vi.mock("@/hooks/use-sales-reps", () => ({ useSalesReps: () => ({ salesReps: [] }) }));
+vi.mock("@/hooks/use-pipeline-config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/hooks/use-pipeline-config")>();
+  return {
+    ...actual,
+    useRegions: () => ({ regions: [], loading: false }),
+    useProjectTypes: () => ({ projectTypes: [], hierarchy: [], loading: false }),
+  };
+});
+
 vi.mock("@dnd-kit/core", () => ({
   DndContext: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   DragOverlay: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { filterBarValueToDealFilters, getDealDisplayDate } from "./deals-filterbar-adapter";
+import {
+  applyBoardVisibilityDefaults,
+  filterBarValueToDealFilters,
+  getBoardVisibleStageScope,
+  getDealDisplayDate,
+} from "./deals-filterbar-adapter";
 import type { FilterBarValue } from "@/components/filters/filterbar-params";
 
 describe("filterBarValueToDealFilters (FilterBar URL value -> useDeals DealFilters)", () => {
@@ -81,6 +86,90 @@ describe("filterBarValueToDealFilters (FilterBar URL value -> useDeals DealFilte
     const result = filterBarValueToDealFilters({ status: "inactive" });
     expect("isActive" in result).toBe(false);
     expect(result).toEqual({ status: "inactive" });
+  });
+});
+
+describe("applyBoardVisibilityDefaults (the under-kanban list mirrors the board it sits under)", () => {
+  const board = { defaultStageIds: ["s-opp", "s-est", "s-won", "s-lost"], terminalStageIds: ["s-won", "s-lost"] };
+
+  it("Q1: with no Status chosen, sends mixed visibility (active + named terminal) so the list shows terminal deals like the board", () => {
+    const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({}), board);
+    // active-only is the contract §5 default; this mount OVERRIDES it to active+terminal to match the board.
+    expect(result.isActive).toBe("pipeline");
+    expect(result.inactiveStageIds).toEqual(["s-won", "s-lost"]);
+  });
+
+  it("Q2: with no stages chosen, defaults stageIds to the board's visible columns (so DD hides when the board hides it)", () => {
+    const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({}), board);
+    expect(result.stageIds).toEqual(["s-opp", "s-est", "s-won", "s-lost"]);
+  });
+
+  it("respects an explicit stage selection (the user's pick overrides the board default)", () => {
+    const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ stageIds: ["s-est"] }), board);
+    expect(result.stageIds).toEqual(["s-est"]);
+    // visibility still mirrors the board (no Status chosen)
+    expect(result.isActive).toBe("pipeline");
+    expect(result.inactiveStageIds).toEqual(["s-won", "s-lost"]);
+  });
+
+  it("yields to an explicit Status — it owns is_active/on_hold server-side, so isActive is NOT forced", () => {
+    const active = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ status: "active" }), board);
+    expect(active.status).toBe("active");
+    expect(active.isActive).toBeUndefined();
+    expect(active.inactiveStageIds).toBeUndefined();
+    // the board-visible stage default still applies (Status narrows lifecycle, not which stages are on the page)
+    expect(active.stageIds).toEqual(["s-opp", "s-est", "s-won", "s-lost"]);
+
+    const inactive = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ status: "inactive" }), board);
+    expect(inactive.status).toBe("inactive");
+    expect(inactive.isActive).toBeUndefined();
+  });
+
+  it("falls back to the contract active-only default when a mount provides no terminal stage ids", () => {
+    const result = applyBoardVisibilityDefaults(filterBarValueToDealFilters({}), { defaultStageIds: ["s-opp"] });
+    expect(result.stageIds).toEqual(["s-opp"]);
+    expect(result.isActive).toBeUndefined();
+    expect(result.inactiveStageIds).toBeUndefined();
+  });
+
+  it("is a pass-through when no board context is given (generic FilterBar mounts are unaffected)", () => {
+    const mapped = filterBarValueToDealFilters({ search: "acme", dateFrom: "2026-05-01" });
+    expect(applyBoardVisibilityDefaults(mapped, {})).toEqual(mapped);
+  });
+
+  it("preserves the other mapped dimensions while layering visibility", () => {
+    const result = applyBoardVisibilityDefaults(
+      filterBarValueToDealFilters({ assignedRepId: "rep-1", valueMin: 1000, dateFrom: "2026-05-01" }),
+      board
+    );
+    expect(result).toMatchObject({ assignedRepId: "rep-1", valueMin: 1000, dateFrom: "2026-05-01" });
+  });
+});
+
+describe("getBoardVisibleStageScope (board columns -> the list's default stage scope)", () => {
+  const isTerminal = (slug: string) => slug === "won" || slug === "lost";
+  const columns = [
+    { id: "s-opp", slug: "opportunity" },
+    { id: "s-dd", slug: "due_diligence" },
+    { id: "s-est", slug: "estimate_in_progress" },
+    { id: "s-won", slug: "won" },
+    { id: "s-lost", slug: "lost" },
+  ];
+
+  it("excludes Due Diligence columns when the board's Show-DD toggle is OFF", () => {
+    const scope = getBoardVisibleStageScope(columns, false, isTerminal);
+    expect(scope.defaultStageIds).toEqual(["s-opp", "s-est", "s-won", "s-lost"]);
+    expect(scope.defaultStageIds).not.toContain("s-dd");
+  });
+
+  it("includes Due Diligence columns when Show-DD is ON", () => {
+    const scope = getBoardVisibleStageScope(columns, true, isTerminal);
+    expect(scope.defaultStageIds).toEqual(["s-opp", "s-dd", "s-est", "s-won", "s-lost"]);
+  });
+
+  it("surfaces the visible TERMINAL columns as the inactive-stage set (so terminal deals flow through)", () => {
+    const scope = getBoardVisibleStageScope(columns, true, isTerminal);
+    expect(scope.terminalStageIds).toEqual(["s-won", "s-lost"]);
   });
 });
 

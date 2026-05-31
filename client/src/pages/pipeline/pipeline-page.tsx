@@ -39,7 +39,11 @@ import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-p
 import { derivePipelineBoardView } from "./pipeline-board-view";
 import { useSalesReps } from "@/hooks/use-sales-reps";
 import { useRegions, useProjectTypes } from "@/hooks/use-pipeline-config";
-import { DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
+import {
+  DEAL_LIST_SORT_OPTIONS,
+  getBoardVisibleStageScope,
+  isBoardVisibleStage,
+} from "@/components/deals/deals-filterbar-adapter";
 import type { FilterDimension } from "@/components/filters/filter-bar";
 
 // Slice 7 proving ground: the deals list under the kanban gets the richest shared FilterBar set.
@@ -503,6 +507,17 @@ export function PipelinePage() {
     return Math.round((won / total) * 100);
   })();
 
+  // The under-kanban list mirrors the board it sits under (Slice 7 design sign-off): its default stage
+  // scope IS the board's visible columns (Show-DD-filtered), and the visible terminal columns flow
+  // through as inactive stages so the list shows active + terminal deals like the board. isTerminalOutcomeSlug
+  // classifies the Won/Lost columns; isBoardVisibleStage is the single Show-DD predicate (also drives the
+  // stage options below) so the list and the board can never disagree about which stages are on the page.
+  const boardStageScope = getBoardVisibleStageScope(
+    columns.map((column) => ({ id: column.stage.id, slug: column.stage.slug })),
+    showDd,
+    isTerminalOutcomeSlug
+  );
+
   if (showSkeleton) {
     return (
       <div className="space-y-4 p-6">
@@ -672,13 +687,17 @@ export function PipelinePage() {
             regions: regions.map((region) => ({ value: region.id, label: region.name })),
             projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
             stages: columns
-              .filter((column) => showDd || !["dd", "due_diligence"].includes(column.stage.slug))
+              .filter((column) => isBoardVisibleStage(column.stage.slug, showDd))
               .map((column) => ({ value: column.stage.id, label: column.stage.name })),
             sortOptions: DEAL_LIST_SORT_OPTIONS,
           },
           // Open-stage entered date + Stalled stay gated until FEATURE_STAGE_ENTRY_DATE; the bar
           // labels the date honestly and hides Stalled while this is false.
           stageEntryDateEnabled: false,
+          // Mirror the board: default to its visible columns (Q2 Show-DD) + let terminal deals through
+          // (Q1 active+terminal) unless the user picks an explicit Status.
+          defaultStageIds: boardStageScope.defaultStageIds,
+          terminalStageIds: boardStageScope.terminalStageIds,
         }}
       />
 

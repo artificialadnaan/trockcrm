@@ -103,6 +103,13 @@ const FB_OPTIONS: FilterBarOptions = {
   ],
 };
 const FB_PROP = { dimensions: FB_DIMENSIONS, options: FB_OPTIONS, stageEntryDateEnabled: false };
+// The pipeline mount mirrors the board: the visible columns are the default stage scope, and the
+// terminal subset flows through as inactive stages (Slice 7 design sign-off — Q1 + Q2).
+const FB_PROP_BOARD = {
+  ...FB_PROP,
+  defaultStageIds: ["stage-opportunity", "stage-won"],
+  terminalStageIds: ["stage-won"],
+};
 
 const lastDealsCall = () => mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
 
@@ -250,6 +257,29 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
       dealHeader?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(lastDealsCall()).toMatchObject({ sortBy: "name", sortDir: "desc" });
+  });
+
+  it("Q1: mirrors the board — with no Status chosen, sends mixed visibility so terminal deals show", async () => {
+    await renderFB("/deals", {}, FB_PROP_BOARD);
+    const call = lastDealsCall();
+    expect(call.isActive).toBe("pipeline");
+    expect(call.inactiveStageIds).toEqual(["stage-won"]);
+    // Q2: defaults to the board's visible columns when the user has picked no stages
+    expect(call.stageIds).toEqual(["stage-opportunity", "stage-won"]);
+  });
+
+  it("Q1: an explicit Status wins — isActive is not forced, the chosen lifecycle owns visibility", async () => {
+    await renderFB("/deals?status=active", {}, FB_PROP_BOARD);
+    const call = lastDealsCall();
+    expect(call.status).toBe("active");
+    expect(call.isActive).toBeUndefined();
+    expect(call.inactiveStageIds).toBeUndefined();
+    expect(call.stageIds).toEqual(["stage-opportunity", "stage-won"]); // stage scope still mirrors the board
+  });
+
+  it("Q2: an explicit stage selection overrides the board default", async () => {
+    await renderFB("/deals?stageIds=stage-opportunity", {}, FB_PROP_BOARD);
+    expect(lastDealsCall().stageIds).toEqual(["stage-opportunity"]);
   });
 
   it("preserves the page-owned scope param on Clear (scope is inherited, not a list dimension here)", async () => {

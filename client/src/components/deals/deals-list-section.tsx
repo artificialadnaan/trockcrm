@@ -39,7 +39,7 @@ import { listPaginationIconButtonClassName } from "@/components/shared/list-pagi
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { useFilterState } from "@/components/filters/use-filter-state";
 import { FilterBar, type FilterDimension, type FilterBarOptions } from "@/components/filters/filter-bar";
-import { filterBarValueToDealFilters, getDealDisplayDate } from "./deals-filterbar-adapter";
+import { applyBoardVisibilityDefaults, filterBarValueToDealFilters, getDealDisplayDate } from "./deals-filterbar-adapter";
 
 const DEAL_STAGE_ORDER = [
   "opportunity",
@@ -93,6 +93,17 @@ interface DealsListSectionProps {
     dimensions: FilterDimension[];
     options?: FilterBarOptions;
     stageEntryDateEnabled?: boolean;
+    /**
+     * Board-mirroring defaults (Slice 7 design sign-off). When this list sits under a kanban, the
+     * mount passes the board's visible column stage ids so the list shows the SAME deals as the board:
+     *  - defaultStageIds: the visible columns (Show-DD-filtered) — used as the list's stageIds when the
+     *    user has selected none, so DD deals hide exactly when the board hides the DD column (Q2);
+     *  - terminalStageIds: the visible terminal subset — sent as inactiveStageIds with isActive
+     *    "pipeline" (unless an explicit Status is chosen) so terminal deals show like the board's
+     *    Won/Lost columns, overriding the contract's active-only default at THIS mount (Q1).
+     */
+    defaultStageIds?: string[];
+    terminalStageIds?: string[];
   };
 }
 
@@ -608,7 +619,10 @@ export function DealsListSection({
   // sets it; the section owns page/limit. filter-axis == display-axis (displayDate rendered below).
   const filterBarDealsArgs: DealFilters = {
     ...baseFilters,
-    ...filterBarValueToDealFilters(urlFilters),
+    ...applyBoardVisibilityDefaults(filterBarValueToDealFilters(urlFilters), {
+      defaultStageIds: filterBar?.defaultStageIds,
+      terminalStageIds: filterBar?.terminalStageIds,
+    }),
     scope: urlFilters.scope ?? scope,
     page: currentPage,
     limit: pageSize,

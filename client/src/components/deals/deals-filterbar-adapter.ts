@@ -47,6 +47,73 @@ export function filterBarValueToDealFilters(value: FilterBarValue): Partial<Deal
   return filters;
 }
 
+/** Canonical Due Diligence stage slugs the board's Show-DD toggle governs. Single source of truth so
+ *  the list's default stage scope and the FilterBar stage options exclude DD identically. */
+export const DUE_DILIGENCE_STAGE_SLUGS = ["dd", "due_diligence"] as const;
+
+/** Is a board column visible given the Show-DD toggle? (DD columns hide when the board hides them.) */
+export function isBoardVisibleStage(slug: string, showDd: boolean): boolean {
+  return showDd || !DUE_DILIGENCE_STAGE_SLUGS.includes(slug as (typeof DUE_DILIGENCE_STAGE_SLUGS)[number]);
+}
+
+export interface BoardVisibility {
+  /** The board's currently-visible column stage ids (Show-DD-filtered). The list defaults its
+   *  `stageIds` to these when the user has selected none, so the list shows the SAME stages as the
+   *  board it sits under — including terminal columns, excluding DD when the board hides it. */
+  defaultStageIds?: string[];
+  /** The visible TERMINAL stage ids (subset of defaultStageIds). Sent as `inactiveStageIds` with
+   *  `isActive:"pipeline"` so terminal (is_active=false) deals flow through the server's active-only
+   *  default — matching the board, which shows Won/Lost columns. Omit to keep the contract's
+   *  active-only default (a generic mount that does not want terminal rows). */
+  terminalStageIds?: string[];
+}
+
+/**
+ * Layer "this list mirrors the board above it" onto the mapped FilterBar filters (Slice 7 design
+ * sign-off). Two overrides, both opt-in via the board context:
+ *  - Q2 (Show-DD mirror): when the user has chosen no stages, default `stageIds` to the board's
+ *    visible columns, so DD deals disappear from the list exactly when the board hides the DD column.
+ *  - Q1 (active+terminal): when the user has chosen no explicit Status, request mixed visibility
+ *    (`isActive:"pipeline"` + the visible terminal ids as `inactiveStageIds`) so terminal deals show
+ *    like the board's terminal columns. An explicit Status owns is_active/on_hold server-side
+ *    (contract §5), so it is NOT overridden — the chosen lifecycle wins.
+ * A user's explicit stage pick or Status always overrides the corresponding default.
+ */
+export function applyBoardVisibilityDefaults(
+  filters: Partial<DealFilters>,
+  board: BoardVisibility
+): Partial<DealFilters> {
+  const next: Partial<DealFilters> = { ...filters };
+  const hasExplicitStages = Array.isArray(next.stageIds) && next.stageIds.length > 0;
+  if (!hasExplicitStages && board.defaultStageIds && board.defaultStageIds.length > 0) {
+    next.stageIds = board.defaultStageIds;
+  }
+  const hasExplicitStatus = next.status !== undefined;
+  if (!hasExplicitStatus && board.terminalStageIds && board.terminalStageIds.length > 0) {
+    next.isActive = "pipeline";
+    next.inactiveStageIds = board.terminalStageIds;
+  }
+  return next;
+}
+
+/**
+ * Derive the list's default stage scope from the board's columns: every visible column id (Show-DD
+ * filtered) as `defaultStageIds`, and the terminal subset as `terminalStageIds`. Feeds
+ * applyBoardVisibilityDefaults so the under-kanban list and the board never disagree about which
+ * stages (and which terminal columns) are on the page.
+ */
+export function getBoardVisibleStageScope(
+  columns: ReadonlyArray<{ id: string; slug: string }>,
+  showDd: boolean,
+  isTerminalSlug: (slug: string) => boolean
+): { defaultStageIds: string[]; terminalStageIds: string[] } {
+  const visible = columns.filter((column) => isBoardVisibleStage(column.slug, showDd));
+  return {
+    defaultStageIds: visible.map((column) => column.id),
+    terminalStageIds: visible.filter((column) => isTerminalSlug(column.slug)).map((column) => column.id),
+  };
+}
+
 /**
  * The date a deal row should DISPLAY. Prefers the server's outcome-aware `displayDate`
  * (Won->signed, Lost->lost, open->stage-entry by row outcome — P0's dealDisplayDateExpr) so the
