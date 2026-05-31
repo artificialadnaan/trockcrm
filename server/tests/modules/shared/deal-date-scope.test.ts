@@ -23,8 +23,13 @@ describe("buildDealOutcomeDateScope", () => {
     expect(buildDealOutcomeDateScope({ from: "", to: "" }, ctx)).toBeUndefined();
   });
 
-  it("windows Won rows on the signed date and Lost rows on lost_at", () => {
+  it("windows Won rows on the CANONICAL won-close date (basis), Lost rows on lost_at", () => {
     const sql = render(buildDealOutcomeDateScope({ from: "2026-01-01", to: "2026-03-31" }, ctx));
+    // Canonical Won basis = COALESCE(NULLIF(hs_closed_won_date,'')::date,
+    // contract_signed_at::date, contract_signed_date) — the SAME chain the getDeals
+    // Won drill-down / getWonCloseSummary use. The hs_closed_won_date PRIMARY is
+    // what makes it canonical (a bare contract_signed COALESCE diverged from basis).
+    expect(sql).toContain("hs_closed_won_date");
     expect(sql).toContain("contract_signed_at");
     expect(sql).toContain("contract_signed_date");
     expect(sql).toContain("lost_at");
@@ -70,16 +75,16 @@ describe("buildDealOutcomeDateScope", () => {
       )
     );
     expect(sql).toContain("d.stage_id");
-    expect(sql).toContain("d.contract_signed_at");
+    expect(sql).toContain("d.contract_signed_at"); // canonical won axis on the alias
     expect(sql).toContain("d.lost_at");
   });
 });
 
 describe("dealDisplayDateExpr (display-axis companion to the filter)", () => {
-  it("emits a CASE selecting the won date for Won, lost date for Lost, stage entry otherwise", () => {
+  it("emits a CASE selecting the canonical won date for Won, lost date for Lost, stage entry otherwise", () => {
     const sql = render(dealDisplayDateExpr(ctx));
     expect(sql).toContain("case");
-    expect(sql).toContain("contract_signed_at"); // won axis
+    expect(sql).toContain("hs_closed_won_date"); // canonical won axis (basis)
     expect(sql).toContain("lost_at"); // lost axis
     expect(sql).toContain("stage_entered_at"); // open axis (ELSE)
     expect(sql).toContain("stage_id"); // classified by the same stage-id sets
@@ -93,7 +98,7 @@ describe("dealDisplayDateExpr (display-axis companion to the filter)", () => {
     // for the stage-entry axis; won/lost are always present in both.
     const display = render(dealDisplayDateExpr(ctx));
     const filter = render(buildDealOutcomeDateScope({ from: "2026-01-01" }, { ...ctx, stageEntryDateEnabled: true }));
-    for (const axis of ["contract_signed_at", "lost_at", "stage_entered_at"]) {
+    for (const axis of ["hs_closed_won_date", "lost_at", "stage_entered_at"]) {
       expect(display).toContain(axis);
       expect(filter).toContain(axis);
     }
