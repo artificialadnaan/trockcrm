@@ -386,6 +386,19 @@ function mapForecastVarianceSummaryRow(row?: ForecastVarianceSummarySqlRow): For
   };
 }
 
+/**
+ * Forecast variance: how each milestone forecast (initial/qualified/estimating) compared to the
+ * final won amount, plus close-date drift.
+ *
+ * Decision 2 (Won-date unification):
+ *  - deal_forecast_milestones.captured_at is a SNAPSHOT/as-of timestamp (when each milestone was
+ *    captured), NOT a won date — it drives the time-series and the close-drift metric only, so it
+ *    is LEFT AS-IS (migrating it would collapse the drift series this report exists to show).
+ *  - The WON-VALUE ANCHOR the variance is measured against was the closed_won milestone's snapshot
+ *    `cw.awarded_amount`; it is now the canonical `aliasedEffectiveWonDealValueSql('d')` (the same
+ *    awarded-first effective won value every other Won read uses), so variance is measured against
+ *    the platform-canonical final won total rather than a possibly-stale snapshot amount.
+ */
 export async function getForecastVarianceOverview(
   tenantDb: TenantDb,
   input: AnalyticsFilterInput = {}
@@ -401,7 +414,7 @@ export async function getForecastVarianceOverview(
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
-        cw.awarded_amount,
+        ${aliasedEffectiveWonDealValueSql("d")} AS awarded_amount,
         cw.captured_at::date AS actual_close_date,
         cw.expected_close_date,
         initial.forecast_amount AS initial_forecast,
@@ -442,7 +455,7 @@ export async function getForecastVarianceOverview(
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
-        cw.awarded_amount,
+        ${aliasedEffectiveWonDealValueSql("d")} AS awarded_amount,
         cw.captured_at::date AS actual_close_date,
         cw.expected_close_date,
         initial.forecast_amount AS initial_forecast,
@@ -487,7 +500,7 @@ export async function getForecastVarianceOverview(
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
-        cw.awarded_amount,
+        ${aliasedEffectiveWonDealValueSql("d")} AS awarded_amount,
         cw.captured_at::date AS actual_close_date,
         cw.expected_close_date,
         initial.forecast_amount AS initial_forecast,

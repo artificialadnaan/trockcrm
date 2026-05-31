@@ -7,9 +7,33 @@ import { AppError } from "../../middleware/error-handler.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveWonDealValueSql,
   aliasedReportableDealFilterSql,
+  aliasedWonHsClosedWonDateSql,
 } from "../shared/deal-value-sql.js";
+import { aliasedHasUsableWonDateSql } from "../deals/service.js";
 import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+
+const WON_STAGE_SLUG_SET = new Set<string>(WON_STAGE_SLUGS);
+
+// Decision 1 (Won-date unification): a custom report whose cohort is filtered to WON stage(s)
+// ONLY is "Won-measuring" — its deal_count / total_value ARE won count / won revenue. For such a
+// report the period axis (the from/to range AND the month/week time-bucket) is FORCED onto the
+// canonical deals.won_closed_date, regardless of the user's selected date field, so a Won total is
+// never reported on a non-Won basis (e.g. updated_at, which counts touched-in-period as won-in-
+// period). "Deals CREATED this period that are now Won" stays a distinct report (a non-Won-only
+// stage filter, or no stage filter, keeps the user's chosen date field). A mixed won+lost/open
+// stage filter is NOT Won-scoped — the cohort isn't a Won total, so the user's axis is preserved.
+//
+//  - wonScoped: every selected stage is a Won stage (so the cohort is a Won total).
+//  - fullWonScope: the selection covers EVERY Won slug the card aggregates — only then do the
+//    report totals actually reconcile to getWonCloseSummary (a Won SUBSET legitimately differs).
+function wonStageScope(filters: Record<string, unknown>): { wonScoped: boolean; fullWonScope: boolean } {
+  const stages = listFilter(filters.stage);
+  const wonScoped = stages.length > 0 && stages.every((slug) => WON_STAGE_SLUG_SET.has(slug));
+  const fullWonScope = wonScoped && WON_STAGE_SLUGS.every((slug) => stages.includes(slug));
+  return { wonScoped, fullWonScope };
+}
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -57,6 +81,7 @@ export interface ReportBuilderColumn {
 export interface ReportBuilderResult {
   columns: ReportBuilderColumn[];
   rows: Record<string, unknown>[];
+  notes?: string[];
 }
 
 const DIMENSION_LABELS: Record<ReportDimension, string> = {
@@ -121,8 +146,13 @@ function dimensionSql(dimension: ReportDimension, dateFieldSql: ReturnType<typeo
   }
 }
 
-function measureSql(measure: ReportMeasure) {
-  const value = dealValueSql();
+// Decision 1: a Won-scoped report passes the CANONICAL awarded-first Won value
+// (aliasedEffectiveWonDealValueSql) here, so its total_value/avg_value reconcile to the Won card
+// (getWonCloseSummary sums the same). A non-Won report keeps the best-estimate-first open value.
+// `closeDateSql` is the close point for avg_cycle_time: the canonical won_closed_date for a
+// Won-scoped report (so a Won deal counted by its won date isn't dropped from / mis-aged in the
+// cycle average by a null/stale actual_close_date), else the legacy actual_close_date.
+function measureSql(measure: ReportMeasure, value: ReturnType<typeof sql>, closeDateSql: ReturnType<typeof sql>) {
   switch (measure) {
     case "deal_count":
       return sql`COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int`;
@@ -146,7 +176,7 @@ function measureSql(measure: ReportMeasure) {
         )::numeric
       `;
     case "avg_cycle_time":
-      return sql`COALESCE(AVG(d.actual_close_date - d.created_at::date) FILTER (WHERE d.actual_close_date IS NOT NULL AND ${aliasedActiveDealCountFilterSql("d")}), 0)::numeric`;
+      return sql`COALESCE(AVG(${closeDateSql} - d.created_at::date) FILTER (WHERE ${closeDateSql} IS NOT NULL AND ${aliasedActiveDealCountFilterSql("d")}), 0)::numeric`;
     case "avg_age_in_stage":
       return sql`COALESCE(AVG(CURRENT_DATE - d.stage_entered_at::date) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")}), 0)::numeric`;
   }
@@ -178,13 +208,24 @@ function textArrayFilter(values: string[]) {
   return sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
 }
 
-function buildFilters(input: ReportBuilderInput, dateFieldSql: ReturnType<typeof sql>) {
+function buildFilters(
+  input: ReportBuilderInput,
+  dateFieldSql: ReturnType<typeof sql>,
+  options: { wonScoped?: boolean; applyWonGuard?: boolean } = {}
+) {
   const filters = input.filters ?? {};
   const clauses: ReturnType<typeof sql>[] = [
-    sql`d.is_active = true`,
     sql`COALESCE(d.is_test_data, false) = false`,
     aliasedReportableDealFilterSql("d"),
   ];
+  // A Won-scoped report must NOT force is_active=true: terminal Won deals are legitimately inactive,
+  // and the canonical Won surfaces (getWonCloseSummary) count them — forcing is_active here would
+  // undercount the Won total. Non-Won reports keep the active-pipeline scope.
+  if (!options.wonScoped) clauses.push(sql`d.is_active = true`);
+  // Period-bounded Won reports require a usable won date so a Won-stage deal with no won date isn't
+  // placed in a window/bucket. All-time Won reports omit this guard (see runReportBuilder) so those
+  // deals still count — matching the canonical helper's all-time behavior.
+  if (options.applyWonGuard) clauses.push(aliasedHasUsableWonDateSql("d"));
   const repId = effectiveReportRepId(input);
   if (repId) clauses.push(sql`d.assigned_rep_id = ${repId}`);
 
@@ -232,14 +273,44 @@ export async function runReportBuilder(
     throw new AppError(400, `Invalid filter: ${invalidFilters.join(", ")}`);
   }
 
-  const dateFieldSql = DATE_FIELDS[dateField];
+  // Decision 1: a Won-stage-only cohort forces both the period AXIS and the VALUE basis onto canon.
+  //  - AXIS: the canonical won_closed_date (overriding the user's date field), so Won count/value
+  //    are windowed/bucketed by the won date.
+  //  - VALUE: the canonical awarded-first effective Won value (the same getWonCloseSummary sums),
+  //    so total_value/avg_value RECONCILE to the Won card — not the best-estimate-first open value.
+  const { wonScoped, fullWonScope } = wonStageScope(filters);
+  const dateFieldSql = wonScoped ? aliasedWonHsClosedWonDateSql("d") : DATE_FIELDS[dateField];
+  const measureValueSql = wonScoped ? aliasedEffectiveWonDealValueSql("d") : dealValueSql();
+  const closeDateSql = wonScoped ? aliasedWonHsClosedWonDateSql("d") : sql`d.actual_close_date`;
+  // The usable-won-date guard drops null-won-date deals — correct ONLY for period-bounded Won
+  // queries (a deal with no won date can't be placed in a window/bucket). All-time Won reports
+  // (no from/to and no month/week time-bucket) must still COUNT those deals, mirroring the canonical
+  // helper's "all-time queries omit the guard" rule — so don't over-drop and undercount.
+  const periodBounded =
+    Boolean(filters.from) || Boolean(filters.to) || dimensions.some((d) => d === "month" || d === "week");
+  const applyWonGuard = wonScoped && periodBounded;
+  // The report only reconciles to the Won card (getWonCloseSummary(from, to)) when its WHOLE scope
+  // matches a card call:
+  //  - every Won slug (fullWonScope) AND no narrowing the card doesn't apply (source/region/deal_type
+  //    or a rep scope), AND
+  //  - an explicit from+to window. A bucket-only report (month/week, no from/to) is period-bounded
+  //    only so rows are bucketable — the usable-won guard then drops null-won-date wins, but there is
+  //    no card window to compare against and summing the buckets omits those deals. An all-time
+  //    report has no window either. Neither can promise card reconciliation.
+  const otherNarrowing =
+    Boolean(effectiveReportRepId(input)) ||
+    listFilter(filters.source).length > 0 ||
+    listFilter(filters.region).length > 0 ||
+    listFilter(filters.deal_type).length > 0;
+  const cardWindow = Boolean(filters.from) && Boolean(filters.to);
+  const reconcilesToCard = fullWonScope && !otherNarrowing && cardWindow;
   const dimensionEntries = dimensions.map((dimension) => ({
     key: dimension,
     expression: dimensionSql(dimension, dateFieldSql),
   }));
   const measureEntries = measures.map((measure) => ({
     key: measure,
-    expression: measureSql(measure),
+    expression: measureSql(measure, measureValueSql, closeDateSql),
   }));
 
   const selectList = sql.join(
@@ -250,7 +321,7 @@ export async function runReportBuilder(
     sql`, `
   );
   const groupBy = sql.join(dimensionEntries.map((entry) => entry.expression), sql`, `);
-  const whereClause = buildFilters(input, dateFieldSql);
+  const whereClause = buildFilters(input, dateFieldSql, { wonScoped, applyWonGuard });
 
   const result = await tenantDb.execute(sql`
     SELECT ${selectList}
@@ -264,11 +335,22 @@ export async function runReportBuilder(
   `);
 
   const rows = ((result as any).rows ?? result).map((row: Record<string, unknown>) => normalizeRow(row, measures));
+  const axisNote = `Won-scoped report: the period axis and value use the canonical won close date (won_closed_date) and Won value${
+    dateField ? `, overriding the selected "${dateField}" field` : ""
+  }.`;
+  const notes = wonScoped
+    ? [
+        reconcilesToCard
+          ? `${axisNote} Totals reconcile to the Won card for this from/to window.`
+          : `${axisNote} NOTE: this report does not match a full Won card window — it is a subset of Won stages, narrowed by a filter the card doesn't apply (source/region/deal type/rep), or has no explicit from/to period — so its totals will NOT match the Won card.`,
+      ]
+    : [];
   return {
     columns: [
       ...dimensions.map((dimension) => ({ key: dimension, label: DIMENSION_LABELS[dimension], kind: "dimension" as const })),
       ...measures.map((measure) => ({ key: measure, label: MEASURE_LABELS[measure], kind: "measure" as const })),
     ],
     rows,
+    ...(notes.length > 0 ? { notes } : {}),
   };
 }

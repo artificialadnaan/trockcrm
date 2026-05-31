@@ -107,6 +107,7 @@ export interface ReportBuilderRequest {
 export interface ReportBuilderResult {
   columns: Array<{ key: string; label: string; kind: "dimension" | "measure" }>;
   rows: Record<string, unknown>[];
+  notes?: string[];
 }
 
 export interface AnalyticsQueryOptions {
