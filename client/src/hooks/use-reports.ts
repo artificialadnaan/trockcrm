@@ -5,6 +5,7 @@ import type {
   MondayShowcaseEvidence,
   EvidenceRequest,
 } from "@/pages/reports/monday-showcase/types";
+import type { RepPackData, AtRiskWatchlist } from "@/pages/reports/part4-types";
 
 export interface SavedReport {
   id: string;
@@ -1435,6 +1436,65 @@ export function useShowcaseEvidence(
         if (requestId === latestRequest.current) setLoading(false);
       });
   }, [request, mode]);
+
+  return { data, loading, error };
+}
+
+// Reports Part 4 -- B·1 Rep 1:1 Pack. repId undefined lets the server default to the top rep.
+export function useRepPack(repId: string | undefined, mode: "to_date" | "completed") {
+  const [data, setData] = useState<RepPackData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const latestRequest = useRef(0);
+
+  useEffect(() => {
+    const requestId = ++latestRequest.current;
+    setLoading(true);
+    setError(null);
+    const params = new URLSearchParams({ mode });
+    if (repId) params.set("repId", repId);
+    api<{ data: RepPackData | null }>(`/reports/rep-pack?${params.toString()}`)
+      .then((result) => {
+        if (requestId === latestRequest.current) setData(result.data);
+      })
+      .catch((err: unknown) => {
+        if (requestId !== latestRequest.current) return;
+        setError(err instanceof Error ? err.message : "Failed to load the rep pack");
+        setData(null);
+      })
+      .finally(() => {
+        if (requestId === latestRequest.current) setLoading(false);
+      });
+  }, [repId, mode]);
+
+  return { data, loading, error };
+}
+
+// Reports Part 4 -- A·3 At-Risk Watchlist. repId undefined = office-wide.
+export function useAtRiskWatchlist(repId?: string) {
+  const [data, setData] = useState<AtRiskWatchlist | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const latestRequest = useRef(0);
+
+  useEffect(() => {
+    const requestId = ++latestRequest.current;
+    setLoading(true);
+    setError(null);
+    const qs = repId ? `?repId=${encodeURIComponent(repId)}` : "";
+    api<{ data: AtRiskWatchlist }>(`/reports/at-risk${qs}`)
+      .then((result) => {
+        if (requestId === latestRequest.current) setData(result.data);
+      })
+      .catch((err: unknown) => {
+        if (requestId !== latestRequest.current) return;
+        setError(err instanceof Error ? err.message : "Failed to load the at-risk watchlist");
+        setData(null);
+      })
+      .finally(() => {
+        if (requestId === latestRequest.current) setLoading(false);
+      });
+  }, [repId]);
 
   return { data, loading, error };
 }
