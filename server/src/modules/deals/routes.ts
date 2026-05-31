@@ -796,6 +796,32 @@ router.get("/", async (req, res, next) => {
     const estimateSentTo = assertOptionalIsoDateQueryParam(req.query.estimateSentTo, "estimateSentTo");
     const wonClosedFrom = assertOptionalIsoDateQueryParam(req.query.wonClosedFrom, "wonClosedFrom");
     const wonClosedTo = assertOptionalIsoDateQueryParam(req.query.wonClosedTo, "wonClosedTo");
+    // FilterBar: one canonical outcome-aware window (the server routes it per
+    // outcome). Accept both snake_case (URL contract) and camelCase.
+    const dateFrom = assertOptionalIsoDateQueryParam(
+      (req.query.date_from as string | undefined) ?? (req.query.dateFrom as string | undefined),
+      "date_from"
+    );
+    const dateTo = assertOptionalIsoDateQueryParam(
+      (req.query.date_to as string | undefined) ?? (req.query.dateTo as string | undefined),
+      "date_to"
+    );
+    const toOptionalNumber = (value: unknown): number | undefined => {
+      if (value === undefined || value === null || value === "") return undefined;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    };
+    const workflowRouteParam = req.query.workflowRoute as string | undefined;
+    const workflowRoute: "normal" | "service" | undefined =
+      workflowRouteParam === "normal" || workflowRouteParam === "service" ? workflowRouteParam : undefined;
+    const statusParam = req.query.status as string | undefined;
+    const status: "active" | "on_hold" | "inactive" | "any" | undefined =
+      statusParam === "active" ||
+      statusParam === "on_hold" ||
+      statusParam === "inactive" ||
+      statusParam === "any"
+        ? statusParam
+        : undefined;
     const isActiveFilter =
       req.query.isActive === "all"
         ? ("all" as const)
@@ -827,6 +853,14 @@ router.get("/", async (req, res, next) => {
       updatedFrom: req.query.updatedFrom as string | undefined,
       updatedTo: req.query.updatedTo as string | undefined,
       isActive: isActiveFilter,
+      workflowRoute,
+      status,
+      valueMin: toOptionalNumber(req.query.valueMin),
+      valueMax: toOptionalNumber(req.query.valueMax),
+      minAgeDays: toOptionalNumber(req.query.minAgeDays),
+      maxAgeDays: toOptionalNumber(req.query.maxAgeDays),
+      dateFrom,
+      dateTo,
       sortBy: req.query.sortBy as any,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,

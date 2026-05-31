@@ -55,10 +55,13 @@ import {
   aliasedActiveDealCountFilterSql,
   aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
+  aliasedEffectiveDealValueSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
 } from "../shared/deal-value-sql.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
+import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
+import { buildDealFilterBarConditions, type DealStatusFilter } from "./deal-filter-predicates.js";
 
 // Type alias for the tenant-scoped Drizzle instance
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -220,6 +223,20 @@ export interface DealFilters {
   regionId?: string;
   source?: string;
   isActive?: boolean | "all" | "pipeline";
+  // Shared FilterBar dimensions, consumed by the predicate registry
+  // (deal-filter-predicates.ts). assignedRepId/regionId also accept the
+  // UNASSIGNED_FILTER_SENTINEL ("__unassigned__") which maps to IS NULL.
+  workflowRoute?: WorkflowRoute;
+  status?: DealStatusFilter;
+  valueMin?: number;
+  valueMax?: number;
+  minAgeDays?: number;
+  maxAgeDays?: number;
+  // Unified outcome-aware date window (the canonical platform-wide date model):
+  // Won rows filter on the won/signed date, Lost rows on the lost date, open rows
+  // on the entered-stage date (only when FEATURE_STAGE_ENTRY_DATE is on).
+  dateFrom?: string;
+  dateTo?: string;
   // Inclusive YYYY-MM-DD bounds against deals.contract_signed_at::date, with
   // deals.contract_signed_date as a transition fallback. RESERVED for the
   // commissions / contracts-signed surfaces (§6.5) — do NOT use for Won-period.
@@ -742,7 +759,13 @@ function buildDealListOrder(filters: DealFilters) {
     case "created_at":
       return buildSortWithIdTieBreaker(deals.createdAt, filters.sortDir === "asc" ? "asc" : "desc");
     case "awarded_amount":
-      return buildSortWithIdTieBreaker(deals.awardedAmount, filters.sortDir === "asc" ? "asc" : "desc");
+      // Value sort uses the SAME effective-value chain the FilterBar value range
+      // filters and the list displays on, so sort == filter (D-1). Raw
+      // awarded_amount is null for most open deals and would mis-sort them.
+      return buildSortWithIdTieBreaker(
+        aliasedEffectiveDealValueSql("deals"),
+        filters.sortDir === "asc" ? "asc" : "desc"
+      );
     case "stage_entered_at":
       return buildSortWithIdTieBreaker(deals.stageEnteredAt, filters.sortDir === "asc" ? "asc" : "desc");
     case "expected_close_date":
@@ -1426,37 +1449,46 @@ export async function getDeals(
   // card (§6.7). Client-supplied inactiveStageIds are intersected with the
   // server's terminal stage set so a crafted request cannot widen visibility to
   // inactive non-terminal rows.
-  if (filters.isActive === "pipeline" || (hasWonClosedFilter && filters.isActive !== "all")) {
-    let terminalInactiveStageIds: string[] = [];
-    if (filters.inactiveStageIds?.length || hasWonClosedFilter) {
-      const allStages = await listDealStages();
-      const terminalStageIds = new Set(
-        allStages.filter((stage) => isTerminalWorkspaceStage(stage)).map((stage) => stage.id)
-      );
-      terminalInactiveStageIds =
-        filters.isActive === "pipeline"
-          ? (filters.inactiveStageIds ?? []).filter((id) => terminalStageIds.has(id))
-          : [];
-      if (hasWonClosedFilter) {
-        // Won-period drill-down must share the same row set as the Won card:
-        // active Won rows plus inactive historical Won aliases. Keep this
-        // aligned here so the generic pipeline visibility guard cannot drop an
-        // inactive Won-family row before the hs_closed_won_date filter runs.
-        for (const wonStageId of await resolveWonClosedStageIds(allStages)) {
-          if (terminalStageIds.has(wonStageId) && !terminalInactiveStageIds.includes(wonStageId)) {
-            terminalInactiveStageIds.push(wonStageId);
+  // The FilterBar Status dimension (when set) owns is_active/on_hold via the
+  // predicate registry below, so the legacy isActive / wonClosed visibility
+  // handling runs only when Status is absent. This prevents a conflicting
+  // is_active=true default from zeroing out a status=inactive request. The
+  // wonClosed drill-down and the FilterBar Status control are distinct surfaces
+  // and never co-occur, so guarding the whole block is byte-identical for every
+  // existing caller (none pass status).
+  if (!filters.status) {
+    if (filters.isActive === "pipeline" || (hasWonClosedFilter && filters.isActive !== "all")) {
+      let terminalInactiveStageIds: string[] = [];
+      if (filters.inactiveStageIds?.length || hasWonClosedFilter) {
+        const allStages = await listDealStages();
+        const terminalStageIds = new Set(
+          allStages.filter((stage) => isTerminalWorkspaceStage(stage)).map((stage) => stage.id)
+        );
+        terminalInactiveStageIds =
+          filters.isActive === "pipeline"
+            ? (filters.inactiveStageIds ?? []).filter((id) => terminalStageIds.has(id))
+            : [];
+        if (hasWonClosedFilter) {
+          // Won-period drill-down must share the same row set as the Won card:
+          // active Won rows plus inactive historical Won aliases. Keep this
+          // aligned here so the generic pipeline visibility guard cannot drop an
+          // inactive Won-family row before the hs_closed_won_date filter runs.
+          for (const wonStageId of await resolveWonClosedStageIds(allStages)) {
+            if (terminalStageIds.has(wonStageId) && !terminalInactiveStageIds.includes(wonStageId)) {
+              terminalInactiveStageIds.push(wonStageId);
+            }
           }
         }
       }
+      conditions.push(
+        or(
+          eq(deals.isActive, true),
+          terminalInactiveStageIds.length ? inArray(deals.stageId, terminalInactiveStageIds) : sql`false`
+        )
+      );
+    } else if (filters.isActive !== "all") {
+      conditions.push(eq(deals.isActive, filters.isActive ?? true));
     }
-    conditions.push(
-      or(
-        eq(deals.isActive, true),
-        terminalInactiveStageIds.length ? inArray(deals.stageId, terminalInactiveStageIds) : sql`false`
-      )
-    );
-  } else if (filters.isActive !== "all") {
-    conditions.push(eq(deals.isActive, filters.isActive ?? true));
   }
 
   if (filters.activeOfficeId) {
@@ -1481,30 +1513,36 @@ export async function getDeals(
     conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
   }
 
-  // Filter by assigned rep (directors/admins filtering by rep)
-  if (filters.assignedRepId) {
-    conditions.push(eq(deals.assignedRepId, filters.assignedRepId));
-  }
-
   // Filter by stage(s)
   if (filters.stageIds && filters.stageIds.length > 0) {
     conditions.push(inArray(deals.stageId, filters.stageIds));
-  }
-
-  // Filter by project type
-  if (filters.projectTypeId) {
-    conditions.push(eq(deals.projectTypeId, filters.projectTypeId));
-  }
-
-  // Filter by region
-  if (filters.regionId) {
-    conditions.push(eq(deals.regionId, filters.regionId));
   }
 
   // Filter by source
   if (filters.source) {
     conditions.push(eq(deals.source, filters.source));
   }
+
+  // FilterBar predicate registry: assigned rep (+Unassigned), region
+  // (+Unassigned), project type, workflow, status, value range, stalled (gated),
+  // and the outcome-aware date window. Each predicate is omitted when unset, so
+  // this only narrows for dimensions the caller set. The won/lost stage-id sets
+  // are resolved once (only when a date window is requested) so the date
+  // predicate can classify rows without joining pipeline_stage_config — the
+  // count queries below select from `deals` alone.
+  const stageEntryDateEnabled = isStageEntryDateFilterEnabled();
+  let wonStageIds: string[] = [];
+  let lostStageIds: string[] = [];
+  if (filters.dateFrom || filters.dateTo) {
+    const stages = await listDealStages();
+    const wonSlugs = WON_STAGE_SLUGS as readonly string[];
+    const lostSlugs = LOST_STAGE_SLUGS as readonly string[];
+    wonStageIds = stages.filter((stage) => wonSlugs.includes(stage.slug)).map((stage) => stage.id);
+    lostStageIds = stages.filter((stage) => lostSlugs.includes(stage.slug)).map((stage) => stage.id);
+  }
+  conditions.push(
+    ...buildDealFilterBarConditions(filters, { wonStageIds, lostStageIds, stageEntryDateEnabled })
+  );
 
   // Inclusive signed-contract range. Used by the rep dashboard YTD/MTD
   // click-through to surface the deals contributing to each card.

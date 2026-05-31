@@ -13,3 +13,15 @@ export function isContractStageSelectionEnabled(env: NodeJS.ProcessEnv = process
 export function isAuthDemoBootstrapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.ENABLE_AUTH_DEMO_BOOTSTRAP === "true";
 }
+
+/**
+ * Gates filtering on the entered-current-stage date (and the days-in-stage /
+ * "stalled" filter), both of which read deals.stage_entered_at. That column is
+ * only reliable for deals that transition FORWARD after PR #535; legacy/imported
+ * deals carry a placeholder. When OFF, the open-stage date window is not applied
+ * (open rows stay current-state, never silently dropped) and the stalled filter
+ * is omitted. Won/Lost date windows are unaffected (reliable now).
+ */
+export function isStageEntryDateFilterEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.ENABLE_STAGE_ENTRY_DATE_FILTER === "true";
+}
