@@ -912,17 +912,21 @@ export function buildPhotoTargetDealSearchCondition(search: string): SQL {
 }
 
 /**
- * SQL relevance score for a row: 3 = exact match on a name column, 2 = prefix
- * match on a name column, 1 = matches the search on ANY widened column (address,
- * contact, source, …), 0 = no match. `matchCondition` is the same predicate used
- * in WHERE, so a row matched only by a secondary column still scores 1 (not 0)
- * and is not truncated behind newer weak matches by the per-type LIMIT. Computed
- * in SQL and carried on each row so both the LIMIT and the cross-type merge keep
- * the most relevant rows, not just the most recent. See
+ * SQL relevance score for a row: 3 = exact match on a ranked identifying column,
+ * 2 = prefix match on a ranked column, 1 = matches the search on ANY searched
+ * column (the full WHERE predicate), 0 = no match. `rankColumns` are the columns
+ * a user types to identify a specific record (name, company, property name and
+ * site ADDRESS, contact name, deal number) — so a prefix match on the site
+ * address outranks a mere substring mention in source/description, instead of
+ * both collapsing to the flat any-match tier. `matchCondition` is the same
+ * predicate used in WHERE, so a row matched only by a coarse/free-text column
+ * (city, state, source, description, stage) still scores 1 (not 0). Computed in
+ * SQL and carried on each row so both the per-type LIMIT and the cross-type merge
+ * keep the most relevant rows, not just the most recent. See
  * .audit/trockcam-leads-photos.md (root cause G3).
  */
 function photoTargetSqlRelevance(
-  nameColumns: AnyColumn[],
+  rankColumns: AnyColumn[],
   matchCondition: SQL,
   search: string
 ): SQL<number> {
@@ -931,14 +935,14 @@ function photoTargetSqlRelevance(
   const escaped = escapeLikePattern(trimmed);
   const exact = escaped;
   const prefix = `${escaped}%`;
-  const nameRanks = nameColumns.map(
+  const ranks = rankColumns.map(
     (column) => sql`(CASE
       WHEN ${column} ILIKE ${exact} ESCAPE '\\' THEN 3
       WHEN ${column} ILIKE ${prefix} ESCAPE '\\' THEN 2
       ELSE 0 END)`
   );
   const anyMatch = sql`(CASE WHEN ${matchCondition} THEN 1 ELSE 0 END)`;
-  return sql<number>`GREATEST(${sql.join([...nameRanks, anyMatch], sql`, `)})`;
+  return sql<number>`GREATEST(${sql.join([...ranks, anyMatch], sql`, `)})`;
 }
 
 /**
@@ -990,11 +994,31 @@ export async function searchPhotoUploadTargets(
   // matches BEFORE the per-type LIMIT and the cross-type merge cap. With no search
   // term it is a constant 0, and ordering is by recency only — a constant in
   // ORDER BY would be read by Postgres as an out-of-range column ordinal.
+  // Rank by the identifying columns a user types to find a specific job —
+  // including the site ADDRESS and on-site contact — so a strong (exact/prefix)
+  // address match outranks a weak source/description mention before truncation.
   const leadRelevance = leadSearch
-    ? photoTargetSqlRelevance([leads.name], leadSearch, trimmed)
+    ? photoTargetSqlRelevance(
+        [leads.name, companies.name, properties.name, properties.address, contacts.firstName, contacts.lastName],
+        leadSearch,
+        trimmed
+      )
     : sql<number>`0`;
   const dealRelevance = dealSearch
-    ? photoTargetSqlRelevance([deals.name, deals.dealNumber], dealSearch, trimmed)
+    ? photoTargetSqlRelevance(
+        [
+          deals.name,
+          deals.dealNumber,
+          companies.name,
+          properties.name,
+          properties.address,
+          deals.propertyAddress,
+          contacts.firstName,
+          contacts.lastName,
+        ],
+        dealSearch,
+        trimmed
+      )
     : sql<number>`0`;
   const leadOrder = hasSearch ? [desc(leadRelevance), desc(leads.updatedAt)] : [desc(leads.updatedAt)];
   const dealOrder = hasSearch ? [desc(dealRelevance), desc(deals.updatedAt)] : [desc(deals.updatedAt)];
