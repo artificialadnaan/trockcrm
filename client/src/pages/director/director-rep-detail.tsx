@@ -59,7 +59,10 @@ const PRESET_ACTIVITY_LABELS: Record<DateRangePreset, string> = {
   custom: "the selected period",
 };
 
-const DEAL_LIST_INITIAL_SORT = { key: "created_at", dir: "desc" } satisfies DealListSortState;
+// D-15: sort off the flagged created_at axis onto the entered-current-stage axis
+// (the open-deal display date), so the order aligns with the outcome date the list
+// now filters + displays rather than the record-creation date.
+const DEAL_LIST_INITIAL_SORT = { key: "stage_entered_at", dir: "desc" } satisfies DealListSortState;
 const LEAD_STATUS_OPTIONS = ["all", "open", "converted", "disqualified"] as const;
 const LIST_RANGE_OPTIONS = ["dashboard", "7d", "wtd", "mtd", "qtd", "ytd"] as const;
 
@@ -657,13 +660,13 @@ export function DirectorRepDetail() {
             scope="all"
             eyebrow="Deals"
             title="Deal records"
-            subtitle={`Newest-first deals assigned to ${data.winLoss.repName}, layered with created-date and stage filters.`}
+            subtitle={`Deals assigned to ${data.winLoss.repName} in the selected window, on the outcome date axis (won/lost/stage-entry) — matching the KPIs above.`}
             pageSize={10}
             lockedOwnerId={repId}
             hideOwnerFilter
             enableDateFilter={false}
             externalDateRange={listDateRange}
-            dateField="created"
+            dateField="outcome"
             initialSort={DEAL_LIST_INITIAL_SORT}
             searchPlaceholder="Deal name, number, company, address"
           />
