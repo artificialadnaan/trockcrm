@@ -385,7 +385,10 @@ describe("RepDashboardPage", () => {
   });
 
   it("maps rep dashboard periods to supported deal drill-down periods", () => {
-    expect(buildRepDealsDrilldownPath("active_pipeline", "Today")).toBe("/deals?filter=active_pipeline&period=week&scope=mine");
+    // The Today KPI now drills into a Today window (the deals page's canonical resolver supports
+    // "today"); previously it was coarsened to "week", landing the user on a wider window than the
+    // card they clicked.
+    expect(buildRepDealsDrilldownPath("active_pipeline", "Today")).toBe("/deals?filter=active_pipeline&period=today&scope=mine");
     expect(buildRepDealsDrilldownPath("active_pipeline", "Week")).toBe("/deals?filter=active_pipeline&period=week&scope=mine");
     expect(buildRepDealsDrilldownPath("active_pipeline", "MTD")).toBe("/deals?filter=active_pipeline&period=mtd&scope=mine");
     expect(buildRepDealsDrilldownPath("active_pipeline", "QTD")).toBe("/deals?filter=active_pipeline&period=qtd&scope=mine");

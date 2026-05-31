@@ -7,6 +7,7 @@ import {
   getWonMetricTerminalLabel,
   readEstimateSentDateFilterFromSearchParams,
 } from "./deal-list-page";
+import { resolveDatePreset } from "@/lib/pipeline-terminal-filters";
 
 // D-7: ONE platform-wide week definition = Sunday->Saturday. The dashboard "week" period
 // (rep-dashboard Week tab / drilldowns) must anchor to Sunday, never Monday.
@@ -47,5 +48,21 @@ describe("deal-list-page preset handling for wtd", () => {
   it("readEstimateSentDateFilterFromSearchParams accepts estimate_sent_preset=wtd", () => {
     const params = new URLSearchParams("estimate_sent_preset=wtd");
     expect(readEstimateSentDateFilterFromSearchParams(params)).toEqual({ preset: "wtd" });
+  });
+});
+
+// Consolidation: the dashboard period tabs resolve through the ONE canonical resolver, so the
+// kanban/dashboard windows can never drift from the FilterBar / director-dashboard windows.
+describe("getDashboardPeriodDateRange delegates to the canonical resolver (consolidated)", () => {
+  it("matches resolveDatePreset for every shared preset ('week' -> 'wtd')", () => {
+    const now = new Date(2026, 2, 18); // Wed 2026-03-18; most recent Sunday is 2026-03-15
+    const cases = [
+      ["today", "today"], ["week", "wtd"], ["mtd", "mtd"], ["qtd", "qtd"], ["ytd", "ytd"],
+      ["last_month", "last_month"], ["last_quarter", "last_quarter"], ["last_year", "last_year"],
+    ] as const;
+    for (const [period, preset] of cases) {
+      expect(getDashboardPeriodDateRange(period, now)).toEqual(resolveDatePreset(preset, now));
+    }
+    expect(getDashboardPeriodDateRange(null, now)).toBeNull();
   });
 });

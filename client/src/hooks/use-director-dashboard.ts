@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import { resolveDatePreset } from "@/lib/pipeline-terminal-filters";
 import type { FunnelBucketSummary } from "./use-dashboard";
 import type { ForecastVsGoal, RepPerformancePeriodKind } from "./use-rep-performance";
 
@@ -274,48 +275,16 @@ export interface RepDetailData {
 
 export type DateRangePreset = "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year" | "custom";
 
-/** Convert a preset to from/to date strings */
+/**
+ * Convert a preset to from/to date strings. Delegates to the CANONICAL platform-wide resolver
+ * (resolveDatePreset) so the director/rep dashboards share one window math with the deals
+ * list / kanban FilterBar and the period tabs. "custom" has no canonical window here, so it keeps
+ * the prior ytd fallback. NOTE: this now resolves on the user's LOCAL calendar (was UTC) — the
+ * intended consolidation; it shifts every presetToDateRange consumer (incl. director rep-detail,
+ * RED's P2 surface, via this shared hook) from UTC to local month/quarter/year boundaries.
+ */
 export function presetToDateRange(preset: DateRangePreset): { from: string; to: string } {
-  const now = new Date();
-  const year = now.getUTCFullYear();
-  const month = now.getUTCMonth(); // 0-indexed
-  const today = now.toISOString().slice(0, 10);
-
-  switch (preset) {
-    case "mtd":
-      return { from: `${year}-${String(month + 1).padStart(2, "0")}-01`, to: today };
-    case "qtd": {
-      const qStart = Math.floor(month / 3) * 3;
-      return { from: `${year}-${String(qStart + 1).padStart(2, "0")}-01`, to: today };
-    }
-    case "ytd":
-      return { from: `${year}-01-01`, to: today };
-    case "last_month": {
-      const lm = month === 0 ? 11 : month - 1;
-      const lmYear = month === 0 ? year - 1 : year;
-      const lastDay = new Date(Date.UTC(lmYear, lm + 1, 0)).getUTCDate();
-      return {
-        from: `${lmYear}-${String(lm + 1).padStart(2, "0")}-01`,
-        to: `${lmYear}-${String(lm + 1).padStart(2, "0")}-${lastDay}`,
-      };
-    }
-    case "last_quarter": {
-      const cq = Math.floor(month / 3);
-      const lq = cq === 0 ? 3 : cq - 1;
-      const lqYear = cq === 0 ? year - 1 : year;
-      const lqStart = lq * 3;
-      const lqEndMonth = lqStart + 2;
-      const lqLastDay = new Date(Date.UTC(lqYear, lqEndMonth + 1, 0)).getUTCDate();
-      return {
-        from: `${lqYear}-${String(lqStart + 1).padStart(2, "0")}-01`,
-        to: `${lqYear}-${String(lqEndMonth + 1).padStart(2, "0")}-${lqLastDay}`,
-      };
-    }
-    case "last_year":
-      return { from: `${year - 1}-01-01`, to: `${year - 1}-12-31` };
-    default: // custom or ytd fallback
-      return { from: `${year}-01-01`, to: today };
-  }
+  return resolveDatePreset(preset === "custom" ? "ytd" : preset);
 }
 
 export function useDirectorDashboard(

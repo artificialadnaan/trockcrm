@@ -132,30 +132,70 @@ export function daysAgo(days: number, now = new Date()) {
   return formatDateParam(date);
 }
 
+/**
+ * CANONICAL platform-wide client date-preset resolver (window math). ONE source of truth so
+ * every surface — the deals list / kanban FilterBar (toDatePresetRange), the dashboard period
+ * tabs (getDashboardPeriodDateRange), and the director/rep dashboards (presetToDateRange) — maps
+ * the same preset to the same {from,to} window. All boundaries are the user's LOCAL calendar
+ * (presets are business-day concepts, not UTC instants), and WTD is Sunday-anchored (D-7 /
+ * PR #539) so the Sunday weekly-won meeting's week is consistent everywhere. Inclusive `to` = today.
+ * Numeric look-back (7/30/60/90 via daysAgo) and "custom"/"all" stay caller concerns.
+ */
+export type DatePreset =
+  | "today"
+  | "wtd"
+  | "mtd"
+  | "qtd"
+  | "ytd"
+  | "last_month"
+  | "last_quarter"
+  | "last_year";
+
+export function resolveDatePreset(preset: DatePreset, now = new Date()): { from: string; to: string } {
+  const today = formatLocalDateParam(now);
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  switch (preset) {
+    case "today":
+      return { from: today, to: today };
+    case "wtd": {
+      // Sunday-anchored local week (getDay(): Sunday = 0 -> walk back to the most recent Sunday).
+      const start = new Date(year, month, now.getDate());
+      start.setDate(start.getDate() - start.getDay());
+      return { from: formatLocalDateParam(start), to: today };
+    }
+    case "mtd":
+      return { from: formatLocalDateParam(new Date(year, month, 1)), to: today };
+    case "qtd":
+      return { from: formatLocalDateParam(new Date(year, Math.floor(month / 3) * 3, 1)), to: today };
+    case "ytd":
+      return { from: `${year}-01-01`, to: today };
+    case "last_month": {
+      const end = new Date(year, month, 0); // day 0 = last day of the previous month
+      return { from: formatLocalDateParam(new Date(end.getFullYear(), end.getMonth(), 1)), to: formatLocalDateParam(end) };
+    }
+    case "last_quarter": {
+      const end = new Date(year, Math.floor(month / 3) * 3, 0); // last day of the previous quarter
+      return {
+        from: formatLocalDateParam(new Date(end.getFullYear(), Math.floor(end.getMonth() / 3) * 3, 1)),
+        to: formatLocalDateParam(end),
+      };
+    }
+    case "last_year":
+      return { from: `${year - 1}-01-01`, to: `${year - 1}-12-31` };
+  }
+}
+
+/**
+ * Terminal-filter preset -> window. Thin delegate to {@link resolveDatePreset} (the canonical
+ * resolver) so the FilterBar / deals-list date control shares the exact window math with the
+ * dashboards. Behavior-preserving: these four presets already resolved local before.
+ */
 export function toDatePresetRange(
   preset: Extract<TerminalDateFilter["preset"], "wtd" | "mtd" | "qtd" | "ytd">,
   now = new Date()
 ) {
-  const today = formatLocalDateParam(now);
-  if (preset === "wtd") {
-    // Week-to-date, Sunday-anchored on the user's LOCAL calendar (their week for the Sunday
-    // weekly-won meeting), consistent with the dashboard's local period tabs (getDashboardPeriod
-    // DateRange) so all "this week" views agree. getDay(): Sunday = 0. (Decision: WTD is the
-    // user's local week, not UTC -- see PR #539 discussion / .audit S5.5.)
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    start.setDate(start.getDate() - start.getDay());
-    return { from: formatLocalDateParam(start), to: today };
-  }
-  if (preset === "mtd") {
-    return { from: formatLocalDateParam(new Date(now.getFullYear(), now.getMonth(), 1)), to: today };
-  }
-  if (preset === "qtd") {
-    return {
-      from: formatLocalDateParam(new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1)),
-      to: today,
-    };
-  }
-  return { from: formatLocalDateParam(new Date(now.getFullYear(), 0, 1)), to: today };
+  return resolveDatePreset(preset, now);
 }
 
 export function readTerminalDateFilter(outcome: TerminalOutcome): TerminalDateFilter {

@@ -108,7 +108,10 @@ function periodToActivityRange(period: Period): ActivityRange {
 }
 
 function periodToDealDrilldownPeriod(period: Period): "today" | "week" | "mtd" | "qtd" | "ytd" {
-  if (period === "Today") return "week";
+  // Map each KPI period faithfully so the drilldown window matches the card the user clicked.
+  // (Was: Today -> "week", which silently widened a Today KPI to a Week window; the deals page's
+  // canonical resolver handles "today", so emit it directly.)
+  if (period === "Today") return "today";
   if (period === "Week") return "week";
   if (period === "QTD") return "qtd";
   if (period === "YTD") return "ytd";

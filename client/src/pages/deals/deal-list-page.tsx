@@ -23,6 +23,7 @@ import {
   isTerminalStage,
   isTerminalOutcomeSlug,
   readTerminalDateFiltersFromSearchParams,
+  resolveDatePreset,
   setTerminalDateFilterSearchParams,
   toDatePresetRange,
   writeTerminalDateFilter,
@@ -88,18 +89,6 @@ export function formatDateInput(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
-function startOfQuarter(date: Date) {
-  return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 1);
-}
-
-function endOfPreviousMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), 0);
-}
-
-function endOfPreviousQuarter(date: Date) {
-  return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 0);
-}
-
 function normalizeDashboardPeriod(periodParam: string | null | undefined): DashboardPeriodSelection {
   switch (periodParam) {
     case "today":
@@ -140,37 +129,9 @@ function getDashboardPeriodLabel(period: DashboardPeriodSelection) {
 
 export function getDashboardPeriodDateRange(period: DashboardPeriodSelection, now = new Date()) {
   if (!period) return null;
-  const today = new Date(now);
-  if (period === "today") {
-    return { from: formatDateInput(today), to: formatDateInput(today) };
-  }
-  if (period === "week") {
-    // D-7: one platform-wide week definition = Sunday->Saturday. getDay(): Sunday = 0,
-    // so subtracting it walks back to the most recent Sunday.
-    const start = new Date(today);
-    const diffToSunday = start.getDay();
-    start.setDate(start.getDate() - diffToSunday);
-    return { from: formatDateInput(start), to: formatDateInput(today) };
-  }
-  if (period === "mtd") {
-    return { from: formatDateInput(new Date(today.getFullYear(), today.getMonth(), 1)), to: formatDateInput(today) };
-  }
-  if (period === "qtd") {
-    return { from: formatDateInput(startOfQuarter(today)), to: formatDateInput(today) };
-  }
-  if (period === "ytd") {
-    return { from: `${today.getFullYear()}-01-01`, to: formatDateInput(today) };
-  }
-  if (period === "last_month") {
-    const end = endOfPreviousMonth(today);
-    return { from: formatDateInput(new Date(end.getFullYear(), end.getMonth(), 1)), to: formatDateInput(end) };
-  }
-  if (period === "last_quarter") {
-    const end = endOfPreviousQuarter(today);
-    return { from: formatDateInput(startOfQuarter(end)), to: formatDateInput(end) };
-  }
-  const end = new Date(today.getFullYear() - 1, 11, 31);
-  return { from: `${today.getFullYear() - 1}-01-01`, to: formatDateInput(end) };
+  // Delegate to the canonical resolver (one window math platform-wide). The dashboard tabs label
+  // the Sunday-anchored week "week"; the canonical preset for it is "wtd" — same Sun-Sat semantics.
+  return resolveDatePreset(period === "week" ? "wtd" : period, now);
 }
 
 function normalizeDashboardDealFilter(filterParam: string | null | undefined): DashboardDealListFilter {
