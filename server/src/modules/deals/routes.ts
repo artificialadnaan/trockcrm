@@ -862,6 +862,8 @@ router.get("/", async (req, res, next) => {
       maxAgeDays: toOptionalNumber(req.query.maxAgeDays),
       dateFrom,
       dateTo,
+      stageEntryDateWindow:
+        req.query.stage_entry_window === "true" || req.query.stageEntryDateWindow === "true",
       sortBy: req.query.sortBy as any,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,

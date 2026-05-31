@@ -58,7 +58,10 @@ const DEFAULT_SORT_STATE = { key: "created_at", dir: "desc" } satisfies DealList
 const EMPTY_STAGE_SLUGS: string[] = [];
 
 type SortKey = "name" | "created_at" | "stage_entered_at" | "awarded_amount" | "updated_at";
-export type DealListSortState = { key: SortKey | "expected_close_date" | "contract_signed_date"; dir: "asc" | "desc" };
+export type DealListSortState = {
+  key: SortKey | "expected_close_date" | "contract_signed_date" | "display_date";
+  dir: "asc" | "desc";
+};
 type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
@@ -79,7 +82,7 @@ interface DealsListSectionProps {
   initialStageSlugs?: string[];
   lockedOwnerId?: string;
   hideOwnerFilter?: boolean;
-  dateField?: "updated" | "created";
+  dateField?: "updated" | "created" | "outcome";
   externalDateRange?: { from?: string; to?: string };
   paginationCountSummary?: { active: number; total: number };
   /**
@@ -415,12 +418,14 @@ export function buildDealListParams(input: {
   createdTo?: string;
   updatedFrom?: string;
   updatedTo?: string;
+  dateFrom?: string;
+  dateTo?: string;
   isActive: DealListActiveFilter;
   sort: DealListSortState;
   page: number;
   limit: number;
   scope?: "mine" | "team" | "all";
-  dateField?: "updated" | "created";
+  dateField?: "updated" | "created" | "outcome";
 }) {
   const params = new URLSearchParams();
   if (input.search) params.set("search", input.search);
@@ -428,7 +433,17 @@ export function buildDealListParams(input: {
   if (input.inactiveStageIds?.length) params.set("inactiveStageIds", input.inactiveStageIds.join(","));
   if (input.assignedRepId) params.set("assignedRepId", input.assignedRepId);
   const dateField = input.dateField ?? "updated";
-  if (dateField === "created") {
+  if (dateField === "outcome") {
+    // D-15: the window narrows the CANONICAL outcome axis (#546 buildDealOutcomeDateScope) —
+    // Won on won_closed_date, Lost on lost_at, open on stage_entered_at — never created/updated.
+    // stage_entry_window forces open rows to be bounded regardless of the server flag, so the
+    // CSV export matches the on-screen list (Codex #564).
+    const dateFrom = input.dateFrom ?? input.dateRange.from;
+    const dateTo = input.dateTo ?? input.dateRange.to;
+    if (dateFrom) params.set("dateFrom", dateFrom);
+    if (dateTo) params.set("dateTo", dateTo);
+    params.set("stage_entry_window", "true");
+  } else if (dateField === "created") {
     const createdFrom = input.createdFrom ?? input.dateRange.from;
     const createdTo = input.createdTo ?? input.dateRange.to;
     if (createdFrom) params.set("createdFrom", createdFrom);
@@ -470,11 +485,13 @@ export async function fetchAllFilteredDeals(input: {
   createdTo?: string;
   updatedFrom?: string;
   updatedTo?: string;
+  dateFrom?: string;
+  dateTo?: string;
   isActive: DealListActiveFilter;
   sort: DealListSortState;
   scope?: "mine" | "team" | "all";
   apiClient?: typeof api;
-  dateField?: "updated" | "created";
+  dateField?: "updated" | "created" | "outcome";
 }) {
   const apiClient = input.apiClient ?? api;
   const limit = EXPORT_PAGE_SIZE;
@@ -581,6 +598,12 @@ export function DealsListSection({
   // conditional); its value only drives the query/UI when filterBarMode is on.
   const { filters: urlFilters, setFilters, resetFilters } = useFilterState();
   const filterBarMode = Boolean(filterBar);
+  // D-15: legacy "outcome" axis — the rep drill-down feeds an externalDateRange that
+  // must narrow the canonical outcome window (dateFrom/dateTo) and DISPLAY the same
+  // outcome-aware date the server projects (displayDate), without the full FilterBar
+  // UI. So this surface, like filterBarMode, shows the honest "Date" column.
+  const outcomeDateAxis = dateField === "outcome";
+  const showOutcomeDate = filterBarMode || outcomeDateAxis;
   // Scope is read from the URL ONLY when this surface actually renders a scope control (the bar owns
   // the "scope" dimension). At the pipeline mount the page owns scope (its toggle), so the list must
   // inherit the page's NORMALIZED scope prop — not a raw, possibly-stale ?scope from the URL (e.g. a
@@ -682,6 +705,13 @@ export function DealsListSection({
     createdTo: dateField === "created" ? dateRange.to ?? baseFilters?.createdTo : baseFilters?.createdTo,
     updatedFrom: dateField === "updated" ? dateRange.from ?? baseFilters?.updatedFrom : baseFilters?.updatedFrom,
     updatedTo: dateField === "updated" ? dateRange.to ?? baseFilters?.updatedTo : baseFilters?.updatedTo,
+    // D-15: outcome mode routes the window to the canonical outcome-aware filter
+    // (dateFrom/dateTo -> buildDealOutcomeDateScope) instead of created/updated, and
+    // forces open rows to be bounded on stage_entered_at regardless of the server flag
+    // (Codex #564 — otherwise the window leaves every open deal in).
+    dateFrom: outcomeDateAxis ? dateRange.from ?? baseFilters?.dateFrom : baseFilters?.dateFrom,
+    dateTo: outcomeDateAxis ? dateRange.to ?? baseFilters?.dateTo : baseFilters?.dateTo,
+    stageEntryDateWindow: outcomeDateAxis ? true : baseFilters?.stageEntryDateWindow,
     estimateSentFrom: baseFilters?.estimateSentFrom,
     estimateSentTo: baseFilters?.estimateSentTo,
     isActive: isActiveFilter,
@@ -772,9 +802,13 @@ export function DealsListSection({
     }));
   };
 
+  // D-15 (Codex #564): in outcome mode the Newest/Oldest pills order by the outcome
+  // DISPLAY date (the axis the list filters + displays), not created_at — clicking them
+  // must NOT revert to the created_at axis and re-introduce the filter!=display mismatch.
+  const recencySortKey: DealListSortState["key"] = outcomeDateAxis ? "display_date" : "created_at";
   const setCreatedAtSort = (dir: "asc" | "desc") => {
     setPage(1);
-    setSort({ key: "created_at", dir });
+    setSort({ key: recencySortKey, dir });
   };
 
   const restoreUpdatedSort = () => {
@@ -787,8 +821,8 @@ export function DealsListSection({
   };
 
   const isUpdatedSortActive = sort.key === "updated_at";
-  const isNewestSortActive = sort.key === "created_at" && sort.dir === "desc";
-  const isOldestSortActive = sort.key === "created_at" && sort.dir === "asc";
+  const isNewestSortActive = sort.key === recencySortKey && sort.dir === "desc";
+  const isOldestSortActive = sort.key === recencySortKey && sort.dir === "asc";
 
   const exportCsv = async () => {
     // FilterBar mode: export EXACTLY what the list shows — the same #546 filters (outcome-aware date,
@@ -828,6 +862,8 @@ export function DealsListSection({
       estimateSentTo: baseFilters?.estimateSentTo,
       updatedFrom: baseFilters?.updatedFrom,
       updatedTo: baseFilters?.updatedTo,
+      dateFrom: baseFilters?.dateFrom,
+      dateTo: baseFilters?.dateTo,
     });
     if (exportResult.truncated) {
       toast.info(
@@ -963,14 +999,15 @@ export function DealsListSection({
     },
     {
       key: "closeDate",
-      // FilterBar mode shows the outcome-aware date axis (Won->signed, Lost->lost, open->stage-entry)
-      // that it ALSO filters on, so the header is the honest "Date"; legacy stays "Close".
-      header: filterBarMode ? "Date" : "Close",
+      // FilterBar mode AND the legacy "outcome" axis (D-15 rep drill-down) show the
+      // outcome-aware date axis (Won->signed, Lost->lost, open->stage-entry) that they
+      // ALSO filter on, so the header is the honest "Date"; other legacy stays "Close".
+      header: showOutcomeDate ? "Date" : "Close",
       headClassName: "md:w-[4.75rem] md:!px-2 md:text-right lg:w-[5rem] lg:!px-3",
       cellClassName: "md:w-[4.75rem] md:!px-2 md:text-right lg:w-[5rem] lg:!px-3",
       render: (deal) => (
         <span className="inline-flex justify-end whitespace-nowrap text-sm font-medium text-slate-600">
-          {formatShortDate(filterBarMode ? getDealDisplayDate(deal) : getDealCloseDate(deal))}
+          {formatShortDate(showOutcomeDate ? getDealDisplayDate(deal) : getDealCloseDate(deal))}
         </span>
       ),
     },
@@ -1137,18 +1174,22 @@ export function DealsListSection({
           >
             Oldest
           </button>
-          <button
-            type="button"
-            className={cn(
-              "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
-              isUpdatedSortActive
-                ? "border-brand-red bg-brand-red text-white"
-                : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
-            )}
-            onClick={restoreUpdatedSort}
-          >
-            Updated {isUpdatedSortActive ? (sort.dir === "asc" ? "↑" : "↓") : null}
-          </button>
+          {/* D-15 (Codex #564): the updated_at quick-sort is not the outcome axis, so
+              it is hidden in outcome mode (Newest/Oldest already order by the outcome date). */}
+          {outcomeDateAxis ? null : (
+            <button
+              type="button"
+              className={cn(
+                "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
+                isUpdatedSortActive
+                  ? "border-brand-red bg-brand-red text-white"
+                  : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
+              )}
+              onClick={restoreUpdatedSort}
+            >
+              Updated {isUpdatedSortActive ? (sort.dir === "asc" ? "↑" : "↓") : null}
+            </button>
+          )}
         </div>
       </div>
       </>
@@ -1237,7 +1278,7 @@ export function DealsListSection({
                       <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-3 text-xs font-medium text-slate-500">
                         <span className="inline-flex items-center gap-1 whitespace-nowrap">
                           <CalendarDays className="h-3.5 w-3.5 text-slate-400" />
-                          {formatShortDate(filterBarMode ? getDealDisplayDate(deal) : getDealCloseDate(deal))}
+                          {formatShortDate(showOutcomeDate ? getDealDisplayDate(deal) : getDealCloseDate(deal))}
                         </span>
                         <span className="inline-flex items-center gap-1 whitespace-nowrap text-right">
                           <Clock3 className="h-3.5 w-3.5 text-slate-400" />

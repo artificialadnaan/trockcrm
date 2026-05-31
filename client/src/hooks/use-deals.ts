@@ -311,6 +311,9 @@ export interface DealFilters {
   // additive predicates BLUE adds to getDeals. Absent key = no filter.
   dateFrom?: string;
   dateTo?: string;
+  // D-15: force the outcome window to bound OPEN rows on stage_entered_at regardless of
+  // the server's ENABLE_STAGE_ENTRY_DATE_FILTER flag (the rep drill-down sets this).
+  stageEntryDateWindow?: boolean;
   status?: "active" | "on_hold" | "inactive" | "any";
   workflowRoute?: "normal" | "service";
   valueMin?: number;
@@ -462,6 +465,7 @@ export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
   // FilterBar (#546) dimensions — appended; absent unless set, so legacy callers are unaffected.
   if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
   if (filters.dateTo) params.set("dateTo", filters.dateTo);
+  if (filters.stageEntryDateWindow) params.set("stage_entry_window", "true");
   if (filters.workflowRoute) params.set("workflowRoute", filters.workflowRoute);
   if (filters.valueMin !== undefined) params.set("valueMin", String(filters.valueMin));
   if (filters.valueMax !== undefined) params.set("valueMax", String(filters.valueMax));
@@ -525,6 +529,7 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.updatedTo,
     filters.dateFrom,
     filters.dateTo,
+    filters.stageEntryDateWindow,
     filters.status,
     filters.workflowRoute,
     filters.valueMin,

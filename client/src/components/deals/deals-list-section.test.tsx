@@ -9,6 +9,7 @@ import type { ReactNode } from "react";
 import type { AtRiskResult } from "@trock-crm/shared/types";
 import {
   DealsListSection,
+  buildDealListParams,
   buildDealStageFilterOptions,
   getDealCloseDate,
   getSelectedDealStageIds,
@@ -929,5 +930,101 @@ describe("DealsListSection", () => {
     expect(html).toContain('title="ESTIMATE SENT TO CLIENT"');
     expect(html).toContain("truncate");
     expect(html).toContain("whitespace-nowrap");
+  });
+
+  // D-15: the rep drill-down list must filter + display on the CANONICAL outcome
+  // date axis (Won->won_closed_date, Lost->lost_at, open->stage_entered_at) so it
+  // agrees with the rep's outcome-axis KPI — not filter created_at while displaying
+  // the close date. dateField="outcome" routes the window to dateFrom/dateTo (the
+  // #546 outcome-aware filter) and renders the server displayDate (#558).
+  describe("dateField=outcome (D-15 rep drill-down: filter-axis == display-axis on the outcome axis)", () => {
+    it("export query maps the range to the canonical outcome window (dateFrom/dateTo), not created/updated", () => {
+      const params = buildDealListParams({
+        search: "",
+        stageIds: [],
+        assignedRepId: "rep-1",
+        dateRange: { from: "2026-04-01", to: "2026-05-31" },
+        dateField: "outcome",
+        isActive: "all",
+        sort: { key: "stage_entered_at", dir: "desc" },
+        page: 1,
+        limit: 50,
+        scope: "all",
+      });
+      expect(params.get("dateFrom")).toBe("2026-04-01");
+      expect(params.get("dateTo")).toBe("2026-05-31");
+      expect(params.has("createdFrom")).toBe(false);
+      expect(params.has("updatedFrom")).toBe(false);
+    });
+
+    it("live query filters the outcome window (dateFrom/dateTo), never created_at/updated_at", () => {
+      render({
+        dateField: "outcome",
+        externalDateRange: { from: "2026-04-01", to: "2026-05-31" },
+        enableDateFilter: false,
+        lockedOwnerId: "rep-1",
+      });
+      const call = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+      expect(call.dateFrom).toBe("2026-04-01");
+      expect(call.dateTo).toBe("2026-05-31");
+      expect(call.createdFrom).toBeUndefined();
+      expect(call.updatedFrom).toBeUndefined();
+      // Codex #564: force open rows to be bounded on stage_entered_at regardless of the
+      // server flag, so the window is not silently inert for open deals.
+      expect(call.stageEntryDateWindow).toBe(true);
+    });
+
+    it("displays the server outcome displayDate, not the close date (filter-axis == display-axis)", async () => {
+      mocks.useDealsMock.mockReturnValue({
+        deals: [
+          makeDeal({
+            displayDate: "2026-05-20T12:00:00.000Z",
+            actualCloseDate: "2026-08-15T12:00:00.000Z",
+            expectedCloseDate: null,
+          }),
+        ],
+        pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+        loading: false,
+        error: null,
+        refetch: vi.fn(),
+      });
+      const view = await renderDom({
+        dateField: "outcome",
+        externalDateRange: { from: "2026-04-01", to: "2026-05-31" },
+        enableDateFilter: false,
+        lockedOwnerId: "rep-1",
+      });
+      // The date column (local "MMM d" formatter) shows the outcome displayDate
+      // (May 20), NOT the close date (Aug 15) — and the header is "Date", not "Close".
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("May 20"); // outcome displayDate
+      expect(text).not.toContain("Aug 15"); // not the close date
+      expect(text).toContain("Date");
+      expect(text).not.toContain("Close");
+      await view.cleanup();
+    });
+
+    it("hides the updated_at quick-sort and orders Newest/Oldest by the outcome display date (Codex #564: pills don't revert to created_at)", async () => {
+      const view = await renderDom({
+        dateField: "outcome",
+        externalDateRange: { from: "2026-04-01", to: "2026-05-31" },
+        enableDateFilter: false,
+        lockedOwnerId: "rep-1",
+        initialSort: { key: "display_date", dir: "desc" },
+      });
+      const buttons = () => Array.from(view.container.querySelectorAll("button"));
+      // The updated_at quick-sort is not the outcome axis -> hidden in outcome mode.
+      expect(buttons().some((b) => b.textContent?.trim().startsWith("Updated"))).toBe(false);
+      // Clicking "Newest" orders by the outcome display date, NOT created_at.
+      const newest = buttons().find((b) => b.textContent?.trim() === "Newest");
+      expect(newest).toBeDefined();
+      await act(async () => {
+        newest!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      const call = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+      expect(call.sortBy).toBe("display_date");
+      expect(call.sortBy).not.toBe("created_at");
+      await view.cleanup();
+    });
   });
 });

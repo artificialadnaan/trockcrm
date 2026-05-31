@@ -364,11 +364,16 @@ describe("DirectorRepDetail", () => {
   it("pre-filters the deals and leads lists to the rep and dashboard date window", () => {
     renderPageHtml("/director/rep/rep-1?preset=qtd");
 
+    // D-15: the rep deal list filters + displays the CANONICAL outcome date axis
+    // (dateField="outcome" -> dateFrom/dateTo + server displayDate), matching the
+    // rep's own outcome-axis KPI — not created_at filtered / Close displayed.
     expect(mocks.dealsListSectionMock.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
         lockedOwnerId: "rep-1",
-        dateField: "created",
+        dateField: "outcome",
         externalDateRange: { from: "2026-04-01", to: "2026-05-21" },
+        // Codex #564: sort by the outcome display axis (won/lost/stage-entry), not created_at.
+        initialSort: { key: "display_date", dir: "desc" },
       })
     );
     expect(mocks.useLeadsMock).toHaveBeenCalledWith(
