@@ -489,6 +489,9 @@ describe("ContactListPage", () => {
       const callLink = cards?.querySelector('a[href^="tel:"]');
       expect(callLink?.className).toContain("h-11");
       expect(callLink?.className).toContain("w-11");
+      // The real action raises itself above the stretched card link (so it stays a
+      // distinct tap), while non-interactive bits fall back to the card navigation.
+      expect(callLink?.className).toContain("z-10");
       // Role filter pills opt into the 44px touch size (reverts at md).
       const roleFilter = container.querySelector('[aria-label="Contact role filter"]');
       expect(roleFilter?.querySelector("button")?.className).toContain("min-h-[44px]");

@@ -107,11 +107,14 @@ export function ContactCard({
         </div>
         <ArrowUpRight className="h-4 w-4 shrink-0 text-slate-400" />
       </div>
-      <div className="relative z-10 mt-3 flex items-center gap-2">
+      {/* Row is NOT raised; only the real call/email anchors get `relative z-10` so they
+          sit above the stretched name link. The non-interactive linked-deals chip stays
+          below the link, so tapping it (or any gap) navigates to the contact. */}
+      <div className="mt-3 flex items-center gap-2">
         {phone ? (
           <a
             href={`tel:${phone}`}
-            className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:border-red-200 hover:text-brand-red"
+            className="relative z-10 inline-flex h-11 w-11 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:border-red-200 hover:text-brand-red"
             aria-label={`Call ${fullName(contact)}${formatPhone(phone) ? ` at ${formatPhone(phone)}` : ""}`}
           >
             <Phone className="h-4 w-4" />
@@ -120,7 +123,7 @@ export function ContactCard({
         {contact.email ? (
           <a
             href={`mailto:${contact.email}`}
-            className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:border-red-200 hover:text-brand-red"
+            className="relative z-10 inline-flex h-11 w-11 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:border-red-200 hover:text-brand-red"
             aria-label={`Email ${fullName(contact)}`}
           >
             <Mail className="h-4 w-4" />
