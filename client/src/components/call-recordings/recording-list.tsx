@@ -224,12 +224,12 @@ export function RecordingList({
                   <div className="mt-2">{renderStatus(recording)}</div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
-                  <Button variant="outline" size="sm" onClick={() => play(recording.id)}>
+                  <Button variant="outline" size="sm" className="min-h-[44px] md:h-7" onClick={() => play(recording.id)}>
                     <Play className="mr-1.5 h-4 w-4" />
                     Play
                   </Button>
                   {isAdmin && (
-                    <Button variant="ghost" size="icon-sm" onClick={() => remove(recording)} aria-label="Delete recording">
+                    <Button variant="ghost" size="icon-sm" className="size-11 md:size-7" onClick={() => remove(recording)} aria-label="Delete recording">
                       <Trash2 className="h-4 w-4 text-red-600" />
                     </Button>
                   )}

@@ -88,7 +88,7 @@ export function FileRow({
         <Button
           variant="ghost"
           size="icon"
-          className="h-8 w-8"
+          className="h-11 w-11 md:h-8 md:w-8"
           onClick={() => onDownload(file.id)}
           title="Download"
         >
@@ -98,7 +98,7 @@ export function FileRow({
         <DropdownMenu>
           <DropdownMenuTrigger
             render={
-              <Button variant="ghost" size="icon" className="h-8 w-8">
+              <Button variant="ghost" size="icon" className="h-11 w-11 md:h-8 md:w-8">
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
             }

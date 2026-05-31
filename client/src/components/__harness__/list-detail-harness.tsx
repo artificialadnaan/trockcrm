@@ -1,0 +1,126 @@
+import type { ReactNode } from "react";
+import { ContactCard } from "@/pages/contacts/contact-list-page";
+import type { Contact } from "@/hooks/use-contacts";
+
+// Dev-only preview for the Contacts/Companies/Properties list+detail mobile pass.
+// Real presentational components, mock data, no backend / no auth. Served by vite
+// dev at /harness-list-detail.html (NOT part of `vite build`, which only builds
+// index.html). 390px viewport, for before/after screenshots. Grows per PR.
+
+// Mock rows are cast pragmatically — the harness only needs the fields the cards
+// read, and this file never ships to production.
+function mockContact(overrides: Partial<Contact>): Contact {
+  return {
+    id: "c1",
+    firstName: "Maria",
+    lastName: "Caldwell",
+    email: "maria@trock.test",
+    phone: "2145550101",
+    mobile: null,
+    companyName: "T Rock Owner Group",
+    ownerUserId: "u1",
+    ownerUserName: "Alicia Adams",
+    jobTitle: "Facilities Director",
+    role: "facilities_director",
+    isPrimary: true,
+    city: "Dallas",
+    state: "TX",
+    linkedDealsCount: 2,
+    lastTouchAt: "2026-04-11T09:00:00.000Z",
+    ...overrides,
+  } as unknown as Contact;
+}
+
+// Stand-in for the shared OwnerAssignmentControl (it is API-backed and out of scope
+// for this responsiveness pass) — sized to its real ~44px footprint in the card.
+function MockOwnerControl({ label = "Owner: Riley Rep" }: { label?: string }) {
+  return (
+    <div className="inline-flex h-11 items-center rounded-md border border-slate-200 px-3 text-xs font-semibold text-slate-600">
+      {label}
+    </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="space-y-3">
+      <h2 className="text-xs font-black uppercase tracking-widest text-slate-500">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+const harnessContacts: Contact[] = [
+  mockContact({}),
+  mockContact({
+    id: "c2",
+    firstName: "Priya",
+    lastName: "Nguyen",
+    jobTitle: "Procurement Lead",
+    role: "procurement",
+    isPrimary: false,
+    companyName: "Northgate Facilities",
+    city: "Fort Worth",
+    email: "priya@trock.test",
+    phone: "8175550144",
+    linkedDealsCount: 0,
+    lastTouchAt: "2025-12-02T09:00:00.000Z",
+  }),
+  mockContact({
+    id: "c3",
+    firstName: "No",
+    lastName: "Owner",
+    jobTitle: null,
+    role: null,
+    isPrimary: false,
+    companyName: null,
+    ownerUserId: null,
+    ownerUserName: null,
+    city: null,
+    state: null,
+    email: null,
+    phone: null,
+    mobile: null,
+    linkedDealsCount: 0,
+    lastTouchAt: null,
+  }),
+];
+
+export function ListDetailHarness() {
+  return (
+    <div className="mx-auto max-w-md space-y-8 bg-[#F5F4F2] p-4 pb-12">
+      <header>
+        <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">List + detail mobile pass</p>
+        <h1 className="mt-1 text-2xl font-black uppercase leading-none text-slate-950">Phone preview · 390px</h1>
+      </header>
+
+      <Section title="Contacts list — table stacks to cards (<md)">
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-red-600">Before</p>
+          <div className="rounded-xl border border-dashed border-red-200 bg-white p-2">
+            <p className="mb-2 text-xs text-slate-500">7-column table → horizontal scroll wall at 390px (drag sideways):</p>
+            <div className="overflow-x-auto">
+              <div className="flex w-[760px] items-center gap-6 whitespace-nowrap border-b border-slate-200 pb-2 text-[11px] font-black uppercase tracking-[0.16em] text-slate-400">
+                <span>Contact</span>
+                <span>Company</span>
+                <span>Role</span>
+                <span>Quick actions</span>
+                <span>Linked deals</span>
+                <span>Last touch</span>
+                <span>›</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <p className="mb-1 text-[10px] font-black uppercase tracking-widest text-emerald-600">After</p>
+          <div className="space-y-2 rounded-xl border border-emerald-200 bg-white p-2">
+            {harnessContacts.map((contact) => (
+              <ContactCard key={contact.id} contact={contact} ownerSlot={<MockOwnerControl />} />
+            ))}
+          </div>
+        </div>
+      </Section>
+    </div>
+  );
+}
