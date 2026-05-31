@@ -6,29 +6,42 @@ import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar } from "@/components/reports/report-filter-bar";
 import type { ExcelSheet } from "@/lib/excel-export";
+import { parseDisplayDate } from "@/lib/deal-utils";
 export { sheetsFromReport } from "@/lib/excel-export";
 
 export const CHART_COLORS = ["#cc0000", "#111827", "#2563eb", "#16a34a", "#f59e0b", "#7c3aed", "#0891b2", "#db2777"];
 
-export function formatCurrency(value: number) {
+// Coerce to a finite number so a NaN/Infinity/null/undefined value (e.g. a 0/0
+// percentage, or a missing aggregate) renders 0 instead of "$NaN" / "NaN%".
+// `?? 0` is NOT enough — it passes NaN through; Number.isFinite catches it.
+function finite(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+export function formatCurrency(value: number | null | undefined) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
-  }).format(value);
+  }).format(finite(value));
 }
 
-export function formatNumber(value: number) {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+export function formatNumber(value: number | null | undefined) {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(finite(value));
 }
 
-export function formatPercent(value: number) {
-  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1, minimumFractionDigits: 1 }).format(value)}%`;
+export function formatPercent(value: number | null | undefined) {
+  return `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1, minimumFractionDigits: 1 }).format(finite(value))}%`;
 }
 
 export function formatDate(value: string | null) {
   if (!value) return "No activity";
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value));
+  // parseDisplayDate anchors a date-only "YYYY-MM-DD" to its literal calendar day
+  // (#572), so a value like "2026-01-14" never renders "Jan 13" west of UTC the
+  // way `new Date("2026-01-14")` (parsed as UTC midnight) would.
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(
+    parseDisplayDate(value)
+  );
 }
 
 export function ReportPageShell({
