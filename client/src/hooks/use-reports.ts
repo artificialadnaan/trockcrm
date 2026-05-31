@@ -1,6 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
-import type { MondayShowcaseData } from "@/pages/reports/monday-showcase/types";
+import type {
+  MondayShowcaseData,
+  MondayShowcaseEvidence,
+  EvidenceRequest,
+} from "@/pages/reports/monday-showcase/types";
 
 export interface SavedReport {
   id: string;
@@ -1385,4 +1389,52 @@ export function useMondayShowcase(mode: "to_date" | "completed" = "to_date") {
   }, [fetchShowcase]);
 
   return { data, loading, error, refetch: fetchShowcase };
+}
+
+// Reports Part 3 -- drill-to-evidence. Fetches the supporting records behind ONE showcase number when a
+// request is set (a number was clicked); null clears. Same monotonic-request guard so a fast re-click
+// can't show stale evidence under a newer heading.
+export function useShowcaseEvidence(
+  request: EvidenceRequest | null,
+  mode: "to_date" | "completed"
+) {
+  const [data, setData] = useState<MondayShowcaseEvidence | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const latestRequest = useRef(0);
+
+  useEffect(() => {
+    if (!request) {
+      setData(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    const requestId = ++latestRequest.current;
+    setLoading(true);
+    setError(null);
+    setData(null);
+    const params = new URLSearchParams({ metric: request.metric, mode });
+    // repId undefined = office-wide (omit); null = the Unassigned bucket (sentinel); else the rep UUID.
+    if (request.repId !== undefined) {
+      params.set("repId", request.repId === null ? "__unassigned__" : request.repId);
+    }
+    if (request.band) params.set("band", request.band);
+    if (request.leadStage) params.set("leadStage", request.leadStage);
+
+    api<{ data: MondayShowcaseEvidence }>(`/reports/monday-showcase/evidence?${params.toString()}`)
+      .then((result) => {
+        if (requestId === latestRequest.current) setData(result.data);
+      })
+      .catch((err: unknown) => {
+        if (requestId !== latestRequest.current) return;
+        setError(err instanceof Error ? err.message : "Failed to load the supporting records");
+        setData(null);
+      })
+      .finally(() => {
+        if (requestId === latestRequest.current) setLoading(false);
+      });
+  }, [request, mode]);
+
+  return { data, loading, error };
 }

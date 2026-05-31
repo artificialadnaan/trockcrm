@@ -83,6 +83,58 @@ export interface MondayShowcaseData {
   notes: string[];
 }
 
+// ===================== Reports Part 3: drill-to-evidence =====================
+// Client mirror of the server MondayShowcaseEvidence payload (monday-showcase-service.ts). Every showcase
+// number is clickable; the drawer shows these records and their total EQUALS the clicked number.
+
+export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "leads";
+
+export interface EvidenceRecord {
+  id: string;
+  dealNumber: string | null;
+  name: string;
+  repId: string | null;
+  repName: string;
+  stageLabel: string;
+  value: number | null;
+  cohortDate: string | null;
+}
+
+export interface EvidenceTotal {
+  count: number;
+  value: number | null;
+  basisLabel: string | null;
+}
+
+export type EvidenceScope =
+  | { kind: "office" }
+  | { kind: "rep"; repId: string | null; repName: string };
+
+export interface MondayShowcaseEvidence {
+  metric: EvidenceMetric;
+  metricLabel: string;
+  dateAxisLabel: string;
+  period: ShowcasePeriod;
+  scope: EvidenceScope;
+  band: ProjectionBand | null;
+  leadStage: string | null;
+  total: EvidenceTotal;
+  records: EvidenceRecord[];
+}
+
+/**
+ * What a clicked number asks the drawer to open. `repId` undefined = office-wide; `null` = the Unassigned
+ * bucket (sent to the server as the `__unassigned__` sentinel). `title`/`subtitle` are the human heading.
+ */
+export interface EvidenceRequest {
+  metric: EvidenceMetric;
+  repId?: string | null;
+  band?: ProjectionBand;
+  leadStage?: string;
+  title: string;
+  subtitle?: string;
+}
+
 export const PROJECTION_BAND_LABEL: Record<ProjectionBand, string> = {
   "0_30": "0–30d",
   "31_60": "31–60d",

@@ -1,38 +1,96 @@
 import { useMemo, useState, type ReactNode } from "react";
+import { TrendingUp, TrendingDown, Minus, ArrowUpRight } from "lucide-react";
 import {
   PROJECTION_BAND_LABEL,
   type MondayShowcaseData,
   type DepartmentMetric,
   type ProjectionLadder,
   type RepShowcaseRow,
+  type EvidenceMetric,
+  type ProjectionBand,
 } from "./types";
+import { DrillNumber, DRILL_UNDERLINE } from "./drill";
 
 // Every variant below renders a slice of the SAME payload -- so Won/Sent/Estimated/Projection figures
-// are identical across all of them by construction (locked server-side by the reconciliation test).
+// are identical across all of them by construction (locked server-side by the reconciliation test). Every
+// number is wrapped in <DrillNumber> so a click opens the EXACT records behind it (Reports Part 3).
 
 const usd = (n: number) =>
   n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 const int = (n: number) => n.toLocaleString("en-US");
 const signed = (n: number) => (n > 0 ? `+${int(n)}` : int(n));
 
-function DeltaChip({ delta }: { delta: number | null }) {
+// Semantic palette: one accent per department/metric, reused everywhere so the eye learns the colors.
+// Won = emerald (money in), Sent = sky (in flight), Estimating = violet (upstream), Collected = slate (deferred).
+type AccentKey = "estimating" | "sent" | "won" | "collected" | "leads";
+const ACCENT: Record<AccentKey, { text: string; soft: string; bar: string; ring: string; grad: string }> = {
+  estimating: { text: "text-violet-700", soft: "bg-violet-50", bar: "bg-violet-500", ring: "ring-violet-200", grad: "from-violet-50" },
+  sent: { text: "text-sky-700", soft: "bg-sky-50", bar: "bg-sky-500", ring: "ring-sky-200", grad: "from-sky-50" },
+  won: { text: "text-emerald-700", soft: "bg-emerald-50", bar: "bg-emerald-500", ring: "ring-emerald-200", grad: "from-emerald-50" },
+  collected: { text: "text-slate-400", soft: "bg-slate-50", bar: "bg-slate-300", ring: "ring-slate-200", grad: "from-slate-50" },
+  leads: { text: "text-amber-700", soft: "bg-amber-50", bar: "bg-amber-500", ring: "ring-amber-200", grad: "from-amber-50" },
+};
+
+// Projection horizon colors: near = warm/urgent through far = cool.
+const BAND_BAR: Record<ProjectionBand, string> = {
+  "0_30": "bg-emerald-500",
+  "31_60": "bg-sky-500",
+  "61_90": "bg-amber-500",
+  beyond_90: "bg-slate-400",
+};
+
+// A department key maps to its evidence metric (the "estimating" department is the "estimated" cohort).
+const DEPT_TO_METRIC: Record<"estimating" | "sent" | "won", EvidenceMetric> = {
+  estimating: "estimated",
+  sent: "sent",
+  won: "won",
+};
+
+function DeltaChip({ delta, suffix = "WoW" }: { delta: number | null; suffix?: string }) {
   if (delta == null) return null;
-  const tone = delta > 0 ? "text-emerald-700 bg-emerald-50" : delta < 0 ? "text-red-700 bg-red-50" : "text-gray-600 bg-gray-100";
-  return <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${tone}`}>{signed(delta)} WoW</span>;
+  const up = delta > 0;
+  const down = delta < 0;
+  const tone = up
+    ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+    : down
+      ? "bg-rose-50 text-rose-700 ring-rose-200"
+      : "bg-slate-100 text-slate-500 ring-slate-200";
+  const Icon = up ? TrendingUp : down ? TrendingDown : Minus;
+  return (
+    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ring-1 ${tone}`}>
+      <Icon className="h-3 w-3" />
+      {signed(delta)} {suffix}
+    </span>
+  );
 }
 
-function Sparkline({ values, spikeIndex }: { values: number[]; spikeIndex?: number }) {
+function Sparkline({
+  values,
+  spikeIndex,
+  barClass = "bg-sky-400",
+  highlightLast = false,
+}: {
+  values: number[];
+  spikeIndex?: number;
+  barClass?: string;
+  highlightLast?: boolean;
+}) {
   const max = Math.max(1, ...values);
+  const lastIdx = values.length - 1;
   return (
-    <div className="flex h-10 items-end gap-0.5" aria-hidden>
-      {values.map((v, i) => (
-        <div
-          key={i}
-          title={spikeIndex === i ? `${v} (backfill spike — excluded from averages)` : String(v)}
-          className={`w-2 rounded-t ${spikeIndex === i ? "bg-amber-300" : "bg-sky-400"}`}
-          style={{ height: `${Math.max(2, (v / max) * 40)}px` }}
-        />
-      ))}
+    <div className="flex h-12 items-end gap-1" aria-hidden>
+      {values.map((v, i) => {
+        const isSpike = spikeIndex === i;
+        const isLast = highlightLast && i === lastIdx;
+        return (
+          <div
+            key={i}
+            title={isSpike ? `${v} (backfill spike — excluded from averages)` : String(v)}
+            className={`w-2.5 rounded-t transition-all ${isSpike ? "bg-amber-400" : barClass} ${isLast ? "opacity-100 ring-2 ring-slate-300 ring-offset-1" : "opacity-80"}`}
+            style={{ height: `${Math.max(3, (v / max) * 48)}px` }}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -42,18 +100,38 @@ function basisLabel(metric: { value: { basisLabel: string } | null }) {
 }
 
 function CoverageCaption({ ladder }: { ladder: ProjectionLadder }) {
-  return <p className="text-xs text-muted-foreground">{ladder.coverageCaption}</p>;
+  return <p className="mt-1 text-[11px] text-slate-400">{ladder.coverageCaption}</p>;
 }
 
-function ProjectionRungs({ ladder, compact = false }: { ladder: ProjectionLadder; compact?: boolean }) {
+/** Per-rep projection rungs, band-colored and each drillable to its rung's deals. */
+function ProjectionRungs({
+  ladder,
+  repId,
+  repName,
+  compact = false,
+}: {
+  ladder: ProjectionLadder;
+  repId: string | null;
+  repName: string;
+  compact?: boolean;
+}) {
   return (
-    <div className={`grid ${compact ? "grid-cols-4 gap-1" : "grid-cols-4 gap-2"}`}>
+    <div className={`grid grid-cols-4 ${compact ? "gap-1.5" : "gap-2"}`}>
       {ladder.bands.map((b) => (
-        <div key={b.band} className="rounded border bg-white p-2 text-center">
-          <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{PROJECTION_BAND_LABEL[b.band]}</div>
-          <div className="text-sm font-semibold">{int(b.count)}</div>
-          <div className="text-[10px] text-muted-foreground">{usd(b.value)}</div>
-        </div>
+        <DrillNumber
+          key={b.band}
+          request={{ metric: "projection", repId, band: b.band, title: `${repName} — Projected ${PROJECTION_BAND_LABEL[b.band]}` }}
+          className="block"
+        >
+          <div className="rounded-lg border border-slate-200 bg-white p-2 text-center">
+            <div className="flex items-center justify-center gap-1">
+              <span className={`h-1.5 w-1.5 rounded-full ${BAND_BAR[b.band]}`} />
+              <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{PROJECTION_BAND_LABEL[b.band]}</span>
+            </div>
+            <div className="mt-0.5 text-base font-bold tabular-nums text-slate-800">{int(b.count)}</div>
+            <div className="text-[10px] tabular-nums text-slate-400">{usd(b.value)}</div>
+          </div>
+        </DrillNumber>
       ))}
     </div>
   );
@@ -67,22 +145,43 @@ export function VariantA1Funnel({ data }: { data: MondayShowcaseData }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-stretch gap-2">
-        {depts.map((d, i) => (
-          <div key={d.key} className="flex items-center gap-2">
-            <div className={`min-w-[150px] rounded-lg border p-3 ${d.deferred ? "border-dashed bg-gray-50 text-gray-400" : "bg-white"}`}>
-              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{d.label}</div>
-              <div className="text-2xl font-bold">{d.deferred ? "—" : int(d.count ?? 0)}</div>
-              <div className="text-xs text-muted-foreground">{d.deferred ? "deferred" : `${usd(d.value?.amount ?? 0)} · ${basisLabel(d)}`}</div>
-            </div>
-            {i < depts.length - 1 && (
-              <div className="text-center text-xs text-muted-foreground">
-                <div className="text-lg">›</div>
+        {depts.map((d, i) => {
+          const accent = ACCENT[d.key as AccentKey];
+          const tile = (
+            <div
+              className={`relative min-w-[160px] overflow-hidden rounded-xl border bg-gradient-to-b to-white p-3.5 ${d.deferred ? "border-dashed border-slate-200 from-slate-50" : `border-slate-200 ${accent.grad}`}`}
+            >
+              <span className={`absolute inset-y-0 left-0 w-1 ${accent.bar}`} />
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{d.label}</div>
+                {!d.deferred && <ArrowUpRight className="h-3.5 w-3.5 text-slate-300" />}
               </div>
-            )}
-          </div>
-        ))}
+              <div className={`mt-1 text-3xl font-extrabold tabular-nums ${d.deferred ? "text-slate-300" : accent.text}`}>
+                {d.deferred ? "—" : int(d.count ?? 0)}
+              </div>
+              <div className="text-[11px] tabular-nums text-slate-400">
+                {d.deferred ? "deferred" : `${usd(d.value?.amount ?? 0)} · ${basisLabel(d)}`}
+              </div>
+            </div>
+          );
+          return (
+            <div key={d.key} className="flex items-center gap-2">
+              {d.deferred || d.key === "collected" ? (
+                tile
+              ) : (
+                <DrillNumber
+                  request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — this week` }}
+                  className="block"
+                >
+                  {tile}
+                </DrillNumber>
+              )}
+              {i < depts.length - 1 && <div className="text-xl text-slate-300">›</div>}
+            </div>
+          );
+        })}
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-xs text-slate-400">
         Same-week throughput, not a cohort conversion — Estimated/Sent are stage-entry cohorts, Won is a close-date cohort.
       </p>
     </div>
@@ -90,23 +189,43 @@ export function VariantA1Funnel({ data }: { data: MondayShowcaseData }) {
 }
 
 export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
+  const spikeIndex = data.weeklyTrend.slice(-8).findIndex((w) => w.spikeExcluded);
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      {data.departments.map((d) => (
-        <div key={d.key} className={`rounded-lg border p-3 ${d.deferred ? "border-dashed bg-gray-50" : "bg-white"}`}>
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{d.label}</span>
-            <DeltaChip delta={d.deltaCountWoW} />
-          </div>
-          <div className="mt-1 text-2xl font-bold">{d.deferred ? "—" : int(d.count ?? 0)}</div>
-          <div className="text-xs text-muted-foreground">{d.deferred ? "Awaiting finance source" : `${usd(d.value?.amount ?? 0)} · ${basisLabel(d)}`}</div>
-          {!d.deferred && d.sparkline.length > 0 && (
-            <div className="mt-2">
-              <Sparkline values={d.sparkline} spikeIndex={data.weeklyTrend.slice(-8).findIndex((w) => w.spikeExcluded)} />
+      {data.departments.map((d) => {
+        const accent = ACCENT[d.key as AccentKey];
+        const inner = (
+          <div className={`relative h-full overflow-hidden rounded-xl border p-3.5 ${d.deferred ? "border-dashed border-slate-200 bg-slate-50" : "border-slate-200 bg-white"}`}>
+            <span className={`absolute inset-y-0 left-0 w-1 ${accent.bar}`} />
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{d.label}</span>
+              <DeltaChip delta={d.deltaCountWoW} />
             </div>
-          )}
-        </div>
-      ))}
+            <div className={`mt-1 text-3xl font-extrabold tabular-nums ${d.deferred ? "text-slate-300" : accent.text}`}>
+              {d.deferred ? "—" : int(d.count ?? 0)}
+            </div>
+            <div className="text-[11px] tabular-nums text-slate-400">
+              {d.deferred ? "Awaiting finance source" : `${usd(d.value?.amount ?? 0)} · ${basisLabel(d)}`}
+            </div>
+            {!d.deferred && d.sparkline.length > 0 && (
+              <div className="mt-2">
+                <Sparkline values={d.sparkline} spikeIndex={spikeIndex} barClass={accent.bar} highlightLast />
+              </div>
+            )}
+          </div>
+        );
+        return d.deferred || d.key === "collected" ? (
+          <div key={d.key}>{inner}</div>
+        ) : (
+          <DrillNumber
+            key={d.key}
+            request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — this week` }}
+            className="block text-left"
+          >
+            {inner}
+          </DrillNumber>
+        );
+      })}
     </div>
   );
 }
@@ -125,32 +244,43 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
   return (
     <div className="space-y-4">
       {lanes.map((lane) => {
+        const accent = ACCENT[lane.key];
         const series = weeks.map((w) => w[lane.key]);
         const usable = weeks.filter((w) => !w.spikeExcluded).map((w) => w[lane.key]);
         const avg = usable.length ? usable.reduce((s, v) => s + v, 0) / usable.length : 0;
         const current = series[lastIdx] ?? 0;
         const delta = Math.round(current - avg);
+        const max = Math.max(1, ...series);
         return (
-          <div key={lane.key} className="rounded-lg border bg-white p-3">
+          <div key={lane.key} className="relative overflow-hidden rounded-xl border border-slate-200 bg-white p-3.5">
+            <span className={`absolute inset-y-0 left-0 w-1 ${accent.bar}`} />
             <div className="mb-2 flex items-center justify-between">
-              <span className="text-sm font-semibold">{lane.label}</span>
-              <span className="text-xs text-muted-foreground">
-                this week {int(current)} · 8wk avg {avg.toFixed(1)} ({signed(delta)})
-                {lastInProgress && <span className="ml-1 italic">· current week in progress</span>}
+              <div className="flex items-center gap-2">
+                <span className={`h-2 w-2 rounded-full ${accent.bar}`} />
+                <span className="text-sm font-semibold text-slate-700">{lane.label}</span>
+              </div>
+              <span className="text-xs text-slate-400">
+                this week{" "}
+                <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — this week` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
+                  {int(current)}
+                </DrillNumber>{" "}
+                · 8wk avg <span className="tabular-nums">{avg.toFixed(1)}</span>{" "}
+                <span className={delta > 0 ? "text-emerald-600" : delta < 0 ? "text-rose-600" : "text-slate-400"}>({signed(delta)})</span>
+                {lastInProgress && <span className="ml-1 italic text-slate-400">· current week in progress</span>}
               </span>
             </div>
-            <div className="flex h-16 items-end gap-1">
+            <div className="flex h-20 items-end gap-1.5">
               {series.map((v, i) => {
-                const max = Math.max(1, ...series);
                 const spike = weeks[i]?.spikeExcluded;
+                const isLast = i === lastIdx && lastInProgress;
                 return (
                   <div key={i} className="flex flex-1 flex-col items-center gap-1">
                     <div
-                      title={spike ? `${v} (spike — excluded from avg)` : i === lastIdx && lastInProgress ? `${v} (in progress)` : String(v)}
-                      className={`w-full rounded-t ${spike ? "bg-amber-300" : i === lastIdx && lastInProgress ? "bg-sky-300" : "bg-sky-500"}`}
-                      style={{ height: `${Math.max(2, (v / max) * 56)}px` }}
+                      title={spike ? `${v} (spike — excluded from avg)` : isLast ? `${v} (in progress)` : String(v)}
+                      className={`w-full rounded-t transition-all ${spike ? "bg-amber-400" : isLast ? `${accent.bar} opacity-50` : accent.bar} ${i === lastIdx ? "ring-2 ring-slate-300 ring-offset-1" : ""}`}
+                      style={{ height: `${Math.max(3, (v / max) * 64)}px` }}
                     />
-                    <span className="text-[9px] text-muted-foreground">{weeks[i]?.weekStart.slice(5)}</span>
+                    <span className="text-[9px] tabular-nums text-slate-400">{weeks[i]?.weekStart.slice(5)}</span>
                   </div>
                 );
               })}
@@ -166,21 +296,34 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
 
 export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
   const periodLabel = data.period.mode === "to_date" ? "this week" : "last week";
-  const tiles = [
-    { label: "Won", metric: data.execHero.won, accent: "text-emerald-700" },
-    { label: "Sent", metric: data.execHero.sent, accent: "text-sky-700" },
-    { label: "Estimated", metric: data.execHero.estimated, accent: "text-indigo-700" },
+  const tiles: Array<{ label: string; metric: EvidenceMetric; accent: AccentKey; value: { count: number; value: { amount: number; basisLabel: string } } }> = [
+    { label: "Won", metric: "won", accent: "won", value: data.execHero.won },
+    { label: "Sent", metric: "sent", accent: "sent", value: data.execHero.sent },
+    { label: "Estimated", metric: "estimated", accent: "estimating", value: data.execHero.estimated },
   ];
   return (
     <div className="grid gap-4 sm:grid-cols-3">
-      {tiles.map((t) => (
-        <div key={t.label} className="rounded-xl border bg-white p-6 text-center shadow-sm">
-          <div className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">{t.label} {periodLabel}</div>
-          <div className={`mt-2 text-4xl font-extrabold ${t.accent}`}>{int(t.metric.count)}</div>
-          <div className="mt-1 text-sm text-muted-foreground">{usd(t.metric.value.amount)}</div>
-          <div className="mt-0.5 text-[10px] text-muted-foreground">{t.metric.value.basisLabel}</div>
-        </div>
-      ))}
+      {tiles.map((t) => {
+        const accent = ACCENT[t.accent];
+        return (
+          <DrillNumber
+            key={t.label}
+            request={{ metric: t.metric, title: `${t.label} — ${periodLabel}` }}
+            className="block text-left"
+          >
+            <div className={`group relative overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br to-white p-6 shadow-sm transition-shadow hover:shadow-md ${accent.grad}`}>
+              <span className={`absolute inset-x-0 top-0 h-1 ${accent.bar}`} />
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">{t.label} {periodLabel}</div>
+                <ArrowUpRight className="h-4 w-4 text-slate-300 transition-colors group-hover:text-slate-500" />
+              </div>
+              <div className={`mt-2 text-5xl font-extrabold tabular-nums ${accent.text}`}>{int(t.value.count)}</div>
+              <div className="mt-1 text-sm font-medium tabular-nums text-slate-600">{usd(t.value.value.amount)}</div>
+              <div className="mt-0.5 text-[10px] text-slate-400">{t.value.value.basisLabel}</div>
+            </div>
+          </DrillNumber>
+        );
+      })}
     </div>
   );
 }
@@ -191,21 +334,32 @@ export function VariantB1Scorecards({ data }: { data: MondayShowcaseData }) {
   return (
     <div className="grid gap-3 md:grid-cols-2">
       {data.reps.map((rep) => (
-        <div key={rep.repId ?? "unassigned"} className="rounded-lg border bg-white p-3">
+        <div key={rep.repId ?? "unassigned"} className="rounded-xl border border-slate-200 bg-white p-3.5">
           <div className="flex items-baseline justify-between">
-            <span className="font-semibold">{rep.repName}</span>
-            <span className="text-sm">
-              <span className="font-bold text-emerald-700">{int(rep.closed.count)}</span> closed · {usd(rep.closed.value.amount)}
+            <span className="font-semibold text-slate-800">{rep.repName}</span>
+            <span className="text-sm text-slate-500">
+              <DrillNumber request={{ metric: "won", repId: rep.repId, title: `${rep.repName} — Won` }} className={`font-bold text-emerald-700 ${DRILL_UNDERLINE} px-0.5`}>
+                {int(rep.closed.count)}
+              </DrillNumber>{" "}
+              closed · <span className="tabular-nums">{usd(rep.closed.value.amount)}</span>
             </span>
           </div>
-          <div className="mt-2"><ProjectionRungs ladder={rep.projection} compact /></div>
+          <div className="mt-2">
+            <ProjectionRungs ladder={rep.projection} repId={rep.repId} repName={rep.repName} compact />
+          </div>
           <CoverageCaption ladder={rep.projection} />
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-            <span className="rounded bg-sky-50 px-2 py-0.5 text-sky-700">Sent {int(rep.sentThisWeek.count)}</span>
+            <DrillNumber request={{ metric: "sent", repId: rep.repId, title: `${rep.repName} — Sent` }} className="rounded-full bg-sky-50 px-2 py-0.5 font-medium text-sky-700 ring-1 ring-sky-200">
+              Sent {int(rep.sentThisWeek.count)}
+            </DrillNumber>
             {rep.leadStatus.map((ls) => (
-              <span key={ls.stageLabel} className="rounded bg-gray-100 px-2 py-0.5 text-gray-700">
+              <DrillNumber
+                key={ls.stageLabel}
+                request={{ metric: "leads", repId: rep.repId, leadStage: ls.stageLabel, title: `${rep.repName} — ${ls.stageLabel} leads` }}
+                className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600 ring-1 ring-slate-200"
+              >
                 {ls.stageLabel}: {int(ls.count)}
-              </span>
+              </DrillNumber>
             ))}
           </div>
         </div>
@@ -239,18 +393,18 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
   };
   const Th = ({ k, children }: { k: SortKey; children: ReactNode }) => (
     <th
-      className={`cursor-pointer px-3 py-2 text-right ${sort === k ? "text-foreground underline" : "text-muted-foreground"}`}
+      className={`cursor-pointer px-3 py-2 text-right transition-colors ${sort === k ? "text-slate-800 underline decoration-2 underline-offset-4" : "text-slate-400 hover:text-slate-600"}`}
       onClick={() => setSort(k)}
     >
       {children}
     </th>
   );
   return (
-    <div className="overflow-x-auto rounded-lg border bg-white">
+    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
       <table className="w-full text-sm">
-        <thead className="border-b bg-gray-50 text-xs uppercase tracking-wide">
+        <thead className="border-b border-slate-100 bg-[#f7f8fb] text-[11px] font-black uppercase tracking-wide">
           <tr>
-            <th className="px-3 py-2 text-left">Rep</th>
+            <th className="px-3 py-2.5 text-left text-slate-500">Rep</th>
             <Th k="closed">Closed $</Th>
             <Th k="projected">Projected #</Th>
             <Th k="sent">Sent</Th>
@@ -259,26 +413,61 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={r.repId ?? "unassigned"} className="border-b last:border-0">
-              <td className="px-3 py-2">{i + 1}. {r.repName}</td>
-              <td className="px-3 py-2 text-right font-semibold">{usd(r.closed.value.amount)}</td>
-              <td className="px-3 py-2 text-right">{int(repProjectedTotal(r))}</td>
-              <td className="px-3 py-2 text-right">{int(r.sentThisWeek.count)}</td>
-              <td className="px-3 py-2 text-right">{int(repLeadTotal(r))}</td>
+            <tr key={r.repId ?? "unassigned"} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
+              <td className="px-3 py-2.5">
+                <span className="mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-slate-100 text-[11px] font-bold text-slate-500">{i + 1}</span>
+                <span className="font-medium text-slate-700">{r.repName}</span>
+              </td>
+              <td className="px-3 py-2.5 text-right">
+                <DrillNumber request={{ metric: "won", repId: r.repId, title: `${r.repName} — Won` }} className={`font-semibold tabular-nums text-emerald-700 ${DRILL_UNDERLINE} px-0.5`}>
+                  {usd(r.closed.value.amount)}
+                </DrillNumber>
+              </td>
+              <td className="px-3 py-2.5 text-right">
+                <DrillNumber request={{ metric: "projection", repId: r.repId, title: `${r.repName} — Projected (all)` }} className={`tabular-nums text-slate-700 ${DRILL_UNDERLINE} px-0.5`}>
+                  {int(repProjectedTotal(r))}
+                </DrillNumber>
+              </td>
+              <td className="px-3 py-2.5 text-right">
+                <DrillNumber request={{ metric: "sent", repId: r.repId, title: `${r.repName} — Sent` }} className={`tabular-nums text-slate-700 ${DRILL_UNDERLINE} px-0.5`}>
+                  {int(r.sentThisWeek.count)}
+                </DrillNumber>
+              </td>
+              <td className="px-3 py-2.5 text-right">
+                <DrillNumber request={{ metric: "leads", repId: r.repId, title: `${r.repName} — Active leads` }} className={`tabular-nums text-slate-700 ${DRILL_UNDERLINE} px-0.5`}>
+                  {int(repLeadTotal(r))}
+                </DrillNumber>
+              </td>
             </tr>
           ))}
         </tbody>
-        <tfoot className="border-t bg-gray-50 font-semibold">
+        <tfoot className="border-t border-slate-200 bg-[#f7f8fb] font-semibold">
           <tr>
-            <td className="px-3 py-2 text-left">TOTAL ({int(totals.closedCount)} won)</td>
-            <td className="px-3 py-2 text-right">{usd(totals.closed)}</td>
-            <td className="px-3 py-2 text-right">{int(totals.projected)}</td>
-            <td className="px-3 py-2 text-right">{int(totals.sent)}</td>
-            <td className="px-3 py-2 text-right">{int(totals.leads)}</td>
+            <td className="px-3 py-2.5 text-left text-slate-600">TOTAL ({int(totals.closedCount)} won)</td>
+            <td className="px-3 py-2.5 text-right">
+              <DrillNumber request={{ metric: "won", title: "Won — office" }} className={`tabular-nums text-emerald-700 ${DRILL_UNDERLINE} px-0.5`}>
+                {usd(totals.closed)}
+              </DrillNumber>
+            </td>
+            <td className="px-3 py-2.5 text-right">
+              <DrillNumber request={{ metric: "projection", title: "Projected — office" }} className={`tabular-nums text-slate-700 ${DRILL_UNDERLINE} px-0.5`}>
+                {int(totals.projected)}
+              </DrillNumber>
+            </td>
+            <td className="px-3 py-2.5 text-right">
+              <DrillNumber request={{ metric: "sent", title: "Sent — office" }} className={`tabular-nums text-slate-700 ${DRILL_UNDERLINE} px-0.5`}>
+                {int(totals.sent)}
+              </DrillNumber>
+            </td>
+            <td className="px-3 py-2.5 text-right">
+              <DrillNumber request={{ metric: "leads", title: "Active leads — office" }} className={`tabular-nums text-slate-700 ${DRILL_UNDERLINE} px-0.5`}>
+                {int(totals.leads)}
+              </DrillNumber>
+            </td>
           </tr>
         </tfoot>
       </table>
-      <p className="px-3 py-2 text-xs text-muted-foreground">TOTAL Closed $ ties to the canonical office Won aggregate. Click a column to re-rank.</p>
+      <p className="px-3 py-2 text-xs text-slate-400">TOTAL Closed $ ties to the canonical office Won aggregate. Click a column header to re-rank; click any number for its records.</p>
     </div>
   );
 }
@@ -287,16 +476,24 @@ export function VariantB3LoadLane({ data }: { data: MondayShowcaseData }) {
   return (
     <div className="space-y-3">
       {data.reps.map((rep) => (
-        <div key={rep.repId ?? "unassigned"} className="rounded-lg border bg-white p-3">
-          <div className="mb-2 font-semibold">{rep.repName}</div>
+        <div key={rep.repId ?? "unassigned"} className="rounded-xl border border-slate-200 bg-white p-3.5">
+          <div className="mb-2 font-semibold text-slate-800">{rep.repName}</div>
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            <span className="rounded bg-gray-100 px-2 py-1">Leads {int(repLeadTotal(rep))}</span>
-            <span>→</span>
-            <span className="rounded bg-sky-50 px-2 py-1 text-sky-700">Sent {int(rep.sentThisWeek.count)}</span>
-            <span>→</span>
-            <span className="rounded bg-indigo-50 px-2 py-1 text-indigo-700">Projected {int(repProjectedTotal(rep))}</span>
-            <span>→</span>
-            <span className="rounded bg-emerald-50 px-2 py-1 font-semibold text-emerald-700">Closed {int(rep.closed.count)}</span>
+            <DrillNumber request={{ metric: "leads", repId: rep.repId, title: `${rep.repName} — Active leads` }} className="rounded-full bg-amber-50 px-2.5 py-1 font-medium text-amber-700 ring-1 ring-amber-200">
+              Leads {int(repLeadTotal(rep))}
+            </DrillNumber>
+            <span className="text-slate-300">→</span>
+            <DrillNumber request={{ metric: "sent", repId: rep.repId, title: `${rep.repName} — Sent` }} className="rounded-full bg-sky-50 px-2.5 py-1 font-medium text-sky-700 ring-1 ring-sky-200">
+              Sent {int(rep.sentThisWeek.count)}
+            </DrillNumber>
+            <span className="text-slate-300">→</span>
+            <DrillNumber request={{ metric: "projection", repId: rep.repId, title: `${rep.repName} — Projected (all)` }} className="rounded-full bg-violet-50 px-2.5 py-1 font-medium text-violet-700 ring-1 ring-violet-200">
+              Projected {int(repProjectedTotal(rep))}
+            </DrillNumber>
+            <span className="text-slate-300">→</span>
+            <DrillNumber request={{ metric: "won", repId: rep.repId, title: `${rep.repName} — Won` }} className="rounded-full bg-emerald-50 px-2.5 py-1 font-semibold text-emerald-700 ring-1 ring-emerald-200">
+              Closed {int(rep.closed.count)}
+            </DrillNumber>
           </div>
           <CoverageCaption ladder={rep.projection} />
         </div>
@@ -308,29 +505,42 @@ export function VariantB3LoadLane({ data }: { data: MondayShowcaseData }) {
 export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) {
   return (
     <div className="space-y-4">
-      <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-900">
-        Office forecast coverage: {data.officeProjection.coverageCaption}
+      <div className="rounded-xl border border-violet-200 bg-gradient-to-r from-violet-50 to-white p-3 text-sm text-violet-900">
+        <span className="font-semibold">Office forecast coverage:</span> {data.officeProjection.coverageCaption}
       </div>
       {data.reps.map((rep) => {
         // per-rung "X of Y dated": the rung's count is the dated subset; Y is the rep's open-deal M.
         const m = rep.projection.coverage.m;
         return (
-          <div key={rep.repId ?? "unassigned"} className="rounded-lg border bg-white p-3">
+          <div key={rep.repId ?? "unassigned"} className="rounded-xl border border-slate-200 bg-white p-3.5">
             <div className="mb-2 flex items-baseline justify-between">
-              <span className="font-semibold">{rep.repName}</span>
-              <span className="text-sm">
-                Closed <span className="font-bold text-emerald-700">{int(rep.closed.count)}</span> · {usd(rep.closed.value.amount)}
+              <span className="font-semibold text-slate-800">{rep.repName}</span>
+              <span className="text-sm text-slate-500">
+                Closed{" "}
+                <DrillNumber request={{ metric: "won", repId: rep.repId, title: `${rep.repName} — Won` }} className={`font-bold text-emerald-700 ${DRILL_UNDERLINE} px-0.5`}>
+                  {int(rep.closed.count)}
+                </DrillNumber>{" "}
+                · <span className="tabular-nums">{usd(rep.closed.value.amount)}</span>
               </span>
             </div>
             <div className="grid grid-cols-4 gap-2">
               {rep.projection.bands.map((b) => (
-                <div key={b.band} className="rounded border p-2 text-center">
-                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{PROJECTION_BAND_LABEL[b.band]}</div>
-                  <div className="text-sm font-semibold">{usd(b.value)}</div>
-                  <div className="mt-1 inline-block rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">
-                    {int(b.count)} of {int(m)} dated
+                <DrillNumber
+                  key={b.band}
+                  request={{ metric: "projection", repId: rep.repId, band: b.band, title: `${rep.repName} — Projected ${PROJECTION_BAND_LABEL[b.band]}` }}
+                  className="block"
+                >
+                  <div className="rounded-lg border border-slate-200 p-2 text-center">
+                    <div className="flex items-center justify-center gap-1">
+                      <span className={`h-1.5 w-1.5 rounded-full ${BAND_BAR[b.band]}`} />
+                      <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{PROJECTION_BAND_LABEL[b.band]}</span>
+                    </div>
+                    <div className="mt-0.5 text-sm font-bold tabular-nums text-slate-800">{usd(b.value)}</div>
+                    <div className="mt-1 inline-block rounded bg-slate-100 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-500">
+                      {int(b.count)} of {int(m)} dated
+                    </div>
                   </div>
-                </div>
+                </DrillNumber>
               ))}
             </div>
           </div>

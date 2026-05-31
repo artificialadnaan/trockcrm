@@ -1,7 +1,14 @@
 import { useState, type ComponentType } from "react";
 import { Loader2 } from "lucide-react";
 import { useMondayShowcase } from "@/hooks/use-reports";
-import { SHOWCASE_VARIANTS, type ShowcaseVariantKey, type MondayShowcaseData } from "./monday-showcase/types";
+import {
+  SHOWCASE_VARIANTS,
+  type ShowcaseVariantKey,
+  type MondayShowcaseData,
+  type EvidenceRequest,
+} from "./monday-showcase/types";
+import { DrillProvider } from "./monday-showcase/drill";
+import { EvidenceDrawer } from "./monday-showcase/evidence-drawer";
 import {
   VariantA1Funnel,
   VariantA2Scoreboard,
@@ -27,6 +34,7 @@ const VARIANT_COMPONENT: Record<ShowcaseVariantKey, ComponentType<{ data: Monday
 export function MondayShowcasePage() {
   const [mode, setMode] = useState<"to_date" | "completed">("to_date");
   const [variant, setVariant] = useState<ShowcaseVariantKey>("HERO");
+  const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
   const { data, loading, error, refetch } = useMondayShowcase(mode);
   const Active = VARIANT_COMPONENT[variant];
 
@@ -38,13 +46,13 @@ export function MondayShowcasePage() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">
-            Reports · Part 2 (Monday showcase)
+            Reports · Monday showcase
           </p>
           <h1 className="text-2xl font-bold">Monday Showcase</h1>
           <p className="max-w-2xl text-sm text-muted-foreground">
             Many presentations, one source of truth — switch variants to compare layouts on identical
-            numbers. Fixed weekly view (use the toggle); the shared date/office/owner filter bar does not
-            apply here.
+            numbers. Every number is evidence-backed: click it to see the exact records behind it. Fixed
+            weekly view (use the toggle); the shared date/office/owner filter bar does not apply here.
           </p>
         </div>
         <button
@@ -92,9 +100,14 @@ export function MondayShowcasePage() {
             ))}
           </div>
 
-          <div className="rounded-xl border bg-gray-50/50 p-4">
-            <Active data={data} />
-          </div>
+          <DrillProvider open={setEvidence}>
+            <div className="rounded-xl border bg-gray-50/50 p-4">
+              <Active data={data} />
+            </div>
+          </DrillProvider>
+          <p className="text-xs text-muted-foreground">
+            Tip: numbers with a dotted underline are clickable — open the exact records behind any figure.
+          </p>
 
           <details className="text-xs text-muted-foreground">
             <summary className="cursor-pointer">Source notes &amp; value-basis discipline</summary>
@@ -110,6 +123,8 @@ export function MondayShowcasePage() {
           No showcase data for this period.
         </div>
       )}
+
+      <EvidenceDrawer request={evidence} mode={mode} onClose={() => setEvidence(null)} />
     </div>
   );
 }

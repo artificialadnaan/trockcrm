@@ -18,7 +18,14 @@ import {
   getWonCloseSummary,
   getCanonicalRepWonSummary,
 } from "../dashboard/service.js";
-import { aliasedReportableDealFilterSql } from "../shared/deal-value-sql.js";
+import {
+  aliasedReportableDealFilterSql,
+  aliasedEffectiveWonDealValueSql,
+  aliasedActiveDealCountFilterSql,
+  aliasedWonHsClosedWonDateSql,
+} from "../shared/deal-value-sql.js";
+import { aliasedHasUsableWonDateSql } from "../deals/service.js";
+import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   getWtdPeriod,
   sundayWeekBucketSql,
@@ -580,4 +587,310 @@ export async function getMondayShowcaseData(
     lastWeek: { estimating: lastEst.count, sent: lastSent.count, won: lastWonSummary.count },
     repNames,
   });
+}
+
+// ===================== DRILL-TO-EVIDENCE (Reports Part 3) =====================
+// Every showcase NUMBER is clickable -> the supporting deal/lead RECORDS. The records behind a number
+// must be EXACTLY the set that number aggregates, so the evidence reconciles to the claim. Each builder
+// below is a row-select over the SAME canonical cohort predicate as its aggregate (Won close-date cohort,
+// Sent/Estimated stage-entry cohort, Projection bands, active leads) and returns, PER ROW, the same value
+// the aggregate summed (same F3 basis SQL) -- so SUM(rows.value) === the number and COUNT(rows) === the
+// count, by construction. Locked by monday-showcase-evidence-sql.test.ts (predicate identity) and
+// monday-showcase-evidence-reconciliation.runtime.test.ts (real-SQL: evidence === aggregate).
+
+export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "leads";
+
+/** A single supporting record (a deal, or a lead for the `leads` metric). */
+export interface EvidenceRecord {
+  id: string;
+  /** deal number (null for leads). */
+  dealNumber: string | null;
+  name: string;
+  repId: string | null;
+  repName: string;
+  /** the record's current pipeline/lead stage. */
+  stageLabel: string;
+  /** this record's contribution to the number, in the metric's F3 basis (null for leads -- no $). */
+  value: number | null;
+  /** the canonical date this record sits on for THIS metric's cohort (close date / entry date / etc). */
+  cohortDate: string | null;
+}
+
+export interface EvidenceTotal {
+  count: number;
+  /** null for leads (no value basis). Equals the showcase number this evidence backs. */
+  value: number | null;
+  basisLabel: string | null;
+}
+
+export type EvidenceScope =
+  | { kind: "office" }
+  | { kind: "rep"; repId: string | null; repName: string };
+
+export interface MondayShowcaseEvidence {
+  metric: EvidenceMetric;
+  metricLabel: string;
+  /** what date axis the records are shown on (honest, per-metric -- never a bare list). */
+  dateAxisLabel: string;
+  period: ShowcasePeriod;
+  scope: EvidenceScope;
+  band: ProjectionBand | null;
+  leadStage: string | null;
+  total: EvidenceTotal;
+  records: EvidenceRecord[];
+}
+
+/**
+ * Optional per-rep narrowing for an evidence query. `undefined` = office-wide (no rep predicate, so it
+ * reconciles to the office number); `null` = the Unassigned bucket (IS NULL); a string = that rep's UUID.
+ * Mirrors how the per-rep aggregates are a GROUP BY slice of the office aggregate.
+ */
+function repScopeSql(alias: string, repId?: string | null): SQL {
+  if (repId === undefined) return sql``;
+  if (repId === null) return sql` AND ${sql.raw(alias)}.assigned_rep_id IS NULL`;
+  return sql` AND ${sql.raw(alias)}.assigned_rep_id = ${repId}::uuid`;
+}
+
+/** Shared deal-row projection for evidence: same columns the FilterBar list shows, plus the cohort $/date. */
+function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
+  return sql`
+    d.id AS id,
+    d.deal_number AS deal_number,
+    d.name AS name,
+    d.assigned_rep_id AS rep_id,
+    COALESCE(u.display_name, '') AS rep_name,
+    COALESCE(psc.name, '') AS stage_label,
+    COALESCE(${valueSql}, 0)::numeric AS value,
+    (${sql.raw(cohortDateExpr)})::date AS cohort_date
+  `;
+}
+
+/**
+ * Won evidence: the deal rows behind the Won count/$ -- byte-identical predicate to getWonCloseSummary
+ * (close-date cohort on won_closed_date, Won stages, usable-won-date guard, reportable + test filters)
+ * and the SAME awarded-first $ basis, so COUNT(rows) === Won count and SUM(value) === Won $.
+ */
+export function buildWonEvidenceSql(from: string, to: string, repId?: string | null): SQL {
+  return sql`
+    SELECT ${dealEvidenceSelectSql(aliasedEffectiveWonDealValueSql("d"), "d.won_closed_date")}
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedActiveDealCountFilterSql("d")}
+      AND psc.slug IN (${slugInList(WON_STAGE_SLUGS)})
+      AND ${aliasedHasUsableWonDateSql("d")}
+      AND ${aliasedWonHsClosedWonDateSql("d")} >= ${from}::date
+      AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date${repScopeSql("d", repId)}
+    ORDER BY value DESC, d.name
+  `;
+}
+
+/**
+ * Sent/Estimated evidence: the DISTINCT deals that entered a sent/estimating stage in the CT window --
+ * same stage-entry cohort and same open best-estimate $ as buildStageEntryCohortSql. The inner GROUP BY
+ * deal_id yields exactly one row per distinct deal (the same set the aggregate's inner DISTINCT counts),
+ * and carries the earliest entry date in-window as the cohort date.
+ */
+export function buildStageEntryEvidenceSql(
+  slugs: readonly string[],
+  from: string,
+  to: string,
+  repId?: string | null
+): SQL {
+  return sql`
+    SELECT ${dealEvidenceSelectSql(openValueSql("d"), "entered.entered_at")}
+    FROM ${deals} d
+    JOIN (
+      SELECT dsh.deal_id, MIN(dsh.created_at) AS entered_at
+      FROM ${dealStageHistory} dsh
+      JOIN ${pipelineStageConfig} psc2 ON psc2.id = dsh.to_stage_id
+      WHERE psc2.slug IN (${slugInList(slugs)})
+        AND ${ctDateInWindowSql("dsh.created_at", from, to)}
+      GROUP BY dsh.deal_id
+    ) entered ON entered.deal_id = d.id
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}${repScopeSql("d", repId)}
+    ORDER BY value DESC, d.name
+  `;
+}
+
+/**
+ * Projection evidence: open, future-dated, non-terminal, active deals -- same predicate as
+ * buildProjectionBandsSql -- optionally narrowed to one 30/60/90 rung via the SAME band CASE, so the
+ * per-band rows reconcile to that rung's count/$.
+ */
+export function buildProjectionEvidenceSql(repId?: string | null, band?: ProjectionBand): SQL {
+  const bandFilter = band
+    ? sql` AND ${projectionBandSql("d.expected_close_date")} = ${band}`
+    : sql``;
+  return sql`
+    SELECT ${dealEvidenceSelectSql(openValueSql("d"), "d.expected_close_date")}
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
+      AND d.is_active = true
+      AND psc.is_terminal = false
+      AND ${futureDatedCloseDatePredicateSql("d.expected_close_date")}${repScopeSql("d", repId)}${bandFilter}
+    ORDER BY d.expected_close_date, value DESC
+  `;
+}
+
+/**
+ * Lead evidence: active (open) lead rows -- same scope as buildLeadStatusSql -- optionally narrowed to one
+ * lead stage. Leads carry no deal value (value column is NULL); the cohort date is the lead's created_at.
+ */
+export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string): SQL {
+  const stageFilter = leadStage ? sql` AND psc.name = ${leadStage}` : sql``;
+  return sql`
+    SELECT l.id AS id,
+           NULL AS deal_number,
+           l.name AS name,
+           l.assigned_rep_id AS rep_id,
+           COALESCE(u.display_name, '') AS rep_name,
+           COALESCE(psc.name, '') AS stage_label,
+           NULL::numeric AS value,
+           l.created_at::date AS cohort_date
+    FROM ${leads} l
+    JOIN ${pipelineStageConfig} psc ON psc.id = l.stage_id
+    LEFT JOIN ${users} u ON u.id = l.assigned_rep_id
+    WHERE l.is_active = true
+      AND l.status = 'open'
+      AND COALESCE(l.is_test_data, false) = false
+      AND psc.workflow_family = 'lead'
+      AND psc.is_terminal = false${repScopeSql("l", repId)}${stageFilter}
+    ORDER BY l.created_at DESC
+  `;
+}
+
+const EVIDENCE_METRIC_LABEL: Record<EvidenceMetric, string> = {
+  won: "Won",
+  sent: "Sent",
+  estimated: "Estimating",
+  projection: "Projected (open)",
+  leads: "Active leads",
+};
+
+const EVIDENCE_DATE_AXIS_LABEL: Record<EvidenceMetric, string> = {
+  won: "Won close date",
+  sent: "Entered the sent stage",
+  estimated: "Entered the estimating stage",
+  projection: "Expected close date",
+  leads: "Lead created",
+};
+
+export interface MondayShowcaseEvidenceOptions {
+  metric: EvidenceMetric;
+  mode?: WeekMode;
+  now?: Date;
+  /** undefined = office-wide; null = Unassigned bucket; string = a rep UUID. */
+  repId?: string | null;
+  /** projection only -- one 30/60/90 rung. */
+  band?: ProjectionBand;
+  /** leads only -- one lead stage label. */
+  leadStage?: string;
+}
+
+interface EvidenceRow {
+  id: string;
+  deal_number: string | null;
+  name: string;
+  rep_id: string | null;
+  rep_name: string;
+  stage_label: string;
+  value: unknown;
+  cohort_date: unknown;
+}
+
+/**
+ * Build the evidence for one showcase number: the supporting records + a total that EQUALS the number.
+ * Computes each canonical figure the same way the showcase service does (same predicate, same $ basis),
+ * so the drawer's total reconciles to the clicked figure by construction.
+ */
+export async function getMondayShowcaseEvidence(
+  tenantDb: TenantDb,
+  options: MondayShowcaseEvidenceOptions
+): Promise<MondayShowcaseEvidence> {
+  const mode: WeekMode = options.mode ?? "to_date";
+  const now = options.now ?? new Date();
+  const { from, to } = getWtdPeriod(mode, now);
+  const period: ShowcasePeriod = { from, to, mode, label: `${from} → ${to}` };
+  const { metric, repId, band, leadStage } = options;
+
+  let query: SQL;
+  switch (metric) {
+    case "won":
+      query = buildWonEvidenceSql(from, to, repId);
+      break;
+    case "sent":
+      query = buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, from, to, repId);
+      break;
+    case "estimated":
+      query = buildStageEntryEvidenceSql(ESTIMATED_STAGE_SLUGS, from, to, repId);
+      break;
+    case "projection":
+      query = buildProjectionEvidenceSql(repId, band);
+      break;
+    case "leads":
+      query = buildLeadEvidenceSql(repId, leadStage);
+      break;
+    default: {
+      const exhaustive: never = metric;
+      throw new Error(`unknown evidence metric: ${String(exhaustive)}`);
+    }
+  }
+
+  const rows = rowsFromExecute<EvidenceRow>(await tenantDb.execute(query));
+  const hasValue = metric !== "leads";
+  const records: EvidenceRecord[] = rows.map((r) => ({
+    id: String(r.id),
+    dealNumber: r.deal_number == null ? null : String(r.deal_number),
+    name: r.name,
+    repId: r.rep_id == null ? null : String(r.rep_id),
+    repName: r.rep_name || (r.rep_id ? "Unknown rep" : "Unassigned"),
+    stageLabel: r.stage_label,
+    value: hasValue ? num(r.value) : null,
+    cohortDate: r.cohort_date == null ? null : String(r.cohort_date).slice(0, 10),
+  }));
+
+  const total: EvidenceTotal = {
+    count: records.length,
+    value: hasValue ? records.reduce((s, rec) => s + (rec.value ?? 0), 0) : null,
+    basisLabel: metric === "won" ? WON_BASIS_LABEL : hasValue ? OPEN_BASIS_LABEL : null,
+  };
+
+  let scope: EvidenceScope;
+  if (repId === undefined) {
+    scope = { kind: "office" };
+  } else {
+    const repName =
+      records.find((rec) => rec.repId === (repId ?? null))?.repName ??
+      (await resolveRepName(tenantDb, repId));
+    scope = { kind: "rep", repId: repId ?? null, repName };
+  }
+
+  return {
+    metric,
+    metricLabel: EVIDENCE_METRIC_LABEL[metric],
+    dateAxisLabel: EVIDENCE_DATE_AXIS_LABEL[metric],
+    period,
+    scope,
+    band: band ?? null,
+    leadStage: leadStage ?? null,
+    total,
+    records,
+  };
+}
+
+/** Resolve a rep's display name for the scope header when the drill returned no rows. */
+async function resolveRepName(tenantDb: TenantDb, repId: string | null): Promise<string> {
+  if (repId == null) return "Unassigned";
+  const rows = rowsFromExecute<{ name: string }>(
+    await tenantDb.execute(sql`SELECT ${users.displayName} AS name FROM ${users} WHERE ${users.id} = ${repId}::uuid`)
+  );
+  return rows[0]?.name ?? "Unknown rep";
 }
