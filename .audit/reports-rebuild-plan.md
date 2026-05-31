@@ -70,6 +70,14 @@ SEQUENCING: #1 (config/seed) + #3 (one-liner) are quick and unblock honest data;
 ================================================================================
 ## PART 2 -- REPORT A (weekly per-department) + REPORT B (per-rep)  [PENDING samples + go]
 
+ADDITIVE FRAMING (locked): all NEW reports are ADDITIVE -- generate MULTIPLE report options/variants
+(different groupings, layouts, metric emphases) ALONGSIDE the existing reports, not destructive
+rewrites, so the team can pick from each (UI-showcase-vote style). Only deep-dive/replace an existing
+report when specifically fixing a broken one. CRITICAL: additive applies to PRESENTATION ONLY -- every
+variant MUST pull from the SAME canonical sources (Won->getWonCloseSummary, "this week"->#539 WTD,
+etc.). Many presentations, ONE source of truth: variants group/lay-out differently but the underlying
+numbers are identical, so no two reports ever disagree on a figure.
+
 Framing locked (fill in once the reporting samples arrive and are mapped metric->canonical source):
 
 REPORT A -- weekly per-department (functional), Sun-Sat WTD:
