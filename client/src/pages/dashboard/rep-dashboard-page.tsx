@@ -4,7 +4,6 @@ import { Link, useNavigate } from "react-router-dom";
 import { useTasks } from "@/hooks/use-tasks";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { ActivityRangeSelect } from "@/components/dashboard/activity-range-select";
-import { NotificationCenter } from "@/components/notifications/notification-center";
 import { type ActivityRange } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
 import { buttonVariants, Button } from "@/components/ui/button";
@@ -627,10 +626,9 @@ export function RepDashboardPage() {
           >
             <BarChart3 className="h-4 w-4" />
           </Link>
-          <NotificationCenter
-            triggerAriaLabel="Notifications"
-            triggerClassName="flex size-11 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-600 md:size-10"
-          />
+          {/* No notifications bell here: AppShell's Topbar already mounts the
+              canonical <NotificationCenter/> on every viewport, so a second one
+              would be a redundant bell with divergent unread state. */}
           <button
             type="button"
             aria-label="Refresh dashboard"

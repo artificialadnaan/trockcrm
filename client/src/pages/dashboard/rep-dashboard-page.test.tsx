@@ -81,11 +81,6 @@ vi.mock("@/components/ui/button", () => ({
 vi.mock("@/components/ui/badge", () => ({
   Badge: ({ children, className }: { children: ReactNode; className?: string }) => <span className={className}>{children}</span>,
 }));
-vi.mock("@/components/notifications/notification-center", () => ({
-  NotificationCenter: ({ triggerClassName }: { triggerClassName?: string }) => (
-    <button type="button" aria-label="Notifications" className={triggerClassName} data-testid="notification-center" />
-  ),
-}));
 
 const dashboardData = {
   activeLeads: { count: 4 },
@@ -384,12 +379,14 @@ describe("RepDashboardPage", () => {
     expect(html).not.toContain('aria-label="Open charts"');
   });
 
-  it("replaces the inert notifications bell with the real NotificationCenter", () => {
+  it("drops the notifications bell from the dashboard header (the Topbar owns it)", () => {
     const html = renderDashboard();
 
-    expect(html).toContain('data-testid="notification-center"');
-    // The old non-functional bell button (and its fake overdue dot) is gone.
+    // The old non-functional bell button (and its fake overdue dot) is gone, and we do
+    // NOT mount a second NotificationCenter here — AppShell's Topbar already provides the
+    // canonical bell on every viewport, so a page-level one would diverge in unread state.
     expect(html).not.toContain('aria-label="Open notifications"');
+    expect(html).not.toContain('aria-label="Notifications"');
   });
 
   it("TimeRangeTabs default to YTD", () => {

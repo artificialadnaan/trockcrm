@@ -12,16 +12,9 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { MobileNavView } from "@/components/layout/mobile-nav";
-import { NotificationCenter } from "@/components/notifications/notification-center";
 import { RepPerfCard, type RepPerfView } from "@/pages/director/director-dashboard-page";
 import { ScopeToggle } from "@/components/shared/scope-toggle";
 import { useState } from "react";
-
-// The rep dashboard header passes this exact class string to <NotificationCenter>.
-// Kept here verbatim so the preview matches the real toolbar (size-11 == the
-// siblings' h-11 w-11; same `size-*` group so tailwind-merge drops the base size-8).
-const NOTIFICATION_TRIGGER_CLASS =
-  "flex size-11 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-600 md:size-10";
 
 // Dev-only preview for the mobile UI refresh (bottom nav, responsive Sales Force
 // table, touch targets). Mirrors the shared-primitives harness pattern: real
@@ -192,13 +185,14 @@ export function MobileUiHarness() {
         />
       </Section>
 
-      <Section id="harness-toolbar-stubs" title="4 · Rep dashboard header — dead controls → real">
+      <Section id="harness-toolbar-stubs" title="4 · Rep dashboard header — dead controls fixed">
         <p className="text-xs text-slate-500">
           The chart &amp; bell icons used to be inert buttons with lying{" "}
-          <code>aria-label</code>s. Now the chart icon links to{" "}
-          <code>/reports</code> and the bell is the real{" "}
-          <code>NotificationCenter</code> (offline here → empty state). All four
-          stay ≥44px and visually identical on phones.
+          <code>aria-label</code>s. The chart icon now links to{" "}
+          <code>/reports</code>. The bell is <strong>removed</strong> — the
+          AppShell <code>Topbar</code> already mounts the canonical{" "}
+          <code>NotificationCenter</code> on every viewport, so a second one here
+          would be a redundant, divergent bell. Remaining controls stay ≥44px.
         </p>
         <BeforeAfter
           before={
@@ -230,7 +224,6 @@ export function MobileUiHarness() {
               >
                 <BarChart3 className="h-4 w-4" />
               </Link>
-              <NotificationCenter triggerAriaLabel="Notifications" triggerClassName={NOTIFICATION_TRIGGER_CLASS} />
               <button
                 type="button"
                 aria-label="Refresh dashboard"
