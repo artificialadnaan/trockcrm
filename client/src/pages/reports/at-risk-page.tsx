@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useAtRiskWatchlist } from "@/hooks/use-reports";
 import { PipelineStageTable, type PipelineStageTableColumn } from "@/components/pipeline/pipeline-stage-table";
 import { usd, int, formatDayShort } from "./evidence-kit";
@@ -30,6 +30,7 @@ export function AtRiskPage() {
   const { data, loading, error } = useAtRiskWatchlist();
   const [repFilter, setRepFilter] = useState<string>("__all__");
   const navigate = useNavigate();
+  const { search } = useLocation(); // preserve ?officeId when opening a deal from the watchlist
 
   const repOptions = useMemo(() => {
     if (!data) return [];
@@ -137,7 +138,7 @@ export function AtRiskPage() {
               columns={columns}
               pagination={{ page: 1, pageSize: records.length, total: records.length, totalPages: 1 }}
               onPageChange={() => {}}
-              onRowClick={(r) => navigate(`/deals/${r.id}`)}
+              onRowClick={(r) => navigate({ pathname: `/deals/${r.id}`, search })}
               getRowKey={(r) => r.id}
               showPagination={false}
             />

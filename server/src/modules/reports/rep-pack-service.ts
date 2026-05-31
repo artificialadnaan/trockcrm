@@ -47,14 +47,16 @@ export async function getRepPackData(tenantDb: TenantDb, options: RepPackOptions
   const allReps = namedReps.map((r) => ({ repId: r.repId, repName: r.repName }));
   if (allReps.length === 0) return null;
 
+  // Resolve the rep. If the requested rep has no activity THIS period (but others do), fall back to the
+  // top rep rather than returning null -- returning null would hide the selector and strand the user with
+  // no way to pick an available rep. namedReps is non-empty here, so `rep` is always defined.
   const targetId = options.repId ?? allReps[0].repId;
-  const rep = namedReps.find((r) => r.repId === targetId);
-  if (!rep) return null;
+  const rep = namedReps.find((r) => r.repId === targetId) ?? namedReps[0];
 
   const trend = await computeWeeklyTrend(tenantDb, {
     from: showcase.period.from,
     to: showcase.period.to,
-    repId: targetId,
+    repId: rep.repId, // the RESOLVED rep (may differ from the requested one on fallback)
   });
 
   return { period: showcase.period, rep, trend, allReps };

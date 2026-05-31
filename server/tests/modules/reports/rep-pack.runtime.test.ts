@@ -82,4 +82,16 @@ describe("Rep 1:1 Pack reconciles to the canonical per-rep numbers", () => {
     const pack = await getRepPackData(tdb, { mode: "to_date", now: NOW });
     expect(pack?.rep.repId).toBe(REP_A); // Alice 180k > Bob 50k
   });
+
+  it("falls back to a valid rep (never collapses) when the requested rep has no activity this period", async () => {
+    // A rep that exists in the roster but has zero activity this period -> must NOT return null (which
+    // would hide the selector and strand the user); fall back to a rep that IS in allReps.
+    const ghost = U("c99");
+    const pack = await getRepPackData(tdb, { repId: ghost, mode: "to_date", now: NOW });
+    expect(pack).not.toBeNull();
+    if (!pack) return;
+    expect(pack.allReps.some((r) => r.repId === pack.rep.repId)).toBe(true); // the resolved rep is selectable
+    // the trend belongs to the RESOLVED rep, not the empty requested one
+    expect(pack.trend[7].won).toBe(pack.rep.closed.count);
+  });
 });

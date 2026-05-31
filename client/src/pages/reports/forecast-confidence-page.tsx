@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Loader2, ShieldAlert } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { useMondayShowcase } from "@/hooks/use-reports";
 import { PROJECTION_BAND_LABEL, type EvidenceRequest, type MondayShowcaseData } from "./monday-showcase/types";
 import { DrillProvider, DrillNumber, EvidenceDrawer, usd, int, BAND_BAR, Sparkline, DRILL_UNDERLINE } from "./evidence-kit";
@@ -10,6 +10,9 @@ import { DrillProvider, DrillNumber, EvidenceDrawer, usd, int, BAND_BAR, Sparkli
 // presentation over the canonical showcase payload (officeProjection + per-rep bands + weeklyTrend).
 
 function Board({ data }: { data: MondayShowcaseData }) {
+  // Carry the current query (esp. ?officeId, which the api client turns into the x-office-id header) into
+  // the At-Risk link, so the watchlist loads the SAME office whose forecast produced this M − N count.
+  const { search } = useLocation();
   const ladder = data.officeProjection;
   const { n, m } = ladder.coverage;
   const blind = Math.max(0, m - n);
@@ -39,15 +42,16 @@ function Board({ data }: { data: MondayShowcaseData }) {
         </div>
         {/* coverage bar: forecastable (N) vs blind (M − N) */}
         <div className="mt-4">
+          {/* With no open deals (m === 0) leave the track neutral -- an empty book is not "100% at-risk". */}
           <div className="flex h-3 overflow-hidden rounded-full bg-slate-100">
-            <div className="bg-indigo-500" style={{ width: `${pctForecastable}%` }} title={`${n} forecastable`} />
-            <div className="bg-rose-400" style={{ width: `${100 - pctForecastable}%` }} title={`${blind} at-risk / undated`} />
+            <div className="bg-indigo-500" style={{ width: `${m > 0 ? pctForecastable : 0}%` }} title={`${n} forecastable`} />
+            <div className="bg-rose-400" style={{ width: `${m > 0 ? 100 - pctForecastable : 0}%` }} title={`${blind} at-risk / undated`} />
           </div>
           <div className="mt-1.5 flex items-center justify-between text-xs">
             <span className="text-indigo-700">{int(n)} forecastable</span>
             <span className="font-medium text-rose-600">
               {int(blind)} blind spots —{" "}
-              <Link to="/reports/at-risk" className="inline-flex items-center gap-1 underline decoration-rose-300 underline-offset-2 hover:decoration-rose-600">
+              <Link to={{ pathname: "/reports/at-risk", search }} className="inline-flex items-center gap-1 underline decoration-rose-300 underline-offset-2 hover:decoration-rose-600">
                 <ShieldAlert className="h-3 w-3" /> see the At-Risk watchlist
               </Link>
             </span>

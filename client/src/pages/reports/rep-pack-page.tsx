@@ -126,7 +126,11 @@ export function RepPackPage() {
   const [repId, setRepId] = useState<string | undefined>(undefined);
   const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
   const { data, loading, error } = useRepPack(repId, mode);
-  const currentRepId = repId ?? data?.rep.repId ?? "";
+  // Show the user's pick when it's a real option; otherwise the rep the server actually resolved (e.g.
+  // after a fallback when the picked rep has no activity this period) -- so the <select> never goes blank.
+  const currentRepId = data
+    ? (repId && data.allReps.some((r) => r.repId === repId) ? repId : data.rep.repId ?? "")
+    : "";
 
   return (
     <div className="space-y-4 p-4">
