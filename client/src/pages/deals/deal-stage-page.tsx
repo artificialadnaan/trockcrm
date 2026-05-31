@@ -11,9 +11,10 @@ import {
   getDrilldownFilterBarDimensions,
 } from "@/components/deals/deals-filterbar-adapter";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
-import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
+import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useAuth } from "@/lib/auth";
+import { getStagePageListStageIds, mapStageRouteFiltersToDealFilters } from "@/lib/pipeline-stage-page";
 
 export function DealStagePage() {
   const { stageId } = useParams();
@@ -22,14 +23,20 @@ export function DealStagePage() {
   const { regions } = useRegions();
   const { projectTypes } = useProjectTypes();
   const { assignees } = useTaskAssignees();
+  const { stages, loading: stagesLoading } = usePipelineStages("deal");
   const { user } = useAuth();
   const summary = buildDealStageSummary(data);
 
   if (route.needsRedirect) return <Navigate to={route.redirectTo} replace />;
   if (error) return <div className="text-sm text-rose-600">{error}</div>;
-  if (loading || !data) return <div className="text-sm text-slate-500">Loading stage...</div>;
+  // Wait for stages too: a terminal route stage broadens to its alias family via the stage list, so
+  // querying before stages load would under-scope the list (Codex P2 reconciliation).
+  if (loading || stagesLoading || !data) return <div className="text-sm text-slate-500">Loading stage...</div>;
 
   const stage = data.stage;
+  // The list's stage scope = the SAME population the header counts: a Won/Lost stage broadens to its
+  // terminal alias family (mirrors the server stage endpoint), every other stage stays its single id.
+  const listStageIds = getStagePageListStageIds(stage, stages);
 
   return (
     <PipelineStagePageHeader
@@ -59,7 +66,7 @@ export function DealStagePage() {
         pageSize={20}
         searchPlaceholder="Deal, number, city, state"
         visibleStages={[stage]}
-        baseFilters={{ stageIds: [stage.id] }}
+        baseFilters={{ ...mapStageRouteFiltersToDealFilters(route.query), stageIds: listStageIds }}
         filterBar={{
           dimensions: getDrilldownFilterBarDimensions({ pinnedStage: true, ownRep: user?.role === "admin" }),
           options: {
@@ -69,8 +76,8 @@ export function DealStagePage() {
             sortOptions: DEAL_LIST_SORT_OPTIONS,
           },
           stageEntryDateEnabled: true,
-          defaultStageIds: [stage.id],
-          terminalStageIds: isTerminalStage(stage.slug) ? [stage.id] : [],
+          defaultStageIds: listStageIds,
+          terminalStageIds: isTerminalStage(stage.slug) ? listStageIds : [],
           paramPrefix: DRILLDOWN_FILTERBAR_PARAM_PREFIX,
           // Default the list to days-in-stage (oldest entry first) — the stage drill-down's age focus —
           // when the bar carries no explicit sort.

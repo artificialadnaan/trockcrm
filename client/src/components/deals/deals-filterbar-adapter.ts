@@ -63,6 +63,42 @@ export function getDrilldownFilterBarDimensions(
   });
 }
 
+/** Which FilterBarValue keys each dimension owns. Used to drop URL params for dimensions a mount does
+ *  not render, so a stray prefixed key (e.g. fb_stageIds on a stage-pinned mount, or fb_assignedRepId
+ *  where Rep is hidden) can't override a pinned/host-owned filter with no visible control to clear it. */
+const DIMENSION_VALUE_KEYS: Record<FilterDimension, ReadonlyArray<keyof FilterBarValue>> = {
+  search: ["search"],
+  scope: ["scope"],
+  date: ["dateFrom", "dateTo", "datePreset"],
+  stage: ["stageIds"],
+  sort: ["sortBy", "sortDir"],
+  rep: ["assignedRepId"],
+  status: ["status"],
+  workflow: ["workflowRoute"],
+  region: ["regionId"],
+  projectType: ["projectTypeId"],
+  value: ["valueMin", "valueMax"],
+  stalled: ["minAgeDays", "maxAgeDays"],
+};
+
+/**
+ * Narrow a deserialized FilterBar URL value to only the keys owned by the dimensions a mount actually
+ * renders. Params for hidden dimensions are dropped, so they can't silently override a pinned filter
+ * (Codex P2) — the bar applies only what it visibly exposes a control for.
+ */
+export function pickFilterBarValueForDimensions(
+  value: FilterBarValue,
+  dimensions: ReadonlyArray<FilterDimension>
+): FilterBarValue {
+  const allowed = new Set<string>();
+  for (const dimension of dimensions) {
+    for (const key of DIMENSION_VALUE_KEYS[dimension]) allowed.add(key);
+  }
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => allowed.has(key))
+  ) as FilterBarValue;
+}
+
 /** The shared-FilterBar config a drill-down list mount feeds to `<DealsListSection filterBar={…}>`.
  *  Superset (all required) of the optional `filterBar` prop, so it is assignable verbatim. */
 export interface DrilldownListFilterBar {

@@ -7,6 +7,7 @@ import {
   getBoardVisibleStageScope,
   getDealDisplayDate,
   getDrilldownFilterBarDimensions,
+  pickFilterBarValueForDimensions,
 } from "./deals-filterbar-adapter";
 import type { FilterBarValue } from "@/components/filters/filterbar-params";
 
@@ -323,5 +324,38 @@ describe("buildDrilldownListFilterBar (the /deals dashboard drill-down list moun
     expect(cfg.options.regions).toEqual([{ value: "region-1", label: "DFW" }]);
     expect(cfg.options.projectTypes).toEqual([{ value: "type-1", label: "Multifamily" }]);
     expect(cfg.options.sortOptions).toBeDefined();
+  });
+});
+
+describe("pickFilterBarValueForDimensions (drop URL params for dimensions a mount doesn't render)", () => {
+  const full: FilterBarValue = {
+    search: "acme",
+    stageIds: ["stage-a"],
+    assignedRepId: "rep-1",
+    regionId: "region-1",
+    valueMin: 1000,
+    dateFrom: "2026-05-01",
+    status: "active",
+  };
+
+  it("keeps only the value keys mapped to the rendered dimensions", () => {
+    // A stage-page-style mount: stage pinned (no stage dim), rep hidden (non-admin) -> a stray
+    // fb_stageIds / fb_assignedRepId in the URL must NOT reach the query.
+    const picked = pickFilterBarValueForDimensions(full, ["search", "date", "value", "status"]);
+    expect(picked).toEqual({ search: "acme", valueMin: 1000, dateFrom: "2026-05-01", status: "active" });
+    expect(picked.stageIds).toBeUndefined();
+    expect(picked.assignedRepId).toBeUndefined();
+    expect(picked.regionId).toBeUndefined();
+  });
+
+  it("keeps rep + stage when those dimensions ARE rendered", () => {
+    const picked = pickFilterBarValueForDimensions(full, ["stage", "rep"]);
+    expect(picked.stageIds).toEqual(["stage-a"]);
+    expect(picked.assignedRepId).toBe("rep-1");
+    expect(picked.search).toBeUndefined();
+  });
+
+  it("returns an empty value when no dimensions are rendered", () => {
+    expect(pickFilterBarValueForDimensions(full, [])).toEqual({});
   });
 });

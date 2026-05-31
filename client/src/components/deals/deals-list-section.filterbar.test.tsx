@@ -88,6 +88,9 @@ const FB_DIMENSIONS: FilterDimension[] = [
   "projectType",
   "value",
   "sort",
+  // stalled is part of an outcome-aware mount's row (DEAL_LIST_FILTERBAR_DIMENSIONS); include it so the
+  // dimension-scoped param pick honors minAgeDays/maxAgeDays the way the real pipeline/drill-down bars do.
+  "stalled",
 ];
 const FB_OPTIONS: FilterBarOptions = {
   reps: [{ value: "rep-1", label: "Brett Jones" }],
@@ -453,6 +456,14 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
       const call = lastDealsCall();
       expect(call.dateFrom).toBe("2026-05-10");
       expect(call.dateTo).toBe("2026-05-20");
+    });
+
+    it("ignores a URL param for a dimension the mount does not render (hidden-dim leak guard)", async () => {
+      // Rep dimension removed -> a stray ?assignedRepId in the URL has no visible control and must not
+      // reach the query (else it would silently override a host-owned / pinned filter).
+      const noRep = { ...FB_PROP, dimensions: FB_DIMENSIONS.filter((d) => d !== "rep") };
+      await renderFB("/deals?assignedRepId=rep-1", {}, noRep);
+      expect(lastDealsCall().assignedRepId).toBeUndefined();
     });
   });
 });

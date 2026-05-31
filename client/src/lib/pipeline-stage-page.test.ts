@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { normalizeStagePageQuery } from "./pipeline-stage-page";
+import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
+import {
+  getStagePageListStageIds,
+  mapStageRouteFiltersToDealFilters,
+  normalizeStagePageQuery,
+} from "./pipeline-stage-page";
 
 describe("normalizeStagePageQuery", () => {
   afterEach(() => {
@@ -102,5 +107,71 @@ describe("normalizeStagePageQuery", () => {
       estimateSentFrom: "2026-05-17",
       estimateSentTo: "2026-05-22",
     });
+  });
+});
+
+describe("getStagePageListStageIds (terminal alias-family broadening — reconciles the list to the header)", () => {
+  const allStages = [
+    { id: "s-est", slug: "estimating" },
+    { id: "s-won", slug: "won" },
+    { id: "s-closed-won", slug: "closed_won" }, // a Won alias the legacy summary also counts
+    { id: "s-lost", slug: "lost" },
+  ];
+
+  it("broadens a Won route stage to every Won-family id present (mirrors the server stage endpoint)", () => {
+    const ids = getStagePageListStageIds({ id: "s-won", slug: "won" }, allStages);
+    expect(ids).toContain("s-won");
+    expect(ids).toContain("s-closed-won");
+    expect(ids).not.toContain("s-est");
+    expect(ids).not.toContain("s-lost");
+  });
+
+  it("uses the SAME shared Won family the server broadens with (no drift)", () => {
+    const stages = WON_DEAL_STAGE_SLUGS.map((slug, i) => ({ id: `w-${i}`, slug }));
+    const ids = getStagePageListStageIds({ id: "w-0", slug: "won" }, stages);
+    expect([...ids].sort()).toEqual(stages.map((stage) => stage.id).sort());
+  });
+
+  it("keeps a non-terminal stage as its single route id", () => {
+    expect(getStagePageListStageIds({ id: "s-est", slug: "estimating" }, allStages)).toEqual(["s-est"]);
+  });
+});
+
+describe("mapStageRouteFiltersToDealFilters (header filters -> list DealFilters, so the list matches the header)", () => {
+  it("maps the population filters the summary applies into getDeals filters", () => {
+    expect(
+      mapStageRouteFiltersToDealFilters({
+        search: "acme",
+        filters: {
+          staleOnly: false,
+          assignedRepId: "rep-1",
+          regionId: "region-1",
+          status: "on_hold",
+          workflowRoute: "service",
+          updatedAfter: "2026-05-01",
+          updatedBefore: "2026-05-31",
+          minAgeDays: "30",
+          wonSince: "2026-04-01",
+          wonUntil: "2026-04-30",
+        },
+      })
+    ).toEqual({
+      search: "acme",
+      assignedRepId: "rep-1",
+      regionId: "region-1",
+      status: "on_hold",
+      workflowRoute: "service",
+      updatedFrom: "2026-05-01",
+      updatedTo: "2026-05-31",
+      minAgeDays: 30,
+      wonClosedFrom: "2026-04-01",
+      wonClosedTo: "2026-04-30",
+    });
+  });
+
+  it("ignores filters with no getDeals equivalent (staleOnly, Lost date window)", () => {
+    expect(
+      mapStageRouteFiltersToDealFilters({ search: "", filters: { staleOnly: true, lostSince: "2026-01-01" } })
+    ).toEqual({});
   });
 });

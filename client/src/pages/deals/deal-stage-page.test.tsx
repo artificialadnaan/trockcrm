@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   useNormalizedStageRouteMock: vi.fn(),
   useRegionsMock: vi.fn(),
   useProjectTypesMock: vi.fn(),
+  usePipelineStagesMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
   useAuthMock: vi.fn(),
   dealsListSectionMock: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("@/lib/pipeline-scope", () => ({ useNormalizedStageRoute: mocks.useNorma
 vi.mock("@/hooks/use-pipeline-config", () => ({
   useRegions: mocks.useRegionsMock,
   useProjectTypes: mocks.useProjectTypesMock,
+  usePipelineStages: mocks.usePipelineStagesMock,
 }));
 vi.mock("@/hooks/use-task-assignees", () => ({ useTaskAssignees: mocks.useTaskAssigneesMock }));
 vi.mock("@/lib/auth", () => ({ useAuth: mocks.useAuthMock }));
@@ -89,11 +91,20 @@ describe("DealStagePage", () => {
     mocks.useProjectTypesMock.mockReturnValue({ projectTypes: [{ id: "type-1", name: "Multifamily" }] });
     mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [{ id: "rep-1", displayName: "Alex Rep" }] });
     mocks.useAuthMock.mockReturnValue({ user: { role: "admin" } });
+    mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      stages: [
+        { id: "stage-estimating", slug: "estimating", name: "Estimating" },
+        { id: "s-won", slug: "won", name: "Won" },
+        { id: "s-closed-won", slug: "closed_won", name: "Closed Won" },
+        { id: "s-lost", slug: "lost", name: "Lost" },
+      ],
+    });
     mocks.useNormalizedStageRouteMock.mockReturnValue({
       needsRedirect: false,
       redirectTo: "/deals/stages/stage-estimating?scope=team",
       backTo: "/deals?scope=team",
-      query: { scope: "team", page: 1 },
+      query: { scope: "team", page: 1, pageSize: 25, sort: "", search: "", filters: { staleOnly: false } },
       onPageChange: vi.fn(),
     });
     setStage({ id: "stage-estimating", name: "Estimating", slug: "estimating" });
@@ -134,15 +145,44 @@ describe("DealStagePage", () => {
     expect(lastListProps().filterBar.dimensions).not.toContain("rep");
   });
 
-  it("flags a terminal stage so terminal deals flow through (inactiveStageIds via terminalStageIds)", () => {
-    setStage({ id: "stage-won", name: "Won", slug: "won" });
-    renderStage("/deals/stages/stage-won?scope=team");
-    expect(lastListProps().filterBar.terminalStageIds).toEqual(["stage-won"]);
-  });
-
   it("leaves an active stage's terminalStageIds empty", () => {
     renderStage();
     expect(lastListProps().filterBar.terminalStageIds).toEqual([]);
+  });
+
+  // RECONCILIATION (Codex P2): the A′ list must scope to the SAME population the header summary counts,
+  // so header count === list count when no bar filter is applied.
+  it("reconciles a terminal Won stage to the whole Won alias family the header counts (not just the route id)", () => {
+    setStage({ id: "s-won", name: "Won", slug: "won" });
+    renderStage("/deals/stages/s-won?scope=team");
+    const props = lastListProps();
+    // The header (useDealStagePage) broadens Won to its alias family server-side; the list must match.
+    expect(props.baseFilters.stageIds).toContain("s-won");
+    expect(props.baseFilters.stageIds).toContain("s-closed-won"); // the Won alias the header also counts
+    expect(props.filterBar.terminalStageIds).toEqual(props.baseFilters.stageIds); // terminal deals flow through
+    expect(props.filterBar.defaultStageIds).toEqual(props.baseFilters.stageIds); // bar scope == list scope
+  });
+
+  it("carries the inbound stage-route filters into the list so it matches the filtered header", () => {
+    mocks.useNormalizedStageRouteMock.mockReturnValue({
+      needsRedirect: false,
+      redirectTo: "/deals/stages/stage-estimating?scope=team",
+      backTo: "/deals?scope=team",
+      query: {
+        scope: "team",
+        page: 1,
+        pageSize: 25,
+        sort: "",
+        search: "acme",
+        filters: { staleOnly: false, assignedRepId: "rep-1", regionId: "region-1" },
+      },
+      onPageChange: vi.fn(),
+    });
+    renderStage();
+    const props = lastListProps();
+    expect(props.baseFilters.assignedRepId).toBe("rep-1");
+    expect(props.baseFilters.regionId).toBe("region-1");
+    expect(props.baseFilters.search).toBe("acme");
   });
 
   it("renders a stage error when the stage query fails", () => {

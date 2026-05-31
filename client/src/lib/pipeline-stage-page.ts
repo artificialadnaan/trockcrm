@@ -1,3 +1,6 @@
+import { LOST_DEAL_STAGE_SLUGS, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
+import type { DealFilters } from "@/hooks/use-deals";
+
 export interface StagePageFilters {
   assignedRepId?: string;
   estimateSentFrom?: string;
@@ -114,4 +117,51 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
       lostAllTime: input.lost_all_time === "true",
     },
   };
+}
+
+/**
+ * The deal-stage ids the A′ stage-page LIST queries through getDeals. Mirrors the server stage endpoint
+ * (getDealStagePage, service.ts:2700-2713): a Won/Lost route stage broadens to every stage id in its
+ * terminal alias family (WON/LOST_DEAL_STAGE_SLUGS — the SAME shared constant the server broadens with),
+ * so the list reconciles to the family-counting header; any other stage stays its single route id.
+ */
+export function getStagePageListStageIds(
+  stage: { id: string; slug: string },
+  allStages: ReadonlyArray<{ id: string; slug: string }>
+): string[] {
+  const family: readonly string[] | null = WON_DEAL_STAGE_SLUGS.includes(stage.slug)
+    ? WON_DEAL_STAGE_SLUGS
+    : LOST_DEAL_STAGE_SLUGS.includes(stage.slug)
+      ? LOST_DEAL_STAGE_SLUGS
+      : null;
+  if (!family) return [stage.id];
+  return allStages.filter((item) => family.includes(item.slug)).map((item) => item.id);
+}
+
+/**
+ * Translate the bare stage-route query (the filters the header summary applies via useDealStagePage)
+ * into the DealFilters the A′ list runs through getDeals, so the list defaults to the header's
+ * population (the FilterBar then refines it). Fields with no getDeals equivalent — `staleOnly` and the
+ * Lost date window — are not mappable here and fall outside the no-bar-filter reconciliation.
+ */
+export function mapStageRouteFiltersToDealFilters(
+  query: Pick<StagePageQuery, "search" | "filters">
+): Partial<DealFilters> {
+  const f = query.filters;
+  const base: Partial<DealFilters> = {};
+  if (query.search) base.search = query.search;
+  if (f.assignedRepId) base.assignedRepId = f.assignedRepId;
+  if (f.regionId) base.regionId = f.regionId;
+  if (f.source) base.source = f.source;
+  if (f.status === "active" || f.status === "on_hold" || f.status === "inactive") base.status = f.status;
+  if (f.workflowRoute === "normal" || f.workflowRoute === "service") base.workflowRoute = f.workflowRoute;
+  if (f.updatedAfter) base.updatedFrom = f.updatedAfter;
+  if (f.updatedBefore) base.updatedTo = f.updatedBefore;
+  if (f.minAgeDays) base.minAgeDays = Number(f.minAgeDays);
+  if (f.maxAgeDays) base.maxAgeDays = Number(f.maxAgeDays);
+  if (f.estimateSentFrom) base.estimateSentFrom = f.estimateSentFrom;
+  if (f.estimateSentTo) base.estimateSentTo = f.estimateSentTo;
+  if (f.wonSince) base.wonClosedFrom = f.wonSince;
+  if (f.wonUntil) base.wonClosedTo = f.wonUntil;
+  return base;
 }

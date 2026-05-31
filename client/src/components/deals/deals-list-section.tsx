@@ -40,7 +40,12 @@ import { listPaginationIconButtonClassName } from "@/components/shared/list-pagi
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { useFilterState } from "@/components/filters/use-filter-state";
 import { FilterBar, type FilterDimension, type FilterBarOptions } from "@/components/filters/filter-bar";
-import { applyBoardVisibilityDefaults, filterBarValueToDealFilters, getDealDisplayDate } from "./deals-filterbar-adapter";
+import {
+  applyBoardVisibilityDefaults,
+  filterBarValueToDealFilters,
+  getDealDisplayDate,
+  pickFilterBarValueForDimensions,
+} from "./deals-filterbar-adapter";
 
 const DEAL_STAGE_ORDER = [
   "opportunity",
@@ -784,7 +789,11 @@ export function DealsListSection({
   // FilterBar mode: URL value -> contract DealFilters (outcome-aware date, status, workflow, value,
   // stalled). baseFilters still layer (parent presets); scope inherits from the page unless the URL
   // sets it; the section owns page/limit. filter-axis == display-axis (displayDate rendered below).
-  const barFilters = applyBoardVisibilityDefaults(filterBarValueToDealFilters(urlFilters), {
+  // Drop URL params for dimensions this mount doesn't render before mapping (Codex P2): a stray
+  // prefixed key (fb_stageIds on a stage-pinned mount, fb_assignedRepId where Rep is hidden) must not
+  // override a pinned/host-owned filter with no visible control to clear it.
+  const visibleUrlFilters = pickFilterBarValueForDimensions(urlFilters, filterBar?.dimensions ?? []);
+  const barFilters = applyBoardVisibilityDefaults(filterBarValueToDealFilters(visibleUrlFilters), {
     defaultStageIds: filterBar?.defaultStageIds,
     terminalStageIds: filterBar?.terminalStageIds,
   });
