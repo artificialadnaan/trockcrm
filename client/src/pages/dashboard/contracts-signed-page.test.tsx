@@ -131,11 +131,76 @@ describe("formatSignedDate", () => {
         isActive: "all",
       })
     );
-    expect(html).toContain("$1.0M");
-    expect(html).toContain("$125K");
-    expect(html).toContain("$900K");
+    // Now uses the SAFE deal-utils formatCurrency (full $, NaN-guarded) instead of the unsafe compact one.
+    expect(html).toContain("$1,025,000"); // total awarded (raw awarded sums, incl. the held deal)
+    expect(html).toContain("$125,000");
+    expect(html).toContain("$900,000");
     expect(html).toContain("No Award Yet");
     expect(html).toContain("Held Deal");
-    expect(html).not.toContain("$375K");
+    expect(html).not.toContain("$375,000"); // never sums bid estimates
+  });
+});
+
+describe("ContractsSignedPage (GREY UI-accuracy fixes)", () => {
+  beforeEach(() => {
+    mocks.useAuthMock.mockReturnValue({ user: { id: "rep-1" }, loading: false });
+    mocks.useDealsMock.mockReturnValue({ deals: [], loading: false, error: null });
+  });
+
+  it("renders '--' (not $NaN) when an awarded amount is non-numeric — the safe formatter guards it", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        {
+          id: "deal-x",
+          name: "Garbled Award",
+          dealNumber: "TR-9",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          contractSignedDate: "2026-05-01",
+          contractSignedAt: null,
+          awardedAmount: "not-a-number",
+          stageName: "Won",
+          onHold: false,
+        },
+      ],
+      loading: false,
+      error: null,
+    });
+    const html = renderPage();
+    expect(html).not.toContain("NaN");
+    expect(html).toContain("--");
+  });
+
+  it("runs ALL hooks before the invalid-period redirect (no rules-of-hooks 'rendered fewer hooks' crash) (GREY)", () => {
+    mocks.useDealsMock.mockClear();
+    // An invalid ?period must NOT early-return before useMemo/useDeals — otherwise an in-place period
+    // change to a bad value changes the hook count between renders and React crashes the page.
+    const html = renderPage("/dashboard/contracts-signed?period=bogus");
+    expect(mocks.useDealsMock).toHaveBeenCalled(); // hooks ran despite the redirect
+    expect(html).not.toContain("Contracts Signed"); // it still redirects (renders <Navigate/>, no header)
+  });
+
+  it("labels each row with the deal's actual stage, not a hardcoded 'Open deal' (the list is isActive:all)", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        {
+          id: "deal-y",
+          name: "Closed Won Deal",
+          dealNumber: "TR-10",
+          propertyCity: "Dallas",
+          propertyState: "TX",
+          contractSignedDate: "2026-05-01",
+          contractSignedAt: null,
+          awardedAmount: "50000",
+          stageName: "Won",
+          onHold: false,
+        },
+      ],
+      loading: false,
+      error: null,
+    });
+    const html = renderPage();
+    expect(html).toContain("Won");
+    expect(html).not.toContain("Open deal");
   });
 });
