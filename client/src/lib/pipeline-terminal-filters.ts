@@ -33,7 +33,11 @@ export function getTerminalStageOutcome(
 
 export type TerminalOutcome = "won" | "lost";
 export type TerminalDateFilter =
-  | { preset: "7" | "30" | "60" | "90" | "mtd" | "qtd" | "ytd" | "all"; customStart?: undefined; customEnd?: undefined }
+  | {
+      preset: "7" | "30" | "60" | "90" | "wtd" | "mtd" | "qtd" | "ytd" | "all";
+      customStart?: undefined;
+      customEnd?: undefined;
+    }
   | { preset: "custom"; customStart: string; customEnd?: string };
 
 const TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
@@ -129,10 +133,19 @@ export function daysAgo(days: number, now = new Date()) {
 }
 
 export function toDatePresetRange(
-  preset: Extract<TerminalDateFilter["preset"], "mtd" | "qtd" | "ytd">,
+  preset: Extract<TerminalDateFilter["preset"], "wtd" | "mtd" | "qtd" | "ytd">,
   now = new Date()
 ) {
   const today = formatLocalDateParam(now);
+  if (preset === "wtd") {
+    // Week-to-date, Sunday-anchored on the user's LOCAL calendar (their week for the Sunday
+    // weekly-won meeting), consistent with the dashboard's local period tabs (getDashboardPeriod
+    // DateRange) so all "this week" views agree. getDay(): Sunday = 0. (Decision: WTD is the
+    // user's local week, not UTC -- see PR #539 discussion / .audit S5.5.)
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    start.setDate(start.getDate() - start.getDay());
+    return { from: formatLocalDateParam(start), to: today };
+  }
   if (preset === "mtd") {
     return { from: formatLocalDateParam(new Date(now.getFullYear(), now.getMonth(), 1)), to: today };
   }
@@ -159,6 +172,7 @@ export function readTerminalDateFilter(outcome: TerminalOutcome): TerminalDateFi
       parsed.preset === "30" ||
       parsed.preset === "60" ||
       parsed.preset === "90" ||
+      parsed.preset === "wtd" ||
       parsed.preset === "mtd" ||
       parsed.preset === "qtd" ||
       parsed.preset === "ytd" ||
@@ -192,6 +206,7 @@ export function getTodayDateParam(now = new Date()) {
 export function getTerminalDateFilterLabel(filter: TerminalDateFilter) {
   if (filter.preset === "custom") return "Custom";
   if (filter.preset === "all") return "All time";
+  if (filter.preset === "wtd") return "WTD";
   if (filter.preset === "mtd") return "MTD";
   if (filter.preset === "qtd") return "QTD";
   if (filter.preset === "ytd") return "YTD";
@@ -214,7 +229,12 @@ function appendTerminalDateParams(
     return;
   }
 
-  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+  if (
+    filter.preset === "wtd" ||
+    filter.preset === "mtd" ||
+    filter.preset === "qtd" ||
+    filter.preset === "ytd"
+  ) {
     const range = toDatePresetRange(filter.preset);
     params.set(`${prefix}_since`, range.from);
     params.set(`${prefix}_until`, range.to);
@@ -282,6 +302,7 @@ function isTerminalPreset(value: string | null): value is Exclude<TerminalDateFi
     value === "30" ||
     value === "60" ||
     value === "90" ||
+    value === "wtd" ||
     value === "mtd" ||
     value === "qtd" ||
     value === "ytd" ||

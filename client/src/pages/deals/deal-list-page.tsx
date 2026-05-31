@@ -138,17 +138,18 @@ function getDashboardPeriodLabel(period: DashboardPeriodSelection) {
   }
 }
 
-function getDashboardPeriodDateRange(period: DashboardPeriodSelection, now = new Date()) {
+export function getDashboardPeriodDateRange(period: DashboardPeriodSelection, now = new Date()) {
   if (!period) return null;
   const today = new Date(now);
   if (period === "today") {
     return { from: formatDateInput(today), to: formatDateInput(today) };
   }
   if (period === "week") {
+    // D-7: one platform-wide week definition = Sunday->Saturday. getDay(): Sunday = 0,
+    // so subtracting it walks back to the most recent Sunday.
     const start = new Date(today);
-    const dayOfWeek = start.getDay();
-    const diffToMonday = (dayOfWeek + 6) % 7;
-    start.setDate(start.getDate() - diffToMonday);
+    const diffToSunday = start.getDay();
+    start.setDate(start.getDate() - diffToSunday);
     return { from: formatDateInput(start), to: formatDateInput(today) };
   }
   if (period === "mtd") {
@@ -356,12 +357,13 @@ function readCurrentTerminalDateFilters(): Record<TerminalOutcome, TerminalDateF
   };
 }
 
-function isDealDatePreset(value: string | null): value is Exclude<TerminalDateFilter["preset"], "custom"> {
+export function isDealDatePreset(value: string | null): value is Exclude<TerminalDateFilter["preset"], "custom"> {
   return (
     value === "7" ||
     value === "30" ||
     value === "60" ||
     value === "90" ||
+    value === "wtd" ||
     value === "mtd" ||
     value === "qtd" ||
     value === "ytd" ||
@@ -369,7 +371,7 @@ function isDealDatePreset(value: string | null): value is Exclude<TerminalDateFi
   );
 }
 
-function readEstimateSentDateFilterFromSearchParams(params: URLSearchParams): TerminalDateFilter {
+export function readEstimateSentDateFilterFromSearchParams(params: URLSearchParams): TerminalDateFilter {
   const preset = params.get("estimate_sent_preset");
   if (isDealDatePreset(preset)) return { preset };
   if (params.get("estimate_sent_all_time") === "true") return { preset: "all" };
@@ -517,16 +519,17 @@ function parseDayStart(value: string) {
   return parseLocalDay(value).getTime();
 }
 
-function getWonMetricTerminalLabel(filter: TerminalDateFilter) {
+export function getWonMetricTerminalLabel(filter: TerminalDateFilter) {
   if (filter.preset === "custom") return "Custom";
   if (filter.preset === "all") return "All time";
+  if (filter.preset === "wtd") return "WTD";
   if (filter.preset === "mtd") return "MTD";
   if (filter.preset === "qtd") return "QTD";
   if (filter.preset === "ytd") return "YTD";
   return `Last ${filter.preset} days`;
 }
 
-function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
+export function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
   if (filter.preset === "all") return {};
 
   const today = formatDateInput(now);
@@ -537,7 +540,12 @@ function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): Dat
     };
   }
 
-  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+  if (
+    filter.preset === "wtd" ||
+    filter.preset === "mtd" ||
+    filter.preset === "qtd" ||
+    filter.preset === "ytd"
+  ) {
     return toDatePresetRange(filter.preset, now);
   }
 
@@ -550,7 +558,7 @@ function getTerminalDateRange(filter: TerminalDateFilter, now = new Date()): Dat
   };
 }
 
-function getEstimateSentDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
+export function getEstimateSentDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
   if (filter.preset === "all") return {};
   if (filter.preset === "custom") {
     return {
@@ -559,7 +567,12 @@ function getEstimateSentDateRange(filter: TerminalDateFilter, now = new Date()):
     };
   }
 
-  if (filter.preset === "mtd" || filter.preset === "qtd" || filter.preset === "ytd") {
+  if (
+    filter.preset === "wtd" ||
+    filter.preset === "mtd" ||
+    filter.preset === "qtd" ||
+    filter.preset === "ytd"
+  ) {
     return toDatePresetRange(filter.preset, now);
   }
 

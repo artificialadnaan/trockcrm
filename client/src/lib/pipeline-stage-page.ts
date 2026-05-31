@@ -28,7 +28,7 @@ export interface StagePageQuery {
 }
 
 const ALLOWED_PAGE_SIZES = new Set([25, 50, 100]);
-const ESTIMATE_SENT_PRESETS = new Set(["7", "30", "60", "90", "mtd", "qtd", "ytd"]);
+const ESTIMATE_SENT_PRESETS = new Set(["7", "30", "60", "90", "wtd", "mtd", "qtd", "ytd"]);
 
 function formatDateParam(date: Date) {
   return date.toISOString().split("T")[0];
@@ -48,6 +48,12 @@ function formatLocalDateParam(date: Date) {
 }
 
 function estimateSentPresetRange(preset: string, now = new Date()) {
+  if (preset === "wtd") {
+    // Week-to-date, Sunday-anchored on the user's local calendar (one platform-wide WTD).
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    start.setDate(start.getDate() - start.getDay());
+    return { from: formatLocalDateParam(start), to: formatLocalDateParam(now) };
+  }
   if (preset === "mtd") {
     return {
       from: formatLocalDateParam(new Date(now.getFullYear(), now.getMonth(), 1)),

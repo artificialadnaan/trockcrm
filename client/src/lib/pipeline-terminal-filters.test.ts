@@ -1,12 +1,20 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import {
   TERMINAL_STAGE_SLUGS,
   activePipelineDealValue,
   calculateActivePipelineTotal,
   excludeTerminalDeals,
+  getTerminalDateFilterLabel,
   getTerminalStageOutcome,
   isTerminalStage,
   numericDealValue,
+  toDatePresetRange,
+  appendPipelineTerminalDateParams,
+  setTerminalDateFilterSearchParams,
+  readTerminalDateFiltersFromSearchParams,
+  readTerminalDateFilter,
+  writeTerminalDateFilter,
 } from "./pipeline-terminal-filters";
 
 describe("pipeline terminal filters", () => {
@@ -99,5 +107,49 @@ describe("pipeline terminal filters", () => {
       120_000
     );
     expect(activePipelineDealValue({ awardedAmount: " ", bidEstimate: " ", ddEstimate: "80000" })).toBe(80_000);
+  });
+});
+
+describe("week-to-date (Sunday-anchored) preset", () => {
+  // WTD is Sunday-anchored on the user's LOCAL calendar (their week for the Sunday meeting).
+  it("spans the most recent Sunday through a midweek reference day", () => {
+    const now = new Date(2026, 4, 27); // Wednesday; the most recent Sunday is 2026-05-24.
+    expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-05-24", to: "2026-05-27" });
+  });
+
+  it("collapses to a single day when the reference day is itself a Sunday", () => {
+    const now = new Date(2026, 4, 24); // Sunday.
+    expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-05-24", to: "2026-05-24" });
+  });
+
+  it("crosses a month boundary back to the prior Sunday", () => {
+    const now = new Date(2026, 2, 3); // Tuesday after Sunday 2026-03-01.
+    expect(toDatePresetRange("wtd", now)).toEqual({ from: "2026-03-01", to: "2026-03-03" });
+  });
+
+  it("labels the wtd preset as WTD", () => {
+    expect(getTerminalDateFilterLabel({ preset: "wtd" })).toBe("WTD");
+  });
+
+  it("round-trips the wtd preset through localStorage (readTerminalDateFilter parse allow-list)", () => {
+    writeTerminalDateFilter("won", { preset: "wtd" });
+    expect(readTerminalDateFilter("won")).toEqual({ preset: "wtd" });
+  });
+
+  it("serializes wtd as a since/until window without throwing", () => {
+    const params = new URLSearchParams();
+    appendPipelineTerminalDateParams(params, { won: { preset: "wtd" }, lost: { preset: "all" } });
+    const since = params.get("won_since");
+    const until = params.get("won_until");
+    expect(since).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(until).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(since! <= until!).toBe(true);
+  });
+
+  it("round-trips the wtd preset through search params", () => {
+    const params = new URLSearchParams();
+    setTerminalDateFilterSearchParams(params, "won", { preset: "wtd" });
+    expect(params.get("won_preset")).toBe("wtd");
+    expect(readTerminalDateFiltersFromSearchParams(params).won).toEqual({ preset: "wtd" });
   });
 });
