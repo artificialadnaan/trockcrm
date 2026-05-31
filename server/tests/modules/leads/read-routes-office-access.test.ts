@@ -3,12 +3,12 @@ import { AppError } from "../../../src/middleware/error-handler.js";
 
 // Regression guard for the leads side of the office-level access model. Unlike deals, the lead
 // routes were already correct (no code change in this PR) -- but nothing locked the invariant, so
-// a future edit could silently revert them to owner-only. This test mounts the real leads router
-// and asserts the same contract the deals test does:
-//   - the 3 per-lead GET routes gate on assertLeadCollaboratorAccess (office-level) AND upgrade a
-//     non-owner rep's read role (via the REAL getCollaborativeReadRole), so getLeadById's owner-only
-//     throw never fires for a teammate's lead.
-//   - the per-lead write routes stay owner-only (a non-owner rep is blocked).
+// a future edit could silently revert them to owner-only. This mounts the real leads router and
+// asserts the same contract the deals guard does:
+//   - the 3 per-lead GET routes resolve (200) for a non-owner rep, gating on
+//     assertLeadCollaboratorAccess (office-level) AND upgrading the read role via the REAL
+//     getCollaborativeReadRole so getLeadById's owner-only throw never fires for a teammate's lead.
+//   - every per-lead write route stays owner-only (a non-owner rep is blocked with 403).
 
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
 vi.mock("@trock-crm/shared/types", async () => import("../../../../shared/src/types/index.js"));
@@ -17,6 +17,8 @@ const leadServiceMocks = vi.hoisted(() => ({
   createLead: vi.fn(),
   deleteLead: vi.fn(),
   getLeadById: vi.fn(),
+  listLeadBoard: vi.fn(),
+  listLeadStagePage: vi.fn(),
   listLeads: vi.fn(),
   transitionLeadStage: vi.fn(),
   updateLead: vi.fn(),
@@ -27,10 +29,15 @@ const accessMocks = vi.hoisted(() => ({
   assertLeadOwnerAccess: vi.fn(),
 }));
 
+// Return every export the router imports from service.js (router-imported but unused exports are
+// fine as no-op fns; omitting them is harmless under vitest factory mocks but we list them for
+// honesty/robustness).
 vi.mock("../../../src/modules/leads/service.js", () => ({
   createLead: leadServiceMocks.createLead,
   deleteLead: leadServiceMocks.deleteLead,
   getLeadById: leadServiceMocks.getLeadById,
+  listLeadBoard: leadServiceMocks.listLeadBoard,
+  listLeadStagePage: leadServiceMocks.listLeadStagePage,
   listLeads: leadServiceMocks.listLeads,
   transitionLeadStage: leadServiceMocks.transitionLeadStage,
   updateLead: leadServiceMocks.updateLead,
@@ -39,11 +46,23 @@ vi.mock("../../../src/modules/leads/service.js", () => ({
 
 vi.mock("../../../src/modules/leads/conversion-service.js", () => ({ convertLead: vi.fn() }));
 vi.mock("../../../src/modules/leads/questionnaire-service.js", () => ({
-  getLeadQuestionnaireSnapshot: vi.fn(),
+  getLeadQuestionnaireSnapshot: vi.fn(async () => ({ nodes: [], allNodes: [], answers: {} })),
   getQuestionnaireTemplateSnapshot: vi.fn(),
   isLeadEditV2Enabled: vi.fn(() => false),
 }));
-vi.mock("../../../src/db.js", () => ({ pool: { connect: vi.fn() } }));
+vi.mock("../../../src/modules/leads/qualification-service.js", () => ({
+  getLeadQualificationByLeadId: vi.fn(async () => ({})),
+}));
+vi.mock("../../../src/modules/leads/scoping-service.js", () => ({
+  getLeadScopingSnapshot: vi.fn(async () => ({})),
+  upsertLeadScopingIntake: vi.fn(async () => ({})),
+}));
+vi.mock("../../../src/modules/shared/mine-visibility.js", () => ({
+  resolveMineVisibilityFeatures: vi.fn(async () => ({ leadSubscriptions: false, dealSubscriptions: false })),
+}));
+// pipeline/service imports a named `db` from db.js; provide both exports so the router's transitive
+// imports resolve cleanly.
+vi.mock("../../../src/db.js", () => ({ pool: { connect: vi.fn() }, db: {} }));
 vi.mock("../../../src/modules/leads/due-diligence-service.js", () => ({
   assertSafeOfficeSlug: vi.fn(),
   dispatchPendingDueDiligenceEmail: vi.fn(),
@@ -124,9 +143,12 @@ const READ_ROUTES = [
   { method: "get", path: "/:id/scoping" },
 ];
 
+// Every per-lead mutation route (each owner-only for a non-owner rep).
 const WRITE_ROUTES = [
   { method: "patch", path: "/:id/scoping" },
+  { method: "patch", path: "/:id" },
   { method: "post", path: "/:id/stage-transition" },
+  { method: "post", path: "/:id/convert" },
   { method: "delete", path: "/:id" },
 ];
 
@@ -139,9 +161,12 @@ describe("lead READ routes are office-level (a rep can view a teammate's lead)",
   });
 
   for (const { method, path } of READ_ROUTES) {
-    it(`${method.toUpperCase()} ${path} gates office-level and upgrades a non-owner rep's read role`, async () => {
-      await invoke(method, path, { user: { id: "rep-1", role: "rep" } });
+    it(`${method.toUpperCase()} ${path} resolves office-level and upgrades a non-owner rep's read role`, async () => {
+      const { res, nextErr } = await invoke(method, path, { user: { id: "rep-1", role: "rep" } });
 
+      // The read succeeds for a non-owner rep (no 403).
+      expect(nextErr).toBeUndefined();
+      expect(res.statusCode).toBe(200);
       // Office-level gate with the lead id + the requesting viewer.
       expect(accessMocks.assertLeadCollaboratorAccess).toHaveBeenCalledWith(
         expect.anything(),
@@ -149,10 +174,9 @@ describe("lead READ routes are office-level (a rep can view a teammate's lead)",
         expect.objectContaining({ id: "rep-1", role: "rep" })
       );
       // The loader is invoked with an UPGRADED (non-"rep") role, so its owner-only throw cannot fire
-      // for a teammate's lead. If the route ever reverts to passing the raw "rep" role, this fails.
+      // for a teammate's lead. If a route ever reverts to passing the raw "rep" role, this fails.
       expect(leadServiceMocks.getLeadById).toHaveBeenCalled();
-      const roleArg = leadServiceMocks.getLeadById.mock.calls[0][2];
-      expect(roleArg).not.toBe("rep");
+      expect(leadServiceMocks.getLeadById.mock.calls[0][2]).not.toBe("rep");
     });
   }
 });
@@ -170,9 +194,10 @@ describe("lead WRITE routes stay owner-only (a rep cannot mutate a teammate's le
 
   for (const { method, path } of WRITE_ROUTES) {
     it(`${method.toUpperCase()} ${path} blocks a non-owner rep with 403`, async () => {
+      // A plain field edit (not an assignment transfer) so PATCH /:id takes the owner-only branch.
       const { nextErr } = await invoke(method, path, {
         user: { id: "rep-1", role: "rep" },
-        body: { targetStageId: "stage-1" },
+        body: { name: "edited", targetStageId: "stage-1" },
       });
       expect(accessMocks.assertLeadOwnerAccess).toHaveBeenCalled();
       expect(nextErr?.statusCode).toBe(403);
