@@ -398,7 +398,7 @@ describe("on-hold report count consistency", () => {
     const closedWonSummaryDb = createMockTenantDb([[], [], []]);
     await getClosedWonSummary(closedWonSummaryDb, { from: "2026-02-01", to: "2026-02-28" });
     const closedWonSummarySql = compactSql(closedWonSummaryDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query)).join("\n"));
-    expect(closedWonSummarySql).toMatch(/avg\( extract\(day from d\.actual_close_date::timestamp - d\.created_at\) \) filter \(where coalesce\(d\.on_hold, false\) = false\)/);
+    expect(closedWonSummarySql).toMatch(/avg\( extract\(day from d\.won_closed_date::timestamp - d\.created_at\) \) filter \(where coalesce\(d\.on_hold, false\) = false\)/);
 
     const regionalDb = createMockTenantDb([[], [], [], []]);
     await getRegionalOwnershipOverview(regionalDb, { from: "2026-02-01", to: "2026-02-28", officeId: "office-1" });
