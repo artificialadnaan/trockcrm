@@ -107,6 +107,9 @@ export interface LeadRecord {
   primaryContactTitle?: string | null;
   name: string;
   stageId: string;
+  /** Authoritative display name of the lead's actual (possibly alias) stage, supplied by listLeads so
+   *  alias-stage rows don't render "—" against the canonical-only board options map (Codex #577 P2). */
+  stageName?: string | null;
   assignedRepId: string;
   salesRepId?: string | null;
   assignedRepName?: string | null;

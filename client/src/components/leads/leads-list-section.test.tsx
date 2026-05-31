@@ -138,6 +138,18 @@ describe("LeadsListSection — shared FilterBar on the leads list (Wave 1)", () 
     expect(container.textContent).toContain("No leads match these filters");
   });
 
+  it("renders the server stageName for an ALIAS-stage lead whose id is not among the canonical board options (Codex #577 P2)", async () => {
+    // The bar's stage OPTIONS only carry canonical board ids; a lead returned in an alias stage would
+    // render "—" against an options-only map. The row's authoritative stageName resolves it.
+    mocks.useLeadsMock.mockReturnValue({
+      leads: [makeLead({ stageId: "alias-stage-not-in-options", stageName: "Estimate Under Review (Service)" })],
+      loading: false,
+      error: null,
+    });
+    await render("/leads");
+    expect(container.textContent).toContain("Estimate Under Review (Service)");
+  });
+
   it("bounds the leads query with a page-size limit so the list is never an unbounded fetch (Codex #577 P2)", async () => {
     await render("/leads");
     expect(lastLeadsCall().limit).toBe(LEADS_LIST_PAGE_SIZE);

@@ -82,8 +82,12 @@ export function LeadsListSection({ scope, filterBar }: LeadsListSectionProps) {
     {
       key: "stage",
       header: "Stage",
+      // Prefer the row's authoritative stageName (covers alias stages listLeads returns); fall back to the
+      // canonical board-options map only when the server hasn't supplied it (Codex #577 P2).
       render: (lead) => (
-        <span className="text-sm font-semibold text-slate-600">{stageNameById.get(lead.stageId) ?? "—"}</span>
+        <span className="text-sm font-semibold text-slate-600">
+          {lead.stageName ?? stageNameById.get(lead.stageId) ?? "—"}
+        </span>
       ),
     },
     {

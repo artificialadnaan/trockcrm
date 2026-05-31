@@ -81,8 +81,9 @@ describe("filterBarValueToLeadFilters (FilterBar URL value -> useLeads LeadFilte
 });
 
 function makeLead(overrides: Record<string, unknown> = {}) {
+  // displayDate is deliberately ABSENT by default — the legacy date chain only applies when the backend
+  // does not SELECT the field. A row with the field PRESENT (even null) is the outcome-aware axis.
   return {
-    displayDate: null,
     convertedAt: null,
     stageEnteredAt: "2026-04-10T10:00:00.000Z",
     createdAt: "2026-03-01T10:00:00.000Z",
@@ -95,7 +96,13 @@ describe("getLeadDisplayDate (filter-axis == display-axis for leads)", () => {
     expect(getLeadDisplayDate(makeLead({ displayDate: "2026-05-20", convertedAt: "2026-01-01" }))).toBe("2026-05-20");
   });
 
-  it("falls back to convertedAt, then stage-entry, then created (pre-backend lead chain)", () => {
+  it("honors an explicit displayDate:null as NO date — it does NOT fall through to a different date so the shown date always matches the filtered axis (Codex #577 P2)", () => {
+    // The row's outcome-aware axis is genuinely null; falling back to stageEnteredAt/createdAt would show
+    // a date the Date filter never windowed on (filter-axis != display-axis).
+    expect(getLeadDisplayDate(makeLead({ displayDate: null, convertedAt: "2026-01-01", stageEnteredAt: "2026-02-02" }))).toBeNull();
+  });
+
+  it("falls back to convertedAt, then stage-entry, then created ONLY when displayDate is ABSENT (pre-backend lead chain)", () => {
     expect(getLeadDisplayDate(makeLead({ convertedAt: "2026-02-02" }))).toBe("2026-02-02");
     expect(getLeadDisplayDate(makeLead({ convertedAt: null, stageEnteredAt: "2026-03-03T00:00:00Z" }))).toBe(
       "2026-03-03T00:00:00Z"

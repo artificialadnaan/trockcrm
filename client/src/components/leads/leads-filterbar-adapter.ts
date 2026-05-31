@@ -60,5 +60,10 @@ export function filterBarValueToLeadFilters(value: FilterBarValue): Partial<Lead
 export function getLeadDisplayDate(
   lead: Partial<Pick<LeadRecord, "displayDate" | "convertedAt" | "stageEnteredAt" | "createdAt">>
 ): string | null {
-  return lead.displayDate ?? lead.convertedAt ?? lead.stageEnteredAt ?? lead.createdAt ?? null;
+  // When the backend SELECTs `displayDate` the field is PRESENT (a string OR null) and IS the outcome-aware
+  // axis the Date filter windows on — honor it verbatim so filter-axis == display-axis. A genuinely-null
+  // axis shows NO date rather than falling through to a different one (Codex #577 P2). Only when the field
+  // is ABSENT (older backend that doesn't SELECT it) do we use the legacy lead date chain.
+  if (lead.displayDate !== undefined) return lead.displayDate;
+  return lead.convertedAt ?? lead.stageEnteredAt ?? lead.createdAt ?? null;
 }

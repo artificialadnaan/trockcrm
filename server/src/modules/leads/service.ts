@@ -540,7 +540,12 @@ function assertLeadStartsInEntryStage(stageSlug: string) {
 
 async function decorateLeads(
   tenantDb: TenantDb,
-  rows: Array<typeof leads.$inferSelect>
+  rows: Array<typeof leads.$inferSelect>,
+  // Full stage-id -> name map over EVERY lead stage (canonical + alias), supplied by the caller (which
+  // owns the getAllStages dependency). listLeads returns rows in their actual (possibly alias) stage, so
+  // a canonical-only client map renders "—" for alias-stage leads; this resolves the real name (Codex
+  // #577 P2). Optional — omitted callers leave stageName null.
+  leadStageNameById?: Map<string, string>
 ) {
   if (rows.length === 0) {
     return [];
@@ -673,6 +678,7 @@ async function decorateLeads(
 
   return rows.map((lead) => ({
     ...lead,
+    stageName: leadStageNameById?.get(lead.stageId) ?? null,
     assignedRepName: assignedRepMap.get(lead.assignedRepId) ?? null,
     companyName: companyMap.get(lead.companyId)?.name ?? null,
     companyOwnerUserId: companyMap.get(lead.companyId)?.ownerUserId ?? null,
@@ -1368,6 +1374,8 @@ export function createLeadService(
       throw new AppError(403, "You can only view your own leads");
     }
 
+    // getLeadById omits the stage-name map (the detail view renders stage separately); only the flat
+    // list needs alias-stage names, so this single-lead path stays unchanged (Codex #577 P2).
     const decoratedLead = (await decorateLeads(tenantDb, [lead]))[0] ?? null;
     if (!decoratedLead) {
       return null;
@@ -1475,11 +1483,7 @@ export function createLeadService(
     const sortColumn = filters.sortBy === "created_at" ? leads.createdAt : leads.updatedAt;
     const sortOrder = filters.sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
 
-    // Bound the result set: this list isn't offset-paginated yet, so cap the rows to keep the
-    // full-list FilterBar query from returning every lead on a large tenant (Codex #577 P2). Honor a
-    // smaller client-requested limit; clamp to [1, LEADS_LIST_MAX_ROWS]; default to the max.
-    const rowLimit = Math.min(Math.max(filters.limit ?? LEADS_LIST_MAX_ROWS, 1), LEADS_LIST_MAX_ROWS);
-    const rows = await tenantDb
+    const query = tenantDb
       .select({
         ...getTableColumns(leads),
         // filter-axis == display-axis: the date the row DISPLAYS is the same outcome-aware
@@ -1489,10 +1493,18 @@ export function createLeadService(
       })
       .from(leads)
       .where(and(...conditions))
-      .orderBy(sortOrder, asc(leads.name))
-      .limit(rowLimit);
+      .orderBy(sortOrder, asc(leads.name));
+    // The row cap is OPT-IN: only the FilterBar list passes `limit`, so it alone is bounded. Aggregate
+    // consumers that omit it (dashboard metrics, director rep totals, company portfolio) MUST receive the
+    // FULL set — a default cap would silently compute counts/forecasts from the first N rows (Codex #577
+    // P1). When a limit IS requested, clamp it to [1, LEADS_LIST_MAX_ROWS].
+    const rows =
+      filters.limit != null
+        ? await query.limit(Math.min(Math.max(filters.limit, 1), LEADS_LIST_MAX_ROWS))
+        : await query;
 
-    return decorateLeads(tenantDb, rows);
+    const leadStageNameById = new Map((await deps.getAllStages("lead")).map((stage) => [stage.id, stage.name]));
+    return decorateLeads(tenantDb, rows, leadStageNameById);
   }
 
   async function createLead(tenantDb: TenantDb, input: CreateLeadInput) {
