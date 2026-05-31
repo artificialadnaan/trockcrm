@@ -903,18 +903,23 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
         WITH months AS (
           SELECT generate_series(date_trunc('month', ${filters.dateFrom}::date), date_trunc('month', ${filters.dateTo}::date), INTERVAL '1 month')::date AS month_start
         )
+        -- Scope is applied PER AGGREGATE (not in a WHERE) so every generated month always emits a
+        -- row: a months-LEFT-JOIN-deals with a WHERE drops a whole month when its only matching
+        -- rows are out-of-scope (the LEFT JOIN stops emitting the null row), and the FIX-3 bucket
+        -- move can newly push an out-of-scope won deal into such a month. Open columns are gated by
+        -- dealScope; won_actual by archivedWonDealScope AND a usable won date — so monthly won_actual
+        -- reconciles to the summary's won_period (which also excludes null-won-date wins).
         SELECT to_char(m.month_start, 'YYYY-MM') AS month,
-          COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(commitSlugs)})), 0)::numeric AS commit,
-          COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(bestCaseSlugs)})), 0)::numeric AS best_case,
-          COALESCE(SUM(${weightedValue}) FILTER (WHERE psc.slug NOT IN (${sqlStringList(terminalSlugs)})), 0)::numeric AS pipeline_weighted,
-          COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)})), 0)::numeric AS won_actual
+          COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(commitSlugs)}) AND (${dealScope})), 0)::numeric AS commit,
+          COALESCE(SUM(${forecastValue}) FILTER (WHERE psc.slug IN (${sqlStringList(bestCaseSlugs)}) AND (${dealScope})), 0)::numeric AS best_case,
+          COALESCE(SUM(${weightedValue}) FILTER (WHERE psc.slug NOT IN (${sqlStringList(terminalSlugs)}) AND (${dealScope})), 0)::numeric AS pipeline_weighted,
+          COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}) FILTER (WHERE psc.slug IN (${sqlStringList(wonSlugs)}) AND ${aliasedHasUsableWonDateSql("d")} AND (${archivedWonDealScope})), 0)::numeric AS won_actual
         FROM months m
         LEFT JOIN deals d ON ${buildForecastMonthBucketDateSql("d")} >= m.month_start
           AND ${buildForecastMonthBucketDateSql("d")} < (m.month_start + INTERVAL '1 month')
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN offices o ON o.id = u.office_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE d.id IS NULL OR (${dealScope}) OR (${archivedWonDealScope} AND psc.slug IN (${sqlStringList(wonSlugs)}))
         GROUP BY m.month_start
         ORDER BY m.month_start
       `);

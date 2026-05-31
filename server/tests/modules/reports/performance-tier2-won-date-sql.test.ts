@@ -67,5 +67,12 @@ describe("perf-tier2 Won-date basis is wired into the live report queries", () =
     expect(text).toContain(
       "coalesce(d.won_closed_date, d.expected_close_date, d.actual_close_date, d.contract_signed_date, d.updated_at::date)",
     );
+    // Codex P2 #1: monthly won_actual now carries the usable-won-date guard too, so it reconciles
+    // to the summary's won_period (which excludes null-won-date wins). The guard now appears at least
+    // twice — once in the summary won_period, once in the monthly won_actual FILTER.
+    expect((text.match(/d\.won_closed_date is not null/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    // Codex P2 #2: the fragile months-LEFT-JOIN-deals WHERE is gone, so scoped forecasts never drop a
+    // month; scope moved into per-aggregate FILTERs.
+    expect(text).not.toContain("d.id is null or");
   });
 });
