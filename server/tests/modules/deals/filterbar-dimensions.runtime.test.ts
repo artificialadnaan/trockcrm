@@ -238,6 +238,21 @@ describe("FilterBar backend dimensions — real SQL via the #546 predicate regis
       expect(ids).not.toContain("rep_b"); // active but rep-b
     });
   });
+
+  describe("excludeOnHold (Won reconciliation — drops migration parking-lot on-hold deals)", () => {
+    it("excludes on-hold rows (active OR inactive) and keeps non-on-hold rows", async () => {
+      const ids = await matched({ excludeOnHold: true });
+      expect(ids).not.toContain("onhold"); // active + on_hold -> excluded
+      expect(ids).not.toContain("onhold_inactive"); // inactive + on_hold -> excluded
+      expect(ids).toContain("rep_a"); // not on_hold -> kept
+      expect(ids).toContain("inactive"); // inactive but NOT on_hold -> kept (it only drops on_hold)
+    });
+
+    it("includes on-hold rows when the flag is absent (every non-Won caller is unchanged)", async () => {
+      const ids = await matched({});
+      expect(ids).toContain("onhold");
+    });
+  });
 });
 
 describe("stageIds", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { CalendarDays, Clock3, Download, MapPin } from "lucide-react";
@@ -40,7 +40,12 @@ import { listPaginationIconButtonClassName } from "@/components/shared/list-pagi
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { useFilterState } from "@/components/filters/use-filter-state";
 import { FilterBar, type FilterDimension, type FilterBarOptions } from "@/components/filters/filter-bar";
-import { applyBoardVisibilityDefaults, filterBarValueToDealFilters, getDealDisplayDate } from "./deals-filterbar-adapter";
+import {
+  applyBoardVisibilityDefaults,
+  filterBarValueToDealFilters,
+  getDealDisplayDate,
+  pickFilterBarValueForDimensions,
+} from "./deals-filterbar-adapter";
 
 const DEAL_STAGE_ORDER = [
   "opportunity",
@@ -108,6 +113,21 @@ interface DealsListSectionProps {
      */
     defaultStageIds?: string[];
     terminalStageIds?: string[];
+    /**
+     * URL param namespace for surfaces that already own bare URL params (the director/stage
+     * drill-downs, where scope/period/filter/page live un-prefixed). When set, the bar reads/writes
+     * its keys as `${paramPrefix}${key}` (fb_stageIds, fb_dateFrom, …) via useFilterState(prefix), so a
+     * bar control never clobbers the host's params. Omit (default "") at the pipeline/base mount, where
+     * the bar owns the whole URL — behavior is byte-identical to today.
+     */
+    paramPrefix?: string;
+    /**
+     * Default sort for FilterBar mode when the URL carries no sort (no `${prefix}sortBy`). The bar's
+     * sort is URL-backed, so without this a default/bookmarked drill-down would fall to the server
+     * default (created_at desc) instead of the view's intended order (e.g. won → contract_signed_date
+     * desc, active → display_date desc). Opt-in: omit it (pipeline/base) to keep the server default.
+     */
+    defaultSort?: DealListSortState;
   };
 }
 
@@ -164,6 +184,31 @@ function getDealPropertyLabel(deal: Deal) {
 
 export function getDealCloseDate(deal: Deal) {
   return deal.actualCloseDate ?? deal.expectedCloseDate ?? null;
+}
+
+/** Intersect two date bounds (YYYY-MM-DD, lexicographic = chronological). `laterDate` = the max-start
+ *  (window can't begin before the floor); `earlierDate` = the min-end. Either side undefined → the other. */
+export function laterDate(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a > b ? a : b;
+}
+export function earlierDate(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a < b ? a : b;
+}
+
+/** Should a namespaced (fb_) FilterBar page snap back to 1? Reset only when a HOST-level key actually
+ *  CHANGES (not the first observation, so a bookmarked fb_page>1 loads intact) and we are past page 1. */
+export function shouldResetNamespacedPage(
+  previousKey: string | null,
+  nextKey: string,
+  currentPage: number
+): boolean {
+  if (previousKey === null) return false;
+  if (previousKey === nextKey) return false;
+  return currentPage > 1;
 }
 
 function renderStageChip(label: string) {
@@ -598,8 +643,10 @@ export function DealsListSection({
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   // Slice 7: opt-in URL-backed filter state. useFilterState is always called (hooks can't be
-  // conditional); its value only drives the query/UI when filterBarMode is on.
-  const { filters: urlFilters, setFilters, resetFilters } = useFilterState();
+  // conditional); its value only drives the query/UI when filterBarMode is on. The optional
+  // paramPrefix namespaces the bar's keys (fb_*) on drill-down surfaces that share their URL with a
+  // host page; default "" = bare keys (the pipeline/base mount), so existing callers are unchanged.
+  const { filters: urlFilters, setFilters, resetFilters } = useFilterState(filterBar?.paramPrefix ?? "");
   const filterBarMode = Boolean(filterBar);
   // D-15: legacy "outcome" axis — the rep drill-down feeds an externalDateRange that
   // must narrow the canonical outcome window (dateFrom/dateTo) and DISPLAY the same
@@ -691,6 +738,21 @@ export function DealsListSection({
     );
   }, [initialSort]);
 
+  // FilterBar mode keeps pagination in the URL (e.g. fb_page); the legacy setPage(1) resets above never
+  // touch it. When a HOST-level input changes (page scope, or the drill-down's baseFilters / locked
+  // owner — captured by drilldownContextKey), snap the namespaced page back to 1 so the list never
+  // requests an out-of-range page of the new, smaller result set (Codex P2). Gated on paramPrefix (the
+  // drill-down mounts); the prefix-less pipeline/base mount resets its page at the page level already.
+  // The ref skips the first run so a bookmarked fb_page>1 is still honored on load.
+  const hostPageResetKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!filterBarMode || !filterBar?.paramPrefix) return;
+    const key = `${scope ?? ""}|${drilldownContextKey}`;
+    const previous = hostPageResetKeyRef.current;
+    hostPageResetKeyRef.current = key;
+    if (shouldResetNamespacedPage(previous, key, urlFilters.page ?? 1)) setFilters({ page: 1 });
+  }, [filterBarMode, filterBar?.paramPrefix, scope, drilldownContextKey, urlFilters.page, setFilters]);
+
   // Pagination + query-enable diverge by mode: FilterBar mode reads page from the URL and never gates
   // on stage-slug loading (stageIds arrive directly from the URL); legacy keeps local page + the
   // stage-aware enable gate. goToPage writes wherever the page lives.
@@ -727,12 +789,29 @@ export function DealsListSection({
   // FilterBar mode: URL value -> contract DealFilters (outcome-aware date, status, workflow, value,
   // stalled). baseFilters still layer (parent presets); scope inherits from the page unless the URL
   // sets it; the section owns page/limit. filter-axis == display-axis (displayDate rendered below).
+  // Drop URL params for dimensions this mount doesn't render before mapping (Codex P2): a stray
+  // prefixed key (fb_stageIds on a stage-pinned mount, fb_assignedRepId where Rep is hidden) must not
+  // override a pinned/host-owned filter with no visible control to clear it.
+  const visibleUrlFilters = pickFilterBarValueForDimensions(urlFilters, filterBar?.dimensions ?? []);
+  const barFilters = applyBoardVisibilityDefaults(filterBarValueToDealFilters(visibleUrlFilters), {
+    defaultStageIds: filterBar?.defaultStageIds,
+    terminalStageIds: filterBar?.terminalStageIds,
+  });
   const filterBarDealsArgs: DealFilters = {
     ...baseFilters,
-    ...applyBoardVisibilityDefaults(filterBarValueToDealFilters(urlFilters), {
-      defaultStageIds: filterBar?.defaultStageIds,
-      terminalStageIds: filterBar?.terminalStageIds,
-    }),
+    ...barFilters,
+    // Default the mount's intended sort when the URL carries none (Codex P2): FilterBar sort is
+    // URL-backed, so a default/bookmarked drill-down would otherwise drop the view's order (won ->
+    // contract_signed_date desc, active -> display_date desc) to the server default created_at desc.
+    // Opt-in via filterBar.defaultSort, so pipeline/base (no defaultSort) keep the server default.
+    sortBy: barFilters.sortBy ?? filterBar?.defaultSort?.key,
+    sortDir: barFilters.sortDir ?? filterBar?.defaultSort?.dir,
+    // Keep the host's date window a FLOOR: intersect the bar's outcome-axis date with baseFilters'
+    // dateFrom/dateTo rather than overwriting it, so a drill-down's ?period can't be widened past the
+    // window the KPI/board showed (Codex P2). No-op with no floor (pipeline) or no bar date; YYYY-MM-DD
+    // compares lexicographically, so string later/earlier = max-start / min-end of the intersection.
+    dateFrom: laterDate(baseFilters?.dateFrom, barFilters.dateFrom),
+    dateTo: earlierDate(baseFilters?.dateTo, barFilters.dateTo),
     // When the bar is outcome-aware (stageEntryDateEnabled — it hides the honest "current state" note and
     // presents Date as outcome-aware + shows Stalled), force the server to bound open rows on
     // stage_entered_at for ANY active date/age filter, regardless of ENABLE_STAGE_ENTRY_DATE_FILTER. The

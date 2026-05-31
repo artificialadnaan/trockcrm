@@ -8,11 +8,11 @@ import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
-import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
 import { useAuth } from "@/lib/auth";
-import { getEffectiveDealValue } from "@trock-crm/shared/types";
+import { getEffectiveDealValue, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import {
   buildDealStageWorkspacePath,
@@ -34,6 +34,7 @@ import type { PipelineScope } from "@/lib/pipeline-scope";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
 import { DecoratedKanbanCard } from "@/components/deals/decorated-kanban-card";
 import { DealsListSection } from "@/components/deals/deals-list-section";
+import { buildDrilldownListFilterBar } from "@/components/deals/deals-filterbar-adapter";
 import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
@@ -735,6 +736,10 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
   const { assignees } = useTaskAssignees();
+  // Option sources for the drill-down FilterBar's region / project-type dimensions (rep stays the
+  // page-level select; scope stays the page toggle — neither is a bar dimension here).
+  const { regions } = useRegions();
+  const { projectTypes } = useProjectTypes();
   // When a parked ?scope=team bookmark is coerced to mine, drop any stale owner filter from
   // the URL too -- otherwise the Mine board (the viewer's deals) is intersected with another
   // rep's owner filter and renders empty instead of the intended Mine view (D-12b).
@@ -909,7 +914,10 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
         : dashboardView.boardMode === "active"
         ? stages.filter((stage) => !isTerminalStage(stage.slug))
         : dashboardView.boardMode === "won"
-          ? stages.filter((stage) => stage.slug === "won")
+          // The Won list scope = the FULL Won alias family (won, closed_won, the service-won stages),
+          // matching the canonical board column / Won KPI which aggregate the family. Canonical-only
+          // would drop historical alias-stage wins and under-report vs the KPI (Codex P2 / BLUE checklist).
+          ? stages.filter((stage) => WON_DEAL_STAGE_SLUGS.includes(stage.slug))
           : dashboardView.boardMode === "at_risk"
             ? stages.filter((stage) => !isTerminalStage(stage.slug))
           : undefined,
@@ -990,6 +998,54 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       ...(estimateSentDateRange.to ? { estimateSentTo: estimateSentDateRange.to } : {}),
     }),
     [drilldownBaseFilters, estimateSentDateRange.from, estimateSentDateRange.to]
+  );
+  // Shared FilterBar on the DRILL-DOWN list (filter !== null). RED owns the base-view mount
+  // (filter === null); the client-side at-risk/stale SLA list has no server predicate, so the bar
+  // (which drives getDeals) can't back it — both return undefined here and keep today's behavior.
+  const drilldownFilterBar = useMemo(() => {
+    if (dashboardView.filter === null || isAtRiskDrilldown) return undefined;
+    // Codex P2: wait for stage metadata before mounting the bar. FilterBar mode queries unconditionally,
+    // so with stages still [] the first request would carry no stage constraint and briefly show all
+    // active deals (wrong cohort on e.g. a Won / Opportunities drill-down) before refetching. Until then
+    // the section stays in legacy mode, which gates the query on stage loading.
+    if (stages.length === 0) return undefined;
+    return {
+      ...buildDrilldownListFilterBar({
+        visibleStages: (drilldownVisibleStages ?? []).map((stage) => ({
+          id: stage.id,
+          slug: stage.slug,
+          name: stage.name,
+        })),
+        isTerminalSlug: isTerminalStage,
+        regions,
+        projectTypes,
+      }),
+      // Codex P2: preserve the drill-down's intended order in FilterBar mode (URL-backed sort would
+      // otherwise fall to the server default created_at desc for a default/bookmarked view).
+      defaultSort: dashboardView.listInitialSort,
+    };
+  }, [
+    dashboardView.filter,
+    dashboardView.listInitialSort,
+    isAtRiskDrilldown,
+    drilldownVisibleStages,
+    regions,
+    projectTypes,
+    stages.length,
+  ]);
+  // In FilterBar mode the list args spread baseFilters then the bar value; they do NOT read
+  // lockedOwnerId (that feeds only the legacy path). So fold the page's rep select into baseFilters,
+  // else the drill-down list would ignore the selected rep and diverge from the board above. The
+  // legacy/base path overrides this with the identical lockedOwnerId value, so it is a no-op there.
+  const drilldownListBaseFilters = useMemo(
+    () => ({
+      ...layeredListBaseFilters,
+      ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+      // Won drill-down: exclude on-hold (migration parking-lot) deals so the list reconciles to the Won
+      // KPI / board column, both of which drop on-hold from the Won count (Codex P2).
+      ...(dashboardView.filter === "won" ? { excludeOnHold: true } : {}),
+    }),
+    [layeredListBaseFilters, selectedRepFilter, dashboardView.filter]
   );
 
   const updateScope = (nextScope: PipelineScope) => {
@@ -1285,7 +1341,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               subtitle={dashboardView.subtitle}
               eyebrow={dashboardView.eyebrow}
               visibleStages={drilldownVisibleStages}
-              baseFilters={layeredListBaseFilters}
+              baseFilters={drilldownFilterBar ? drilldownListBaseFilters : layeredListBaseFilters}
+              filterBar={drilldownFilterBar}
               dateField={dashboardView.listDateField}
               initialSort={dashboardView.listInitialSort}
               initialStageSlugs={dashboardView.initialStageSlugs}
