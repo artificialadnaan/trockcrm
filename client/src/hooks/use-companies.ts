@@ -270,6 +270,17 @@ export function useCompanyDeals(companyId: string | undefined) {
 
 // --- Mutation Functions ---
 
+export interface CompanyDedupSuggestion {
+  id: string;
+  name: string;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+  dealCount: number;
+  matchReason: string;
+}
+
 export async function createCompany(input: {
   name: string;
   category?: string | null;
@@ -280,8 +291,11 @@ export async function createCompany(input: {
   phone?: string | null;
   website?: string | null;
   notes?: string | null;
+  skipDedupCheck?: boolean;
 }, options: OfficeRequestOptions = {}) {
-  return api<{ company: Company }>("/companies", {
+  // On a name-duplicate the server returns 200 { company: null, dedupWarning, suggestions }
+  // instead of creating — the caller warns and re-submits with skipDedupCheck to override.
+  return api<{ company: Company | null; dedupWarning?: boolean; suggestions?: CompanyDedupSuggestion[] }>("/companies", {
     method: "POST",
     json: input,
     ...getOfficeRequestOptions(options.officeId),

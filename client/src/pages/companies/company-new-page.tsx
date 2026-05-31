@@ -13,7 +13,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { createCompany } from "@/hooks/use-companies";
+import { createCompany, type CompanyDedupSuggestion } from "@/hooks/use-companies";
+import { CompanyDedupWarning } from "@/components/companies/company-dedup-warning";
 
 const COMPANY_CATEGORY_LABELS: Record<string, string> = {
   client: "Client",
@@ -62,12 +63,13 @@ export function CompanyNewPage() {
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dedupSuggestions, setDedupSuggestions] = useState<CompanyDedupSuggestion[] | null>(null);
 
   const handleChange = (field: keyof CompanyFormData, value: string) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent, skipDedup = false) => {
     e.preventDefault();
     if (!formData.name.trim()) {
       setError("Company name is required");
@@ -76,6 +78,7 @@ export function CompanyNewPage() {
 
     setSubmitting(true);
     setError(null);
+    setDedupSuggestions(null);
 
     try {
       const result = await createCompany({
@@ -88,14 +91,43 @@ export function CompanyNewPage() {
         phone: formData.phone || null,
         website: formData.website || null,
         notes: formData.notes || null,
+        skipDedupCheck: skipDedup,
       });
-      navigate(`/companies/${result.company.id}`);
+
+      // Likely duplicate found — show the warning and let the rep decide.
+      if (result.dedupWarning && result.suggestions && result.suggestions.length > 0) {
+        setDedupSuggestions(result.suggestions);
+        setSubmitting(false);
+        return;
+      }
+
+      if (result.company) {
+        navigate(`/companies/${result.company.id}`);
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to create company");
     } finally {
       setSubmitting(false);
     }
   };
+
+  if (dedupSuggestions) {
+    return (
+      <div className="max-w-3xl">
+        <h2 className="text-2xl font-bold mb-4">New Company</h2>
+        <CompanyDedupWarning
+          suggestions={dedupSuggestions}
+          onUseExisting={(companyId) => navigate(`/companies/${companyId}`)}
+          onCreateAnyway={() => {
+            setDedupSuggestions(null);
+            const syntheticEvent = { preventDefault: () => {} } as React.FormEvent;
+            handleSubmit(syntheticEvent, true);
+          }}
+          onCancel={() => setDedupSuggestions(null)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-3xl">
