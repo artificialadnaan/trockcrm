@@ -51,6 +51,14 @@ describe("useFilterState (URL-backed)", () => {
     expect(filters()).toEqual({ search: "acme", status: "on_hold" });
   });
 
+  it("re-resolves a relative date preset from a stale/bookmarked URL to a fresh window", () => {
+    render("/deals?datePreset=30&dateFrom=2020-01-01&dateTo=2020-01-02");
+    const f = filters();
+    expect(f.datePreset).toBe("30");
+    expect(f.dateFrom).not.toBe("2020-01-01"); // not frozen at the bookmarked bounds
+    expect(f.dateFrom).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
   it("setFilters updates a param and preserves non-FilterBar params", () => {
     render("/deals?filter=won&search=acme");
     act(() => container.querySelector<HTMLButtonElement>('[data-testid="set"]')?.click());

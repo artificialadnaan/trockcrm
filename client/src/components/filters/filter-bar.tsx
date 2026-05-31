@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SearchInput } from "@/components/ui/search-input";
@@ -112,6 +113,15 @@ export function FilterBar({
 }: FilterBarProps) {
   const has = (dimension: FilterDimension) => dimensions.includes(dimension);
   const sortOptions = options.sortOptions ?? [];
+
+  // When stage-entry dates are off, the stalled control is hidden — also CLEAR any stale
+  // minAgeDays/maxAgeDays from a bookmarked URL so the list isn't filtered by an invisible
+  // constraint with no way to see or remove it (Codex #548). Self-heals to a no-op once cleared.
+  useEffect(() => {
+    if (!stageEntryDateEnabled && (value.minAgeDays !== undefined || value.maxAgeDays !== undefined)) {
+      onChange({ minAgeDays: undefined, maxAgeDays: undefined });
+    }
+  }, [stageEntryDateEnabled, value.minAgeDays, value.maxAgeDays, onChange]);
   const currentSortIndex = sortOptions.findIndex(
     (option) => option.sortBy === value.sortBy && option.sortDir === value.sortDir
   );

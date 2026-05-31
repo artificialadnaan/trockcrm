@@ -1,4 +1,5 @@
 import { type TerminalDateFilter, toDatePresetRange } from "@/lib/pipeline-terminal-filters";
+import type { FilterBarValue } from "./filterbar-params";
 
 export interface DateWindow {
   /** Always present (possibly undefined) so a preset switch can CLEAR a prior window via merge. */
@@ -50,6 +51,21 @@ export function resolveDateWindow(filter: TerminalDateFilter, now = new Date()):
 }
 
 const NAMED_PRESETS = new Set(["7", "30", "60", "90", "wtd", "mtd", "qtd", "ytd", "all"]);
+
+/**
+ * Re-resolve a stored value's date window from its named preset, so a relative preset stays
+ * relative across reloads/bookmarks: e.g. an overnight URL with `datePreset=30` + yesterday's
+ * dateFrom/dateTo yields a fresh "last 30 days" window (and "all" clears the bounds). Custom and
+ * unrecognized presets keep their stored bounds. Apply on READ (the URL self-heals on next change).
+ */
+export function withResolvedDateWindow(value: FilterBarValue, now = new Date()): FilterBarValue {
+  const preset = value.datePreset;
+  if (preset && NAMED_PRESETS.has(preset)) {
+    const window = resolveDateWindow({ preset: preset as Exclude<TerminalDateFilter["preset"], "custom"> }, now);
+    return { ...value, dateFrom: window.dateFrom, dateTo: window.dateTo };
+  }
+  return value;
+}
 
 /** Reconstruct the date control's filter from a stored FilterBar value. A custom preset with no
  *  start, or an unrecognized preset, falls back to all-time. */

@@ -110,6 +110,18 @@ describe("FilterBar", () => {
     expect(q('button[aria-label="Stalled filter"]')).not.toBeNull();
   });
 
+  it("clears stale stalled params from the URL when the stage-entry gate is off", () => {
+    const onChange = vi.fn();
+    render(["status"], { onChange, value: { minAgeDays: 30 }, stageEntryDateEnabled: false });
+    expect(onChange).toHaveBeenCalledWith({ minAgeDays: undefined, maxAgeDays: undefined });
+  });
+
+  it("does NOT clear stalled params when the gate is on", () => {
+    const onChange = vi.fn();
+    render(["stalled"], { onChange, value: { minAgeDays: 30 }, stageEntryDateEnabled: true });
+    expect(onChange).not.toHaveBeenCalledWith({ minAgeDays: undefined, maxAgeDays: undefined });
+  });
+
   it("toggles a stage selection", () => {
     const onChange = vi.fn();
     render(["stage"], { onChange });

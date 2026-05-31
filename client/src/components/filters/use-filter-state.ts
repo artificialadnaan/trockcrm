@@ -6,6 +6,7 @@ import {
   clearFilterParams,
   type FilterBarValue,
 } from "./filterbar-params";
+import { withResolvedDateWindow } from "./filterbar-date";
 
 export interface UseFilterStateResult {
   filters: FilterBarValue;
@@ -19,7 +20,9 @@ export interface UseFilterStateResult {
  */
 export function useFilterState(): UseFilterStateResult {
   const [searchParams, setSearchParams] = useSearchParams();
-  const filters = useMemo(() => deserializeFilters(searchParams), [searchParams]);
+  // Re-resolve named date presets on read so a relative preset (e.g. "last 30 days") stays current
+  // across reloads/bookmarks rather than freezing at the URL's stored bounds.
+  const filters = useMemo(() => withResolvedDateWindow(deserializeFilters(searchParams)), [searchParams]);
 
   const setFilters = useCallback(
     (patch: Partial<FilterBarValue>) => {

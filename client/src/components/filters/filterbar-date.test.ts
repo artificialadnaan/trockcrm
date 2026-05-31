@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveDateWindow, dateFilterFromValue } from "./filterbar-date";
+import { resolveDateWindow, dateFilterFromValue, withResolvedDateWindow } from "./filterbar-date";
 
 // Wednesday 2026-05-27 (noon UTC for tz-robustness); the most recent Sunday is 2026-05-24.
 const NOW = new Date(Date.UTC(2026, 4, 27, 12));
@@ -73,5 +73,25 @@ describe("dateFilterFromValue (FilterBar value -> date control filter)", () => {
       customStart: "2026-05-01",
       customEnd: "2026-05-10",
     });
+  });
+});
+
+describe("withResolvedDateWindow (re-resolve relative presets on read)", () => {
+  it("re-resolves a relative preset to a fresh window, dropping stale bookmarked bounds", () => {
+    expect(
+      withResolvedDateWindow({ datePreset: "30", dateFrom: "2020-01-01", dateTo: "2020-01-02" }, NOW)
+    ).toEqual({ datePreset: "30", dateFrom: "2026-04-27", dateTo: "2026-05-27" });
+  });
+
+  it("clears the window for an all-time preset", () => {
+    expect(withResolvedDateWindow({ datePreset: "all", dateFrom: "2020-01-01", dateTo: "2020-01-02" }, NOW)).toEqual({
+      datePreset: "all",
+    });
+  });
+
+  it("leaves a custom window and a preset-less value untouched", () => {
+    const custom = { datePreset: "custom", dateFrom: "2026-05-01", dateTo: "2026-05-10" };
+    expect(withResolvedDateWindow(custom, NOW)).toEqual(custom);
+    expect(withResolvedDateWindow({ search: "x" }, NOW)).toEqual({ search: "x" });
   });
 });
