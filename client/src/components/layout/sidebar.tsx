@@ -55,7 +55,7 @@ export type AdminGroup = {
 
 const navItems: NavItem[] = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard", roles: ["admin", "director", "rep"] },
-  { to: "/deals", icon: Handshake, label: "Deals", roles: ["admin", "director", "rep"] },
+  { to: "/deals", icon: Handshake, label: "Deals Dashboard", roles: ["admin", "director", "rep"] },
   { to: "/leads", icon: ClipboardList, label: "Leads", roles: ["admin", "director", "rep"] },
   { to: "/properties", icon: Building2, label: "Properties", roles: ["admin", "director", "rep"] },
   { to: "/pipeline", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] },

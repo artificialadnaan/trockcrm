@@ -478,7 +478,7 @@ describe("DealListPage", () => {
       won: { preset: "all" },
       lost: { preset: "all" },
     }, 8, null, undefined, {});
-    expect(html).toContain("Read-only pipeline board");
+    expect(html).toContain("Deals Dashboard"); // relabeled to distinguish the dashboard from /pipeline
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
     expect(html).toContain("Estimating");
