@@ -232,6 +232,8 @@ function normalizeDashboardDealFilter(filterParam: string | null | undefined): D
 // the bar's Rep NESTS within the header Rep — the header is the broad scope, the bar refines the list
 // within it (Adnaan). Namespaced `dl_` so the list's params can't collide with the header's bare
 // ?assignedRepId/?scope/?period. Cards + read-only board stay untouched.
+// NOTE: this PR is the base-list FilterBar mount ONLY. The top "Estimate Sent to Client" control
+// removal + the real board-wide ?period dropdown is a SEPARATE follow-up (not built here).
 const DEALS_BASE_LIST_FILTERBAR_DIMENSIONS: FilterDimension[] = [
   "search",
   "date",
