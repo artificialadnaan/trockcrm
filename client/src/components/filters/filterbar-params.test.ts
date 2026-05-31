@@ -107,6 +107,15 @@ describe("deserializeFilters (URL query -> FilterBar)", () => {
     expect("status" in deserializeFilters(new URLSearchParams("status=any"))).toBe(false);
     expect("status" in deserializeFilters(new URLSearchParams("status="))).toBe(false);
   });
+
+  it("round-trips arbitrary domain statuses (Companies verification: pending/verified/rejected/not_required, #582)", () => {
+    // The status param is multi-domain: a Companies mount can pass verification statuses through
+    // statusOptions and they serialize/deserialize unchanged (no client-side allow-list to extend).
+    for (const status of ["pending", "verified", "rejected", "not_required"]) {
+      expect(serializeFilters({ status })).toEqual({ status });
+      expect(deserializeFilters(new URLSearchParams(`status=${status}`)).status).toBe(status);
+    }
+  });
 });
 
 describe("mergeFilterParams (URL patch: preserve non-FilterBar params + page-reset)", () => {

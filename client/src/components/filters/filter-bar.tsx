@@ -44,6 +44,10 @@ export interface FilterBarOptions {
    *  where assigned_rep_id/region_id are nullable). Set false on surfaces with non-null FKs (e.g.
    *  leads: assignedRepId is a non-null UUID, so the sentinel would error/no-match) — Codex #577 P1. */
   allowUnassigned?: boolean;
+  /** Label for the Rep dimension. Defaults to "Rep" (deals/pipeline/leads). Surfaces that filter by a
+   *  generic owner_id rather than a sales rep set this (e.g. Companies: "Owner", #582). Drives both the
+   *  control label and its "All …" option, so existing mounts are byte-identical. */
+  repLabel?: string;
 }
 
 type ScopeValue = "mine" | "team" | "all";
@@ -186,8 +190,8 @@ export function FilterBar({
 
       {has("rep") && (
         <FilterSelect
-          label="Rep"
-          allLabel="All reps"
+          label={options.repLabel ?? "Rep"}
+          allLabel={`All ${(options.repLabel ?? "Rep").toLowerCase()}s`}
           value={value.assignedRepId}
           options={[...unassignedOption, ...(options.reps ?? [])]}
           onChange={(assignedRepId) => onChange({ assignedRepId })}
