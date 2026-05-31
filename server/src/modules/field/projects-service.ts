@@ -7,6 +7,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { buildFileDownloadUrlFromRecord, getDealPhotoTimeline, searchPhotoUploadTargets } from "../files/service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
 import { getDealById } from "../deals/service.js";
+import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -15,16 +16,12 @@ export type FieldAccessContext = {
   userRole: UserRole;
 };
 
-const TERMINAL_FIELD_STAGE_SLUGS = [
-  "won",
-  "lost",
-  "sent_to_production",
-  "service_sent_to_production",
-  "closed_won",
-  "closed_lost",
-  "production_lost",
-  "service_lost",
-] as const;
+// The set of terminal (won/lost) stage slugs whose deals are excluded from the
+// field "active projects" list. Sourced from the shared canonical constant
+// (canonical terminal + the full Won and Lost slug families) rather than a
+// hardcoded literal — a hardcoded subset silently let terminal deals on omitted
+// alias stages (e.g. service_scheduled / service_complete) leak in as "active".
+const TERMINAL_FIELD_STAGE_SLUGS = TERMINAL_STAGE_SLUGS;
 
 const textArray = (values: readonly string[]) => sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
 
