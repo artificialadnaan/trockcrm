@@ -172,9 +172,14 @@ function renderStageChip(label: string) {
   );
 }
 
-function escapeCsvCell(value: string | number | null | undefined) {
+export function escapeCsvCell(value: string | number | null | undefined) {
+  // Numbers are never an injection vector and must stay numeric (don't neutralize e.g. -5).
+  if (typeof value === "number") return String(value);
   const text = value == null ? "" : String(value);
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  // CSV-injection hardening: a STRING cell beginning with a formula trigger (= + - @, or a leading
+  // control char) can execute as a formula in Excel/Sheets. Prefix with ' so it renders as text.
+  const guarded = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+  return /[",\n]/.test(guarded) ? `"${guarded.replace(/"/g, '""')}"` : guarded;
 }
 
 /** Serialize rows to CSV and trigger a client-side download. Shared by the legacy and FilterBar export paths. */
@@ -185,7 +190,11 @@ function triggerCsvDownload(rows: (string | number | null | undefined)[][], file
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
+  // Attach before clicking: a detached anchor's click() does not reliably start the download in some
+  // browsers (e.g. Firefox). Remove it right after.
+  document.body.appendChild(anchor);
   anchor.click();
+  anchor.remove();
   URL.revokeObjectURL(url);
 }
 

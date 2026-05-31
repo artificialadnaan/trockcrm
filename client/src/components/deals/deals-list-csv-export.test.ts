@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildFilterBarCsvRows,
+  escapeCsvCell,
   fetchAllDealsForFilters,
   MAX_EXPORT_PAGES,
 } from "./deals-list-section";
@@ -115,6 +116,31 @@ describe("fetchAllDealsForFilters (FilterBar-aware CSV export — canonical #546
     expect(result.truncated).toBe(true);
     expect(result.pagesFetched).toBe(MAX_EXPORT_PAGES);
     expect(apiClient).toHaveBeenCalledTimes(MAX_EXPORT_PAGES);
+  });
+});
+
+describe("escapeCsvCell (CSV-injection hardening + RFC-4180 quoting)", () => {
+  it("neutralizes a string cell that begins with a spreadsheet-formula trigger (= + - @) by prefixing '", () => {
+    expect(escapeCsvCell("=1+2")).toBe("'=1+2");
+    expect(escapeCsvCell("+1")).toBe("'+1");
+    expect(escapeCsvCell("-cmd")).toBe("'-cmd");
+    expect(escapeCsvCell("@SUM(A1)")).toBe("'@SUM(A1)");
+  });
+
+  it("quotes a neutralized cell that ALSO contains a comma/quote/newline", () => {
+    expect(escapeCsvCell("=HYPERLINK(\"x\"),y")).toBe('"\'=HYPERLINK(""x""),y"');
+  });
+
+  it("leaves numeric cells untouched (numbers are not an injection vector — negatives stay numeric)", () => {
+    expect(escapeCsvCell(-5)).toBe("-5");
+    expect(escapeCsvCell(1000)).toBe("1000");
+    expect(escapeCsvCell(0)).toBe("0");
+  });
+
+  it("leaves a safe string unchanged and still quotes commas/newlines", () => {
+    expect(escapeCsvCell("Palm Villas")).toBe("Palm Villas");
+    expect(escapeCsvCell("Acme, Inc")).toBe('"Acme, Inc"');
+    expect(escapeCsvCell(null)).toBe("");
   });
 });
 
