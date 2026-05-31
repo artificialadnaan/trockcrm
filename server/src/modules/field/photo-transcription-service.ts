@@ -4,7 +4,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { getFileById, updateFile } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
-import { assertAccessibleFieldCaptureTarget } from "./projects-service.js";
+import { assertScopedCaptureTargetAccess } from "./projects-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -152,7 +152,9 @@ export async function getAccessibleFieldPhoto(
     throw new AppError(404, "Photo not found.");
   }
 
-  await assertAccessibleFieldCaptureTarget(tenantDb, {
+  // Existing-photo edits stay rep-OWNED (scoped), unlike the company-wide capture
+  // picker — a rep must not transcribe/retag photos on another rep's record.
+  await assertScopedCaptureTargetAccess(tenantDb, {
     dealId: photo.dealId ?? undefined,
     leadId: photo.leadId ?? undefined,
     opportunityId: undefined,
