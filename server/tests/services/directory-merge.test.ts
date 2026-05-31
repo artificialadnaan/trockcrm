@@ -279,6 +279,25 @@ describe("classifyNameCluster (clearly_safe vs review)", () => {
     expect(r.classification).toBe("review");
     expect(r.reasons).toContain("divergent_website");
   });
+
+  it("review when web identities are split across website and domain (mixed case)", () => {
+    // One row's website vs another row's domain-only -> two distinct web identities.
+    const r = classifyNameCluster([
+      member({ website: "acme.com", domain: null }),
+      member({ website: null, domain: "other.com" }),
+    ]);
+    expect(r.classification).toBe("review");
+    expect(r.reasons).toContain("divergent_website");
+  });
+
+  it("clearly_safe when one row's website matches another row's domain", () => {
+    // Same web identity expressed in different fields must NOT be flagged.
+    const r = classifyNameCluster([
+      member({ website: "acme.com", domain: null }),
+      member({ website: null, domain: "acme.com" }),
+    ]);
+    expect(r.classification).toBe("clearly_safe");
+  });
 });
 
 describe("planFieldReconciliation", () => {

@@ -266,12 +266,19 @@ export interface ClusterClassification {
 export function classifyNameCluster(members: CompanyMergeMember[]): ClusterClassification {
   const reasons: string[] = [];
 
-  // Treat website and domain as INDEPENDENT web-identity signals: divergence in
-  // either (across the cluster's members) means the rows may be different entities.
-  // Checking them separately catches "websites match but domains differ" too.
-  const websites = new Set(members.map((m) => normalizeWebsiteDomain(m.website)).filter(Boolean));
-  const domains = new Set(members.map((m) => normalizeWebsiteDomain(m.domain)).filter(Boolean));
-  if (websites.size > 1 || domains.size > 1) reasons.push("divergent_website");
+  // Web-identity divergence: collect EVERY normalized web identity present across
+  // the cluster -- each member contributes its website AND its domain. More than
+  // one distinct identity in the whole set means the rows may be different
+  // entities. This catches websites-differ, domains-differ, AND the mixed case
+  // (one row's website vs another row's domain-only). Errs toward review.
+  const webIdentities = new Set<string>();
+  for (const m of members) {
+    const w = normalizeWebsiteDomain(m.website);
+    if (w) webIdentities.add(w);
+    const d = normalizeWebsiteDomain(m.domain);
+    if (d) webIdentities.add(d);
+  }
+  if (webIdentities.size > 1) reasons.push("divergent_website");
 
   const phones = new Set(members.map((m) => normalizePhoneDigits(m.phone)).filter(Boolean));
   if (phones.size > 1) reasons.push("divergent_phone");
@@ -752,14 +759,20 @@ export async function mergeDirectoryEntities(
     const movedRows = await repointCompanyReferences(tenantDb, winnerId, loserId, (winnerRow as any).name);
 
     // Winner inherits the loser's non-null fields only where the winner is empty.
+    // Apply each field with a concurrent-safe guard: only fill it if the winner
+    // column is STILL NULL at write time, so a value populated by another request
+    // between our read and this write is preserved (keeps the "only where empty"
+    // rule atomic).
     const reconciliation = planFieldReconciliation(toMergeMember(winnerRow as any), [
       toMergeMember(loserRow as any),
     ]);
-    if (Object.keys(reconciliation.updates).length > 0) {
+    for (const [field, value] of Object.entries(reconciliation.updates)) {
+      const column = (companies as any)[field];
+      if (!column) continue;
       await tenantDb
         .update(companies)
-        .set(reconciliation.updates as any)
-        .where(eq(companies.id, winnerId));
+        .set({ [field]: value } as any)
+        .where(and(eq(companies.id, winnerId), sql`${column} IS NULL`));
     }
 
     // Loser is soft-deactivated and stamped with merged_into -- NEVER deleted.
