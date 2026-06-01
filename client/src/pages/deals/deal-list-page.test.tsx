@@ -998,12 +998,19 @@ describe("DealListPage", () => {
     await view.cleanup();
   });
 
+  it("strips stale estimate_sent_* params from the URL on load — the removed control must not invisibly filter the board or a stage drill-down (Codex #600 P2)", async () => {
+    const view = await renderPageDomWithLocation("/deals?scope=all&estimate_sent_since=2026-04-01&estimate_sent_until=2026-04-30");
+    expect(lastSearch(view.searches)).not.toContain("estimate_sent_");
+    expect(lastSearch(view.searches)).toContain("scope=all");
+    await view.cleanup();
+  });
+
   it("requests an expanded preview window for the SLA drill-down board", () => {
     renderPage("/deals?scope=all&filter=at_risk&period=week", "director");
 
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
-      lost: { preset: "all" },
+      lost: { preset: "wtd" }, // ?period=week now windows the Lost column too (Codex #600 P2)
     }, 1000, { from: "2026-05-03", to: "2026-05-08" }, undefined);
   });
 
@@ -1011,8 +1018,8 @@ describe("DealListPage", () => {
     renderPage("/deals?scope=all&period=last_month&won_preset=30", "director");
 
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
-      won: { preset: "30" },
-      lost: { preset: "all" },
+      won: { preset: "30" }, // explicit Won filter wins
+      lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month
     }, 8, { from: "2026-04-01", to: "2026-04-30" }, undefined);
   });
 
@@ -1023,7 +1030,7 @@ describe("DealListPage", () => {
         new Date("2026-05-31T12:00:00.000Z")
       );
       expect(resolved.won).toEqual({ preset: "qtd" });
-      expect(resolved.lost).toEqual({ preset: "all" });
+      expect(resolved.lost).toEqual({ preset: "qtd" }); // Lost also seeded from the period (Codex #600 P2)
     });
 
     it("respects an explicit Won filter in the URL over the period (the user's choice wins)", () => {
@@ -1335,9 +1342,9 @@ describe("DealListPage", () => {
     ).toBe("/deals?filter=won&scope=team&period=last_month&won_preset=30&won_since=2026-04-01&won_until=2026-04-30");
     expect(
       buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
-        queryParams: new URLSearchParams("assignedRepId=rep-1&search=roof"),
+        queryParams: new URLSearchParams("assignedRepId=rep-1&period=mtd&search=roof"),
       })
-    ).toBe("/deals?filter=active_pipeline&scope=all&assignedRepId=rep-1"); // rep preserved; search dropped
+    ).toBe("/deals?filter=active_pipeline&scope=all&assignedRepId=rep-1&period=mtd"); // rep + period preserved; search dropped (Codex #600 P2)
     expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe(
       "/deals?filter=at_risk&scope=mine"
     );
@@ -1346,9 +1353,10 @@ describe("DealListPage", () => {
   it("renders clickable KPI cards on the deals page", () => {
     const html = renderPage("/deals?scope=all&period=last_month&assignedRepId=rep-1", "director");
 
-    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=all&amp;assignedRepId=rep-1"');
+    // Period is preserved through EVERY drill-down now, so the cohort matches the page clicked from (Codex #600 P2).
+    expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=all&amp;period=last_month&amp;assignedRepId=rep-1"');
     expect(html).toContain('href="/deals?filter=won&amp;scope=all&amp;period=last_month&amp;assignedRepId=rep-1"');
-    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all&amp;assignedRepId=rep-1"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all&amp;period=last_month&amp;assignedRepId=rep-1"');
     expect(html).toContain("View active pipeline deals");
     expect(html).toContain("View won deals");
     expect(html).toContain("View at-risk deals");
@@ -1573,7 +1581,7 @@ describe("DealListPage", () => {
       true,
       {
         won: { preset: "30" },
-        lost: { preset: "all" },
+        lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month (Codex #600 P2)
       },
       8,
       { from: "2026-04-01", to: "2026-04-30" },

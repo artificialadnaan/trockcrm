@@ -196,15 +196,25 @@ export function resolveDrilldownTerminalDateFilters(
 ): Record<TerminalOutcome, TerminalDateFilter> {
   const base = readTerminalDateFiltersFromSearchParams(params);
   const period = normalizeDashboardPeriod(params.get("period"));
-  // Scope to the Won drill-down (the surface D-7 flags): other drill-downs keep the
-  // Won column current-state and let their own caption fall back to the period label.
+  if (!period) return base;
   const isWonDrilldown = normalizeDashboardDealFilter(params.get("filter")) === "won";
   const hasExplicitWon =
     params.has("won_preset") || params.has("won_all_time") || params.has("won_since");
-  if (period && isWonDrilldown && !hasExplicitWon) {
-    return { ...base, won: periodToTerminalDateFilter(period, now) };
+  const hasExplicitLost =
+    params.has("lost_preset") || params.has("lost_all_time") || params.has("lost_since");
+  const result = { ...base };
+  // Won column: seed from the period ONLY on the Won drill-down (the surface D-7 flags); other views keep
+  // the Won column current-state and let won_period window the board-wide aggregate.
+  if (isWonDrilldown && !hasExplicitWon) {
+    result.won = periodToTerminalDateFilter(period, now);
   }
-  return base;
+  // Lost column: the header period must window it too. won_period covers Won + open columns server-side,
+  // but the Lost column reads lost_since/lost_until — so seed it from the period whenever ?period is set
+  // and no explicit Lost filter is present, or Lost shows all-time under a board-wide period (Codex #600 P2).
+  if (!hasExplicitLost) {
+    result.lost = periodToTerminalDateFilter(period, now);
+  }
+  return result;
 }
 
 function normalizeDashboardDealFilter(filterParam: string | null | undefined): DashboardDealListFilter {
@@ -469,6 +479,7 @@ export function buildDealsPageKpiDrilldownPath(
       if (!value) continue;
       if (
         key === "assignedRepId" ||
+        key === "period" || // keep the header period scope through every drill-down (Codex #600 P2)
         (filter === "won" && key.startsWith("won_"))
       ) {
         params.set(key, value);
@@ -771,6 +782,18 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     next.delete("assignedRepId");
     setSearchParams(next, { replace: true });
   }, [requestedScope, searchParams, setSearchParams]);
+
+  // The Estimate-Sent control was replaced by the header Period dropdown. Strip any stale estimate_sent_*
+  // params from the URL on load so a bookmarked/shared link can neither invisibly filter the board (the
+  // range is no longer read here) NOR be forwarded into a stage-page drill-down — which still passes the
+  // full searchParams and would otherwise apply an invisible, control-less filter there (Codex #600 P2).
+  useEffect(() => {
+    const stale = [...searchParams.keys()].filter((key) => key.startsWith("estimate_sent_"));
+    if (stale.length === 0) return;
+    const next = new URLSearchParams(searchParams);
+    for (const key of stale) next.delete(key);
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const updateTerminalDateFilter = useCallback((outcome: TerminalOutcome, filter: TerminalDateFilter) => {
     writeTerminalDateFilter(outcome, filter);
