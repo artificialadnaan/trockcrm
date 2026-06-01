@@ -212,7 +212,17 @@ export function resolveDrilldownTerminalDateFilters(
   // but the Lost column reads lost_since/lost_until — so seed it from the period whenever ?period is set
   // and no explicit Lost filter is present, or Lost shows all-time under a board-wide period (Codex #600 P2).
   if (!hasExplicitLost) {
-    result.lost = periodToTerminalDateFilter(period, now);
+    if (period === "today") {
+      // periodToTerminalDateFilter nulls `today` to {preset:"all"} to dodge a WON-only won_until vs
+      // won_period_to clamp conflict (Codex #566). Lost has no won_period sibling, so give it the REAL
+      // today window — otherwise ?period=today leaves the Lost column all-time (Codex #600 P2).
+      const todayRange = getDashboardPeriodDateRange(period, now);
+      result.lost = todayRange?.from
+        ? { preset: "custom", customStart: todayRange.from, customEnd: todayRange.to }
+        : { preset: "all" };
+    } else {
+      result.lost = periodToTerminalDateFilter(period, now);
+    }
   }
   return result;
 }
@@ -479,7 +489,12 @@ export function buildDealsPageKpiDrilldownPath(
       if (!value) continue;
       if (
         key === "assignedRepId" ||
-        key === "period" || // keep the header period scope through every drill-down (Codex #600 P2)
+        // Keep the header period scope through outcome-aware drill-downs (active pipeline / Won), but NOT
+        // the SLA drill-downs: getDashboardDealListView turns ?period into updatedFrom/updatedTo, which the
+        // at-risk/stale lists filter via matchesUpdatedRange — a different axis than the SLA card's count, so
+        // carrying period there drops at-risk deals the card counted but that weren't updated in the window
+        // (cohort mismatch, Codex #600 P2).
+        (key === "period" && filter !== "at_risk" && filter !== "stale") ||
         (filter === "won" && key.startsWith("won_"))
       ) {
         params.set(key, value);
@@ -818,13 +833,17 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   // board-wide (selectedPeriodRange → useDealBoard wonPeriodRange → won_period_from/to, the outcome-aware
   // D-11 window) AND scopes the base list (fed into its baseFilters below). "__all__" clears the param.
   const updatePeriod = useCallback((value: string) => {
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      if (!value || value === "__all__") next.delete("period");
-      else next.set("period", value);
-      return next;
-    });
-  }, [setSearchParams]);
+    const next = new URLSearchParams(searchParams);
+    if (!value || value === "__all__") next.delete("period");
+    else next.set("period", value);
+    // Write ?period AND the period-derived terminal (Won/Lost) filters in LOCKSTEP. If we only wrote
+    // ?period and let the boardParamKey effect re-sync terminalDateFilters a render later, the board would
+    // fire one fetch with the NEW won_period_from/to but STALE lost_since/until (and stale Won filters) — a
+    // mixed window; useDealBoard does not cancel or order responses, so that stale fetch could win and leave
+    // the board/cards on a blended date range (Codex #600 P2).
+    setSearchParams(next);
+    setTerminalDateFilters(resolveDrilldownTerminalDateFilters(next));
+  }, [searchParams, setSearchParams]);
 
   const boardColumns = useMemo(
     () => buildCanonicalDealBoardColumns(board?.columns, stages),

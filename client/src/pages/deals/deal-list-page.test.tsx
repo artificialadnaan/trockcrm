@@ -1058,6 +1058,15 @@ describe("DealListPage", () => {
       expect(won).toEqual({ preset: "all" });
     });
 
+    it("still windows the LOST column for period=today (Won's today->all dodge is won_period-specific; Lost has no such sibling, so ?period=today must not leave Lost all-time) (Codex #600 P2)", () => {
+      const resolved = resolveDrilldownTerminalDateFilters(
+        new URLSearchParams("period=today&scope=all"),
+        new Date("2026-05-31T12:00:00.000Z")
+      );
+      expect(resolved.won).toEqual({ preset: "all" }); // Won stays all (the #566 clamp dodge)
+      expect(resolved.lost).toEqual({ preset: "custom", customStart: "2026-05-31", customEnd: "2026-05-31" });
+    });
+
     it("leaves the Won filter at its default when no period is inherited", () => {
       expect(resolveDrilldownTerminalDateFilters(new URLSearchParams("scope=all")).won).toEqual({ preset: "all" });
     });
@@ -1348,15 +1357,30 @@ describe("DealListPage", () => {
     expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe(
       "/deals?filter=at_risk&scope=mine"
     );
+    // SLA drill-downs (at_risk / stale) must DROP ?period even when the page URL carries it: there period
+    // becomes updatedFrom/updatedTo (matchesUpdatedRange), a different axis than the SLA card count, so a
+    // perioded at-risk link would show a different cohort than the card (Codex #600 P2). Rep still preserved.
+    expect(
+      buildDealsPageKpiDrilldownPath("at_risk", "all", null, {
+        queryParams: new URLSearchParams("assignedRepId=rep-1&period=last_month"),
+      })
+    ).toBe("/deals?filter=at_risk&scope=all&assignedRepId=rep-1");
+    expect(
+      buildDealsPageKpiDrilldownPath("stale", "all", null, {
+        queryParams: new URLSearchParams("period=mtd"),
+      })
+    ).toBe("/deals?filter=stale&scope=all");
   });
 
   it("renders clickable KPI cards on the deals page", () => {
     const html = renderPage("/deals?scope=all&period=last_month&assignedRepId=rep-1", "director");
 
-    // Period is preserved through EVERY drill-down now, so the cohort matches the page clicked from (Codex #600 P2).
+    // Period is preserved through the OUTCOME-AWARE drill-downs (active pipeline / Won) so the cohort matches
+    // the page clicked from — but the at-risk (SLA) drill-down must DROP it, since period there becomes an
+    // updated-date window that mismatches the SLA card count (Codex #600 P2).
     expect(html).toContain('href="/deals?filter=active_pipeline&amp;scope=all&amp;period=last_month&amp;assignedRepId=rep-1"');
     expect(html).toContain('href="/deals?filter=won&amp;scope=all&amp;period=last_month&amp;assignedRepId=rep-1"');
-    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all&amp;period=last_month&amp;assignedRepId=rep-1"');
+    expect(html).toContain('href="/deals?filter=at_risk&amp;scope=all&amp;assignedRepId=rep-1"');
     expect(html).toContain("View active pipeline deals");
     expect(html).toContain("View won deals");
     expect(html).toContain("View at-risk deals");
@@ -1369,6 +1393,49 @@ describe("DealListPage", () => {
     // ?period now windows the cards + read-only board board-wide via useDealBoard arg5 (wonPeriodRange).
     const call = mocks.useDealBoardMock.mock.calls[mocks.useDealBoardMock.mock.calls.length - 1];
     expect(call[4]).toEqual(expect.objectContaining({ from: expect.any(String), to: expect.any(String) })); // period range
+  });
+
+  it("changes the period and its derived Lost window in LOCKSTEP — the board never fetches a new won_period with a stale all-time Lost (Codex #600 P2)", async () => {
+    const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+    const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Period"]');
+    // Base UI's Select opens on pointerdown (not a bare click) in jsdom.
+    await act(async () => {
+      trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      trigger?.click();
+    });
+    await act(async () => {
+      const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+        (el) => el.textContent?.trim() === "Last month"
+      );
+      // Base UI's SelectItem only commits a click on a HIGHLIGHTED item (or a touch pointer); a non-touch
+      // click on an unhighlighted option is a no-op. Mark the pointer as touch so the click commits in jsdom.
+      option?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      option?.click();
+    });
+
+    // The URL moved to last_month.
+    expect(lastSearch(view.searches)).toContain("period=last_month");
+
+    // Every board fetch carrying a period window (arg5) must also carry the period-derived Lost window
+    // (arg3.lost) — NEVER the stale all-time Lost. Without the lockstep, the render between the ?period write
+    // and the URL-sync effect fires exactly that mismatched combo.
+    const callsWithPeriodWindow = mocks.useDealBoardMock.mock.calls.filter((call) => call[4] != null);
+    expect(callsWithPeriodWindow.length).toBeGreaterThan(0);
+    for (const call of callsWithPeriodWindow) {
+      expect((call[2] as { lost: unknown }).lost).not.toEqual({ preset: "all" });
+    }
+    // And the settled board fetch windows BOTH the period (arg5) and the Lost column to last_month.
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+      "all",
+      true,
+      expect.objectContaining({ lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" } }),
+      8,
+      expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
+      undefined
+    );
+
+    await view.cleanup();
   });
 
   it("nests the base list within ?period — feeds the period window into baseFilters as outcome-aware dateFrom/dateTo so the bar Date narrows WITHIN it", () => {
