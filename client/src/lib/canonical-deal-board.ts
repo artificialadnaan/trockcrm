@@ -108,24 +108,23 @@ export interface CanonicalDealStageFamily {
  * Group raw stage ids into the canonical board columns they belong to, keyed by canonical slug. Used to
  * derive the under-kanban list's stage scope so it matches the board EXACTLY (Codex #589): the explicit-
  * pick family, the default-stage union, AND the terminal classification all flow from the SAME canonical
- * membership the board uses (normalizeDealStageSlug under either route). So Won/Lost ALIASES (closed_won,
- * service_lost, …) land in the won/lost columns, and contract_signed + service_contract_signed → contract.
+ * membership the board uses. ROUTE-SPECIFIC: each stage maps to ITS OWN route's column (workflowFamily →
+ * route, with a service_-prefix slug fallback), so the route-dependent estimating pair never cross-
+ * pollinates — a standard `estimating` stage joins ONLY the normal Estimating column, a service one ONLY
+ * service_estimating (Codex #589 over-grouping P2; normalizing under BOTH routes over-showed the sibling
+ * column). Route-INVARIANT aliases still land together (contract_signed/service_contract_signed → contract;
+ * every Won/Lost alias → its terminal column; estimate_under_review/service_… → estimate_under_review).
  */
 export function buildCanonicalDealStageFamilies(
-  stages: Array<Pick<DealStageLike, "id" | "slug">>
+  stages: Array<Pick<DealStageLike, "id" | "slug" | "workflowFamily">>
 ): CanonicalDealStageFamily[] {
   const byCanonical = new Map<string, string[]>();
   for (const stage of stages) {
-    const canonicalSlugs = new Set(
-      [normalizeDealStageSlug(stage.slug, "normal"), normalizeDealStageSlug(stage.slug, "service")].filter(
-        (value): value is NonNullable<typeof value> => value != null
-      )
-    );
-    for (const slug of canonicalSlugs) {
-      const ids = byCanonical.get(slug) ?? [];
-      if (!ids.includes(stage.id)) ids.push(stage.id);
-      byCanonical.set(slug, ids);
-    }
+    const slug = normalizeDealStageSlug(stage.slug, workflowRouteFromStage(stage));
+    if (!slug) continue;
+    const ids = byCanonical.get(slug) ?? [];
+    if (!ids.includes(stage.id)) ids.push(stage.id);
+    byCanonical.set(slug, ids);
   }
   return [...byCanonical.entries()].map(([slug, ids]) => ({ slug, ids }));
 }

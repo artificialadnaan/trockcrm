@@ -28,6 +28,21 @@ describe("buildCanonicalDealStageFamilies (canonical-slug-keyed membership the l
     // Selecting canonical "Estimate Under Review" must query BOTH ids so the list == the board column.
     expect(eur?.ids).toEqual(expect.arrayContaining(["eur-standard", "eur-service"]));
   });
+
+  it("groups the route-dependent estimating stages ROUTE-SPECIFICALLY — normal estimating does NOT leak into service_estimating, and vice versa (Codex #589 over-grouping P2)", () => {
+    const families = buildCanonicalDealStageFamilies([
+      { id: "est-normal", slug: "estimating", workflowFamily: "standard_deal" },
+      { id: "est-service", slug: "service_estimating", workflowFamily: "service_deal" },
+    ]);
+    const normal = families.find((family) => family.slug === "estimating");
+    const service = families.find((family) => family.slug === "service_estimating");
+    // Each stage maps to ITS OWN route's canonical column only — no cross-pollination (the both-routes
+    // grouping put `estimating` in BOTH families → selecting either Estimating column OVER-showed the other).
+    expect(normal?.ids).toEqual(["est-normal"]);
+    expect(service?.ids).toEqual(["est-service"]);
+    expect(normal?.ids).not.toContain("est-service");
+    expect(service?.ids).not.toContain("est-normal");
+  });
 });
 
 describe("buildCanonicalDealStageIdFamilies (explicit stage pick → board column's full membership, Codex #589 P1)", () => {
