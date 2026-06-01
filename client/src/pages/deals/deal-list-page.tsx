@@ -65,6 +65,9 @@ export type DashboardDealListFilter =
 type DashboardPeriod = "today" | "week" | "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
 type DashboardPeriodSelection = DashboardPeriod | null;
 
+// Order shown in the header period dropdown (labels via getDashboardPeriodLabel). "__all__" = no ?period.
+const PERIOD_OPTIONS: DashboardPeriod[] = ["today", "week", "mtd", "qtd", "ytd", "last_month", "last_quarter", "last_year"];
+
 type DashboardDealListView = {
   filter: DashboardDealListFilter;
   title: string;
@@ -428,43 +431,6 @@ export function isDealDatePreset(value: string | null): value is Exclude<Termina
   );
 }
 
-export function readEstimateSentDateFilterFromSearchParams(params: URLSearchParams): TerminalDateFilter {
-  const preset = params.get("estimate_sent_preset");
-  if (isDealDatePreset(preset)) return { preset };
-  if (params.get("estimate_sent_all_time") === "true") return { preset: "all" };
-
-  const since = params.get("estimate_sent_since");
-  const until = params.get("estimate_sent_until");
-  if (since) {
-    return {
-      preset: "custom",
-      customStart: clampDateToToday(since),
-      customEnd: until ? clampDateToToday(until) : undefined,
-    };
-  }
-
-  return { preset: "all" };
-}
-
-function setEstimateSentDateFilterSearchParams(params: URLSearchParams, filter: TerminalDateFilter) {
-  params.delete("estimate_sent_preset");
-  params.delete("estimate_sent_since");
-  params.delete("estimate_sent_until");
-  params.delete("estimate_sent_all_time");
-
-  if (filter.preset === "all") {
-    return;
-  }
-
-  if (filter.preset === "custom") {
-    params.set("estimate_sent_since", clampDateToToday(filter.customStart));
-    if (filter.customEnd) params.set("estimate_sent_until", clampDateToToday(filter.customEnd));
-    return;
-  }
-
-  params.set("estimate_sent_preset", filter.preset);
-}
-
 export function buildDealStageNavigationPath(
   column: DealBoardColumn,
   scope: PipelineScope,
@@ -503,7 +469,6 @@ export function buildDealsPageKpiDrilldownPath(
       if (!value) continue;
       if (
         key === "assignedRepId" ||
-        key.startsWith("estimate_sent_") ||
         (filter === "won" && key.startsWith("won_"))
       ) {
         params.set(key, value);
@@ -613,27 +578,6 @@ export function getTerminalDateRange(filter: TerminalDateFilter, now = new Date(
     from: formatDateInput(start),
     to: today,
   };
-}
-
-export function getEstimateSentDateRange(filter: TerminalDateFilter, now = new Date()): DateRange {
-  if (filter.preset === "all") return {};
-  if (filter.preset === "custom") {
-    return {
-      from: filter.customStart,
-      to: filter.customEnd,
-    };
-  }
-
-  if (
-    filter.preset === "wtd" ||
-    filter.preset === "mtd" ||
-    filter.preset === "qtd" ||
-    filter.preset === "ytd"
-  ) {
-    return toDatePresetRange(filter.preset, now);
-  }
-
-  return { from: daysAgo(Number(filter.preset), now) };
 }
 
 function intersectDateRanges(...ranges: Array<DateRange | null | undefined>): DateRange {
@@ -763,9 +707,6 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const [terminalDateFilters, setTerminalDateFilters] = useState<Record<TerminalOutcome, TerminalDateFilter>>(() =>
     resolveDrilldownTerminalDateFilters(searchParams)
   );
-  const [estimateSentDateFilter, setEstimateSentDateFilter] = useState<TerminalDateFilter>(() =>
-    readEstimateSentDateFilterFromSearchParams(searchParams)
-  );
   const requestedScope = resolvePreferredScope({
     requestedScope: searchParams.get("scope"),
     userId,
@@ -793,10 +734,6 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     selectedRepId === "__all__"
       ? "All reps"
       : assignees.find((assignee) => assignee.id === selectedRepId)?.displayName ?? "Selected rep";
-  const estimateSentDateRange = useMemo(
-    () => getEstimateSentDateRange(estimateSentDateFilter),
-    [estimateSentDateFilter]
-  );
   const dashboardView = useMemo(
     () =>
       getDashboardDealListView({
@@ -812,17 +749,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     terminalDateFilters,
     isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : 8,
     selectedPeriodRange,
-    selectedRepFilter,
-    estimateSentDateRange
+    selectedRepFilter
   );
 
-  // Sync the board's terminal/estimate date state from the URL — but key on the BOARD params only, so a
-  // dl_*-namespaced list edit (the under-kanban FilterBar) never churns this state and refetches the
-  // kanban above it (Codex #589). searchParams is read live inside; it is current whenever the key changes.
+  // Sync the board's terminal (Won/Lost) date state from the URL — but key on the BOARD params only, so a
+  // list-namespaced (dl_/fb_) FilterBar edit never churns this state and refetches the kanban above it
+  // (Codex #589). searchParams is read live inside; it is current whenever the key changes.
   const boardParamKey = boardRelevantParamKey(searchParams.toString());
   useEffect(() => {
     setTerminalDateFilters(resolveDrilldownTerminalDateFilters(searchParams));
-    setEstimateSentDateFilter(readEstimateSentDateFilterFromSearchParams(searchParams));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally keyed on board params only.
   }, [boardParamKey]);
 
@@ -856,11 +791,14 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     });
   }, [setSearchParams]);
 
-  const updateEstimateSentDateFilter = useCallback((filter: TerminalDateFilter) => {
-    setEstimateSentDateFilter(filter);
+  // The header period dropdown writes ?period, which already drives the KPI cards + read-only board
+  // board-wide (selectedPeriodRange → useDealBoard wonPeriodRange → won_period_from/to, the outcome-aware
+  // D-11 window) AND scopes the base list (fed into its baseFilters below). "__all__" clears the param.
+  const updatePeriod = useCallback((value: string) => {
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
-      setEstimateSentDateFilterSearchParams(next, filter);
+      if (!value || value === "__all__") next.delete("period");
+      else next.set("period", value);
       return next;
     });
   }, [setSearchParams]);
@@ -1064,14 +1002,9 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       ...(wonDateRange.to ? { wonClosedTo: wonDateRange.to } : {}),
     };
   }, [dashboardView.filter, dashboardView.listBaseFilters, wonDateRange.from, wonDateRange.to]);
-  const layeredListBaseFilters = useMemo(
-    () => ({
-      ...drilldownBaseFilters,
-      ...(estimateSentDateRange.from ? { estimateSentFrom: estimateSentDateRange.from } : {}),
-      ...(estimateSentDateRange.to ? { estimateSentTo: estimateSentDateRange.to } : {}),
-    }),
-    [drilldownBaseFilters, estimateSentDateRange.from, estimateSentDateRange.to]
-  );
+  // The drill-down list baseline = the drill-down base filters (the estimate-sent overlay was removed with
+  // the top control; the period control's window is layered at the base-view mount, not here).
+  const layeredListBaseFilters = drilldownBaseFilters;
   // Shared FilterBar on the DRILL-DOWN list (filter !== null). RED owns the base-view mount
   // (filter === null); the client-side at-risk/stale SLA list has no server predicate, so the bar
   // (which drives getDeals) can't back it — both return undefined here and keep today's behavior.
@@ -1218,13 +1151,19 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               ))}
             </SelectContent>
           </Select>
-          <TerminalDateFilterControl
-            stageName="Estimate Sent to Client"
-            filter={estimateSentDateFilter}
-            onFilterChange={updateEstimateSentDateFilter}
-            buttonClassName="h-10 rounded-md"
-            inputClassName="rounded-md"
-          />
+          <Select value={selectedPeriod ?? "__all__"} onValueChange={(value) => updatePeriod(value ?? "__all__")}>
+            <SelectTrigger className="h-10 w-[11rem] bg-white" aria-label="Period">
+              <SelectValue placeholder="All time">{getDashboardPeriodLabel(selectedPeriod)}</SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">All time</SelectItem>
+              {PERIOD_OPTIONS.map((period) => (
+                <SelectItem key={period} value={period}>
+                  {getDashboardPeriodLabel(period)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <ScopeToggle options={scopeOptions} value={scope} onChange={updateScope} ariaLabel="Deal scope" />
           <Button onClick={() => navigate("/deals/service-opportunity/new")} className="bg-brand-red text-white hover:bg-brand-red/90">
             <Plus className="mr-2 h-4 w-4" />
@@ -1416,7 +1355,20 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               title={dashboardView.title}
               subtitle={dashboardView.subtitle}
               eyebrow={dashboardView.eyebrow}
-              baseFilters={selectedRepFilter ? { assignedRepId: selectedRepFilter } : undefined}
+              // Inherit the header Rep AND the header ?period window (outcome-aware dateFrom/dateTo) as the
+              // list baseline, so the top period scopes cards+board+list together. The FilterBar's own Date
+              // then narrows the list WITHIN it: the section intersects baseFilters' date with the bar's via
+              // laterDate/earlierDate (the merged date-floor), so the bar Date can't widen past ?period — the
+              // same nesting model as Rep (period control).
+              baseFilters={
+                selectedRepFilter || selectedPeriodRange?.from || selectedPeriodRange?.to
+                  ? {
+                      ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+                      ...(selectedPeriodRange?.from ? { dateFrom: selectedPeriodRange.from } : {}),
+                      ...(selectedPeriodRange?.to ? { dateTo: selectedPeriodRange.to } : {}),
+                    }
+                  : undefined
+              }
               // Preserve the base list's prior default ordering (updated_at desc) when no dl_sort is set,
               // so it still surfaces recently-touched deals first (Codex #589).
               initialSort={dashboardView.listInitialSort}

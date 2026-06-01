@@ -3,9 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   getDashboardPeriodDateRange,
   getTerminalDateRange,
-  getEstimateSentDateRange,
   getWonMetricTerminalLabel,
-  readEstimateSentDateFilterFromSearchParams,
 } from "./deal-list-page";
 import { resolveDatePreset } from "@/lib/pipeline-terminal-filters";
 
@@ -31,11 +29,6 @@ describe("terminal date-range mappers handle the wtd preset (no NaN)", () => {
     const now = new Date(2026, 4, 27); // Wednesday; most recent Sunday = 2026-05-24
     expect(getTerminalDateRange({ preset: "wtd" }, now)).toEqual({ from: "2026-05-24", to: "2026-05-27" });
   });
-
-  it("getEstimateSentDateRange resolves wtd to the Sunday-anchored window", () => {
-    const now = new Date(2026, 4, 27);
-    expect(getEstimateSentDateRange({ preset: "wtd" }, now)).toEqual({ from: "2026-05-24", to: "2026-05-27" });
-  });
 });
 
 // Codex round-2: wtd must also be accepted by the estimate-sent preset allow-list and labeled
@@ -43,11 +36,6 @@ describe("terminal date-range mappers handle the wtd preset (no NaN)", () => {
 describe("deal-list-page preset handling for wtd", () => {
   it("getWonMetricTerminalLabel labels wtd as WTD", () => {
     expect(getWonMetricTerminalLabel({ preset: "wtd" })).toBe("WTD");
-  });
-
-  it("readEstimateSentDateFilterFromSearchParams accepts estimate_sent_preset=wtd", () => {
-    const params = new URLSearchParams("estimate_sent_preset=wtd");
-    expect(readEstimateSentDateFilterFromSearchParams(params)).toEqual({ preset: "wtd" });
   });
 });
 
