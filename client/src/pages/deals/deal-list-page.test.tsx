@@ -11,6 +11,7 @@ import type { AtRiskResult } from "@trock-crm/shared/types";
 import {
   DealListPage,
   buildDealsPageKpiDrilldownPath,
+  boardRelevantParamKey,
   buildDealStageNavigationPath,
   formatDateInput,
   getCanonicalTerminalMetric,
@@ -140,7 +141,10 @@ vi.mock("@/components/ui/button", () => ({
   ),
 }));
 
-vi.mock("@/components/deals/deals-list-section", () => ({
+vi.mock("@/components/deals/deals-list-section", async (importOriginal) => ({
+  // Keep the real pure helpers (e.g. buildDealStageFilterOptions, used by the base-list stage scope)
+  // while stubbing the component itself to capture props.
+  ...(await importOriginal<typeof import("@/components/deals/deals-list-section")>()),
   DealsListSection: (props: Record<string, unknown>) => {
     mocks.dealsListSectionMock(props);
     return (
@@ -384,6 +388,29 @@ async function renderPageDomWithLocation(path = "/deals?scope=all", role = "admi
     },
   };
 }
+
+describe("boardRelevantParamKey (the board sync ignores list-namespace params, Codex #589)", () => {
+  it("yields the SAME key when only dl_* (base list) params change — so a list edit doesn't refetch the kanban", () => {
+    expect(boardRelevantParamKey("scope=all&period=qtd&dl_stageIds=x&dl_page=2")).toBe(
+      boardRelevantParamKey("scope=all&period=qtd&dl_stageIds=y&dl_page=5&dl_status=on_hold")
+    );
+  });
+
+  it("yields the SAME key when only fb_* (drill-down list) params change — a drill-down list edit must not refetch the kanban either (Codex #589 P3)", () => {
+    expect(boardRelevantParamKey("scope=all&period=qtd&filter=won&fb_search=acme&fb_stageIds=x")).toBe(
+      boardRelevantParamKey("scope=all&period=qtd&filter=won&fb_search=beta&fb_stageIds=y&fb_page=3")
+    );
+  });
+
+  it("yields a DIFFERENT key when a board param changes (the board must re-sync)", () => {
+    expect(boardRelevantParamKey("scope=all&period=qtd")).not.toBe(
+      boardRelevantParamKey("scope=all&period=mtd")
+    );
+    expect(boardRelevantParamKey("scope=all&assignedRepId=rep-1")).not.toBe(
+      boardRelevantParamKey("scope=all&assignedRepId=rep-2")
+    );
+  });
+});
 
 describe("DealListPage", () => {
   beforeEach(() => {
@@ -1218,20 +1245,133 @@ describe("DealListPage", () => {
     // Team is not an offered scope (D-12b).
     expect(html).not.toContain(">Team</button>");
   });
-  it("embeds a scoped paginated exportable deal list below the kanban without date filters", () => {
+  it("mounts the FULL FilterBar (incl. Rep, dl_-namespaced) on the BASE deal list, inheriting scope; Scope omitted", () => {
     renderPage("/deals?scope=mine", "director");
 
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         workflowFamily: "deal",
-        scope: "mine",
+        scope: "mine", // inherited from the page toggle
         enableExport: true,
-        enableDateFilter: false,
-        showFilterButton: true,
-        pageSize: 20,
-        searchPlaceholder: "Search deals or accounts",
+        filterBar: expect.objectContaining({
+          paramPrefix: "dl_", // namespaced so the list can't collide with the header's bare params
+          dimensions: expect.arrayContaining(["search", "date", "stage", "sort", "rep", "status", "value", "stalled"]),
+        }),
       })
     );
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { dimensions: string[] };
+      enableDateFilter?: boolean;
+    };
+    // Rep IS in the bar now (it nests under the header Rep); Scope stays the page toggle's.
+    expect(props.filterBar.dimensions).toContain("rep");
+    expect(props.filterBar.dimensions).not.toContain("scope");
+    // The legacy inline filter row is gone (FilterBar mode supersedes it).
+    expect(props.enableDateFilter).toBeUndefined();
+  });
+
+  it("drops the Rep dimension entirely when the header pins a concrete rep (no no-op single-rep control, no misleading Unassigned) (Codex #589 P2)", () => {
+    mocks.useTaskAssigneesMock.mockReturnValue({
+      assignees: [
+        { id: "rep-1", displayName: "Brett Jones" },
+        { id: "rep-2", displayName: "Adam Smith" },
+      ],
+    });
+    renderPage("/deals?scope=all&assignedRepId=rep-2", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { dimensions: string[] };
+    };
+    // The header already owns rep-2; a bar Rep control could only offer rep-2 (a no-op) and would still
+    // surface an "Unassigned" option that reconciliation clamps back to rep-2 (misleading). Drop it.
+    expect(props.filterBar.dimensions).not.toContain("rep");
+  });
+
+  it("passes CANONICAL stage sibling families (cross-slug aliases grouped by board column) so an explicit pick includes every member id (Codex #589 P1)", () => {
+    // contract_signed + service_contract_signed are DIFFERENT raw slugs the board collapses into the one
+    // canonical "Contract" column. The family must group them together (raw-slug grouping would split
+    // them), or selecting Contract under-shows the service-contract deals.
+    mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
+      stages: [
+        { id: "contract-standard", name: "Contract", slug: "contract_signed", displayOrder: 5, isTerminal: false },
+        { id: "contract-service", name: "Contract", slug: "service_contract_signed", displayOrder: 5, isTerminal: false },
+      ],
+    });
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { stageIdFamilies?: string[][] };
+    };
+    const contractFamily = props.filterBar.stageIdFamilies?.find((ids) => ids.includes("contract-standard"));
+    expect(contractFamily).toEqual(expect.arrayContaining(["contract-standard", "contract-service"]));
+  });
+
+  it("classifies Won/Lost ALIAS ids as terminal by CANONICAL slug so their inactive rows survive the active-only default (Codex #589)", () => {
+    // closed_won / service_lost are terminal stages whose RAW slug is not literally 'won'/'lost'. A raw-slug
+    // terminal predicate would omit them from terminalStageIds → the active-only default would drop those
+    // inactive deals from the base list, mismatching the board's Won/Lost columns.
+    mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
+      stages: [
+        { id: "won-canonical", name: "Won", slug: "won", displayOrder: 6, isTerminal: true },
+        { id: "won-closed", name: "Closed Won", slug: "closed_won", displayOrder: 6, isTerminal: true },
+        { id: "lost-service", name: "Service Lost", slug: "service_lost", displayOrder: 7, isTerminal: true },
+      ],
+    });
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { terminalStageIds: string[] };
+    };
+    expect(props.filterBar.terminalStageIds).toEqual(
+      expect.arrayContaining(["won-canonical", "won-closed", "lost-service"])
+    );
+  });
+
+  it("expands a canonical Estimate-Under-Review pick to BOTH the standard and service-alias ids (list == board column, Codex #589 #1)", () => {
+    mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
+      stages: [
+        { id: "eur-standard", name: "Estimate Under Review", slug: "estimate_under_review", displayOrder: 4, isTerminal: false },
+        { id: "eur-service", name: "Estimate Under Review", slug: "service_estimate_under_review", displayOrder: 4, isTerminal: false },
+      ],
+    });
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { stageIdFamilies?: string[][] };
+    };
+    const eurFamily = props.filterBar.stageIdFamilies?.find((ids) => ids.includes("eur-standard"));
+    expect(eurFamily).toEqual(expect.arrayContaining(["eur-standard", "eur-service"]));
+  });
+
+  it("mounts a drill-down FilterBar on drill-down views (YELLOW's #590 surface), NAMESPACED distinct from the base list's dl_ mount", () => {
+    // Post-#590, drill-downs are no longer the legacy list — they carry their own namespaced FilterBar.
+    // RED's base mount uses dl_; the drill-down must use a DIFFERENT prefix so the two never collide.
+    renderPage("/deals?filter=won&scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar?: { paramPrefix?: string };
+    };
+    expect(props.filterBar).toBeDefined();
+    expect(props.filterBar?.paramPrefix).not.toBe("dl_");
+  });
+
+  it("includes ALL workflow-family stage IDs in the base list's default stage scope — no silent family drop (Codex #589 P1)", () => {
+    // Two stages share the canonical slug 'opportunity' (standard + service families). The default
+    // stage scope must contain BOTH ids, or the default /deals list would drop one family's deals.
+    mocks.usePipelineStagesMock.mockReturnValue({
+      loading: false,
+      error: null,
+      stages: [
+        { id: "opp-standard", name: "Opportunity", slug: "opportunity", displayOrder: 1, isTerminal: false },
+        { id: "opp-service", name: "Opportunity", slug: "opportunity", displayOrder: 1, isTerminal: false },
+      ],
+    });
+    renderPage("/deals?scope=mine", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1][0] as {
+      filterBar: { defaultStageIds: string[] };
+    };
+    expect(props.filterBar.defaultStageIds).toEqual(expect.arrayContaining(["opp-standard", "opp-service"]));
   });
 
   it("builds clickable KPI drilldown paths with preserved scope and period", () => {
@@ -1489,9 +1629,19 @@ describe("DealListPage", () => {
     expect(props.filterBar?.dimensions).not.toContain("rep");
   });
 
-  it("leaves the base view (filter === null) WITHOUT a FilterBar — RED owns that mount", () => {
+  it("mounts RED's dl_-namespaced FilterBar on the base view (filter === null) — #589, distinct from the drill-down bar", () => {
+    renderPage("/deals?scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { filterBar?: { paramPrefix?: string } };
+    expect(props.filterBar).toBeDefined();
+    expect(props.filterBar?.paramPrefix).toBe("dl_");
+  });
+
+  it("gates the base FilterBar mount until stage metadata loads — no unscoped first request on cold load (Codex)", () => {
+    mocks.usePipelineStagesMock.mockReturnValue({ loading: true, error: null, stages: [] }); // not loaded yet
     renderPage("/deals?scope=all", "director");
     const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { filterBar?: unknown };
+    // stages:[] → defaultStageIds would be [] → unscoped query; render in legacy mode (filterBar undefined),
+    // which gates the query on stage loading, until metadata arrives.
     expect(props.filterBar).toBeUndefined();
   });
 

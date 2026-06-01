@@ -85,6 +85,60 @@ function dedupeDealsById<T extends { id: string }>(deals: T[]): T[] {
   return result;
 }
 
+/**
+ * Group raw stage ids into the canonical board columns they belong to (Codex #589 P1). Mirrors
+ * buildCanonicalDealBoardColumns' membership EXACTLY: a stage joins the canonical column its slug
+ * normalizes to under EITHER workflow route (the `|| service` OR above), so cross-slug aliases that
+ * the board collapses into one column share one family — contract_signed + service_contract_signed →
+ * "contract"; every Won/Lost alias → its terminal column. The stage OPTIONS the FilterBar shows carry
+ * only ONE canonical id per column, so the list expands an explicit pick to its full family before
+ * querying — otherwise getDeals' exact `stage_id IN (...)` would under-show the sibling-family deals the
+ * board column represents. Returns one id-array per canonical slug (a stage that normalizes to two
+ * canonical slugs — only the route-dependent estimating pair — appears in both, so a pick never
+ * under-shows).
+ */
+export interface CanonicalDealStageFamily {
+  /** The board's canonical column slug (won/lost/contract/estimating/…). */
+  slug: string;
+  /** Every raw stage id that normalizes to this canonical column (canonical + aliases). */
+  ids: string[];
+}
+
+/**
+ * Group raw stage ids into the canonical board columns they belong to, keyed by canonical slug. Used to
+ * derive the under-kanban list's stage scope so it matches the board EXACTLY (Codex #589): the explicit-
+ * pick family, the default-stage union, AND the terminal classification all flow from the SAME canonical
+ * membership the board uses. ROUTE-SPECIFIC: each stage maps to ITS OWN route's column (workflowFamily →
+ * route, with a service_-prefix slug fallback), so the route-dependent estimating pair never cross-
+ * pollinates — a standard `estimating` stage joins ONLY the normal Estimating column, a service one ONLY
+ * service_estimating (Codex #589 over-grouping P2; normalizing under BOTH routes over-showed the sibling
+ * column). Route-INVARIANT aliases still land together (contract_signed/service_contract_signed → contract;
+ * every Won/Lost alias → its terminal column; estimate_under_review/service_… → estimate_under_review).
+ */
+export function buildCanonicalDealStageFamilies(
+  stages: Array<Pick<DealStageLike, "id" | "slug" | "workflowFamily">>
+): CanonicalDealStageFamily[] {
+  const byCanonical = new Map<string, string[]>();
+  for (const stage of stages) {
+    const slug = normalizeDealStageSlug(stage.slug, workflowRouteFromStage(stage));
+    if (!slug) continue;
+    const ids = byCanonical.get(slug) ?? [];
+    if (!ids.includes(stage.id)) ids.push(stage.id);
+    byCanonical.set(slug, ids);
+  }
+  return [...byCanonical.entries()].map(([slug, ids]) => ({ slug, ids }));
+}
+
+/**
+ * The explicit-pick expansion families (one id-array per canonical column). Thin wrapper over
+ * buildCanonicalDealStageFamilies; see it for the membership rule (Codex #589 P1).
+ */
+export function buildCanonicalDealStageIdFamilies(
+  stages: Array<Pick<DealStageLike, "id" | "slug">>
+): string[][] {
+  return buildCanonicalDealStageFamilies(stages).map((family) => family.ids);
+}
+
 export function buildCanonicalDealBoardColumns(
   rawColumns: DealBoardColumn[] | null | undefined,
   stages: DealStageLike[]

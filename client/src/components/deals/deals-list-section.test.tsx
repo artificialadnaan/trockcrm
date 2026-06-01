@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
+import { act, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
 import type { AtRiskResult } from "@trock-crm/shared/types";
@@ -393,6 +393,152 @@ describe("DealsListSection", () => {
     } finally {
       await cleanup();
     }
+  });
+
+  it("threads filterBar.paramPrefix so the list reads dl_* params, not the page's bare board params", async () => {
+    // The /deals base list shares its URL with the dashboard's bare ?assignedRepId/?scope/etc.; a dl_
+    // prefix namespaces the list's FilterBar so it can't collide with (or mutate) those page controls.
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root!: Root;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={["/deals?dl_search=fromlist&search=fromboard"]}>
+          <DealsListSection
+            workflowFamily="deal"
+            filterBar={{ dimensions: ["search", "stage", "sort"], paramPrefix: "dl_" }}
+          />
+        </MemoryRouter>
+      );
+    });
+    const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(lastCall.search).toBe("fromlist"); // the dl_-namespaced value, not the bare board ?search
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  async function renderAt(url: string, props: Parameters<typeof DealsListSection>[0]) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root!: Root;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={[url]}>
+          <DealsListSection {...props} />
+        </MemoryRouter>
+      );
+    });
+    const lastCall = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    await act(async () => root.unmount());
+    container.remove();
+    return lastCall;
+  }
+
+  it("ignores a namespaced rep filter when the Rep dimension is NOT rendered; the header/baseFilters rep wins (Codex #589)", async () => {
+    const call = await renderAt("/deals?dl_assignedRepId=rep-B", {
+      workflowFamily: "deal",
+      baseFilters: { assignedRepId: "rep-A" }, // inherited from the page header
+      filterBar: { dimensions: ["search", "stage", "sort"], paramPrefix: "dl_" }, // no "rep" dim
+    });
+    expect(call.assignedRepId).toBe("rep-A"); // dl_assignedRepId dropped (hidden), baseFilters rep preserved
+  });
+
+  it("NESTS the bar Rep within the header Rep via the dimension model (post-#590): the base mount DROPS the Rep dimension when the header pins a rep, so a bar rep never overrides it", async () => {
+    // header rep-A + bar rep-A, Rep rendered (header = a rep but dim kept) → rep-A (no conflict)
+    expect(
+      (await renderAt("/deals?dl_assignedRepId=rep-A", {
+        workflowFamily: "deal",
+        baseFilters: { assignedRepId: "rep-A" },
+        filterBar: { dimensions: ["search", "rep", "sort"], paramPrefix: "dl_" },
+      })).assignedRepId
+    ).toBe("rep-A");
+    // The real nesting guard is the mount DROPPING the Rep dimension when the header pins a rep: with Rep
+    // NOT a dimension, pickFilterBarValueForDimensions drops the bar's dl_assignedRepId and the header
+    // (baseFilters) rep wins — a bookmarked bar rep can never override the header rep.
+    expect(
+      (await renderAt("/deals?dl_assignedRepId=rep-B", {
+        workflowFamily: "deal",
+        baseFilters: { assignedRepId: "rep-A" },
+        filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_" }, // Rep dropped (header pins a rep)
+      })).assignedRepId
+    ).toBe("rep-A");
+  });
+
+  it("applies the bar Rep when the header has NO rep scope (header = All reps)", async () => {
+    const call = await renderAt("/deals?dl_assignedRepId=rep-B", {
+      workflowFamily: "deal",
+      // no baseFilters.assignedRepId → header is "All reps"; the bar narrows the list to rep-B
+      filterBar: { dimensions: ["search", "rep", "sort"], paramPrefix: "dl_" },
+    });
+    expect(call.assignedRepId).toBe("rep-B");
+  });
+
+  it("resets the namespaced page when the INHERITED header Rep changes — a ?dl_page deep link must not query page N of the new rep's shorter list (Codex #589 P2)", async () => {
+    // One persistent router so the ?dl_page survives the props change (renderDom remounts the router).
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let switchRep!: (rep: string) => void;
+    function Harness() {
+      const [rep, setRep] = useState("rep-A");
+      switchRep = setRep;
+      return (
+        <DealsListSection
+          workflowFamily="deal"
+          baseFilters={{ assignedRepId: rep }}
+          filterBar={{ dimensions: ["search", "sort"], paramPrefix: "dl_" }}
+        />
+      );
+    }
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/deals?dl_page=4"]}>
+          <Harness />
+        </MemoryRouter>
+      );
+    });
+    const initial = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(initial.assignedRepId).toBe("rep-A");
+    expect(initial.page).toBe(4); // deep-linked page preserved on first render
+
+    const callsBeforeSwitch = mocks.useDealsMock.mock.calls.length;
+    await act(async () => switchRep("rep-B")); // the header switches the inherited rep
+
+    const afterSwitch = mocks.useDealsMock.mock.calls[mocks.useDealsMock.mock.calls.length - 1][0];
+    expect(afterSwitch.assignedRepId).toBe("rep-B");
+    expect(afterSwitch.page).toBe(1); // page reset so we don't request page 4 of rep-B's list
+
+    // The clamp is SYNCHRONOUS: NO query for rep-B was ever fired at the stale page 4 (the passive reset
+    // effect never beats the query) — every call from the switch onward queries page 1 (Codex #589).
+    const callsForRepB = mocks.useDealsMock.mock.calls
+      .slice(callsBeforeSwitch)
+      .map((call) => call[0])
+      .filter((args) => args.assignedRepId === "rep-B");
+    expect(callsForRepB.length).toBeGreaterThan(0);
+    expect(callsForRepB.every((args) => args.page === 1)).toBe(true);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("seeds the query sort from filterBar.defaultSort when no namespaced sort is set, preserving the base default ordering (Codex #589 / #590 defaultSort)", async () => {
+    const call = await renderAt("/deals", {
+      workflowFamily: "deal",
+      filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_", defaultSort: { key: "updated_at", dir: "desc" } },
+    });
+    expect(call.sortBy).toBe("updated_at");
+    expect(call.sortDir).toBe("desc");
+  });
+
+  it("uses an explicit namespaced sort over the filterBar.defaultSort default", async () => {
+    const call = await renderAt("/deals?dl_sortBy=created_at&dl_sortDir=asc", {
+      workflowFamily: "deal",
+      filterBar: { dimensions: ["search", "sort"], paramPrefix: "dl_", defaultSort: { key: "updated_at", dir: "desc" } },
+    });
+    expect(call.sortBy).toBe("created_at");
+    expect(call.sortDir).toBe("asc");
   });
 
   it("keeps a user-selected sort across rerenders when drill-down props are omitted", async () => {

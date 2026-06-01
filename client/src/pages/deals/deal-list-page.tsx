@@ -10,7 +10,9 @@ import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
-import { buildCanonicalDealBoardColumns } from "@/lib/canonical-deal-board";
+import { buildCanonicalDealBoardColumns, buildCanonicalDealStageFamilies } from "@/lib/canonical-deal-board";
+import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
+import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
 import { getEffectiveDealValue, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
@@ -94,6 +96,26 @@ export function formatDateInput(date: Date) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+/** URL-param namespaces owned by the under-kanban lists (NOT the board): the base list (dl_) and the
+ *  drill-down FilterBar (fb_). Stripped from the board key so list-only edits never refetch the kanban. */
+const LIST_PARAM_PREFIXES = ["dl_", "fb_"] as const;
+
+/**
+ * A canonical key over only the BOARD-relevant URL params (scope/period/assignedRepId/terminal/estimate).
+ * The kanban + KPI cards read these; the under-kanban lists own the dl_* (base) and fb_* (drill-down)
+ * namespaces. The board sync effect keys on this so a list-only filter edit (either namespace) does NOT
+ * re-sync the board's terminal/estimate state and pointlessly refetch the kanban (Codex #589). Sorted so
+ * param order never matters.
+ */
+export function boardRelevantParamKey(search: string): string {
+  const params = new URLSearchParams(search);
+  for (const key of [...params.keys()]) {
+    if (LIST_PARAM_PREFIXES.some((prefix) => key.startsWith(prefix))) params.delete(key);
+  }
+  params.sort();
+  return params.toString();
 }
 
 function normalizeDashboardPeriod(periodParam: string | null | undefined): DashboardPeriodSelection {
@@ -210,6 +232,27 @@ function normalizeDashboardDealFilter(filterParam: string | null | undefined): D
       return null;
   }
 }
+
+// The /deals BASE-view list mounts the FULL /pipeline FilterBar (incl. Rep), MINUS only Scope (the page
+// toggle owns scope; the list inherits it). The header's Rep + period also drive the KPI cards + board;
+// the bar's Rep NESTS within the header Rep — the header is the broad scope, the bar refines the list
+// within it (Adnaan). Namespaced `dl_` so the list's params can't collide with the header's bare
+// ?assignedRepId/?scope/?period. Cards + read-only board stay untouched.
+// NOTE: this PR is the base-list FilterBar mount ONLY. The top "Estimate Sent to Client" control
+// removal + the real board-wide ?period dropdown is a SEPARATE follow-up (not built here).
+const DEALS_BASE_LIST_FILTERBAR_DIMENSIONS: FilterDimension[] = [
+  "search",
+  "date",
+  "stage",
+  "sort",
+  "rep",
+  "status",
+  "workflow",
+  "region",
+  "projectType",
+  "value",
+  "stalled",
+];
 
 export function getDashboardDealListView(input: {
   filterParam: string | null | undefined;
@@ -736,8 +779,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const scopeOptions = SCOPE_OPTIONS;
   const { stages } = usePipelineStages("deal");
   const { assignees } = useTaskAssignees();
-  // Option sources for the drill-down FilterBar's region / project-type dimensions (rep stays the
-  // page-level select; scope stays the page toggle — neither is a bar dimension here).
+  // Option sources for the base-view + drill-down FilterBar region / project-type dimensions (Rep stays
+  // the page-level select / header; scope stays the page toggle — neither is a bar dimension here).
   const { regions } = useRegions();
   const { projectTypes } = useProjectTypes();
   // When a parked ?scope=team bookmark is coerced to mine, drop any stale owner filter from
@@ -773,10 +816,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     estimateSentDateRange
   );
 
+  // Sync the board's terminal/estimate date state from the URL — but key on the BOARD params only, so a
+  // dl_*-namespaced list edit (the under-kanban FilterBar) never churns this state and refetches the
+  // kanban above it (Codex #589). searchParams is read live inside; it is current whenever the key changes.
+  const boardParamKey = boardRelevantParamKey(searchParams.toString());
   useEffect(() => {
     setTerminalDateFilters(resolveDrilldownTerminalDateFilters(searchParams));
     setEstimateSentDateFilter(readEstimateSentDateFilterFromSearchParams(searchParams));
-  }, [searchParams]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally keyed on board params only.
+  }, [boardParamKey]);
 
   // A parked ?scope=team bookmark is coerced to mine for the render above; also rewrite the
   // URL so the stale scope/owner params do not persist -- otherwise updateScope clones them
@@ -821,6 +869,31 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     () => buildCanonicalDealBoardColumns(board?.columns, stages),
     [board?.columns, stages]
   );
+  // Base-list board-mirror scope: the /deals board always includes DD (useDealBoard includeDd=true),
+  // so showDd=true — the list defaults to the full visible-column set and lets terminal deals through,
+  // exactly like the board it sits under (mirrors the /pipeline mount).
+  //
+  // ALL three values flow from ONE CANONICAL grouping — the same normalizeDealStageSlug membership the
+  // board uses — so the list matches the board column-for-column (Codex #589):
+  //  - defaultStageIds: every member id of every visible canonical column (no family dropped);
+  //  - terminalStageIds: members of the canonical WON/LOST columns — classified by CANONICAL slug, so
+  //    Won/Lost ALIASES (closed_won, sent_to_production, service_lost, …) are included and their inactive
+  //    rows survive the active-only default (raw-slug isTerminalOutcomeSlug only matched literal won/lost);
+  //  - stageIdFamilies: the per-column id set, so an explicit canonical pick expands to the board column's
+  //    full membership (contract_signed + service_contract_signed → contract).
+  // isBoardVisibleStage filters DD, which canonicalizes into opportunity, so it is a no-op at showDd=true.
+  const dealsBaseListStageScope = useMemo(() => {
+    const families = buildCanonicalDealStageFamilies(stages).filter((family) =>
+      isBoardVisibleStage(family.slug, true)
+    );
+    return {
+      defaultStageIds: families.flatMap((family) => family.ids),
+      terminalStageIds: families
+        .filter((family) => isTerminalOutcomeSlug(family.slug))
+        .flatMap((family) => family.ids),
+      stageIdFamilies: families.map((family) => family.ids),
+    };
+  }, [stages]);
   const columns = useMemo(
     () => {
       const searchTerm = search.trim().toLowerCase();
@@ -1328,6 +1401,61 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
             <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
               <div className="text-sm font-semibold text-slate-500">Loading SLA drill-down...</div>
             </section>
+          ) : dashboardView.filter === null ? (
+            // BASE /deals view: the SAME shared FilterBar as /pipeline's working list (signed-off shape).
+            // Inherits Scope (page toggle) + Rep (header → baseFilters); the header's Estimate-Sent stays
+            // a cards/board control and is intentionally NOT layered here (decoupled — the list's date
+            // axis is the FilterBar's outcome-aware Date). dl_-namespaced so list filters never collide
+            // with the header's bare ?assignedRepId/?scope/?period. Drill-downs keep the legacy list below
+            // (YELLOW's surface, untouched). Cards + read-only board above are unchanged.
+            <DealsListSection
+              workflowFamily="deal"
+              scope={scope}
+              enableExport
+              pageSize={20}
+              title={dashboardView.title}
+              subtitle={dashboardView.subtitle}
+              eyebrow={dashboardView.eyebrow}
+              baseFilters={selectedRepFilter ? { assignedRepId: selectedRepFilter } : undefined}
+              // Preserve the base list's prior default ordering (updated_at desc) when no dl_sort is set,
+              // so it still surfaces recently-touched deals first (Codex #589).
+              initialSort={dashboardView.listInitialSort}
+              // Gate the FilterBar mount on stage metadata: on a cold load usePipelineStages returns
+              // stages:[], so dealsBaseListStageScope.defaultStageIds would be [] and the first request would
+              // be unscoped/active-only. Until stages arrive, pass NO filterBar — the section stays in legacy
+              // mode, which gates the query on stage loading (mirrors #590's drill-down gate) (Codex).
+              filterBar={stages.length === 0 ? undefined : {
+                // Nest the bar Rep within the header Rep: when the header is "All reps" the bar offers the
+                // Rep dimension (narrow the list to one rep within the all-reps cards/board). When the
+                // header PINS a concrete rep, drop the Rep dimension entirely — a bar Rep control could
+                // only re-offer that same rep (a no-op) and would still surface an "Unassigned" option that
+                // reconciliation clamps back to the pinned rep (misleading); the header owns it then
+                // (Codex #589 P2).
+                dimensions: selectedRepFilter
+                  ? DEALS_BASE_LIST_FILTERBAR_DIMENSIONS.filter((dimension) => dimension !== "rep")
+                  : DEALS_BASE_LIST_FILTERBAR_DIMENSIONS,
+                paramPrefix: "dl_",
+                options: {
+                  reps: assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+                  regions: regions.map((region) => ({ value: region.id, label: region.name })),
+                  projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
+                  stages: boardColumns
+                    .filter((column) => isBoardVisibleStage(column.stage.slug, true))
+                    .map((column) => ({ value: column.stage.id, label: column.stage.name })),
+                  sortOptions: DEAL_LIST_SORT_OPTIONS,
+                },
+                // ENABLE_STAGE_ENTRY_DATE_FILTER is on in prod (matches /pipeline): open rows are
+                // date-windowed, so Stalled is offered and the date axis is labeled outcome-aware.
+                stageEntryDateEnabled: true,
+                defaultStageIds: dealsBaseListStageScope.defaultStageIds,
+                terminalStageIds: dealsBaseListStageScope.terminalStageIds,
+                // Expand an explicit canonical stage pick to its full workflow-family (Codex #589 P1).
+                stageIdFamilies: dealsBaseListStageScope.stageIdFamilies,
+                // Seed the bar's default ordering (the base list's updated_at desc) when no dl_sort is set
+                // — the shared component now seeds FilterBar-mode sort from filterBar.defaultSort (#590).
+                defaultSort: dashboardView.listInitialSort,
+              }}
+            />
           ) : (
             <DealsListSection
               workflowFamily="deal"

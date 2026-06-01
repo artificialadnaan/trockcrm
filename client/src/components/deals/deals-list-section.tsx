@@ -114,11 +114,18 @@ interface DealsListSectionProps {
     defaultStageIds?: string[];
     terminalStageIds?: string[];
     /**
-     * URL param namespace for surfaces that already own bare URL params (the director/stage
-     * drill-downs, where scope/period/filter/page live un-prefixed). When set, the bar reads/writes
-     * its keys as `${paramPrefix}${key}` (fb_stageIds, fb_dateFrom, …) via useFilterState(prefix), so a
-     * bar control never clobbers the host's params. Omit (default "") at the pipeline/base mount, where
-     * the bar owns the whole URL — behavior is byte-identical to today.
+     * The visible stages grouped into workflow-family sibling-id sets. The stage OPTIONS carry one
+     * canonical id per slug, so an explicit pick is expanded to its full family before the query —
+     * otherwise a single canonical id under-shows sibling-family deals (Codex #589 P1). Opt-in; omit it
+     * and explicit picks pass through unexpanded (mounts with canonical-only defaultStageIds unchanged).
+     */
+    stageIdFamilies?: string[][];
+    /**
+     * URL param namespace for surfaces that already own bare URL params (the /deals base list + the
+     * director/stage drill-downs, where scope/period/filter/page live un-prefixed). When set, the bar
+     * reads/writes its keys as `${paramPrefix}${key}` (dl_stageIds, fb_dateFrom, …) via
+     * useFilterState(prefix), so a bar control never clobbers the host's params. Omit (default "") at the
+     * pipeline mount, where the bar owns the whole URL — byte-identical to today (Codex #577).
      */
     paramPrefix?: string;
     /**
@@ -643,9 +650,9 @@ export function DealsListSection({
 }: DealsListSectionProps) {
   const navigate = useNavigate();
   // Slice 7: opt-in URL-backed filter state. useFilterState is always called (hooks can't be
-  // conditional); its value only drives the query/UI when filterBarMode is on. The optional
-  // paramPrefix namespaces the bar's keys (fb_*) on drill-down surfaces that share their URL with a
-  // host page; default "" = bare keys (the pipeline/base mount), so existing callers are unchanged.
+  // conditional); its value only drives the query/UI when filterBarMode is on. The optional paramPrefix
+  // namespaces the bar's keys (dl_*/fb_*) on the base list + drill-down surfaces that share their URL with
+  // a host page; default "" = bare keys (the pipeline mount), so existing callers are unchanged.
   const { filters: urlFilters, setFilters, resetFilters } = useFilterState(filterBar?.paramPrefix ?? "");
   const filterBarMode = Boolean(filterBar);
   // D-15: legacy "outcome" axis — the rep drill-down feeds an externalDateRange that
@@ -738,13 +745,24 @@ export function DealsListSection({
     );
   }, [initialSort]);
 
-  // FilterBar mode keeps pagination in the URL (e.g. fb_page); the legacy setPage(1) resets above never
-  // touch it. When a HOST-level input changes (page scope, or the drill-down's baseFilters / locked
-  // owner — captured by drilldownContextKey), snap the namespaced page back to 1 so the list never
-  // requests an out-of-range page of the new, smaller result set (Codex P2). Gated on paramPrefix (the
-  // drill-down mounts); the prefix-less pipeline/base mount resets its page at the page level already.
-  // The ref skips the first run so a bookmarked fb_page>1 is still honored on load.
+  // FilterBar mode keeps pagination in the URL (e.g. dl_page/fb_page); the legacy setPage(1) resets above
+  // never touch it. When a HOST-level input changes (page scope, OR the host's baseFilters / locked owner /
+  // inherited Rep — all captured by drilldownContextKey, which JSON-stringifies baseFilters), snap the
+  // namespaced page back to 1 so the list never requests an out-of-range page of the new, smaller result
+  // set (Codex P2 / #589). Gated on paramPrefix (the base + drill-down mounts); the prefix-less pipeline
+  // mount resets its page at the page level already. The ref skips the first run so a bookmarked page>1
+  // still loads.
   const hostPageResetKeyRef = useRef<string | null>(null);
+  const hostPageResetKey =
+    filterBarMode && filterBar?.paramPrefix ? `${scope ?? ""}|${drilldownContextKey}` : null;
+  // SYNCHRONOUS clamp (Codex #589 r3): the reset effect below is passive and runs post-commit, so the query
+  // in THIS render would otherwise fire with the stale namespaced page FIRST (a wasted/empty page-N request)
+  // before the URL reset lands. The ref still holds the last COMMITTED key (the effect advances it
+  // post-commit), so a key change THIS render means a host input just changed — clamp the effective page.
+  const hostKeyChangedThisRender =
+    hostPageResetKey !== null &&
+    hostPageResetKeyRef.current !== null &&
+    hostPageResetKeyRef.current !== hostPageResetKey;
   useEffect(() => {
     if (!filterBarMode || !filterBar?.paramPrefix) return;
     const key = `${scope ?? ""}|${drilldownContextKey}`;
@@ -755,8 +773,9 @@ export function DealsListSection({
 
   // Pagination + query-enable diverge by mode: FilterBar mode reads page from the URL and never gates
   // on stage-slug loading (stageIds arrive directly from the URL); legacy keeps local page + the
-  // stage-aware enable gate. goToPage writes wherever the page lives.
-  const currentPage = filterBarMode ? urlFilters.page ?? 1 : page;
+  // stage-aware enable gate. goToPage writes wherever the page lives. On a host scope/baseFilters/rep change
+  // clamp to page 1 for THIS render so the racing reset effect is never beaten by a stale page-N query (#589).
+  const currentPage = filterBarMode ? (hostKeyChangedThisRender ? 1 : urlFilters.page ?? 1) : page;
   const queryEnabled = filterBarMode ? true : listQueryState.enabled;
   const goToPage = filterBarMode ? (next: number) => setFilters({ page: next }) : setPage;
 
@@ -789,27 +808,33 @@ export function DealsListSection({
   // FilterBar mode: URL value -> contract DealFilters (outcome-aware date, status, workflow, value,
   // stalled). baseFilters still layer (parent presets); scope inherits from the page unless the URL
   // sets it; the section owns page/limit. filter-axis == display-axis (displayDate rendered below).
-  // Drop URL params for dimensions this mount doesn't render before mapping (Codex P2): a stray
-  // prefixed key (fb_stageIds on a stage-pinned mount, fb_assignedRepId where Rep is hidden) must not
-  // override a pinned/host-owned filter with no visible control to clear it.
+  // Drop URL params for dimensions this mount doesn't render before mapping (Codex P2 / #589): a stray
+  // prefixed key (dl_/fb_stageIds on a stage-pinned mount, dl_/fb_assignedRepId where Rep is hidden) must
+  // not override a pinned/host-owned filter with no visible control to clear it. The /deals base mount
+  // drops the Rep dimension when the header pins a concrete rep, so this also enforces the header-Rep
+  // nesting (a bookmarked dl_assignedRepId can't override the header's rep).
   const visibleUrlFilters = pickFilterBarValueForDimensions(urlFilters, filterBar?.dimensions ?? []);
   const barFilters = applyBoardVisibilityDefaults(filterBarValueToDealFilters(visibleUrlFilters), {
     defaultStageIds: filterBar?.defaultStageIds,
     terminalStageIds: filterBar?.terminalStageIds,
+    // Expand an explicit canonical stage pick to its full workflow-family so the list matches the board
+    // column the option represents (Codex #589 P1). Opt-in; canonical-only mounts pass through unchanged.
+    stageIdFamilies: filterBar?.stageIdFamilies,
   });
   const filterBarDealsArgs: DealFilters = {
     ...baseFilters,
     ...barFilters,
-    // Default the mount's intended sort when the URL carries none (Codex P2): FilterBar sort is
-    // URL-backed, so a default/bookmarked drill-down would otherwise drop the view's order (won ->
-    // contract_signed_date desc, active -> display_date desc) to the server default created_at desc.
-    // Opt-in via filterBar.defaultSort, so pipeline/base (no defaultSort) keep the server default.
+    // Default the mount's intended sort when the URL carries none (Codex P2 / #589): FilterBar sort is
+    // URL-backed, so a default/bookmarked mount would otherwise drop the view's order (won ->
+    // contract_signed_date desc, active -> display_date desc, /deals base -> updated_at desc) to the
+    // server default created_at desc. Opt-in via filterBar.defaultSort, so pipeline keeps the server default.
     sortBy: barFilters.sortBy ?? filterBar?.defaultSort?.key,
     sortDir: barFilters.sortDir ?? filterBar?.defaultSort?.dir,
     // Keep the host's date window a FLOOR: intersect the bar's outcome-axis date with baseFilters'
-    // dateFrom/dateTo rather than overwriting it, so a drill-down's ?period can't be widened past the
-    // window the KPI/board showed (Codex P2). No-op with no floor (pipeline) or no bar date; YYYY-MM-DD
-    // compares lexicographically, so string later/earlier = max-start / min-end of the intersection.
+    // dateFrom/dateTo rather than overwriting it, so a drill-down's / the /deals ?period window can't be
+    // widened past what the KPI/board showed (Codex P2). This IS the date nesting for the /deals top period
+    // control — ?period sets baseFilters.dateFrom/To, the bar Date narrows WITHIN it. No-op with no floor
+    // (pipeline) or no bar date; YYYY-MM-DD compares lexicographically (later/earlier = max-start/min-end).
     dateFrom: laterDate(baseFilters?.dateFrom, barFilters.dateFrom),
     dateTo: earlierDate(baseFilters?.dateTo, barFilters.dateTo),
     // When the bar is outcome-aware (stageEntryDateEnabled — it hides the honest "current state" note and
