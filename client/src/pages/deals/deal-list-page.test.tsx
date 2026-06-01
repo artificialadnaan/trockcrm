@@ -1630,6 +1630,15 @@ describe("DealListPage", () => {
     expect(props.filterBar?.paramPrefix).toBe("dl_");
   });
 
+  it("gates the base FilterBar mount until stage metadata loads — no unscoped first request on cold load (Codex)", () => {
+    mocks.usePipelineStagesMock.mockReturnValue({ loading: true, error: null, stages: [] }); // not loaded yet
+    renderPage("/deals?scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { filterBar?: unknown };
+    // stages:[] → defaultStageIds would be [] → unscoped query; render in legacy mode (filterBar undefined),
+    // which gates the query on stage loading, until metadata arrives.
+    expect(props.filterBar).toBeUndefined();
+  });
+
   it("folds the selected rep into the drill-down list baseFilters (FilterBar mode ignores lockedOwnerId)", () => {
     renderPage("/deals?filter=won&scope=all&assignedRepId=rep-1", "director");
     const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as { baseFilters?: { assignedRepId?: string } };

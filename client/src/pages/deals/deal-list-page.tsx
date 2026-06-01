@@ -1415,7 +1415,11 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               // Preserve the base list's prior default ordering (updated_at desc) when no dl_sort is set,
               // so it still surfaces recently-touched deals first (Codex #589).
               initialSort={dashboardView.listInitialSort}
-              filterBar={{
+              // Gate the FilterBar mount on stage metadata: on a cold load usePipelineStages returns
+              // stages:[], so dealsBaseListStageScope.defaultStageIds would be [] and the first request would
+              // be unscoped/active-only. Until stages arrive, pass NO filterBar — the section stays in legacy
+              // mode, which gates the query on stage loading (mirrors #590's drill-down gate) (Codex).
+              filterBar={stages.length === 0 ? undefined : {
                 // Nest the bar Rep within the header Rep: when the header is "All reps" the bar offers the
                 // Rep dimension (narrow the list to one rep within the all-reps cards/board). When the
                 // header PINS a concrete rep, drop the Rep dimension entirely — a bar Rep control could
