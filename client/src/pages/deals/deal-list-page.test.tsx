@@ -389,10 +389,16 @@ async function renderPageDomWithLocation(path = "/deals?scope=all", role = "admi
   };
 }
 
-describe("boardRelevantParamKey (the board sync ignores dl_* list params, Codex #589)", () => {
-  it("yields the SAME key when only dl_* (list) params change — so a list edit doesn't refetch the kanban", () => {
+describe("boardRelevantParamKey (the board sync ignores list-namespace params, Codex #589)", () => {
+  it("yields the SAME key when only dl_* (base list) params change — so a list edit doesn't refetch the kanban", () => {
     expect(boardRelevantParamKey("scope=all&period=qtd&dl_stageIds=x&dl_page=2")).toBe(
       boardRelevantParamKey("scope=all&period=qtd&dl_stageIds=y&dl_page=5&dl_status=on_hold")
+    );
+  });
+
+  it("yields the SAME key when only fb_* (drill-down list) params change — a drill-down list edit must not refetch the kanban either (Codex #589 P3)", () => {
+    expect(boardRelevantParamKey("scope=all&period=qtd&filter=won&fb_search=acme&fb_stageIds=x")).toBe(
+      boardRelevantParamKey("scope=all&period=qtd&filter=won&fb_search=beta&fb_stageIds=y&fb_page=3")
     );
   });
 

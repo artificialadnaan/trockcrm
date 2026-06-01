@@ -98,16 +98,21 @@ export function formatDateInput(date: Date) {
   return `${year}-${month}-${day}`;
 }
 
+/** URL-param namespaces owned by the under-kanban lists (NOT the board): the base list (dl_) and the
+ *  drill-down FilterBar (fb_). Stripped from the board key so list-only edits never refetch the kanban. */
+const LIST_PARAM_PREFIXES = ["dl_", "fb_"] as const;
+
 /**
  * A canonical key over only the BOARD-relevant URL params (scope/period/assignedRepId/terminal/estimate).
- * The kanban + KPI cards read these; the under-kanban FilterBar list owns the dl_*-namespaced params. The
- * board sync effect keys on this so a list-only (dl_*) filter edit does NOT re-sync the board's terminal/
- * estimate state and pointlessly refetch the kanban (Codex #589). Sorted so param order never matters.
+ * The kanban + KPI cards read these; the under-kanban lists own the dl_* (base) and fb_* (drill-down)
+ * namespaces. The board sync effect keys on this so a list-only filter edit (either namespace) does NOT
+ * re-sync the board's terminal/estimate state and pointlessly refetch the kanban (Codex #589). Sorted so
+ * param order never matters.
  */
 export function boardRelevantParamKey(search: string): string {
   const params = new URLSearchParams(search);
   for (const key of [...params.keys()]) {
-    if (key.startsWith("dl_")) params.delete(key);
+    if (LIST_PARAM_PREFIXES.some((prefix) => key.startsWith(prefix))) params.delete(key);
   }
   params.sort();
   return params.toString();
