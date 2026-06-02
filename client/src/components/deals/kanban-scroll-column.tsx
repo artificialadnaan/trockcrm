@@ -6,20 +6,41 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "@/lib/utils";
+
+const DEFAULT_ESTIMATE_ITEM_SIZE = 120;
+const DEFAULT_OVERSCAN_ROWS = 6;
+// Assumed viewport height before the scroll element is measured (SSR + first
+// paint) so the initial render produces a full window of cards rather than an
+// empty list until the ResizeObserver fires.
+const INITIAL_VIRTUAL_VIEWPORT_HEIGHT = 720;
 
 interface KanbanScrollColumnProps {
   header: ReactNode;
-  children: ReactNode;
+  children?: ReactNode;
   className?: string;
   bodyClassName?: string;
   fadeFromClassName?: string;
   fadeToClassName?: string;
   /**
    * Triggers re-measurement of overflow fades when this number changes
-   * (typically pass the count of cards rendered as children).
+   * (typically pass the count of cards rendered as children / items).
    */
   childCount?: number;
+  /**
+   * Opt-in virtualization. When `renderItem` is provided and `itemCount` > 0
+   * the column windows its rows with @tanstack/react-virtual (variable-height,
+   * measured), mounting only the viewport-visible rows so a single column can
+   * hold hundreds of cards and scroll smoothly. When omitted (or itemCount is
+   * 0) the column renders `children` exactly as before — existing callers that
+   * pass `children` are unaffected.
+   */
+  itemCount?: number;
+  renderItem?: (index: number) => ReactNode;
+  estimateItemSize?: number;
+  overscan?: number;
+  getItemKey?: (index: number) => string | number;
 }
 
 export const KanbanScrollColumn = forwardRef<HTMLDivElement, KanbanScrollColumnProps>(
@@ -32,6 +53,11 @@ export const KanbanScrollColumn = forwardRef<HTMLDivElement, KanbanScrollColumnP
       fadeFromClassName = "from-gray-50",
       fadeToClassName = "to-gray-50",
       childCount,
+      itemCount,
+      renderItem,
+      estimateItemSize = DEFAULT_ESTIMATE_ITEM_SIZE,
+      overscan = DEFAULT_OVERSCAN_ROWS,
+      getItemKey,
     },
     forwardedRef
   ) {
@@ -40,6 +66,20 @@ export const KanbanScrollColumn = forwardRef<HTMLDivElement, KanbanScrollColumnP
       showTopFade: boolean;
       showBottomFade: boolean;
     }>({ showTopFade: false, showBottomFade: false });
+
+    const virtualize = renderItem != null && (itemCount ?? 0) > 0;
+
+    // Always called (rules of hooks); inert when not virtualizing because
+    // getScrollElement returns null and count is 0, so no observers attach and
+    // getVirtualItems() is empty — children-mode callers see no behavior change.
+    const virtualizer = useVirtualizer({
+      count: itemCount ?? 0,
+      getScrollElement: () => (virtualize ? cardsRef.current : null),
+      estimateSize: () => estimateItemSize,
+      overscan,
+      getItemKey,
+      initialRect: { width: 0, height: INITIAL_VIRTUAL_VIEWPORT_HEIGHT },
+    });
 
     const recomputeOverflow = useCallback(() => {
       const el = cardsRef.current;
@@ -65,6 +105,8 @@ export const KanbanScrollColumn = forwardRef<HTMLDivElement, KanbanScrollColumnP
       recomputeOverflow();
       const observer = new ResizeObserver(recomputeOverflow);
       observer.observe(el);
+      // In virtualized mode `el`'s only child is the spacer (whose height grows
+      // as rows are measured); observing it keeps the fades accurate.
       for (const child of Array.from(el.children)) {
         observer.observe(child);
       }
@@ -87,12 +129,30 @@ export const KanbanScrollColumn = forwardRef<HTMLDivElement, KanbanScrollColumnP
             ref={cardsRef}
             onScroll={recomputeOverflow}
             data-testid="kanban-scroll-column-body"
+            data-virtualized-card-count={virtualize ? itemCount : undefined}
             className={cn(
-              "absolute inset-0 space-y-2 overflow-y-auto px-2 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+              "absolute inset-0 overflow-y-auto px-2 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+              virtualize ? null : "space-y-2",
               bodyClassName
             )}
           >
-            {children}
+            {virtualize ? (
+              <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+                {virtualizer.getVirtualItems().map((virtualItem) => (
+                  <div
+                    key={virtualItem.key}
+                    data-index={virtualItem.index}
+                    ref={virtualizer.measureElement}
+                    className="absolute inset-x-0 top-0 pb-2"
+                    style={{ transform: `translateY(${virtualItem.start}px)` }}
+                  >
+                    {renderItem!(virtualItem.index)}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              children
+            )}
           </div>
 
           {overflowState.showTopFade && (
