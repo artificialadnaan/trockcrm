@@ -22,9 +22,10 @@
 --     re-entry re-enqueues with the SAME id and the worker collapses it to a no-op. This is safe ONLY
 --     because the dedup is record_id-alone — do NOT widen the index with stage_entered_at / any
 --     per-entry column, and do NOT add an event-type filter to the reuse-SELECT.
---   * CRM-genuine ONLY. The origin guard (created_by_user_id IS NOT NULL OR source_lead_id IS NOT NULL)
---     restricts notifications to deals created in the CRM. SyncHub/Procore/migration-origin deals that
---     pass through Opportunity do NOT email — matching the accounting backfill report's population.
+--   * CRM-genuine ONLY. The origin guard requires created_by_user_id IS NOT NULL — the positive
+--     "an app user created this deal" signal, set by both genuine paths. SyncHub/Procore/HubSpot-import
+--     /legacy deals leave it NULL and do NOT email. (source_lead_id is deliberately NOT used: migrations
+--     0026/0027 synthesize it on imported deals, so it is not a safe CRM-origin signal.)
 --   * NO-SEED. This migration does NOT back-seed markers for deals already in Opportunity. That avoids
 --     re-creating the #498/#602 suppression trap, and the historical cohort is covered by the one-time
 --     backfill report instead. A pre-existing Opportunity deal only notifies if it makes a genuine new
@@ -78,9 +79,16 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  -- CRM-genuine origin guard: only deals created in the CRM (New Service Opportunity button or lead
-  -- conversion) notify. SyncHub/Procore/migration-origin deals entering Opportunity do NOT.
-  IF NEW.created_by_user_id IS NULL AND NEW.source_lead_id IS NULL THEN
+  -- CRM-genuine origin guard: require created_by_user_id — the positive "an app user created this
+  -- deal" signal. BOTH genuine paths set it going forward (New Service Opportunity and lead conversion
+  -- both pass actorUserId to createDeal: service.ts createDeal -> created_by_user_id, and
+  -- conversion-service passes actorUserId AND source_lead_id). It is immune to the import/sync trap:
+  -- SyncHub/Procore mirror-creates and HubSpot/legacy imports leave created_by_user_id NULL. We do NOT
+  -- also accept source_lead_id, because migrations 0026/0027 synthesize source_lead_id onto imported /
+  -- legacy deals, so a non-null source_lead_id is NOT a reliable CRM-origin signal. The only deals
+  -- excluded are pre-0128 rows created before the created_by_user_id column existed (2026-05-19) — and
+  -- excluding those is correct: they predate this notification and are covered by the backfill report.
+  IF NEW.created_by_user_id IS NULL THEN
     RETURN NEW;
   END IF;
 

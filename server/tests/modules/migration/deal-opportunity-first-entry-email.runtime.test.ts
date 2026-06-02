@@ -137,6 +137,8 @@ const LATER = "00000000-0000-0000-0000-0000000000a4";
 const REENTRY = "00000000-0000-0000-0000-0000000000a5";
 const NOOP = "00000000-0000-0000-0000-0000000000a6";
 const SYNCMOVE = "00000000-0000-0000-0000-0000000000a7";
+const LEGACY = "00000000-0000-0000-0000-0000000000a8";
+const LEGACY2 = "00000000-0000-0000-0000-0000000000a9";
 
 describe("deal_opportunity_first_entry trigger — fires once on first Opportunity entry, keyed to deal_number", () => {
   it("New Service Opportunity (INSERT born in Opportunity, created_by set) enqueues exactly one job carrying deal_number", async () => {
@@ -157,9 +159,10 @@ describe("deal_opportunity_first_entry trigger — fires once on first Opportuni
     expect(String(jobs[0]!.payload.auditLogId)).toBe(String(marker.rows[0]!.id));
   });
 
-  it("lead conversion (INSERT born in Opportunity, created_by NULL but source_lead set) enqueues exactly one job", async () => {
+  it("lead conversion (INSERT born in Opportunity; createDeal sets BOTH created_by + source_lead) enqueues exactly one job", async () => {
     pg = await setup();
-    await insertDeal(pg, { id: CONVERT, name: "Converted", dealNumber: "DFW-4-15327-cd", stageId: OPP, createdBy: null, sourceLead: LEAD });
+    // conversion-service passes actorUserId AND sourceLeadId, so a live converted deal has both set.
+    await insertDeal(pg, { id: CONVERT, name: "Converted", dealNumber: "DFW-4-15327-cd", stageId: OPP, createdBy: USER, sourceLead: LEAD });
 
     const jobs = await emailJobs(pg);
     expect(jobs).toHaveLength(1);
@@ -171,6 +174,19 @@ describe("deal_opportunity_first_entry trigger — fires once on first Opportuni
     pg = await setup();
     await insertDeal(pg, { id: SYNCED, name: "Synced", dealNumber: "DFW-4-15328-ef", stageId: OPP, createdBy: null, sourceLead: null });
 
+    expect(await emailJobs(pg)).toHaveLength(0);
+  });
+
+  it("legacy/imported lineage (created_by NULL + synthesized source_lead_id, per migrations 0026/0027) does NOT enqueue", async () => {
+    pg = await setup();
+    // A HubSpot-imported / legacy deal: source_lead_id was backfilled, but no app user created it.
+    // The origin guard requires created_by_user_id, so source_lead_id alone must NOT qualify.
+    await insertDeal(pg, { id: LEGACY, name: "Legacy", dealNumber: "DFW-4-15333-op", stageId: OPP, createdBy: null, sourceLead: LEAD });
+    expect(await emailJobs(pg)).toHaveLength(0);
+
+    // ...and it must stay silent when a legacy deal is MOVED into Opportunity later, too.
+    await insertDeal(pg, { id: LEGACY2, name: "Legacy2", dealNumber: "DFW-4-15334-qr", stageId: DD, createdBy: null, sourceLead: LEAD });
+    await moveStage(pg, LEGACY2, OPP);
     expect(await emailJobs(pg)).toHaveLength(0);
   });
 
@@ -260,8 +276,11 @@ describe("0147 migration text — locks the design contract", () => {
     expect(MIGRATION_SQL).toContain("slug = 'opportunity'");
   });
 
-  it("applies the CRM-genuine origin guard inside the trigger body", () => {
-    expect(MIGRATION_SQL).toContain("NEW.created_by_user_id IS NULL AND NEW.source_lead_id IS NULL");
+  it("applies the CRM-genuine origin guard (require created_by_user_id; source_lead_id is NOT a signal)", () => {
+    expect(MIGRATION_SQL).toContain("IF NEW.created_by_user_id IS NULL THEN");
+    // source_lead_id must NOT qualify a deal — migrations 0026/0027 synthesize it on imported deals
+    expect(MIGRATION_SQL).not.toContain("NEW.created_by_user_id IS NULL AND NEW.source_lead_id");
+    expect(MIGRATION_SQL).not.toContain("OR NEW.source_lead_id IS NOT NULL");
   });
 
   it("carries deal_number and enqueues the new job type", () => {

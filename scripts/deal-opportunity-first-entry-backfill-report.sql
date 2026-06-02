@@ -5,10 +5,12 @@
 -- number"). This RE-POINTS the earlier "project number backfill report" off the old
 -- `project_number IS NOT NULL` predicate — which was a no-op-ish filter on an operator-assigned column
 -- that is almost never set — and onto the real signal the live notification now uses:
---   CRM-origin (created_by_user_id OR source_lead_id) + entered Opportunity + created since May 13.
+--   CRM-origin (created_by_user_id IS NOT NULL) + entered Opportunity + created since May 13.
 --
--- The live trigger's origin guard is kept IDENTICAL to the WHERE clause here, so the one-time report
--- and the ongoing emails describe the same population. `deal_number` is the operative number (it is
+-- The live trigger's origin guard uses the SAME signal (created_by_user_id), so the one-time report and
+-- the ongoing emails describe the same population. source_lead_id is intentionally NOT used as an
+-- origin signal (migrations 0026/0027 synthesize it onto imported deals). `deal_number` is the
+-- operative number (it is
 -- NOT NULL + UNIQUE on every deal); `project_number` is surfaced only as an optional legacy display
 -- column. Run per CRM tenant schema (office_dallas + office_atlanta are the live tenants;
 -- office_pwauditoffice is non-prod and is intentionally excluded).
@@ -24,16 +26,26 @@ SELECT
   d.name                                 AS deal_name,
   d.created_at                           AS created_at,
   CASE
-    WHEN d.created_by_user_id IS NOT NULL THEN 'service_or_direct'
+    -- Lead conversions set BOTH created_by_user_id and source_lead_id, so check source_lead_id FIRST.
     WHEN d.source_lead_id     IS NOT NULL THEN 'lead_conversion'
+    ELSE 'service_or_direct'
   END                                    AS crm_origin_route,
   d.project_number                       AS legacy_project_number  -- optional display only (usually NULL)
 FROM office_dallas.deals d
 WHERE
-  -- May-13 cutoff anchored to America/Chicago (created_at is timestamptz; a bare DATE would be 5h early)
+  -- May-13 cutoff on the CREATED date (per spec), anchored to America/Chicago (created_at is
+  -- timestamptz; a bare DATE would be 5h early). NOTE: for the dominant cohort (born-in-Opportunity)
+  -- created_at == the Opportunity-entry date. If accounting instead wants "ENTERED Opportunity since
+  -- May 13" (incl. older deals first moved into Opportunity after the cutoff), key the cutoff on the
+  -- deal_stage_history entry timestamp instead — see the ENTRY-DATE variant at the bottom.
   d.created_at >= (DATE '2026-05-13' AT TIME ZONE 'America/Chicago')
-  -- CRM-genuine origin — BYTE-IDENTICAL to the live trigger's origin guard (migration 0147)
-  AND (d.created_by_user_id IS NOT NULL OR d.source_lead_id IS NOT NULL)
+  -- CRM-genuine origin — matches the live trigger (migration 0147): require created_by_user_id, the
+  -- positive "an app user created this" signal. source_lead_id is deliberately NOT accepted: migrations
+  -- 0026/0027 synthesize it onto imported/legacy deals (and the 2026-05-14 HubSpot reimport gives some
+  -- a created_at >= the cutoff), so it would admit non-CRM rows. Trade-off: pre-0128 genuine conversions
+  -- (created < 2026-05-19, NULL created_by_user_id) are excluded — a small bounded gap to supplement
+  -- manually if accounting needs it.
+  AND d.created_by_user_id IS NOT NULL
   -- entered the Opportunity stage: born there (the two genuine paths), or moved there at some point
   AND (
     d.stage_id = (SELECT id FROM opportunity_stage)
@@ -54,24 +66,32 @@ ORDER BY d.created_at;
 -- )
 -- SELECT 'office_dallas' AS tenant_schema, d.deal_number AS project_number, d.name AS deal_name,
 --        d.created_at,
---        CASE WHEN d.created_by_user_id IS NOT NULL THEN 'service_or_direct'
---             WHEN d.source_lead_id IS NOT NULL THEN 'lead_conversion' END AS crm_origin_route,
+--        CASE WHEN d.source_lead_id IS NOT NULL THEN 'lead_conversion' ELSE 'service_or_direct' END AS crm_origin_route,
 --        d.project_number AS legacy_project_number
 --   FROM office_dallas.deals d
 --  WHERE d.created_at >= (DATE '2026-05-13' AT TIME ZONE 'America/Chicago')
---    AND (d.created_by_user_id IS NOT NULL OR d.source_lead_id IS NOT NULL)
+--    AND d.created_by_user_id IS NOT NULL
 --    AND (d.stage_id = (SELECT id FROM opportunity_stage)
 --         OR EXISTS (SELECT 1 FROM office_dallas.deal_stage_history h
 --                     WHERE h.deal_id = d.id AND h.to_stage_id = (SELECT id FROM opportunity_stage)))
 -- UNION ALL
 -- SELECT 'office_atlanta' AS tenant_schema, d.deal_number, d.name, d.created_at,
---        CASE WHEN d.created_by_user_id IS NOT NULL THEN 'service_or_direct'
---             WHEN d.source_lead_id IS NOT NULL THEN 'lead_conversion' END,
+--        CASE WHEN d.source_lead_id IS NOT NULL THEN 'lead_conversion' ELSE 'service_or_direct' END,
 --        d.project_number
 --   FROM office_atlanta.deals d
 --  WHERE d.created_at >= (DATE '2026-05-13' AT TIME ZONE 'America/Chicago')
---    AND (d.created_by_user_id IS NOT NULL OR d.source_lead_id IS NOT NULL)
+--    AND d.created_by_user_id IS NOT NULL
 --    AND (d.stage_id = (SELECT id FROM opportunity_stage)
 --         OR EXISTS (SELECT 1 FROM office_atlanta.deal_stage_history h
 --                     WHERE h.deal_id = d.id AND h.to_stage_id = (SELECT id FROM opportunity_stage)))
 -- ORDER BY created_at;
+--
+-- ENTRY-DATE variant (Codex F2): if accounting wants "ENTERED Opportunity since May 13" rather than
+-- "CREATED since May 13" — i.e. also include deals created earlier but first moved into Opportunity
+-- after the cutoff — replace the created_at predicate above with a first-Opportunity-entry timestamp:
+--   AND COALESCE(
+--         (SELECT MIN(h.created_at) FROM office_dallas.deal_stage_history h
+--           WHERE h.deal_id = d.id AND h.to_stage_id = (SELECT id FROM opportunity_stage)),
+--         d.created_at  -- born in Opportunity: no stage-history "entry" row, so use created_at
+--       ) >= (DATE '2026-05-13' AT TIME ZONE 'America/Chicago')
+-- (Left as a documented option; the default keys on created_at per the agreed spec.)
