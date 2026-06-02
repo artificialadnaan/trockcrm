@@ -2932,31 +2932,26 @@ export async function setDealContractSignedDate(
   auditContext?: AuditContext
 ): Promise<typeof deals.$inferSelect | null> {
   return tenantDb.transaction(async (tx) => {
+    // Lock the deal row FOR UPDATE (same as changeDealStage) so a concurrent stage change can't
+    // race between the Won-family classification below and the won_closed_date write/omit — the
+    // stored Won date must match the deal's FINAL stage.
     const [existing] = await tx
       .select()
       .from(deals)
       .where(eq(deals.id, dealId))
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (!existing) return null;
 
     const oldValue = existing.contractSignedDate ?? null;
     const newValue = contractSignedDate ?? null;
     const oldContractSignedAt = normalizeContractSignedAt(existing.contractSignedAt);
     const newContractSignedAt = contractSignedAtFromDate(newValue);
-    if (
-      oldValue === newValue &&
-      (oldValue !== null || timestampKey(oldContractSignedAt) === timestampKey(newContractSignedAt))
-    ) {
-      return existing;
-    }
 
-    const isInitialContractSignedAt =
-      oldValue == null && oldContractSignedAt == null && newContractSignedAt != null;
-
-    // UNGATED: the contract-signed date is editable at ANY stage (accounting's correction
-    // lever; previously this threw CONTRACT_SIGNED_STAGE_REQUIRED unless slug === "contract").
-    // We still resolve the current stage once — its slug decides the Won-family WRITE-THROUGH
-    // below and whether to suppress the Procore handoff (already-Won deals already have a project).
+    // UNGATED: the contract-signed date is editable at ANY stage (accounting's correction lever;
+    // previously this threw CONTRACT_SIGNED_STAGE_REQUIRED unless slug === "contract"). Resolve the
+    // current (locked) stage once — its slug decides the Won-family WRITE-THROUGH below and whether
+    // to suppress the Procore handoff (already-Won deals already have a project).
     const currentStage = await getStageByIdForWorkflowRoute(
       existing.stageId,
       existing.workflowRoute ?? "normal"
@@ -2967,26 +2962,46 @@ export async function setDealContractSignedDate(
       existing.workflowRoute ?? "normal"
     );
 
+    // WRITE-THROUGH (Won-family only, always-when-present): the authoritative stored Won date —
+    // contract-signed wins when present; when cleared, the stage-driven won date
+    // (stage_entered_at::date) stands. A non-Won deal's won_closed_date is NEVER written (no
+    // promotion; membership stays gated by stage). Every Won read surface inherits this via the
+    // stored deals.won_closed_date column — no read-path change.
+    const oldWonClosedDate = existing.wonClosedDate ?? null;
+    const newWonClosedDate = isWonFamilyDeal
+      ? resolveWonClosedDateWriteThrough({
+          contractSignedDate: newValue,
+          stageDrivenWonDate: stageEnteredAtDateOnly(existing.stageEnteredAt),
+        })
+      : oldWonClosedDate;
+    const wonClosedDateChanged = isWonFamilyDeal && newWonClosedDate !== oldWonClosedDate;
+
+    // A same-value re-save normally short-circuits as a no-op — but if the contract date is PRESENT
+    // and the stored Won date is stale relative to it (e.g. a pre-write-through Won-entry stamp),
+    // the stored basis must still be reconciled. Scoped to a PRESENT contract date only: when it is
+    // absent there is no authoritative source, so we must NOT recompute from stage_entered_at on a
+    // no-op (that would overwrite the real Won-entry/backfill stamp).
+    const reconcileStaleWonDate = isWonFamilyDeal && newValue != null && wonClosedDateChanged;
+
+    if (
+      oldValue === newValue &&
+      (oldValue !== null || timestampKey(oldContractSignedAt) === timestampKey(newContractSignedAt)) &&
+      !reconcileStaleWonDate
+    ) {
+      return existing;
+    }
+
+    const isInitialContractSignedAt =
+      oldValue == null && oldContractSignedAt == null && newContractSignedAt != null;
+
     const now = new Date();
-    // WRITE-THROUGH (Won-family only, always-when-present): for a deal that IS in the Won family,
-    // the contract-signed date is the authoritative won-close date. When present it wins; when
-    // cleared, the stage-driven won date (stage_entered_at::date) stands. Every Won read surface
-    // inherits this via the stored deals.won_closed_date column — no read path changes. A non-Won
-    // deal's won_closed_date is NEVER written here (no promotion; membership stays gated by stage).
     const [updated] = await tx
       .update(deals)
       .set({
         contractSignedDate: newValue,
         contractSignedAt: newContractSignedAt,
         updatedAt: now,
-        ...(isWonFamilyDeal
-          ? {
-              wonClosedDate: resolveWonClosedDateWriteThrough({
-                contractSignedDate: newValue,
-                stageDrivenWonDate: stageEnteredAtDateOnly(existing.stageEnteredAt),
-              }),
-            }
-          : {}),
+        ...(isWonFamilyDeal ? { wonClosedDate: newWonClosedDate } : {}),
       })
       .where(eq(deals.id, dealId))
       .returning();
@@ -2999,6 +3014,11 @@ export async function setDealContractSignedDate(
         from: oldContractSignedAt ? oldContractSignedAt.toISOString() : null,
         to: newContractSignedAt ? newContractSignedAt.toISOString() : null,
       },
+      // When the write-through moves the canonical Won close date, record it so the accounting
+      // re-bucketing of a closed deal is traceable in the audit trail.
+      ...(wonClosedDateChanged
+        ? { wonClosedDate: { from: oldWonClosedDate, to: newWonClosedDate } }
+        : {}),
     };
 
     if (auditContext) {
