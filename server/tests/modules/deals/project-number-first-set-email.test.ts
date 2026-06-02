@@ -6,6 +6,7 @@ import {
   formatCurrency,
   handleProjectNumberFirstSetEmail,
   resolveChristyProjectNumberRecipient,
+  resolveFrontendUrl,
   resolveProjectNumberEmailCcRecipient,
 } from "../../../../worker/src/jobs/project-number-email.js";
 import { sendSystemEmailWithMetadata } from "../../../../worker/src/lib/system-email.js";
@@ -112,14 +113,13 @@ describe("project number first-set notification email", () => {
     expect(resolveChristyProjectNumberRecipient({ NODE_ENV: "development" } as NodeJS.ProcessEnv)).toBe("kscheidegger@trockgc.com");
   });
 
-  it("builds an email with the required fields and awarded_amount currency", () => {
+  it("builds an email with the required fields, the canonical deal link (no officeId), and the branded logo/button", () => {
     const email = buildProjectNumberFirstSetEmail({
       dealId: "deal-1",
       dealName: "The Noble Property",
       projectNumber: "DFW-1-12345-aa",
       salesRepName: "Avery Rep",
       awardedAmount: "123456.78",
-      officeId: "office-dallas",
       frontendUrl: "https://crm.example.com/",
     });
 
@@ -128,8 +128,56 @@ describe("project number first-set notification email", () => {
     expect(email.html).toContain("DFW-1-12345-aa");
     expect(email.html).toContain("Avery Rep");
     expect(email.html).toContain("$123,456.78");
-    expect(email.html).toContain("https://crm.example.com/deals/deal-1?officeId=office-dallas");
+    // canonical deal URL: /deals/{id} with NO query string (officeId dropped)
+    expect(email.dealUrl).toBe("https://crm.example.com/deals/deal-1");
+    expect(email.html).toContain("https://crm.example.com/deals/deal-1");
+    expect(email.html).not.toContain("officeId");
+    // branded building blocks: hosted PNG logo + the View-Deal button carry the link
+    expect(email.html).toContain('<img src="https://trockcrm.com/trock-logo-email.png"');
+    expect(email.html).toContain('alt="T Rock Construction"');
+    expect(email.html).toContain("View Deal in CRM");
     expect(email.text).toContain("Awarded amount: $123,456.78");
+    expect(email.text).toContain("https://crm.example.com/deals/deal-1");
+  });
+
+  it("link domain regression: the production default points at trockcrm.com, never trockconstruction.com", () => {
+    // worker leaves FRONTEND_URL unset, so this default is what every link renders.
+    expect(resolveFrontendUrl({} as NodeJS.ProcessEnv)).toBe("https://trockcrm.com");
+    const email = buildProjectNumberFirstSetEmail({
+      dealId: "acbf7a59-c774-4d35-a9db-40296de8e03e",
+      dealName: "Sample",
+      projectNumber: "DFW-1-99999-zz",
+      salesRepName: "Rep",
+      awardedAmount: null,
+      frontendUrl: resolveFrontendUrl({} as NodeJS.ProcessEnv),
+    });
+    expect(email.dealUrl).toBe("https://trockcrm.com/deals/acbf7a59-c774-4d35-a9db-40296de8e03e");
+    expect(email.html).toContain("https://trockcrm.com/deals/acbf7a59-c774-4d35-a9db-40296de8e03e");
+    // the broken domain must never reappear anywhere in the email
+    expect(email.html).not.toContain("trockconstruction.com");
+    expect(email.dealUrl).not.toContain("trockconstruction.com");
+    expect(email.text).not.toContain("trockconstruction.com");
+  });
+
+  it("is Outlook-safe: table layout, inline CSS only, hosted PNG logo with width/height, VML button, no web-only constructs", () => {
+    const email = buildProjectNumberFirstSetEmail({
+      dealId: "d",
+      dealName: "n",
+      projectNumber: "p",
+      salesRepName: "r",
+      awardedAmount: null,
+      frontendUrl: "https://trockcrm.com",
+    });
+    const h = email.html;
+    expect(h).toContain('role="presentation"'); // table-based layout
+    expect(h).toContain("<v:roundrect"); // VML bulletproof button (Outlook)
+    expect(h).toContain("PixelsPerInch"); // mso image-scaling fix
+    expect(h).toContain('width="220" height="246"'); // logo sized via HTML attributes, not CSS
+    expect(h).not.toMatch(/<style[\s>]/i); // Outlook ignores <style> blocks — everything inline
+    expect(h).not.toMatch(/<link[\s>]/i); // no external CSS
+    expect(h).not.toMatch(/display:\s*(flex|grid)/i); // no flexbox/grid
+    expect(h).not.toMatch(/\.svg|<svg/i); // no SVG (filename or inline element)
+    expect(h).not.toMatch(/background-image/i); // no CSS background-images for critical content
   });
 
   it("formats missing or invalid awarded_amount as not set", () => {
@@ -179,8 +227,7 @@ describe("project number first-set notification email", () => {
           awarded_amount: "50",
           sales_rep_name: "Avery Rep",
         }],
-      })
-      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] });
+      });
     const sendEmail = vi.fn().mockResolvedValue({ success: false, messageId: null });
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -236,11 +283,10 @@ describe("project number first-set notification email", () => {
     };
     const query = vi
       .fn()
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [dealRow] })
-      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ resend_message_id: "resend-1", sent_at: new Date().toISOString() }] });
+      .mockResolvedValueOnce({ rows: [] }) // call 1: receipt-check (none yet)
+      .mockResolvedValueOnce({ rows: [dealRow] }) // call 2: deal-load
+      .mockResolvedValueOnce({ rows: [] }) // call 3: receipt-insert (after send)
+      .mockResolvedValueOnce({ rows: [{ resend_message_id: "resend-1", sent_at: new Date().toISOString() }] }); // call 4: 2nd-call receipt-check (already sent)
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const payload = {
@@ -268,7 +314,7 @@ describe("project number first-set notification email", () => {
     expect(sendEmail).toHaveBeenCalledWith(
       "christy@example.com",
       "New project number assigned: DFW-1-12345-aa (Noble)",
-      expect.stringContaining("https://crm.example.com/deals/00000000-0000-0000-0000-000000000001?officeId=office-dallas"),
+      expect.stringContaining("https://crm.example.com/deals/00000000-0000-0000-0000-000000000001"),
       expect.objectContaining({ idempotencyKey: "project-number-first-set-office_dallas-123" })
     );
     expect(query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO public.project_number_first_set_email_receipts"), [
@@ -297,14 +343,12 @@ describe("project number first-set notification email", () => {
     };
     const query = vi
       .fn()
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [dealRow] })
-      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [dealRow] })
-      .mockResolvedValueOnce({ rows: [{ id: "office-atlanta" }] })
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [] }) // T1 call 1: receipt-check
+      .mockResolvedValueOnce({ rows: [dealRow] }) // T1 call 2: deal-load
+      .mockResolvedValueOnce({ rows: [] }) // T1 call 3: receipt-insert
+      .mockResolvedValueOnce({ rows: [] }) // T2 call 4: receipt-check
+      .mockResolvedValueOnce({ rows: [dealRow] }) // T2 call 5: deal-load
+      .mockResolvedValueOnce({ rows: [] }); // T2 call 6: receipt-insert
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
     const deps = {
       env: {
@@ -342,7 +386,7 @@ describe("project number first-set notification email", () => {
       ["office_dallas", 123]
     );
     expect(query).toHaveBeenNthCalledWith(
-      5,
+      4,
       expect.stringContaining("WHERE tenant_schema = $1"),
       ["office_atlanta", 123]
     );
@@ -383,7 +427,6 @@ describe("project number first-set notification email", () => {
           sales_rep_name: "Avery Rep",
         }],
       })
-      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] })
       .mockResolvedValueOnce({ rows: [] });
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
