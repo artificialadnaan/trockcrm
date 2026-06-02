@@ -17,7 +17,11 @@ export const bidBoardSyncRuns = pgTable(
     skippedNoProjectNumberCount: integer("skipped_no_project_number_count").default(0).notNull(),
     skippedUnmappedStatusCount: integer("skipped_unmapped_status_count").default(0).notNull(),
     skippedTemplateCount: integer("skipped_template_count").default(0).notNull(),
+    // Legacy: retained for historical run rows. The Bid Board export is now authoritative on
+    // backward stage moves, so backward syncs are APPLIED (applied_backward_count) rather than
+    // skipped. New runs leave this at 0; appliedBackwardCount is the live counter.
     skippedBackwardCount: integer("skipped_backward_count").default(0).notNull(),
+    appliedBackwardCount: integer("applied_backward_count").default(0).notNull(),
     skippedTerminalCount: integer("skipped_terminal_count").default(0).notNull(),
     skippedNoStageChangeCount: integer("skipped_no_stage_change_count").default(0).notNull(),
     estimateUpdatedCount: integer("estimate_updated_count").default(0).notNull(),
