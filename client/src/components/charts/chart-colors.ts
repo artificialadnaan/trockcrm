@@ -43,14 +43,30 @@ export function formatCurrency(value: number | null | undefined): string {
   return `$${value.toFixed(0)}`;
 }
 
-/** Format a number as a compact count (1.2K, 5M, etc.) */
-export function formatCompact(value: number): string {
+/**
+ * Format a number as a compact count (1.2K, 5M, etc.).
+ *
+ * Guards against null/undefined/NaN/±Infinity → "--" (matching formatCurrency
+ * above and the safe formatter in deal-utils.ts) so no surface renders the
+ * literal "NaN". A real 0 is finite and still renders "0".
+ */
+export function formatCompact(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "--";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(value);
 }
 
-/** Format a percentage */
-export function formatPercent(value: number): string {
+/**
+ * Format a percentage.
+ *
+ * Guards against null/undefined/NaN/±Infinity → "--" so no surface renders the
+ * literal "NaN%" (a bare template would coerce null→"null%", NaN→"NaN%"). A real
+ * 0 still renders "0%". Used as a Recharts tick/tooltip formatter too — the
+ * return value is display text only (the scale reads the raw datum), so the
+ * "--" fallback never breaks axis rendering.
+ */
+export function formatPercent(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "--";
   return `${value}%`;
 }

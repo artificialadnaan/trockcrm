@@ -607,7 +607,11 @@ describe("DealListPage", () => {
     const html = renderPage();
 
     expect(html).toContain("Active pipeline");
-    expect(html).toMatch(/Active pipeline.*\$180K.*1\/1 deals/);
+    // USD_COMPACT(180000) renders "$180.0K" — Intl compact notation with
+    // maximumFractionDigits:1 emits the trailing ".0" for round thousands/millions
+    // (consistent with the "$125.0K"/"$4.0M" expectations elsewhere in the suite).
+    // The previous "$180K" expectation omitted the ".0" and so never matched.
+    expect(html).toMatch(/Active pipeline.*\$180\.0K.*1\/1 deals/);
     expect(html).not.toContain("$1.6M");
     expect(html).not.toContain("4 deals");
   });
