@@ -52,13 +52,17 @@ const DRILLDOWN_DIMENSION_ORDER: FilterDimension[] = [
  *    select (it filters the board AND the embedded list together), so the bar omits rep there;
  *  - `stage` is dropped when the surface PINS a single stage (`pinnedStage`) — the stage drill-down's
  *    route already fixes the stage, so a stage multi-select would let the user escape the route's stage.
+ *  - `date` is dropped when the surface OWNS the date axis (`ownDate`) — the rep drill-down binds the
+ *    bar's Date to its own listRange window (via `filterBar.dateControl`), so the generic outcome-aware
+ *    date control is replaced and the bar's own fb_date params must stay out of the query.
  */
 export function getDrilldownFilterBarDimensions(
-  opts: { pinnedStage?: boolean; ownRep?: boolean } = {}
+  opts: { pinnedStage?: boolean; ownRep?: boolean; ownDate?: boolean } = {}
 ): FilterDimension[] {
   return DRILLDOWN_DIMENSION_ORDER.filter((dimension) => {
     if (dimension === "rep") return opts.ownRep === true;
     if (dimension === "stage") return opts.pinnedStage !== true;
+    if (dimension === "date") return opts.ownDate !== true;
     return true;
   });
 }

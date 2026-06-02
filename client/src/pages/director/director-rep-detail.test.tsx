@@ -595,6 +595,90 @@ describe("DirectorRepDetail", () => {
     }
   });
 
+  // Date-binding (Option B): the top list-range pills and the bar's Date dropdown share ONE source of
+  // truth (listRange). The bar OWNS the date axis (date dropped from dimensions; bound via dateControl),
+  // so the two controls always mirror and never conflict, and the bar's fb_date never reaches the query.
+  it("binds the bar Date dropdown to listRange — same six presets as the top pills, date dropped from dimensions", () => {
+    renderPageHtml("/director/rep/rep-1?preset=qtd&listRange=dashboard");
+
+    const props = mocks.dealsListSectionMock.mock.calls[0]?.[0] as {
+      filterBar?: {
+        dimensions?: string[];
+        dateControl?: { value?: string; ariaLabel?: string; options?: { value: string; label: string }[] };
+      };
+    };
+    // Host owns the date axis -> "date" is NOT a bar dimension (so fb_date can't leak into the query).
+    expect(props.filterBar?.dimensions).not.toContain("date");
+    // The bar's Date dropdown is bound to listRange (default "dashboard") with the SAME options as the pills.
+    expect(props.filterBar?.dateControl?.value).toBe("dashboard");
+    expect(props.filterBar?.dateControl?.options).toEqual([
+      { value: "dashboard", label: "Dashboard (QTD)" },
+      { value: "7d", label: "7D" },
+      { value: "wtd", label: "WTD" },
+      { value: "mtd", label: "MTD" },
+      { value: "qtd", label: "QTD" },
+      { value: "ytd", label: "YTD" },
+    ]);
+  });
+
+  it("clicking a top pill updates the bar Date dropdown value (top → dropdown mirror)", async () => {
+    const page = await renderPageWithRouter("/director/rep/rep-1?preset=qtd&listRange=dashboard");
+
+    try {
+      const wtdButton = Array.from(page.container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("WTD")
+      );
+      await act(async () => {
+        wtdButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const lastProps =
+        mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+          filterBar?: { dateControl?: { value?: string } };
+        };
+      expect(lastProps.filterBar?.dateControl?.value).toBe("wtd");
+    } finally {
+      await page.cleanup();
+    }
+  });
+
+  it("changing the bar Date dropdown updates listRange — URL, top pill highlight, and the list/leads window (dropdown → top)", async () => {
+    const page = await renderPageWithRouter("/director/rep/rep-1?preset=qtd&listRange=dashboard");
+
+    try {
+      const onChange = mocks.dealsListSectionMock.mock.calls[
+        mocks.dealsListSectionMock.mock.calls.length - 1
+      ]?.[0]?.filterBar?.dateControl?.onChange as (value: string) => void;
+      expect(typeof onChange).toBe("function");
+
+      await act(async () => {
+        onChange("wtd");
+      });
+
+      // Single source of truth: the dropdown change drives listRange just like a top pill click would.
+      expect(window.location.search).toContain("listRange=wtd");
+      const wtdPill = Array.from(page.container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("WTD")
+      );
+      expect(wtdPill?.getAttribute("aria-pressed")).toBe("true");
+      expect(page.container.textContent).toContain("2026-05-17 to 2026-05-21");
+
+      const lastProps =
+        mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+          filterBar?: { dateControl?: { value?: string } };
+          baseFilters?: { dateFrom?: string; dateTo?: string };
+        };
+      expect(lastProps.filterBar?.dateControl?.value).toBe("wtd");
+      expect(lastProps.baseFilters?.dateFrom).toBe("2026-05-17");
+      expect(lastProps.baseFilters?.dateTo).toBe("2026-05-21");
+      expect(mocks.useLeadsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ createdFrom: "2026-05-17", createdTo: "2026-05-21" })
+      );
+    } finally {
+      await page.cleanup();
+    }
+  });
+
   it("renders newest leads first and routes rows to the lead detail page", async () => {
     mocks.useLeadsMock.mockReturnValue({
       leads: [

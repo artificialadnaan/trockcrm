@@ -342,6 +342,25 @@ describe("getDrilldownFilterBarDimensions (per-surface dimension set)", () => {
     expect(getDrilldownFilterBarDimensions({ pinnedStage: true })).not.toContain("stage");
   });
 
+  it("drops the date dimension when the surface OWNS the date axis (rep drill-down binds Date to its listRange)", () => {
+    // The rep drill-down renders its own host-owned Date control (PresetSelect over listRange presets)
+    // via filterBar.dateControl, so "date" must NOT be a bar dimension — keeping the bar's own
+    // fb_dateFrom/fb_dateTo params out of the query (a single date source of truth = the page's listRange).
+    const dims = getDrilldownFilterBarDimensions({ ownDate: true });
+    expect(dims).not.toContain("date");
+    expect(dims).toEqual([
+      "search",
+      "stage",
+      "sort",
+      "status",
+      "workflow",
+      "region",
+      "projectType",
+      "value",
+      "stalled",
+    ]);
+  });
+
   it("the stage-page set (pinned stage + bar-owned rep) is the full dim row minus the stage picker", () => {
     expect(getDrilldownFilterBarDimensions({ pinnedStage: true, ownRep: true })).toEqual([
       "search",

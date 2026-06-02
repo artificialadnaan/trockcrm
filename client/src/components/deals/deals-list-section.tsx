@@ -39,7 +39,7 @@ import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { useFilterState } from "@/components/filters/use-filter-state";
-import { FilterBar, type FilterDimension, type FilterBarOptions } from "@/components/filters/filter-bar";
+import { FilterBar, type FilterDimension, type FilterBarOptions, type FilterBarDateControl } from "@/components/filters/filter-bar";
 import {
   applyBoardVisibilityDefaults,
   filterBarValueToDealFilters,
@@ -143,6 +143,15 @@ interface DealsListSectionProps {
      * desc, active → display_date desc). Opt-in: omit it (pipeline/base) to keep the server default.
      */
     defaultSort?: DealListSortState;
+    /**
+     * Opt-in host-owned Date control. When set, the bar renders a single-select over the host's own date
+     * presets (bound to a single source of truth shared with a page-level control) instead of the generic
+     * outcome-aware date filter. The host should also pass dimensions WITHOUT "date" (via
+     * getDrilldownFilterBarDimensions({ ownDate: true })) so the bar's own fb_date params stay out of the
+     * query — the host's date (e.g. baseFilters from listRange) is then the only date source. Used by the
+     * rep drill-down to bind its top listRange pills and the bar's Date dropdown to one state (#3 follow-up).
+     */
+    dateControl?: FilterBarDateControl;
   };
 }
 
@@ -1205,6 +1214,7 @@ export function DealsListSection({
           <FilterBar
             dimensions={filterBar.dimensions}
             options={filterBar.options}
+            dateControl={filterBar.dateControl}
             value={urlFilters}
             onChange={setFilters}
             // Preserve any param the bar inherits but does not render (e.g. the board-owned `scope`

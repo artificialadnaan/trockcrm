@@ -1685,6 +1685,22 @@ describe("DealListPage", () => {
     expect(props.filterBar?.paramPrefix).toBe("dl_");
   });
 
+  it("shows the running-total card on the base /deals list (#4: SUM over the full filtered set, all pages)", () => {
+    renderPage("/deals?scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+      showValueTotal?: boolean;
+    };
+    expect(props.showValueTotal).toBe(true);
+  });
+
+  it("shows the running-total card on a /deals drill-down list (#4)", () => {
+    renderPage("/deals?filter=won&scope=all", "director");
+    const props = mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
+      showValueTotal?: boolean;
+    };
+    expect(props.showValueTotal).toBe(true);
+  });
+
   it("gates the base FilterBar mount until stage metadata loads — no unscoped first request on cold load (Codex)", () => {
     mocks.usePipelineStagesMock.mockReturnValue({ loading: true, error: null, stages: [] }); // not loaded yet
     renderPage("/deals?scope=all", "director");

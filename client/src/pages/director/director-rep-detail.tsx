@@ -437,6 +437,13 @@ export function DirectorRepDetail() {
     () => getVisibleListTerminalStageIds(dealStages, repStageOptions),
     [dealStages, repStageOptions]
   );
+  // Date binding (Option B): the bar's Date dropdown shares the SAME options + state as the top
+  // list-range pills (listRange), so the two controls always mirror and never conflict. The label
+  // tracks the active dashboard preset (so "Dashboard" reads "Dashboard (YTD)" etc.).
+  const listRangeDateOptions = useMemo(
+    () => LIST_RANGE_OPTIONS.map((option) => ({ value: option, label: getRepDetailListRangeLabel(option, preset) })),
+    [preset]
+  );
 
   const handlePresetChange = (nextPreset: DateRangePreset) => {
     setPreset(nextPreset);
@@ -706,8 +713,22 @@ export function DirectorRepDetail() {
               dateTo: listDateRange.to,
             }}
             filterBar={{
-              // Every shared control EXCEPT Rep (locked above) and Scope (the page owns scope="all").
-              dimensions: getDrilldownFilterBarDimensions(),
+              // Every shared control EXCEPT Rep (locked above), Scope (the page owns scope="all"), and
+              // Date — the page owns the date axis (listRange), so the bar drops "date" from dimensions
+              // and renders a host-owned Date dropdown bound to listRange via dateControl (Option B).
+              dimensions: getDrilldownFilterBarDimensions({ ownDate: true }),
+              // The bar's Date dropdown and the top list-range pills share ONE source of truth (listRange):
+              // both edit it, both reflect it, so they never show conflicting windows. The window itself is
+              // computed once by getRepDetailListDateRange (flowing through baseFilters above), so the
+              // dropdown can't introduce a divergent date — it only selects which listRange preset is active.
+              dateControl: {
+                ariaLabel: "Date range",
+                value: listRange,
+                options: listRangeDateOptions,
+                onChange: (next) => {
+                  if (isRepDetailListRange(next)) handleListRangeChange(next);
+                },
+              },
               options: {
                 regions: regions.map((region) => ({ value: region.id, label: region.name })),
                 projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),

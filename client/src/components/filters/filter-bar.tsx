@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { MultiSelectMenu, type MultiSelectOption } from "./multi-select-menu";
 import { NumericRangePopover, type NumericRangeBucket } from "./numeric-range-popover";
 import { FilterSelect, type FilterSelectOption } from "./filter-select";
+import { PresetSelect } from "./preset-select";
 import { resolveDateWindow, dateFilterFromValue } from "./filterbar-date";
 import { UNASSIGNED, type DealStatusFilter, type FilterBarValue } from "./filterbar-params";
 
@@ -90,6 +91,24 @@ export function sortPatch(
   return { sortBy: option?.sortBy, sortDir: option?.sortDir };
 }
 
+/**
+ * A surface-owned override for the Date control. When provided, the bar renders a simple single-select
+ * (PresetSelect) over `options` bound to the host's own date state instead of the generic outcome-aware
+ * TerminalDateFilterControl — so a surface that already owns its date axis (e.g. the rep drill-down,
+ * whose listRange window also drives its leads list + KPI cards) can present ONE date control bound to a
+ * single source of truth. The host owns the date entirely, so it should also DROP "date" from
+ * `dimensions` (the bar still renders the slot from this prop), keeping the bar's own date params out of
+ * the query. Generic mounts (pipeline/deals/leads/companies) omit this and keep the default control.
+ */
+export interface FilterBarDateControl {
+  /** Accessible name for the trigger (the date slot renders its own "Date:" label). */
+  ariaLabel: string;
+  /** The current option value — always set (no "All"/no-filter state). */
+  value: string;
+  options: FilterSelectOption[];
+  onChange: (value: string) => void;
+}
+
 interface FilterBarProps {
   /** Which dimensions this surface shows, in render order. */
   dimensions: FilterDimension[];
@@ -97,6 +116,9 @@ interface FilterBarProps {
   onChange: (patch: Partial<FilterBarValue>) => void;
   onReset: () => void;
   options?: FilterBarOptions;
+  /** Opt-in host-owned Date control (see FilterBarDateControl). Renders the date slot even when "date"
+   *  is not a dimension, so the host can own the date axis while the bar shows the control inline. */
+  dateControl?: FilterBarDateControl;
   scopeOptions?: ScopeToggleOption<ScopeValue>[];
   /**
    * When false (the honest pre-backfill default), the date filter is labeled as covering only
@@ -119,6 +141,7 @@ export function FilterBar({
   onChange,
   onReset,
   options = {},
+  dateControl,
   scopeOptions = DEFAULT_SCOPE_OPTIONS,
   stageEntryDateEnabled = false,
   className,
@@ -163,18 +186,32 @@ export function FilterBar({
         />
       )}
 
-      {has("date") && (
+      {(has("date") || dateControl) && (
         <div className="flex items-center gap-1.5">
           <span className="text-sm font-medium text-muted-foreground">Date:</span>
-          <TerminalDateFilterControl
-            stageName="Date"
-            filter={dateFilterFromValue(value)}
-            onFilterChange={(filter) => onChange(resolveDateWindow(filter))}
-          />
-          {!stageEntryDateEnabled && (
-            <span className="text-[11px] leading-tight text-muted-foreground" data-testid="date-scope-note">
-              Won/Lost &amp; activity · open stages show current state
-            </span>
+          {dateControl ? (
+            // Host-owned date axis (e.g. the rep drill-down's listRange presets): a single source of
+            // truth shared with the page's own date control, so the two never disagree. No honesty note
+            // — the host owns the date semantics, not the generic outcome-aware window.
+            <PresetSelect
+              ariaLabel={dateControl.ariaLabel}
+              value={dateControl.value}
+              options={dateControl.options}
+              onChange={dateControl.onChange}
+            />
+          ) : (
+            <>
+              <TerminalDateFilterControl
+                stageName="Date"
+                filter={dateFilterFromValue(value)}
+                onFilterChange={(filter) => onChange(resolveDateWindow(filter))}
+              />
+              {!stageEntryDateEnabled && (
+                <span className="text-[11px] leading-tight text-muted-foreground" data-testid="date-scope-note">
+                  Won/Lost &amp; activity · open stages show current state
+                </span>
+              )}
+            </>
           )}
         </div>
       )}
