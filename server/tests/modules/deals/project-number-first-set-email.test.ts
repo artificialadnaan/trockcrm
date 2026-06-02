@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
-import path from "node:path";
 
 import {
   buildProjectNumberFirstSetEmail,
@@ -12,7 +11,7 @@ import {
 import { sendSystemEmailWithMetadata } from "../../../../worker/src/lib/system-email.js";
 
 const migrationSql = fs.readFileSync(
-  path.resolve(process.cwd(), "migrations/0138_project_number_first_set_notification.sql"),
+  new URL("../../../../migrations/0138_project_number_first_set_notification.sql", import.meta.url),
   "utf8"
 );
 
@@ -92,6 +91,27 @@ describe("project number first-set notification email", () => {
     expect(resolveProjectNumberEmailCcRecipient({ NODE_ENV: "production" } as NodeJS.ProcessEnv)).toBeNull();
   });
 
+  it("never falls back to a hardcoded dev address when NODE_ENV is unset or non-canonical (prod-safety)", () => {
+    // The fallback is an allowlist of {development, test}, NOT `!== production`, so a misconfigured
+    // prod worker (NODE_ENV unset / "prod" / "staging") returns null and fails loudly instead of
+    // silently emailing the hardcoded dev recipient.
+    expect(resolveChristyProjectNumberRecipient({} as NodeJS.ProcessEnv)).toBeNull();
+    expect(resolveChristyProjectNumberRecipient({ NODE_ENV: "" } as NodeJS.ProcessEnv)).toBeNull();
+    expect(resolveChristyProjectNumberRecipient({ NODE_ENV: "staging" } as NodeJS.ProcessEnv)).toBeNull();
+    expect(resolveChristyProjectNumberRecipient({ NODE_ENV: "prod" } as NodeJS.ProcessEnv)).toBeNull();
+    expect(resolveProjectNumberEmailCcRecipient({} as NodeJS.ProcessEnv)).toBeNull();
+    expect(resolveProjectNumberEmailCcRecipient({ NODE_ENV: "staging" } as NodeJS.ProcessEnv)).toBeNull();
+    // an explicitly-configured value always wins, regardless of NODE_ENV
+    expect(resolveChristyProjectNumberRecipient({
+      CHRISTY_PROJECT_NUMBER_EMAIL: "christy@example.com",
+    } as NodeJS.ProcessEnv)).toBe("christy@example.com");
+    expect(resolveProjectNumberEmailCcRecipient({
+      PROJECT_NUMBER_EMAIL_CC: "adnaan@example.com",
+    } as NodeJS.ProcessEnv)).toBe("adnaan@example.com");
+    // the development context still gets the dev convenience default
+    expect(resolveChristyProjectNumberRecipient({ NODE_ENV: "development" } as NodeJS.ProcessEnv)).toBe("kscheidegger@trockgc.com");
+  });
+
   it("builds an email with the required fields and awarded_amount currency", () => {
     const email = buildProjectNumberFirstSetEmail({
       dealId: "deal-1",
@@ -138,10 +158,12 @@ describe("project number first-set notification email", () => {
     )).rejects.toThrow("CHRISTY_PROJECT_NUMBER_EMAIL is not configured");
 
     expect(sendEmail).not.toHaveBeenCalled();
-    expect(logger.warn).toHaveBeenCalledWith(
-      "[ProjectNumberEmail] CHRISTY_PROJECT_NUMBER_EMAIL is not configured - retrying later",
+    // missing required recipient must be a VISIBLE failure (error, not warn) before the job retries
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("CHRISTY_PROJECT_NUMBER_EMAIL is not set"),
       expect.objectContaining({ projectNumber: "DFW-1-12345-aa" })
     );
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it("sends using loaded deal data and retries when email delivery fails", async () => {
@@ -395,10 +417,12 @@ describe("project number first-set notification email", () => {
         idempotencyKey: "project-number-first-set-office_dallas-123",
       }
     );
-    expect(logger.warn).toHaveBeenCalledWith(
-      "[ProjectNumberEmail] PROJECT_NUMBER_EMAIL_CC is not configured - sending without CC",
+    // dropping the CC must be a VISIBLE failure (error, not warn); Christy's email still sends
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining("PROJECT_NUMBER_EMAIL_CC is not set"),
       expect.objectContaining({ projectNumber: "DFW-1-12345-aa" })
     );
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
   it("does not mark production email successful when Resend is not configured", async () => {

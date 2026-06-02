@@ -56,18 +56,23 @@ export async function handleProjectNumberFirstSetEmail(
   const recipient = resolveChristyProjectNumberRecipient(deps.env ?? process.env);
   if (!recipient) {
     const error = new Error("CHRISTY_PROJECT_NUMBER_EMAIL is not configured");
-    logger.warn("[ProjectNumberEmail] CHRISTY_PROJECT_NUMBER_EMAIL is not configured - retrying later", {
-      dealId,
-      projectNumber,
-    });
+    // error (not warn): a required recipient is missing, so the notification cannot send. Logged
+    // loudly and re-thrown so the failure is VISIBLE and the job retries (then dead-letters after the
+    // job queue's max_attempts) instead of silently completing as a no-op.
+    logger.error(
+      "[ProjectNumberEmail] CHRISTY_PROJECT_NUMBER_EMAIL is not set - cannot send the project-number notification. Set it on the worker service; the job retries a few times, then dead-letters.",
+      { dealId, projectNumber }
+    );
     throw error;
   }
   const ccRecipient = resolveProjectNumberEmailCcRecipient(deps.env ?? process.env);
   if (!ccRecipient) {
-    logger.warn("[ProjectNumberEmail] PROJECT_NUMBER_EMAIL_CC is not configured - sending without CC", {
-      dealId,
-      projectNumber,
-    });
+    // error (not warn): the CC copy is being dropped. Christy's notification still sends (we do not
+    // block the primary recipient on a missing CC), but the drop is surfaced loudly, not silent.
+    logger.error(
+      "[ProjectNumberEmail] PROJECT_NUMBER_EMAIL_CC is not set - sending to Christy WITHOUT the CC copy. Set it on the worker service to restore the CC.",
+      { dealId, projectNumber }
+    );
   }
 
   const query = deps.query ?? pool.query.bind(pool);
@@ -177,16 +182,29 @@ export async function handleProjectNumberFirstSetEmail(
   }
 }
 
+/**
+ * Whether a hardcoded non-prod default recipient is acceptable. This is an ALLOWLIST of explicitly
+ * non-production environments — deliberately NOT `NODE_ENV !== "production"`. A misconfigured prod
+ * worker (NODE_ENV unset, or a non-canonical value like "prod"/"staging") must fail loudly rather
+ * than silently emailing a hardcoded dev address, so anything outside {development, test} is treated
+ * as "the env var must be configured".
+ */
+const DEV_FALLBACK_NODE_ENVS = new Set(["development", "test"]);
+
+export function isDevFallbackRecipientContext(env: NodeJS.ProcessEnv): boolean {
+  return typeof env.NODE_ENV === "string" && DEV_FALLBACK_NODE_ENVS.has(env.NODE_ENV);
+}
+
 export function resolveChristyProjectNumberRecipient(env: NodeJS.ProcessEnv): string | null {
   const configured = normalizeText(env.CHRISTY_PROJECT_NUMBER_EMAIL);
   if (configured) return configured;
-  return env.NODE_ENV === "production" ? null : DEFAULT_NON_PROD_CHRISTY_PROJECT_NUMBER_EMAIL;
+  return isDevFallbackRecipientContext(env) ? DEFAULT_NON_PROD_CHRISTY_PROJECT_NUMBER_EMAIL : null;
 }
 
 export function resolveProjectNumberEmailCcRecipient(env: NodeJS.ProcessEnv): string | null {
   const configured = normalizeText(env.PROJECT_NUMBER_EMAIL_CC);
   if (configured) return configured;
-  return env.NODE_ENV === "production" ? null : DEFAULT_NON_PROD_PROJECT_NUMBER_EMAIL_CC;
+  return isDevFallbackRecipientContext(env) ? DEFAULT_NON_PROD_PROJECT_NUMBER_EMAIL_CC : null;
 }
 
 export function resolveFrontendUrl(env: NodeJS.ProcessEnv): string {
