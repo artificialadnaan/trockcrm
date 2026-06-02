@@ -116,6 +116,7 @@ describe("Bid Board sync stage writeback", () => {
           "stage-opportunity",
           "stage-under-review",
           "system-user",
+          false,
           "Bid Board export sync - Status Estimate Under Review -> Stage estimate_under_review",
           "2026-05-01T00:00:00.000Z",
         ]);
@@ -316,7 +317,8 @@ describe("Bid Board sync stage writeback", () => {
     expect(result.metrics.stageUpdated).toBe(1);
   });
 
-  it("does not move a later-stage CRM deal backward from the Bid Board export", async () => {
+  it("applies a backward Bid Board stage move (board is source of truth) and resets the stage clock", async () => {
+    let stageEnteredAtParam: Date | undefined;
     query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const base = successfulRunBase(sql);
       if (base) return base;
@@ -346,11 +348,36 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
+      // Bid Board is authoritative: the backward move IS applied, writing the earlier stage_id
+      // with a FRESH stage_entered_at (the SLA clock resets on re-entry, exactly like a forward move).
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("stage_id = $1")) {
-        throw new Error("backward Bid Board sync must not update CRM stage");
+        expect(params[0]).toBe("stage-under-review");
+        expect(params[1]).toBeInstanceOf(Date);
+        stageEnteredAtParam = params[1] as Date;
+        expect(params.slice(2, 10)).toEqual([
+          null,
+          0,
+          0,
+          "estimate_under_review",
+          "estimating",
+          "Estimate Under Review",
+          "deal-contract",
+          "stage-contract",
+        ]);
+        return { rows: [{ id: "deal-contract" }], rowCount: 1 };
       }
+      // The stage-history row records the move as backward (is_backward_move = true).
       if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) {
-        throw new Error("backward Bid Board sync must not write stage history");
+        expect(params).toEqual([
+          "deal-contract",
+          "stage-contract",
+          "stage-under-review",
+          "system-user",
+          true,
+          "Bid Board export sync (backward) - Status Estimate Under Review -> Stage estimate_under_review",
+          "2026-05-01T00:00:00.000Z",
+        ]);
+        return { rows: [], rowCount: 1 };
       }
       if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
         return { rows: [] };
@@ -370,9 +397,12 @@ describe("Bid Board sync stage writeback", () => {
     });
 
     expect(result.metrics.matched).toBe(1);
-    expect(result.metrics.stageUpdated).toBe(0);
-    expect(result.metrics.skippedBackward).toBe(1);
-    expect(result.warnings.join("\n")).toContain("backward");
+    expect(result.metrics.stageUpdated).toBe(1);
+    expect(result.metrics.appliedBackward).toBe(1);
+    // The stage clock RESET to ~now, not the deal's original 2026-05-01 entry — SLA age recomputes from re-entry.
+    expect(stageEnteredAtParam).toBeInstanceOf(Date);
+    expect(Date.now() - stageEnteredAtParam!.getTime()).toBeLessThan(10_000);
+    expect(stageEnteredAtParam!.getTime()).toBeGreaterThan(new Date("2026-05-01T00:00:00.000Z").getTime());
   });
 
   it("does not downgrade a terminal CRM deal from Bid Board export status", async () => {

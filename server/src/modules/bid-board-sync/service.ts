@@ -59,7 +59,7 @@ interface IngestionMetrics {
   skippedNoProjectNumber: number;
   skippedUnmappedStatus: number;
   skippedTemplate: number;
-  skippedBackward: number;
+  appliedBackward: number;
   skippedTerminal: number;
   skippedNoStageChange: number;
   estimateUpdated: number;
@@ -552,7 +552,7 @@ function isTemplatesStatus(value: string | null): boolean {
 interface StageWritebackResult {
   updated: boolean;
   skippedNoStageChange: boolean;
-  skippedBackward: boolean;
+  appliedBackward: boolean;
   skippedTerminal: boolean;
   warning: string | null;
 }
@@ -707,41 +707,39 @@ async function writeStageIfSafe(
       return {
         updated: false,
         skippedNoStageChange: false,
-        skippedBackward: false,
+        appliedBackward: false,
         skippedTerminal: false,
         warning: `Skipped Bid Board stage metadata refresh for deal ${deal.id}: stage changed during sync`,
       };
     }
-    return { updated: false, skippedNoStageChange: true, skippedBackward: false, skippedTerminal: false, warning: null };
+    return { updated: false, skippedNoStageChange: true, appliedBackward: false, skippedTerminal: false, warning: null };
   }
 
   if (deal.stage_is_terminal || isTerminalWorkflowStage(deal.stage_slug, route)) {
     return {
       updated: false,
       skippedNoStageChange: false,
-      skippedBackward: false,
+      appliedBackward: false,
       skippedTerminal: true,
       warning: `Skipped terminal Bid Board stage update for deal ${deal.id}: CRM=${deal.stage_slug}, Bid Board=${row.bidBoardStatus ?? "unknown"}`,
     };
   }
 
+  // Bid Board is the source of truth for stage: a backward move (target display_order < current,
+  // among NON-terminal stages — the terminal lock above already protects Won/Lost) is APPLIED,
+  // not pinned. We still detect the direction so it is recorded on the stage-history row
+  // (is_backward_move) and surfaced via the appliedBackward metric/log. The stage UPDATE below
+  // stamps a fresh stage_entered_at on every move, so the SLA clock resets on re-entry exactly as
+  // it does for a forward move.
   const currentOrder = stageOrder(deal.stage_display_order);
   const targetOrder = stageOrder(targetStage.display_order);
-  if (currentOrder != null && targetOrder != null && targetOrder < currentOrder) {
-    return {
-      updated: false,
-      skippedNoStageChange: false,
-      skippedBackward: true,
-      skippedTerminal: false,
-      warning: `Skipped backward Bid Board stage update for deal ${deal.id}: CRM=${deal.stage_slug}, Bid Board=${row.bidBoardStatus ?? "unknown"}`,
-    };
-  }
+  const isBackwardMove = currentOrder != null && targetOrder != null && targetOrder < currentOrder;
 
   if (!changedByUserId) {
     return {
       updated: false,
       skippedNoStageChange: false,
-      skippedBackward: false,
+      appliedBackward: false,
       skippedTerminal: false,
       warning: `Skipped Bid Board stage update for deal ${deal.id}: no active admin/director user available for audit history`,
     };
@@ -796,7 +794,7 @@ async function writeStageIfSafe(
     return {
       updated: false,
       skippedNoStageChange: false,
-      skippedBackward: false,
+      appliedBackward: false,
       skippedTerminal: false,
       warning: `Skipped Bid Board stage update for deal ${deal.id}: stage changed during sync`,
     };
@@ -806,14 +804,15 @@ async function writeStageIfSafe(
     `INSERT INTO ${schemaName}.deal_stage_history
        (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move,
         is_director_override, override_reason, duration_in_previous_stage)
-     VALUES ($1, $2, $3, $4, false, false, $5,
-       CASE WHEN $6::timestamptz IS NULL THEN NULL ELSE NOW() - $6::timestamptz END)`,
+     VALUES ($1, $2, $3, $4, $5, false, $6,
+       CASE WHEN $7::timestamptz IS NULL THEN NULL ELSE NOW() - $7::timestamptz END)`,
     [
       deal.id,
       deal.stage_id,
       targetStage.id,
       changedByUserId,
-      `Bid Board export sync - Status ${status} -> Stage ${targetSlug}`,
+      isBackwardMove,
+      `Bid Board export sync${isBackwardMove ? " (backward)" : ""} - Status ${status} -> Stage ${targetSlug}`,
       deal.stage_entered_at,
     ]
   );
@@ -826,7 +825,7 @@ async function writeStageIfSafe(
     readOnlySyncedAt: { from: null, to: "now" },
   }, { source: "stage_writeback", bidBoardStatus: row.bidBoardStatus });
 
-  return { updated: true, skippedNoStageChange: false, skippedBackward: false, skippedTerminal: false, warning: null };
+  return { updated: true, skippedNoStageChange: false, appliedBackward: isBackwardMove, skippedTerminal: false, warning: null };
 }
 
 export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
@@ -856,7 +855,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     skippedNoProjectNumber: 0,
     skippedUnmappedStatus: 0,
     skippedTemplate: 0,
-    skippedBackward: 0,
+    appliedBackward: 0,
     skippedTerminal: 0,
     skippedNoStageChange: 0,
     estimateUpdated: 0,
@@ -995,7 +994,12 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       const stageResult = await writeStageIfSafe(client, schemaName, matches[0], targetStage, normalized, changedByUserId);
       if (stageResult.updated) metrics.stageUpdated++;
       if (stageResult.skippedNoStageChange) metrics.skippedNoStageChange++;
-      if (stageResult.skippedBackward) metrics.skippedBackward++;
+      if (stageResult.appliedBackward) {
+        metrics.appliedBackward++;
+        console.info(
+          `[BidBoardSync] Applied backward stage move for deal ${matches[0].id}: ${matches[0].stage_slug} -> ${targetStage.slug} (Bid Board is source of truth)`
+        );
+      }
       if (stageResult.skippedTerminal) metrics.skippedTerminal++;
       if (stageResult.warning) warnings.push(stageResult.warning);
     }
@@ -1015,7 +1019,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
               skipped_no_project_number_count = $11,
               skipped_unmapped_status_count = $12,
               skipped_template_count = $13,
-              skipped_backward_count = $14,
+              applied_backward_count = $14,
               skipped_terminal_count = $15,
               skipped_no_stage_change_count = $16,
               unmatched_project_numbers = $17::jsonb,
@@ -1041,7 +1045,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         metrics.skippedNoProjectNumber,
         metrics.skippedUnmappedStatus,
         metrics.skippedTemplate,
-        metrics.skippedBackward,
+        metrics.appliedBackward,
         metrics.skippedTerminal,
         metrics.skippedNoStageChange,
         JSON.stringify(unmatchedProjectNumbers),
