@@ -316,6 +316,17 @@ async function renderPageWithRouter(initialEntry = "/director/rep/rep-1?preset=q
   };
 }
 
+/** The FilterBar's host-owned Date dropdown (PresetSelect) is now the SOLE list-date control — the
+ *  standalone list-range button row was removed. Tests drive a list-range change by invoking the
+ *  dropdown's onChange and read its reflected value (DealsListSection is mocked, so the dropdown isn't
+ *  rendered here; we exercise its captured contract instead of clicking a now-removed pill). */
+function latestDateControl() {
+  const calls = mocks.dealsListSectionMock.mock.calls;
+  return calls[calls.length - 1]?.[0]?.filterBar?.dateControl as
+    | { value?: string; options?: { value: string; label: string }[]; onChange?: (v: string) => void }
+    | undefined;
+}
+
 describe("DirectorRepDetail", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -431,17 +442,13 @@ describe("DirectorRepDetail", () => {
     expect(html).toContain("Loading deal records");
   });
 
-  it("updates the layered lead filters when the page-level timeline and stage filters change", async () => {
+  it("updates the layered lead filters when the list range (Date dropdown) and stage filters change", async () => {
     const page = await renderPageDom();
 
     try {
-      const wtdButton = Array.from(page.container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("WTD")
-      );
-      expect(wtdButton).not.toBeNull();
-
+      // The list date is now driven solely by the FilterBar Date dropdown (the pill row was removed).
       await act(async () => {
-        wtdButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        latestDateControl()?.onChange?.("wtd");
       });
 
       const qualifiedStageButton = Array.from(page.container.querySelectorAll("button")).find((button) =>
@@ -483,13 +490,8 @@ describe("DirectorRepDetail", () => {
     const page = await renderPageDom();
 
     try {
-      const sevenDayButton = Array.from(page.container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("7D")
-      );
-      expect(sevenDayButton).not.toBeNull();
-
       await act(async () => {
-        sevenDayButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        latestDateControl()?.onChange?.("7d");
       });
 
       expect(mocks.useLeadsMock).toHaveBeenLastCalledWith(
@@ -533,26 +535,22 @@ describe("DirectorRepDetail", () => {
     expect(html).not.toContain("aria-pressed=\"false\">Disqualified Lead</button>");
   });
 
-  it("syncs the list-range UI from URL changes while the route stays mounted", async () => {
+  it("syncs the list-range control (Date dropdown) from URL changes while the route stays mounted", async () => {
     const page = await renderPageWithRouter("/director/rep/rep-1?preset=qtd&listRange=dashboard");
 
     try {
       expect(page.container.textContent).toContain("Current list window");
       expect(page.container.textContent).toContain("2026-04-01 to 2026-05-21");
-      const wtdBefore = Array.from(page.container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("WTD")
-      );
-      expect(wtdBefore?.getAttribute("aria-pressed")).toBe("false");
+      // The Date dropdown reflects the single source of truth (listRange) — "dashboard" before the change.
+      expect(latestDateControl()?.value).toBe("dashboard");
 
       await act(async () => {
         window.history.pushState({}, "", "/director/rep/rep-1?preset=qtd&listRange=wtd");
         window.dispatchEvent(new PopStateEvent("popstate"));
       });
 
-      const wtdAfter = Array.from(page.container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("WTD")
-      );
-      expect(wtdAfter?.getAttribute("aria-pressed")).toBe("true");
+      // …and "wtd" after an external URL change (no separate local state to drift).
+      expect(latestDateControl()?.value).toBe("wtd");
       expect(page.container.textContent).toContain("2026-05-17 to 2026-05-21");
       expect(mocks.useLeadsMock).toHaveBeenLastCalledWith(
         expect.objectContaining({
@@ -575,17 +573,12 @@ describe("DirectorRepDetail", () => {
     }
   });
 
-  it("updates the URL when the user changes the list range in the UI", async () => {
+  it("updates the URL when the list range changes via the Date dropdown", async () => {
     const page = await renderPageWithRouter("/director/rep/rep-1?preset=qtd&listRange=dashboard");
 
     try {
-      const wtdButton = Array.from(page.container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("WTD")
-      );
-      expect(wtdButton).not.toBeNull();
-
       await act(async () => {
-        wtdButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        latestDateControl()?.onChange?.("wtd");
       });
 
       expect(window.location.search).toContain("listRange=wtd");
@@ -595,10 +588,34 @@ describe("DirectorRepDetail", () => {
     }
   });
 
-  // Date-binding (Option B): the top list-range pills and the bar's Date dropdown share ONE source of
-  // truth (listRange). The bar OWNS the date axis (date dropped from dimensions; bound via dateControl),
-  // so the two controls always mirror and never conflict, and the bar's fb_date never reaches the query.
-  it("binds the bar Date dropdown to listRange — same six presets as the top pills, date dropped from dimensions", () => {
+  it("removes the standalone list-range button row — the FilterBar Date dropdown is the sole list-date control", async () => {
+    const page = await renderPageDom("/director/rep/rep-1?preset=qtd&listRange=dashboard");
+
+    try {
+      // The list-range pills (7D / WTD / Dashboard(QTD)) are GONE. Only the KPI DateRangeToggle
+      // (MTD/QTD/YTD/Last*) and the leads stage pills remain — none carry the list-range-unique labels.
+      const buttonLabels = Array.from(page.container.querySelectorAll("button")).map((b) => b.textContent ?? "");
+      expect(buttonLabels).not.toContain("7D");
+      expect(buttonLabels.some((label) => label.includes("Dashboard ("))).toBe(false);
+      // …and the host-owned Date dropdown is still the single list-date control (the six list-range presets).
+      expect(latestDateControl()?.options?.map((option) => option.value)).toEqual([
+        "dashboard",
+        "7d",
+        "wtd",
+        "mtd",
+        "qtd",
+        "ytd",
+      ]);
+      expect(latestDateControl()?.value).toBe("dashboard");
+    } finally {
+      await page.cleanup();
+    }
+  });
+
+  // Date-binding: the FilterBar's host-owned Date dropdown is the SINGLE list-date control (the standalone
+  // pill row was removed). It reads/writes the one source of truth (listRange); the bar OWNS the date axis
+  // (date dropped from dimensions; bound via dateControl), so its fb_date never reaches the query.
+  it("binds the bar Date dropdown to listRange — the six list-range presets, date dropped from dimensions", () => {
     renderPageHtml("/director/rep/rep-1?preset=qtd&listRange=dashboard");
 
     const props = mocks.dealsListSectionMock.mock.calls[0]?.[0] as {
@@ -609,7 +626,7 @@ describe("DirectorRepDetail", () => {
     };
     // Host owns the date axis -> "date" is NOT a bar dimension (so fb_date can't leak into the query).
     expect(props.filterBar?.dimensions).not.toContain("date");
-    // The bar's Date dropdown is bound to listRange (default "dashboard") with the SAME options as the pills.
+    // The bar's Date dropdown is bound to listRange (default "dashboard") — the six list-range presets.
     expect(props.filterBar?.dateControl?.value).toBe("dashboard");
     expect(props.filterBar?.dateControl?.options).toEqual([
       { value: "dashboard", label: "Dashboard (QTD)" },
@@ -621,28 +638,33 @@ describe("DirectorRepDetail", () => {
     ]);
   });
 
-  it("clicking a top pill updates the bar Date dropdown value (top → dropdown mirror)", async () => {
-    const page = await renderPageWithRouter("/director/rep/rep-1?preset=qtd&listRange=dashboard");
+  it("re-labels the dropdown's Dashboard option when the KPI preset changes (listRangeDateOptions tracks preset)", async () => {
+    const page = await renderPageDom("/director/rep/rep-1?preset=qtd&listRange=dashboard");
 
     try {
-      const wtdButton = Array.from(page.container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("WTD")
+      // The Dashboard option reflects the active KPI preset (QTD) so the user sees which window it follows.
+      expect(latestDateControl()?.options?.find((option) => option.value === "dashboard")?.label).toBe(
+        "Dashboard (QTD)"
+      );
+
+      // Changing the top KPI DateRangeToggle preset re-labels the Dashboard option (memo dep = [preset]);
+      // a broken dep array would leave it stale at "Dashboard (QTD)".
+      const ytdPreset = Array.from(page.container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Preset YTD"
       );
       await act(async () => {
-        wtdButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        ytdPreset?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       });
 
-      const lastProps =
-        mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as {
-          filterBar?: { dateControl?: { value?: string } };
-        };
-      expect(lastProps.filterBar?.dateControl?.value).toBe("wtd");
+      expect(latestDateControl()?.options?.find((option) => option.value === "dashboard")?.label).toBe(
+        "Dashboard (YTD)"
+      );
     } finally {
       await page.cleanup();
     }
   });
 
-  it("changing the bar Date dropdown updates listRange — URL, top pill highlight, and the list/leads window (dropdown → top)", async () => {
+  it("changing the bar Date dropdown updates listRange — URL + the list and leads window", async () => {
     const page = await renderPageWithRouter("/director/rep/rep-1?preset=qtd&listRange=dashboard");
 
     try {
@@ -655,12 +677,8 @@ describe("DirectorRepDetail", () => {
         onChange("wtd");
       });
 
-      // Single source of truth: the dropdown change drives listRange just like a top pill click would.
+      // Single source of truth: the dropdown change drives listRange (URL) and the list/leads window.
       expect(window.location.search).toContain("listRange=wtd");
-      const wtdPill = Array.from(page.container.querySelectorAll("button")).find((button) =>
-        button.textContent?.includes("WTD")
-      );
-      expect(wtdPill?.getAttribute("aria-pressed")).toBe("true");
       expect(page.container.textContent).toContain("2026-05-17 to 2026-05-21");
 
       const lastProps =

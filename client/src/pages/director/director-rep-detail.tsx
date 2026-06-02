@@ -437,9 +437,9 @@ export function DirectorRepDetail() {
     () => getVisibleListTerminalStageIds(dealStages, repStageOptions),
     [dealStages, repStageOptions]
   );
-  // Date binding (Option B): the bar's Date dropdown shares the SAME options + state as the top
-  // list-range pills (listRange), so the two controls always mirror and never conflict. The label
-  // tracks the active dashboard preset (so "Dashboard" reads "Dashboard (YTD)" etc.).
+  // Options for the bar's host-owned Date dropdown — the SOLE list-date control (the standalone list-range
+  // pill row was removed). The label tracks the active dashboard preset, so "Dashboard" reads
+  // "Dashboard (YTD)" etc.; recomputed on a preset change so the dropdown stays in step with the KPI window.
   const listRangeDateOptions = useMemo(
     () => LIST_RANGE_OPTIONS.map((option) => ({ value: option, label: getRepDetailListRangeLabel(option, preset) })),
     [preset]
@@ -651,8 +651,8 @@ export function DirectorRepDetail() {
               </p>
               <CardTitle className="mt-1">Deals and Leads</CardTitle>
               <p className="mt-1 text-sm font-medium text-slate-500">
-                This section is fixed to {data.winLoss.repName}. The list filter defaults to the
-                director dashboard preset and can be tightened to a created-date window on page.
+                This section is fixed to {data.winLoss.repName}. Its date window defaults to the director
+                dashboard preset and is set with the Date filter on the records below.
               </p>
             </div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
@@ -664,27 +664,6 @@ export function DirectorRepDetail() {
                 {listDateRange.from} to {listDateRange.to}
               </p>
             </div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {LIST_RANGE_OPTIONS.map((option) => {
-              const active = listRange === option;
-              return (
-                <button
-                  key={option}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => handleListRangeChange(option)}
-                  className={cn(
-                    "rounded-full border px-3 py-1.5 text-xs font-black uppercase tracking-[0.12em]",
-                    active
-                      ? "border-brand-red bg-brand-red text-white"
-                      : "border-slate-200 bg-white text-slate-600 hover:border-brand-red/40 hover:text-brand-red"
-                  )}
-                >
-                  {getRepDetailListRangeLabel(option, preset)}
-                </button>
-              );
-            })}
           </div>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -715,12 +694,12 @@ export function DirectorRepDetail() {
             filterBar={{
               // Every shared control EXCEPT Rep (locked above), Scope (the page owns scope="all"), and
               // Date — the page owns the date axis (listRange), so the bar drops "date" from dimensions
-              // and renders a host-owned Date dropdown bound to listRange via dateControl (Option B).
+              // and renders a host-owned Date dropdown bound to listRange via dateControl.
               dimensions: getDrilldownFilterBarDimensions({ ownDate: true }),
-              // The bar's Date dropdown and the top list-range pills share ONE source of truth (listRange):
-              // both edit it, both reflect it, so they never show conflicting windows. The window itself is
-              // computed once by getRepDetailListDateRange (flowing through baseFilters above), so the
-              // dropdown can't introduce a divergent date — it only selects which listRange preset is active.
+              // The bar's Date dropdown is the SOLE list-date control (the standalone pill row was removed):
+              // it reads/writes the single source of truth (listRange). The window itself is computed once
+              // by getRepDetailListDateRange (flowing through baseFilters above), so the dropdown can't
+              // introduce a divergent date — it only selects which listRange preset is active.
               dateControl: {
                 ariaLabel: "Date range",
                 value: listRange,
