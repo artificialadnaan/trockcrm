@@ -426,7 +426,7 @@ export function DirectorRepDetail() {
   // Shared FilterBar config for the rep-scoped deal records list (#3). The stage options + terminal
   // ids are built with the SAME helpers the legacy list used internally (active-pipeline stages,
   // terminal subset), so the migrated list shows the SAME deals — including Won/Lost by default.
-  const { stages: dealStages } = usePipelineStages("deal");
+  const { stages: dealStages, loading: dealStagesLoading, error: dealStagesError } = usePipelineStages("deal");
   const { regions } = useRegions();
   const { projectTypes } = useProjectTypes();
   const repStageOptions = useMemo(
@@ -681,6 +681,12 @@ export function DirectorRepDetail() {
           </div>
         </CardHeader>
         <CardContent className="space-y-6">
+          {/* Gate the rep deal list on the deal stage config (which terminalStageIds is derived from):
+              until it loads, terminalStageIds is [] and applyBoardVisibilityDefaults would NOT request
+              active+terminal visibility, so the list would silently drop Won/Lost and the total would
+              undercount — transiently, or permanently if the stage-config load fails. The legacy list
+              gated on this same load for the terminal-visibility decision (Codex P2). */}
+          {dealStages.length > 0 ? (
           <DealsListSection
             scope="all"
             eyebrow="Deals"
@@ -722,6 +728,13 @@ export function DirectorRepDetail() {
               defaultSort: DEAL_LIST_INITIAL_SORT,
             }}
           />
+          ) : (
+            <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
+              {dealStagesError
+                ? "Couldn't load pipeline stages — deal records are unavailable."
+                : "Loading deal records…"}
+            </div>
+          )}
 
           <DirectorRepLeadsListSection
             repId={repId}

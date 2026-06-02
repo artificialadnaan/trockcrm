@@ -351,7 +351,12 @@ describe("DirectorRepDetail", () => {
             { id: "lead-stage-new", name: "New Lead", slug: "new_lead", isActivePipeline: true },
             { id: "lead-stage-qualified", name: "Qualified Lead", slug: "qualified_lead", isActivePipeline: true },
           ]
-        : [],
+        : [
+            // Deal stages must be present so the rep deal list renders (it gates on the deal stage
+            // config being loaded — the terminal-visibility decision depends on it; Codex P2).
+            { id: "deal-stage-opp", name: "Opportunity", slug: "opportunity", isActivePipeline: true, isTerminal: false },
+            { id: "deal-stage-won", name: "Won", slug: "won", isActivePipeline: true, isTerminal: true },
+          ],
       loading: false,
       error: null,
     }));
@@ -405,6 +410,25 @@ describe("DirectorRepDetail", () => {
         sortDir: "desc",
       })
     );
+  });
+
+  it("gates the rep deal list until the deal stage config loads — no active-only undercount of Won/Lost (Codex P2)", () => {
+    // Deal stages not yet loaded -> repTerminalStageIds would be [], so applyBoardVisibilityDefaults
+    // would NOT request active+terminal visibility and the list would silently drop Won/Lost (and the
+    // total would undercount). The list must NOT render/query until the stage config is available.
+    mocks.usePipelineStagesMock.mockImplementation((workflowFamily?: string) => ({
+      stages:
+        workflowFamily === "lead"
+          ? [{ id: "lead-stage-qualified", name: "Qualified Lead", slug: "qualified_lead", isActivePipeline: true }]
+          : [], // deal stages still loading
+      loading: workflowFamily !== "lead",
+      error: null,
+    }));
+
+    const html = renderPageHtml();
+
+    expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
+    expect(html).toContain("Loading deal records");
   });
 
   it("updates the layered lead filters when the page-level timeline and stage filters change", async () => {
