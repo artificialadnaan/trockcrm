@@ -10,6 +10,7 @@ import {
   VALID_PROPOSAL_STATUSES,
   workflowFamilyForRoute,
 } from "../deals/service.js";
+import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 
 export const BID_BOARD_MIRROR_OVERRIDE_REASON = "Bid Board mirror sync";
 const VALID_ESTIMATING_SUBSTAGE_SET = new Set<string>(VALID_ESTIMATING_SUBSTAGES);
@@ -105,6 +106,7 @@ type MirrorableDeal = {
   estimatingSubstage: string | null;
   actualCloseDate: string | null;
   wonClosedDate?: string | null;
+  contractSignedDate?: string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
   lostCompetitor: string | null;
@@ -455,9 +457,17 @@ export function buildBidBoardMirrorUpdate(input: {
       input.deal.id === "new" ||
       (stageChanged && previousCanonicalStageSlug !== "won");
     const sourceWonDate = stageEnteredAt.toISOString().split("T")[0] ?? null;
-    updates.wonClosedDate = enteringWonFresh
+    const stageDrivenWonDate = enteringWonFresh
       ? input.deal.wonClosedDate ?? sourceWonDate
       : input.deal.wonClosedDate ?? null;
+    // WRITE-THROUGH (always-when-present): a contract-signed date on this Won deal is
+    // accounting's authoritative correction and wins over the Procore stage-entry-derived
+    // won date; else the existing fresh-stamp / preserve logic stands. Every Won read surface
+    // inherits this through the stored won_closed_date column.
+    updates.wonClosedDate = resolveWonClosedDateWriteThrough({
+      contractSignedDate: input.deal.contractSignedDate,
+      stageDrivenWonDate,
+    });
   }
 
   if (canonicalTargetStageSlug === "lost") {

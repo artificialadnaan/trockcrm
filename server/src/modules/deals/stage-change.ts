@@ -9,6 +9,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { getHoldStateAtStageEntry, isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
+import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
@@ -361,9 +362,17 @@ export async function changeDealStage(
       gateResult.currentStage.slug,
       currentDeal[0].workflowRoute
     );
-    dealUpdates.wonClosedDate = alreadyWon
+    const stageDrivenWonDate = alreadyWon
       ? currentDeal[0].wonClosedDate
       : new Date().toISOString().split("T")[0];
+    // WRITE-THROUGH (always-when-present): if this Won-family deal carries a contract-signed
+    // date (accounting's authoritative correction), it wins over the stage-driven stamp; else
+    // the stage-driven date (preserved-when-already-Won / today-on-fresh-entry) stands. Every
+    // Won read surface inherits this via the stored won_closed_date column.
+    dealUpdates.wonClosedDate = resolveWonClosedDateWriteThrough({
+      contractSignedDate: currentDeal[0].contractSignedDate,
+      stageDrivenWonDate,
+    });
   }
 
   if (isLostOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {

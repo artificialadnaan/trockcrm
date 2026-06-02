@@ -370,10 +370,16 @@ describe("setDealContractSignedDate", () => {
     expect(updated?.contractSignedAt).toEqual(new Date("2026-12-01T00:00:00.000Z"));
     expect(tenantDb._state.updateCalls).toHaveLength(1);
     expect(tenantDb._state.jobInserts).toHaveLength(0);
-    expect(pipelineService.getStageById).not.toHaveBeenCalled();
+    // The stage is now resolved on every change to decide Won-family write-through;
+    // estimating is non-Won, so won_closed_date is left untouched.
+    expect(tenantDb._state.updateCalls[0]).not.toHaveProperty("wonClosedDate");
   });
 
-  it("rejects setting contract_signed_at when the deal is not in Contract", async () => {
+  it("allows setting contract_signed_at outside Contract (ungated); a non-Won deal keeps won_closed_date untouched and still emits the handoff", async () => {
+    // UNGATE: the contract-signed date is now editable at ANY stage (accounting's
+    // correction lever). A deal in estimating is NOT in the Won family, so the
+    // write-through must NOT touch won_closed_date (no promotion). The deal is also
+    // not already-Won, so the Procore handoff still fires on this initial sign.
     process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "true";
     vi.mocked(pipelineService.getStageById).mockResolvedValueOnce({
       id: "stage-estimating",
@@ -390,14 +396,20 @@ describe("setDealContractSignedDate", () => {
       contractSignedAt: null,
     });
 
-    await expect(
-      setDealContractSignedDate(tenantDb as never, "deal-1", "2026-09-15", "director-1", "office-1")
-    ).rejects.toMatchObject({
-      statusCode: 400,
-      code: "CONTRACT_SIGNED_STAGE_REQUIRED",
-    });
-    expect(tenantDb._state.updateCalls).toHaveLength(0);
-    expect(tenantDb._state.jobInserts).toHaveLength(0);
+    const updated = await setDealContractSignedDate(
+      tenantDb as never,
+      "deal-1",
+      "2026-09-15",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updated?.contractSignedDate).toBe("2026-09-15");
+    expect(tenantDb._state.updateCalls).toHaveLength(1);
+    // No promotion: a non-Won deal's won_closed_date is never written.
+    expect(tenantDb._state.updateCalls[0]).not.toHaveProperty("wonClosedDate");
+    // Non-Won initial sign with the flag on → Procore create-project handoff still fires.
+    expect(tenantDb._state.jobInserts).toHaveLength(1);
   });
 
   it("does not emit duplicate contract-signed jobs when re-saving the same contract_signed_at", async () => {
@@ -444,5 +456,73 @@ describe("setDealContractSignedDate", () => {
     expect(updated).toBeNull();
     expect(tenantDb._state.updateCalls).toHaveLength(0);
     expect(tenantDb._state.auditInserts).toHaveLength(0);
+  });
+
+  it("writes won_closed_date through on a Won-family deal (contract-signed wins) and suppresses the Procore handoff", async () => {
+    // Accounting-correction path: setting the contract-signed date on an ALREADY-WON deal
+    // writes it through to the canonical won_closed_date (always-when-present), so every Won
+    // report surface re-buckets to the corrected date. The Procore create-project handoff is
+    // SUPPRESSED for an already-Won deal (the project already exists); commission still fires.
+    process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "true";
+    vi.mocked(pipelineService.getStageById).mockResolvedValueOnce({
+      id: "stage-won",
+      slug: "won",
+      workflowFamily: "standard_deal",
+      isTerminal: true,
+      displayOrder: 9,
+    } as never);
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      stageId: "stage-won",
+      workflowRoute: "normal",
+      contractSignedDate: null,
+      contractSignedAt: null,
+      stageEnteredAt: new Date("2026-01-20T08:30:00.000Z"),
+    });
+
+    const updated = await setDealContractSignedDate(
+      tenantDb as never,
+      "deal-1",
+      "2026-02-15",
+      "director-1",
+      "office-1"
+    );
+
+    expect(updated?.contractSignedDate).toBe("2026-02-15");
+    expect(tenantDb._state.updateCalls).toHaveLength(1);
+    expect(tenantDb._state.updateCalls[0]?.wonClosedDate).toBe("2026-02-15");
+    // Already-Won → Procore handoff suppressed even though flag is on and this is an initial sign.
+    expect(tenantDb._state.jobInserts).toHaveLength(0);
+  });
+
+  it("reverts won_closed_date to the stage-entry date when the contract date is cleared on a Won-family deal", async () => {
+    vi.mocked(pipelineService.getStageById).mockResolvedValueOnce({
+      id: "stage-won",
+      slug: "won",
+      workflowFamily: "standard_deal",
+      isTerminal: true,
+      displayOrder: 9,
+    } as never);
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      stageId: "stage-won",
+      workflowRoute: "normal",
+      contractSignedDate: "2026-02-15",
+      contractSignedAt: new Date("2026-02-15T00:00:00.000Z"),
+      stageEnteredAt: new Date("2026-01-20T08:30:00.000Z"),
+    });
+
+    const updated = await setDealContractSignedDate(
+      tenantDb as never,
+      "deal-1",
+      null,
+      "director-1",
+      "office-1"
+    );
+
+    expect(updated?.contractSignedDate).toBeNull();
+    expect(tenantDb._state.updateCalls).toHaveLength(1);
+    // Cleared → the stage-driven won date stands (stage_entered_at::date).
+    expect(tenantDb._state.updateCalls[0]?.wonClosedDate).toBe("2026-01-20");
   });
 });
