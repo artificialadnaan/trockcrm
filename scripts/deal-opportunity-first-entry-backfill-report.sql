@@ -46,14 +46,19 @@ WHERE
   -- (created < 2026-05-19, NULL created_by_user_id) are excluded — a small bounded gap to supplement
   -- manually if accounting needs it.
   AND d.created_by_user_id IS NOT NULL
-  -- entered the Opportunity stage: born there (the two genuine paths), or moved there at some point
+  -- Was EVER in the Opportunity stage: currently in it, moved INTO it (to_stage_id), or moved OUT of it
+  -- (from_stage_id). Checking from_stage_id matters for CRM deals born in Opportunity BEFORE the 0143
+  -- stage-history backstop shipped (creation recorded no history row) that have SINCE advanced: their
+  -- move out of Opportunity recorded from_stage_id=opportunity via changeDealStage's explicit insert,
+  -- so they are still captured. (Residual gap: a born-in-Opportunity deal whose only stage move bypassed
+  -- app recording — negligible for CRM-genuine / created_by deals, whose moves go through changeDealStage.)
   AND (
     d.stage_id = (SELECT id FROM opportunity_stage)
     OR EXISTS (
       SELECT 1
       FROM office_dallas.deal_stage_history h
       WHERE h.deal_id = d.id
-        AND h.to_stage_id = (SELECT id FROM opportunity_stage)
+        AND (SELECT id FROM opportunity_stage) IN (h.to_stage_id, h.from_stage_id)
     )
   )
 ORDER BY d.created_at;
@@ -73,7 +78,7 @@ ORDER BY d.created_at;
 --    AND d.created_by_user_id IS NOT NULL
 --    AND (d.stage_id = (SELECT id FROM opportunity_stage)
 --         OR EXISTS (SELECT 1 FROM office_dallas.deal_stage_history h
---                     WHERE h.deal_id = d.id AND h.to_stage_id = (SELECT id FROM opportunity_stage)))
+--                     WHERE h.deal_id = d.id AND (SELECT id FROM opportunity_stage) IN (h.to_stage_id, h.from_stage_id)))
 -- UNION ALL
 -- SELECT 'office_atlanta' AS tenant_schema, d.deal_number, d.name, d.created_at,
 --        CASE WHEN d.source_lead_id IS NOT NULL THEN 'lead_conversion' ELSE 'service_or_direct' END,
@@ -83,7 +88,7 @@ ORDER BY d.created_at;
 --    AND d.created_by_user_id IS NOT NULL
 --    AND (d.stage_id = (SELECT id FROM opportunity_stage)
 --         OR EXISTS (SELECT 1 FROM office_atlanta.deal_stage_history h
---                     WHERE h.deal_id = d.id AND h.to_stage_id = (SELECT id FROM opportunity_stage)))
+--                     WHERE h.deal_id = d.id AND (SELECT id FROM opportunity_stage) IN (h.to_stage_id, h.from_stage_id)))
 -- ORDER BY created_at;
 --
 -- ENTRY-DATE variant (Codex F2): if accounting wants "ENTERED Opportunity since May 13" rather than
