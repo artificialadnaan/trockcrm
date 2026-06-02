@@ -6,7 +6,7 @@ import {
   type DateRangePreset,
 } from "@/hooks/use-director-dashboard";
 import { useLeads, formatLeadPropertyLine } from "@/hooks/use-leads";
-import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { usePipelineStages, useRegions, useProjectTypes } from "@/hooks/use-pipeline-config";
 import { toDatePresetRange } from "@/lib/pipeline-terminal-filters";
 import { DateRangeToggle } from "@/components/dashboard/date-range-toggle";
 import { StatCard } from "@/components/dashboard/stat-card";
@@ -15,7 +15,17 @@ import { StaleLeadList } from "@/components/dashboard/stale-lead-list";
 import { PipelineBarChart } from "@/components/charts/pipeline-bar-chart";
 import { WinRateTrendChart } from "@/components/charts/win-rate-trend-chart";
 import { formatCurrency } from "@/components/charts/chart-colors";
-import { DealsListSection, type DealListSortState } from "@/components/deals/deals-list-section";
+import {
+  DealsListSection,
+  buildDealStageFilterOptions,
+  getVisibleListTerminalStageIds,
+  type DealListSortState,
+} from "@/components/deals/deals-list-section";
+import {
+  DEAL_LIST_SORT_OPTIONS,
+  DRILLDOWN_FILTERBAR_PARAM_PREFIX,
+  getDrilldownFilterBarDimensions,
+} from "@/components/deals/deals-filterbar-adapter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -413,6 +423,21 @@ export function DirectorRepDetail() {
   const periodLabel = PRESET_LABELS[preset];
   const activityPeriodLabel = PRESET_ACTIVITY_LABELS[preset];
 
+  // Shared FilterBar config for the rep-scoped deal records list (#3). The stage options + terminal
+  // ids are built with the SAME helpers the legacy list used internally (active-pipeline stages,
+  // terminal subset), so the migrated list shows the SAME deals — including Won/Lost by default.
+  const { stages: dealStages } = usePipelineStages("deal");
+  const { regions } = useRegions();
+  const { projectTypes } = useProjectTypes();
+  const repStageOptions = useMemo(
+    () => buildDealStageFilterOptions(dealStages.filter((stage) => stage.isActivePipeline !== false)),
+    [dealStages]
+  );
+  const repTerminalStageIds = useMemo(
+    () => getVisibleListTerminalStageIds(dealStages, repStageOptions),
+    [dealStages, repStageOptions]
+  );
+
   const handlePresetChange = (nextPreset: DateRangePreset) => {
     setPreset(nextPreset);
     const nextParams = new URLSearchParams(searchParams);
@@ -662,13 +687,36 @@ export function DirectorRepDetail() {
             title="Deal records"
             subtitle={`Deals assigned to ${data.winLoss.repName} in the selected window, on the outcome date axis (won/lost/stage-entry) — matching the KPIs above.`}
             pageSize={10}
-            lockedOwnerId={repId}
-            hideOwnerFilter
-            enableDateFilter={false}
-            externalDateRange={listDateRange}
+            enableExport
+            showValueTotal
             dateField="outcome"
-            initialSort={DEAL_LIST_INITIAL_SORT}
             searchPlaceholder="Deal name, number, company, address"
+            baseFilters={{
+              // Rep lock (#3): pin the rep server-side; the bar OMITS the Rep dimension so a stray
+              // fb_assignedRepId can never override it. The page's listRange window (which also drives
+              // the KPIs above) is the date FLOOR — the bar's Date can only narrow WITHIN it.
+              assignedRepId: repId,
+              dateFrom: listDateRange.from,
+              dateTo: listDateRange.to,
+            }}
+            filterBar={{
+              // Every shared control EXCEPT Rep (locked above) and Scope (the page owns scope="all").
+              dimensions: getDrilldownFilterBarDimensions(),
+              options: {
+                regions: regions.map((region) => ({ value: region.id, label: region.name })),
+                projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
+                stages: repStageOptions.map((stage) => ({ value: stage.ids[0], label: stage.name })),
+                sortOptions: DEAL_LIST_SORT_OPTIONS,
+              },
+              stageEntryDateEnabled: true,
+              // No defaultStageIds: the rep list isn't board-scoped, so with no stage pick it shows
+              // every stage (active + terminal) like the legacy list. terminalStageIds lets Won/Lost
+              // through by default (Q1) unless the user picks an explicit Status.
+              terminalStageIds: repTerminalStageIds,
+              paramPrefix: DRILLDOWN_FILTERBAR_PARAM_PREFIX,
+              // Default to the outcome display-date axis (matches the legacy rep list's initial sort).
+              defaultSort: DEAL_LIST_INITIAL_SORT,
+            }}
           />
 
           <DirectorRepLeadsListSection

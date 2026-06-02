@@ -328,6 +328,9 @@ export interface DealFilters {
   page?: number;
   limit?: number;
   scope?: "mine" | "team" | "all";
+  /** Opt-in: also request pagination.valueTotal (the running-total card, #4). Only the surfaces
+   *  that show the Total card set this, so plain list calls don't pay for the extra aggregate. */
+  includeValueTotal?: boolean;
 }
 
 export interface Pagination {
@@ -336,6 +339,13 @@ export interface Pagination {
   total: number;
   activeCount?: number;
   totalPages: number;
+  /**
+   * The summed effective deal value of the ENTIRE filtered set (all pages), computed server-side
+   * over the same WHERE as `total` (SUM of the stage-aware effective value — Won awarded-first,
+   * else best-estimate; on_hold ⇒ 0; test data excluded). Drives the running-total card (#4) so
+   * the total can never disagree with the list it totals. Absent on legacy/older responses.
+   */
+  valueTotal?: number;
 }
 
 export interface DealBoardColumn {
@@ -475,6 +485,7 @@ export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
   if (filters.valueMax !== undefined) params.set("valueMax", String(filters.valueMax));
   if (filters.minAgeDays !== undefined) params.set("minAgeDays", String(filters.minAgeDays));
   if (filters.maxAgeDays !== undefined) params.set("maxAgeDays", String(filters.maxAgeDays));
+  if (filters.includeValueTotal) params.set("includeValueTotal", "true");
   return params;
 }
 
@@ -547,6 +558,7 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.page,
     filters.limit,
     filters.scope,
+    filters.includeValueTotal,
     enabled,
   ]);
 

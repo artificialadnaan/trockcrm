@@ -31,18 +31,29 @@ vi.mock("@/hooks/use-leads", () => ({
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   usePipelineStages: mocks.usePipelineStagesMock,
+  // The rep deal list now builds its shared-FilterBar options from these (#3).
+  useRegions: () => ({ regions: [] }),
+  useProjectTypes: () => ({ projectTypes: [] }),
 }));
 
 vi.mock("@/components/deals/deals-list-section", () => ({
+  // Pure stage helpers the rep list uses to build its FilterBar stage options/terminal scope (#3).
+  // The page's rep-scoping assertions don't depend on the option values, so [] is sufficient here.
+  buildDealStageFilterOptions: () => [],
+  getVisibleListTerminalStageIds: () => [],
   DealsListSection: (props: Record<string, unknown>) => {
     mocks.dealsListSectionMock(props);
-    const range = props.externalDateRange as { from?: string; to?: string } | undefined;
+    // The rep list is now the shared FilterBar (rep-scoped): the rep + page date window flow via
+    // baseFilters (not the legacy lockedOwnerId/externalDateRange props).
+    const baseFilters = props.baseFilters as
+      | { assignedRepId?: string; dateFrom?: string; dateTo?: string }
+      | undefined;
     return (
       <div
         data-testid="deals-list-section"
-        data-owner={String(props.lockedOwnerId ?? "")}
-        data-date-from={range?.from ?? ""}
-        data-date-to={range?.to ?? ""}
+        data-owner={String(baseFilters?.assignedRepId ?? "")}
+        data-date-from={baseFilters?.dateFrom ?? ""}
+        data-date-to={baseFilters?.dateTo ?? ""}
       >
         Deals list
       </div>
@@ -364,18 +375,27 @@ describe("DirectorRepDetail", () => {
   it("pre-filters the deals and leads lists to the rep and dashboard date window", () => {
     renderPageHtml("/director/rep/rep-1?preset=qtd");
 
-    // D-15: the rep deal list filters + displays the CANONICAL outcome date axis
-    // (dateField="outcome" -> dateFrom/dateTo + server displayDate), matching the
-    // rep's own outcome-axis KPI — not created_at filtered / Close displayed.
+    // D-15 / #3: the rep deal list is the shared FilterBar, rep-scoped — the rep is locked via
+    // baseFilters.assignedRepId (the bar OMITS the Rep dimension) and the page's dashboard window
+    // is the baseFilters date floor on the CANONICAL outcome axis (dateField="outcome" +
+    // displayDate), matching the rep's outcome-axis KPI — not created_at filtered / Close displayed.
+    const repListProps = mocks.dealsListSectionMock.mock.calls[0]?.[0] as {
+      filterBar?: { dimensions?: string[]; defaultSort?: { key: string; dir: string } };
+    };
     expect(mocks.dealsListSectionMock.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
-        lockedOwnerId: "rep-1",
         dateField: "outcome",
-        externalDateRange: { from: "2026-04-01", to: "2026-05-21" },
-        // Codex #564: sort by the outcome display axis (won/lost/stage-entry), not created_at.
-        initialSort: { key: "display_date", dir: "desc" },
+        baseFilters: expect.objectContaining({
+          assignedRepId: "rep-1",
+          dateFrom: "2026-04-01",
+          dateTo: "2026-05-21",
+        }),
       })
     );
+    // The rep lock: Rep is not a rendered dimension (so a stray URL rep can't override the lock),
+    // and the bar defaults to the outcome display axis (Codex #564: sort == display).
+    expect(repListProps.filterBar?.dimensions).not.toContain("rep");
+    expect(repListProps.filterBar?.defaultSort).toEqual({ key: "display_date", dir: "desc" });
     expect(mocks.useLeadsMock).toHaveBeenCalledWith(
       expect.objectContaining({
         assignedRepId: "rep-1",
@@ -422,8 +442,11 @@ describe("DirectorRepDetail", () => {
         mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0];
       expect(lastDealsListCall).toEqual(
         expect.objectContaining({
-          lockedOwnerId: "rep-1",
-          externalDateRange: { from: "2026-05-17", to: "2026-05-21" },
+          baseFilters: expect.objectContaining({
+            assignedRepId: "rep-1",
+            dateFrom: "2026-05-17",
+            dateTo: "2026-05-21",
+          }),
         })
       );
     } finally {
@@ -517,7 +540,10 @@ describe("DirectorRepDetail", () => {
         mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0];
       expect(lastDealsListCall).toEqual(
         expect.objectContaining({
-          externalDateRange: { from: "2026-05-17", to: "2026-05-21" },
+          baseFilters: expect.objectContaining({
+            dateFrom: "2026-05-17",
+            dateTo: "2026-05-21",
+          }),
         })
       );
     } finally {

@@ -466,6 +466,80 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
       expect(lastDealsCall().assignedRepId).toBeUndefined();
     });
   });
+
+  describe("rep drill-down migration: locked rep + running-total card (#3/#4)", () => {
+    // The rep drill-down list is the shared FilterBar with Rep OMITTED from dimensions and the rep
+    // pinned via baseFilters.assignedRepId. The lock must be unbypassable AND terminal (Won/Lost)
+    // deals must still show by default, matching the legacy rep list.
+    const REP_SCOPED = {
+      ...FB_PROP,
+      dimensions: FB_DIMENSIONS.filter((d) => d !== "rep"),
+      // canonical terminal id so the adapter requests active+terminal visibility (Q1) like the legacy
+      // rep list (no stages selected -> isActive:"pipeline" + terminal inactiveStageIds).
+      terminalStageIds: ["stage-won"],
+    };
+
+    it("locks the rep via baseFilters and a stray URL rep cannot bypass it", async () => {
+      await renderFB(
+        "/deals?assignedRepId=rep-other",
+        { baseFilters: { assignedRepId: "rep-7" } },
+        REP_SCOPED
+      );
+      // baseFilters wins; the Rep-less mount drops the stray URL rep before mapping.
+      expect(lastDealsCall().assignedRepId).toBe("rep-7");
+    });
+
+    it("includes terminal (Won/Lost) deals by default via terminalStageIds (matches the legacy rep list)", async () => {
+      await renderFB("/deals", { baseFilters: { assignedRepId: "rep-7" } }, REP_SCOPED);
+      const call = lastDealsCall();
+      expect(call.assignedRepId).toBe("rep-7");
+      expect(call.isActive).toBe("pipeline");
+      expect(call.inactiveStageIds).toEqual(["stage-won"]);
+    });
+
+    it("renders the running-total card with the full-set valueTotal, SAFE-formatted (#4)", async () => {
+      mocks.useDealsMock.mockReturnValue({
+        deals: [makeDeal()],
+        // valueTotal is the SUM over ALL pages, not just total=3 visible — drives the card.
+        pagination: { page: 1, limit: 10, total: 3, totalPages: 1, valueTotal: 1234567 },
+        loading: false,
+        error: null,
+        refetch: vi.fn(),
+      });
+      await renderFB("/deals", { showValueTotal: true, enableExport: true }, REP_SCOPED);
+      const total = container.querySelector('[aria-label="Filtered total value"]');
+      expect(total?.textContent).toBe("$1,234,567");
+    });
+
+    it("shows the SAFE placeholder (never $NaN) when valueTotal is absent", async () => {
+      mocks.useDealsMock.mockReturnValue({
+        deals: [makeDeal()],
+        pagination: { page: 1, limit: 10, total: 1, totalPages: 1 }, // no valueTotal
+        loading: false,
+        error: null,
+        refetch: vi.fn(),
+      });
+      await renderFB("/deals", { showValueTotal: true }, REP_SCOPED);
+      const total = container.querySelector('[aria-label="Filtered total value"]');
+      expect(total?.textContent).toBe("--");
+      expect(container.textContent ?? "").not.toContain("NaN");
+    });
+
+    it("does NOT render the total card unless showValueTotal is set", async () => {
+      await renderFB("/deals", { enableExport: true }, REP_SCOPED);
+      expect(container.querySelector('[aria-label="Filtered total value"]')).toBeNull();
+    });
+
+    it("requests the server-side total (includeValueTotal) ONLY when showValueTotal is set (#4 gating)", async () => {
+      await renderFB("/deals", { showValueTotal: true }, REP_SCOPED);
+      expect(lastDealsCall().includeValueTotal).toBe(true);
+    });
+
+    it("does NOT request the server-side total when showValueTotal is unset", async () => {
+      await renderFB("/deals", {}, REP_SCOPED);
+      expect(lastDealsCall().includeValueTotal).toBeFalsy();
+    });
+  });
 });
 
 describe("shouldResetNamespacedPage (fb_ page reset on host change — Codex P2)", () => {

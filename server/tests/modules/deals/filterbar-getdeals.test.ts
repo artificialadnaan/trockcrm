@@ -48,7 +48,11 @@ function createTenantDbCapturingWhere() {
   };
   dataChain.limit = () => dataChain;
   dataChain.offset = () => Promise.resolve([]);
-  (dataChain as { then: unknown }).then = (resolve: (rows: unknown[]) => unknown) => resolve([{ count: 0 }]);
+  // count(*) / activeCount / the running-total aggregate all await the chain directly (no
+  // limit/offset). Carry a `total` alongside `count` so the value-total aggregate (#4) can be
+  // asserted through the same harness without a real database.
+  (dataChain as { then: unknown }).then = (resolve: (rows: unknown[]) => unknown) =>
+    resolve([{ count: 0, total: 4242 }]);
   return { db: { select: () => dataChain } as never, capturedWheres, capturedOrderBys };
 }
 
@@ -145,6 +149,53 @@ describe("getDeals — FilterBar wiring", () => {
 
     const orderText = capturedOrderBys.flat().map(renderText).join(" ");
     expect(orderText).toContain("on_hold");
+  });
+
+  it("returns pagination.valueTotal when includeValueTotal is requested — SUM over the SAME filtered set (#4)", async () => {
+    // The running-total card needs the summed value of the ENTIRE filtered set (all pages),
+    // not just the visible page, so it rides on getDeals' response. The harness resolves every
+    // aggregate query to { count, total }, so a returned valueTotal proves getDeals issues the
+    // value aggregate and surfaces it (the SUM math itself is proven against real SQL in
+    // value-total-sql.runtime.test.ts).
+    const { db } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    const result = await getDeals(db, { includeValueTotal: true, scope: "all" }, "director", "director-1");
+
+    expect(result.pagination.valueTotal).toBe(4242);
+  });
+
+  it("does NOT compute valueTotal unless requested — no extra aggregate on plain list calls (#4)", async () => {
+    // Opt-in gating: /deals base, pipeline and stage drill-downs call getDeals constantly but don't
+    // show the Total card, so the value aggregate must NOT run for them. Captured WHEREs without the
+    // flag: [count(*), activeCount, dealRows] — exactly 3, no value-total query.
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    const result = await getDeals(db, { scope: "all" }, "director", "director-1");
+
+    expect(result.pagination.valueTotal).toBeUndefined();
+    expect(capturedWheres.length).toBe(3);
+  });
+
+  it("sums the running total over the full WHERE (same set as count(*) total), so the list and total can't diverge (#4)", async () => {
+    // The value aggregate must use the SAME `where` as the count(*) total — never the
+    // active-only WHERE — so on-hold rows (counted, shown as $0) and every other row in the
+    // list are in the summed set. Captured: count(*) WHERE, activeCount WHERE, value-total
+    // WHERE, then the dealRows WHERE. The total's WHERE must equal the count(*) WHERE.
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { includeValueTotal: true, valueMin: 100000, scope: "all" }, "director", "director-1");
+
+    // capturedWheres order: [count(*), activeCount, valueTotal, dealRows]
+    expect(capturedWheres.length).toBeGreaterThanOrEqual(4);
+    const countWhere = renderText(capturedWheres[0]);
+    const valueTotalWhere = renderText(capturedWheres[2]);
+    const activeCountWhere = renderText(capturedWheres[1]);
+    expect(valueTotalWhere).toBe(countWhere);
+    // The value-total WHERE is the full set, NOT the active-only WHERE (which adds on_hold=false).
+    expect(valueTotalWhere).not.toBe(activeCountWhere);
   });
 
   it("date window classifies Won/Lost by stage id; open rows current-state when the flag is OFF", async () => {

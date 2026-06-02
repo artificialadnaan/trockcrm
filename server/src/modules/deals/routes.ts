@@ -871,6 +871,8 @@ router.get("/", async (req, res, next) => {
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
       scope: normalizeCollaborativeScope(req.user!.role, readListScope(req.query.scope, req.user!.role)),
       activeOfficeId: req.user!.activeOfficeId ?? req.user!.officeId,
+      // Opt-in running-total aggregate (#4): only surfaces showing the Total card request it.
+      includeValueTotal: req.query.includeValueTotal === "true",
     };
 
     const result = await getDeals(
