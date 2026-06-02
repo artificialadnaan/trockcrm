@@ -56,7 +56,19 @@ describe("FilterBar", () => {
 
   function render(
     dimensions: FilterDimension[],
-    extra: Partial<{ value: FilterBarValue; onChange: (p: Partial<FilterBarValue>) => void; onReset: () => void; stageEntryDateEnabled: boolean; options: FilterBarOptions }> = {}
+    extra: Partial<{
+      value: FilterBarValue;
+      onChange: (p: Partial<FilterBarValue>) => void;
+      onReset: () => void;
+      stageEntryDateEnabled: boolean;
+      options: FilterBarOptions;
+      dateControl: {
+        ariaLabel: string;
+        value: string;
+        options: { value: string; label: string }[];
+        onChange: (v: string) => void;
+      };
+    }> = {}
   ) {
     act(() => {
       root?.render(
@@ -67,6 +79,7 @@ describe("FilterBar", () => {
           onReset={extra.onReset ?? (() => {})}
           options={extra.options ?? OPTIONS}
           stageEntryDateEnabled={extra.stageEntryDateEnabled}
+          dateControl={extra.dateControl}
         />
       );
     });
@@ -103,6 +116,40 @@ describe("FilterBar", () => {
     const mtd = document.querySelector<HTMLButtonElement>('button[aria-label="Show Date deals month to date"]');
     act(() => mtd?.click());
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ datePreset: "mtd" }));
+  });
+
+  it("renders a host-owned date control (PresetSelect) instead of the generic date filter when dateControl is provided", () => {
+    const onDateChange = vi.fn();
+    render(["date"], {
+      dateControl: {
+        ariaLabel: "Date range",
+        value: "wtd",
+        options: [
+          { value: "dashboard", label: "Dashboard (YTD)" },
+          { value: "wtd", label: "WTD" },
+        ],
+        onChange: onDateChange,
+      },
+    });
+    // The custom control renders and shows the selected listRange label…
+    const trigger = q('button[aria-label="Date range"]');
+    expect(trigger).not.toBeNull();
+    expect(trigger?.textContent).toContain("WTD");
+    // …and the generic outcome-aware date filter (and its honesty note) are NOT rendered on this surface.
+    expect(q('button[aria-label="Date date filter"]')).toBeNull();
+    expect(q('[data-testid="date-scope-note"]')).toBeNull();
+  });
+
+  it("renders the host-owned date control even when 'date' is not a dimension (the host owns the date axis)", () => {
+    render([], {
+      dateControl: {
+        ariaLabel: "Date range",
+        value: "dashboard",
+        options: [{ value: "dashboard", label: "Dashboard (YTD)" }],
+        onChange: () => {},
+      },
+    });
+    expect(q('button[aria-label="Date range"]')).not.toBeNull();
   });
 
   it("gates the stalled (days-in-stage) dimension on stage-entry dates being enabled", () => {

@@ -497,6 +497,46 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
       expect(call.inactiveStageIds).toEqual(["stage-won"]);
     });
 
+    // Date-binding (#3 follow-up): the rep drill-down OWNS the date axis via filterBar.dateControl (a
+    // single source of truth = the page's listRange window, applied as baseFilters). It therefore drops
+    // "date" from the bar dimensions, so the bar's own fb_date params are stripped and can never disagree
+    // with — or narrow — the page's window. The bar renders the host date control inline (PresetSelect).
+    const REP_SCOPED_OWN_DATE = {
+      ...REP_SCOPED,
+      paramPrefix: "fb_",
+      dimensions: FB_DIMENSIONS.filter((d) => d !== "rep" && d !== "date"),
+      dateControl: {
+        ariaLabel: "Date range",
+        value: "dashboard",
+        options: [
+          { value: "dashboard", label: "Dashboard (YTD)" },
+          { value: "wtd", label: "WTD" },
+        ],
+        onChange: () => {},
+      },
+    };
+
+    it("host-owned Date: renders the inline date control (PresetSelect), not the generic outcome-aware filter", async () => {
+      await renderFB("/deals", { baseFilters: { assignedRepId: "rep-7" } }, REP_SCOPED_OWN_DATE);
+      // The bar shows the host date control (the page's listRange presets) bound to one source of truth…
+      expect(container.querySelector('button[aria-label="Date range"]')).not.toBeNull();
+      // …and NOT the generic outcome-aware date filter.
+      expect(container.querySelector('button[aria-label="Date date filter"]')).toBeNull();
+    });
+
+    it("host-owned Date: a stray fb_date param cannot narrow the page's baseFilters window (single date source)", async () => {
+      await renderFB(
+        "/deals?fb_dateFrom=2026-05-10&fb_dateTo=2026-05-20",
+        { baseFilters: { assignedRepId: "rep-7", dateFrom: "2026-05-01", dateTo: "2026-05-31" } },
+        REP_SCOPED_OWN_DATE
+      );
+      const call = lastDealsCall();
+      // "date" is not a bar dimension, so the stray fb_date is dropped before mapping — the page's
+      // listRange window (baseFilters) is the ONLY date source; no floor/narrow intersection occurs.
+      expect(call.dateFrom).toBe("2026-05-01");
+      expect(call.dateTo).toBe("2026-05-31");
+    });
+
     it("renders the running-total card with the full-set valueTotal, SAFE-formatted (#4)", async () => {
       mocks.useDealsMock.mockReturnValue({
         deals: [makeDeal()],

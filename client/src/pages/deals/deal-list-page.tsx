@@ -1408,6 +1408,11 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               workflowFamily="deal"
               scope={scope}
               enableExport
+              // Running-total card (#4): the summed effective value of the WHOLE filtered set across all
+              // pages (server SUM over the list's exact WHERE), so it updates live as filters narrow and
+              // can never disagree with the list. Frontend-only flip — the includeValueTotal aggregate is
+              // surface-agnostic, computed only when a mount opts in via showValueTotal.
+              showValueTotal
               pageSize={20}
               title={dashboardView.title}
               subtitle={dashboardView.subtitle}
@@ -1470,6 +1475,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               workflowFamily="deal"
               scope={scope}
               enableExport
+              // Running-total card (#4) on the dashboard drill-down lists (Won / Active / Bid Board …) too.
+              showValueTotal
               enableDateFilter={false}
               showFilterButton
               pageSize={20}
