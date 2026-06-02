@@ -54,7 +54,8 @@ describe("deal opportunity first-entry notification email (worker handler)", () 
           awarded_amount: "50",
           sales_rep_name: "Avery Rep",
         }],
-      });
+      })
+      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] }); // office load
     const sendEmail = vi.fn().mockResolvedValue({ success: false, messageId: null });
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -113,6 +114,7 @@ describe("deal opportunity first-entry notification email (worker handler)", () 
       .fn()
       .mockResolvedValueOnce({ rows: [] }) // call 1: receipt check (none yet)
       .mockResolvedValueOnce({ rows: [dealRow] }) // call 1: deal load
+      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] }) // call 1: office load
       .mockResolvedValueOnce({ rows: [] }) // call 1: receipt insert
       .mockResolvedValueOnce({ rows: [{ resend_message_id: "resend-1", sent_at: new Date().toISOString() }] }); // call 2: receipt check (already sent)
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
@@ -146,7 +148,7 @@ describe("deal opportunity first-entry notification email (worker handler)", () 
       ["office_dallas", 123],
     );
     expect(query).toHaveBeenNthCalledWith(
-      4,
+      5,
       expect.stringContaining("FROM public.deal_opportunity_first_entry_email_receipts"),
       ["office_dallas", 123],
     );
@@ -168,6 +170,7 @@ describe("deal opportunity first-entry notification email (worker handler)", () 
       .mockResolvedValueOnce({
         rows: [{ id: dealId, name: "Noble", deal_number: "DFW-4-15326-ab", awarded_amount: "50", sales_rep_name: "Avery Rep" }],
       })
+      .mockResolvedValueOnce({ rows: [{ id: "office-dallas" }] })
       .mockResolvedValueOnce({ rows: [] });
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "resend-1" });
     const logger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };

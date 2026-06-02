@@ -24,6 +24,10 @@ interface ProjectNumberEmailDeal {
   sales_rep_name: string | null;
 }
 
+interface ProjectNumberEmailOffice {
+  id: string;
+}
+
 interface HandlerDeps {
   query?: typeof pool.query;
   sendEmail?: (
@@ -115,12 +119,25 @@ export async function handleProjectNumberFirstSetEmail(
     logger.warn("[ProjectNumberEmail] Deal not found - skipping", { tenantSchema, dealId, projectNumber });
     return;
   }
+  // The deal's office id (resolved from its tenant schema) is threaded into the deal link so the
+  // email loads the correct tenant even for a recipient whose default office differs.
+  const officeResult = await query(
+    `SELECT id
+       FROM public.offices
+      WHERE ('office_' || slug) = $1
+        AND is_active = true
+      LIMIT 1`,
+    [tenantSchema]
+  );
+  const office = officeResult.rows[0] as ProjectNumberEmailOffice | undefined;
+
   const email = buildProjectNumberFirstSetEmail({
     dealId,
     dealName: deal.name,
     projectNumber,
     salesRepName: deal.sales_rep_name ?? "Unassigned",
     awardedAmount: deal.awarded_amount,
+    officeId: office?.id ?? null,
     frontendUrl: resolveFrontendUrl(deps.env ?? process.env),
   });
 
@@ -273,6 +290,16 @@ export async function handleDealOpportunityFirstEntryEmail(
     logger.warn("[OpportunityEntryEmail] Deal not found - skipping", { tenantSchema, dealId, dealNumber });
     return;
   }
+  const officeResult = await query(
+    `SELECT id
+       FROM public.offices
+      WHERE ('office_' || slug) = $1
+        AND is_active = true
+      LIMIT 1`,
+    [tenantSchema]
+  );
+  const office = officeResult.rows[0] as ProjectNumberEmailOffice | undefined;
+
   // The business "project number" IS the deal_number, so the existing email template is reused with
   // deal_number as the displayed number.
   const email = buildProjectNumberFirstSetEmail({
@@ -281,6 +308,7 @@ export async function handleDealOpportunityFirstEntryEmail(
     projectNumber: dealNumber,
     salesRepName: deal.sales_rep_name ?? "Unassigned",
     awardedAmount: deal.awarded_amount,
+    officeId: office?.id ?? null,
     frontendUrl: resolveFrontendUrl(deps.env ?? process.env),
   });
 
@@ -373,11 +401,15 @@ export function buildProjectNumberFirstSetEmail(input: {
   projectNumber: string;
   salesRepName: string;
   awardedAmount: string | number | null;
+  officeId?: string | null;
   frontendUrl: string;
 }) {
-  // Canonical deal URL: /deals/{id} with NO query string. The detail page resolves the deal by id
-  // alone (officeId is only an optional hint), so the link matches the real CRM URL operators share.
-  const dealUrl = `${input.frontendUrl.replace(/\/+$/, "")}/deals/${encodeURIComponent(input.dealId)}`;
+  // Deal URL: /deals/{id}?officeId={deal's office}. The officeId carries the deal's tenant so the link
+  // loads the correct office even for a recipient whose default office differs (the detail page threads
+  // it into the x-office-id header). Without it, /deals/{id} queries the recipient's default office and
+  // would 404 a cross-office deal (Codex P1 on #611).
+  const officeParam = input.officeId ? `?officeId=${encodeURIComponent(input.officeId)}` : "";
+  const dealUrl = `${input.frontendUrl.replace(/\/+$/, "")}/deals/${encodeURIComponent(input.dealId)}${officeParam}`;
   const awardedAmount = formatCurrency(input.awardedAmount);
   const subject = `New project number assigned: ${input.projectNumber} (${input.dealName})`;
 
