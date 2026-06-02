@@ -3,6 +3,8 @@ import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/
 
 export const PROJECT_NUMBER_FIRST_SET_JOB = "project_number_first_set_email";
 export const PROJECT_NUMBER_FIRST_SET_AUDIT_PROCESS = "project_number_first_set";
+export const DEAL_OPPORTUNITY_FIRST_ENTRY_JOB = "deal_opportunity_first_entry_email";
+export const DEAL_OPPORTUNITY_FIRST_ENTRY_AUDIT_PROCESS = "deal_opportunity_first_entry";
 export const DEFAULT_NON_PROD_CHRISTY_PROJECT_NUMBER_EMAIL = "kscheidegger@trockgc.com";
 export const DEFAULT_NON_PROD_PROJECT_NUMBER_EMAIL_CC = "adnaan.iqbal@gmail.com";
 
@@ -176,6 +178,177 @@ export async function handleProjectNumberFirstSetEmail(
     logger.error("[ProjectNumberEmail] Failed to send Christy notification", {
       dealId,
       projectNumber,
+      error,
+    });
+    throw error;
+  }
+}
+
+interface DealOpportunityFirstEntryPayload {
+  tenantSchema?: string;
+  dealId?: string;
+  dealNumber?: string;
+  auditLogId?: number;
+}
+
+interface DealOpportunityEmailDeal {
+  id: string;
+  name: string;
+  deal_number: string | null;
+  awarded_amount: string | number | null;
+  sales_rep_name: string | null;
+}
+
+/**
+ * Re-keyed Christy/Adnaan notification: fires on a deal's FIRST entry into the Opportunity stage and
+ * carries deal_number (the operative business "project number"). Enqueued by migration 0147's
+ * `deals_opportunity_first_entry_email_trg`. Mirrors handleProjectNumberFirstSetEmail but with its own
+ * receipts ledger + idempotencyKey, and reads deal_number instead of project_number.
+ *
+ * Exactly-once: a deal that re-enters Opportunity is re-enqueued by the trigger with the SAME stable
+ * audit_log_id (the marker is record_id-alone), so the receipts check below short-circuits the second
+ * job — never a duplicate send. The recipient/CC resolution and env-hardening are shared with the
+ * project_number handler (CHRISTY_PROJECT_NUMBER_EMAIL / PROJECT_NUMBER_EMAIL_CC).
+ */
+export async function handleDealOpportunityFirstEntryEmail(
+  payload: DealOpportunityFirstEntryPayload,
+  _officeId: string | null,
+  deps: HandlerDeps = {}
+) {
+  const logger = deps.logger ?? console;
+  const tenantSchema = payload.tenantSchema;
+  const dealId = payload.dealId;
+  const dealNumber = normalizeText(payload.dealNumber);
+  const auditLogId = normalizeAuditLogId(payload.auditLogId);
+  if (!isSafeTenantSchema(tenantSchema) || !dealId || !dealNumber || auditLogId == null) {
+    logger.warn("[OpportunityEntryEmail] Invalid job payload - skipping", { tenantSchema, dealId, dealNumber, auditLogId });
+    return;
+  }
+
+  const recipient = resolveChristyProjectNumberRecipient(deps.env ?? process.env);
+  if (!recipient) {
+    const error = new Error("CHRISTY_PROJECT_NUMBER_EMAIL is not configured");
+    // error (not warn): a required recipient is missing, so the notification cannot send. Logged
+    // loudly and re-thrown so the failure is VISIBLE and the job retries (then dead-letters after the
+    // job queue's max_attempts) instead of silently completing as a no-op.
+    logger.error(
+      "[OpportunityEntryEmail] CHRISTY_PROJECT_NUMBER_EMAIL is not set - cannot send the project-number notification. Set it on the worker service; the job retries a few times, then dead-letters.",
+      { dealId, dealNumber }
+    );
+    throw error;
+  }
+  const ccRecipient = resolveProjectNumberEmailCcRecipient(deps.env ?? process.env);
+  if (!ccRecipient) {
+    // error (not warn): the CC copy is being dropped. Christy's notification still sends (we do not
+    // block the primary recipient on a missing CC), but the drop is surfaced loudly, not silent.
+    logger.error(
+      "[OpportunityEntryEmail] PROJECT_NUMBER_EMAIL_CC is not set - sending to Christy WITHOUT the CC copy. Set it on the worker service to restore the CC.",
+      { dealId, dealNumber }
+    );
+  }
+
+  const query = deps.query ?? pool.query.bind(pool);
+  const receiptResult = await query(
+    `SELECT resend_message_id, sent_at
+       FROM public.deal_opportunity_first_entry_email_receipts
+      WHERE tenant_schema = $1
+        AND audit_log_id = $2
+      LIMIT 1`,
+    [tenantSchema, auditLogId]
+  );
+  if (receiptResult.rows.length > 0) {
+    logger.log("[OpportunityEntryEmail] Notification already sent - skipping duplicate job", {
+      dealId,
+      dealNumber,
+      auditLogId,
+      messageId: receiptResult.rows[0]?.resend_message_id ?? null,
+    });
+    return;
+  }
+
+  const result = await query(
+    `SELECT d.id,
+            d.name,
+            d.deal_number,
+            d.awarded_amount,
+            COALESCE(
+              NULLIF(u.display_name, ''),
+              NULLIF(BTRIM(CONCAT_WS(' ', u.first_name, u.last_name)), ''),
+              u.email,
+              'Unassigned'
+            ) AS sales_rep_name
+       FROM ${quoteIdent(tenantSchema)}.deals d
+       LEFT JOIN public.users u ON u.id = d.assigned_rep_id
+      WHERE d.id = $1::uuid
+      LIMIT 1`,
+    [dealId]
+  );
+  const deal = result.rows[0] as DealOpportunityEmailDeal | undefined;
+  if (!deal) {
+    logger.warn("[OpportunityEntryEmail] Deal not found - skipping", { tenantSchema, dealId, dealNumber });
+    return;
+  }
+  const officeResult = await query(
+    `SELECT id
+       FROM public.offices
+      WHERE ('office_' || slug) = $1
+        AND is_active = true
+      LIMIT 1`,
+    [tenantSchema]
+  );
+  const office = officeResult.rows[0] as { id: string } | undefined;
+
+  // The business "project number" IS the deal_number, so the existing email template is reused with
+  // deal_number as the displayed number.
+  const email = buildProjectNumberFirstSetEmail({
+    dealId,
+    dealName: deal.name,
+    projectNumber: dealNumber,
+    salesRepName: deal.sales_rep_name ?? "Unassigned",
+    awardedAmount: deal.awarded_amount,
+    officeId: office?.id ?? null,
+    frontendUrl: resolveFrontendUrl(deps.env ?? process.env),
+  });
+
+  try {
+    const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
+    const sendResult = await sendEmail(recipient, email.subject, email.html, {
+      text: email.text,
+      idempotencyKey: `deal-opportunity-first-entry-${tenantSchema}-${auditLogId}`,
+      ...(ccRecipient ? { cc: ccRecipient } : {}),
+    });
+    if (!sendResult.success) {
+      throw new Error("Email provider returned unsuccessful result");
+    }
+    await query(
+      `INSERT INTO public.deal_opportunity_first_entry_email_receipts (
+          audit_log_id,
+          tenant_schema,
+          deal_id,
+          deal_number,
+          recipient_email,
+          resend_message_id,
+          sent_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3::uuid, $4, $5, $6, NOW(), NOW())
+        ON CONFLICT (tenant_schema, audit_log_id) DO UPDATE
+          SET recipient_email = EXCLUDED.recipient_email,
+              resend_message_id = EXCLUDED.resend_message_id,
+              sent_at = EXCLUDED.sent_at,
+              updated_at = NOW()`,
+      [auditLogId, tenantSchema, dealId, dealNumber, recipient, sendResult.messageId]
+    );
+    logger.log("[OpportunityEntryEmail] Sent Christy notification", {
+      dealId,
+      dealNumber,
+      messageId: sendResult.messageId,
+      auditLogId,
+    });
+  } catch (error) {
+    logger.error("[OpportunityEntryEmail] Failed to send Christy notification", {
+      dealId,
+      dealNumber,
       error,
     });
     throw error;

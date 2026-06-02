@@ -25,7 +25,12 @@ import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts
 import { handleRfpRequestDelivery } from "./rfp-request-delivery.js";
 import { runReportsExecutionTick } from "./reports-execution.js";
 import { runRepPerformanceRollup } from "./rep-performance-rollup.js";
-import { handleProjectNumberFirstSetEmail, PROJECT_NUMBER_FIRST_SET_JOB } from "./project-number-email.js";
+import {
+  handleDealOpportunityFirstEntryEmail,
+  handleProjectNumberFirstSetEmail,
+  DEAL_OPPORTUNITY_FIRST_ENTRY_JOB,
+  PROJECT_NUMBER_FIRST_SET_JOB,
+} from "./project-number-email.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -116,6 +121,7 @@ export function registerAllJobs() {
     await handleRfpRequestDelivery(payload, officeId);
   });
   registerJobHandler(PROJECT_NUMBER_FIRST_SET_JOB, handleProjectNumberFirstSetEmail);
+  registerJobHandler(DEAL_OPPORTUNITY_FIRST_ENTRY_JOB, handleDealOpportunityFirstEntryEmail);
 
   registerJobHandler("reports_execution", async () => {
     await runReportsExecutionTick();
