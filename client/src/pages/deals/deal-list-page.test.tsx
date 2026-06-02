@@ -607,7 +607,11 @@ describe("DealListPage", () => {
     const html = renderPage();
 
     expect(html).toContain("Active pipeline");
-    expect(html).toMatch(/Active pipeline.*\$180K.*1\/1 deals/);
+    // USD_COMPACT(180000) is compact currency for 180k. Its trailing ".0" is
+    // ICU/V8-version-dependent: Node 20/22 render "$180.0K", Node 24+ render
+    // "$180K". The old literal "$180K" pinned one version (and never matched on
+    // Node 20/22). Match version-agnostically so this is deterministic everywhere.
+    expect(html).toMatch(/Active pipeline.*\$180(\.0)?K.*1\/1 deals/);
     expect(html).not.toContain("$1.6M");
     expect(html).not.toContain("4 deals");
   });

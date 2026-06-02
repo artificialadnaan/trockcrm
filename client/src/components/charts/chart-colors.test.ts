@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatCurrency } from "./chart-colors";
+import { formatCurrency, formatCompact, formatPercent } from "./chart-colors";
 
 // This formatter is the compact one used by charts AND by deal/dashboard surfaces
 // (rep cards, stale-deal list, funnel buckets, director workspace, report cells).
@@ -31,5 +31,56 @@ describe("chart-colors formatCurrency (hardened)", () => {
     expect(formatCurrency(2_000_000)).toBe("$2.0M");
     // Negatives are valid numbers — they fall through to the base branch unchanged.
     expect(formatCurrency(-500)).toBe("$-500");
+  });
+});
+
+// formatCompact (compact COUNT — "1.2K", "5M") previously emitted the literal
+// "NaN" / "NaN.0K" for bad input and "null"/"undefined" via String(value).
+// Same finite-guard as formatCurrency: missing/invalid → "--", a real 0 → "0".
+describe("chart-colors formatCompact (hardened)", () => {
+  it("returns the safe fallback — never 'NaN', never 'null'/'undefined' — for missing/non-finite input", () => {
+    expect(formatCompact(null)).toBe("--");
+    expect(formatCompact(undefined)).toBe("--");
+    expect(formatCompact(NaN)).toBe("--");
+    expect(formatCompact(Infinity)).toBe("--");
+    expect(formatCompact(-Infinity)).toBe("--");
+    expect(formatCompact(NaN)).not.toContain("NaN");
+  });
+
+  it("renders a real zero as '0' (only missing/invalid → '--')", () => {
+    expect(formatCompact(0)).toBe("0");
+  });
+
+  it("leaves valid-number formatting unchanged — no behavior change", () => {
+    expect(formatCompact(50)).toBe("50");
+    expect(formatCompact(999)).toBe("999");
+    expect(formatCompact(1_200)).toBe("1.2K");
+    expect(formatCompact(5_000_000)).toBe("5.0M");
+    expect(formatCompact(-3)).toBe("-3");
+  });
+});
+
+// formatPercent ("42%") previously coerced bad input into "NaN%" / "null%" /
+// "undefined%" / "Infinity%" via the template literal. Same guard: missing/invalid
+// → "--" (matching how the director dashboard already renders a null win rate),
+// a real 0 → "0%". It is also a Recharts tick/tooltip formatter — display only.
+describe("chart-colors formatPercent (hardened)", () => {
+  it("returns the safe fallback — never 'NaN%'/'null%'/'undefined%' — for missing/non-finite input", () => {
+    expect(formatPercent(null)).toBe("--");
+    expect(formatPercent(undefined)).toBe("--");
+    expect(formatPercent(NaN)).toBe("--");
+    expect(formatPercent(Infinity)).toBe("--");
+    expect(formatPercent(-Infinity)).toBe("--");
+    expect(formatPercent(NaN)).not.toContain("NaN");
+  });
+
+  it("renders a real zero as '0%' (only missing/invalid → '--')", () => {
+    expect(formatPercent(0)).toBe("0%");
+  });
+
+  it("leaves valid-number formatting unchanged — no behavior change", () => {
+    expect(formatPercent(42)).toBe("42%");
+    expect(formatPercent(100)).toBe("100%");
+    expect(formatPercent(7.5)).toBe("7.5%");
   });
 });
