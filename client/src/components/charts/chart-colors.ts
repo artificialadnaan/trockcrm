@@ -26,8 +26,18 @@ export function getStageColor(stageColor: string | null | undefined, index: numb
   return stageColor ?? getChartColor(index);
 }
 
-/** Format a number as currency ($123K, $1.2M, etc.) */
-export function formatCurrency(value: number): string {
+/**
+ * Format a number as currency ($123K, $1.2M, etc.).
+ *
+ * Guards against null/undefined/NaN/±Infinity so no surface ever renders the
+ * literal "$NaN" (and so a null value can't throw on `.toFixed`). A missing or
+ * invalid value degrades to "--", matching the safe formatter in deal-utils.ts.
+ * A real 0 is finite and still renders "$0". Used as a Recharts tick/tooltip
+ * formatter too — the return value is display text only (scales read the raw
+ * datum), so the "--" fallback never breaks axis rendering.
+ */
+export function formatCurrency(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "--";
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
   return `$${value.toFixed(0)}`;
