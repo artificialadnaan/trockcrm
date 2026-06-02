@@ -15,20 +15,15 @@ import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/
 import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
 import { getEffectiveDealValue, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
-import { TerminalDateFilterControl } from "@/components/pipeline/terminal-date-filter-control";
 import {
   buildDealStageWorkspacePath,
   clampDateToToday,
   daysAgo,
   getActivePipelineColumns,
-  getTerminalDateFilterLabel,
   isTerminalStage,
   isTerminalOutcomeSlug,
-  readTerminalDateFiltersFromSearchParams,
   resolveDatePreset,
-  setTerminalDateFilterSearchParams,
   toDatePresetRange,
-  writeTerminalDateFilter,
   type TerminalDateFilter,
   type TerminalOutcome,
 } from "@/lib/pipeline-terminal-filters";
@@ -193,45 +188,42 @@ function periodToTerminalDateFilter(period: DashboardPeriod, now = new Date()): 
   return { preset: "all" };
 }
 
-// D-7: a Won/period drill-down arrives as ?filter=won&period=qtd with NO explicit won_* param,
-// so the Won terminal filter would default to "all" — the column's date chip then reads "All time"
-// while the data is windowed by won_period (the contradictory all_time+period the audit flagged).
-// Seed the Won filter FROM the inherited period instead, so the chip reads "QTD" and the board
-// request emits won_since/until via the preset (never won_all_time). An explicit won_* in the URL
-// always wins (the user's own choice, e.g. after changing the chip).
+// Option A (board-wide date): the /deals board carries ONE shared date — the header ?period. The Won/Lost
+// terminal columns mirror it and no longer own independent per-column overrides, so the board's terminal
+// windows derive PURELY from ?period. Any stale won_*/lost_* still in the URL (an old bookmark) is collapsed
+// here and stripped on load — it can no longer pin a column to a divergent window.
+//   Won vs Lost asymmetry is preserved: the Won column lets the board-wide won_period aggregate window it
+// (so it stays {all} on non-Won views), while the Lost column has no won_period sibling and is windowed
+// directly from the period (Codex #600 P2). #566: period=today routes Won to {all} to dodge the UTC
+// won_until-vs-won_period_to clamp that would otherwise empty the Won board.
 export function resolveDrilldownTerminalDateFilters(
   params: URLSearchParams,
   now = new Date()
 ): Record<TerminalOutcome, TerminalDateFilter> {
-  const base = readTerminalDateFiltersFromSearchParams(params);
   const period = normalizeDashboardPeriod(params.get("period"));
-  if (!period) return base;
+  if (!period) return { won: { preset: "all" }, lost: { preset: "all" } };
   const isWonDrilldown = normalizeDashboardDealFilter(params.get("filter")) === "won";
-  const hasExplicitWon =
-    params.has("won_preset") || params.has("won_all_time") || params.has("won_since");
-  const hasExplicitLost =
-    params.has("lost_preset") || params.has("lost_all_time") || params.has("lost_since");
-  const result = { ...base };
+  const result: Record<TerminalOutcome, TerminalDateFilter> = {
+    won: { preset: "all" },
+    lost: { preset: "all" },
+  };
   // Won column: seed from the period ONLY on the Won drill-down (the surface D-7 flags); other views keep
   // the Won column current-state and let won_period window the board-wide aggregate.
-  if (isWonDrilldown && !hasExplicitWon) {
+  if (isWonDrilldown) {
     result.won = periodToTerminalDateFilter(period, now);
   }
-  // Lost column: the header period must window it too. won_period covers Won + open columns server-side,
-  // but the Lost column reads lost_since/lost_until — so seed it from the period whenever ?period is set
-  // and no explicit Lost filter is present, or Lost shows all-time under a board-wide period (Codex #600 P2).
-  if (!hasExplicitLost) {
-    if (period === "today") {
-      // periodToTerminalDateFilter nulls `today` to {preset:"all"} to dodge a WON-only won_until vs
-      // won_period_to clamp conflict (Codex #566). Lost has no won_period sibling, so give it the REAL
-      // today window — otherwise ?period=today leaves the Lost column all-time (Codex #600 P2).
-      const todayRange = getDashboardPeriodDateRange(period, now);
-      result.lost = todayRange?.from
-        ? { preset: "custom", customStart: todayRange.from, customEnd: todayRange.to }
-        : { preset: "all" };
-    } else {
-      result.lost = periodToTerminalDateFilter(period, now);
-    }
+  // Lost column: the header period windows it directly. won_period covers Won + open columns server-side,
+  // but the Lost column reads lost_since/lost_until — so seed it from the period whenever ?period is set.
+  if (period === "today") {
+    // periodToTerminalDateFilter nulls `today` to {preset:"all"} to dodge a WON-only won_until vs
+    // won_period_to clamp conflict (Codex #566). Lost has no won_period sibling, so give it the REAL
+    // today window — otherwise ?period=today leaves the Lost column all-time (Codex #600 P2).
+    const todayRange = getDashboardPeriodDateRange(period, now);
+    result.lost = todayRange?.from
+      ? { preset: "custom", customStart: todayRange.from, customEnd: todayRange.to }
+      : { preset: "all" };
+  } else {
+    result.lost = periodToTerminalDateFilter(period, now);
   }
   return result;
 }
@@ -502,9 +494,9 @@ export function buildDealsPageKpiDrilldownPath(
         // the SLA drill-downs: getDashboardDealListView turns ?period into updatedFrom/updatedTo, which the
         // at-risk/stale lists filter via matchesUpdatedRange — a different axis than the SLA card's count, so
         // carrying period there drops at-risk deals the card counted but that weren't updated in the window
-        // (cohort mismatch, Codex #600 P2).
-        (key === "period" && filter !== "at_risk" && filter !== "stale") ||
-        (filter === "won" && key.startsWith("won_"))
+        // (cohort mismatch, Codex #600 P2). Option A: won_*/lost_* are NOT forwarded — the Won drill-down
+        // inherits the single shared ?period (already set above), not a collapsed per-column override.
+        (key === "period" && filter !== "at_risk" && filter !== "stale")
       ) {
         params.set(key, value);
       }
@@ -654,20 +646,23 @@ function DealsBoardColumn({
   column,
   onOpenStage,
   onOpenRecord,
-  terminalFilter,
-  onTerminalFilterChange,
+  periodValue,
+  onPeriodChange,
 }: {
   column: DealBoardColumn;
   onOpenStage: (column: DealBoardColumn) => void;
   onOpenRecord: (id: string) => void;
-  terminalFilter?: TerminalDateFilter;
-  onTerminalFilterChange?: (filter: TerminalDateFilter) => void;
+  // Option A: the Won/Lost terminal columns mirror the single shared board date (?period). `periodValue`
+  // is the page's selected period ("__all__" = no period); `onPeriodChange` is the shared period setter —
+  // both supplied ONLY for terminal columns, so changing a column writes the same ?period the top control does.
+  periodValue?: string;
+  onPeriodChange?: (value: string) => void;
 }) {
   const totalValue =
     column.totalValue ?? sumNonOnHoldDealValues(column.cards);
   const terminalOutcome = isTerminalOutcomeSlug(column.stage.slug) ? column.stage.slug : null;
-  const terminalLabel = terminalFilter ? getTerminalDateFilterLabel(terminalFilter) : null;
-  const emptyText = terminalOutcome && terminalFilter?.preset !== "all" ? "No deals in selected range" : "No deals";
+  const hasBoardDate = periodValue != null && periodValue !== "__all__";
+  const emptyText = terminalOutcome && hasBoardDate ? "No deals in selected range" : "No deals";
 
   const header = (
     <>
@@ -678,21 +673,32 @@ function DealsBoardColumn({
           onClick={() => onOpenStage(column)}
         >
           {column.stage.name}
-          {terminalLabel ? <span className="ml-1 text-slate-400">· {terminalLabel}</span> : null}
         </button>
         <span className="rounded-sm bg-gray-200/70 px-1.5 py-0.5 text-xs font-medium tabular-nums text-gray-600">
           {column.count}/{column.totalCount ?? column.count}
         </span>
       </div>
-      {terminalOutcome && terminalFilter && onTerminalFilterChange ? (
-        <TerminalDateFilterControl
-          stageName={column.stage.name}
-          filter={terminalFilter}
-          onFilterChange={onTerminalFilterChange}
-          className="mt-2"
-          buttonClassName="rounded-sm text-xs"
-          inputClassName="rounded-sm text-xs"
-        />
+      {terminalOutcome && periodValue !== undefined && onPeriodChange ? (
+        <Select value={periodValue} onValueChange={(value) => onPeriodChange(value ?? "__all__")}>
+          <SelectTrigger
+            aria-label={`${column.stage.name} date range`}
+            className="mt-2 h-7 w-full justify-between rounded-sm border-slate-300 bg-white text-xs font-semibold text-slate-700"
+          >
+            <SelectValue>
+              {getDashboardPeriodLabel(
+                normalizeDashboardPeriod(periodValue === "__all__" ? null : periodValue)
+              )}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="__all__">All time</SelectItem>
+            {PERIOD_OPTIONS.map((period) => (
+              <SelectItem key={period} value={period}>
+                {getDashboardPeriodLabel(period)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       ) : null}
       <p className="mt-1 text-xl font-semibold tabular-nums text-gray-900">
         {USD_COMPACT(totalValue)}
@@ -813,27 +819,22 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     setSearchParams(next, { replace: true });
   }, [requestedScope, searchParams, setSearchParams]);
 
-  // The Estimate-Sent control was replaced by the header Period dropdown. Strip any stale estimate_sent_*
-  // params from the URL on load so a bookmarked/shared link can neither invisibly filter the board (the
-  // range is no longer read here) NOR be forwarded into a stage-page drill-down — which still passes the
-  // full searchParams and would otherwise apply an invisible, control-less filter there (Codex #600 P2).
+  // Strip stale params from the URL on load so a bookmarked/shared link can neither invisibly filter the
+  // board NOR be forwarded into a stage-page drill-down (which still passes the full searchParams and would
+  // otherwise apply an invisible, control-less filter there, Codex #600 P2). Two families are collapsed:
+  //   - estimate_sent_*: the Estimate-Sent control was replaced by the header Period dropdown (its range is
+  //     no longer read here);
+  //   - won_*/lost_*: the per-column Won/Lost overrides were collapsed into the single shared ?period
+  //     (Option A). A bare won_/lost_ in the URL would otherwise be carried into the Won drill-down path.
   useEffect(() => {
-    const stale = [...searchParams.keys()].filter((key) => key.startsWith("estimate_sent_"));
+    const stale = [...searchParams.keys()].filter(
+      (key) => key.startsWith("estimate_sent_") || key.startsWith("won_") || key.startsWith("lost_")
+    );
     if (stale.length === 0) return;
     const next = new URLSearchParams(searchParams);
     for (const key of stale) next.delete(key);
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
-
-  const updateTerminalDateFilter = useCallback((outcome: TerminalOutcome, filter: TerminalDateFilter) => {
-    writeTerminalDateFilter(outcome, filter);
-    setTerminalDateFilters((current) => ({ ...current, [outcome]: filter }));
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      setTerminalDateFilterSearchParams(next, outcome, filter);
-      return next;
-    });
-  }, [setSearchParams]);
 
   const updateSelectedRep = useCallback((repId: string) => {
     setSearchParams((current) => {
@@ -847,15 +848,23 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   // The header period dropdown writes ?period, which already drives the KPI cards + read-only board
   // board-wide (selectedPeriodRange → useDealBoard wonPeriodRange → won_period_from/to, the outcome-aware
   // D-11 window) AND scopes the base list (fed into its baseFilters below). "__all__" clears the param.
+  // The single shared "set board date" setter — used by BOTH the header Period dropdown and the Won/Lost
+  // column date controls (Option A). One action -> one ?period write -> the board, KPIs, list, and both
+  // terminal columns all follow it.
   const updatePeriod = useCallback((value: string) => {
     const next = new URLSearchParams(searchParams);
     if (!value || value === "__all__") next.delete("period");
     else next.set("period", value);
+    // Collapse any per-column won_*/lost_* override so a board-date change (from the top control OR a
+    // terminal column) can never leave a stale per-column window behind — the board carries ONE date.
+    for (const key of [...next.keys()]) {
+      if (key.startsWith("won_") || key.startsWith("lost_")) next.delete(key);
+    }
     // Write ?period AND the period-derived terminal (Won/Lost) filters in LOCKSTEP. If we only wrote
     // ?period and let the boardParamKey effect re-sync terminalDateFilters a render later, the board would
-    // fire one fetch with the NEW won_period_from/to but STALE lost_since/until (and stale Won filters) — a
-    // mixed window; useDealBoard does not cancel or order responses, so that stale fetch could win and leave
-    // the board/cards on a blended date range (Codex #600 P2).
+    // fire one fetch with the NEW won_period_from/to but STALE lost_since/until — a mixed window;
+    // useDealBoard does not cancel or order responses, so that stale fetch could win and leave the
+    // board/cards on a blended date range (Codex #600 P2).
     setSearchParams(next);
     setTerminalDateFilters(resolveDrilldownTerminalDateFilters(next));
   }, [searchParams, setSearchParams]);
@@ -1318,15 +1327,11 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
                     column={column}
                     onOpenStage={openStage}
                     onOpenRecord={(id) => navigate(`/deals/${id}`)}
-                    terminalFilter={
-                      isTerminalOutcomeSlug(column.stage.slug)
-                        ? terminalDateFilters[column.stage.slug]
-                        : undefined
+                    periodValue={
+                      isTerminalOutcomeSlug(column.stage.slug) ? selectedPeriod ?? "__all__" : undefined
                     }
-                    onTerminalFilterChange={
-                      isTerminalOutcomeSlug(column.stage.slug)
-                        ? (filter) => updateTerminalDateFilter(column.stage.slug as TerminalOutcome, filter)
-                        : undefined
+                    onPeriodChange={
+                      isTerminalOutcomeSlug(column.stage.slug) ? updatePeriod : undefined
                     }
                   />
                 ))}
