@@ -713,6 +713,10 @@ export function DirectorRepDetail() {
               // every stage (active + terminal) like the legacy list. terminalStageIds lets Won/Lost
               // through by default (Q1) unless the user picks an explicit Status.
               terminalStageIds: repTerminalStageIds,
+              // Each stage OPTION carries one canonical id, but a slug can group sibling workflow-family
+              // ids (standard/service). Pass the families so picking a grouped stage queries ALL its ids
+              // — matching the legacy slug filter, which selected every id for the slug (Codex P2).
+              stageIdFamilies: repStageOptions.map((stage) => stage.ids),
               paramPrefix: DRILLDOWN_FILTERBAR_PARAM_PREFIX,
               // Default to the outcome display-date axis (matches the legacy rep list's initial sort).
               defaultSort: DEAL_LIST_INITIAL_SORT,

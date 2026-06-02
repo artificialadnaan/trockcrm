@@ -185,6 +185,29 @@ describe("applyBoardVisibilityDefaults (the under-kanban list mirrors the board 
     expect(result.stageIds).toEqual(["opp-standard"]);
   });
 
+  it("expands a grouped-slug pick to its full family even WITHOUT defaultStageIds (rep drill-down: no board scope) (Codex P2)", () => {
+    // The rep drill-down is not board-scoped (no defaultStageIds) but groups sibling workflow-family ids
+    // per slug. Picking the canonical Contract id must still query BOTH the standard and service Contract
+    // ids — exactly as the legacy slug filter did (getSelectedDealStageIds returned every id for a slug).
+    const result = applyBoardVisibilityDefaults(
+      filterBarValueToDealFilters({ stageIds: ["contract-standard"] }),
+      { stageIdFamilies: [["contract-standard", "contract-service"], ["s-won"]], terminalStageIds: ["s-won"] }
+    );
+    expect(result.stageIds).toEqual(["contract-standard", "contract-service"]);
+  });
+
+  it("leaves the no-pick rep list unscoped (every stage) when stageIdFamilies is set but no stage is picked (Codex P2)", () => {
+    // No explicit pick → the unscoped mount must NOT restrict stageIds (so the default list shows every
+    // stage like the legacy rep list), while terminalStageIds still lets Won/Lost through.
+    const result = applyBoardVisibilityDefaults(
+      filterBarValueToDealFilters({}),
+      { stageIdFamilies: [["contract-standard", "contract-service"], ["s-won"]], terminalStageIds: ["s-won"] }
+    );
+    expect(result.stageIds).toBeUndefined();
+    expect(result.isActive).toBe("pipeline");
+    expect(result.inactiveStageIds).toEqual(["s-won"]);
+  });
+
   it("yields to an explicit Status — it owns is_active/on_hold server-side, so isActive is NOT forced", () => {
     const active = applyBoardVisibilityDefaults(filterBarValueToDealFilters({ status: "active" }), board);
     expect(active.status).toBe("active");

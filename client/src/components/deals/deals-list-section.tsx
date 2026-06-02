@@ -958,7 +958,12 @@ export function DealsListSection({
     // status, value, …) via fetchAllDealsForFilters, and the canonical displayDate axis in the Date
     // column. Mirrors the on-screen list instead of the legacy created/updated export axis.
     if (filterBarMode) {
-      const result = await fetchAllDealsForFilters({ filters: filterBarDealsArgs });
+      // The CSV never reads pagination.valueTotal, so strip includeValueTotal before paginating the
+      // export — otherwise every export page would run the extra full-set SUM aggregate for nothing
+      // (Codex P2). The on-screen list keeps requesting it; only the export drops it.
+      const result = await fetchAllDealsForFilters({
+        filters: { ...filterBarDealsArgs, includeValueTotal: false },
+      });
       if (result.truncated) {
         toast.info(
           `Exported first ${result.maxRows.toLocaleString()} rows (${result.pagesFetched} pages). Narrow filters for full export.`

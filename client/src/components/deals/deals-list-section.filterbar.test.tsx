@@ -539,6 +539,32 @@ describe("DealsListSection — FilterBar (URL) mode (Slice 7 proving ground)", (
       await renderFB("/deals", {}, REP_SCOPED);
       expect(lastDealsCall().includeValueTotal).toBeFalsy();
     });
+
+    it("strips includeValueTotal from EXPORT pages — the CSV never reads it (Codex P2)", async () => {
+      const realCreate = (URL as { createObjectURL?: unknown }).createObjectURL;
+      const realRevoke = (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+      (URL as unknown as { createObjectURL: () => string }).createObjectURL = () => "blob:x";
+      (URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = () => {};
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+      // useDeals is mocked, so every api call here IS an export page fetch.
+      mocks.apiMock.mockResolvedValue({ deals: [makeDeal()], pagination: { totalPages: 1 } });
+
+      await renderFB("/deals", { showValueTotal: true, enableExport: true }, REP_SCOPED);
+      const exportBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Export");
+      expect(exportBtn).toBeTruthy();
+      await act(async () => {
+        exportBtn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      const exportUrls = mocks.apiMock.mock.calls.map((c) => String(c[0]));
+      expect(exportUrls.length).toBeGreaterThan(0);
+      // No export page may carry the (unused) full-set SUM aggregate flag.
+      expect(exportUrls.some((u) => u.includes("includeValueTotal"))).toBe(false);
+
+      clickSpy.mockRestore();
+      (URL as { createObjectURL?: unknown }).createObjectURL = realCreate;
+      (URL as { revokeObjectURL?: unknown }).revokeObjectURL = realRevoke;
+    });
   });
 });
 
