@@ -6,6 +6,7 @@ import {
   formatCurrency,
   handleProjectNumberFirstSetEmail,
   resolveChristyProjectNumberRecipient,
+  resolveFrontendUrl,
   resolveProjectNumberEmailCcRecipient,
 } from "../../../../worker/src/jobs/project-number-email.js";
 import { sendSystemEmailWithMetadata } from "../../../../worker/src/lib/system-email.js";
@@ -128,8 +129,58 @@ describe("project number first-set notification email", () => {
     expect(email.html).toContain("DFW-1-12345-aa");
     expect(email.html).toContain("Avery Rep");
     expect(email.html).toContain("$123,456.78");
+    expect(email.dealUrl).toBe("https://crm.example.com/deals/deal-1?officeId=office-dallas");
     expect(email.html).toContain("https://crm.example.com/deals/deal-1?officeId=office-dallas");
     expect(email.text).toContain("Awarded amount: $123,456.78");
+    expect(email.text).toContain("https://crm.example.com/deals/deal-1?officeId=office-dallas");
+    // branded, Outlook-safe building blocks: hosted PNG logo + the View-Deal button carries the link
+    expect(email.html).toContain('<img src="https://trockcrm.com/trock-logo-email.png"');
+    expect(email.html).toContain('alt="T Rock Construction"');
+    expect(email.html).toContain("View Deal in CRM");
+  });
+
+  it("link domain regression: the production default points at trockcrm.com, never trockconstruction.com", () => {
+    // worker leaves FRONTEND_URL unset, so this default is what every link renders.
+    expect(resolveFrontendUrl({} as NodeJS.ProcessEnv)).toBe("https://trockcrm.com");
+    const email = buildProjectNumberFirstSetEmail({
+      dealId: "acbf7a59-c774-4d35-a9db-40296de8e03e",
+      dealName: "Sample",
+      projectNumber: "DFW-1-99999-zz",
+      salesRepName: "Rep",
+      awardedAmount: null,
+      officeId: "11111111-1111-1111-1111-111111111111",
+      frontendUrl: resolveFrontendUrl({} as NodeJS.ProcessEnv),
+    });
+    expect(email.dealUrl).toBe(
+      "https://trockcrm.com/deals/acbf7a59-c774-4d35-a9db-40296de8e03e?officeId=11111111-1111-1111-1111-111111111111",
+    );
+    expect(email.html).toContain("https://trockcrm.com/deals/acbf7a59-c774-4d35-a9db-40296de8e03e");
+    // the broken domain must never reappear anywhere in the email
+    expect(email.html).not.toContain("trockconstruction.com");
+    expect(email.dealUrl).not.toContain("trockconstruction.com");
+    expect(email.text).not.toContain("trockconstruction.com");
+  });
+
+  it("is Outlook-safe: table layout, inline CSS only, hosted PNG logo with width/height, VML button, no web-only constructs", () => {
+    const email = buildProjectNumberFirstSetEmail({
+      dealId: "d",
+      dealName: "n",
+      projectNumber: "p",
+      salesRepName: "r",
+      awardedAmount: null,
+      officeId: "o",
+      frontendUrl: "https://trockcrm.com",
+    });
+    const h = email.html;
+    expect(h).toContain('role="presentation"'); // table-based layout
+    expect(h).toContain("<v:roundrect"); // VML bulletproof button (Outlook)
+    expect(h).toContain("PixelsPerInch"); // mso image-scaling fix
+    expect(h).toContain('width="220" height="246"'); // logo sized via HTML attributes, not CSS
+    expect(h).not.toMatch(/<style[\s>]/i); // Outlook ignores <style> blocks — everything inline
+    expect(h).not.toMatch(/<link[\s>]/i); // no external CSS
+    expect(h).not.toMatch(/display:\s*(flex|grid)/i); // no flexbox/grid
+    expect(h).not.toMatch(/\.svg|<svg/i); // no SVG (filename or inline element)
+    expect(h).not.toMatch(/background-image/i); // no CSS background-images for critical content
   });
 
   it("formats missing or invalid awarded_amount as not set", () => {

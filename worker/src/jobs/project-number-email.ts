@@ -119,6 +119,8 @@ export async function handleProjectNumberFirstSetEmail(
     logger.warn("[ProjectNumberEmail] Deal not found - skipping", { tenantSchema, dealId, projectNumber });
     return;
   }
+  // The deal's office id (resolved from its tenant schema) is threaded into the deal link so the
+  // email loads the correct tenant even for a recipient whose default office differs.
   const officeResult = await query(
     `SELECT id
        FROM public.offices
@@ -296,7 +298,7 @@ export async function handleDealOpportunityFirstEntryEmail(
       LIMIT 1`,
     [tenantSchema]
   );
-  const office = officeResult.rows[0] as { id: string } | undefined;
+  const office = officeResult.rows[0] as ProjectNumberEmailOffice | undefined;
 
   // The business "project number" IS the deal_number, so the existing email template is reused with
   // deal_number as the displayed number.
@@ -380,8 +382,17 @@ export function resolveProjectNumberEmailCcRecipient(env: NodeJS.ProcessEnv): st
   return isDevFallbackRecipientContext(env) ? DEFAULT_NON_PROD_PROJECT_NUMBER_EMAIL_CC : null;
 }
 
+// Production CRM frontend. trockcrm.com is the public custom domain on the Frontend service
+// (the railway-generated crm.trockconstruction.com is NOT the address operators use). FRONTEND_URL
+// overrides this when set; the worker leaves it unset, so this default is what every link renders.
+export const DEFAULT_FRONTEND_URL = "https://trockcrm.com";
+
+// Hosted in client/public/ → served by the Frontend service at the domain root (e.g. serve dist -s,
+// same as /logo.png and /favicon.png). White-background PNG so it renders predictably on Outlook chrome.
+export const TROCK_LOGO_EMAIL_URL = "https://trockcrm.com/trock-logo-email.png";
+
 export function resolveFrontendUrl(env: NodeJS.ProcessEnv): string {
-  return normalizeText(env.FRONTEND_URL) ?? "https://crm.trockconstruction.com";
+  return normalizeText(env.FRONTEND_URL) ?? DEFAULT_FRONTEND_URL;
 }
 
 export function buildProjectNumberFirstSetEmail(input: {
@@ -393,63 +404,105 @@ export function buildProjectNumberFirstSetEmail(input: {
   officeId?: string | null;
   frontendUrl: string;
 }) {
+  // Deal URL: /deals/{id}?officeId={deal's office}. The officeId carries the deal's tenant so the link
+  // loads the correct office even for a recipient whose default office differs (the detail page threads
+  // it into the x-office-id header). Without it, /deals/{id} queries the recipient's default office and
+  // would 404 a cross-office deal (Codex P1 on #611).
   const officeParam = input.officeId ? `?officeId=${encodeURIComponent(input.officeId)}` : "";
   const dealUrl = `${input.frontendUrl.replace(/\/+$/, "")}/deals/${encodeURIComponent(input.dealId)}${officeParam}`;
   const awardedAmount = formatCurrency(input.awardedAmount);
   const subject = `New project number assigned: ${input.projectNumber} (${input.dealName})`;
+
+  // Data fields (the CRM-deal link is the prominent button below, not a raw-URL row).
   const rows = [
-    ["Deal name", input.dealName],
-    ["Project number", input.projectNumber],
-    ["Sales rep", input.salesRepName],
-    ["Awarded amount", awardedAmount],
-    ["CRM deal", dealUrl],
+    ["Deal name", input.dealName, false],
+    ["Project number", input.projectNumber, true],
+    ["Sales rep", input.salesRepName, false],
+    ["Awarded amount", awardedAmount, false],
   ] as const;
 
   const htmlRows = rows
-    .map(([label, value]) => `
-      <tr>
-        <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#64748b;font-size:14px;width:160px;">${escapeHtml(label)}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-size:14px;">${
-          label === "CRM deal"
-            ? `<a href="${escapeHtml(value)}" style="color:#2563eb;text-decoration:underline;">${escapeHtml(value)}</a>`
-            : escapeHtml(value)
-        }</td>
-      </tr>`)
+    .map(([label, value, emphasize]) => `
+        <tr>
+          <td style="padding:10px 0;border-bottom:1px solid #e2e8f0;color:#64748b;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:18px;vertical-align:top;width:150px;">${escapeHtml(label)}</td>
+          <td style="padding:10px 0;border-bottom:1px solid #e2e8f0;color:#111111;font-family:Arial,Helvetica,sans-serif;font-size:${emphasize ? "16px" : "14px"};line-height:20px;font-weight:${emphasize ? "bold" : "normal"};vertical-align:top;">${escapeHtml(value)}</td>
+        </tr>`)
     .join("");
 
-  const html = `<!DOCTYPE html>
-<html>
+  const safeDealUrl = escapeHtml(dealUrl);
+
+  // Outlook (Windows) renders via the Word engine: table-only layout, fully inline CSS, no flexbox/
+  // grid, no SVG, no web fonts, no CSS background-images for critical content. The logo is a hosted
+  // PNG <img> with HTML width/height attributes; the CTA is a VML "bulletproof button" for Outlook
+  // with an <a> fallback for every other client.
+  const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <title>New Project Number Assigned</title>
+  <!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->
 </head>
-<body style="margin:0;padding:0;background-color:#f4f4f5;font-family:Arial,Helvetica,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f5;padding:24px 0;">
+<body style="margin:0;padding:0;background-color:#f4f4f5;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f4f5;">
     <tr>
-      <td align="center">
-        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+      <td align="center" style="padding:24px 12px;">
+        <!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background-color:#ffffff;border:1px solid #e2e8f0;">
           <tr>
-            <td style="background-color:#1e293b;padding:20px 24px;color:#ffffff;font-size:18px;font-weight:bold;">T Rock CRM</td>
+            <td style="background-color:#CC0000;height:4px;line-height:4px;font-size:4px;mso-line-height-rule:exactly;">&nbsp;</td>
           </tr>
           <tr>
-            <td style="padding:24px;">
-              <h2 style="margin:0 0 12px;color:#1e293b;font-size:18px;">New project number assigned</h2>
-              <p style="margin:0 0 16px;color:#475569;font-size:14px;line-height:1.6;">A project number was added to a deal.</p>
-              <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border-top:1px solid #e2e8f0;">${htmlRows}
+            <td align="center" style="padding:28px 24px 8px 24px;background-color:#ffffff;">
+              <img src="${TROCK_LOGO_EMAIL_URL}" alt="T Rock Construction" width="220" height="246" style="display:block;width:220px;height:246px;border:0;outline:none;text-decoration:none;-ms-interpolation-mode:bicubic;" />
+            </td>
+          </tr>
+          <tr>
+            <td align="center" style="padding:4px 24px 0 24px;">
+              <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:26px;color:#111111;font-weight:bold;">New Project Number Assigned</h1>
+            </td>
+          </tr>
+          <tr>
+            <td align="center" style="padding:6px 24px 16px 24px;">
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#64748b;">A project number was assigned to a deal in the CRM.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0 28px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border-top:1px solid #e2e8f0;">${htmlRows}
               </table>
             </td>
           </tr>
           <tr>
-            <td style="padding:16px 24px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;">This is an automated notification from T Rock CRM. Do not reply to this email.</td>
+            <td align="center" style="padding:24px 24px 28px 24px;">
+              <!--[if mso]>
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="${safeDealUrl}" style="height:44px;v-text-anchor:middle;width:240px;" arcsize="9%" stroke="f" fillcolor="#CC0000">
+                <w:anchorlock/>
+                <center style="color:#ffffff;font-family:Arial,sans-serif;font-size:15px;font-weight:bold;">View Deal in CRM</center>
+              </v:roundrect>
+              <![endif]-->
+              <!--[if !mso]><!-- -->
+              <a href="${safeDealUrl}" style="display:inline-block;background-color:#CC0000;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:240px;border-radius:4px;">View Deal in CRM</a>
+              <!--<![endif]-->
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 24px;border-top:1px solid #e2e8f0;background-color:#fafafa;">
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#94a3b8;">This is an automated notification from T Rock Construction CRM. Please do not reply to this email.</p>
+            </td>
           </tr>
         </table>
+        <!--[if mso]></td></tr></table><![endif]-->
       </td>
     </tr>
   </table>
 </body>
 </html>`;
 
-  const text = rows.map(([label, value]) => `${label}: ${value}`).join("\n");
+  const text =
+    rows.map(([label, value]) => `${label}: ${value}`).join("\n") +
+    `\n\nView deal in the CRM: ${dealUrl}`;
   return { subject, html, text, dealUrl };
 }
 
