@@ -3052,11 +3052,17 @@ export async function setDealContractSignedDate(
       });
     }
 
-    // The Procore create-project handoff fires on an initial sign, but NOT for a deal that is
-    // already in the Won family: ungating lets accounting set/correct the contract-signed date on
-    // an already-Won (often already-in-production) deal, which would otherwise re-enqueue a
-    // duplicate create_project job. Suppress it there; the Contract-stage handoff is unchanged.
-    if (isInitialContractSignedAt && isContractSignedHandoffEnabled() && !isWonFamilyDeal) {
+    // The Procore create-project handoff fires on an initial sign, but is suppressed when the deal
+    // ALREADY has a Procore project (procoreProjectId): ungating lets accounting set/correct the
+    // contract-signed date on an already-in-production deal, which would otherwise re-enqueue a
+    // create_project job. Gating on the actual project link (not the Won stage) means a Won deal
+    // that has NO project yet still gets its only project-creation trigger — the create_project job
+    // is itself idempotent on procoreProjectId, so this is a precise optimization, not the backstop.
+    if (
+      isInitialContractSignedAt &&
+      isContractSignedHandoffEnabled() &&
+      existing.procoreProjectId == null
+    ) {
       const payload = {
         eventName: DOMAIN_EVENTS.DEAL_CONTRACT_SIGNED,
         eventId: randomUUID(),

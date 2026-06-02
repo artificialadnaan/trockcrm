@@ -471,11 +471,12 @@ describe("setDealContractSignedDate", () => {
     expect(tenantDb._state.auditInserts).toHaveLength(0);
   });
 
-  it("writes won_closed_date through on a Won-family deal (contract-signed wins) and suppresses the Procore handoff", async () => {
+  it("writes won_closed_date through on a Won-family deal (contract-signed wins) and suppresses the Procore handoff when a project already exists", async () => {
     // Accounting-correction path: setting the contract-signed date on an ALREADY-WON deal
     // writes it through to the canonical won_closed_date (always-when-present), so every Won
     // report surface re-buckets to the corrected date. The Procore create-project handoff is
-    // SUPPRESSED for an already-Won deal (the project already exists); commission still fires.
+    // suppressed when the deal ALREADY has a Procore project (procoreProjectId set); commission
+    // still fires.
     process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "true";
     vi.mocked(pipelineService.getStageById).mockResolvedValueOnce({
       id: "stage-won",
@@ -490,6 +491,8 @@ describe("setDealContractSignedDate", () => {
       workflowRoute: "normal",
       contractSignedDate: null,
       contractSignedAt: null,
+      wonClosedDate: null,
+      procoreProjectId: 990001, // already linked to a Procore project
       stageEnteredAt: new Date("2026-01-20T08:30:00.000Z"),
     });
 
@@ -504,8 +507,39 @@ describe("setDealContractSignedDate", () => {
     expect(updated?.contractSignedDate).toBe("2026-02-15");
     expect(tenantDb._state.updateCalls).toHaveLength(1);
     expect(tenantDb._state.updateCalls[0]?.wonClosedDate).toBe("2026-02-15");
-    // Already-Won → Procore handoff suppressed even though flag is on and this is an initial sign.
+    // Existing Procore project → create-project handoff suppressed (the idempotent job would
+    // no-op anyway), even though the flag is on and this is an initial sign.
     expect(tenantDb._state.jobInserts).toHaveLength(0);
+  });
+
+  it("fires the Procore create-project handoff for a Won deal with NO existing Procore project", async () => {
+    // A Won deal that reached Won without a Procore project (procoreProjectId null) must still get
+    // its only project-creation trigger on the first contract sign — suppression keys on actual
+    // project linkage, not the Won stage alone.
+    process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "true";
+    vi.mocked(pipelineService.getStageById).mockResolvedValueOnce({
+      id: "stage-won",
+      slug: "won",
+      workflowFamily: "standard_deal",
+      isTerminal: true,
+      displayOrder: 9,
+    } as never);
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      stageId: "stage-won",
+      workflowRoute: "normal",
+      contractSignedDate: null,
+      contractSignedAt: null,
+      wonClosedDate: null,
+      procoreProjectId: null, // no existing project
+      stageEnteredAt: new Date("2026-01-20T08:30:00.000Z"),
+    });
+
+    await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-02-15", "director-1", "office-1");
+
+    // No existing project → the create-project handoff fires (still writes the won date through).
+    expect(tenantDb._state.updateCalls[0]?.wonClosedDate).toBe("2026-02-15");
+    expect(tenantDb._state.jobInserts).toHaveLength(1);
   });
 
   it("reverts won_closed_date to the stage-entry date when the contract date is cleared on a Won-family deal", async () => {

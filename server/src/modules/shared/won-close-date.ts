@@ -30,3 +30,22 @@ export function resolveWonClosedDateWriteThrough(opts: {
   if (contractSigned) return contractSigned;
   return opts.stageDrivenWonDate ?? null;
 }
+
+/**
+ * The deal's EFFECTIVE contract-signed date — matches the app's canonical basis
+ * COALESCE(contract_signed_at::date, contract_signed_date) under a UTC session. Callers feed this
+ * (not the bare contract_signed_date) into resolveWonClosedDateWriteThrough so the write-through
+ * agrees with every reporting/commission read of contract-signed, including rows the reseed path
+ * (scripts/reseed-bid-board-stage-dates.ts) populated via contract_signed_at alone. The UTC date
+ * matches how contract_signed_at is derived (midnight UTC) and the UTC-typed won-date bounds.
+ */
+export function effectiveContractSignedDate(
+  contractSignedDate: string | null | undefined,
+  contractSignedAt: Date | string | null | undefined
+): string | null {
+  if (contractSignedAt) {
+    const parsed = contractSignedAt instanceof Date ? contractSignedAt : new Date(contractSignedAt);
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+  }
+  return contractSignedDate || null;
+}

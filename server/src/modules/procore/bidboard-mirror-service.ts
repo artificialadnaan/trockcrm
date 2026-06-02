@@ -10,7 +10,10 @@ import {
   VALID_PROPOSAL_STATUSES,
   workflowFamilyForRoute,
 } from "../deals/service.js";
-import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
+import {
+  effectiveContractSignedDate,
+  resolveWonClosedDateWriteThrough,
+} from "../shared/won-close-date.js";
 
 export const BID_BOARD_MIRROR_OVERRIDE_REASON = "Bid Board mirror sync";
 const VALID_ESTIMATING_SUBSTAGE_SET = new Set<string>(VALID_ESTIMATING_SUBSTAGES);
@@ -107,6 +110,7 @@ type MirrorableDeal = {
   actualCloseDate: string | null;
   wonClosedDate?: string | null;
   contractSignedDate?: string | null;
+  contractSignedAt?: Date | string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
   lostCompetitor: string | null;
@@ -465,7 +469,10 @@ export function buildBidBoardMirrorUpdate(input: {
     // won date; else the existing fresh-stamp / preserve logic stands. Every Won read surface
     // inherits this through the stored won_closed_date column.
     updates.wonClosedDate = resolveWonClosedDateWriteThrough({
-      contractSignedDate: input.deal.contractSignedDate,
+      contractSignedDate: effectiveContractSignedDate(
+        input.deal.contractSignedDate,
+        input.deal.contractSignedAt
+      ),
       stageDrivenWonDate,
     });
   }

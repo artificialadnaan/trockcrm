@@ -1,5 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { resolveWonClosedDateWriteThrough } from "../../../src/modules/shared/won-close-date.js";
+import {
+  effectiveContractSignedDate,
+  resolveWonClosedDateWriteThrough,
+} from "../../../src/modules/shared/won-close-date.js";
+
+/**
+ * The "effective" contract-signed date matches the app's canonical basis
+ * COALESCE(contract_signed_at::date, contract_signed_date) under a UTC session — so the
+ * write-through agrees with how reports/commissions read contract-signed, including rows the
+ * reseed path set via contract_signed_at alone (contract_signed_date null).
+ */
+describe("effectiveContractSignedDate", () => {
+  it("prefers contract_signed_at::date (UTC) when present", () => {
+    expect(
+      effectiveContractSignedDate("2026-02-20", new Date("2026-02-15T00:00:00.000Z"))
+    ).toBe("2026-02-15");
+  });
+
+  it("falls back to contract_signed_date when contract_signed_at is null", () => {
+    expect(effectiveContractSignedDate("2026-02-20", null)).toBe("2026-02-20");
+  });
+
+  it("uses contract_signed_at alone when contract_signed_date is null (reseed-only rows)", () => {
+    expect(
+      effectiveContractSignedDate(null, new Date("2026-03-09T18:30:00.000Z"))
+    ).toBe("2026-03-09");
+  });
+
+  it("returns null when both are absent", () => {
+    expect(effectiveContractSignedDate(null, null)).toBeNull();
+  });
+});
 
 /**
  * Unit proof for the WRITE-TIME contract-signed override rule (always-when-present).

@@ -9,7 +9,10 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { getHoldStateAtStageEntry, isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
-import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
+import {
+  effectiveContractSignedDate,
+  resolveWonClosedDateWriteThrough,
+} from "../shared/won-close-date.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { DOMAIN_EVENTS } from "../../events/types.js";
 import {
@@ -370,7 +373,10 @@ export async function changeDealStage(
     // the stage-driven date (preserved-when-already-Won / today-on-fresh-entry) stands. Every
     // Won read surface inherits this via the stored won_closed_date column.
     dealUpdates.wonClosedDate = resolveWonClosedDateWriteThrough({
-      contractSignedDate: currentDeal[0].contractSignedDate,
+      contractSignedDate: effectiveContractSignedDate(
+        currentDeal[0].contractSignedDate,
+        currentDeal[0].contractSignedAt
+      ),
       stageDrivenWonDate,
     });
   }
