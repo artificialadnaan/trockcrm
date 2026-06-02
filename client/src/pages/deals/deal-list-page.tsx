@@ -188,6 +188,22 @@ function periodToTerminalDateFilter(period: DashboardPeriod, now = new Date()): 
   return { preset: "all" };
 }
 
+// The shared period as a terminal-STAGE-page window. Stage drill-downs read won_since/until & lost_since/until
+// and have NO won_period sibling, so the WON stage page must be windowed by the period directly — the #566
+// today->all dodge is BOARD-specific (it dodges a won_until-vs-won_period_to clamp the stage page can't hit).
+// Mirrors the Lost windowing in resolveDrilldownTerminalDateFilters, so both terminal stage pages match the
+// visibly period-windowed board columns.
+function periodToStageWindow(period: DashboardPeriodSelection, now = new Date()): TerminalDateFilter {
+  if (!period) return { preset: "all" };
+  if (period === "today") {
+    const range = getDashboardPeriodDateRange(period, now);
+    return range?.from
+      ? { preset: "custom", customStart: range.from, customEnd: range.to }
+      : { preset: "all" };
+  }
+  return periodToTerminalDateFilter(period, now);
+}
+
 // Option A (board-wide date): the /deals board carries ONE shared date — the header ?period. The Won/Lost
 // terminal columns mirror it and no longer own independent per-column overrides, so the board's terminal
 // windows derive PURELY from ?period. Any stale won_*/lost_* still in the URL (an old bookmark) is collapsed
@@ -1127,8 +1143,17 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     setSearchParams(next);
   };
 
+  // Stage drill-downs inherit the single shared board date. terminalDateFilters.won is {all} on non-Won
+  // views (the board windows it via won_period, which the stage page lacks), so window BOTH terminal stage
+  // pages by the period directly — otherwise the visibly period-windowed Won column would open an all-time
+  // stage page (Codex P2).
+  const stageNavTerminalFilters = useMemo<Record<TerminalOutcome, TerminalDateFilter>>(() => {
+    const periodWindow = periodToStageWindow(selectedPeriod);
+    return { won: periodWindow, lost: periodWindow };
+  }, [selectedPeriod]);
+
   const openStage = (column: DealBoardColumn) => {
-    navigate(buildDealStageNavigationPath(column, scope, terminalDateFilters, searchParams));
+    navigate(buildDealStageNavigationPath(column, scope, stageNavTerminalFilters, searchParams));
   };
 
   useEffect(() => {

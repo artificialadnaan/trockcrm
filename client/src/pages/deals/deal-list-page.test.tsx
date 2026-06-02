@@ -1015,6 +1015,56 @@ describe("DealListPage", () => {
       }
       await view.cleanup();
     });
+
+    it("opens the Won stage drill-down windowed by the shared period, not all-time — the visibly-QTD column drills into QTD (Codex P2)", async () => {
+      const view = await renderPageDom("/deals?scope=all&period=qtd", "director");
+      const wonStageButton = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>("button")
+      ).find((button) => button.textContent?.trim() === "Won");
+      expect(wonStageButton).toBeTruthy();
+
+      await act(async () => {
+        wonStageButton?.click();
+      });
+
+      const calls = mocks.buildDealStageWorkspacePathMock.mock.calls;
+      const lastCall = calls[calls.length - 1]?.[0] as {
+        stageSlug?: string;
+        filters?: Record<string, { preset?: string }>;
+      };
+      expect(lastCall?.stageSlug).toBe("won");
+      // The Won stage page has no won_period sibling, so it must be windowed by the period directly —
+      // NOT all-time, which would contradict the visibly QTD-windowed Won column.
+      expect(lastCall?.filters?.won).toEqual({ preset: "qtd" });
+      expect(lastCall?.filters?.lost).toEqual({ preset: "qtd" });
+
+      await view.cleanup();
+    });
+
+    it("opens the Won stage drill-down for ?period=today with the real today window (no #566 board-only all-time dodge on the stage page)", async () => {
+      const view = await renderPageDom("/deals?scope=all&period=today", "director");
+      const wonStageButton = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>("button")
+      ).find((button) => button.textContent?.trim() === "Won");
+
+      await act(async () => {
+        wonStageButton?.click();
+      });
+
+      const calls = mocks.buildDealStageWorkspacePathMock.mock.calls;
+      const lastCall = calls[calls.length - 1]?.[0] as {
+        filters?: Record<string, unknown>;
+      };
+      // ?period=today routes the BOARD's Won column to {all} (the #566 won_period clamp dodge), but the
+      // stage page has no won_period sibling, so it gets the REAL today window — not all-time.
+      expect(lastCall?.filters?.won).toEqual({
+        preset: "custom",
+        customStart: "2026-05-08",
+        customEnd: "2026-05-08",
+      });
+
+      await view.cleanup();
+    });
   });
 
   describe("D-7: Won drill-down chip inherits the page period (no contradictory all_time+period)", () => {
