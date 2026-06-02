@@ -31,6 +31,7 @@ import {
   DEAL_OPPORTUNITY_FIRST_ENTRY_JOB,
   PROJECT_NUMBER_FIRST_SET_JOB,
 } from "./project-number-email.js";
+import { handleRfpRejectedEmail, RFP_REJECTED_JOB } from "./rfp-rejection-email.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -122,6 +123,7 @@ export function registerAllJobs() {
   });
   registerJobHandler(PROJECT_NUMBER_FIRST_SET_JOB, handleProjectNumberFirstSetEmail);
   registerJobHandler(DEAL_OPPORTUNITY_FIRST_ENTRY_JOB, handleDealOpportunityFirstEntryEmail);
+  registerJobHandler(RFP_REJECTED_JOB, handleRfpRejectedEmail);
 
   registerJobHandler("reports_execution", async () => {
     await runReportsExecutionTick();
