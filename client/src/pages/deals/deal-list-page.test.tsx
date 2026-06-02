@@ -883,123 +883,13 @@ describe("DealListPage", () => {
     });
   });
 
-  it("requests the selected terminal date filters for the deals board", () => {
+  it("collapses standalone won_*/lost_* params when there is no shared period — the board reads ?period, not per-column overrides (Option A)", () => {
     renderPage("/deals?scope=all&won_preset=30&lost_preset=60");
 
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
-      won: { preset: "30" },
-      lost: { preset: "60" },
+      won: { preset: "all" },
+      lost: { preset: "all" },
     }, 1000, null, undefined);
-  });
-
-  it("does not refetch or update URL params while editing a custom terminal date until Enter commits it", async () => {
-    const view = await renderPageDomWithLocation("/deals?scope=all&won_since=2026-04-01");
-    const initialBoardCalls = mocks.useDealBoardMock.mock.calls.length;
-
-    await act(async () => {
-      view.container.querySelector<HTMLButtonElement>('button[aria-label="Won date filter"]')?.click();
-    });
-
-    const startInput = document.body.querySelector<HTMLInputElement>('input[aria-label="Won start date"]');
-    expect(startInput?.value).toBe("2026-04-01");
-
-    await act(async () => {
-      if (!startInput) return;
-      changeInputValue(startInput, "2026-04-15");
-    });
-
-    expect(mocks.useDealBoardMock.mock.calls).toHaveLength(initialBoardCalls);
-    expect(lastSearch(view.searches)).toBe("?scope=all&won_since=2026-04-01");
-
-    await act(async () => {
-      startInput?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    });
-
-    expect(mocks.useDealBoardMock.mock.calls.length).toBeGreaterThan(initialBoardCalls);
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
-      "all",
-      true,
-      {
-        won: { preset: "custom", customStart: "2026-04-15" },
-        lost: { preset: "all" },
-      },
-      1000,
-      null,
-      undefined
-    );
-    expect(lastSearch(view.searches)).toContain("won_since=2026-04-15");
-
-    await view.cleanup();
-  });
-
-  it("does not refetch or update URL params while editing a custom lost date until Apply commits it", async () => {
-    const view = await renderPageDomWithLocation("/deals?scope=all&lost_since=2026-03-01");
-    const initialBoardCalls = mocks.useDealBoardMock.mock.calls.length;
-
-    await act(async () => {
-      view.container.querySelector<HTMLButtonElement>('button[aria-label="Lost date filter"]')?.click();
-    });
-
-    const startInput = document.body.querySelector<HTMLInputElement>('input[aria-label="Lost start date"]');
-    expect(startInput?.value).toBe("2026-03-01");
-
-    await act(async () => {
-      if (!startInput) return;
-      changeInputValue(startInput, "2026-03-12");
-    });
-
-    expect(mocks.useDealBoardMock.mock.calls).toHaveLength(initialBoardCalls);
-    expect(lastSearch(view.searches)).toBe("?scope=all&lost_since=2026-03-01");
-
-    await act(async () => {
-      document.body.querySelector<HTMLButtonElement>('button[aria-label="Apply Lost custom date range"]')?.click();
-    });
-
-    expect(mocks.useDealBoardMock.mock.calls.length).toBeGreaterThan(initialBoardCalls);
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
-      "all",
-      true,
-      {
-        won: { preset: "all" },
-        lost: { preset: "custom", customStart: "2026-03-12" },
-      },
-      1000,
-      null,
-      undefined
-    );
-    expect(lastSearch(view.searches)).toContain("lost_since=2026-03-12");
-
-    await view.cleanup();
-  });
-
-  it("commits a terminal preset immediately to URL params and the board request", async () => {
-    const view = await renderPageDomWithLocation("/deals?scope=all&won_since=2026-04-01");
-    const initialBoardCalls = mocks.useDealBoardMock.mock.calls.length;
-
-    await act(async () => {
-      view.container.querySelector<HTMLButtonElement>('button[aria-label="Won date filter"]')?.click();
-    });
-
-    await act(async () => {
-      document.body.querySelector<HTMLButtonElement>('button[aria-label="Show Won deals from the last 7 days"]')?.click();
-    });
-
-    expect(mocks.useDealBoardMock.mock.calls.length).toBeGreaterThan(initialBoardCalls);
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
-      "all",
-      true,
-      {
-        won: { preset: "7" },
-        lost: { preset: "all" },
-      },
-      1000,
-      null,
-      undefined
-    );
-    expect(lastSearch(view.searches)).toContain("won_preset=7");
-    expect(lastSearch(view.searches)).not.toContain("won_since=2026-04-01");
-
-    await view.cleanup();
   });
 
   it("strips stale estimate_sent_* params from the URL on load — the removed control must not invisibly filter the board or a stage drill-down (Codex #600 P2)", async () => {
@@ -1022,9 +912,163 @@ describe("DealListPage", () => {
     renderPage("/deals?scope=all&period=last_month&won_preset=30", "director");
 
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
-      won: { preset: "30" }, // explicit Won filter wins
+      won: { preset: "all" }, // Option A: the stale won_preset is collapsed; the board-wide won_period (arg5) windows Won
       lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month
     }, 1000, { from: "2026-04-01", to: "2026-04-30" }, undefined);
+  });
+
+  describe("Option A: one board-wide date — Won & Lost columns mirror the shared ?period", () => {
+    it("renders period-vocabulary date controls on the Won and Lost columns, both showing the shared period", async () => {
+      const view = await renderPageDom("/deals?scope=all&period=qtd", "director");
+      const won = view.container.querySelector<HTMLButtonElement>('button[aria-label="Won date range"]');
+      const lost = view.container.querySelector<HTMLButtonElement>('button[aria-label="Lost date range"]');
+      expect(won?.textContent).toContain("QTD");
+      expect(lost?.textContent).toContain("QTD");
+      // The old per-column rich-vocab control (which owned the divergent won_*/lost_* override) is gone.
+      expect(view.container.querySelector('button[aria-label="Won date filter"]')).toBeNull();
+      await view.cleanup();
+    });
+
+    it("changing the Won column date writes the shared ?period (never won_*) and mirrors onto the top control + the Lost column", async () => {
+      const view = await renderPageDomWithLocation("/deals?scope=all&period=qtd", "director");
+      await act(async () => {
+        const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Won date range"]');
+        trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        trigger?.click();
+      });
+      await act(async () => {
+        const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+          (el) => el.textContent?.trim() === "MTD"
+        );
+        option?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+        option?.click();
+      });
+      expect(lastSearch(view.searches)).toContain("period=mtd");
+      expect(lastSearch(view.searches)).not.toContain("won_");
+      expect(lastSearch(view.searches)).not.toContain("lost_");
+      // The top control and the Lost column reflect the same shared period.
+      expect(view.container.querySelector('button[aria-label="Period"]')?.textContent).toContain("MTD");
+      expect(view.container.querySelector('button[aria-label="Lost date range"]')?.textContent).toContain("MTD");
+      await view.cleanup();
+    });
+
+    it("changing the Lost column date sets the SAME shared period — Won and Lost can never diverge", async () => {
+      const view = await renderPageDomWithLocation("/deals?scope=all&period=qtd", "director");
+      await act(async () => {
+        const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Lost date range"]');
+        trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        trigger?.click();
+      });
+      await act(async () => {
+        const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+          (el) => el.textContent?.trim() === "YTD"
+        );
+        option?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+        option?.click();
+      });
+      expect(lastSearch(view.searches)).toContain("period=ytd");
+      expect(view.container.querySelector<HTMLButtonElement>('button[aria-label="Won date range"]')?.textContent).toContain("YTD");
+      expect(view.container.querySelector<HTMLButtonElement>('button[aria-label="Lost date range"]')?.textContent).toContain("YTD");
+      await view.cleanup();
+    });
+
+    it("collapses stale per-column won_*/lost_* params — the board reads the single shared period only", () => {
+      renderPage("/deals?scope=all&period=qtd&won_preset=30&lost_preset=60", "director");
+      expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+        "all",
+        true,
+        { won: { preset: "all" }, lost: { preset: "qtd" } },
+        1000,
+        expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
+        undefined
+      );
+    });
+
+    it("strips stale won_*/lost_* params from the URL on load so they can't leak into a stage drill-down", async () => {
+      const view = await renderPageDomWithLocation(
+        "/deals?scope=all&period=qtd&won_preset=30&lost_since=2026-03-01",
+        "director"
+      );
+      expect(lastSearch(view.searches)).not.toContain("won_");
+      expect(lastSearch(view.searches)).not.toContain("lost_");
+      expect(lastSearch(view.searches)).toContain("period=qtd");
+      await view.cleanup();
+    });
+
+    it("a single column-date change keeps the board lockstep — every period-windowed fetch also windows Lost (#600 P2)", async () => {
+      const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+      await act(async () => {
+        const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Lost date range"]');
+        trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        trigger?.click();
+      });
+      await act(async () => {
+        const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+          (el) => el.textContent?.trim() === "Last month"
+        );
+        option?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+        option?.click();
+      });
+      expect(lastSearch(view.searches)).toContain("period=last_month");
+      expect(lastSearch(view.searches)).not.toContain("won_");
+      expect(lastSearch(view.searches)).not.toContain("lost_");
+      const callsWithPeriod = mocks.useDealBoardMock.mock.calls.filter((call) => call[4] != null);
+      expect(callsWithPeriod.length).toBeGreaterThan(0);
+      for (const call of callsWithPeriod) {
+        expect((call[2] as { lost: unknown }).lost).not.toEqual({ preset: "all" });
+      }
+      await view.cleanup();
+    });
+
+    it("opens the Won stage drill-down windowed by the shared period, not all-time — the visibly-QTD column drills into QTD (Codex P2)", async () => {
+      const view = await renderPageDom("/deals?scope=all&period=qtd", "director");
+      const wonStageButton = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>("button")
+      ).find((button) => button.textContent?.trim() === "Won");
+      expect(wonStageButton).toBeTruthy();
+
+      await act(async () => {
+        wonStageButton?.click();
+      });
+
+      const calls = mocks.buildDealStageWorkspacePathMock.mock.calls;
+      const lastCall = calls[calls.length - 1]?.[0] as {
+        stageSlug?: string;
+        filters?: Record<string, { preset?: string }>;
+      };
+      expect(lastCall?.stageSlug).toBe("won");
+      // The Won stage page has no won_period sibling, so it must be windowed by the period directly —
+      // NOT all-time, which would contradict the visibly QTD-windowed Won column.
+      expect(lastCall?.filters?.won).toEqual({ preset: "qtd" });
+      expect(lastCall?.filters?.lost).toEqual({ preset: "qtd" });
+
+      await view.cleanup();
+    });
+
+    it("opens the Won stage drill-down for ?period=today with the real today window (no #566 board-only all-time dodge on the stage page)", async () => {
+      const view = await renderPageDom("/deals?scope=all&period=today", "director");
+      const wonStageButton = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>("button")
+      ).find((button) => button.textContent?.trim() === "Won");
+
+      await act(async () => {
+        wonStageButton?.click();
+      });
+
+      const calls = mocks.buildDealStageWorkspacePathMock.mock.calls;
+      const lastCall = calls[calls.length - 1]?.[0] as {
+        filters?: Record<string, unknown>;
+      };
+      // ?period=today routes the BOARD's Won column to {all} (the #566 won_period clamp dodge), but the
+      // stage page has no won_period sibling, so it gets the REAL today window — not all-time.
+      expect(lastCall?.filters?.won).toEqual({
+        preset: "custom",
+        customStart: "2026-05-08",
+        customEnd: "2026-05-08",
+      });
+
+      await view.cleanup();
+    });
   });
 
   describe("D-7: Won drill-down chip inherits the page period (no contradictory all_time+period)", () => {
@@ -1037,13 +1081,13 @@ describe("DealListPage", () => {
       expect(resolved.lost).toEqual({ preset: "qtd" }); // Lost also seeded from the period (Codex #600 P2)
     });
 
-    it("respects an explicit Won filter in the URL over the period (the user's choice wins)", () => {
+    it("collapses an explicit won_* override — the shared period wins (Option A; per-column overrides removed)", () => {
       expect(
         resolveDrilldownTerminalDateFilters(new URLSearchParams("filter=won&period=qtd&won_preset=30&scope=all")).won
-      ).toEqual({ preset: "30" });
+      ).toEqual({ preset: "qtd" });
       expect(
         resolveDrilldownTerminalDateFilters(new URLSearchParams("filter=won&period=qtd&won_all_time=true&scope=all")).won
-      ).toEqual({ preset: "all" });
+      ).toEqual({ preset: "qtd" });
     });
 
     it("maps last_* periods to a custom window so the chip never reads the false 'All time'", () => {
@@ -1348,11 +1392,12 @@ describe("DealListPage", () => {
     expect(buildDealsPageKpiDrilldownPath("won", "team", "last_month")).toBe(
       "/deals?filter=won&scope=team&period=last_month"
     );
+    // Option A: a stale per-column won_* override is NOT forwarded — the Won drill-down inherits the shared period.
     expect(
       buildDealsPageKpiDrilldownPath("won", "team", "last_month", {
         wonQueryParams: new URLSearchParams("won_preset=30&won_since=2026-04-01&won_until=2026-04-30"),
       })
-    ).toBe("/deals?filter=won&scope=team&period=last_month&won_preset=30&won_since=2026-04-01&won_until=2026-04-30");
+    ).toBe("/deals?filter=won&scope=team&period=last_month");
     expect(
       buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
         queryParams: new URLSearchParams("assignedRepId=rep-1&period=mtd&search=roof"),
@@ -1480,12 +1525,12 @@ describe("DealListPage", () => {
     expect(renderPage("/deals?scope=all", "director")).toContain("View won deals");
   });
 
-  it("preserves won terminal query params on the Won KPI drilldown link", () => {
+  it("points the Won KPI drilldown link at the shared period only — stale won_* overrides are collapsed (Option A)", () => {
     const html = renderPage("/deals?scope=all&period=last_month&won_preset=30&won_since=2026-04-01&won_until=2026-04-30", "director");
 
-    expect(html).toContain(
-      'href="/deals?filter=won&amp;scope=all&amp;period=last_month&amp;won_preset=30&amp;won_since=2026-04-01&amp;won_until=2026-04-30"'
-    );
+    // The Won KPI card links to the period-windowed Won drill-down; the per-column won_* override is not forwarded.
+    expect(html).toContain('href="/deals?filter=won&amp;scope=all&amp;period=last_month"');
+    expect(html).not.toContain("won_preset=30");
   });
 
   it("renders the Won KPI from the canonical backend column when the request preserves the page period", () => {
@@ -1651,7 +1696,8 @@ describe("DealListPage", () => {
       "all",
       true,
       {
-        won: { preset: "30" },
+        // Option A: the stale won_preset is collapsed; the Won drill-down column inherits the period window.
+        won: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" },
         lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month (Codex #600 P2)
       },
       1000,
@@ -1662,8 +1708,9 @@ describe("DealListPage", () => {
       expect.objectContaining({
         baseFilters: expect.objectContaining({
           // Won drill-down now gates on the true HubSpot close-won date (§6.1),
-          // not contract_signed (which is reserved for the commissions surface).
-          wonClosedFrom: "2026-04-08",
+          // not contract_signed (which is reserved for the commissions surface). The window is the
+          // period (last_month) — the per-column override no longer narrows it (Option A).
+          wonClosedFrom: "2026-04-01",
           wonClosedTo: "2026-04-30",
         }),
       })
@@ -1748,12 +1795,14 @@ describe("DealListPage", () => {
     expect(props.baseFilters?.excludeOnHold).toBe(true);
   });
 
-  it("uses the Won terminal filter caption ahead of the page period and falls back correctly", () => {
-    const htmlWithTerminalFilter = renderPage("/deals?scope=all&period=last_month&won_preset=30", "director");
+  it("captions the Won KPI from the shared period — a stale per-column override is collapsed (Option A)", () => {
+    const htmlWithStaleOverride = renderPage("/deals?scope=all&period=last_month&won_preset=30", "director");
     const htmlWithPeriodOnly = renderPage("/deals?scope=all&period=last_month", "director");
     const htmlAllTime = renderPage("/deals?scope=all", "director");
 
-    expect(htmlWithTerminalFilter).toContain("Last 30 days");
+    // The stale won_preset is collapsed — the caption follows the period, identical to the period-only URL.
+    expect(htmlWithStaleOverride).toContain("Last month");
+    expect(htmlWithStaleOverride).not.toContain("Last 30 days");
     expect(htmlWithPeriodOnly).toContain("Last month");
     expect(htmlAllTime).toContain("All time");
   });
@@ -2379,18 +2428,22 @@ describe("DealListPage", () => {
     expect(html).toContain('aria-pressed="false">All');
   });
 
-  it("adds terminal date filter controls to Won and Lost on /deals", () => {
-    const html = renderPage("/deals?scope=all&won_preset=30&lost_preset=60");
+  it("renders the shared period date control on both terminal columns, not the old per-column override (Option A)", async () => {
+    const view = await renderPageDom("/deals?scope=all&period=qtd", "director");
 
-    expect(html).not.toContain("Coverage map");
-    expect(html).not.toContain("DFW map");
-    expect(html).toContain("Won<span class=\"ml-1 text-slate-400\">· Last 30d");
-    expect(html).toContain("Lost<span class=\"ml-1 text-slate-400\">· Last 60d");
-    expect(html).toContain("Last 30d");
-    expect(html).toContain("Last 60d");
+    expect(view.container.innerHTML).not.toContain("Coverage map");
+    expect(view.container.innerHTML).not.toContain("DFW map");
+    // Period-vocabulary controls on both terminal columns, bound to the shared ?period.
+    expect(view.container.querySelector('button[aria-label="Won date range"]')).not.toBeNull();
+    expect(view.container.querySelector('button[aria-label="Lost date range"]')).not.toBeNull();
+    // The old per-column rich-vocab override control (with its own won_*/lost_* params) is gone.
+    expect(view.container.querySelector('button[aria-label="Won date filter"]')).toBeNull();
+    expect(view.container.querySelector('button[aria-label="Lost date filter"]')).toBeNull();
+
+    await view.cleanup();
   });
 
-  it("shows a selected-range empty state for empty terminal columns", () => {
+  it("shows a selected-range empty state for empty terminal columns when a board date is active", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: { columns: [], terminalStages: [] },
       loading: false,
@@ -2398,7 +2451,7 @@ describe("DealListPage", () => {
       refetch: vi.fn(),
     });
 
-    const html = renderPage("/deals?scope=all&won_preset=30&lost_preset=60");
+    const html = renderPage("/deals?scope=all&period=qtd");
 
     expect(html).toContain("No deals in selected range");
   });
