@@ -1,0 +1,77 @@
+-- deal-opportunity-first-entry-backfill-report.sql
+--
+-- READ-ONLY accounting backfill: the all-time list of CRM-originated deals that entered the
+-- Opportunity stage since 2026-05-13, with their deal_number (the operative business "project
+-- number"). This RE-POINTS the earlier "project number backfill report" off the old
+-- `project_number IS NOT NULL` predicate — which was a no-op-ish filter on an operator-assigned column
+-- that is almost never set — and onto the real signal the live notification now uses:
+--   CRM-origin (created_by_user_id OR source_lead_id) + entered Opportunity + created since May 13.
+--
+-- The live trigger's origin guard is kept IDENTICAL to the WHERE clause here, so the one-time report
+-- and the ongoing emails describe the same population. `deal_number` is the operative number (it is
+-- NOT NULL + UNIQUE on every deal); `project_number` is surfaced only as an optional legacy display
+-- column. Run per CRM tenant schema (office_dallas + office_atlanta are the live tenants;
+-- office_pwauditoffice is non-prod and is intentionally excluded).
+--
+-- Adnaan runs this against production; nothing here writes.
+
+-- Single-tenant form (swap office_dallas -> office_atlanta to run the other tenant):
+WITH opportunity_stage AS (
+  SELECT id FROM public.pipeline_stage_config WHERE slug = 'opportunity'
+)
+SELECT
+  d.deal_number                          AS project_number,        -- operative "project number"
+  d.name                                 AS deal_name,
+  d.created_at                           AS created_at,
+  CASE
+    WHEN d.created_by_user_id IS NOT NULL THEN 'service_or_direct'
+    WHEN d.source_lead_id     IS NOT NULL THEN 'lead_conversion'
+  END                                    AS crm_origin_route,
+  d.project_number                       AS legacy_project_number  -- optional display only (usually NULL)
+FROM office_dallas.deals d
+WHERE
+  -- May-13 cutoff anchored to America/Chicago (created_at is timestamptz; a bare DATE would be 5h early)
+  d.created_at >= (DATE '2026-05-13' AT TIME ZONE 'America/Chicago')
+  -- CRM-genuine origin — BYTE-IDENTICAL to the live trigger's origin guard (migration 0147)
+  AND (d.created_by_user_id IS NOT NULL OR d.source_lead_id IS NOT NULL)
+  -- entered the Opportunity stage: born there (the two genuine paths), or moved there at some point
+  AND (
+    d.stage_id = (SELECT id FROM opportunity_stage)
+    OR EXISTS (
+      SELECT 1
+      FROM office_dallas.deal_stage_history h
+      WHERE h.deal_id = d.id
+        AND h.to_stage_id = (SELECT id FROM opportunity_stage)
+    )
+  )
+ORDER BY d.created_at;
+
+-- Cross-tenant form (one result set over both live CRM offices). The opportunity stage id is global
+-- (public.pipeline_stage_config.slug is unique), so it resolves once and applies to every tenant.
+--
+-- WITH opportunity_stage AS (
+--   SELECT id FROM public.pipeline_stage_config WHERE slug = 'opportunity'
+-- )
+-- SELECT 'office_dallas' AS tenant_schema, d.deal_number AS project_number, d.name AS deal_name,
+--        d.created_at,
+--        CASE WHEN d.created_by_user_id IS NOT NULL THEN 'service_or_direct'
+--             WHEN d.source_lead_id IS NOT NULL THEN 'lead_conversion' END AS crm_origin_route,
+--        d.project_number AS legacy_project_number
+--   FROM office_dallas.deals d
+--  WHERE d.created_at >= (DATE '2026-05-13' AT TIME ZONE 'America/Chicago')
+--    AND (d.created_by_user_id IS NOT NULL OR d.source_lead_id IS NOT NULL)
+--    AND (d.stage_id = (SELECT id FROM opportunity_stage)
+--         OR EXISTS (SELECT 1 FROM office_dallas.deal_stage_history h
+--                     WHERE h.deal_id = d.id AND h.to_stage_id = (SELECT id FROM opportunity_stage)))
+-- UNION ALL
+-- SELECT 'office_atlanta' AS tenant_schema, d.deal_number, d.name, d.created_at,
+--        CASE WHEN d.created_by_user_id IS NOT NULL THEN 'service_or_direct'
+--             WHEN d.source_lead_id IS NOT NULL THEN 'lead_conversion' END,
+--        d.project_number
+--   FROM office_atlanta.deals d
+--  WHERE d.created_at >= (DATE '2026-05-13' AT TIME ZONE 'America/Chicago')
+--    AND (d.created_by_user_id IS NOT NULL OR d.source_lead_id IS NOT NULL)
+--    AND (d.stage_id = (SELECT id FROM opportunity_stage)
+--         OR EXISTS (SELECT 1 FROM office_atlanta.deal_stage_history h
+--                     WHERE h.deal_id = d.id AND h.to_stage_id = (SELECT id FROM opportunity_stage)))
+-- ORDER BY created_at;
