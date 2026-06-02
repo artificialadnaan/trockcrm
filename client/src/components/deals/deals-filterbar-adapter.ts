@@ -227,32 +227,40 @@ export function applyBoardVisibilityDefaults(
   board: BoardVisibility
 ): Partial<DealFilters> {
   const next: Partial<DealFilters> = { ...filters };
+  const explicit = Array.isArray(next.stageIds) ? next.stageIds : [];
+  // Expand each explicit canonical pick to its full sibling workflow-family, so a single canonical id
+  // (the one each stage OPTION carries) queries every family stage and never under-shows sibling-family
+  // deals — matching the legacy slug filter (getSelectedDealStageIds returned EVERY id for the picked
+  // slug) and the board column's membership (Codex #589 P1). The families are keyed by the canonical
+  // slug, so cross-route siblings (contract + service_contract sharing a slug; Won/Lost aliases) resolve
+  // together. Union ALL families that contain the id (a stage can land in two columns) so unioning never
+  // under-shows. Computed BEFORE the board-scope intersect so it ALSO applies to an UNSCOPED mount (the
+  // rep drill-down passes stageIdFamilies but no defaultStageIds). Opt-in via stageIdFamilies; unknown
+  // ids and family-less mounts pass through unchanged.
+  const expanded = board.stageIdFamilies
+    ? [
+        ...new Set(
+          explicit.flatMap((id) => {
+            const matches = board.stageIdFamilies!.filter((family) => family.includes(id));
+            return matches.length > 0 ? matches.flat() : [id];
+          })
+        ),
+      ]
+    : explicit;
   const visible = board.defaultStageIds;
   if (visible && visible.length > 0) {
-    // Intersect the user's explicit stage picks with the board's currently-visible columns, so a stage
+    // Intersect the user's (expanded) stage picks with the board's currently-visible columns, so a stage
     // the board has hidden (e.g. a DD selection left in the URL after Show-DD is toggled off) cannot
     // linger in the list query (Q2). With no pick — or once every pick is hidden — mirror the board's
     // full visible column set rather than querying nothing or a hidden stage.
-    const explicit = Array.isArray(next.stageIds) ? next.stageIds : [];
-    // Expand each explicit canonical pick to its full sibling workflow-family before intersecting, so a
-    // single canonical id (all the board options carry) queries every family stage and never under-shows
-    // sibling-family deals — matching the board column's membership (Codex #589 P1). The families are keyed
-    // by the board's CANONICAL slug (normalizeDealStageSlug), so cross-slug aliases (contract_signed +
-    // service_contract_signed → contract; Won/Lost aliases) resolve together. Union ALL families that
-    // contain the id — the route-dependent estimating stage lands in two columns, so unioning never
-    // under-shows. Opt-in via stageIdFamilies; unknown ids and family-less mounts pass through unchanged.
-    const expanded = board.stageIdFamilies
-      ? [
-          ...new Set(
-            explicit.flatMap((id) => {
-              const matches = board.stageIdFamilies!.filter((family) => family.includes(id));
-              return matches.length > 0 ? matches.flat() : [id];
-            })
-          ),
-        ]
-      : explicit;
     const intersected = expanded.filter((id) => visible.includes(id));
     next.stageIds = intersected.length > 0 ? intersected : visible;
+  } else if (board.stageIdFamilies && explicit.length > 0) {
+    // Unscoped mount (no board columns — the rep drill-down): apply the family-expanded explicit pick
+    // directly so a grouped-slug pick includes all sibling ids like the legacy list, WITHOUT restricting
+    // the no-pick default (explicit is [] there, so this is skipped and the list stays unscoped = every
+    // stage, matching the legacy rep list).
+    next.stageIds = expanded;
   }
   const hasExplicitStatus = next.status !== undefined;
   if (!hasExplicitStatus && board.terminalStageIds && board.terminalStageIds.length > 0) {

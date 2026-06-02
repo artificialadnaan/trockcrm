@@ -34,7 +34,7 @@ import {
   getOwnerInitialColor,
 } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
-import { parseDisplayDate } from "@/lib/deal-utils";
+import { formatCurrency, parseDisplayDate } from "@/lib/deal-utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
@@ -75,6 +75,14 @@ interface DealsListSectionProps {
   workflowFamily?: Parameters<typeof usePipelineStages>[0];
   enableDateFilter?: boolean;
   enableExport?: boolean;
+  /**
+   * Show the running-total card (#4) next to the Export button: the summed effective value of the
+   * ENTIRE filtered set (all pages), read from pagination.valueTotal (the server SUM over the same
+   * WHERE the list query uses, so the total can never disagree with the list). Formatted with the
+   * SAFE formatCurrency (never "$NaN"). Opt-in per surface; off by default so existing mounts are
+   * unchanged.
+   */
+  showValueTotal?: boolean;
   showFilterButton?: boolean;
   visibleStages?: Array<Pick<PipelineStage, "id" | "slug" | "name"> & Partial<Pick<PipelineStage, "isTerminal" | "displayOrder">>>;
   excludeStageSlugs?: string[];
@@ -631,6 +639,7 @@ export function DealsListSection({
   workflowFamily = "deal",
   enableDateFilter = false,
   enableExport = false,
+  showValueTotal = false,
   visibleStages,
   excludeStageSlugs = [],
   eyebrow = "Deal list",
@@ -804,6 +813,8 @@ export function DealsListSection({
     page,
     limit: pageSize,
     scope,
+    // Only request the server-side running total when this mount shows the Total card (#4).
+    includeValueTotal: showValueTotal,
   };
   // FilterBar mode: URL value -> contract DealFilters (outcome-aware date, status, workflow, value,
   // stalled). baseFilters still layer (parent presets); scope inherits from the page unless the URL
@@ -849,6 +860,8 @@ export function DealsListSection({
     scope: filterBarOwnsScope ? urlFilters.scope ?? scope : scope,
     page: currentPage,
     limit: pageSize,
+    // Only request the server-side running total when this mount shows the Total card (#4).
+    includeValueTotal: showValueTotal,
   };
   const {
     deals: rawDeals,
@@ -945,7 +958,12 @@ export function DealsListSection({
     // status, value, …) via fetchAllDealsForFilters, and the canonical displayDate axis in the Date
     // column. Mirrors the on-screen list instead of the legacy created/updated export axis.
     if (filterBarMode) {
-      const result = await fetchAllDealsForFilters({ filters: filterBarDealsArgs });
+      // The CSV never reads pagination.valueTotal, so strip includeValueTotal before paginating the
+      // export — otherwise every export page would run the extra full-set SUM aggregate for nothing
+      // (Codex P2). The on-screen list keeps requesting it; only the export drops it.
+      const result = await fetchAllDealsForFilters({
+        filters: { ...filterBarDealsArgs, includeValueTotal: false },
+      });
       if (result.truncated) {
         toast.info(
           `Exported first ${result.maxRows.toLocaleString()} rows (${result.pagesFetched} pages). Narrow filters for full export.`
@@ -1148,15 +1166,37 @@ export function DealsListSection({
             <p className="mt-1 text-sm font-medium text-slate-500">{subtitle}</p>
           ) : null}
         </div>
-        {enableExport ? (
-          <button
-            type="button"
-            onClick={exportCsv}
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 hover:border-brand-red/40 hover:text-brand-red focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
-          >
-            <Download className="h-4 w-4" />
-            Export
-          </button>
+        {showValueTotal || enableExport ? (
+          <div className="flex items-center gap-3">
+            {showValueTotal ? (
+              // Running-total card (#4): the summed value of the WHOLE filtered set across all pages
+              // (pagination.valueTotal = server SUM over the list's exact WHERE), so it updates live
+              // as filters narrow and can never disagree with the list. SAFE formatCurrency renders
+              // "--" (never "$NaN") before the first response lands.
+              <div className="flex flex-col items-end rounded-md border border-slate-200 bg-white px-3 py-1 leading-tight">
+                <span className="text-[10px] font-black uppercase tracking-[0.16em] text-slate-500">
+                  Total
+                </span>
+                <span
+                  aria-label="Filtered total value"
+                  aria-busy={isRefreshing}
+                  className="whitespace-nowrap text-sm font-black tabular-nums text-slate-950"
+                >
+                  {formatCurrency(pagination.valueTotal)}
+                </span>
+              </div>
+            ) : null}
+            {enableExport ? (
+              <button
+                type="button"
+                onClick={exportCsv}
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 hover:border-brand-red/40 hover:text-brand-red focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+              >
+                <Download className="h-4 w-4" />
+                Export
+              </button>
+            ) : null}
+          </div>
         ) : null}
       </div>
 

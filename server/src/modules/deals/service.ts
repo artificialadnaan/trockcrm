@@ -281,6 +281,14 @@ export interface DealFilters {
   limit?: number;
   scope?: WorkspaceScope;
   activeOfficeId?: string;
+  /**
+   * Opt-in: also compute pagination.valueTotal — the SUM of the stage-aware effective value over the
+   * full filtered set (the running-total card, #4). Off by default so the extra aggregate runs ONLY
+   * for the surfaces that show the card, not every /deals call. When set, the Won stage-id set is
+   * resolved (see needsStageClassification) so the SUM is always awarded-first for Won rows and can
+   * never disagree with the list.
+   */
+  includeValueTotal?: boolean;
 }
 
 export interface PipelineTerminalDateFilters {
@@ -1547,7 +1555,11 @@ export async function getDeals(
     Boolean(filters.dateFrom || filters.dateTo) ||
     valueFilterRequested ||
     filters.sortBy === "awarded_amount" ||
-    filters.sortBy === "display_date";
+    filters.sortBy === "display_date" ||
+    // The running-total SUM (#4) is stage-aware (awarded-first for Won stages), so it needs the Won
+    // set resolved even when no date/value/sort dimension is active — otherwise a Won row would be
+    // summed by the best-estimate chain and diverge from the awarded-first value the list displays.
+    Boolean(filters.includeValueTotal);
   if (needsStageClassification) {
     const stages = await listDealStages();
     const wonSlugs = WON_STAGE_SLUGS as readonly string[];
@@ -1625,6 +1637,23 @@ export async function getDeals(
     .select({ count: sql<number>`count(*)` })
     .from(deals)
     .where(activeCountWhere);
+  // Running-total card (#4): the summed effective value of the ENTIRE filtered set (all pages,
+  // not just the visible one), over the SAME `where` as the count(*) total — so the total can
+  // never disagree with the list. Uses the stage-aware effective value (awarded-first for Won
+  // stage ids, best-estimate otherwise) — the IDENTICAL expression the value sort/filter and the
+  // client's per-row getEffectiveDealValue DISPLAY use, so sort == filter == display == total
+  // (D-1; Codex #546). on_hold rows are summed as 0 (the expression zeroes them, matching the
+  // list's $0 display), test data is already excluded by `where`, and $0 deals contribute 0.
+  // Opt-in (includeValueTotal): runs ONLY for the surfaces that show the card; wonStageIds is
+  // resolved above whenever the total is requested, so the SUM is always awarded-first for Won.
+  const valueTotalResult = filters.includeValueTotal
+    ? await tenantDb
+        .select({
+          total: sql<number>`coalesce(sum(${aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds)}), 0)`,
+        })
+        .from(deals)
+        .where(where)
+    : null;
   const dealRows = await tenantDb
     .select({
       ...getTableColumns(deals),
@@ -1660,6 +1689,7 @@ export async function getDeals(
 
   const total = Number(countResult[0]?.count ?? 0);
   const activeCount = Number(activeCountResult[0]?.count ?? total);
+  const valueTotal = valueTotalResult ? Number(valueTotalResult[0]?.total ?? 0) : undefined;
 
   return {
     deals: dealRows.map((deal) => attachAtRiskResult(deal, atRiskViewerRole)),
@@ -1669,6 +1699,10 @@ export async function getDeals(
       total,
       activeCount,
       totalPages: Math.ceil(total / limit),
+      // The summed effective value of the full filtered set (#4) — surfaced on pagination
+      // alongside the other set-wide aggregates (total / activeCount). Only present when the
+      // caller opted in via includeValueTotal.
+      ...(valueTotal !== undefined ? { valueTotal } : {}),
     },
   };
 }
