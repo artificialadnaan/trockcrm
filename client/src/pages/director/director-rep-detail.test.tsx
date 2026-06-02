@@ -442,6 +442,46 @@ describe("DirectorRepDetail", () => {
     expect(html).toContain("Loading deal records");
   });
 
+  it("keeps a date control available when the deal stage config fails — the leads list stays re-windowable (Codex P2)", async () => {
+    // The deal list (and its in-bar Date dropdown) is gated on the deal stage config. The standalone
+    // pill row used to cover the failure case; now the gate's fallback must still render a date control so
+    // the user can re-window the leads list (which renders independently) when the deal list can't load.
+    mocks.usePipelineStagesMock.mockImplementation((family?: string) => ({
+      stages:
+        family === "lead"
+          ? [{ id: "lead-stage-qualified", name: "Qualified Lead", slug: "qualified_lead", isActivePipeline: true }]
+          : [], // deal stages failed to load
+      loading: false,
+      error: family === "lead" ? null : "stage config unavailable",
+    }));
+
+    const page = await renderPageDom("/director/rep/rep-1?preset=qtd&listRange=dashboard");
+    try {
+      // The deal list itself is unavailable (it needs the stage config)…
+      expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
+      expect(page.container.textContent).toContain("Couldn't load pipeline stages");
+
+      // …but a date control is STILL rendered (the six list-range presets), reflecting listRange.
+      const dateSelect = Array.from(page.container.querySelectorAll("select")).find((select) =>
+        select.querySelector('option[value="7d"]')
+      );
+      expect(dateSelect).toBeTruthy();
+      expect(dateSelect?.value).toBe("dashboard");
+
+      // Changing it still drives listRange -> the leads list re-queries with the new (WTD) window.
+      const setSelectValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+      await act(async () => {
+        setSelectValue?.call(dateSelect, "wtd");
+        dateSelect?.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(mocks.useLeadsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ createdFrom: "2026-05-17", createdTo: "2026-05-21" })
+      );
+    } finally {
+      await page.cleanup();
+    }
+  });
+
   it("updates the layered lead filters when the list range (Date dropdown) and stage filters change", async () => {
     const page = await renderPageDom();
 

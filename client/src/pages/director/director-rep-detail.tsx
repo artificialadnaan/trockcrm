@@ -26,6 +26,7 @@ import {
   DRILLDOWN_FILTERBAR_PARAM_PREFIX,
   getDrilldownFilterBarDimensions,
 } from "@/components/deals/deals-filterbar-adapter";
+import { PresetSelect } from "@/components/filters/preset-select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -459,6 +460,19 @@ export function DirectorRepDetail() {
     setSearchParams(nextParams, { replace: true });
   };
 
+  // The single list-date control (the standalone pill row was removed). Shared by the FilterBar's
+  // in-bar Date dropdown AND the gate fallback below, so a date control stays available even when the
+  // deal stage config (which the deal list — and thus the in-bar dropdown — needs) fails to load; the
+  // leads list renders independently and still follows this listRange window (Codex P2).
+  const listDateControl = {
+    ariaLabel: "Date range",
+    value: listRange,
+    options: listRangeDateOptions,
+    onChange: (next: string) => {
+      if (isRepDetailListRange(next)) handleListRangeChange(next);
+    },
+  };
+
   useEffect(() => {
     setListRange((current) => (current === listRangeFromUrl ? current : listRangeFromUrl));
   }, [listRangeFromUrl]);
@@ -700,14 +714,7 @@ export function DirectorRepDetail() {
               // it reads/writes the single source of truth (listRange). The window itself is computed once
               // by getRepDetailListDateRange (flowing through baseFilters above), so the dropdown can't
               // introduce a divergent date — it only selects which listRange preset is active.
-              dateControl: {
-                ariaLabel: "Date range",
-                value: listRange,
-                options: listRangeDateOptions,
-                onChange: (next) => {
-                  if (isRepDetailListRange(next)) handleListRangeChange(next);
-                },
-              },
+              dateControl: listDateControl,
               options: {
                 regions: regions.map((region) => ({ value: region.id, label: region.name })),
                 projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
@@ -729,10 +736,23 @@ export function DirectorRepDetail() {
             }}
           />
           ) : (
-            <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
-              {dealStagesError
-                ? "Couldn't load pipeline stages — deal records are unavailable."
-                : "Loading deal records…"}
+            <div className="space-y-3">
+              {/* The deal list (and its in-bar Date dropdown) can't render without the stage config, but the
+                  leads list below still follows this date window — so keep a date control available here. */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-muted-foreground">Date:</span>
+                <PresetSelect
+                  ariaLabel={listDateControl.ariaLabel}
+                  value={listDateControl.value}
+                  options={listDateControl.options}
+                  onChange={listDateControl.onChange}
+                />
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
+                {dealStagesError
+                  ? "Couldn't load pipeline stages — deal records are unavailable."
+                  : "Loading deal records…"}
+              </div>
             </div>
           )}
 
