@@ -66,6 +66,9 @@ type FakeDeal = {
   bidBoardProjectNumber: string | null;
   actualCloseDate: string | null;
   expectedCloseDate?: string | null;
+  contractSignedDate?: string | null;
+  contractSignedAt?: Date | string | null;
+  wonClosedDate?: string | null;
   lostReasonId: string | null;
   lostNotes: string | null;
   lostCompetitor: string | null;
@@ -1549,6 +1552,94 @@ describe("changeDealStage", () => {
         ],
       }),
     ]);
+  });
+
+  it("stamps won_closed_date from the contract-signed date when entering Won (override wins over today)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-10T09:00:00.000Z"));
+    const tenantDb = createTenantDb({
+      stageId: "stage-opportunity",
+      contractSignedDate: "2026-02-15",
+      ddEstimate: null,
+      bidEstimate: "125000",
+    });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-won", name: "Won", slug: "won", isTerminal: true, isActivePipeline: true, displayOrder: 9 },
+      currentStage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-won",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(result.deal.stageId).toBe("stage-won");
+    // Contract-signed wins: won_closed_date is the contract date, NOT today (2026-05-10).
+    expect(result.deal.wonClosedDate).toBe("2026-02-15");
+    vi.useRealTimers();
+  });
+
+  it("stamps won_closed_date with today when entering Won without a contract-signed date (existing behavior preserved)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-10T09:00:00.000Z"));
+    const tenantDb = createTenantDb({
+      stageId: "stage-opportunity",
+      contractSignedDate: null,
+      ddEstimate: null,
+      bidEstimate: "125000",
+    });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-won", name: "Won", slug: "won", isTerminal: true, isActivePipeline: true, displayOrder: 9 },
+      currentStage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-won",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    expect(result.deal.wonClosedDate).toBe("2026-05-10");
+    vi.useRealTimers();
+  });
+
+  it("stamps won_closed_date from contract_signed_at when only the timestamp is set (effective contract-signed basis)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-10T09:00:00.000Z"));
+    const tenantDb = createTenantDb({
+      stageId: "stage-opportunity",
+      contractSignedDate: null,
+      contractSignedAt: new Date("2026-02-15T00:00:00.000Z"), // reseed-set timestamp, date column null
+      ddEstimate: null,
+      bidEstimate: "125000",
+    });
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: false,
+      requiresOverride: false,
+      targetStage: { id: "stage-won", name: "Won", slug: "won", isTerminal: true, isActivePipeline: true, displayOrder: 9 },
+      currentStage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+    } as never);
+
+    const result = await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-won",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    // Effective contract-signed = contract_signed_at::date wins over today (2026-05-10).
+    expect(result.deal.wonClosedDate).toBe("2026-02-15");
+    vi.useRealTimers();
   });
 
 });

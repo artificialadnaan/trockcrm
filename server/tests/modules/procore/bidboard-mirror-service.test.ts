@@ -184,6 +184,112 @@ describe("bid board mirror service", () => {
     expect(result.updates.lostAt).toBeNull();
   });
 
+  it("writes won_closed_date from the contract-signed date on Won entry (override wins over the stage-entry date)", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        contractSignedDate: "2026-02-15",
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      payload: { stageSlug: "won", stageStatus: "signed", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+
+    // Contract-signed wins over the Procore stage-entry-derived won date.
+    expect(result.updates.wonClosedDate).toBe("2026-02-15");
+  });
+
+  it("falls back to the stage-entry won date on Won entry when there is no contract-signed date", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        contractSignedDate: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      payload: { stageSlug: "won", stageStatus: "signed", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+
+    // No contract date → the stage-entry-derived won date stands (existing behavior).
+    expect(result.updates.wonClosedDate).toBe("2026-04-22");
+  });
+
+  it("writes won_closed_date from contract_signed_at on Won entry when only the timestamp is set (effective basis)", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        contractSignedDate: null,
+        contractSignedAt: new Date("2026-02-15T00:00:00.000Z"), // reseed-set timestamp, date column null
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      payload: { stageSlug: "won", stageStatus: "signed", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+
+    // Effective contract-signed = contract_signed_at::date wins over the stage-entry date.
+    expect(result.updates.wonClosedDate).toBe("2026-02-15");
+  });
+
   it("accepts historical terminal aliases while storing shared canonical mirror slugs", () => {
     const result = buildBidBoardMirrorUpdate({
       now: new Date("2026-04-23T18:00:00.000Z"),

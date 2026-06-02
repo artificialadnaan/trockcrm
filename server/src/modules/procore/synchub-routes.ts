@@ -363,7 +363,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
                 stage_id, stage_entered_at, on_hold, on_hold_started_at,
                 on_hold_accumulated_seconds, on_hold_accumulated_seconds_at_stage_entry,
                 workflow_route, is_bid_board_owned,
-                proposal_status, estimating_substage, actual_close_date, won_closed_date,
+                proposal_status, estimating_substage, actual_close_date, won_closed_date, contract_signed_date, contract_signed_at,
                 dd_estimate, bid_estimate, awarded_amount, proposal_notes,
                 bid_board_stage_slug, bid_board_stage_family, bid_board_stage_status,
                 lost_reason_id, lost_notes, lost_competitor, lost_at
@@ -441,6 +441,8 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           estimatingSubstage: currentDeal.estimating_substage,
           actualCloseDate: currentDeal.actual_close_date,
           wonClosedDate: currentDeal.won_closed_date ?? null,
+          contractSignedDate: currentDeal.contract_signed_date ?? null,
+          contractSignedAt: currentDeal.contract_signed_at ?? null,
           lostReasonId: currentDeal.lost_reason_id,
           lostNotes: currentDeal.lost_notes,
           lostCompetitor: currentDeal.lost_competitor,

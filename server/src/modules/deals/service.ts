@@ -21,6 +21,7 @@ import {
 import {
   DOMAIN_EVENTS,
   getDealAtRiskResult,
+  isGenuineWonDealStageSlug,
   resolveEffectiveStageEnteredAt,
   USER_ROLES,
   type AtRiskResult,
@@ -65,6 +66,7 @@ import {
   dealDateScopeColumns,
   dealDisplayDateExpr,
 } from "../shared/deal-date-scope.js";
+import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
 import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import {
@@ -2895,6 +2897,18 @@ export async function getDealSources(tenantDb: TenantDb) {
 }
 
 /**
+ * The deal's stage-entry date as YYYY-MM-DD (UTC) — matching the won_closed_date date-only
+ * convention used by changeDealStage and the Bid-Board mirror. This is the stage-driven won
+ * date that stands when a Won-family deal's contract-signed date is cleared (revert basis).
+ */
+function stageEnteredAtDateOnly(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString().split("T")[0] ?? null;
+}
+
+/**
  * Set or clear contract_signed_date on a deal. Writes an audit_log row when
  * the value actually changes. No-op (and no audit row) when the requested
  * value matches the current value.
@@ -2918,41 +2932,67 @@ export async function setDealContractSignedDate(
   auditContext?: AuditContext
 ): Promise<typeof deals.$inferSelect | null> {
   return tenantDb.transaction(async (tx) => {
+    // Lock the deal row FOR UPDATE (same as changeDealStage) so a concurrent stage change can't
+    // race between the Won-family classification below and the won_closed_date write/omit — the
+    // stored Won date must match the deal's FINAL stage.
     const [existing] = await tx
       .select()
       .from(deals)
       .where(eq(deals.id, dealId))
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (!existing) return null;
 
     const oldValue = existing.contractSignedDate ?? null;
     const newValue = contractSignedDate ?? null;
     const oldContractSignedAt = normalizeContractSignedAt(existing.contractSignedAt);
     const newContractSignedAt = contractSignedAtFromDate(newValue);
+
+    // UNGATED: the contract-signed date is editable at ANY stage (accounting's correction lever;
+    // previously this threw CONTRACT_SIGNED_STAGE_REQUIRED unless slug === "contract"). Resolve the
+    // current (locked) stage once — its slug decides the Won-family WRITE-THROUGH below and whether
+    // to suppress the Procore handoff (already-Won deals already have a project).
+    const currentStage = await getStageByIdForWorkflowRoute(
+      existing.stageId,
+      existing.workflowRoute ?? "normal"
+    );
+    const contractStageId: string | null = currentStage?.id ?? null;
+    const isWonFamilyDeal = isGenuineWonDealStageSlug(
+      currentStage?.slug,
+      existing.workflowRoute ?? "normal"
+    );
+
+    // WRITE-THROUGH (Won-family only, always-when-present): the authoritative stored Won date —
+    // contract-signed wins when present; when cleared, the stage-driven won date
+    // (stage_entered_at::date) stands. A non-Won deal's won_closed_date is NEVER written (no
+    // promotion; membership stays gated by stage). Every Won read surface inherits this via the
+    // stored deals.won_closed_date column — no read-path change.
+    const oldWonClosedDate = existing.wonClosedDate ?? null;
+    const newWonClosedDate = isWonFamilyDeal
+      ? resolveWonClosedDateWriteThrough({
+          contractSignedDate: newValue,
+          stageDrivenWonDate: stageEnteredAtDateOnly(existing.stageEnteredAt),
+        })
+      : oldWonClosedDate;
+    const wonClosedDateChanged = isWonFamilyDeal && newWonClosedDate !== oldWonClosedDate;
+
+    // A same-value re-save normally short-circuits as a no-op — but if the contract date is PRESENT
+    // and the stored Won date is stale relative to it (e.g. a pre-write-through Won-entry stamp),
+    // the stored basis must still be reconciled. Scoped to a PRESENT contract date only: when it is
+    // absent there is no authoritative source, so we must NOT recompute from stage_entered_at on a
+    // no-op (that would overwrite the real Won-entry/backfill stamp).
+    const reconcileStaleWonDate = isWonFamilyDeal && newValue != null && wonClosedDateChanged;
+
     if (
       oldValue === newValue &&
-      (oldValue !== null || timestampKey(oldContractSignedAt) === timestampKey(newContractSignedAt))
+      (oldValue !== null || timestampKey(oldContractSignedAt) === timestampKey(newContractSignedAt)) &&
+      !reconcileStaleWonDate
     ) {
       return existing;
     }
 
     const isInitialContractSignedAt =
       oldValue == null && oldContractSignedAt == null && newContractSignedAt != null;
-    let contractStageId: string | null = null;
-    if (isInitialContractSignedAt) {
-      const currentStage = await getStageByIdForWorkflowRoute(
-        existing.stageId,
-        existing.workflowRoute ?? "normal"
-      );
-      if (currentStage?.slug !== "contract") {
-        throw new AppError(
-          400,
-          "contract_signed_at can only be set while the deal is in Contract.",
-          "CONTRACT_SIGNED_STAGE_REQUIRED"
-        );
-      }
-      contractStageId = currentStage.id;
-    }
 
     const now = new Date();
     const [updated] = await tx
@@ -2961,6 +3001,7 @@ export async function setDealContractSignedDate(
         contractSignedDate: newValue,
         contractSignedAt: newContractSignedAt,
         updatedAt: now,
+        ...(isWonFamilyDeal ? { wonClosedDate: newWonClosedDate } : {}),
       })
       .where(eq(deals.id, dealId))
       .returning();
@@ -2973,6 +3014,11 @@ export async function setDealContractSignedDate(
         from: oldContractSignedAt ? oldContractSignedAt.toISOString() : null,
         to: newContractSignedAt ? newContractSignedAt.toISOString() : null,
       },
+      // When the write-through moves the canonical Won close date, record it so the accounting
+      // re-bucketing of a closed deal is traceable in the audit trail.
+      ...(wonClosedDateChanged
+        ? { wonClosedDate: { from: oldWonClosedDate, to: newWonClosedDate } }
+        : {}),
     };
 
     if (auditContext) {
@@ -3006,7 +3052,17 @@ export async function setDealContractSignedDate(
       });
     }
 
-    if (isInitialContractSignedAt && isContractSignedHandoffEnabled()) {
+    // The Procore create-project handoff fires on an initial sign, but is suppressed when the deal
+    // ALREADY has a Procore project (procoreProjectId): ungating lets accounting set/correct the
+    // contract-signed date on an already-in-production deal, which would otherwise re-enqueue a
+    // create_project job. Gating on the actual project link (not the Won stage) means a Won deal
+    // that has NO project yet still gets its only project-creation trigger — the create_project job
+    // is itself idempotent on procoreProjectId, so this is a precise optimization, not the backstop.
+    if (
+      isInitialContractSignedAt &&
+      isContractSignedHandoffEnabled() &&
+      existing.procoreProjectId == null
+    ) {
       const payload = {
         eventName: DOMAIN_EVENTS.DEAL_CONTRACT_SIGNED,
         eventId: randomUUID(),
