@@ -507,7 +507,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 8, null, undefined);
+    }, 1000, null, undefined);
     expect(html).toContain("Deals Dashboard"); // relabeled to distinguish the dashboard from /pipeline
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
@@ -528,7 +528,7 @@ describe("DealListPage", () => {
       "all",
       true,
       { won: { preset: "all" }, lost: { preset: "all" } },
-      8,
+      1000,
       null,
       "rep-1"
     );
@@ -885,7 +885,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "30" },
       lost: { preset: "60" },
-    }, 8, null, undefined);
+    }, 1000, null, undefined);
   });
 
   it("does not refetch or update URL params while editing a custom terminal date until Enter commits it", async () => {
@@ -919,7 +919,7 @@ describe("DealListPage", () => {
         won: { preset: "custom", customStart: "2026-04-15" },
         lost: { preset: "all" },
       },
-      8,
+      1000,
       null,
       undefined
     );
@@ -959,7 +959,7 @@ describe("DealListPage", () => {
         won: { preset: "all" },
         lost: { preset: "custom", customStart: "2026-03-12" },
       },
-      8,
+      1000,
       null,
       undefined
     );
@@ -988,7 +988,7 @@ describe("DealListPage", () => {
         won: { preset: "7" },
         lost: { preset: "all" },
       },
-      8,
+      1000,
       null,
       undefined
     );
@@ -1020,7 +1020,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "30" }, // explicit Won filter wins
       lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month
-    }, 8, { from: "2026-04-01", to: "2026-04-30" }, undefined);
+    }, 1000, { from: "2026-04-01", to: "2026-04-30" }, undefined);
   });
 
   describe("D-7: Won drill-down chip inherits the page period (no contradictory all_time+period)", () => {
@@ -1100,7 +1100,7 @@ describe("DealListPage", () => {
 
     renderPage("/deals", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 8, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
   });
 
   it("uses the board terminal filters when building terminal stage navigation", () => {
@@ -1152,16 +1152,16 @@ describe("DealListPage", () => {
 
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/deals", "rep");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
 
     renderPage("/deals", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
 
     renderPage("/deals", "admin");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
 
     renderPage("/deals?scope=mine", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
   });
 
   it("hides the Team scope and coerces a requested team scope to mine (D-12b)", () => {
@@ -1171,7 +1171,7 @@ describe("DealListPage", () => {
     // coerced to the rendered fallback ("mine"); no dead placeholder is shown.
     expect(html).not.toContain(">Team</button>");
     expect(html).not.toContain("Team view is not yet configured");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
   });
 
   it("drops a stale owner filter when a team bookmark is coerced to mine (D-12b)", () => {
@@ -1179,7 +1179,7 @@ describe("DealListPage", () => {
 
     // Coerced to mine AND the owner filter cleared (6th arg undefined), so the Mine board is
     // not intersected with rep-2's deals into an empty result.
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
   });
 
   it("rewrites a parked team bookmark URL to mine and drops the stale owner param (D-12b)", async () => {
@@ -1202,7 +1202,7 @@ describe("DealListPage", () => {
   it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/deals?scope=all", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 8, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 1000, null, undefined);
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="true">All');
     // Team is not an offered scope (D-12b).
@@ -1430,7 +1430,7 @@ describe("DealListPage", () => {
       "all",
       true,
       expect.objectContaining({ lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" } }),
-      8,
+      1000,
       expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
       undefined
     );
@@ -1650,7 +1650,7 @@ describe("DealListPage", () => {
         won: { preset: "30" },
         lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month (Codex #600 P2)
       },
-      8,
+      1000,
       { from: "2026-04-01", to: "2026-04-30" },
       undefined
     );
@@ -2353,7 +2353,7 @@ describe("DealListPage", () => {
   it("coerces a requested team scope to mine in the scope toggle (D-12b)", () => {
     const html = renderPage("/deals?scope=team", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 8, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
     expect(html).not.toContain(">Team</button>");
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">All');

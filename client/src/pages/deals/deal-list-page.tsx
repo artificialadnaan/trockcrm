@@ -50,6 +50,15 @@ const SCOPE_OPTIONS = [
 ] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
 const SLA_DRILLDOWN_PREVIEW_LIMIT = 1000;
+// Request the full per-stage card set (mirrors the server's
+// MAX_PIPELINE_CARDS_PER_STAGE_LIMIT) so each board column scrolls internally
+// through ALL its deals instead of an 8-card preview. Header counts/totals come
+// from independent backend aggregates, so this changes only how many cards are
+// fetched into the scroll list — not any displayed total.
+const BOARD_CARDS_PER_STAGE_LIMIT = 1000;
+// Initial row-height estimate for the virtualized board column; the real height
+// of each variable-height DecoratedKanbanCard is measured after mount.
+const DEALS_KANBAN_CARD_ESTIMATE_HEIGHT = 132;
 
 export type DashboardDealListFilter =
   | "active"
@@ -692,21 +701,27 @@ function DealsBoardColumn({
   );
 
   return (
-    <KanbanScrollColumn header={header} childCount={column.cards.length}>
-      {column.cards.length > 0 ? (
-        column.cards.map((deal) => (
+    <KanbanScrollColumn
+      header={header}
+      childCount={column.cards.length}
+      itemCount={column.cards.length}
+      estimateItemSize={DEALS_KANBAN_CARD_ESTIMATE_HEIGHT}
+      getItemKey={(index) => column.cards[index]!.id}
+      renderItem={(index) => {
+        const deal = column.cards[index]!;
+        return (
           <DecoratedKanbanCard
-            key={deal.id}
             deal={deal}
             stageSlug={column.stage.slug}
             onClick={() => onOpenRecord(deal.id)}
           />
-        ))
-      ) : (
-        <div className="border border-dashed border-gray-200 py-8 text-center text-xs text-gray-400">
-          {emptyText}
-        </div>
-      )}
+        );
+      }}
+    >
+      {/* Rendered only when itemCount is 0 (virtualization off). */}
+      <div className="border border-dashed border-gray-200 py-8 text-center text-xs text-gray-400">
+        {emptyText}
+      </div>
     </KanbanScrollColumn>
   );
 }
@@ -773,7 +788,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     scope,
     true,
     terminalDateFilters,
-    isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : 8,
+    isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : BOARD_CARDS_PER_STAGE_LIMIT,
     selectedPeriodRange,
     selectedRepFilter
   );
