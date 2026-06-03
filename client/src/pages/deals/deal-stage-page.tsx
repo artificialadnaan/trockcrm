@@ -61,9 +61,26 @@ export function buildStageSummaryFilters(
   const from = barDate.dateFrom ?? (searchParams.get("won_since") || searchParams.get("lost_since") || undefined);
   const to = barDate.dateTo ?? (searchParams.get("won_until") || searchParams.get("lost_until") || undefined);
   const allTime = !from && !to;
+  // The remaining list filters all narrow the deal set, so the top "Stage Value" must apply them too —
+  // read them from the bar's fb_ namespace exactly like rep+date, so the header recomputes with the same
+  // set the list shows. (status, workflow, type, value range, stalled/days-in-stage.)
+  const status = fb("status");
+  const workflowRoute = fb("workflowRoute");
+  const projectTypeId = fb("projectTypeId");
+  const valueMin = fb("valueMin");
+  const valueMax = fb("valueMax");
+  const minAgeDays = fb("minAgeDays");
+  const maxAgeDays = fb("maxAgeDays");
   return {
     ...baseFilters,
     ...(assignedRepId ? { assignedRepId } : {}),
+    ...(status ? { status } : {}),
+    ...(workflowRoute ? { workflowRoute } : {}),
+    ...(projectTypeId ? { projectTypeId } : {}),
+    ...(valueMin ? { valueMin } : {}),
+    ...(valueMax ? { valueMax } : {}),
+    ...(minAgeDays ? { minAgeDays } : {}),
+    ...(maxAgeDays ? { maxAgeDays } : {}),
     ...(from ? { wonSince: from, lostSince: from } : {}),
     ...(to ? { wonUntil: to, lostUntil: to } : {}),
     ...(allTime ? { wonAllTime: true, lostAllTime: true } : {}),
@@ -102,7 +119,16 @@ export function DealStagePage() {
   const summaryFilters = buildStageSummaryFilters(searchParams, route.query.filters, {
     ownRep: user?.role === "admin",
   });
-  const { data, loading, error } = useDealStagePage({ stageId: stageId!, ...route.query, filters: summaryFilters });
+  // Search also narrows the list, so feed the bar's fb_search into the summary too (route.query.search is
+  // the stripped bare param). Falls back to the normalized bare search for the pre-redirect first paint.
+  const summarySearch =
+    searchParams.get(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`) || route.query.search;
+  const { data, loading, error } = useDealStagePage({
+    stageId: stageId!,
+    ...route.query,
+    search: summarySearch,
+    filters: summaryFilters,
+  });
   const { regions } = useRegions();
   const { projectTypes } = useProjectTypes();
   const { assignees } = useTaskAssignees();

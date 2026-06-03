@@ -7,6 +7,9 @@ export interface StagePageFilters {
   staleOnly: boolean;
   status?: string;
   workflowRoute?: string;
+  projectTypeId?: string;
+  valueMin?: string;
+  valueMax?: string;
   source?: string;
   regionId?: string;
   updatedAfter?: string;

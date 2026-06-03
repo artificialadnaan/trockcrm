@@ -228,6 +228,14 @@ describe("DealStagePage", () => {
     const lastCall = calls[calls.length - 1]?.[0];
     expect(lastCall.filters.assignedRepId).toBeUndefined();
   });
+
+  it("threads the bar's fb_search into the summary query so the total reflects the searched list", () => {
+    setStage({ id: "s-won", name: "Won", slug: "won" });
+    renderStage("/deals/stages/s-won?scope=team&fb_search=acme");
+    const calls = mocks.useDealStagePageMock.mock.calls;
+    const lastCall = calls[calls.length - 1]?.[0];
+    expect(lastCall.search).toBe("acme");
+  });
 });
 
 describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + date)", () => {
@@ -313,6 +321,25 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
     expect(filters.wonSince).toBe("2026-04-01"); // 30 days before 2026-05-01
     expect(filters.wonUntil).toBe("2026-05-01"); // today
     vi.useRealTimers();
+  });
+
+  // GREEN (#616 follow-up): the top "Stage Value" must follow ALL the list filters, not just rep+date —
+  // status, workflow, type, value, and stalled (days-in-stage) all narrow the deal set, so all flow in.
+  it("inherits the remaining list filters (status, workflow, type, value, stalled) from the fb_ namespace", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams(
+        "fb_status=on_hold&fb_workflowRoute=service&fb_projectTypeId=type-1&fb_valueMin=1000&fb_valueMax=50000&fb_minAgeDays=7&fb_maxAgeDays=30"
+      ),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.status).toBe("on_hold");
+    expect(filters.workflowRoute).toBe("service");
+    expect(filters.projectTypeId).toBe("type-1");
+    expect(filters.valueMin).toBe("1000");
+    expect(filters.valueMax).toBe("50000");
+    expect(filters.minAgeDays).toBe("7");
+    expect(filters.maxAgeDays).toBe("30");
   });
 });
 

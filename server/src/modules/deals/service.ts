@@ -73,6 +73,7 @@ import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import {
   buildDealFilterBarConditions,
   aliasedStageAwareEffectiveDealValueSql,
+  aliasedEffectiveStageAgeDaysSql,
   UNASSIGNED_FILTER_SENTINEL,
 } from "./deal-filter-predicates.js";
 
@@ -739,6 +740,10 @@ export interface DealStagePageInput extends DealBoardInput {
   source?: string;
   staleOnly?: boolean;
   workflowRoute?: string;
+  status?: string;
+  projectTypeId?: string;
+  valueMin?: number;
+  valueMax?: number;
   updatedFrom?: string;
   updatedTo?: string;
   minAgeDays?: number;
@@ -1226,8 +1231,16 @@ async function buildDealWorkspaceScope(
     buildDealOfficeScopeCondition("d", activeOfficeScope),
   ];
 
+  // An explicit Status (stage-page only) OWNS is_active/on_hold (mirrors getDeals + buildStatusPredicate):
+  // skip the active-only default so a status=inactive drill-down reconciles with the list instead of being
+  // forced empty by is_active=true. The board (DealBoardInput) has no status, so its default is unchanged.
+  const explicitStatus =
+    "stageId" in input &&
+    typeof (input as DealStagePageInput).status === "string" &&
+    (input as DealStagePageInput).status !== "" &&
+    (input as DealStagePageInput).status !== "any";
   if (!terminalScope) {
-    filters.unshift(sql`d.is_active = true`);
+    if (!explicitStatus) filters.unshift(sql`d.is_active = true`);
   } else {
     filters.push(...terminalDateConditions);
   }
@@ -2814,6 +2827,33 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (input.workflowRoute === "normal" || input.workflowRoute === "service") {
     conditions.push(sql`d.workflow_route = ${input.workflowRoute}`);
   }
+  // Status (lifecycle) — mirror buildStatusPredicate so the summary narrows the SAME way the list does
+  // (is_active + on_hold are orthogonal; on_hold is a subset of active). GREEN #616 follow-up.
+  if (input.status === "active") {
+    conditions.push(sql`d.is_active = true and coalesce(d.on_hold, false) = false`);
+  } else if (input.status === "on_hold") {
+    conditions.push(sql`d.is_active = true and coalesce(d.on_hold, false) = true`);
+  } else if (input.status === "inactive") {
+    conditions.push(sql`d.is_active = false`);
+  } else if (input.status && input.status !== "any") {
+    conditions.push(sql`false`); // unrecognized status → no-match, mirroring buildStatusPredicate
+  }
+  if (input.projectTypeId) {
+    conditions.push(sql`d.project_type_id = ${input.projectTypeId}`);
+  }
+  // Value range — BETWEEN on the stage-aware effective value (awarded-first for Won stages, best-estimate
+  // otherwise): the SAME number the list filters/sorts/displays by (buildValueRangePredicate), so the
+  // top "Stage Value" total reconciles with the value-filtered list.
+  if (input.valueMin !== undefined || input.valueMax !== undefined) {
+    const valueExpr = aliasedStageAwareEffectiveDealValueSql("d", isWonTerminalStage ? stageIds : []);
+    if (input.valueMin !== undefined && input.valueMax !== undefined) {
+      conditions.push(sql`${valueExpr} between ${input.valueMin} and ${input.valueMax}`);
+    } else if (input.valueMin !== undefined) {
+      conditions.push(sql`${valueExpr} >= ${input.valueMin}`);
+    } else {
+      conditions.push(sql`${valueExpr} <= ${input.valueMax}`);
+    }
+  }
   if (input.staleOnly) {
     conditions.push(
       sql`(d.last_activity_at is null or d.last_activity_at < now() - interval '14 days')`
@@ -2826,11 +2866,18 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     conditions.push(sql`d.updated_at::date <= ${input.updatedTo}::date`);
   }
   addWorkspaceEstimateSentDateConditions(conditions, input);
-  if (typeof input.minAgeDays === "number" && Number.isFinite(input.minAgeDays)) {
-    conditions.push(sql`extract(day from now() - d.stage_entered_at) >= ${input.minAgeDays}`);
-  }
-  if (typeof input.maxAgeDays === "number" && Number.isFinite(input.maxAgeDays)) {
-    conditions.push(sql`extract(day from now() - d.stage_entered_at) <= ${input.maxAgeDays}`);
+  // Stalled / days-in-stage — match the LIST exactly (buildStalledPredicate): gated on the stage-entry
+  // flag (so legacy import-placeholder dates can't false-stall) and measured on the HOLD-AWARE effective
+  // stage age, not raw wall-clock — otherwise an on-hold deal is in/out of the summary differently than
+  // the list. GREEN #616 follow-up: adopts the helper the list already uses.
+  if (isStageEntryDateFilterEnabled()) {
+    const stageAgeDays = aliasedEffectiveStageAgeDaysSql("d");
+    if (typeof input.minAgeDays === "number" && Number.isFinite(input.minAgeDays)) {
+      conditions.push(sql`${stageAgeDays} >= ${input.minAgeDays}`);
+    }
+    if (typeof input.maxAgeDays === "number" && Number.isFinite(input.maxAgeDays)) {
+      conditions.push(sql`${stageAgeDays} <= ${input.maxAgeDays}`);
+    }
   }
 
   const where = sql.join(conditions, sql` and `);
