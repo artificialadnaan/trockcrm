@@ -2847,10 +2847,16 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (input.projectTypeId) {
     conditions.push(sql`d.project_type_id = ${input.projectTypeId}`);
   }
+  // A present-but-malformed numeric bound (e.g. a hand-crafted/duplicated ?valueMin=abc, arriving as NaN)
+  // no-matches like the list (buildValueRangePredicate / buildStalledPredicate → sql`false`) rather than
+  // being silently dropped — so the header total can't stay unfiltered while the list is empty (Codex P2).
+  const presentButMalformed = (v: number | undefined) => v !== undefined && !Number.isFinite(v);
   // Value range — BETWEEN on the stage-aware effective value (awarded-first for Won stages, best-estimate
   // otherwise): the SAME number the list filters/sorts/displays by (buildValueRangePredicate), so the
   // top "Stage Value" total reconciles with the value-filtered list.
-  if (input.valueMin !== undefined || input.valueMax !== undefined) {
+  if (presentButMalformed(input.valueMin) || presentButMalformed(input.valueMax)) {
+    conditions.push(sql`false`);
+  } else if (input.valueMin !== undefined || input.valueMax !== undefined) {
     const valueExpr = aliasedStageAwareEffectiveDealValueSql("d", isWonTerminalStage ? stageIds : []);
     if (input.valueMin !== undefined && input.valueMax !== undefined) {
       conditions.push(sql`${valueExpr} between ${input.valueMin} and ${input.valueMax}`);
@@ -2878,12 +2884,14 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   // stage page's list always enables stalled (DealsListSection sends stageEntryDateWindow=true, and getDeals
   // treats that as flag-OR-window), so the summary must apply it whenever a bound is present to reconcile
   // even when the global flag is off (Codex P2).
-  {
+  if (presentButMalformed(input.minAgeDays) || presentButMalformed(input.maxAgeDays)) {
+    conditions.push(sql`false`);
+  } else if (input.minAgeDays !== undefined || input.maxAgeDays !== undefined) {
     const stageAgeDays = aliasedEffectiveStageAgeDaysSql("d");
-    if (typeof input.minAgeDays === "number" && Number.isFinite(input.minAgeDays)) {
+    if (input.minAgeDays !== undefined) {
       conditions.push(sql`${stageAgeDays} >= ${input.minAgeDays}`);
     }
-    if (typeof input.maxAgeDays === "number" && Number.isFinite(input.maxAgeDays)) {
+    if (input.maxAgeDays !== undefined) {
       conditions.push(sql`${stageAgeDays} <= ${input.maxAgeDays}`);
     }
   }
@@ -2895,7 +2903,10 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       count(*)::int as total_count,
       count(*) filter (where d.is_active and coalesce(d.on_hold, false) = false)::int as active_count,
       coalesce(sum(${workspaceEffectiveDealValueSql(stage)}), 0)::numeric as total_value,
-      round(avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false))::int as average_days_in_stage
+      round(coalesce(
+        avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false),
+        avg(extract(day from now() - d.stage_entered_at))
+      ))::int as average_days_in_stage
     from deals d
     left join users u on u.id = d.assigned_rep_id
     where ${where}

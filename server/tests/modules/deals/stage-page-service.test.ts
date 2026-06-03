@@ -1065,4 +1065,24 @@ describe("listDealStagePage", () => {
     const oneChar = await runEstimatingStage({ search: "a" });
     expect(oneChar).not.toContain("owner_user");
   });
+
+  it("no-matches a present-but-malformed value / age bound (mirrors the list) instead of dropping the filter", async () => {
+    // The list preserves a present-but-invalid numeric bound as NaN -> sql`false` (empty); the summary must
+    // too, or it stays unfiltered while the list is empty (Codex P2). readStageInput forwards NaN; the
+    // condition no-matches it rather than applying a range.
+    const badValue = fromDealsWhereSql(await runEstimatingStage({ valueMin: Number("abc") }));
+    expect(badValue).toMatch(/and false/);
+    expect(badValue).not.toContain("between");
+
+    const badAge = fromDealsWhereSql(await runEstimatingStage({ minAgeDays: Number("abc") }));
+    expect(badAge).toMatch(/and false/);
+  });
+
+  it("computes avg visible age with a fallback so a status=on_hold (all-on-hold) page is not null", async () => {
+    // coalesce(avg(age) filter (where not on_hold), avg(age)) — prefers non-on-hold rows but falls back to
+    // all visible rows when there are none, so an On-Hold-filtered page shows a real average, not 0 (Codex P2).
+    const sql = await runEstimatingStage({});
+    const avgTerms = (sql.match(/avg\(extract\(day from now\(\) - d\.stage_entered_at\)\)/g) || []).length;
+    expect(avgTerms).toBe(2);
+  });
 });

@@ -64,7 +64,12 @@ export function buildStageSummaryFilters(
   // The remaining list filters all narrow the deal set, so the top "Stage Value" must apply them too —
   // read them from the bar's fb_ namespace exactly like rep+date, so the header recomputes with the same
   // set the list shows. (status, workflow, type, value range, stalled/days-in-stage.)
-  const status = fb("status");
+  // Only the three DEAL statuses are valid filters (mirrors filterBarValueToDealFilters); a stray lead
+  // status (e.g. a bookmarked fb_status=open) is dropped, exactly like the list — otherwise the server
+  // no-matches it and the header shows zero while the list stays unfiltered (Codex P2).
+  const statusRaw = fb("status");
+  const status =
+    statusRaw === "active" || statusRaw === "on_hold" || statusRaw === "inactive" ? statusRaw : undefined;
   const workflowRoute = fb("workflowRoute");
   const regionId = fb("regionId");
   const projectTypeId = fb("projectTypeId");

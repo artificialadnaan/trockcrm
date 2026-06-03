@@ -342,6 +342,15 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
     expect(filters.minAgeDays).toBe("7");
     expect(filters.maxAgeDays).toBe("30");
   });
+
+  it("drops a non-deal fb_status (e.g. a lead status) so the summary doesn't no-match while the list is unfiltered", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_status=open"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.status).toBeUndefined();
+  });
 });
 
 describe("appendInheritedTerminalDateToBarSearch (Bug B: carry inherited window into fb_ so list + header agree)", () => {
