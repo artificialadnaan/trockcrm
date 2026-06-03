@@ -447,6 +447,112 @@ describe("getDealsForPipeline", () => {
     expect(cardsChain?.limit).toHaveBeenCalledWith(5);
   });
 
+  it("pushes on-hold and zero-value cards to the bottom of each board column (active/non-zero tier leads the sort)", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-estimating",
+          slug: "estimating",
+          name: "Estimating",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn((...selectArgs: unknown[]) => {
+        const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          return resolve(isCardsQuery ? [] : [{ count: 0, totalValue: 0 }]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 5,
+    });
+
+    const { PgDialect } = await import("drizzle-orm/pg-core");
+    const dialect = new PgDialect();
+    const cardsChain = findStageCardsChain(tenantChains, "stage-estimating");
+    const orderByText = cardsChain?.orderBy.mock.calls
+      .flatMap((call: unknown[]) => call)
+      .map((part: unknown) => dialect.sqlToQuery(part as never).sql)
+      .join(" ")
+      .toLowerCase();
+
+    // The active + non-zero tier (on_hold guard + the best-estimate value chain)
+    // is the leading sort key, ahead of the existing created_at recency order.
+    expect(orderByText).toContain("on_hold");
+    expect(orderByText).toContain("bid_estimate");
+    expectSqlTermsInOrder(orderByText ?? "", ["on_hold", "created_at"]);
+    // Existing recency order is preserved as the within-tier sort.
+    expect(orderByText).toContain("created_at");
+    expect(orderByText).toContain("desc");
+  });
+
+  it("threads the stage value source into the tier (Won columns use the awarded-first chain)", async () => {
+    dbState.responses = [
+      [
+        {
+          id: "stage-won",
+          slug: "won",
+          name: "Won",
+          displayOrder: 2,
+          isTerminal: true,
+          isActivePipeline: true,
+        },
+      ],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn((...selectArgs: unknown[]) => {
+        const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          return resolve(isCardsQuery ? [] : [{ totalCount: 0, activeCount: 0, totalValue: 0 }]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 5,
+      wonAllTime: true,
+    });
+
+    const { PgDialect } = await import("drizzle-orm/pg-core");
+    const dialect = new PgDialect();
+    const cardsChain = findStageCardsChain(tenantChains, "stage-won");
+    const orderByText = cardsChain?.orderBy.mock.calls
+      .flatMap((call: unknown[]) => call)
+      .map((part: unknown) => dialect.sqlToQuery(part as never).sql)
+      .join(" ")
+      .toLowerCase();
+
+    // Won-stage value source is awarded-first, so awarded_amount precedes bid_estimate
+    // in the tier — proving the per-stage valueSource is threaded (not hardcoded to the
+    // current/best-estimate chain, where bid_estimate would come first).
+    expect(orderByText).toContain("on_hold");
+    expectSqlTermsInOrder(orderByText ?? "", ["awarded_amount", "bid_estimate"]);
+  });
+
   it("clamps oversized drill-down preview requests to the server maximum", async () => {
     dbState.responses = [
       [
