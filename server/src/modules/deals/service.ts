@@ -72,6 +72,8 @@ import { buildDealSearchCondition } from "../search/unified-search.js";
 import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import {
   buildDealFilterBarConditions,
+  buildInvolvedRepCondition,
+  buildAliasedInvolvedRepSql,
   aliasedStageAwareEffectiveDealValueSql,
   UNASSIGNED_FILTER_SENTINEL,
 } from "./deal-filter-predicates.js";
@@ -2578,9 +2580,12 @@ export async function getDealsForPipeline(
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     if (filters?.assignedRepId) {
+      // Team scope, filtered to one person: bound by team membership (assigned_rep IN teamRepIds)
+      // AND match rep-OR-estimator, so the estimator clause can't surface deals assigned OUTSIDE
+      // the team — the same bounded pattern the deals list and stage drill-down use.
       commonConditions.push(
-        teamRepIds.includes(filters.assignedRepId)
-          ? eq(deals.assignedRepId, filters.assignedRepId)
+        teamRepIds.length > 0
+          ? and(inArray(deals.assignedRepId, teamRepIds), buildInvolvedRepCondition(filters.assignedRepId))!
           : sql`false`
       );
       assignedRepFilterHandled = true;
@@ -2589,7 +2594,7 @@ export async function getDealsForPipeline(
     }
   }
   if (filters?.assignedRepId && !assignedRepFilterHandled) {
-    commonConditions.push(eq(deals.assignedRepId, filters.assignedRepId));
+    commonConditions.push(buildInvolvedRepCondition(filters.assignedRepId));
   }
 
   // Office scope: mirror getDeals so the kanban board and the drill-down list
@@ -2795,11 +2800,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (input.assignedRepId) {
     // The Unassigned FilterBar option sends the sentinel; map it to IS NULL like the list (getDeals /
     // buildAssignedRepPredicate), not a literal equality that would error on the UUID column (Codex P2).
-    conditions.push(
-      input.assignedRepId === UNASSIGNED_FILTER_SENTINEL
-        ? sql`d.assigned_rep_id is null`
-        : sql`d.assigned_rep_id = ${input.assignedRepId}`
-    );
+    conditions.push(buildAliasedInvolvedRepSql("d", input.assignedRepId));
   }
   if (input.regionId) {
     conditions.push(

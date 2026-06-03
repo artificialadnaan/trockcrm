@@ -11,6 +11,7 @@ import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { BID_BOARD_SYNC } from "../audit/system-processes.js";
 import { canonicalizeProjectNumber, canonicalProjectNumberSql } from "./project-number.js";
+import { resolveEstimatorUserId, isEstimatorMapConfigured } from "./estimator-map.js";
 
 type RawBidBoardRow = Record<string, unknown>;
 
@@ -89,6 +90,7 @@ interface DealMatch {
   project_number: string | null;
   bid_board_project_number: string | null;
   bid_board_estimator: string | null;
+  estimator_user_id: string | null;
   bid_board_office: string | null;
   bid_board_status: string | null;
   bid_board_sales_price_per_area: string | null;
@@ -304,6 +306,7 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
            bid_board_customer_name = $12,
            bid_board_customer_contact_raw = $13,
            bid_board_project_number = $14,
+           estimator_user_id = $16,
            -- Bid Board exports do not include a per-row updated-at, so this stores the sync cycle timestamp.
            bid_board_last_updated_at = $15::timestamptz,
            updated_at = NOW()
@@ -322,13 +325,19 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
             bid_board_customer_name IS DISTINCT FROM $12 OR
             bid_board_customer_contact_raw IS DISTINCT FROM $13 OR
             bid_board_project_number IS DISTINCT FROM $14 OR
-            bid_board_last_updated_at IS DISTINCT FROM $15::timestamptz
+            bid_board_last_updated_at IS DISTINCT FROM $15::timestamptz OR
+            estimator_user_id IS DISTINCT FROM $16
        )
      RETURNING id, name, deal_number, project_number
   `;
 }
 
-export function updateParams(dealId: string, row: NormalizedBidBoardRow, bidBoardLastUpdatedAt: string) {
+export function updateParams(
+  dealId: string,
+  row: NormalizedBidBoardRow,
+  bidBoardLastUpdatedAt: string,
+  estimatorUserId: string | null
+) {
   return [
     dealId,
     row.name,
@@ -345,6 +354,7 @@ export function updateParams(dealId: string, row: NormalizedBidBoardRow, bidBoar
     row.bidBoardCustomerContactRaw,
     row.bidBoardProjectNumber,
     bidBoardLastUpdatedAt,
+    estimatorUserId,
   ];
 }
 
@@ -363,6 +373,7 @@ function dealMatchSelectSql(schemaName: string): string {
            d.project_number,
            d.bid_board_project_number,
            d.bid_board_estimator,
+           d.estimator_user_id,
            d.bid_board_office,
            d.bid_board_status,
            d.bid_board_sales_price_per_area,
@@ -460,6 +471,12 @@ async function findSystemChangedByUserId(client: { query: Function }, officeSlug
   return result.rows[0]?.id ?? null;
 }
 
+/** Existing active user ids, used to keep a misconfigured estimator map id from FK-violating. */
+async function loadActiveUserIds(client: { query: Function }): Promise<Set<string>> {
+  const result = await client.query(`SELECT id FROM public.users WHERE is_active = true`);
+  return new Set((result.rows ?? []).map((r: { id: string }) => r.id));
+}
+
 function workflowRoute(value: string | null): WorkflowRoute {
   return value === "service" ? "service" : "normal";
 }
@@ -494,10 +511,11 @@ function targetStageSlugForDeal(stageSlug: string, route: WorkflowRoute, row: No
   return stageSlug === "estimating" && (route === "service" || status === "service estimating") ? "service_estimating" : stageSlug;
 }
 
-function buildBidBoardMirrorFieldChanges(deal: DealMatch, row: NormalizedBidBoardRow, bidBoardLastUpdatedAt: string) {
+function buildBidBoardMirrorFieldChanges(deal: DealMatch, row: NormalizedBidBoardRow, bidBoardLastUpdatedAt: string, estimatorUserId: string | null) {
   return {
     name: { from: deal.name, to: row.name },
     bidBoardEstimator: { from: deal.bid_board_estimator, to: row.bidBoardEstimator },
+    estimatorUserId: { from: deal.estimator_user_id, to: estimatorUserId },
     bidBoardOffice: { from: deal.bid_board_office, to: row.bidBoardOffice },
     bidBoardStatus: { from: deal.bid_board_status, to: row.bidBoardStatus },
     bidBoardSalesPricePerArea: { from: deal.bid_board_sales_price_per_area, to: row.bidBoardSalesPricePerArea },
@@ -905,6 +923,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
 
     const updateSql = buildBidBoardDealUpdateSql(schemaName);
     const changedByUserId = await findSystemChangedByUserId(client, officeSlug);
+    const activeUserIds = await loadActiveUserIds(client);
 
     for (const rawRow of rows) {
       const normalized = normalizeBidBoardRow(rawRow);
@@ -951,7 +970,32 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       }
 
       metrics.matched++;
-      const updateResult = await client.query(updateSql, updateParams(matches[0].id, normalized, bidBoardLastUpdatedAt));
+      // Resolve the estimator name to a user id, but only WRITE it if it is an existing active
+      // user — a misconfigured map id (valid UUID shape but no such user) would otherwise
+      // FK-violate deals.estimator_user_id and abort the whole batch. Bad id -> null + warning.
+      // When the map is unconfigured (unset/empty/malformed) PRESERVE the existing
+      // estimator_user_id so a deploy gap can't wipe backfilled ids. When configured, resolve
+      // the current estimator name and only write an EXISTING active user id (a bad/inactive
+      // map id -> null + warning, never an FK-abort).
+      let estimatorUserId: string | null;
+      if (!isEstimatorMapConfigured()) {
+        estimatorUserId = matches[0].estimator_user_id ?? null;
+      } else {
+        const resolvedEstimatorUserId = resolveEstimatorUserId(normalized.bidBoardEstimator);
+        estimatorUserId =
+          resolvedEstimatorUserId && activeUserIds.has(resolvedEstimatorUserId)
+            ? resolvedEstimatorUserId
+            : null;
+        if (resolvedEstimatorUserId && !estimatorUserId) {
+          warnings.push(
+            `Bid Board estimator "${normalized.bidBoardEstimator}" maps to ${resolvedEstimatorUserId}, which is not an active CRM user — estimator_user_id left null (check BID_BOARD_ESTIMATOR_USER_MAP)`
+          );
+        }
+      }
+      const updateResult = await client.query(
+        updateSql,
+        updateParams(matches[0].id, normalized, bidBoardLastUpdatedAt, estimatorUserId)
+      );
       if ((updateResult.rowCount ?? 0) > 0) {
         metrics.updated++;
         const updateDeal = updateResult.rows?.[0] ?? matches[0];
@@ -959,7 +1003,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           client,
           schemaName,
           updateDeal,
-          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt),
+          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt, estimatorUserId),
           { source: "bid_board_mirror", runId }
         );
       }

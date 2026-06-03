@@ -21,6 +21,7 @@ const text = (value: SQL | undefined) => (value ? dialect.sqlToQuery(value).sql.
 import {
   UNASSIGNED_FILTER_SENTINEL,
   buildAssignedRepPredicate,
+  buildAliasedInvolvedRepSql,
   buildRegionPredicate,
   buildProjectTypePredicate,
   buildWorkflowRoutePredicate,
@@ -35,14 +36,36 @@ describe("assigned-rep predicate", () => {
   it("omits when unset", () => {
     expect(buildAssignedRepPredicate({})).toBeUndefined();
   });
-  it("equals a concrete rep id", () => {
-    expect(text(buildAssignedRepPredicate({ assignedRepId: "rep-1" }))).toContain("assigned_rep_id");
+  it("matches assigned_rep OR estimator_user_id for a concrete rep id", () => {
+    const sql = text(buildAssignedRepPredicate({ assignedRepId: "rep-1" }));
+    expect(sql).toContain("assigned_rep_id");
+    expect(sql).toContain("estimator_user_id");
+    expect(sql).toContain(" or ");
   });
-  it("maps the Unassigned sentinel to IS NULL (never eq sentinel)", () => {
+  it("maps the Unassigned sentinel to assigned_rep IS NULL ONLY (estimator must not widen it)", () => {
     const sql = text(buildAssignedRepPredicate({ assignedRepId: UNASSIGNED_FILTER_SENTINEL }));
     expect(sql).toContain("assigned_rep_id");
     expect(sql).toContain("is null");
+    expect(sql).not.toContain("estimator_user_id");
     expect(sql).not.toContain(UNASSIGNED_FILTER_SENTINEL);
+  });
+});
+
+describe("aliased involved-rep SQL (raw, for d-aliased report/drill-down queries)", () => {
+  it("matches alias.assigned_rep_id OR alias.estimator_user_id for a concrete rep", () => {
+    const sql = text(buildAliasedInvolvedRepSql("d", "rep-1"));
+    expect(sql).toContain("d.assigned_rep_id");
+    expect(sql).toContain("d.estimator_user_id");
+    expect(sql).toContain(" or ");
+  });
+  it("maps the Unassigned sentinel to alias.assigned_rep_id IS NULL only (no estimator widening)", () => {
+    const sql = text(buildAliasedInvolvedRepSql("d", UNASSIGNED_FILTER_SENTINEL));
+    expect(sql).toContain("d.assigned_rep_id");
+    expect(sql).toContain("is null");
+    expect(sql).not.toContain("estimator_user_id");
+  });
+  it("rejects an invalid alias (identifier-injection guard)", () => {
+    expect(() => buildAliasedInvolvedRepSql("d; drop table deals", "rep-1")).toThrow();
   });
 });
 
