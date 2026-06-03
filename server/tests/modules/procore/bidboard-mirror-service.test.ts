@@ -182,6 +182,11 @@ describe("bid board mirror service", () => {
       lostCompetitor: null,
     });
     expect(result.updates.lostAt).toBeNull();
+    // PR #613 no-clobber guard: the Bid-Board mirror READS contract-signed (for the effective
+    // won-date basis) but never WRITES contract_signed_date/at, so a value accounting sets on a
+    // synced deal survives re-sync. (It IS one of the deal's read fields the resolver consumes.)
+    expect(result.updates).not.toHaveProperty("contractSignedDate");
+    expect(result.updates).not.toHaveProperty("contractSignedAt");
   });
 
   it("writes won_closed_date from the contract-signed date on Won entry (override wins over the stage-entry date)", () => {

@@ -196,7 +196,11 @@ vi.mock("./deal-proposal-card", () => ({
 }));
 
 vi.mock("./deal-contract-signed-card", () => ({
-  DealContractSignedCard: () => <div>Contract Signed Card</div>,
+  // Surface the canEdit prop so the page-level wiring (canEdit={isDirectorOrAdmin})
+  // is assertable: admin/director edit, reps read-only.
+  DealContractSignedCard: ({ canEdit }: { canEdit?: boolean }) => (
+    <div data-can-edit={String(Boolean(canEdit))}>Contract Signed Card</div>
+  ),
 }));
 
 vi.mock("./deal-estimating-substage", () => ({
@@ -1253,6 +1257,41 @@ describe("DealDetailPage", () => {
     expect(html).toContain("Bid Board now owns downstream progression");
     expect(html).toContain("Bid Board is now the source of truth once this deal entered estimating.");
     expect(html).toContain('data-disabled-reason="bid-board-managed"');
+  });
+
+  it("renders the Contract-Signed card for a Bid-Board-owned deal (previously hidden), editable for a director", () => {
+    // The default deal is Bid-Board-owned. Pre-#613 the card was hidden behind !isBidBoardOwned;
+    // accounting must be able to set the contract-signed date on EVERY deal, so it now renders.
+    const html = renderPage();
+
+    expect(html).toContain("Contract Signed Card");
+    // Page wires canEdit={isDirectorOrAdmin}; default auth is a director → editable.
+    expect(html).toContain('data-can-edit="true"');
+  });
+
+  it("renders the Contract-Signed card read-only for a rep on a Bid-Board-owned deal", () => {
+    mocks.useAuthMock.mockReturnValue({
+      user: { id: "rep-1", role: "rep" },
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Contract Signed Card");
+    expect(html).toContain('data-can-edit="false"');
+  });
+
+  it("still renders the Contract-Signed card for a non-bid-board deal (no regression)", () => {
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ isBidBoardOwned: false, bidBoardOwnership: null }),
+    });
+
+    const html = renderPage();
+
+    expect(html).toContain("Contract Signed Card");
+    expect(html).toContain('data-can-edit="true"');
   });
 
   it("renders the Bid Board summary panel only for BidBoard-owned deals", () => {
