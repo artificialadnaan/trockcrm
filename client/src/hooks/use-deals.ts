@@ -881,6 +881,15 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
     input.filters.minAgeDays,
     input.filters.maxAgeDays,
     input.filters.workflowRoute,
+    // The Won/Lost window is sent to the server (won_since/won_until/…) and now backs the header
+    // summary (Bug B); include it so changing the date on the drill-down refetches the total rather
+    // than leaving it stale against the list/board.
+    input.filters.wonSince,
+    input.filters.wonUntil,
+    input.filters.wonAllTime,
+    input.filters.lostSince,
+    input.filters.lostUntil,
+    input.filters.lostAllTime,
     input.page,
     input.pageSize,
     input.scope,

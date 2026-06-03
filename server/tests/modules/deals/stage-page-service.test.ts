@@ -927,4 +927,39 @@ describe("listDealStagePage", () => {
     expect(countQueryText).toContain("left join users u");
     expect(rowsQueryText).toContain("left join users u");
   });
+
+  // Codex P2: the FilterBar's Unassigned option sends assignedRepId/regionId = "__unassigned__". The
+  // list maps that to IS NULL; the stage summary must too, or `d.assigned_rep_id = '__unassigned__'`
+  // errors on the UUID column (or shows zero) while the visible list correctly shows unassigned deals.
+  it("maps the __unassigned__ rep/region sentinel to IS NULL instead of a UUID equality", async () => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "0", active_count: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+      assignedRepId: "__unassigned__",
+      regionId: "__unassigned__",
+    } as any);
+
+    const countSql = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(countSql).toContain("d.assigned_rep_id is null");
+    expect(countSql).toContain("d.region_id is null");
+    // The sentinel must never reach a column equality (the join u.id = d.assigned_rep_id is fine).
+    expect(countSql).not.toContain("d.assigned_rep_id =");
+    expect(countSql).not.toContain("d.region_id =");
+  });
 });

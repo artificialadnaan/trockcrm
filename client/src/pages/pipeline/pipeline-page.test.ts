@@ -13,6 +13,7 @@ import {
 import {
   MAX_EXPORT_PAGES,
   buildDealListParams,
+  buildPipelineStageNavigationPath,
   buildStageNameById,
   fetchAllFilteredDeals,
   getDealDisplayNumber,
@@ -500,5 +501,38 @@ describe("terminal pipeline date filters", () => {
       customStart: "2026-04-01",
       customEnd: "2026-04-30",
     });
+  });
+});
+
+describe("buildPipelineStageNavigationPath (Bug A: carry scope + terminal window, NOT the list-only rep)", () => {
+  it("carries the active scope + terminal window into the drill-down, but NOT a rep", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
+
+    const path = buildPipelineStageNavigationPath(
+      "stage-won",
+      "won",
+      "all",
+      { won: { preset: "30" }, lost: { preset: "all" } }
+    );
+
+    // The real Bug A: the old nav dropped scope, so the drill-down defaulted to scope=mine.
+    expect(path).toContain("scope=all");
+    // The terminal Won window flows through via `filters`.
+    expect(path).toContain("won_since=2026-04-01");
+    // The pipeline BOARD is all-rep (buildPipelineRequestPath takes no rep), so the column the user
+    // clicked is all-rep — the drill-down must NOT rep-scope or it stops matching that card.
+    expect(path).not.toContain("assignedRepId");
+    expect(path).toBe("/deals/stages/stage-won?scope=all&won_since=2026-04-01");
+  });
+
+  it("still works for a non-terminal stage (scope only)", () => {
+    const path = buildPipelineStageNavigationPath(
+      "stage-estimating",
+      "estimating",
+      "mine",
+      { won: { preset: "all" }, lost: { preset: "all" } }
+    );
+    expect(path).toBe("/deals/stages/stage-estimating?scope=mine");
   });
 });

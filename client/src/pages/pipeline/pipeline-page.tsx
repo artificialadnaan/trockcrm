@@ -155,6 +155,27 @@ export function resolvePipelinePageMove(
   return { deal, targetStageId };
 }
 
+// Open a stage column's drill-down at the SAME scope + terminal window the board is showing. The bug was
+// that the pipeline navigated with ONLY the terminal date filters, so the drill-down dropped the active
+// scope and defaulted to mine. Forward scope + the terminal filters so the drill-down matches the column
+// the user clicked. Deliberately NOT forwarding the URL's bare assignedRepId: the pipeline BOARD is fetched
+// all-rep (buildPipelineRequestPath takes only showDd/terminalDateFilters/scope — no rep), so the column
+// counts/values the user clicked are all-rep. The rep lives only on the under-kanban LIST's FilterBar;
+// forwarding it would open a rep-scoped drill-down that no longer matches the all-rep card (Codex P2).
+export function buildPipelineStageNavigationPath(
+  stageId: string,
+  stageSlug: string,
+  scope: PipelineScope,
+  terminalDateFilters: Record<TerminalOutcome, TerminalDateFilter>
+) {
+  return buildDealStageWorkspacePath({
+    stageId,
+    stageSlug,
+    scope,
+    filters: terminalDateFilters,
+  });
+}
+
 function formatRefreshedLabel(date: Date, now: Date): string {
   const minutes = Math.floor((now.getTime() - date.getTime()) / 60000);
   if (minutes < 1) return "Updated just now";
@@ -654,11 +675,12 @@ export function PipelinePage() {
                   activeDealId={activeDeal?.id ?? null}
                   onOpenStage={(stageId) =>
                     navigate(
-                      buildDealStageWorkspacePath({
+                      buildPipelineStageNavigationPath(
                         stageId,
-                        stageSlug: column.stage.slug,
-                        filters: terminalDateFilters,
-                      })
+                        column.stage.slug,
+                        scope,
+                        terminalDateFilters
+                      )
                     )
                   }
                   terminalFilter={

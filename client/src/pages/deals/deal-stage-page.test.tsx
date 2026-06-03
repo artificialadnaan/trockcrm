@@ -53,7 +53,7 @@ vi.mock("@/components/deals/deals-list-section", () => ({
   },
 }));
 
-import { DealStagePage } from "./deal-stage-page";
+import { DealStagePage, buildStageSummaryFilters, appendInheritedTerminalDateToBarSearch } from "./deal-stage-page";
 
 const lastListProps = () =>
   mocks.dealsListSectionMock.mock.calls[mocks.dealsListSectionMock.mock.calls.length - 1]?.[0] as Record<
@@ -190,5 +190,167 @@ describe("DealStagePage", () => {
   it("renders a stage error when the stage query fails", () => {
     mocks.useDealStagePageMock.mockReturnValue({ data: null, loading: false, error: "Failed to load stage" });
     expect(renderStage()).toContain("Failed to load stage");
+  });
+
+  // Bug B: the header "Stage value" must reconcile with the board card. The summary query
+  // (useDealStagePage) previously ran whole-stage (rep + date stripped at mount). It must now inherit
+  // the bar's active rep + date so the total equals the rep/date-scoped board card.
+  it("inherits the active fb_ rep + date window into the whole-stage summary query (reconciles with the board card)", () => {
+    setStage({ id: "s-won", name: "Won", slug: "won" });
+    renderStage("/deals/stages/s-won?scope=team&fb_assignedRepId=rep-1&fb_dateFrom=2026-01-01&fb_dateTo=2026-06-03");
+    expect(mocks.useDealStagePageMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: expect.objectContaining({
+          assignedRepId: "rep-1",
+          wonSince: "2026-01-01",
+          wonUntil: "2026-06-03",
+          lostSince: "2026-01-01",
+          lostUntil: "2026-06-03",
+        }),
+      })
+    );
+  });
+
+  it("opens an unfiltered drill-down as all-rep + all-time (not the server 30-day default)", () => {
+    renderStage("/deals/stages/stage-estimating?scope=team");
+    const calls = mocks.useDealStagePageMock.mock.calls;
+    const lastCall = calls[calls.length - 1]?.[0];
+    expect(lastCall.filters.assignedRepId).toBeUndefined();
+    expect(lastCall.filters.wonSince).toBeUndefined();
+    expect(lastCall.filters.wonAllTime).toBe(true);
+  });
+
+  it("does not rep-scope the summary for a non-admin even if the URL carries fb_assignedRepId", () => {
+    mocks.useAuthMock.mockReturnValue({ user: { role: "sales" } });
+    setStage({ id: "s-won", name: "Won", slug: "won" });
+    renderStage("/deals/stages/s-won?scope=mine&fb_assignedRepId=rep-1");
+    const calls = mocks.useDealStagePageMock.mock.calls;
+    const lastCall = calls[calls.length - 1]?.[0];
+    expect(lastCall.filters.assignedRepId).toBeUndefined();
+  });
+});
+
+describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + date)", () => {
+  it("reads the fb_ rep + date window into the summary filters (both won + lost windows)", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_assignedRepId=rep-1&fb_dateFrom=2026-01-01&fb_dateTo=2026-06-03"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.assignedRepId).toBe("rep-1");
+    // Outcome-agnostic: set both windows; the server applies only the one matching the stage outcome.
+    expect(filters.wonSince).toBe("2026-01-01");
+    expect(filters.wonUntil).toBe("2026-06-03");
+    expect(filters.lostSince).toBe("2026-01-01");
+    expect(filters.lostUntil).toBe("2026-06-03");
+  });
+
+  it("falls back to inherited bare params (pre-redirect first paint) so the summary is never momentarily whole-stage", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("assignedRepId=rep-2&won_since=2026-02-01&won_until=2026-05-01"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.assignedRepId).toBe("rep-2");
+    expect(filters.wonSince).toBe("2026-02-01");
+    expect(filters.wonUntil).toBe("2026-05-01");
+  });
+
+  it("prefers an explicit fb_ value over the inherited bare value", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_assignedRepId=rep-1&assignedRepId=rep-2"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.assignedRepId).toBe("rep-1");
+  });
+
+  // Codex P2: the bar renders Rep only for admins, so a non-admin's list ignores fb_assignedRepId. The
+  // summary must ignore it too, or the header is rep-scoped while the visible list (mine/all only) is all-rep.
+  it("does NOT apply the rep for non-admins (ownRep:false), but still applies the date window", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_assignedRepId=rep-1&fb_dateFrom=2026-01-01&fb_dateTo=2026-06-03"),
+      { staleOnly: false },
+      { ownRep: false }
+    );
+    expect(filters.assignedRepId).toBeUndefined();
+    expect(filters.wonSince).toBe("2026-01-01"); // Date dimension is always rendered, so the window still applies
+  });
+
+  // Codex P2: an all-time board card (won_all_time, no since/until) must not fall back to the server's
+  // 30-day terminal default. No window ⇒ pin all-time so the header matches the all-time card + list.
+  it("pins all-time (wonAllTime/lostAllTime) when no window is present, instead of the server 30-day default", () => {
+    const filters = buildStageSummaryFilters(new URLSearchParams("scope=team"), { staleOnly: true }, { ownRep: true });
+    expect(filters.assignedRepId).toBeUndefined();
+    expect(filters.wonSince).toBeUndefined();
+    expect(filters.wonAllTime).toBe(true);
+    expect(filters.lostAllTime).toBe(true);
+    expect(filters.staleOnly).toBe(true); // base filters pass through untouched
+  });
+
+  it("does NOT pin all-time when a window is present", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_dateFrom=2026-01-01&fb_dateTo=2026-06-03"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.wonAllTime).toBeUndefined();
+    expect(filters.lostAllTime).toBeUndefined();
+  });
+
+  // Codex P2: a bookmarked/shared URL with a relative preset (fb_datePreset=30) + stale bounds must
+  // re-resolve to a FRESH window for "now" — matching the list (withResolvedDateWindow) — not the stale
+  // saved dates, or the header and list diverge on a later day.
+  it("re-resolves a relative fb_ date preset for now instead of using stale bookmarked bounds", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_datePreset=30&fb_dateFrom=2026-01-01&fb_dateTo=2026-01-31"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.wonSince).not.toBe("2026-01-01"); // not the stale saved lower bound
+    expect(filters.wonSince).toBe("2026-04-01"); // 30 days before 2026-05-01
+    expect(filters.wonUntil).toBe("2026-05-01"); // today
+    vi.useRealTimers();
+  });
+});
+
+describe("appendInheritedTerminalDateToBarSearch (Bug B: carry inherited window into fb_ so list + header agree)", () => {
+  it("translates an inherited Won window into the bar's fb_ date namespace", () => {
+    const out = appendInheritedTerminalDateToBarSearch(
+      "scope=team&fb_assignedRepId=rep-1",
+      new URLSearchParams("scope=team&assignedRepId=rep-1&won_since=2026-01-01&won_until=2026-06-03")
+    );
+    const params = new URLSearchParams(out);
+    expect(params.get("fb_dateFrom")).toBe("2026-01-01");
+    expect(params.get("fb_dateTo")).toBe("2026-06-03");
+  });
+
+  it("translates an inherited Lost window into the bar's fb_ date namespace", () => {
+    const out = appendInheritedTerminalDateToBarSearch(
+      "scope=team",
+      new URLSearchParams("lost_since=2026-02-01&lost_until=2026-05-01")
+    );
+    const params = new URLSearchParams(out);
+    expect(params.get("fb_dateFrom")).toBe("2026-02-01");
+    expect(params.get("fb_dateTo")).toBe("2026-05-01");
+  });
+
+  it("does not clobber an fb_ date the user already set on the bar", () => {
+    const out = appendInheritedTerminalDateToBarSearch(
+      "fb_dateFrom=2026-03-01",
+      new URLSearchParams("won_since=2026-01-01&won_until=2026-06-03")
+    );
+    const params = new URLSearchParams(out);
+    expect(params.get("fb_dateFrom")).toBe("2026-03-01");
+  });
+
+  it("returns the search unchanged when there is no inherited terminal window", () => {
+    const out = appendInheritedTerminalDateToBarSearch(
+      "scope=team&fb_assignedRepId=rep-1",
+      new URLSearchParams("scope=team&assignedRepId=rep-1")
+    );
+    expect(new URLSearchParams(out).has("fb_dateFrom")).toBe(false);
   });
 });
