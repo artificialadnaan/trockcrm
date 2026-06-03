@@ -2898,10 +2898,19 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
 
   const where = sql.join(conditions, sql` and `);
 
+  // active_count requires is_active ONLY on the explicit inactive-status path (so status=inactive doesn't
+  // render inactive deals as "active"). For terminal Won/Lost pages WITHOUT a status, the inactive terminal
+  // deals ARE the reportable population the board/list counts (non-on-hold), so don't is_active-gate them
+  // there (Codex P2: keep terminal reportable rows in the active count).
+  const activeCountFilter =
+    input.status === "inactive"
+      ? sql`d.is_active and coalesce(d.on_hold, false) = false`
+      : sql`coalesce(d.on_hold, false) = false`;
+
   const countResult = await tenantDb.execute(sql`
     select
       count(*)::int as total_count,
-      count(*) filter (where d.is_active and coalesce(d.on_hold, false) = false)::int as active_count,
+      count(*) filter (where ${activeCountFilter})::int as active_count,
       coalesce(sum(${workspaceEffectiveDealValueSql(stage)}), 0)::numeric as total_value,
       round(coalesce(
         avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false),

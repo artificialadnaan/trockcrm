@@ -1017,6 +1017,35 @@ describe("listDealStagePage", () => {
     expect(noneSql).toContain("avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false)");
   });
 
+  it("counts terminal (Won/Lost) reportable rows in active_count without is_active gating when no status is set", async () => {
+    // Codex P2: a Won/Lost page WITHOUT a status intentionally includes inactive terminal deals as the
+    // reportable population (non-on-hold), so active_count must NOT be is_active-gated there — only the
+    // explicit status=inactive path requires is_active.
+    dbState.responses = [
+      [{ id: "stage-won", slug: "won", name: "Won", displayOrder: 8, isTerminal: true }],
+    ];
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "4", active_count: "4", total_value: "1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-won",
+      page: 1,
+      pageSize: 25,
+      wonAllTime: true,
+    } as any);
+    const countSql = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(countSql).toContain("count(*) filter (where coalesce(d.on_hold, false) = false)::int as active_count");
+    expect(countSql).not.toContain("d.is_active"); // terminal page: no is_active default, no is_active-gated count
+  });
+
   it("applies the project-type filter to the summary", async () => {
     const sql = await runEstimatingStage({ projectTypeId: "type-1" });
     expect(sql).toContain("d.project_type_id");

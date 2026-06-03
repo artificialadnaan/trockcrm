@@ -46,6 +46,13 @@ export function buildStageSummaryFilters(
   prefix = DRILLDOWN_FILTERBAR_PARAM_PREFIX
 ): StagePageFilters {
   const fb = (key: string) => searchParams.get(`${prefix}${key}`) || undefined;
+  // Numeric fb_ filters: drop a present-but-malformed value (mirrors the bar's parseNumberParam, which
+  // returns undefined for it) so the summary is UNFILTERED exactly when the bar-driven list is — the list
+  // never forwards a malformed bound to /deals, so the header must not no-match on it either (Codex P3).
+  const fbNumeric = (key: string) => {
+    const raw = fb(key);
+    return raw !== undefined && Number.isFinite(Number(raw)) ? raw : undefined;
+  };
   const assignedRepId = options.ownRep
     ? fb("assignedRepId") ?? (searchParams.get("assignedRepId") || undefined)
     : undefined;
@@ -73,10 +80,10 @@ export function buildStageSummaryFilters(
   const workflowRoute = fb("workflowRoute");
   const regionId = fb("regionId");
   const projectTypeId = fb("projectTypeId");
-  const valueMin = fb("valueMin");
-  const valueMax = fb("valueMax");
-  const minAgeDays = fb("minAgeDays");
-  const maxAgeDays = fb("maxAgeDays");
+  const valueMin = fbNumeric("valueMin");
+  const valueMax = fbNumeric("valueMax");
+  const minAgeDays = fbNumeric("minAgeDays");
+  const maxAgeDays = fbNumeric("maxAgeDays");
   return {
     ...baseFilters,
     ...(assignedRepId ? { assignedRepId } : {}),

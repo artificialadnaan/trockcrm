@@ -351,6 +351,18 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
     );
     expect(filters.status).toBeUndefined();
   });
+
+  it("drops malformed fb_ numeric filters (value/age) so the summary stays unfiltered like the bar, not no-matched", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_valueMin=abc&fb_valueMax=xyz&fb_minAgeDays=nope&fb_maxAgeDays=bad"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.valueMin).toBeUndefined();
+    expect(filters.valueMax).toBeUndefined();
+    expect(filters.minAgeDays).toBeUndefined();
+    expect(filters.maxAgeDays).toBeUndefined();
+  });
 });
 
 describe("appendInheritedTerminalDateToBarSearch (Bug B: carry inherited window into fb_ so list + header agree)", () => {
