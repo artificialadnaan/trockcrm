@@ -127,6 +127,9 @@ export const deals = pgTable(
     bidBoardStageDuration: interval("bid_board_stage_duration"),
     bidBoardLossOutcome: varchar("bid_board_loss_outcome", { length: 100 }),
     bidBoardEstimator: text("bid_board_estimator"),
+    // Resolved at ingest from bid_board_estimator via BID_BOARD_ESTIMATOR_USER_MAP, so the
+    // rep/owner filter can match deals a person ESTIMATED (not just ones they own as rep).
+    estimatorUserId: uuid("estimator_user_id"),
     bidBoardOffice: text("bid_board_office"),
     bidBoardStatus: text("bid_board_status"),
     bidBoardSalesPricePerArea: text("bid_board_sales_price_per_area"),

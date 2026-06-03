@@ -41,6 +41,7 @@ beforeAll(async () => {
       id text PRIMARY KEY,
       stage_id text NOT NULL DEFAULT 'open',
       assigned_rep_id text,
+      estimator_user_id text,
       region_id text,
       project_type_id text,
       workflow_route text NOT NULL DEFAULT 'normal',
@@ -70,6 +71,10 @@ beforeAll(async () => {
       ('onhold_inactive', 'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  false, true,  50000),
       ('inactive',        'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  false, false, 50000),
       ('val_high',        'open', 'rep-a', 'reg-a', 'pt-a', 'normal',  true,  false, 900000);
+    -- estimator-aware rep filter: a deal ASSIGNED to rep-b but ESTIMATED by rep-a.
+    -- Filtering by rep-a must surface it (assigned_rep OR estimator); __unassigned__ must NOT.
+    INSERT INTO deals (id, stage_id, assigned_rep_id, estimator_user_id, is_active, on_hold, dd_estimate) VALUES
+      ('estimated_by_a', 'open', 'rep-b', 'rep-a', true, false, 50000);
     -- date-axis rows (outcome dates); is_active mirrors real terminal rows.
     -- won_in: LOW open best-estimate (dd 10000) but HIGH awarded (500000) — so a value filter only
     --   includes it if Won awarded-first classification is actually applied (Codex #567).
@@ -101,11 +106,20 @@ describe("FilterBar backend dimensions — real SQL via the #546 predicate regis
       expect(await matched({ assignedRepId: "rep-a" })).toContain("rep_a");
       expect(await matched({ assignedRepId: "rep-a" })).not.toContain("rep_b");
     });
-    it("maps __unassigned__ to IS NULL (matches NULL-rep rows, excludes assigned)", async () => {
+    it("also matches deals the person ESTIMATED, not just ones they own (assigned_rep OR estimator)", async () => {
+      const byA = await matched({ assignedRepId: "rep-a" });
+      expect(byA).toContain("rep_a"); // owned as assigned rep
+      expect(byA).toContain("estimated_by_a"); // estimated by rep-a (assigned to rep-b)
+      const byB = await matched({ assignedRepId: "rep-b" });
+      expect(byB).toContain("rep_b");
+      expect(byB).toContain("estimated_by_a"); // rep-b owns it as the assigned rep
+    });
+    it("maps __unassigned__ to IS NULL (matches NULL-rep rows, excludes assigned AND estimated)", async () => {
       const ids = await matched({ assignedRepId: UNASSIGNED_FILTER_SENTINEL });
       expect(ids).toContain("unassigned");
       expect(ids).not.toContain("rep_a");
       expect(ids).not.toContain("rep_b");
+      expect(ids).not.toContain("estimated_by_a"); // estimator must NOT widen the Unassigned bucket
     });
     it("unset rep omits the predicate (no narrowing)", async () => {
       expect((await matched({})).length).toBeGreaterThan(1);

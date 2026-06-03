@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deals, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 const dbState = vi.hoisted(() => ({
   stages: [
@@ -67,6 +68,9 @@ function containsValue(value: unknown, expected: string, seen = new Set<unknown>
   if (Array.isArray(value)) return value.some((item) => containsValue(item, expected, seen));
   return Object.values(value as Record<string, unknown>).some((item) => containsValue(item, expected, seen));
 }
+
+const dialect = new PgDialect();
+const sqlText = (value: unknown) => dialect.sqlToQuery(value as never).sql.toLowerCase();
 
 // resolveActiveOfficeScope (the office-scope predicate added to getDealsForPipeline)
 // queries users + userOfficeAccess on the tenant client and awaits .where() directly.
@@ -181,7 +185,7 @@ describe("getDealsForPipeline team scope", () => {
     expect(result.pipelineColumns[0].deals[0]?.assignedRepName).toBe("Brett Jones");
   });
 
-  it("getDealsForPipeline narrows to specific rep when scope=team and assignedRepId both set", async () => {
+  it("getDealsForPipeline bounds to the team AND targets the selected person (rep or estimator) when scope=team", async () => {
     const teamQuery = {
       from: vi.fn().mockReturnThis(),
       where: vi.fn().mockResolvedValue([{ id: "rep-team-1" }, { id: "rep-team-2" }]),
@@ -215,8 +219,15 @@ describe("getDealsForPipeline team scope", () => {
       includeDd: true,
     });
 
-    expect(containsValue(dealQuery.where.mock.calls[0][0], "rep-team-1")).toBe(true);
-    expect(containsValue(dealQuery.where.mock.calls[0][0], "rep-team-2")).toBe(false);
+    const where = dealQuery.where.mock.calls[0][0];
+    // Estimator-aware + team-bounded: the rep-OR-estimator clause targets rep-team-1, AND'd with
+    // the team-membership IN bound (which includes the other team member rep-team-2 — so the
+    // estimator clause can't surface deals assigned outside the team).
+    expect(containsValue(where, "rep-team-1")).toBe(true);
+    expect(containsValue(where, "rep-team-2")).toBe(true);
+    const text = sqlText(where);
+    expect(text).toContain("estimator_user_id"); // rep filter applied (rep OR estimator), not team-only
+    expect(text).toContain(" in ("); // bounded to the team (assigned_rep_id IN (...))
   });
 
   it("preserves inactive terminal history for all-time terminal pipeline columns", async () => {

@@ -172,11 +172,27 @@ describe("Bid Board sync service", () => {
       "Project ID": "987654",
       Status: "Estimate in Progress",
     });
-    const params = updateParams("deal-123", normalized, "2026-05-06T16:30:00.000Z");
+    const params = updateParams("deal-123", normalized, "2026-05-06T16:30:00.000Z", null);
 
-    expect(params.at(-1)).toBe("2026-05-06T16:30:00.000Z");
+    // $15 (index 14) is the cycle timestamp; $16 (last) is the estimator_user_id.
+    expect(params[14]).toBe("2026-05-06T16:30:00.000Z");
     await findDealIds({ query }, "office_dallas", normalized);
-    const newerParams = updateParams("deal-123", normalized, "2026-05-06T16:45:00.000Z");
-    expect(newerParams.at(-1)).toBe("2026-05-06T16:45:00.000Z");
+    const newerParams = updateParams("deal-123", normalized, "2026-05-06T16:45:00.000Z", null);
+    expect(newerParams[14]).toBe("2026-05-06T16:45:00.000Z");
+  });
+
+  it("writes the (resolved + validated) estimator_user_id at $16, or null, into the deal update", () => {
+    const sql = buildBidBoardDealUpdateSql("office_dallas").toLowerCase();
+    expect(sql).toContain("estimator_user_id = $16");
+    expect(sql).toContain("estimator_user_id is distinct from $16");
+
+    const row = normalizeBidBoardRow({
+      Name: "Palm Villas",
+      Status: "Estimate in Progress",
+      "Project #": "DFW-4-11826-ab",
+    });
+    const ALEX = "636fd7e9-2575-4826-b11d-2869b24a12cf";
+    expect(updateParams("deal-1", row, "2026-05-06T16:30:00.000Z", ALEX)[15]).toBe(ALEX);
+    expect(updateParams("deal-2", row, "2026-05-06T16:30:00.000Z", null)[15]).toBeNull();
   });
 });

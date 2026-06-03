@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql, type SQL } from "drizzle-orm";
+import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import { deals } from "@trock-crm/shared/schema";
 import {
   aliasedActiveDealCountFilterSql,
@@ -69,12 +69,38 @@ function finiteNumber(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-/** assigned rep — eq, or IS NULL for the Unassigned sentinel. */
+/**
+ * "Involved as rep or estimator": the deal's assigned rep OR the resolved estimator
+ * (deals.estimator_user_id) is the filtered person. The Unassigned sentinel maps to
+ * assigned_rep IS NULL ONLY — the estimator clause must NOT widen the Unassigned bucket.
+ * For service reps who estimate their own deals (estimator == rep) this returns the same
+ * deals as before; for estimator-only people it also surfaces deals they estimated.
+ */
+export function buildInvolvedRepCondition(repId: string): SQL {
+  if (repId === UNASSIGNED_FILTER_SENTINEL) return isNull(deals.assignedRepId);
+  return or(eq(deals.assignedRepId, repId), eq(deals.estimatorUserId, repId)) as SQL;
+}
+
+/** assigned rep — matches assigned_rep OR estimator (id-or-id), or IS NULL for the Unassigned sentinel. */
 export function buildAssignedRepPredicate(input: DealFilterBarInput): SQL | undefined {
   if (!input.assignedRepId) return undefined;
-  return input.assignedRepId === UNASSIGNED_FILTER_SENTINEL
-    ? isNull(deals.assignedRepId)
-    : eq(deals.assignedRepId, input.assignedRepId);
+  return buildInvolvedRepCondition(input.assignedRepId);
+}
+
+/**
+ * Raw-SQL variant of buildInvolvedRepCondition for queries that alias the deals table
+ * (e.g. "d") and so can't use the unaliased Drizzle `deals` object — mirrors the
+ * unaliased/aliased mine-visibility split. `alias` is interpolated raw, so it MUST be a
+ * trusted internal identifier (validated below to block injection); `repId` is parameterized.
+ */
+export function buildAliasedInvolvedRepSql(alias: string, repId: string): SQL {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new Error(`Invalid SQL alias for involved-rep predicate: ${alias}`);
+  }
+  const repCol = sql.raw(`${alias}.assigned_rep_id`);
+  if (repId === UNASSIGNED_FILTER_SENTINEL) return sql`${repCol} is null`;
+  const estCol = sql.raw(`${alias}.estimator_user_id`);
+  return sql`(${repCol} = ${repId} OR ${estCol} = ${repId})`;
 }
 
 /** region — eq, or IS NULL for the Unassigned sentinel (region is very sparse). */
