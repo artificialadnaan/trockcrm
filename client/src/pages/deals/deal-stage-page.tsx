@@ -29,21 +29,34 @@ import {
  * first, then the inherited bare params (so the summary is correct on the pre-redirect first paint too)
  * — and apply them. The date is written to BOTH the Won and Lost windows; the server (listDealStagePage)
  * applies only the one matching the route stage's outcome, so this stays outcome-agnostic here.
+ *
+ * `ownRep` mirrors the list's Rep dimension (admin-only). When the bar does NOT render Rep, the list
+ * ignores an inherited fb_assignedRepId, so the summary must ignore it too — otherwise the header would
+ * be rep-scoped while the visible list (scoped only by mine/all) is all-rep (Codex P2).
+ *
+ * No explicit window ⇒ all-time: the board treats "no period" as all-time and the list shows all-time
+ * with no date, so pin wonAllTime/lostAllTime rather than let the server fall back to its 30-day terminal
+ * default — otherwise an all-time board card would open a 30-day header total (Codex P2).
  */
 export function buildStageSummaryFilters(
   searchParams: URLSearchParams,
   baseFilters: StagePageFilters,
+  options: { ownRep: boolean },
   prefix = DRILLDOWN_FILTERBAR_PARAM_PREFIX
 ): StagePageFilters {
   const fb = (key: string) => searchParams.get(`${prefix}${key}`) || undefined;
-  const assignedRepId = fb("assignedRepId") ?? (searchParams.get("assignedRepId") || undefined);
+  const assignedRepId = options.ownRep
+    ? fb("assignedRepId") ?? (searchParams.get("assignedRepId") || undefined)
+    : undefined;
   const from = fb("dateFrom") ?? (searchParams.get("won_since") || searchParams.get("lost_since") || undefined);
   const to = fb("dateTo") ?? (searchParams.get("won_until") || searchParams.get("lost_until") || undefined);
+  const allTime = !from && !to;
   return {
     ...baseFilters,
     ...(assignedRepId ? { assignedRepId } : {}),
     ...(from ? { wonSince: from, lostSince: from } : {}),
     ...(to ? { wonUntil: to, lostUntil: to } : {}),
+    ...(allTime ? { wonAllTime: true, lostAllTime: true } : {}),
   };
 }
 
@@ -71,16 +84,19 @@ export function DealStagePage() {
   const location = useLocation();
   const [searchParams] = useSearchParams();
   const route = useNormalizedStageRoute("deals", stageId!);
+  const { user } = useAuth();
   // Bug B: the header summary inherits the bar's active rep + date so the "Stage value" total reconciles
   // with the rep/date-scoped board card — it is no longer forced whole-stage. The server already scopes
-  // /deals/stages/:id by assignedRepId + the Won/Lost window when they are sent.
-  const summaryFilters = buildStageSummaryFilters(searchParams, route.query.filters);
+  // /deals/stages/:id by assignedRepId + the Won/Lost window when they are sent. `ownRep` matches the
+  // bar's Rep dimension (admin-only) so the summary only rep-scopes when the list does.
+  const summaryFilters = buildStageSummaryFilters(searchParams, route.query.filters, {
+    ownRep: user?.role === "admin",
+  });
   const { data, loading, error } = useDealStagePage({ stageId: stageId!, ...route.query, filters: summaryFilters });
   const { regions } = useRegions();
   const { projectTypes } = useProjectTypes();
   const { assignees } = useTaskAssignees();
   const { stages, loading: stagesLoading } = usePipelineStages("deal");
-  const { user } = useAuth();
   const summary = buildDealStageSummary(data);
 
   if (route.needsRedirect) return <Navigate to={route.redirectTo} replace />;

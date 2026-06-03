@@ -211,12 +211,22 @@ describe("DealStagePage", () => {
     );
   });
 
-  it("keeps the summary whole-stage when no rep/date is active (unfiltered drill-down)", () => {
+  it("opens an unfiltered drill-down as all-rep + all-time (not the server 30-day default)", () => {
     renderStage("/deals/stages/stage-estimating?scope=team");
     const calls = mocks.useDealStagePageMock.mock.calls;
     const lastCall = calls[calls.length - 1]?.[0];
     expect(lastCall.filters.assignedRepId).toBeUndefined();
     expect(lastCall.filters.wonSince).toBeUndefined();
+    expect(lastCall.filters.wonAllTime).toBe(true);
+  });
+
+  it("does not rep-scope the summary for a non-admin even if the URL carries fb_assignedRepId", () => {
+    mocks.useAuthMock.mockReturnValue({ user: { role: "sales" } });
+    setStage({ id: "s-won", name: "Won", slug: "won" });
+    renderStage("/deals/stages/s-won?scope=mine&fb_assignedRepId=rep-1");
+    const calls = mocks.useDealStagePageMock.mock.calls;
+    const lastCall = calls[calls.length - 1]?.[0];
+    expect(lastCall.filters.assignedRepId).toBeUndefined();
   });
 });
 
@@ -224,7 +234,8 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
   it("reads the fb_ rep + date window into the summary filters (both won + lost windows)", () => {
     const filters = buildStageSummaryFilters(
       new URLSearchParams("fb_assignedRepId=rep-1&fb_dateFrom=2026-01-01&fb_dateTo=2026-06-03"),
-      { staleOnly: false }
+      { staleOnly: false },
+      { ownRep: true }
     );
     expect(filters.assignedRepId).toBe("rep-1");
     // Outcome-agnostic: set both windows; the server applies only the one matching the stage outcome.
@@ -237,7 +248,8 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
   it("falls back to inherited bare params (pre-redirect first paint) so the summary is never momentarily whole-stage", () => {
     const filters = buildStageSummaryFilters(
       new URLSearchParams("assignedRepId=rep-2&won_since=2026-02-01&won_until=2026-05-01"),
-      { staleOnly: false }
+      { staleOnly: false },
+      { ownRep: true }
     );
     expect(filters.assignedRepId).toBe("rep-2");
     expect(filters.wonSince).toBe("2026-02-01");
@@ -247,16 +259,43 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
   it("prefers an explicit fb_ value over the inherited bare value", () => {
     const filters = buildStageSummaryFilters(
       new URLSearchParams("fb_assignedRepId=rep-1&assignedRepId=rep-2"),
-      { staleOnly: false }
+      { staleOnly: false },
+      { ownRep: true }
     );
     expect(filters.assignedRepId).toBe("rep-1");
   });
 
-  it("leaves the summary unscoped (whole-stage) when no rep/date is present, preserving base filters", () => {
-    const filters = buildStageSummaryFilters(new URLSearchParams("scope=team"), { staleOnly: true });
+  // Codex P2: the bar renders Rep only for admins, so a non-admin's list ignores fb_assignedRepId. The
+  // summary must ignore it too, or the header is rep-scoped while the visible list (mine/all only) is all-rep.
+  it("does NOT apply the rep for non-admins (ownRep:false), but still applies the date window", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_assignedRepId=rep-1&fb_dateFrom=2026-01-01&fb_dateTo=2026-06-03"),
+      { staleOnly: false },
+      { ownRep: false }
+    );
+    expect(filters.assignedRepId).toBeUndefined();
+    expect(filters.wonSince).toBe("2026-01-01"); // Date dimension is always rendered, so the window still applies
+  });
+
+  // Codex P2: an all-time board card (won_all_time, no since/until) must not fall back to the server's
+  // 30-day terminal default. No window ⇒ pin all-time so the header matches the all-time card + list.
+  it("pins all-time (wonAllTime/lostAllTime) when no window is present, instead of the server 30-day default", () => {
+    const filters = buildStageSummaryFilters(new URLSearchParams("scope=team"), { staleOnly: true }, { ownRep: true });
     expect(filters.assignedRepId).toBeUndefined();
     expect(filters.wonSince).toBeUndefined();
+    expect(filters.wonAllTime).toBe(true);
+    expect(filters.lostAllTime).toBe(true);
     expect(filters.staleOnly).toBe(true); // base filters pass through untouched
+  });
+
+  it("does NOT pin all-time when a window is present", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_dateFrom=2026-01-01&fb_dateTo=2026-06-03"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.wonAllTime).toBeUndefined();
+    expect(filters.lostAllTime).toBeUndefined();
   });
 });
 

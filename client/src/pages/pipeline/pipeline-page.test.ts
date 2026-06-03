@@ -504,8 +504,8 @@ describe("terminal pipeline date filters", () => {
   });
 });
 
-describe("buildPipelineStageNavigationPath (Bug A: carry scope + active filters into the drill-down)", () => {
-  it("forwards the active scope AND the URL rep filter into the stage drill-down, mirroring the deals page", () => {
+describe("buildPipelineStageNavigationPath (Bug A: carry scope + terminal window, NOT the list-only rep)", () => {
+  it("carries the active scope + terminal window into the drill-down, but NOT a rep", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
 
@@ -513,24 +513,25 @@ describe("buildPipelineStageNavigationPath (Bug A: carry scope + active filters 
       "stage-won",
       "won",
       "all",
-      { won: { preset: "30" }, lost: { preset: "all" } },
-      new URLSearchParams("scope=all&assignedRepId=rep-1&fb_search=ignored")
+      { won: { preset: "30" }, lost: { preset: "all" } }
     );
 
-    // The old inline nav dropped BOTH of these — the drill-down then opened scope=mine, all-rep.
+    // The real Bug A: the old nav dropped scope, so the drill-down defaulted to scope=mine.
     expect(path).toContain("scope=all");
-    expect(path).toContain("assignedRepId=rep-1");
-    // The terminal Won window keeps flowing through via `filters` (unchanged behavior).
-    expect(path).toBe("/deals/stages/stage-won?scope=all&assignedRepId=rep-1&won_since=2026-04-01");
+    // The terminal Won window flows through via `filters`.
+    expect(path).toContain("won_since=2026-04-01");
+    // The pipeline BOARD is all-rep (buildPipelineRequestPath takes no rep), so the column the user
+    // clicked is all-rep — the drill-down must NOT rep-scope or it stops matching that card.
+    expect(path).not.toContain("assignedRepId");
+    expect(path).toBe("/deals/stages/stage-won?scope=all&won_since=2026-04-01");
   });
 
-  it("still works for a non-terminal stage with no URL filters (scope only)", () => {
+  it("still works for a non-terminal stage (scope only)", () => {
     const path = buildPipelineStageNavigationPath(
       "stage-estimating",
       "estimating",
       "mine",
-      { won: { preset: "all" }, lost: { preset: "all" } },
-      new URLSearchParams("scope=mine")
+      { won: { preset: "all" }, lost: { preset: "all" } }
     );
     expect(path).toBe("/deals/stages/stage-estimating?scope=mine");
   });

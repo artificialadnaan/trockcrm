@@ -155,24 +155,24 @@ export function resolvePipelinePageMove(
   return { deal, targetStageId };
 }
 
-// Open a stage column's drill-down at the SAME scope + filters the board is showing. The pipeline page
-// previously navigated with only the terminal date filters, so the drill-down dropped the active scope
-// (it defaulted to mine) and the active rep — mirror the deals page (buildDealStageNavigationPath) by
-// forwarding scope + the current URL params (assignedRepId, estimate-sent window) so the drill-down
-// opens the same cohort the user was looking at, not a stale whole-stage / scope=mine view.
+// Open a stage column's drill-down at the SAME scope + terminal window the board is showing. The bug was
+// that the pipeline navigated with ONLY the terminal date filters, so the drill-down dropped the active
+// scope and defaulted to mine. Forward scope + the terminal filters so the drill-down matches the column
+// the user clicked. Deliberately NOT forwarding the URL's bare assignedRepId: the pipeline BOARD is fetched
+// all-rep (buildPipelineRequestPath takes only showDd/terminalDateFilters/scope — no rep), so the column
+// counts/values the user clicked are all-rep. The rep lives only on the under-kanban LIST's FilterBar;
+// forwarding it would open a rep-scoped drill-down that no longer matches the all-rep card (Codex P2).
 export function buildPipelineStageNavigationPath(
   stageId: string,
   stageSlug: string,
   scope: PipelineScope,
-  terminalDateFilters: Record<TerminalOutcome, TerminalDateFilter>,
-  queryParams: URLSearchParams
+  terminalDateFilters: Record<TerminalOutcome, TerminalDateFilter>
 ) {
   return buildDealStageWorkspacePath({
     stageId,
     stageSlug,
     scope,
     filters: terminalDateFilters,
-    queryParams,
   });
 }
 
@@ -679,8 +679,7 @@ export function PipelinePage() {
                         stageId,
                         column.stage.slug,
                         scope,
-                        terminalDateFilters,
-                        searchParams
+                        terminalDateFilters
                       )
                     )
                   }
