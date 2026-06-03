@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq, and, desc, asc, inArray, sql, or, isNull, not, getTableColumns, type SQLWrapper } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -2801,9 +2802,14 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     conditions.push(aliasedActiveDealCountFilterSql("d"));
   }
 
-  if (input.search?.trim()) {
-    const searchTerm = `%${input.search.trim()}%`;
-    conditions.push(sql`(d.name ilike ${searchTerm} or d.deal_number ilike ${searchTerm})`);
+  // Search must match the LIST exactly: reuse the unified buildDealSearchCondition (name/number/project/
+  // address/city/state/company/contact/owner) with the same >=2-char guard getDeals applies — not the
+  // legacy name/number-only ILIKE — so the header total reconciles with the searched list (Codex P2).
+  // `alias(deals, "d")` renders the predicate against this query's `from deals d`.
+  if (input.search && input.search.trim().length >= 2) {
+    // alias(deals, "d") is column-compatible with `deals` at runtime; Drizzle's aliased-table wrapper type
+    // doesn't structurally overlap, so go through `unknown` (the only column access is the shared columns).
+    conditions.push(buildDealSearchCondition(input.search, alias(deals, "d") as unknown as typeof deals));
   }
   if (input.assignedRepId) {
     // The Unassigned FilterBar option sends the sentinel; map it to IS NULL like the list (getDeals /
@@ -2866,11 +2872,13 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     conditions.push(sql`d.updated_at::date <= ${input.updatedTo}::date`);
   }
   addWorkspaceEstimateSentDateConditions(conditions, input);
-  // Stalled / days-in-stage — match the LIST exactly (buildStalledPredicate): gated on the stage-entry
-  // flag (so legacy import-placeholder dates can't false-stall) and measured on the HOLD-AWARE effective
-  // stage age, not raw wall-clock — otherwise an on-hold deal is in/out of the summary differently than
-  // the list. GREEN #616 follow-up: adopts the helper the list already uses.
-  if (isStageEntryDateFilterEnabled()) {
+  // Stalled / days-in-stage — measured on the HOLD-AWARE effective stage age (the SAME measure the list
+  // filters by, aliasedEffectiveStageAgeDaysSql), not raw wall-clock, so an on-hold deal is in/out of the
+  // summary the same way as the list. NOT gated on the global ENABLE_STAGE_ENTRY_DATE_FILTER flag: the
+  // stage page's list always enables stalled (DealsListSection sends stageEntryDateWindow=true, and getDeals
+  // treats that as flag-OR-window), so the summary must apply it whenever a bound is present to reconcile
+  // even when the global flag is off (Codex P2).
+  {
     const stageAgeDays = aliasedEffectiveStageAgeDaysSql("d");
     if (typeof input.minAgeDays === "number" && Number.isFinite(input.minAgeDays)) {
       conditions.push(sql`${stageAgeDays} >= ${input.minAgeDays}`);
@@ -2885,9 +2893,9 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   const countResult = await tenantDb.execute(sql`
     select
       count(*)::int as total_count,
-      count(*) filter (where coalesce(d.on_hold, false) = false)::int as active_count,
+      count(*) filter (where d.is_active and coalesce(d.on_hold, false) = false)::int as active_count,
       coalesce(sum(${workspaceEffectiveDealValueSql(stage)}), 0)::numeric as total_value,
-      round(avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false))::int as average_days_in_stage
+      round(avg(extract(day from now() - d.stage_entered_at)) filter (where d.is_active and coalesce(d.on_hold, false) = false))::int as average_days_in_stage
     from deals d
     left join users u on u.id = d.assigned_rep_id
     where ${where}

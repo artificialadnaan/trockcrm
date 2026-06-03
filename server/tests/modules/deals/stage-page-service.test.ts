@@ -996,10 +996,16 @@ describe("listDealStagePage", () => {
     expect(onHoldSql).toContain("coalesce(d.on_hold, false) = true");
 
     const inactiveSql = await runEstimatingStage({ status: "inactive" });
-    expect(inactiveSql).toContain("d.is_active = false");
-    // The non-terminal active-only DEFAULT must NOT also fire, or status=inactive would be forced empty
-    // (is_active=true AND is_active=false) while the list shows inactive deals (adversarial R3).
-    expect(inactiveSql).not.toContain("d.is_active = true");
+    const inactiveWhere = fromDealsWhereSql(inactiveSql);
+    expect(inactiveWhere).toContain("d.is_active = false");
+    // The non-terminal active-only DEFAULT must NOT fire in the WHERE, or status=inactive is forced empty
+    // (is_active=true AND is_active=false) while the list shows inactive deals (adversarial R3). (Checked on
+    // the WHERE slice — the active_count SELECT legitimately references is_active=true.)
+    expect(inactiveWhere).not.toContain("d.is_active = true");
+    // active_count must require is_active (not just on_hold=false) so inactive deals are NOT counted as
+    // active in the header (Codex P2). Boolean form (no "= true") keeps the terminal WHERE-relaxation
+    // assertions valid while still requiring is_active in the active-count aggregate.
+    expect(inactiveSql).toContain("filter (where d.is_active and coalesce(d.on_hold, false) = false)");
 
     // No status = the active-only default still applies on a non-terminal stage (unchanged).
     const noneSql = await runEstimatingStage({});
@@ -1033,23 +1039,27 @@ describe("listDealStagePage", () => {
     expect(noneSql).not.toContain("between");
   });
 
-  it("applies the stalled filter on hold-aware effective age, gated on the stage-entry flag (mirrors the list)", async () => {
-    // Flag OFF (test default) → no stalled condition at all, exactly like buildStalledPredicate (undefined),
-    // so the summary and the list both skip it. (on_hold_accumulated_seconds is unique to the effective-age
-    // expression in the WHERE; the count SELECT's avg uses raw stage_entered_at, so it is a clean marker.)
-    const offSql = await runEstimatingStage({ minAgeDays: 7, maxAgeDays: 30 });
-    expect(offSql).not.toContain("on_hold_accumulated_seconds");
+  it("applies the stalled filter on hold-aware effective age, NOT gated on the global flag (mirrors the stage-page list)", async () => {
+    // The stage page's list always enables stalled (DealsListSection sends stageEntryDateWindow=true, and
+    // getDeals gates on flag-OR-window), so the summary must apply it whenever a bound is present — even
+    // with ENABLE_STAGE_ENTRY_DATE_FILTER off — on the HOLD-AWARE effective age. on_hold_accumulated_seconds
+    // is unique to aliasedEffectiveStageAgeDaysSql in the WHERE (the count avg uses raw stage_entered_at).
+    const sql = await runEstimatingStage({ minAgeDays: 7, maxAgeDays: 30 });
+    expect(sql).toContain("on_hold_accumulated_seconds");
 
-    const prev = process.env.ENABLE_STAGE_ENTRY_DATE_FILTER;
-    process.env.ENABLE_STAGE_ENTRY_DATE_FILTER = "true";
-    try {
-      const onSql = await runEstimatingStage({ minAgeDays: 7, maxAgeDays: 30 });
-      // Hold-aware effective stage age (aliasedEffectiveStageAgeDaysSql) — the SAME measure the list filters
-      // by — not raw wall-clock, so an on-hold deal reconciles between the header and the list.
-      expect(onSql).toContain("on_hold_accumulated_seconds");
-    } finally {
-      if (prev === undefined) delete process.env.ENABLE_STAGE_ENTRY_DATE_FILTER;
-      else process.env.ENABLE_STAGE_ENTRY_DATE_FILTER = prev;
-    }
+    const noneSql = await runEstimatingStage({});
+    expect(noneSql).not.toContain("on_hold_accumulated_seconds");
+  });
+
+  it("reconciles search with the list: uses the unified search predicate with a >=2-char guard", async () => {
+    // Must match the LIST's buildDealSearchCondition (owner/company/contact + project number/address),
+    // not the legacy name/number-only ILIKE, or the header search diverges from the searched list (Codex P2).
+    const sql = await runEstimatingStage({ search: "acme" });
+    expect(sql).toContain("owner_user"); // owner display_name EXISTS subquery — unique to the unified search
+    expect(sql).toContain("ilike");
+
+    // >=2-char guard, matching getDeals: a single-character term applies NO search predicate.
+    const oneChar = await runEstimatingStage({ search: "a" });
+    expect(oneChar).not.toContain("owner_user");
   });
 });
