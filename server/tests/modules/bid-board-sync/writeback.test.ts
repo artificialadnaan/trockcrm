@@ -65,7 +65,7 @@ describe("Bid Board sync stage writeback", () => {
       if (base) return base;
 
       const normalizedSql = sql.toLowerCase();
-      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         expect(params).toEqual(["dfw-4-11826-ab"]);
         return { rows: [matchedDeal()], rowCount: 1 };
       }
@@ -168,7 +168,7 @@ describe("Bid Board sync stage writeback", () => {
       if (base) return base;
 
       const normalizedSql = sql.toLowerCase();
-      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         return { rows: [matchedDeal({ workflow_route: "service", deal_number: "DFW-4-22222-ab" })], rowCount: 1 };
       }
       if (normalizedSql.includes("from public.pipeline_stage_config") && normalizedSql.includes("slug = $1")) {
@@ -230,7 +230,7 @@ describe("Bid Board sync stage writeback", () => {
       if (base) return base;
 
       const normalizedSql = sql.toLowerCase();
-      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         return {
           rows: [matchedDeal({ stage_id: "stage-estimating", stage_slug: "estimating", stage_display_order: 3 })],
           rowCount: 1,
@@ -286,7 +286,7 @@ describe("Bid Board sync stage writeback", () => {
       if (base) return base;
 
       const normalizedSql = sql.toLowerCase();
-      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         return { rows: [matchedDeal()], rowCount: 1 };
       }
       if (normalizedSql.includes("from public.pipeline_stage_config") && normalizedSql.includes("slug = $1")) {
@@ -324,7 +324,7 @@ describe("Bid Board sync stage writeback", () => {
       if (base) return base;
 
       const normalizedSql = sql.toLowerCase();
-      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         return {
           rows: [
             matchedDeal({
@@ -411,7 +411,7 @@ describe("Bid Board sync stage writeback", () => {
       if (base) return base;
 
       const normalizedSql = sql.toLowerCase();
-      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         return {
           rows: [
             matchedDeal({
@@ -484,7 +484,7 @@ describe("Bid Board sync stage writeback", () => {
         return base;
       }
 
-      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         return {
           rows: [
             matchedDeal({
@@ -542,7 +542,7 @@ describe("Bid Board sync stage writeback", () => {
       if (base) return base;
 
       const normalizedSql = sql.toLowerCase();
-      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         return {
           rows: [
             matchedDeal({
@@ -617,7 +617,7 @@ describe("Bid Board sync stage writeback", () => {
       if (base) return base;
 
       const normalizedSql = sql.toLowerCase();
-      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("lower(trim(d.project_number))")) {
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
         const projectNumber = params[0];
         if (projectNumber === "dfw-9-00000-aa") {
           return {
