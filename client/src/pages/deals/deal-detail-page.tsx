@@ -900,6 +900,7 @@ export function DealDetailPage() {
               touch contract_signed_date, so a value set on a synced deal survives re-sync. Editing
               stays role-gated (canEdit={isDirectorOrAdmin}); reps see it read-only. */}
           <DealContractSignedCard
+            key={deal.id}
             deal={deal}
             canEdit={isDirectorOrAdmin}
             onUpdate={refetch}

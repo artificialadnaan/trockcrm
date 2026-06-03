@@ -6,6 +6,16 @@ export interface DateFieldProps {
   id?: string;
   value: string;
   onChange: (value: string) => void;
+  /**
+   * Optional explicit-commit callback. When provided, it fires on blur and on
+   * Enter with the input's current value — so callers can keep `onChange` for
+   * a local draft and persist only when the user finishes editing. A native
+   * <input type="date"> emits a change the instant MM/DD/YYYY form a complete
+   * date (mid-year-typing), so persisting on `onChange` saves prematurely;
+   * `onCommit` is the seam for save-on-commit. Additive: consumers that omit
+   * it (filters, form drafts) are unaffected.
+   */
+  onCommit?: (value: string) => void;
   disabled?: boolean;
   min?: string;
   max?: string;
@@ -23,6 +33,7 @@ export function DateField({
   id,
   value,
   onChange,
+  onCommit,
   disabled,
   min,
   max,
@@ -36,6 +47,14 @@ export function DateField({
       type="date"
       value={safeValue}
       onChange={(event) => onChange(event.target.value)}
+      onBlur={onCommit ? (event) => onCommit(event.target.value) : undefined}
+      onKeyDown={
+        onCommit
+          ? (event) => {
+              if (event.key === "Enter") onCommit(event.currentTarget.value);
+            }
+          : undefined
+      }
       disabled={disabled}
       min={min}
       max={max}
