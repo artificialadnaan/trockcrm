@@ -325,16 +325,17 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
 
   // GREEN (#616 follow-up): the top "Stage Value" must follow ALL the list filters, not just rep+date —
   // status, workflow, type, value, and stalled (days-in-stage) all narrow the deal set, so all flow in.
-  it("inherits the remaining list filters (status, workflow, type, value, stalled) from the fb_ namespace", () => {
+  it("inherits the remaining list filters (status, workflow, region, type, value, stalled) from the fb_ namespace", () => {
     const filters = buildStageSummaryFilters(
       new URLSearchParams(
-        "fb_status=on_hold&fb_workflowRoute=service&fb_projectTypeId=type-1&fb_valueMin=1000&fb_valueMax=50000&fb_minAgeDays=7&fb_maxAgeDays=30"
+        "fb_status=on_hold&fb_workflowRoute=service&fb_regionId=region-1&fb_projectTypeId=type-1&fb_valueMin=1000&fb_valueMax=50000&fb_minAgeDays=7&fb_maxAgeDays=30"
       ),
       { staleOnly: false },
       { ownRep: true }
     );
     expect(filters.status).toBe("on_hold");
     expect(filters.workflowRoute).toBe("service");
+    expect(filters.regionId).toBe("region-1");
     expect(filters.projectTypeId).toBe("type-1");
     expect(filters.valueMin).toBe("1000");
     expect(filters.valueMax).toBe("50000");

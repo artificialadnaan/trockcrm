@@ -66,6 +66,7 @@ export function buildStageSummaryFilters(
   // set the list shows. (status, workflow, type, value range, stalled/days-in-stage.)
   const status = fb("status");
   const workflowRoute = fb("workflowRoute");
+  const regionId = fb("regionId");
   const projectTypeId = fb("projectTypeId");
   const valueMin = fb("valueMin");
   const valueMax = fb("valueMax");
@@ -76,6 +77,7 @@ export function buildStageSummaryFilters(
     ...(assignedRepId ? { assignedRepId } : {}),
     ...(status ? { status } : {}),
     ...(workflowRoute ? { workflowRoute } : {}),
+    ...(regionId ? { regionId } : {}),
     ...(projectTypeId ? { projectTypeId } : {}),
     ...(valueMin ? { valueMin } : {}),
     ...(valueMax ? { valueMax } : {}),

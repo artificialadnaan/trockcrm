@@ -1012,6 +1012,9 @@ describe("listDealStagePage", () => {
     expect(noneSql).toContain("d.is_active = true");
     expect(noneSql).not.toContain("d.is_active = false");
     expect(noneSql).not.toContain("coalesce(d.on_hold, false) = true");
+    // The avg-visible-age aggregate stays over the visible (on_hold-only) rows — NOT is_active-gated — so a
+    // terminal/inactive page (rows visible but is_active=false) still yields an average, not null (Codex r2).
+    expect(noneSql).toContain("avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false)");
   });
 
   it("applies the project-type filter to the summary", async () => {

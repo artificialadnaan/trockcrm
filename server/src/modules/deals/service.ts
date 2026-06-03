@@ -2895,7 +2895,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       count(*)::int as total_count,
       count(*) filter (where d.is_active and coalesce(d.on_hold, false) = false)::int as active_count,
       coalesce(sum(${workspaceEffectiveDealValueSql(stage)}), 0)::numeric as total_value,
-      round(avg(extract(day from now() - d.stage_entered_at)) filter (where d.is_active and coalesce(d.on_hold, false) = false))::int as average_days_in_stage
+      round(avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false))::int as average_days_in_stage
     from deals d
     left join users u on u.id = d.assigned_rep_id
     where ${where}

@@ -588,7 +588,9 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     staleOnly: req.query.staleOnly === "true",
     workflowRoute: req.query.workflowRoute as string | undefined,
     status: req.query.status as string | undefined,
-    projectTypeId: req.query.projectTypeId as string | undefined,
+    // Single-value reader (like source): a duplicated ?projectTypeId=a&projectTypeId=b arrives as an
+    // array; reject it with a 400 instead of letting it reach `d.project_type_id = ${array}` and 500 (P3).
+    projectTypeId: readOptionalStringParam(req.query.projectTypeId, "projectTypeId"),
     valueMin: parseNumber(req.query.valueMin),
     valueMax: parseNumber(req.query.valueMax),
     updatedFrom: (req.query.updatedAfter as string | undefined) ?? (req.query.updatedFrom as string | undefined),
