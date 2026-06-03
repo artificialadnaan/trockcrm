@@ -145,6 +145,7 @@ let latestDealsResult: ReturnType<typeof useDeals> | null = null;
 let hookTerminalDateFilters: Record<TerminalOutcome, TerminalDateFilter> | undefined;
 let hookPreviewLimit: number | null | undefined;
 let hookWonPeriodRange: { from?: string; to?: string } | null | undefined;
+let hookStageWonSince: string | undefined;
 let hookDealFilters: DealFilters = {};
 let hookDealDetailOfficeId: string | null | undefined;
 
@@ -166,6 +167,19 @@ function StageHookProbe() {
       wonSince: "2026-04-01",
       wonUntil: "2026-04-30",
     },
+  });
+  return null;
+}
+
+function StageWindowDepsProbe() {
+  useDealStagePage({
+    stageId: "stage-won",
+    scope: "all",
+    page: 1,
+    pageSize: 25,
+    sort: "age_desc",
+    search: "",
+    filters: { staleOnly: false, wonSince: hookStageWonSince },
   });
   return null;
 }
@@ -670,6 +684,44 @@ describe("normalizeDealBoardResponse", () => {
     expect(requestPath).toContain("scope=all");
     expect(requestPath).toContain("won_since=2026-04-01");
     expect(requestPath).toContain("won_until=2026-04-30");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("refetches the stage summary when the Won window changes (deps include the terminal window)", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({
+      stage: { id: "stage-won", name: "Won", slug: "won" },
+      summary: { count: 1, totalValue: 1, averageDaysInStage: 1 },
+      pagination: { page: 1, pageSize: 25, total: 1, totalPages: 1 },
+      rows: [],
+    });
+    hookStageWonSince = "2026-04-01";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(StageWindowDepsProbe));
+      await flushEffects();
+    });
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    expect(String(apiMock.mock.calls[0]?.[0])).toContain("won_since=2026-04-01");
+
+    // Change ONLY the Won window and re-render: the header summary must refetch so it can't go stale
+    // against the list/board. Before the fix, wonSince/wonUntil were absent from the effect deps.
+    hookStageWonSince = "2026-01-01";
+    await act(async () => {
+      root.render(createElement(StageWindowDepsProbe));
+      await flushEffects();
+    });
+    expect(apiMock).toHaveBeenCalledTimes(2);
+    expect(String(apiMock.mock.calls[1]?.[0])).toContain("won_since=2026-01-01");
 
     await act(async () => {
       root.unmount();

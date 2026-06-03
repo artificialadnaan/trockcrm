@@ -155,6 +155,27 @@ export function resolvePipelinePageMove(
   return { deal, targetStageId };
 }
 
+// Open a stage column's drill-down at the SAME scope + filters the board is showing. The pipeline page
+// previously navigated with only the terminal date filters, so the drill-down dropped the active scope
+// (it defaulted to mine) and the active rep — mirror the deals page (buildDealStageNavigationPath) by
+// forwarding scope + the current URL params (assignedRepId, estimate-sent window) so the drill-down
+// opens the same cohort the user was looking at, not a stale whole-stage / scope=mine view.
+export function buildPipelineStageNavigationPath(
+  stageId: string,
+  stageSlug: string,
+  scope: PipelineScope,
+  terminalDateFilters: Record<TerminalOutcome, TerminalDateFilter>,
+  queryParams: URLSearchParams
+) {
+  return buildDealStageWorkspacePath({
+    stageId,
+    stageSlug,
+    scope,
+    filters: terminalDateFilters,
+    queryParams,
+  });
+}
+
 function formatRefreshedLabel(date: Date, now: Date): string {
   const minutes = Math.floor((now.getTime() - date.getTime()) / 60000);
   if (minutes < 1) return "Updated just now";
@@ -654,11 +675,13 @@ export function PipelinePage() {
                   activeDealId={activeDeal?.id ?? null}
                   onOpenStage={(stageId) =>
                     navigate(
-                      buildDealStageWorkspacePath({
+                      buildPipelineStageNavigationPath(
                         stageId,
-                        stageSlug: column.stage.slug,
-                        filters: terminalDateFilters,
-                      })
+                        column.stage.slug,
+                        scope,
+                        terminalDateFilters,
+                        searchParams
+                      )
                     )
                   }
                   terminalFilter={

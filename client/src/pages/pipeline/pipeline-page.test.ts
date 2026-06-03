@@ -13,6 +13,7 @@ import {
 import {
   MAX_EXPORT_PAGES,
   buildDealListParams,
+  buildPipelineStageNavigationPath,
   buildStageNameById,
   fetchAllFilteredDeals,
   getDealDisplayNumber,
@@ -500,5 +501,37 @@ describe("terminal pipeline date filters", () => {
       customStart: "2026-04-01",
       customEnd: "2026-04-30",
     });
+  });
+});
+
+describe("buildPipelineStageNavigationPath (Bug A: carry scope + active filters into the drill-down)", () => {
+  it("forwards the active scope AND the URL rep filter into the stage drill-down, mirroring the deals page", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
+
+    const path = buildPipelineStageNavigationPath(
+      "stage-won",
+      "won",
+      "all",
+      { won: { preset: "30" }, lost: { preset: "all" } },
+      new URLSearchParams("scope=all&assignedRepId=rep-1&fb_search=ignored")
+    );
+
+    // The old inline nav dropped BOTH of these — the drill-down then opened scope=mine, all-rep.
+    expect(path).toContain("scope=all");
+    expect(path).toContain("assignedRepId=rep-1");
+    // The terminal Won window keeps flowing through via `filters` (unchanged behavior).
+    expect(path).toBe("/deals/stages/stage-won?scope=all&assignedRepId=rep-1&won_since=2026-04-01");
+  });
+
+  it("still works for a non-terminal stage with no URL filters (scope only)", () => {
+    const path = buildPipelineStageNavigationPath(
+      "stage-estimating",
+      "estimating",
+      "mine",
+      { won: { preset: "all" }, lost: { preset: "all" } },
+      new URLSearchParams("scope=mine")
+    );
+    expect(path).toBe("/deals/stages/stage-estimating?scope=mine");
   });
 });
