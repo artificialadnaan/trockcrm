@@ -51,7 +51,10 @@ export function buildStageSummaryFilters(
   // never forwards a malformed bound to /deals, so the header must not no-match on it either (Codex P3).
   const fbNumeric = (key: string) => {
     const raw = fb(key);
-    return raw !== undefined && Number.isFinite(Number(raw)) ? raw : undefined;
+    // Blank/whitespace is unset (Number(" ") is 0, which would otherwise read as a 0 bound) — mirrors
+    // parseNumberParam's `raw.trim() === ""` guard so the summary stays aligned with the list (Codex P3).
+    if (raw === undefined || raw.trim() === "") return undefined;
+    return Number.isFinite(Number(raw)) ? raw : undefined;
   };
   const assignedRepId = options.ownRep
     ? fb("assignedRepId") ?? (searchParams.get("assignedRepId") || undefined)

@@ -352,7 +352,7 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
     expect(filters.status).toBeUndefined();
   });
 
-  it("drops malformed fb_ numeric filters (value/age) so the summary stays unfiltered like the bar, not no-matched", () => {
+  it("drops malformed or blank fb_ numeric filters (value/age) so the summary stays unfiltered like the bar", () => {
     const filters = buildStageSummaryFilters(
       new URLSearchParams("fb_valueMin=abc&fb_valueMax=xyz&fb_minAgeDays=nope&fb_maxAgeDays=bad"),
       { staleOnly: false },
@@ -362,6 +362,16 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
     expect(filters.valueMax).toBeUndefined();
     expect(filters.minAgeDays).toBeUndefined();
     expect(filters.maxAgeDays).toBeUndefined();
+
+    // Blank/whitespace must be unset too (Number(" ") === 0 would otherwise read as a 0 bound) — mirrors
+    // the bar's parseNumberParam trim guard (Codex P3).
+    const blank = buildStageSummaryFilters(
+      new URLSearchParams("fb_valueMin=%20&fb_minAgeDays=%20"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(blank.valueMin).toBeUndefined();
+    expect(blank.minAgeDays).toBeUndefined();
   });
 });
 
