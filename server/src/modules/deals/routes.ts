@@ -566,6 +566,11 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : undefined;
   };
+  // Filter bounds (value/age) PRESERVE a present-but-malformed value as NaN (absent → undefined), so the
+  // summary no-matches it exactly like the list (buildValueRangePredicate/buildStalledPredicate turn a
+  // present NaN into sql`false`) instead of silently dropping the filter (Codex P2). Pagination keeps the
+  // default-on-malformed parseNumber.
+  const parseFilterNumber = (value: unknown) => (value === undefined ? undefined : Number(value));
 
   return {
     ...readBoardInput(req),
@@ -587,10 +592,16 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     source: readOptionalStringParam(req.query.source, "source"),
     staleOnly: req.query.staleOnly === "true",
     workflowRoute: req.query.workflowRoute as string | undefined,
+    status: req.query.status as string | undefined,
+    // Single-value reader (like source): a duplicated ?projectTypeId=a&projectTypeId=b arrives as an
+    // array; reject it with a 400 instead of letting it reach `d.project_type_id = ${array}` and 500 (P3).
+    projectTypeId: readOptionalStringParam(req.query.projectTypeId, "projectTypeId"),
+    valueMin: parseFilterNumber(req.query.valueMin),
+    valueMax: parseFilterNumber(req.query.valueMax),
     updatedFrom: (req.query.updatedAfter as string | undefined) ?? (req.query.updatedFrom as string | undefined),
     updatedTo: (req.query.updatedBefore as string | undefined) ?? (req.query.updatedTo as string | undefined),
-    minAgeDays: parseNumber(req.query.minAgeDays),
-    maxAgeDays: parseNumber(req.query.maxAgeDays),
+    minAgeDays: parseFilterNumber(req.query.minAgeDays),
+    maxAgeDays: parseFilterNumber(req.query.maxAgeDays),
     wonSince: req.query.won_since as string | undefined,
     wonUntil: req.query.won_until as string | undefined,
     wonAllTime: req.query.won_all_time === "true",

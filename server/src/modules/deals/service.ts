@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq, and, desc, asc, inArray, sql, or, isNull, not, getTableColumns, type SQLWrapper } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
@@ -75,6 +76,7 @@ import {
   buildInvolvedRepCondition,
   buildAliasedInvolvedRepSql,
   aliasedStageAwareEffectiveDealValueSql,
+  aliasedEffectiveStageAgeDaysSql,
   UNASSIGNED_FILTER_SENTINEL,
 } from "./deal-filter-predicates.js";
 
@@ -741,6 +743,10 @@ export interface DealStagePageInput extends DealBoardInput {
   source?: string;
   staleOnly?: boolean;
   workflowRoute?: string;
+  status?: string;
+  projectTypeId?: string;
+  valueMin?: number;
+  valueMax?: number;
   updatedFrom?: string;
   updatedTo?: string;
   minAgeDays?: number;
@@ -1228,8 +1234,16 @@ async function buildDealWorkspaceScope(
     buildDealOfficeScopeCondition("d", activeOfficeScope),
   ];
 
+  // An explicit Status (stage-page only) OWNS is_active/on_hold (mirrors getDeals + buildStatusPredicate):
+  // skip the active-only default so a status=inactive drill-down reconciles with the list instead of being
+  // forced empty by is_active=true. The board (DealBoardInput) has no status, so its default is unchanged.
+  const explicitStatus =
+    "stageId" in input &&
+    typeof (input as DealStagePageInput).status === "string" &&
+    (input as DealStagePageInput).status !== "" &&
+    (input as DealStagePageInput).status !== "any";
   if (!terminalScope) {
-    filters.unshift(sql`d.is_active = true`);
+    if (!explicitStatus) filters.unshift(sql`d.is_active = true`);
   } else {
     filters.push(...terminalDateConditions);
   }
@@ -2793,9 +2807,14 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     conditions.push(aliasedActiveDealCountFilterSql("d"));
   }
 
-  if (input.search?.trim()) {
-    const searchTerm = `%${input.search.trim()}%`;
-    conditions.push(sql`(d.name ilike ${searchTerm} or d.deal_number ilike ${searchTerm})`);
+  // Search must match the LIST exactly: reuse the unified buildDealSearchCondition (name/number/project/
+  // address/city/state/company/contact/owner) with the same >=2-char guard getDeals applies — not the
+  // legacy name/number-only ILIKE — so the header total reconciles with the searched list (Codex P2).
+  // `alias(deals, "d")` renders the predicate against this query's `from deals d`.
+  if (input.search && input.search.trim().length >= 2) {
+    // alias(deals, "d") is column-compatible with `deals` at runtime; Drizzle's aliased-table wrapper type
+    // doesn't structurally overlap, so go through `unknown` (the only column access is the shared columns).
+    conditions.push(buildDealSearchCondition(input.search, alias(deals, "d") as unknown as typeof deals));
   }
   if (input.assignedRepId) {
     // The Unassigned FilterBar option sends the sentinel; map it to IS NULL like the list (getDeals /
@@ -2815,6 +2834,39 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (input.workflowRoute === "normal" || input.workflowRoute === "service") {
     conditions.push(sql`d.workflow_route = ${input.workflowRoute}`);
   }
+  // Status (lifecycle) — mirror buildStatusPredicate so the summary narrows the SAME way the list does
+  // (is_active + on_hold are orthogonal; on_hold is a subset of active). GREEN #616 follow-up.
+  if (input.status === "active") {
+    conditions.push(sql`d.is_active = true and coalesce(d.on_hold, false) = false`);
+  } else if (input.status === "on_hold") {
+    conditions.push(sql`d.is_active = true and coalesce(d.on_hold, false) = true`);
+  } else if (input.status === "inactive") {
+    conditions.push(sql`d.is_active = false`);
+  } else if (input.status && input.status !== "any") {
+    conditions.push(sql`false`); // unrecognized status → no-match, mirroring buildStatusPredicate
+  }
+  if (input.projectTypeId) {
+    conditions.push(sql`d.project_type_id = ${input.projectTypeId}`);
+  }
+  // A present-but-malformed numeric bound (e.g. a hand-crafted/duplicated ?valueMin=abc, arriving as NaN)
+  // no-matches like the list (buildValueRangePredicate / buildStalledPredicate → sql`false`) rather than
+  // being silently dropped — so the header total can't stay unfiltered while the list is empty (Codex P2).
+  const presentButMalformed = (v: number | undefined) => v !== undefined && !Number.isFinite(v);
+  // Value range — BETWEEN on the stage-aware effective value (awarded-first for Won stages, best-estimate
+  // otherwise): the SAME number the list filters/sorts/displays by (buildValueRangePredicate), so the
+  // top "Stage Value" total reconciles with the value-filtered list.
+  if (presentButMalformed(input.valueMin) || presentButMalformed(input.valueMax)) {
+    conditions.push(sql`false`);
+  } else if (input.valueMin !== undefined || input.valueMax !== undefined) {
+    const valueExpr = aliasedStageAwareEffectiveDealValueSql("d", isWonTerminalStage ? stageIds : []);
+    if (input.valueMin !== undefined && input.valueMax !== undefined) {
+      conditions.push(sql`${valueExpr} between ${input.valueMin} and ${input.valueMax}`);
+    } else if (input.valueMin !== undefined) {
+      conditions.push(sql`${valueExpr} >= ${input.valueMin}`);
+    } else {
+      conditions.push(sql`${valueExpr} <= ${input.valueMax}`);
+    }
+  }
   if (input.staleOnly) {
     conditions.push(
       sql`(d.last_activity_at is null or d.last_activity_at < now() - interval '14 days')`
@@ -2827,21 +2879,44 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     conditions.push(sql`d.updated_at::date <= ${input.updatedTo}::date`);
   }
   addWorkspaceEstimateSentDateConditions(conditions, input);
-  if (typeof input.minAgeDays === "number" && Number.isFinite(input.minAgeDays)) {
-    conditions.push(sql`extract(day from now() - d.stage_entered_at) >= ${input.minAgeDays}`);
-  }
-  if (typeof input.maxAgeDays === "number" && Number.isFinite(input.maxAgeDays)) {
-    conditions.push(sql`extract(day from now() - d.stage_entered_at) <= ${input.maxAgeDays}`);
+  // Stalled / days-in-stage — measured on the HOLD-AWARE effective stage age (the SAME measure the list
+  // filters by, aliasedEffectiveStageAgeDaysSql), not raw wall-clock, so an on-hold deal is in/out of the
+  // summary the same way as the list. NOT gated on the global ENABLE_STAGE_ENTRY_DATE_FILTER flag: the
+  // stage page's list always enables stalled (DealsListSection sends stageEntryDateWindow=true, and getDeals
+  // treats that as flag-OR-window), so the summary must apply it whenever a bound is present to reconcile
+  // even when the global flag is off (Codex P2).
+  if (presentButMalformed(input.minAgeDays) || presentButMalformed(input.maxAgeDays)) {
+    conditions.push(sql`false`);
+  } else if (input.minAgeDays !== undefined || input.maxAgeDays !== undefined) {
+    const stageAgeDays = aliasedEffectiveStageAgeDaysSql("d");
+    if (input.minAgeDays !== undefined) {
+      conditions.push(sql`${stageAgeDays} >= ${input.minAgeDays}`);
+    }
+    if (input.maxAgeDays !== undefined) {
+      conditions.push(sql`${stageAgeDays} <= ${input.maxAgeDays}`);
+    }
   }
 
   const where = sql.join(conditions, sql` and `);
 
+  // active_count requires is_active ONLY on the explicit inactive-status path (so status=inactive doesn't
+  // render inactive deals as "active"). For terminal Won/Lost pages WITHOUT a status, the inactive terminal
+  // deals ARE the reportable population the board/list counts (non-on-hold), so don't is_active-gate them
+  // there (Codex P2: keep terminal reportable rows in the active count).
+  const activeCountFilter =
+    input.status === "inactive"
+      ? sql`d.is_active and coalesce(d.on_hold, false) = false`
+      : sql`coalesce(d.on_hold, false) = false`;
+
   const countResult = await tenantDb.execute(sql`
     select
       count(*)::int as total_count,
-      count(*) filter (where coalesce(d.on_hold, false) = false)::int as active_count,
+      count(*) filter (where ${activeCountFilter})::int as active_count,
       coalesce(sum(${workspaceEffectiveDealValueSql(stage)}), 0)::numeric as total_value,
-      round(avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false))::int as average_days_in_stage
+      round(coalesce(
+        avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false),
+        avg(extract(day from now() - d.stage_entered_at))
+      ))::int as average_days_in_stage
     from deals d
     left join users u on u.id = d.assigned_rep_id
     where ${where}

@@ -46,6 +46,16 @@ export function buildStageSummaryFilters(
   prefix = DRILLDOWN_FILTERBAR_PARAM_PREFIX
 ): StagePageFilters {
   const fb = (key: string) => searchParams.get(`${prefix}${key}`) || undefined;
+  // Numeric fb_ filters: drop a present-but-malformed value (mirrors the bar's parseNumberParam, which
+  // returns undefined for it) so the summary is UNFILTERED exactly when the bar-driven list is — the list
+  // never forwards a malformed bound to /deals, so the header must not no-match on it either (Codex P3).
+  const fbNumeric = (key: string) => {
+    const raw = fb(key);
+    // Blank/whitespace is unset (Number(" ") is 0, which would otherwise read as a 0 bound) — mirrors
+    // parseNumberParam's `raw.trim() === ""` guard so the summary stays aligned with the list (Codex P3).
+    if (raw === undefined || raw.trim() === "") return undefined;
+    return Number.isFinite(Number(raw)) ? raw : undefined;
+  };
   const assignedRepId = options.ownRep
     ? fb("assignedRepId") ?? (searchParams.get("assignedRepId") || undefined)
     : undefined;
@@ -61,9 +71,33 @@ export function buildStageSummaryFilters(
   const from = barDate.dateFrom ?? (searchParams.get("won_since") || searchParams.get("lost_since") || undefined);
   const to = barDate.dateTo ?? (searchParams.get("won_until") || searchParams.get("lost_until") || undefined);
   const allTime = !from && !to;
+  // The remaining list filters all narrow the deal set, so the top "Stage Value" must apply them too —
+  // read them from the bar's fb_ namespace exactly like rep+date, so the header recomputes with the same
+  // set the list shows. (status, workflow, type, value range, stalled/days-in-stage.)
+  // Only the three DEAL statuses are valid filters (mirrors filterBarValueToDealFilters); a stray lead
+  // status (e.g. a bookmarked fb_status=open) is dropped, exactly like the list — otherwise the server
+  // no-matches it and the header shows zero while the list stays unfiltered (Codex P2).
+  const statusRaw = fb("status");
+  const status =
+    statusRaw === "active" || statusRaw === "on_hold" || statusRaw === "inactive" ? statusRaw : undefined;
+  const workflowRoute = fb("workflowRoute");
+  const regionId = fb("regionId");
+  const projectTypeId = fb("projectTypeId");
+  const valueMin = fbNumeric("valueMin");
+  const valueMax = fbNumeric("valueMax");
+  const minAgeDays = fbNumeric("minAgeDays");
+  const maxAgeDays = fbNumeric("maxAgeDays");
   return {
     ...baseFilters,
     ...(assignedRepId ? { assignedRepId } : {}),
+    ...(status ? { status } : {}),
+    ...(workflowRoute ? { workflowRoute } : {}),
+    ...(regionId ? { regionId } : {}),
+    ...(projectTypeId ? { projectTypeId } : {}),
+    ...(valueMin ? { valueMin } : {}),
+    ...(valueMax ? { valueMax } : {}),
+    ...(minAgeDays ? { minAgeDays } : {}),
+    ...(maxAgeDays ? { maxAgeDays } : {}),
     ...(from ? { wonSince: from, lostSince: from } : {}),
     ...(to ? { wonUntil: to, lostUntil: to } : {}),
     ...(allTime ? { wonAllTime: true, lostAllTime: true } : {}),
@@ -102,7 +136,16 @@ export function DealStagePage() {
   const summaryFilters = buildStageSummaryFilters(searchParams, route.query.filters, {
     ownRep: user?.role === "admin",
   });
-  const { data, loading, error } = useDealStagePage({ stageId: stageId!, ...route.query, filters: summaryFilters });
+  // Search also narrows the list, so feed the bar's fb_search into the summary too (route.query.search is
+  // the stripped bare param). Falls back to the normalized bare search for the pre-redirect first paint.
+  const summarySearch =
+    searchParams.get(`${DRILLDOWN_FILTERBAR_PARAM_PREFIX}search`) || route.query.search;
+  const { data, loading, error } = useDealStagePage({
+    stageId: stageId!,
+    ...route.query,
+    search: summarySearch,
+    filters: summaryFilters,
+  });
   const { regions } = useRegions();
   const { projectTypes } = useProjectTypes();
   const { assignees } = useTaskAssignees();

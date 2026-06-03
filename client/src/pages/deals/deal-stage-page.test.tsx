@@ -228,6 +228,14 @@ describe("DealStagePage", () => {
     const lastCall = calls[calls.length - 1]?.[0];
     expect(lastCall.filters.assignedRepId).toBeUndefined();
   });
+
+  it("threads the bar's fb_search into the summary query so the total reflects the searched list", () => {
+    setStage({ id: "s-won", name: "Won", slug: "won" });
+    renderStage("/deals/stages/s-won?scope=team&fb_search=acme");
+    const calls = mocks.useDealStagePageMock.mock.calls;
+    const lastCall = calls[calls.length - 1]?.[0];
+    expect(lastCall.search).toBe("acme");
+  });
 });
 
 describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + date)", () => {
@@ -313,6 +321,57 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
     expect(filters.wonSince).toBe("2026-04-01"); // 30 days before 2026-05-01
     expect(filters.wonUntil).toBe("2026-05-01"); // today
     vi.useRealTimers();
+  });
+
+  // GREEN (#616 follow-up): the top "Stage Value" must follow ALL the list filters, not just rep+date —
+  // status, workflow, type, value, and stalled (days-in-stage) all narrow the deal set, so all flow in.
+  it("inherits the remaining list filters (status, workflow, region, type, value, stalled) from the fb_ namespace", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams(
+        "fb_status=on_hold&fb_workflowRoute=service&fb_regionId=region-1&fb_projectTypeId=type-1&fb_valueMin=1000&fb_valueMax=50000&fb_minAgeDays=7&fb_maxAgeDays=30"
+      ),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.status).toBe("on_hold");
+    expect(filters.workflowRoute).toBe("service");
+    expect(filters.regionId).toBe("region-1");
+    expect(filters.projectTypeId).toBe("type-1");
+    expect(filters.valueMin).toBe("1000");
+    expect(filters.valueMax).toBe("50000");
+    expect(filters.minAgeDays).toBe("7");
+    expect(filters.maxAgeDays).toBe("30");
+  });
+
+  it("drops a non-deal fb_status (e.g. a lead status) so the summary doesn't no-match while the list is unfiltered", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_status=open"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.status).toBeUndefined();
+  });
+
+  it("drops malformed or blank fb_ numeric filters (value/age) so the summary stays unfiltered like the bar", () => {
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_valueMin=abc&fb_valueMax=xyz&fb_minAgeDays=nope&fb_maxAgeDays=bad"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.valueMin).toBeUndefined();
+    expect(filters.valueMax).toBeUndefined();
+    expect(filters.minAgeDays).toBeUndefined();
+    expect(filters.maxAgeDays).toBeUndefined();
+
+    // Blank/whitespace must be unset too (Number(" ") === 0 would otherwise read as a 0 bound) — mirrors
+    // the bar's parseNumberParam trim guard (Codex P3).
+    const blank = buildStageSummaryFilters(
+      new URLSearchParams("fb_valueMin=%20&fb_minAgeDays=%20"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(blank.valueMin).toBeUndefined();
+    expect(blank.minAgeDays).toBeUndefined();
   });
 });
 

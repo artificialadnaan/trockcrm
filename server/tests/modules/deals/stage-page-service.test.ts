@@ -962,4 +962,156 @@ describe("listDealStagePage", () => {
     expect(countSql).not.toContain("d.assigned_rep_id =");
     expect(countSql).not.toContain("d.region_id =");
   });
+
+  // GREEN (#616 follow-up): the top "Stage Value" must follow ALL the list filters. status / project
+  // type / value range narrow the deal set on the list, so listDealStagePage must apply them too.
+  const runEstimatingStage = async (extra: Record<string, unknown>) => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "0", active_count: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+      sort: "newest",
+      ...extra,
+    } as any);
+    return extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+  };
+
+  it("applies the status filter to the summary (mirrors buildStatusPredicate)", async () => {
+    const onHoldSql = await runEstimatingStage({ status: "on_hold" });
+    expect(onHoldSql).toContain("d.is_active = true");
+    expect(onHoldSql).toContain("coalesce(d.on_hold, false) = true");
+
+    const inactiveSql = await runEstimatingStage({ status: "inactive" });
+    const inactiveWhere = fromDealsWhereSql(inactiveSql);
+    expect(inactiveWhere).toContain("d.is_active = false");
+    // The non-terminal active-only DEFAULT must NOT fire in the WHERE, or status=inactive is forced empty
+    // (is_active=true AND is_active=false) while the list shows inactive deals (adversarial R3). (Checked on
+    // the WHERE slice — the active_count SELECT legitimately references is_active=true.)
+    expect(inactiveWhere).not.toContain("d.is_active = true");
+    // active_count must require is_active (not just on_hold=false) so inactive deals are NOT counted as
+    // active in the header (Codex P2). Boolean form (no "= true") keeps the terminal WHERE-relaxation
+    // assertions valid while still requiring is_active in the active-count aggregate.
+    expect(inactiveSql).toContain("filter (where d.is_active and coalesce(d.on_hold, false) = false)");
+
+    // No status = the active-only default still applies on a non-terminal stage (unchanged).
+    const noneSql = await runEstimatingStage({});
+    expect(noneSql).toContain("d.is_active = true");
+    expect(noneSql).not.toContain("d.is_active = false");
+    expect(noneSql).not.toContain("coalesce(d.on_hold, false) = true");
+    // The avg-visible-age aggregate stays over the visible (on_hold-only) rows — NOT is_active-gated — so a
+    // terminal/inactive page (rows visible but is_active=false) still yields an average, not null (Codex r2).
+    expect(noneSql).toContain("avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false)");
+  });
+
+  it("counts terminal (Won/Lost) reportable rows in active_count without is_active gating when no status is set", async () => {
+    // Codex P2: a Won/Lost page WITHOUT a status intentionally includes inactive terminal deals as the
+    // reportable population (non-on-hold), so active_count must NOT be is_active-gated there — only the
+    // explicit status=inactive path requires is_active.
+    dbState.responses = [
+      [{ id: "stage-won", slug: "won", name: "Won", displayOrder: 8, isTerminal: true }],
+    ];
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "4", active_count: "4", total_value: "1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-won",
+      page: 1,
+      pageSize: 25,
+      wonAllTime: true,
+    } as any);
+    const countSql = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(countSql).toContain("count(*) filter (where coalesce(d.on_hold, false) = false)::int as active_count");
+    expect(countSql).not.toContain("d.is_active"); // terminal page: no is_active default, no is_active-gated count
+  });
+
+  it("applies the project-type filter to the summary", async () => {
+    const sql = await runEstimatingStage({ projectTypeId: "type-1" });
+    expect(sql).toContain("d.project_type_id");
+    expect(sql).toContain("type-1");
+    const noneSql = await runEstimatingStage({});
+    expect(noneSql).not.toContain("d.project_type_id");
+  });
+
+  it("applies the value-range filter to the summary on the effective deal value", async () => {
+    // (Numeric bounds are bound params, which extractSqlText does not inline — assert the structure:
+    // a BETWEEN on the stage-aware effective value chain, the SAME number the list filters/sorts by.)
+    const sql = await runEstimatingStage({ valueMin: 1000, valueMax: 50000 });
+    expect(sql).toContain("between");
+    expect(sql).toContain("bid_estimate");
+    expect(sql).toContain("bid_board_total_sales");
+
+    // single-bound forms still emit a comparison on the value expression
+    const minOnly = await runEstimatingStage({ valueMin: 1000 });
+    expect(minOnly).toContain("bid_estimate");
+    expect(minOnly).toContain(">=");
+
+    const noneSql = await runEstimatingStage({});
+    expect(noneSql).not.toContain("between");
+  });
+
+  it("applies the stalled filter on hold-aware effective age, NOT gated on the global flag (mirrors the stage-page list)", async () => {
+    // The stage page's list always enables stalled (DealsListSection sends stageEntryDateWindow=true, and
+    // getDeals gates on flag-OR-window), so the summary must apply it whenever a bound is present — even
+    // with ENABLE_STAGE_ENTRY_DATE_FILTER off — on the HOLD-AWARE effective age. on_hold_accumulated_seconds
+    // is unique to aliasedEffectiveStageAgeDaysSql in the WHERE (the count avg uses raw stage_entered_at).
+    const sql = await runEstimatingStage({ minAgeDays: 7, maxAgeDays: 30 });
+    expect(sql).toContain("on_hold_accumulated_seconds");
+
+    const noneSql = await runEstimatingStage({});
+    expect(noneSql).not.toContain("on_hold_accumulated_seconds");
+  });
+
+  it("reconciles search with the list: uses the unified search predicate with a >=2-char guard", async () => {
+    // Must match the LIST's buildDealSearchCondition (owner/company/contact + project number/address),
+    // not the legacy name/number-only ILIKE, or the header search diverges from the searched list (Codex P2).
+    const sql = await runEstimatingStage({ search: "acme" });
+    expect(sql).toContain("owner_user"); // owner display_name EXISTS subquery — unique to the unified search
+    expect(sql).toContain("ilike");
+
+    // >=2-char guard, matching getDeals: a single-character term applies NO search predicate.
+    const oneChar = await runEstimatingStage({ search: "a" });
+    expect(oneChar).not.toContain("owner_user");
+  });
+
+  it("no-matches a present-but-malformed value / age bound (mirrors the list) instead of dropping the filter", async () => {
+    // The list preserves a present-but-invalid numeric bound as NaN -> sql`false` (empty); the summary must
+    // too, or it stays unfiltered while the list is empty (Codex P2). readStageInput forwards NaN; the
+    // condition no-matches it rather than applying a range.
+    const badValue = fromDealsWhereSql(await runEstimatingStage({ valueMin: Number("abc") }));
+    expect(badValue).toMatch(/and false/);
+    expect(badValue).not.toContain("between");
+
+    const badAge = fromDealsWhereSql(await runEstimatingStage({ minAgeDays: Number("abc") }));
+    expect(badAge).toMatch(/and false/);
+  });
+
+  it("computes avg visible age with a fallback so a status=on_hold (all-on-hold) page is not null", async () => {
+    // coalesce(avg(age) filter (where not on_hold), avg(age)) — prefers non-on-hold rows but falls back to
+    // all visible rows when there are none, so an On-Hold-filtered page shows a real average, not 0 (Codex P2).
+    const sql = await runEstimatingStage({});
+    const avgTerms = (sql.match(/avg\(extract\(day from now\(\) - d\.stage_entered_at\)\)/g) || []).length;
+    expect(avgTerms).toBe(2);
+  });
 });

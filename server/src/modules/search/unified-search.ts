@@ -53,27 +53,30 @@ export function escapeLikePattern(value: string): string {
  *
  * Caller must guard min length (>= 2 chars); the term is trimmed + escaped here.
  */
-export function buildDealSearchCondition(search: string): SQL {
+export function buildDealSearchCondition(search: string, dealsTable: typeof deals = deals): SQL {
+  // `dealsTable` lets a caller that aliases the deals table (e.g. the stage-page summary's raw
+  // `from deals d`) reuse the EXACT same predicate via `alias(deals, "d")`, so the drill-down header
+  // search reconciles with the list. Default is the unaliased `deals` table — existing callers unchanged.
   const searchTerm = `%${escapeLikePattern(search.trim())}%`;
   return sql`(
-    ${deals.name} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${deals.dealNumber} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${deals.projectNumber} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${deals.description} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${deals.propertyAddress} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${deals.propertyCity} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${deals.propertyState} ILIKE ${searchTerm} ESCAPE '\\'
-    OR ${deals.bidBoardCustomerName} ILIKE ${searchTerm} ESCAPE '\\'
+    ${dealsTable.name} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${dealsTable.dealNumber} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${dealsTable.projectNumber} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${dealsTable.description} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${dealsTable.propertyAddress} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${dealsTable.propertyCity} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${dealsTable.propertyState} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${dealsTable.bidBoardCustomerName} ILIKE ${searchTerm} ESCAPE '\\'
     OR EXISTS (
       SELECT 1
       FROM ${companies}
-      WHERE ${companies.id} = ${deals.companyId}
+      WHERE ${companies.id} = ${dealsTable.companyId}
         AND ${companies.name} ILIKE ${searchTerm} ESCAPE '\\'
     )
     OR EXISTS (
       SELECT 1
       FROM ${contacts}
-      WHERE ${contacts.id} = ${deals.primaryContactId}
+      WHERE ${contacts.id} = ${dealsTable.primaryContactId}
         AND (
           ${contacts.firstName} ILIKE ${searchTerm} ESCAPE '\\'
           OR ${contacts.lastName} ILIKE ${searchTerm} ESCAPE '\\'
@@ -83,7 +86,7 @@ export function buildDealSearchCondition(search: string): SQL {
     OR EXISTS (
       SELECT 1
       FROM public.users owner_user
-      WHERE owner_user.id = ${deals.assignedRepId}
+      WHERE owner_user.id = ${dealsTable.assignedRepId}
         AND owner_user.display_name ILIKE ${searchTerm} ESCAPE '\\'
     )
   )`;

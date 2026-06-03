@@ -184,6 +184,19 @@ function StageWindowDepsProbe() {
   return null;
 }
 
+function StageListFiltersProbe() {
+  useDealStagePage({
+    stageId: "stage-estimating",
+    scope: "all",
+    page: 1,
+    pageSize: 25,
+    sort: "newest",
+    search: "",
+    filters: { staleOnly: false, projectTypeId: "type-1", valueMin: "1000", valueMax: "50000" },
+  });
+  return null;
+}
+
 function DealsHookProbe() {
   latestDealsResult = useDeals(hookDealFilters);
   return null;
@@ -684,6 +697,38 @@ describe("normalizeDealBoardResponse", () => {
     expect(requestPath).toContain("scope=all");
     expect(requestPath).toContain("won_since=2026-04-01");
     expect(requestPath).toContain("won_until=2026-04-30");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("passes type + value-range filters through to the stage drill-down request", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({
+      stage: { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+      summary: { count: 1, totalValue: 15000, averageDaysInStage: 3 },
+      pagination: { page: 1, pageSize: 25, total: 1, totalPages: 1 },
+      rows: [],
+    });
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(StageListFiltersProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    const requestPath = String(apiMock.mock.calls[0]?.[0]);
+    expect(requestPath).toContain("/deals/stages/stage-estimating?");
+    expect(requestPath).toContain("projectTypeId=type-1");
+    expect(requestPath).toContain("valueMin=1000");
+    expect(requestPath).toContain("valueMax=50000");
 
     await act(async () => {
       root.unmount();
