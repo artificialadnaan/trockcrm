@@ -10,6 +10,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { BID_BOARD_SYNC } from "../audit/system-processes.js";
+import { canonicalizeProjectNumber, canonicalProjectNumberSql } from "./project-number.js";
 
 type RawBidBoardRow = Record<string, unknown>;
 
@@ -139,7 +140,6 @@ interface StageConfig {
   is_terminal: boolean | null;
 }
 
-const STRUCTURED_PROJECT_NUMBER_PATTERN = /^[A-Z]{3}-\d+-\d{5}-[a-z]{2}$/i;
 const MAX_UNMATCHED_PROJECT_NUMBERS = 100;
 const BID_BOARD_ESTIMATE_SYNC_SOURCE = "bid_board_sync";
 const BID_BOARD_ESTIMATE_SYNC_REASON = "Bid Board export sync - Total Sales -> Bid Estimate";
@@ -229,8 +229,10 @@ export function parseBidBoardDueDate(
 }
 
 export function normalizeBidBoardProjectNumber(value: unknown): string | null {
-  const text = textValue(value);
-  return text ? text.toLowerCase() : null;
+  // Canonicalize so visually-identical project numbers (Unicode dash glyphs, NBSP, case,
+  // surrounding whitespace) match. MUST mirror canonicalProjectNumberSql used on the deal
+  // columns and the migration 0149 unique index.
+  return canonicalizeProjectNumber(value);
 }
 
 function extractRows(payload: BidBoardSyncPayload): RawBidBoardRow[] {
@@ -403,9 +405,9 @@ async function findDealMatches(
     const byProject = await client.query(
       `${dealMatchSelectSql(schemaName)}
        AND (
-            LOWER(TRIM(d.project_number)) = $1 OR
-            LOWER(TRIM(d.deal_number)) = $1 OR
-            LOWER(TRIM(d.bid_board_project_number)) = $1
+            ${canonicalProjectNumberSql("d.project_number")} = $1 OR
+            ${canonicalProjectNumberSql("d.deal_number")} = $1 OR
+            ${canonicalProjectNumberSql("d.bid_board_project_number")} = $1
        )`,
       [projectNumber]
     );
@@ -933,11 +935,11 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         if (unmatchedProjectNumbers.length < MAX_UNMATCHED_PROJECT_NUMBERS) {
           unmatchedProjectNumbers.push(normalized.bidBoardProjectNumber);
         }
-        if (STRUCTURED_PROJECT_NUMBER_PATTERN.test(normalized.bidBoardProjectNumber)) {
-          warnings.push(
-            `No CRM deal matched structured Bid Board Project # ${normalized.bidBoardProjectNumber} (${normalized.name})`
-          );
-        }
+        // Surface EVERY unmatched row (not only strictly-structured numbers) so a deal
+        // that silently failed to receive its Bid Board stage is visible to the operator.
+        warnings.push(
+          `No CRM deal matched Bid Board Project # ${normalized.bidBoardProjectNumber} (${normalized.name})`
+        );
         continue;
       }
       if (matches.length > 1) {
@@ -1037,7 +1039,11 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         metrics.noMatch,
         metrics.multiMatch,
         warnings.length,
-        errors.length > 0 ? "failed" : "success",
+        errors.length > 0
+          ? "failed"
+          : metrics.noMatch > 0
+            ? "completed_with_unmatched"
+            : "success",
         JSON.stringify(errors),
         JSON.stringify(warnings),
         metrics.matched,

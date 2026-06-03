@@ -123,9 +123,46 @@ describe("Bid Board sync service", () => {
     expect(query.mock.calls[0][1]).toEqual(["dfw-4-11826-ab"]);
   });
 
+  it("matches on the canonical project number on BOTH sides (incoming + column) so dash/NBSP variants match legacy stored values", async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: "deal-canonical" }] });
+    const enDash = String.fromCharCode(0x2013);
+    const normalized = normalizeBidBoardRow({
+      Name: "Palm Villas",
+      "Project #": `DFW${enDash}4${enDash}11826-AB`,
+      Status: "Estimate in Progress",
+    });
+
+    const ids = await findDealIds({ query }, "office_dallas", normalized);
+
+    expect(ids).toEqual(["deal-canonical"]);
+    const sql = String(query.mock.calls[0][0]).toLowerCase();
+    // columns are canonicalized in SQL (not just LOWER(TRIM)), so a stored Unicode-dash
+    // value still matches the canonicalized incoming param.
+    expect(sql).toContain("translate(");
+    expect(sql).toContain("normalize(d.project_number, nfc)");
+    expect(sql).toContain("normalize(d.deal_number, nfc)");
+    expect(sql).toContain("normalize(d.bid_board_project_number, nfc)");
+    // incoming param is the canonical form of the en-dash value
+    expect(query.mock.calls[0][1]).toEqual(["dfw-4-11826-ab"]);
+  });
+
   it("normalizes Bid Board Project # tokens for case-insensitive CRM matching", () => {
     expect(normalizeBidBoardProjectNumber("  DFW-4-11826-ab  ")).toBe("dfw-4-11826-ab");
     expect(normalizeBidBoardProjectNumber("\t")).toBeNull();
+  });
+
+  it("canonicalizes Bid Board Project # dashes/NBSP/case so visually-identical values match", () => {
+    const emDash = String.fromCharCode(0x2014);
+    const enDash = String.fromCharCode(0x2013);
+    const nbsp = String.fromCharCode(0x00a0);
+    // Unicode dashes fold to ASCII hyphen
+    expect(normalizeBidBoardProjectNumber(`DFW${emDash}4${enDash}11826-AB`)).toBe("dfw-4-11826-ab");
+    // NBSP is stripped (surrounding or internal)
+    expect(normalizeBidBoardProjectNumber(`DFW-4-11826-ab${nbsp}`)).toBe("dfw-4-11826-ab");
+    // a genuinely different suffix still does NOT collide
+    expect(normalizeBidBoardProjectNumber("DFW-4-11826-ai")).not.toBe(
+      normalizeBidBoardProjectNumber("DFW-4-11826-ab")
+    );
   });
 
   it("passes the latest ingestion cycle timestamp into the deal update", async () => {
