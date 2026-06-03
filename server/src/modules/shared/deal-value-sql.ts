@@ -160,6 +160,18 @@ export function aliasedActiveDealCountFilterSql(alias: string): SQL {
 }
 
 /**
+ * Two-tier sort key: 0 for active, non-zero deals (sorted on top), 1 for on-hold
+ * or $0-value deals (pushed to the bottom of the list/column). Use as the LEADING
+ * `ORDER BY` key, ascending, ahead of the surface's existing sort. `valueSql` should
+ * be the SAME value expression the surface displays/counts so the tier matches what
+ * users see. (Effective-value chains already zero on-hold, but the explicit
+ * reportable guard keeps the intent clear and also covers raw value chains.)
+ */
+export function aliasedActiveNonZeroDealSortTierSql(alias: string, valueSql: SQL): SQL {
+  return sql`CASE WHEN ${aliasedReportableDealFilterSql(alias)} AND ${valueSql} > 0 THEN 0 ELSE 1 END`;
+}
+
+/**
  * CANONICAL Won-period date — the single source of truth for "when was this deal
  * Won", used by every Won read-site (getWonCloseSummary dashboard card,
  * getDealsForPipeline Won column, /deals?filter=won drill-down) and the shared

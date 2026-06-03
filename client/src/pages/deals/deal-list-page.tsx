@@ -539,7 +539,14 @@ function stageAgeDaysLabel(deal: Deal) {
   return deal.atRisk ? `${deal.atRisk.effectiveStageAgeDays}d` : "N/A";
 }
 
-function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownListRow, sort: DealListSortState) {
+export function compareDrilldownDeals(left: DrilldownListRow, right: DrilldownListRow, sort: DealListSortState) {
+  // Primary tier: active, non-zero deals on top; on-hold and $0 deals sink to the
+  // bottom regardless of the active sort. (on-hold already reads as $0 via
+  // getEffectiveDealValue/moneyValue, but the explicit guard keeps the intent clear.)
+  const tierOf = (deal: DrilldownListRow) => (!deal.onHold && moneyValue(deal) > 0 ? 0 : 1);
+  const tierDelta = tierOf(left) - tierOf(right);
+  if (tierDelta !== 0) return tierDelta;
+
   const direction = sort.dir === "asc" ? 1 : -1;
   const textCompare = (a: string, b: string) => a.localeCompare(b) * direction;
   const numberCompare = (a: number, b: number) => (a - b) * direction;

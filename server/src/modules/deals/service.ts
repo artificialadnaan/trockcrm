@@ -54,6 +54,7 @@ import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shar
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
   aliasedActiveDealCountFilterSql,
+  aliasedActiveNonZeroDealSortTierSql,
   aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
   aliasedWonHsClosedWonDateSql,
@@ -788,6 +789,22 @@ function buildDealListOrder(
   filters: DealFilters,
   classification: { wonStageIds: string[]; lostStageIds: string[]; stageEntryDateEnabled: boolean }
 ) {
+  // Primary tier: active, non-zero deals on top; on-hold and $0-value deals sink to
+  // the bottom of the list (sort-only — the WHERE set is unchanged, so they still
+  // appear, just last). Within each tier the requested column sort + id tiebreaker
+  // apply. The tier reuses the SAME stage-aware effective value the list displays and
+  // filters on, so sort == filter == display (D-1).
+  const tier = aliasedActiveNonZeroDealSortTierSql(
+    "deals",
+    aliasedStageAwareEffectiveDealValueSql("deals", classification.wonStageIds)
+  );
+  return [asc(tier), ...buildDealListColumnOrder(filters, classification)];
+}
+
+function buildDealListColumnOrder(
+  filters: DealFilters,
+  classification: { wonStageIds: string[]; lostStageIds: string[]; stageEntryDateEnabled: boolean }
+) {
   const { wonStageIds, lostStageIds, stageEntryDateEnabled } = classification;
   switch (filters.sortBy) {
     case "name":
@@ -825,10 +842,16 @@ function buildDealListOrder(
   }
 }
 
-function buildPipelineStageCardsOrder() {
+function buildPipelineStageCardsOrder(valueSource: PipelineValueSource) {
+  // Two-tier order: active, non-zero cards on top; on-hold / $0 cards sink to the
+  // bottom of the column. This is sort-only — every card still loads (the preview
+  // limit is the board's effective-all 1000), nothing is hidden. The value tier
+  // uses the SAME per-stage value source the column counts/sums, so the tier
+  // matches what the column displays.
+  const tier = aliasedActiveNonZeroDealSortTierSql("deals", dealPipelineValueSql(valueSource));
   // Sort before preview limiting so each column shows the actual newest cards,
   // not an arbitrary subset from a tied timestamp group.
-  return [desc(deals.createdAt), desc(deals.id)] as const;
+  return [asc(tier), desc(deals.createdAt), desc(deals.id)] as const;
 }
 
 function buildStagePageOrder(sort: StagePageSort | undefined, stage: PipelineStageRow) {
@@ -2694,7 +2717,7 @@ export async function getDealsForPipeline(
       .leftJoin(companies, eq(companies.id, deals.companyId))
       .leftJoin(users, eq(users.id, deals.assignedRepId))
       .where(where)
-      .orderBy(...buildPipelineStageCardsOrder())
+      .orderBy(...buildPipelineStageCardsOrder(valueSource))
       .limit(pipelineCardsPerStageLimit);
     dealsByStage.set(stage.id, stageDeals);
 
