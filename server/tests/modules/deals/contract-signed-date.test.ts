@@ -667,4 +667,43 @@ describe("setDealContractSignedDate", () => {
       wonClosedDate: { from: "2026-05-01", to: "2026-02-15" },
     });
   });
+
+  // PR #613 un-hides the Contract-Signed card for Bid-Board-owned deals, making this write path
+  // reachable for them via the UI. The backend has no bid-board read-only guard here, so the #612
+  // write-through must fire for a Bid-Board-owned Won deal exactly as for any other deal — this
+  // guard locks that dependency in (catches a future bid-board guard regressing the new capability).
+  it("writes won_closed_date through for a Bid-Board-OWNED Won-family deal (no bid-board guard blocks it)", async () => {
+    vi.mocked(pipelineService.getStageById).mockResolvedValueOnce({
+      id: "stage-won",
+      slug: "won",
+      workflowFamily: "standard_deal",
+      isTerminal: true,
+      displayOrder: 9,
+    } as never);
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      stageId: "stage-won",
+      workflowRoute: "normal",
+      isBidBoardOwned: true,
+      readOnlySyncedAt: new Date("2026-01-25T00:00:00.000Z"),
+      procoreProjectId: 990001,
+      contractSignedDate: null,
+      contractSignedAt: null,
+      wonClosedDate: "2026-05-01",
+      stageEnteredAt: new Date("2026-01-20T08:30:00.000Z"),
+    });
+
+    const updated = await setDealContractSignedDate(
+      tenantDb as never,
+      "deal-1",
+      "2026-02-15",
+      "director-1",
+      "office-1"
+    );
+
+    // Accepted (no BID_BOARD_OWNED_FIELD_READ_ONLY) and written through to won_closed_date.
+    expect(updated?.contractSignedDate).toBe("2026-02-15");
+    expect(tenantDb._state.updateCalls).toHaveLength(1);
+    expect(tenantDb._state.updateCalls[0]?.wonClosedDate).toBe("2026-02-15");
+  });
 });

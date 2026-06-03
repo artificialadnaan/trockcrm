@@ -894,13 +894,16 @@ export function DealDetailPage() {
               onOpenProposalEditor={handleOpenProposalEditor}
             />
           )}
-          {!isBidBoardOwned && (
-            <DealContractSignedCard
-              deal={deal}
-              canEdit={isDirectorOrAdmin}
-              onUpdate={refetch}
-            />
-          )}
+          {/* Rendered for ALL deals regardless of Bid-Board ownership: accounting must be able to
+              set the contract-signed date on every deal (it writes through to won_closed_date per
+              #612). The backend accepts the write on any deal and the Bid-Board mirror does not
+              touch contract_signed_date, so a value set on a synced deal survives re-sync. Editing
+              stays role-gated (canEdit={isDirectorOrAdmin}); reps see it read-only. */}
+          <DealContractSignedCard
+            deal={deal}
+            canEdit={isDirectorOrAdmin}
+            onUpdate={refetch}
+          />
           {isBidBoardOwned && bidBoardOwnership && (
             <BidBoardReadOnlySummary ownership={bidBoardOwnership} />
           )}
