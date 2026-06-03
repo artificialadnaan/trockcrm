@@ -297,6 +297,23 @@ describe("buildStageSummaryFilters (Bug B: summary inherits the active rep + dat
     expect(filters.wonAllTime).toBeUndefined();
     expect(filters.lostAllTime).toBeUndefined();
   });
+
+  // Codex P2: a bookmarked/shared URL with a relative preset (fb_datePreset=30) + stale bounds must
+  // re-resolve to a FRESH window for "now" — matching the list (withResolvedDateWindow) — not the stale
+  // saved dates, or the header and list diverge on a later day.
+  it("re-resolves a relative fb_ date preset for now instead of using stale bookmarked bounds", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-01T16:00:00Z"));
+    const filters = buildStageSummaryFilters(
+      new URLSearchParams("fb_datePreset=30&fb_dateFrom=2026-01-01&fb_dateTo=2026-01-31"),
+      { staleOnly: false },
+      { ownRep: true }
+    );
+    expect(filters.wonSince).not.toBe("2026-01-01"); // not the stale saved lower bound
+    expect(filters.wonSince).toBe("2026-04-01"); // 30 days before 2026-05-01
+    expect(filters.wonUntil).toBe("2026-05-01"); // today
+    vi.useRealTimers();
+  });
 });
 
 describe("appendInheritedTerminalDateToBarSearch (Bug B: carry inherited window into fb_ so list + header agree)", () => {

@@ -11,6 +11,7 @@ import {
   getDrilldownFilterBarDimensions,
 } from "@/components/deals/deals-filterbar-adapter";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
+import { withResolvedDateWindow } from "@/components/filters/filterbar-date";
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useAuth } from "@/lib/auth";
@@ -48,8 +49,17 @@ export function buildStageSummaryFilters(
   const assignedRepId = options.ownRep
     ? fb("assignedRepId") ?? (searchParams.get("assignedRepId") || undefined)
     : undefined;
-  const from = fb("dateFrom") ?? (searchParams.get("won_since") || searchParams.get("lost_since") || undefined);
-  const to = fb("dateTo") ?? (searchParams.get("won_until") || searchParams.get("lost_until") || undefined);
+  // Resolve the bar's date the SAME way the list does (withResolvedDateWindow): a relative preset such
+  // as fb_datePreset=30/ytd re-derives a fresh window for now, so a bookmark's stale fb_dateFrom/dateTo
+  // can't make the header diverge from the list on a later day (Codex P2). Falls back to the inherited
+  // bare won/lost bounds for the pre-redirect first paint.
+  const barDate = withResolvedDateWindow({
+    datePreset: fb("datePreset"),
+    dateFrom: fb("dateFrom"),
+    dateTo: fb("dateTo"),
+  });
+  const from = barDate.dateFrom ?? (searchParams.get("won_since") || searchParams.get("lost_since") || undefined);
+  const to = barDate.dateTo ?? (searchParams.get("won_until") || searchParams.get("lost_until") || undefined);
   const allTime = !from && !to;
   return {
     ...baseFilters,

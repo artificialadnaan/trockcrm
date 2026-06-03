@@ -72,6 +72,7 @@ import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import {
   buildDealFilterBarConditions,
   aliasedStageAwareEffectiveDealValueSql,
+  UNASSIGNED_FILTER_SENTINEL,
 } from "./deal-filter-predicates.js";
 
 // Type alias for the tenant-scoped Drizzle instance
@@ -2769,10 +2770,20 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     conditions.push(sql`(d.name ilike ${searchTerm} or d.deal_number ilike ${searchTerm})`);
   }
   if (input.assignedRepId) {
-    conditions.push(sql`d.assigned_rep_id = ${input.assignedRepId}`);
+    // The Unassigned FilterBar option sends the sentinel; map it to IS NULL like the list (getDeals /
+    // buildAssignedRepPredicate), not a literal equality that would error on the UUID column (Codex P2).
+    conditions.push(
+      input.assignedRepId === UNASSIGNED_FILTER_SENTINEL
+        ? sql`d.assigned_rep_id is null`
+        : sql`d.assigned_rep_id = ${input.assignedRepId}`
+    );
   }
   if (input.regionId) {
-    conditions.push(sql`d.region_id = ${input.regionId}`);
+    conditions.push(
+      input.regionId === UNASSIGNED_FILTER_SENTINEL
+        ? sql`d.region_id is null`
+        : sql`d.region_id = ${input.regionId}`
+    );
   }
   if (input.source) {
     conditions.push(sql`d.source = ${input.source}`);
