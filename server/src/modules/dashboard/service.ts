@@ -2398,7 +2398,9 @@ async function getDashboardStaleDeals(
   return buildDashboardAtRiskStaleDeals(rows, options.viewerRole ?? "rep");
 }
 
-async function getDashboardAtRiskRows(
+// Exported for the runtime SQL test (dashboard-query.runtime.test.ts), which executes this
+// query against a faithful PGlite schema so a bad column/missing join fails CI.
+export async function getDashboardAtRiskRows(
   tenantDb: TenantDb,
   options: DashboardScopeOptions = {}
 ): Promise<DashboardAtRiskSummaryRow[]> {
