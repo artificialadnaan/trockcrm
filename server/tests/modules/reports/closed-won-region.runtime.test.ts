@@ -16,7 +16,7 @@ const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const WON = WON_STAGE_SLUGS[0];
 const ST = U("57001");
 const REP = U("a01");
-const D = { d1: U("d01"), d2: U("d02"), d3: U("d03"), d4: U("d04") };
+const D = { d1: U("d01"), d2: U("d02"), d3: U("d03"), d4: U("d04"), d5: U("d05") };
 const FILTERS: SalesReportFilters = {
   dateFrom: "2026-03-01",
   dateTo: "2026-03-31",
@@ -52,7 +52,10 @@ beforeAll(async () => {
       ('${D.d3}','Houston','${ST}','${REP}','2026-03-15','Houston, TX','Houston Office', 200000);
     -- NULL region_classification -> falls back to property city/state.
     INSERT INTO deals (id, name, stage_id, assigned_rep_id, won_closed_date, property_city, property_state, awarded_amount) VALUES
-      ('${D.d4}','Austin','${ST}','${REP}','2026-03-20','Austin','TX', 50000);
+      ('${D.d4}','Austin','${ST}','${REP}','2026-03-20','Austin','TX', 50000),
+      -- BLANK city (empty string, not NULL) + state -> must yield "GA", not ", GA" (Codex P2): CONCAT_WS
+      -- skips NULLs but not blanks, so each component is NULLIF(TRIM(..),'') normalized first.
+      ('${D.d5}','Blank city','${ST}','${REP}','2026-03-22','','GA', 25000);
   `);
   tdb = drizzle(pg);
 });
@@ -65,15 +68,18 @@ describe("Closed Won Revenue rolls up by region (combining what byOffice fragmen
     const report = await getClosedWonRevenueReport(tdb, FILTERS, "region-test");
     const byRegion = report.byRegion;
     expect(byRegion).toBeDefined();
-    // Three regions: Dallas (combined), Houston, Austin (city/state fallback).
-    expect(byRegion.length).toBe(3);
+    // Four regions: Dallas (combined), Houston, Austin (city/state fallback), GA (blank-city fallback).
+    expect(byRegion.length).toBe(4);
     const dallas = byRegion.filter((r) => r.regionName === "Dallas, TX");
     expect(dallas.length).toBe(1); // ONE combined row, not two
     expect(dallas[0].wonDeals).toBe(2);
     expect(dallas[0].totalRevenue).toBeCloseTo(400000, 2);
     expect(byRegion.find((r) => r.regionName === "Houston, TX")?.totalRevenue).toBeCloseTo(200000, 2);
     expect(byRegion.find((r) => r.regionName === "Austin, TX")?.totalRevenue).toBeCloseTo(50000, 2);
-    // Shares sum to ~100% of booked revenue (650k).
+    // Codex P2: a blank city component yields "GA", not a malformed ", GA".
+    expect(byRegion.find((r) => r.regionName === "GA")?.totalRevenue).toBeCloseTo(25000, 2);
+    expect(byRegion.every((r) => r.regionName === r.regionName.trim() && !r.regionName.startsWith(",") && !r.regionName.endsWith(","))).toBe(true);
+    // Shares sum to ~100% of booked revenue.
     const totalPct = byRegion.reduce((acc, r) => acc + r.percentOfTotal, 0);
     expect(totalPct).toBeCloseTo(100, 0);
   });

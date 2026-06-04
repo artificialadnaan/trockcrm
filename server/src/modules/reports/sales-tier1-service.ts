@@ -637,7 +637,9 @@ export async function getClosedWonRevenueReport(
       SELECT
         COALESCE(
           NULLIF(TRIM(d.region_classification), ''),
-          NULLIF(TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), ''),
+          -- Normalize each component (NULLIF(TRIM(..),'')) BEFORE concatenating: CONCAT_WS skips NULLs
+          -- but NOT empty strings, so a blank city/state would otherwise leak ", TX" / "Dallas, " labels.
+          NULLIF(TRIM(CONCAT_WS(', ', NULLIF(TRIM(d.property_city), ''), NULLIF(TRIM(d.property_state), ''))), ''),
           'Unassigned Region'
         ) AS "regionName",
         COUNT(*)::int AS "wonDeals",
