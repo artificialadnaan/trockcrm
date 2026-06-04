@@ -139,7 +139,7 @@ describe("sales tier 1 report services", () => {
           largestWonDealValue: 425000,
         },
       ],
-      officeRows: [{ officeId: "office-1", officeName: "Dallas", wonDeals: 2, totalRevenue: 600000 }],
+      regionRows: [{ regionName: "Dallas, TX", wonDeals: 2, totalRevenue: 600000 }],
       workflowRows: [{ workflowFamily: "standard_deal", wonDeals: 2, totalRevenue: 600000 }],
       monthlyRows: [{ month: "2026-05", totalRevenue: 600000, wonDeals: 2 }],
       topDeals: [
@@ -160,7 +160,7 @@ describe("sales tier 1 report services", () => {
       winRate: 66.7,
     });
     expect(overview.byWorkflowFamily[0].workflowFamilyName).toBe("Standard Deal");
-    expect(overview.byOffice[0].percentOfTotal).toBe(100);
+    expect(overview.byRegion[0].percentOfTotal).toBe(100);
   });
 
   it("aggregates lead conversion rows into funnel, source, and monthly trend data", () => {
