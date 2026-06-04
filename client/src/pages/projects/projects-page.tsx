@@ -7,15 +7,7 @@ import {
   type PortfolioProjectBoardColumn,
   type PortfolioProjectSummary,
 } from "@/hooks/use-projects";
-
-function formatCurrency(value: number | null | undefined) {
-  if (value == null) return null;
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(value);
-}
+import { formatCurrency } from "@/lib/deal-utils";
 
 function formatSyncDate(value: string | null | undefined) {
   if (!value) return null;
@@ -54,7 +46,7 @@ function ProjectCard({ project }: { project: PortfolioProjectSummary }) {
           Contract Value
         </p>
         <p className="mt-1 text-sm font-black tabular-nums text-slate-950">
-          {formattedValue ?? "--"}
+          {formattedValue}
         </p>
         {syncDate ? (
           <p className={cn(
@@ -91,6 +83,14 @@ function StageColumn({ column }: { column: PortfolioProjectBoardColumn }) {
           <span className="rounded-full bg-brand-red px-2.5 py-0.5 text-xs font-black text-white">
             Portfolio
           </span>
+        </div>
+        <div className="mt-3">
+          <p className="text-lg font-black tabular-nums text-slate-950">
+            {formatCurrency(column.totalValue)}
+          </p>
+          <p className="mt-0.5 text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400">
+            Stage total
+          </p>
         </div>
       </div>
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
