@@ -469,6 +469,25 @@ describe("Deal Service", () => {
       ).toThrow(/companyId is immutable/);
     });
 
+    // Case (d) of the deal PATCH empty-string uuid hardening: the route's
+    // stripBlankUuidPatchFields() deliberately leaves explicit null INTACT
+    // (only blank strings are omitted), so an already-set company/property still
+    // cannot be cleared — this guard is what enforces it end-to-end.
+    it("still rejects clearing an already-set companyId or propertyId via explicit null", () => {
+      expect(() =>
+        assertDealUpdateLineagePolicy(
+          { sourceLeadId: null, companyId: "company-1", propertyId: "property-1" },
+          { companyId: null }
+        )
+      ).toThrow(/cannot be cleared once set/);
+      expect(() =>
+        assertDealUpdateLineagePolicy(
+          { sourceLeadId: null, companyId: "company-1", propertyId: "property-1" },
+          { propertyId: null }
+        )
+      ).toThrow(/cannot be cleared once set/);
+    });
+
     it("does not allow generic PATCH to attach a source lead to a direct-created deal", () => {
       expect(() =>
         assertDealUpdateLineagePolicy(

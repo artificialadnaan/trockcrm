@@ -30,6 +30,7 @@ import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
 import { validateOptionalExpectedCloseDateInput } from "./expected-close-date-input.js";
+import { stripBlankUuidPatchFields } from "./uuid-patch-coercion.js";
 import { resolveMineVisibilityFeatures } from "../shared/mine-visibility.js";
 import { preflightStageCheck } from "./stage-gate.js";
 import { getContactsForDeal } from "../contacts/association-service.js";
@@ -1990,6 +1991,14 @@ router.patch("/:id", async (req, res, next) => {
     const clientRequestedMigrationMode = body.migrationMode === true;
     delete body.forceEditAfterRfp;
     delete body.migrationMode;
+
+    // An empty-string relationship id fails the Postgres uuid cast (22P02 -> 500),
+    // and an explicit null is rejected downstream ("…cannot be cleared once set");
+    // the only correct "not provided" shape is to OMIT the field. Coerce blank
+    // uuid fields to omitted here so ANY caller is safe, not just the form that
+    // BLUE's #636 hardened client-side. null is left intact so the existing
+    // clear-semantics still apply.
+    stripBlankUuidPatchFields(body);
 
     const patchKeys = Object.keys(body);
     const isAssignmentTransferOnly = patchKeys.length > 0 && patchKeys.every((field) => field === "assignedRepId");
