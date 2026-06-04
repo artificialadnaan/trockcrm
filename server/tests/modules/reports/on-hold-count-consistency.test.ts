@@ -297,7 +297,7 @@ describe("on-hold report count consistency", () => {
     await getExecutiveTrendsReport(executiveDb, { from: "2026-01-01", to: "2026-12-31" });
     const executiveSql = executiveDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase()).join("\n");
     expect(executiveSql).toContain("won_revenue");
-    expect(executiveSql).toContain("pipeline_end_value");
+    expect(executiveSql).toContain("total_pipeline");
     expect(executiveSql).toContain("coalesce(d.on_hold, false) = false");
 
     const reportBuilderDb = createMockTenantDb([]);
@@ -393,7 +393,10 @@ describe("on-hold report count consistency", () => {
     expect(executiveSql).toContain("case when d.bid_board_total_sales > 0 then d.bid_board_total_sales end");
     expect(executiveSql).toContain("case when d.awarded_amount > 0 then d.awarded_amount end");
     expect(executiveSql).not.toContain("nullif");
-    expect(executiveSql).toMatch(/avg\(case when coalesce\(d\.on_hold, false\).*awarded_amount.*filter \( where psc\.slug in .* and coalesce\(d\.on_hold, false\) = false \)/);
+    // PR-C: avg deal size = AVG over the on-hold-zeroed awarded-first Won value, FILTERed to the Won
+    // stage + usable won date (the won-date cohort). On-hold exclusion is via the value-zeroing CASE +
+    // the outer scope WHERE (asserted above), not inside the AVG FILTER.
+    expect(executiveSql).toMatch(/avg\(case when coalesce\(d\.on_hold, false\).*awarded_amount.*\) filter \(\s*where psc\.slug in .*d\.won_closed_date is not null/);
 
     const closedWonSummaryDb = createMockTenantDb([[], [], []]);
     await getClosedWonSummary(closedWonSummaryDb, { from: "2026-02-01", to: "2026-02-28" });

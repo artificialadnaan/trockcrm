@@ -52,22 +52,22 @@ describe("analytics-tier4 Won-date basis wired into the live queries", () => {
     expect(text).not.toContain("coalesce(d.actual_close_date, d.updated_at) at time zone");
   });
 
-  it("getExecutiveTrendsReport: won_fallback on won_closed_date; lost_fallback untouched", async () => {
+  it("getExecutiveTrendsReport: won/lost bucket by canonical outcome date, not deal_stage_history (PR-C)", async () => {
     const { getExecutiveTrendsReport } = await import("../../../src/modules/reports/analytics-tier4-service.js");
     const db = createMockTenantDb([[], [], [], [], []]);
     await getExecutiveTrendsReport(db, RANGE);
     const text = compact(db.execute.mock.calls.map(([q]: [unknown]) => extractSqlText(q)).join("\n"));
 
-    // won_fallback now buckets/windows by the canonical won date (+ usable-won-date guard), with
-    // date-typed bounds (session-TZ-independent; `<=` upper bound only exists in the fixed form).
+    // Monthly won buckets/windows by the canonical won date (+ usable-won-date guard, date-typed bounds).
     expect(text).toContain("to_char(d.won_closed_date, 'yyyy-mm')");
     expect(text).toContain("d.won_closed_date is not null");
     expect(text).toContain("d.won_closed_date <=");
-    // The old won_fallback basis is gone...
+    // The old contaminated won_fallback basis is gone...
     expect(text).not.toContain("coalesce((d.actual_close_date at time zone 'utc'), d.updated_at)");
-    // ...but the lost_fallback basis (lost_at) is intentionally preserved.
+    // ...and Lost is bucketed/windowed on lost_at (else updated_at), the canonical lost outcome date.
     expect(text).toContain("coalesce(d.lost_at, d.updated_at)");
-    // won_history stays on the stage-transition axis (not migrated).
-    expect(text).toContain("to_char(dsh.created_at at time zone 'utc', 'yyyy-mm')");
+    // CC2: won/lost/win-rate no longer bucket by the deal_stage_history TRANSITION month (which
+    // double-counted reopened deals). Outcomes are classified by the CURRENT stage_id + outcome date.
+    expect(text).not.toContain("to_char(dsh.created_at at time zone 'utc', 'yyyy-mm')");
   });
 });
