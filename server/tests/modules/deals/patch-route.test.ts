@@ -393,6 +393,9 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     expect(patch).not.toHaveProperty("propertyId");
   });
 
+  // Backend-tolerance guard: the route accepts a property-only partial PATCH even though the form UI
+  // requires a company before a property (PropertySelector is company-scoped). This keeps the route a
+  // permissive partial-PATCH endpoint regardless of how the client composes a single-field save.
   it("accepts a property-only relationship fill-in on a relationship-less deal without requiring a company", async () => {
     dealsServiceMocks.getDealById.mockResolvedValue(
       baseDeal({ isBidBoardOwned: true, companyId: null, propertyId: null, sourceLeadId: null })
