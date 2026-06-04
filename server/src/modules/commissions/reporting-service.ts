@@ -13,6 +13,9 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { aliasedActiveDealCountFilterSql, aliasedDealBestEstimateSql } from "../shared/deal-value-sql.js";
+// Estimator-aware rep filter (PR 2): the DEAL filter matches assigned_rep OR estimator_user_id. This is
+// a view-filter change ONLY — commission attribution (dsc.rep_user_id) and rate (cs.user_id) are untouched.
+import { buildAliasedInvolvedRepSql } from "../deals/deal-filter-predicates.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -130,9 +133,10 @@ function effectiveRepForRepDashboard(filters: CommissionReportFilters): string {
   return filters.role === "rep" ? filters.userId : (filters.repId ?? filters.userId);
 }
 
-function repSql(filters: CommissionReportFilters) {
+// Exported for the runtime test that proves the commission DEAL filter is estimator-aware.
+export function repSql(filters: CommissionReportFilters) {
   const repId = effectiveCommissionRepId(filters);
-  return repId ? sql`AND d.assigned_rep_id = ${repId}` : sql``;
+  return repId ? sql`AND ${buildAliasedInvolvedRepSql("d", repId)}` : sql``;
 }
 
 function commissionRepSql(filters: CommissionReportFilters) {
@@ -290,8 +294,18 @@ function normalizeDashboardRow(row: any): RepCommissionDashboardDeal | null {
   };
 }
 
-async function refreshCommissionSnapshots(tenantDb: TenantDb, dealsForSnapshot: RepCommissionDashboardDeal[]) {
-  if (dealsForSnapshot.length === 0) return;
+async function refreshCommissionSnapshots(
+  tenantDb: TenantDb,
+  dealsForSnapshot: RepCommissionDashboardDeal[],
+  dashboardRepId: string
+) {
+  // Only refresh snapshots for the dashboard rep's OWN rows (rep_id === the rep whose dashboard this is).
+  // The estimator-aware pipeline filter (PR 2) surfaces deals the rep only ESTIMATED, whose rep_id is the
+  // OWNER's id (d.assigned_rep_id) — writing those would (a) crash on a NULL owner (''::uuid -> 22P02) and
+  // (b) overwrite the OWNER's "since last update" delta during the estimator's request. Restricting to the
+  // dashboard rep keeps the pre-PR behavior (every row used to be the rep's own) and fixes both.
+  const snapshotRows = dealsForSnapshot.filter((deal) => deal.repId === dashboardRepId);
+  if (snapshotRows.length === 0) return;
   await tenantDb.execute(sql`
     INSERT INTO commission_deal_snapshots (
       deal_id,
@@ -300,7 +314,7 @@ async function refreshCommissionSnapshots(tenantDb: TenantDb, dealsForSnapshot: 
       last_computed_at
     )
     VALUES ${sql.join(
-      dealsForSnapshot.map((deal) => sql`(
+      snapshotRows.map((deal) => sql`(
         ${deal.dealId}::uuid,
         ${deal.repId}::uuid,
         ${String(deal.commission)}::numeric,
@@ -385,8 +399,12 @@ export async function getRepCommissionDashboard(
       LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
       LEFT JOIN ${companies} c ON c.id = d.company_id
       LEFT JOIN ${properties} p ON p.id = d.property_id
-      LEFT JOIN commission_deal_snapshots cds ON cds.deal_id = d.id AND cds.rep_user_id = d.assigned_rep_id
-      WHERE d.assigned_rep_id = ${repId}
+      -- Read the snapshot keyed on the DASHBOARD rep (not the owner): the estimator-aware filter can
+      -- surface deals this rep only ESTIMATED (owned by someone else), and showing the OWNER's
+      -- "since last update" delta to the estimator would be misleading. For the rep's own deals
+      -- d.assigned_rep_id = repId, so this is identical to before; estimator-visible rows get no delta.
+      LEFT JOIN commission_deal_snapshots cds ON cds.deal_id = d.id AND cds.rep_user_id = ${repId}
+      WHERE ${buildAliasedInvolvedRepSql("d", repId)}
         AND d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
         AND d.contract_signed_at IS NULL
@@ -424,7 +442,7 @@ export async function getRepCommissionDashboard(
   const rows: RepCommissionDashboardDeal[] = ((result as any).rows ?? result)
     .map(normalizeDashboardRow)
     .filter((row: RepCommissionDashboardDeal | null): row is RepCommissionDashboardDeal => row != null);
-  await refreshCommissionSnapshots(tenantDb, rows);
+  await refreshCommissionSnapshots(tenantDb, rows, repId);
 
   const earned = Number(rows.filter((deal) => deal.isEarned).reduce((sum, deal) => sum + deal.commission, 0).toFixed(2));
   const inPipeline = Number(rows.filter((deal) => !deal.isEarned).reduce((sum, deal) => sum + deal.commission, 0).toFixed(2));
