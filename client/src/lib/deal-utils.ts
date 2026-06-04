@@ -72,15 +72,41 @@ export function formatCurrencyCompact(value: string | number | null | undefined)
 }
 
 /**
- * Calculate current contract value: awarded_amount + change_order_total.
+ * Calculate current contract value: awarded_amount + Procore change_order_total + CRM change orders.
+ *
+ * `change_order_total` is the Procore-synced approved-CO rollup; `crmChangeOrderTotal` is the sum of
+ * the CRM-native deal_change_orders (passed from the deal detail). Both are added so the displayed
+ * Current Contract Value reflects every change order on the deal.
  */
-export function currentContractValue(deal: {
-  awardedAmount?: string | null;
-  changeOrderTotal?: string | null;
-}): number {
+export function currentContractValue(
+  deal: {
+    awardedAmount?: string | null;
+    changeOrderTotal?: string | null;
+  },
+  crmChangeOrderTotal?: string | number | null
+): number {
   const awarded = parseFloat(deal.awardedAmount ?? "0") || 0;
   const coTotal = parseFloat(deal.changeOrderTotal ?? "0") || 0;
-  return awarded + coTotal;
+  const crmTotal =
+    typeof crmChangeOrderTotal === "number"
+      ? crmChangeOrderTotal
+      : parseFloat((crmChangeOrderTotal ?? "0") as string) || 0;
+  return awarded + coTotal + (Number.isFinite(crmTotal) ? crmTotal : 0);
+}
+
+/**
+ * Combined change-order total shown on the deal: Procore approved COs + CRM-native change orders.
+ */
+export function combinedChangeOrderTotal(
+  changeOrderTotal: string | null | undefined,
+  crmChangeOrderTotal: string | number | null | undefined
+): number {
+  const procore = parseFloat((changeOrderTotal ?? "0") as string) || 0;
+  const crm =
+    typeof crmChangeOrderTotal === "number"
+      ? crmChangeOrderTotal
+      : parseFloat((crmChangeOrderTotal ?? "0") as string) || 0;
+  return (Number.isFinite(procore) ? procore : 0) + (Number.isFinite(crm) ? crm : 0);
 }
 
 export type DealEstimateSource = "bid_board" | "bid" | "estimate" | "awarded" | "none";

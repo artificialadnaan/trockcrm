@@ -293,7 +293,13 @@ export function DealOverviewTab({ deal, officeId, onDealUpdated }: DealOverviewT
           <p className="text-xs text-red-600" role="alert">{assignmentError}</p>
         ) : null}
 
-        <DealEstimatesCard deal={deal} />
+        <DealEstimatesCard
+          deal={deal}
+          changeOrders={deal.dealChangeOrders}
+          changeOrderTotal={deal.dealChangeOrderTotal}
+          canManage={user?.role === "admin"}
+          onChanged={onDealUpdated}
+        />
 
         {/* Procore Link */}
         {deal.procoreProjectId && (
