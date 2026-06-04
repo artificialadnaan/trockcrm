@@ -170,6 +170,11 @@ function writeMatchConflictsCsv(conflicts: CompanyCamMatchConflict[], outputPath
 
 export async function loadDeals(client: pg.Client, tenant: string): Promise<DealForCompanyCamPlan[]> {
   const schema = quoteIdent(tenant);
+  // On-hold deals are excluded here so they are never seed targets. As a consequence the
+  // exact-name uniqueness check (in the matcher) is evaluated over the non-on-hold deals only:
+  // a name shared by one active + one on-hold deal counts as unique and auto-links the active deal
+  // (the on-hold deal is not a viable target anyway). The read-only inventory loadDeals, by
+  // contrast, keeps on-hold deals so its report flags such names as ambiguous.
   const { rows } = await client.query(`
     SELECT id::text, name, deal_number, project_number, companycam_project_id
     FROM ${schema}.deals

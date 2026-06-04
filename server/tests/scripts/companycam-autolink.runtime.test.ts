@@ -1,6 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { importPhoto, loadDeals } from "../../../scripts/companycam-import";
+import { buildCompanyCamImportPlan, companyCamPlanDisposition } from "../../../scripts/companycam-inventory";
 import type { CCPhoto } from "../../src/modules/companycam/client.js";
 
 /**
@@ -122,5 +123,31 @@ describe("companycam auto-link seed — real SQL", () => {
       [DEAL],
     );
     expect(links.rows[0].n).toBe(1);
+  });
+});
+
+// The headline safety property of the auto-link tier, promoted into the CI-gated runtime lane
+// (regular *.test.ts do NOT run in check:premerge): an exact name carried by MORE THAN ONE deal is
+// an ambiguous collision and must be held for manual review — never auto-linked, even at confidence 1.
+describe("companycam auto-link — exact-AND-unique collision guard", () => {
+  it("holds an exact name carried by TWO deals for manual review (never auto-links)", () => {
+    const plan = buildCompanyCamImportPlan(
+      [{ id: "cc-collide", name: "Tides North Dallas", photoCount: 12 }],
+      [
+        { id: "d-a", name: "Tides North Dallas", dealNumber: "T-1", projectNumber: null, companycamProjectId: null, onHold: false },
+        { id: "d-b", name: "Tides North Dallas", dealNumber: "T-2", projectNumber: null, companycamProjectId: null, onHold: false },
+      ],
+    );
+    expect(plan.rows[0].matchReason).toBe("fuzzy_project_name"); // ambiguous — NOT exact_unique_name
+    expect(companyCamPlanDisposition(plan.rows[0])).toBe("manual_review");
+  });
+
+  it("auto-links an exact name carried by exactly ONE deal", () => {
+    const plan = buildCompanyCamImportPlan(
+      [{ id: "cc-uniq", name: "Winkler Apartments", photoCount: 8 }],
+      [{ id: "d-uniq", name: "Winkler Apartments", dealNumber: "W-1", projectNumber: null, companycamProjectId: null, onHold: false }],
+    );
+    expect(plan.rows[0].matchReason).toBe("exact_unique_name");
+    expect(companyCamPlanDisposition(plan.rows[0])).toBe("auto");
   });
 });
