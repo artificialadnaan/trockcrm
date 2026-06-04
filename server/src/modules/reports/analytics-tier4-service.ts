@@ -12,6 +12,8 @@ import {
 } from "../shared/deal-value-sql.js";
 import { aliasedHasUsableWonDateSql } from "../deals/service.js";
 import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+// Estimator-aware rep filter (PR 2): owner IN-list matches assigned_rep OR estimator_user_id.
+import { buildAliasedInvolvedRepInListSql } from "../deals/deal-filter-predicates.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -168,12 +170,28 @@ function buildWonClosedWhere(filters: ReturnType<typeof normalizeFilters>) {
   `;
 }
 
-function buildScopeWhere(filters: ReturnType<typeof normalizeFilters>) {
-  const ownerFilter = filters.ownerIds.length
-    ? sql`AND d.assigned_rep_id IN (${sql.join(filters.ownerIds.map((id) => sql`${id}::uuid`), sql`, `)})`
+/**
+ * Owner narrowing for the analytics tiers: estimator-aware id IN-list (PR 2 — matches assigned_rep OR
+ * estimator_user_id, "value"/::uuid cast preserved) with a display-name fallback. Exported so the runtime
+ * test can prove an estimator-only person's deals surface here. Carries the leading AND for interpolation.
+ */
+export function buildOwnerScopeSql(
+  filters: Pick<ReturnType<typeof normalizeFilters>, "ownerIds" | "ownerNames">
+): SQL {
+  return filters.ownerIds.length
+    ? sql`AND ${buildAliasedInvolvedRepInListSql("d", filters.ownerIds, "value")!}`
     : filters.ownerNames.length
-      ? sql`AND u.display_name IN (${sqlStringList(filters.ownerNames)})`
+      // Estimator-aware by NAME too (Codex P2): match the assigned rep's name OR a deal whose resolved
+      // estimator has a listed name (name->id subquery on estimator_user_id). The consuming queries LEFT
+      // JOIN users on the assigned rep, so an unassigned-but-estimated deal still surfaces via the subquery.
+      ? sql`AND (u.display_name IN (${sqlStringList(filters.ownerNames)}) OR d.estimator_user_id IN (
+          SELECT eu.id FROM users eu WHERE eu.display_name IN (${sqlStringList(filters.ownerNames)})
+        ))`
     : sql``;
+}
+
+function buildScopeWhere(filters: ReturnType<typeof normalizeFilters>) {
+  const ownerFilter = buildOwnerScopeSql(filters);
   const officeClause = buildOfficeExistsMatcher(filters.office);
   const officeFilter = officeClause ? sql`AND ${officeClause}` : sql``;
 

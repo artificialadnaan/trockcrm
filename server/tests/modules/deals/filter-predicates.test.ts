@@ -22,6 +22,7 @@ import {
   UNASSIGNED_FILTER_SENTINEL,
   buildAssignedRepPredicate,
   buildAliasedInvolvedRepSql,
+  buildAliasedInvolvedRepInListSql,
   buildRegionPredicate,
   buildProjectTypePredicate,
   buildWorkflowRoutePredicate,
@@ -66,6 +67,36 @@ describe("aliased involved-rep SQL (raw, for d-aliased report/drill-down queries
   });
   it("rejects an invalid alias (identifier-injection guard)", () => {
     expect(() => buildAliasedInvolvedRepSql("d; drop table deals", "rep-1")).toThrow();
+  });
+});
+
+describe("aliased involved-rep IN-list SQL (raw, for multi-rep/owner report filters)", () => {
+  it("matches alias.assigned_rep_id IN (..) OR alias.estimator_user_id IN (..) for an id list", () => {
+    const sql = text(buildAliasedInvolvedRepInListSql("d", ["rep-1", "rep-2"]));
+    expect(sql).toContain("d.assigned_rep_id in (");
+    expect(sql).toContain("d.estimator_user_id in (");
+    expect(sql).toContain(" or ");
+  });
+  it("returns undefined for an empty list so the caller OMITS the clause (never an empty IN)", () => {
+    expect(buildAliasedInvolvedRepInListSql("d", [])).toBeUndefined();
+  });
+  it("cast 'value' casts each id literal to ::uuid (analytics-tier4 style)", () => {
+    const sql = text(buildAliasedInvolvedRepInListSql("d", ["rep-1"], "value"));
+    expect(sql).toContain("::uuid");
+    expect(sql).toContain("d.assigned_rep_id in (");
+    expect(sql).toContain("d.estimator_user_id in (");
+  });
+  it("cast 'column' casts both columns to ::text (operations-tier3 style)", () => {
+    const sql = text(buildAliasedInvolvedRepInListSql("d", ["rep-1"], "column"));
+    expect(sql).toContain("d.assigned_rep_id::text in (");
+    expect(sql).toContain("d.estimator_user_id::text in (");
+  });
+  it("never maps to IS NULL — the Unassigned sentinel is not selectable via an id list", () => {
+    const sql = text(buildAliasedInvolvedRepInListSql("d", [UNASSIGNED_FILTER_SENTINEL]));
+    expect(sql).not.toContain("is null");
+  });
+  it("rejects an invalid alias (identifier-injection guard)", () => {
+    expect(() => buildAliasedInvolvedRepInListSql("d; drop table deals", ["rep-1"])).toThrow();
   });
 });
 

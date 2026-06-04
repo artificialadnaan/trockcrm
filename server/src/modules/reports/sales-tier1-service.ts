@@ -113,6 +113,9 @@ function sqlStringList(values: readonly string[]) {
   return sql.join(values.map((value) => sql`${value}`), sql`, `);
 }
 
+// Assigned-rep only (NOT estimator-aware): buildOwnerIdentitySql feeds getClosedWonRevenueReport, which
+// emits a per-rep rollup (PARTITION BY / GROUP BY assigned_rep_id) — an estimator-OR filter would
+// misattribute an estimator-only person's deals to the owner's row. See the rep-keyed-report exclusion.
 function buildOwnerIdentitySql(filters: Pick<SalesReportFilters, "ownerIds" | "ownerEmails" | "ownerNames">) {
   const clauses = [];
   if (filters.ownerIds.length > 0) clauses.push(sql`d.assigned_rep_id IN (${sqlStringList(filters.ownerIds)})`);
