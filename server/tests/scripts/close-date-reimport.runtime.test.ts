@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
+  applyCloseDate,
   runReimport,
   type ImportRowInput,
   type Queryable,
@@ -190,6 +191,38 @@ describe("re-import fault isolation (real DB errors + commit failure)", () => {
     expect(await dateOfF(A)).toBe("2026-09-15");
     expect(await dateOfF(B)).toBeNull(); // failed row rolled back
     expect(await dateOfF(C)).toBe("2026-10-01"); // sibling still committed
+  });
+
+  it("applyCloseDate returns false when the fill-only guard skips an already-set deal, true when it writes", async () => {
+    expect(await applyCloseDate(fclient, "office_dallas", A, "2026-09-15", { onlyIfNull: true })).toBe(true);
+    expect(await applyCloseDate(fclient, "office_dallas", A, "2026-10-01", { onlyIfNull: true })).toBe(false); // already set
+    expect(await applyCloseDate(fclient, "office_dallas", A, "2026-10-01", { onlyIfNull: false })).toBe(true); // overwrite
+  });
+
+  it("reclassifies a guarded write that hits 0 rows (date set concurrently) as CONFLICT, not WRITTEN", async () => {
+    let injected = false;
+    const racing: Queryable = {
+      query: async (text: string, params?: unknown[]) => {
+        // Simulate a concurrent edit landing between the read and the fill-only write.
+        if (!injected && /UPDATE\s.*SET expected_close_date/i.test(text) && params?.[1] === A) {
+          injected = true;
+          await fpg.query(`UPDATE office_dallas.deals SET expected_close_date = DATE '2026-01-01' WHERE id = $1`, [A]);
+        }
+        return fpg.query(text, params);
+      },
+    };
+
+    const report = await runReimport({
+      client: racing,
+      rows: [{ tenantSchema: "office_dallas", dealId: A, rawDate: "2026-09-15" }],
+      validSchemas: new Set(["office_dallas"]),
+      mode: "commit",
+      overwriteExisting: false,
+    });
+
+    expect(report.counts.WRITTEN).toBe(0);
+    expect(report.counts.CONFLICT).toBe(1);
+    expect(await dateOfF(A)).toBe("2026-01-01"); // concurrent value preserved, not clobbered or falsely reported
   });
 
   it("a COMMIT failure marks the ENTIRE rolled-back tenant batch as ERROR (no false WRITTEN in the audit)", async () => {

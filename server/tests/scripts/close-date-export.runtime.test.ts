@@ -30,6 +30,7 @@ const D = {
   d10_bob_atlanta: U("d10"),
   d11_inactive_rep: U("d11"),
   d12_orphan_rep: U("d12"),
+  d13_on_hold: U("d13"),
 };
 
 let pg: PGlite;
@@ -51,6 +52,7 @@ function dealsDDL(schema: string): string {
       is_active boolean NOT NULL DEFAULT true,
       is_test_data boolean NOT NULL DEFAULT false,
       is_read_only_mirror boolean NOT NULL DEFAULT false,
+      on_hold boolean NOT NULL DEFAULT false,
       updated_at timestamptz NOT NULL DEFAULT now()
     );
   `;
@@ -80,6 +82,8 @@ beforeAll(async () => {
       ('${D.d8_unassigned}',  'DFW-1-00008-aa','Roof H','${ST.est}', NULL,          NULL,        NULL, NULL, true, false, false),          -- INCLUDED (unassigned)
       ('${D.d11_inactive_rep}','DFW-1-00011-aa','Roof K','${ST.est}','${REP.gone}',  NULL,        NULL, NULL, true, false, false),          -- INCLUDED -> Unassigned (rep inactive)
       ('${D.d12_orphan_rep}', 'DFW-1-00012-aa','Roof L','${ST.est}','${REP.ghost}', NULL,        NULL, NULL, true, false, false);          -- INCLUDED -> Unassigned (rep row missing)
+    INSERT INTO office_dallas.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date, on_hold) VALUES
+      ('${D.d13_on_hold}','DFW-1-00013-aa','Roof M','${ST.est}','${REP.alice}', NULL, true);       -- excluded: on hold (paused / non-reportable)
 
     INSERT INTO office_atlanta.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date, is_active) VALUES
       ('${D.d9_alice_atlanta}', 'ATL-1-00009-aa','Roof I','${ST.est}','${REP.alice}', NULL, true),  -- INCLUDED (alice spans offices)
@@ -111,6 +115,11 @@ describe("close-date export query (PGlite)", () => {
         D.d12_orphan_rep,
       ].sort(),
     );
+  });
+
+  it("excludes on-hold deals (deliberately paused / non-reportable)", async () => {
+    const deals = await fetchMissingCloseDateDeals(client);
+    expect(deals.find((d) => d.dealId === D.d13_on_hold)).toBeUndefined();
   });
 
   it("routes deals owned by an inactive or missing rep into the single Unassigned bucket", async () => {

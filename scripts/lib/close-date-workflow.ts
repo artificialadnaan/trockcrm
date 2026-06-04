@@ -287,6 +287,7 @@ export function buildMissingCloseDateSql(schema: string): string {
       AND d.is_active = true
       AND d.is_test_data = false
       AND d.is_read_only_mirror = false
+      AND COALESCE(d.on_hold, false) = false
       AND COALESCE(psc.is_terminal, false) = false
     ORDER BY d.deal_number ASC, d.id ASC`;
 }
@@ -395,19 +396,24 @@ export async function fetchDealExistingCloseDate(
   return { found: true, existing: d == null ? null : String(d) };
 }
 
-/** Write expected_close_date. `onlyIfNull` double-guards the fill-only case against races. */
+/**
+ * Write expected_close_date. `onlyIfNull` guards the fill-only case against a
+ * concurrent edit. Returns whether a row was actually persisted (via RETURNING,
+ * which is driver-agnostic) so the caller never reports a write the guard skipped.
+ */
 export async function applyCloseDate(
   client: Queryable,
   schema: string,
   dealId: string,
   value: string,
   opts: { onlyIfNull: boolean },
-): Promise<void> {
+): Promise<boolean> {
   const guard = opts.onlyIfNull ? " AND expected_close_date IS NULL" : "";
-  await client.query(
-    `UPDATE ${quoteIdent(schema)}.deals SET expected_close_date = $1::date, updated_at = NOW() WHERE id = $2${guard}`,
+  const { rows } = await client.query(
+    `UPDATE ${quoteIdent(schema)}.deals SET expected_close_date = $1::date, updated_at = NOW() WHERE id = $2${guard} RETURNING id`,
     [value, dealId],
   );
+  return rows.length > 0;
 }
 
 /** Look up a deal's current date and classify the row (no write). */
@@ -501,11 +507,28 @@ export async function runReimport(input: {
         for (const { index, row, value } of items) {
           await client.query("SAVEPOINT cd_row");
           try {
-            const res = await resolveDeferredRow(client, row, value, overwriteExisting);
+            let res = await resolveDeferredRow(client, row, value, overwriteExisting);
             if (res.outcome === "WRITTEN" || res.outcome === "OVERWRITTEN") {
-              await applyCloseDate(client, row.tenantSchema, row.dealId, value, {
+              const persisted = await applyCloseDate(client, row.tenantSchema, row.dealId, value, {
                 onlyIfNull: res.outcome === "WRITTEN",
               });
+              if (!persisted) {
+                // The deal changed between the read and the guarded write (date set
+                // concurrently, or the row vanished) — re-read and report the truth
+                // so the audit never claims a write that did not persist.
+                const recheck = await fetchDealExistingCloseDate(client, row.tenantSchema, row.dealId);
+                const reclass = classifyImportRow({
+                  parsed: { status: "ok", value },
+                  keyValid: true,
+                  found: recheck.found,
+                  existing: recheck.existing,
+                  overwriteExisting,
+                });
+                res =
+                  reclass.outcome === "WRITTEN" || reclass.outcome === "OVERWRITTEN"
+                    ? { ...row, outcome: "ERROR", value: null, existing: recheck.existing, message: "guarded update affected 0 rows" }
+                    : { ...row, outcome: reclass.outcome, value: reclass.writeValue, existing: recheck.existing };
+              }
             }
             await client.query("RELEASE SAVEPOINT cd_row");
             results[index] = res;

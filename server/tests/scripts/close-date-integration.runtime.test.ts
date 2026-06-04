@@ -41,6 +41,7 @@ beforeAll(async () => {
       assigned_rep_id uuid, company_id uuid, expected_close_date date,
       awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, is_read_only_mirror boolean NOT NULL DEFAULT false,
+      on_hold boolean NOT NULL DEFAULT false,
       updated_at timestamptz DEFAULT now()
     );
     INSERT INTO users (id, display_name) VALUES ('${REP}','Alice Rep');

@@ -29,13 +29,26 @@ export type ExportArgs = { tenant: string | null; outDir: string | null; dryRun:
 
 /** Parse the export CLI flags (`--tenant=`, `--out=`, `--dry-run`). */
 export function parseExportArgs(argv: string[]): ExportArgs {
-  const tenantArg = argv.find((a) => a.startsWith("--tenant="))?.split("=")[1] ?? null;
-  const outArg = argv.find((a) => a.startsWith("--out="))?.split("=")[1] ?? null;
+  // An explicitly-empty value (e.g. a bad shell expansion `--tenant=$UNSET`) must
+  // fail loud — silently falling back to "all offices" would broaden a real
+  // customer-data export.
+  const tenantRaw = readFlag(argv, "--tenant");
+  const outRaw = readFlag(argv, "--out");
   return {
-    tenant: tenantArg && tenantArg !== "all" ? tenantArg : null,
-    outDir: outArg,
+    tenant: tenantRaw && tenantRaw !== "all" ? tenantRaw : null,
+    outDir: outRaw,
     dryRun: argv.includes("--dry-run"),
   };
+}
+
+/** Read a `--flag=value` value; returns null if the flag is absent, throws if present but empty. */
+function readFlag(argv: string[], flag: string): string | null {
+  const prefix = `${flag}=`;
+  const arg = argv.find((a) => a.startsWith(prefix));
+  if (arg === undefined) return null;
+  const value = arg.slice(prefix.length).trim();
+  if (value === "") throw new Error(`${flag}= was given an empty value (check for an unset shell variable).`);
+  return value;
 }
 
 /** Resolve the Postgres URL (Railway injects DATABASE_URL); enable SSL for a public proxy URL. */

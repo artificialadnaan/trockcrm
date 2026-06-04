@@ -22,6 +22,12 @@ describe("parseExportArgs", () => {
     expect(args.outDir).toBe("/tmp/x");
     expect(args.dryRun).toBe(true);
   });
+  it("throws on an empty --tenant= (a bad shell expansion must not silently export all offices)", () => {
+    expect(() => parseExportArgs(["--tenant="])).toThrow();
+  });
+  it("throws on an empty --out=", () => {
+    expect(() => parseExportArgs(["--out="])).toThrow();
+  });
 });
 
 describe("parseReimportArgs", () => {
