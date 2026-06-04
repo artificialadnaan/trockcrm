@@ -2,3 +2,4 @@ companycam-import-plan-*.csv
 companycam-match-conflicts-*.csv
 duplicate-companies-*.csv
 hubspot-reconciliation-*.md
+close-date-reimport-*.csv

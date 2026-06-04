@@ -18,3 +18,6 @@ tmp/staging-dumps/*.env
 tmp/
 .reviews/**/*.csv
 .reviews/**/dry-run-output.txt
+
+# Per-rep close-date export workbooks (real customer deal data — never commit)
+close-date-exports/

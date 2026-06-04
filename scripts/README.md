@@ -51,6 +51,31 @@ railway run --service=Postgres npx tsx scripts/reconcile-hubspot-csv.ts --tenant
 
 Close dates are normalized deterministically for cutover comparison. Date-only ISO strings stay date-only, ISO datetimes with `Z` or a numeric offset are converted to UTC dates, and ISO datetimes without an offset are treated as UTC by assumption.
 
+## Per-rep expected-close-date export / re-import
+
+Two-way workflow to fill in missing `expected_close_date` values: export one Excel file per rep listing their open deals that lack a forecast close date, send each rep their file, then re-import the filled files.
+
+**Export** (read-only) writes one `close-dates-<rep>.xlsx` per rep to `close-date-exports/<date>/` (git-ignored — real customer data). Scope is open, rep-actionable deals only: `expected_close_date IS NULL`, active, non-test, non-mirror, non-terminal stage.
+
+```bash
+railway run --service=Postgres npx tsx scripts/close-date-export.ts                 # all offices
+railway run --service=Postgres npx tsx scripts/close-date-export.ts --tenant=office_dallas
+railway run --service=Postgres npx tsx scripts/close-date-export.ts --dry-run        # per-rep counts, write no files
+```
+
+Each workbook hides + locks the matching-key columns (`Deal ID` = deal UUID, `Office` = tenant schema) and protects the sheet so reps can only edit the highlighted **Expected Close Date** column. The UUID is the foolproof match key — `deal_number`/`project_number` are mutable and frequently null, so they are never used to match.
+
+**Re-import** is **dry-run by default**; pass `--commit` to write. It reads the locked key columns to update the exact deal and writes only `expected_close_date`. An existing date is **never** overwritten (reported as `CONFLICT`) unless `--overwrite-existing` is passed; blank rows are skipped; bad dates / bad keys / unmatched rows are reported (the run never crashes on one bad row); re-running is idempotent. Writing only the close date is side-effect-safe — the deal stage-history / `stage_entered_at` triggers are guarded on stage changes and the close-date email triggers are column-scoped elsewhere. A per-row audit CSV is written to `docs/audit/close-date-reimport-<timestamp>.csv` (git-ignored).
+
+```bash
+railway run --service=Postgres npx tsx scripts/close-date-reimport.ts --dir=./filled            # preview a folder
+railway run --service=Postgres npx tsx scripts/close-date-reimport.ts --dir=./filled --commit    # write
+railway run --service=Postgres npx tsx scripts/close-date-reimport.ts --file=close-dates-alice.xlsx --commit
+railway run --service=Postgres npx tsx scripts/close-date-reimport.ts --dir=./filled --commit --overwrite-existing
+```
+
+Shared logic lives in `scripts/lib/close-date-workflow.ts` (queries, classification) and `scripts/lib/close-date-xlsx.ts` (workbook IO); both are covered by `server/tests/scripts/close-date-*.runtime.test.ts`.
+
 ## Surgically applying a single migration
 
 When a feature branch adds a migration but other unrelated migrations on the working tree are not ready to apply (e.g., orphaned migrations from a sibling branch), do **not** run `npm run db:migrate` — it walks the entire `migrations/` directory and would sweep up unwanted siblings. Instead, write a one-off `apply-XXXX-surgical.ts` modeled on `apply-0062-surgical.ts`: it reads the single SQL file, runs it inside a `BEGIN`/`COMMIT`, and inserts the filename into `public._migrations` so the regular runner skips it on the next deploy. Then verify with a `verify-XXXX.ts` that checks `information_schema.tables`, `pg_constraint`, and `pg_indexes` against each tenant schema (currently `office_atlanta`, `office_dallas`, `office_pwauditoffice`). After both run clean, delete the one-off scripts in the same PR or keep them under `scripts/` as a record of what was applied — team preference.
