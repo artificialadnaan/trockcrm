@@ -563,4 +563,141 @@ describe("DealForm direct-create context", () => {
       })
     );
   });
+
+  // Piece A: a rep must be able to save a single enrichment field on an existing deal (including a
+  // Bid-Board-Owned deal) without being forced to first attach BOTH a company and a property. The
+  // unset relationship ids must be OMITTED from the PATCH payload — not sent as "" — because the
+  // server writes them straight into uuid columns (an empty string fails the uuid cast → 500).
+  it("saves an existing relationship-less deal (close-date-only enrichment) without requiring company or property", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderEditForm({
+      id: "deal-bbo",
+      dealNumber: "DFW-1-09999-aa",
+      name: "Bid Board Deal",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: null,
+      propertyId: null,
+      sourceLeadId: null,
+      isBidBoardOwned: true,
+      expectedCloseDate: "2026-09-01",
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+
+    await submit(container);
+
+    expect(container.textContent).not.toContain("Company and property are required");
+    expect(mocks.updateDeal).toHaveBeenCalledTimes(1);
+    const [dealId, payload] = mocks.updateDeal.mock.calls[0];
+    expect(dealId).toBe("deal-bbo");
+    expect(payload.expectedCloseDate).toBe("2026-09-01");
+    expect(payload).not.toHaveProperty("companyId");
+    expect(payload).not.toHaveProperty("propertyId");
+  });
+
+  it("saves a company-only fill-in on an existing deal without requiring a property", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderEditForm({
+      id: "deal-company-only",
+      dealNumber: "DFW-1-09998-aa",
+      name: "Company Only Deal",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: null,
+      propertyId: null,
+      sourceLeadId: null,
+      isBidBoardOwned: true,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      mocks.companySelectorProps?.onChange("company-7");
+    });
+    await submit(container);
+
+    expect(container.textContent).not.toContain("Company and property are required");
+    expect(mocks.updateDeal).toHaveBeenCalledTimes(1);
+    const [, payload] = mocks.updateDeal.mock.calls[0];
+    expect(payload.companyId).toBe("company-7");
+    expect(payload).not.toHaveProperty("propertyId");
+  });
+
+  it("saves a property-only fill-in on an existing deal without requiring a company", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderEditForm({
+      id: "deal-property-only",
+      dealNumber: "DFW-1-09997-aa",
+      name: "Property Only Deal",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: null,
+      propertyId: null,
+      sourceLeadId: null,
+      isBidBoardOwned: true,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      mocks.propertySelectorProps?.onChange("property-7");
+    });
+    await submit(container);
+
+    expect(container.textContent).not.toContain("Company and property are required");
+    expect(mocks.updateDeal).toHaveBeenCalledTimes(1);
+    const [, payload] = mocks.updateDeal.mock.calls[0];
+    expect(payload.propertyId).toBe("property-7");
+    expect(payload).not.toHaveProperty("companyId");
+  });
+
+  // The relaxation is scoped to editing an existing deal. Creating a brand-new deal must STILL require
+  // both a company and a property (a new direct-create deal needs its relationships established).
+  it("still requires company and property when creating a new deal", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderForm({
+      name: "New Deal Without Relationships",
+      projectTypeId: "type-roofing",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await submit(container);
+
+    expect(container.textContent).toContain("Company and property are required");
+    expect(mocks.createDeal).not.toHaveBeenCalled();
+  }, 30000);
 });
