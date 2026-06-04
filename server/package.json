@@ -46,6 +46,7 @@
     "@types/pg": "^8.11.10",
     "@types/supertest": "^6.0.2",
     "@types/swagger-ui-express": "^4.1.8",
+    "exceljs": "^4.4.0",
     "supertest": "^7.0.0",
     "tsx": "^4.19.2",
     "vitest": "^3.0.4"
