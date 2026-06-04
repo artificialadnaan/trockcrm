@@ -136,6 +136,17 @@ export function ScrollTable({ children }: { children: ReactNode }) {
   return <div className="overflow-x-auto">{children}</div>;
 }
 
+// CC8 (Wave 0): the Operations reports answer "what is active right now" and intentionally ignore the
+// date range in SQL. The FilterBar still shows a date picker (shared component), so this note makes the
+// behavior honest instead of letting a user think narrowing dates changed the result.
+export function ActiveWorkNote() {
+  return (
+    <p role="note" className="-mt-2 text-xs font-medium text-slate-500">
+      Showing current active work — the date range is not applied to this report.
+    </p>
+  );
+}
+
 export function DealLink({ dealId, children }: { dealId: string; children: ReactNode }) {
   return (
     <Link to={`/deals/${dealId}`} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">

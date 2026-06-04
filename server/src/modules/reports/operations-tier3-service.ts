@@ -7,6 +7,9 @@ import {
   aliasedDealBestEstimateWithForecastSql,
   aliasedEffectiveDealValueSql,
 } from "../shared/deal-value-sql.js";
+// CC3 (Wave 0): hold-aware effective stage age (days), so on-hold time is not counted toward
+// days-in-stage / stuck thresholds. Replaces raw NOW() - stage_entered_at.
+import { aliasedEffectiveStageAgeDaysSql } from "../deals/deal-filter-predicates.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -310,6 +313,7 @@ function baseOpenDealWhere(filters: OperationsReportFilters) {
   // such as stage_entered_at or deal_stage_history.changed_at.
   return sql`
     d.is_active = TRUE
+    AND COALESCE(d.is_test_data, false) = false
     AND psc.is_terminal = FALSE
     AND ${officeFilter(filters)}
     AND ${ownerFilter(filters)}
@@ -351,10 +355,10 @@ export async function getWorkflowBottlenecksReport(
       SELECT
         psc.name AS stage_name,
         COUNT(*)::int AS open_deal_count,
-        ROUND(AVG(EXTRACT(day FROM NOW() - d.stage_entered_at))::numeric, 1) AS avg_days_in_stage,
-        ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(day FROM NOW() - d.stage_entered_at))::numeric, 1) AS median_days_in_stage,
-        MAX(EXTRACT(day FROM NOW() - d.stage_entered_at))::int AS max_days_in_stage,
-        COUNT(*) FILTER (WHERE d.stage_entered_at <= NOW() - INTERVAL '30 days')::int AS stuck_deal_count
+        ROUND(AVG(${aliasedEffectiveStageAgeDaysSql("d")})::numeric, 1) AS avg_days_in_stage,
+        ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ${aliasedEffectiveStageAgeDaysSql("d")})::numeric, 1) AS median_days_in_stage,
+        MAX(${aliasedEffectiveStageAgeDaysSql("d")})::int AS max_days_in_stage,
+        COUNT(*) FILTER (WHERE ${aliasedEffectiveStageAgeDaysSql("d")} >= ${STUCK_DAYS_THRESHOLD})::int AS stuck_deal_count
       FROM deals d
       ${activeDealJoins()}
       WHERE ${baseOpenDealWhere(filters)}
@@ -370,7 +374,7 @@ export async function getWorkflowBottlenecksReport(
         COALESCE(u.display_name, 'Unassigned') AS owner_name,
         psc.name AS stage_name,
         psc.slug AS stage_slug,
-        EXTRACT(day FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
+        ${aliasedEffectiveStageAgeDaysSql("d")}::int AS days_in_stage,
         CASE WHEN d.last_activity_at IS NULL THEN NULL ELSE EXTRACT(day FROM NOW() - d.last_activity_at)::int END AS days_since_last_activity,
         ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
         d.project_number
@@ -378,7 +382,7 @@ export async function getWorkflowBottlenecksReport(
       ${activeDealJoins()}
       WHERE ${baseOpenDealWhere(filters)}
         AND ${aliasedActiveDealCountFilterSql("d")}
-        AND d.stage_entered_at <= NOW() - INTERVAL '30 days'
+        AND ${aliasedEffectiveStageAgeDaysSql("d")} >= ${STUCK_DAYS_THRESHOLD}
       ORDER BY days_in_stage DESC, value DESC
       LIMIT 15
     `));
@@ -390,7 +394,7 @@ export async function getWorkflowBottlenecksReport(
         COALESCE(u.display_name, 'Unassigned') AS owner_name,
         psc.name AS stage_name,
         psc.slug AS stage_slug,
-        EXTRACT(day FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
+        ${aliasedEffectiveStageAgeDaysSql("d")}::int AS days_in_stage,
         CASE WHEN d.last_activity_at IS NULL THEN NULL ELSE EXTRACT(day FROM NOW() - d.last_activity_at)::int END AS days_since_last_activity,
         ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
         d.project_number
@@ -398,7 +402,7 @@ export async function getWorkflowBottlenecksReport(
       ${activeDealJoins()}
       WHERE ${baseOpenDealWhere(filters)}
         AND ${aliasedActiveDealCountFilterSql("d")}
-        AND d.stage_entered_at <= NOW() - INTERVAL '15 days'
+        AND ${aliasedEffectiveStageAgeDaysSql("d")} >= 15
         AND (
           psc.slug ILIKE '%scoping%'
           OR psc.slug ILIKE '%estimating%'
@@ -534,7 +538,7 @@ export async function getProjectReadinessReport(
         COALESCE(u.display_name, 'Unassigned') AS owner_name,
         psc.name AS stage_name,
         psc.slug AS stage_slug,
-        EXTRACT(day FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
+        ${aliasedEffectiveStageAgeDaysSql("d")}::int AS days_in_stage,
         CASE WHEN d.last_activity_at IS NULL THEN NULL ELSE EXTRACT(day FROM NOW() - d.last_activity_at)::int END AS days_since_last_activity,
         ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
         d.project_number,
@@ -647,7 +651,7 @@ export async function getPortfolioLoadReport(
         COALESCE(p.state, c.state, d.property_state) AS state,
         COALESCE(c.region, d.region_classification) AS region,
         ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
-        EXTRACT(day FROM NOW() - d.stage_entered_at)::int AS days_in_stage,
+        ${aliasedEffectiveStageAgeDaysSql("d")}::int AS days_in_stage,
         COALESCE(d.last_activity_at, p.last_activity_at, c.last_activity_at, d.updated_at) AS last_activity_at
       FROM deals d
       ${activeDealJoins()}

@@ -4,6 +4,7 @@ import { ReportFilterBar, useReportFilters } from "@/components/reports/report-f
 import { useWorkflowBottlenecksReport } from "@/hooks/use-reports";
 import { sheetsFromReport } from "@/lib/excel-export";
 import {
+  ActiveWorkNote,
   DealLink,
   EmptyState,
   ErrorState,
@@ -37,6 +38,7 @@ export function WorkflowBottlenecksPage() {
       exportSheets={sheetsFromReport("Workflow Bottlenecks", data)}
     >
       <ReportFilterBar />
+      <ActiveWorkNote />
       {loading ? <LoadingState /> : null}
       {error ? <ErrorState message={error} /> : null}
       {!loading && !error && data ? (
