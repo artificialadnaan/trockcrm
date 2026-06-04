@@ -45,7 +45,7 @@ async function ccFetch<T>(path: string, params?: Record<string, string>): Promis
 
 export interface CCProject {
   id: string;
-  name: string;
+  name: string | null; // CompanyCam occasionally returns a null project name
   status: string;
   archived: boolean;
   photo_count: number;
