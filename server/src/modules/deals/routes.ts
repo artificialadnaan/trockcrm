@@ -3,6 +3,14 @@ import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
+import {
+  addDealChangeOrder,
+  deleteDealChangeOrder,
+  getDealChangeOrderById,
+  listDealChangeOrders,
+  sumDealChangeOrders,
+  updateDealChangeOrder,
+} from "./change-order-service.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { assertOptionalIsoDateQueryParam } from "../../lib/date-query.js";
@@ -1957,6 +1965,140 @@ router.patch(
     } catch (err) { next(err); }
   }
 );
+
+// ===== CRM change orders (dated value records added to Won / Bid-Board-Owned deals) =====
+// Distinct from the Procore-synced `change_orders` table; never synced out. Mutations are
+// admin-only; the amount is positive-only and the parent deal must be Won / Bid-Board-Owned
+// (both enforced in change-order-service).
+
+// GET /api/deals/:id/change-orders — list a deal's CRM change orders + their sum
+router.get("/:id/change-orders", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const changeOrders = await listDealChangeOrders(req.tenantDb!, req.params.id);
+    const total = await sumDealChangeOrders(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json({ changeOrders, total });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/change-orders — add a CRM change order (admin only)
+router.post("/:id/change-orders", requireRole("admin"), async (req, res, next) => {
+  try {
+    const dealId = req.params.id as string;
+    await assertDealRouteAccess(req, dealId);
+    const changeOrder = await addDealChangeOrder(req.tenantDb!, {
+      dealId,
+      signedDate: req.body?.signedDate,
+      amount: req.body?.amount,
+      description: req.body?.description,
+      createdBy: req.user!.id,
+    });
+    await writeAuditLog(req.tenantDb!, {
+      tableName: "deal_change_orders",
+      recordId: changeOrder.id,
+      action: "insert",
+      changedBy: req.user!.id,
+      actorName: req.user!.displayName ?? req.user!.email ?? req.user!.id,
+      actorRole: req.user!.role,
+      entityType: "deal_change_order",
+      changes: {
+        amount: { from: null, to: changeOrder.amount },
+        signedDate: { from: null, to: changeOrder.signedDate },
+        description: { from: null, to: changeOrder.description },
+      },
+      fullRow: { dealId },
+      ipAddress: req.ip ?? null,
+      userAgent: buildRouteAuditContext(req).userAgent,
+    });
+    await req.commitTransaction!();
+    res.status(201).json({ changeOrder });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/deals/:id/change-orders/:changeOrderId — edit a CRM change order (admin only)
+router.patch("/:id/change-orders/:changeOrderId", requireRole("admin"), async (req, res, next) => {
+  try {
+    const dealId = req.params.id as string;
+    const changeOrderId = req.params.changeOrderId as string;
+    await assertDealRouteAccess(req, dealId);
+    const before = await getDealChangeOrderById(req.tenantDb!, changeOrderId, dealId);
+    const changeOrder = await updateDealChangeOrder(req.tenantDb!, {
+      id: changeOrderId,
+      dealId,
+      signedDate: req.body?.signedDate,
+      amount: req.body?.amount,
+      description: req.body?.description,
+      updatedBy: req.user!.id,
+    });
+    // Audit only the fields the request actually sent, with their true before -> after values.
+    const changes: Record<string, { from: unknown; to: unknown }> = {};
+    if (req.body?.amount !== undefined) {
+      changes.amount = { from: before?.amount ?? null, to: changeOrder.amount };
+    }
+    if (req.body?.signedDate !== undefined) {
+      changes.signedDate = { from: before?.signedDate ?? null, to: changeOrder.signedDate };
+    }
+    if (req.body?.description !== undefined) {
+      changes.description = { from: before?.description ?? null, to: changeOrder.description };
+    }
+    await writeAuditLog(req.tenantDb!, {
+      tableName: "deal_change_orders",
+      recordId: changeOrder.id,
+      action: "update",
+      changedBy: req.user!.id,
+      actorName: req.user!.displayName ?? req.user!.email ?? req.user!.id,
+      actorRole: req.user!.role,
+      entityType: "deal_change_order",
+      changes,
+      fullRow: { dealId },
+      ipAddress: req.ip ?? null,
+      userAgent: buildRouteAuditContext(req).userAgent,
+    });
+    await req.commitTransaction!();
+    res.json({ changeOrder });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/deals/:id/change-orders/:changeOrderId — remove a CRM change order (admin only)
+router.delete("/:id/change-orders/:changeOrderId", requireRole("admin"), async (req, res, next) => {
+  try {
+    const dealId = req.params.id as string;
+    const changeOrderId = req.params.changeOrderId as string;
+    await assertDealRouteAccess(req, dealId);
+    const removed = await deleteDealChangeOrder(req.tenantDb!, {
+      id: changeOrderId,
+      dealId,
+    });
+    await writeAuditLog(req.tenantDb!, {
+      tableName: "deal_change_orders",
+      recordId: changeOrderId,
+      action: "delete",
+      changedBy: req.user!.id,
+      actorName: req.user!.displayName ?? req.user!.email ?? req.user!.id,
+      actorRole: req.user!.role,
+      entityType: "deal_change_order",
+      changes: {
+        amount: { from: removed.amount, to: null },
+        signedDate: { from: removed.signedDate, to: null },
+        description: { from: removed.description, to: null },
+      },
+      fullRow: { dealId },
+      ipAddress: req.ip ?? null,
+      userAgent: buildRouteAuditContext(req).userAgent,
+    });
+    await req.commitTransaction!();
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // POST /api/deals/:id/proposal-draft - create a draft proposal handoff
 router.post("/:id/proposal-draft", async (req, res, next) => {

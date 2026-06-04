@@ -68,6 +68,7 @@ export {
   forecastMilestoneCaptureSourceEnum,
 } from "./tenant/deal-forecast-milestones.js";
 export { changeOrders, changeOrderStatusEnum } from "./tenant/change-orders.js";
+export { dealChangeOrders } from "./tenant/deal-change-orders.js";
 export { dealPaymentEvents } from "./tenant/deal-payment-events.js";
 export { dealSignedCommissions } from "./tenant/deal-signed-commissions.js";
 export { bidBoardSyncRuns } from "./tenant/bid-board-sync-runs.js";

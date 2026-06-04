@@ -285,6 +285,22 @@ export interface DealDetail extends Deal {
     effectiveOwnerUserId: string | null;
     pendingDepartment: DealDepartment | null;
   };
+  // CRM-native change orders (dedicated deal_change_orders table) + their summed amount. Distinct
+  // from `changeOrders` above (the Procore-synced mirror). Their sum adds to Current Contract Value.
+  dealChangeOrders: DealChangeOrder[];
+  dealChangeOrderTotal: string;
+}
+
+export interface DealChangeOrder {
+  id: string;
+  dealId: string;
+  signedDate: string;
+  amount: string;
+  description: string | null;
+  createdBy: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DealFilters {
@@ -640,6 +656,36 @@ export type UpdateDealPayload = Partial<Deal> & {
 
 export async function updateDeal(dealId: string, input: UpdateDealPayload) {
   return api<{ deal: Deal }>(`/deals/${dealId}`, { method: "PATCH", json: input });
+}
+
+export interface ChangeOrderInput {
+  signedDate: string;
+  amount: string;
+  description?: string | null;
+}
+
+export async function addDealChangeOrder(dealId: string, input: ChangeOrderInput) {
+  return api<{ changeOrder: DealChangeOrder }>(`/deals/${dealId}/change-orders`, {
+    method: "POST",
+    json: input,
+  });
+}
+
+export async function updateDealChangeOrder(
+  dealId: string,
+  changeOrderId: string,
+  input: Partial<ChangeOrderInput>
+) {
+  return api<{ changeOrder: DealChangeOrder }>(`/deals/${dealId}/change-orders/${changeOrderId}`, {
+    method: "PATCH",
+    json: input,
+  });
+}
+
+export async function deleteDealChangeOrder(dealId: string, changeOrderId: string) {
+  return api<{ success: boolean }>(`/deals/${dealId}/change-orders/${changeOrderId}`, {
+    method: "DELETE",
+  });
 }
 
 export async function changeDealStage(

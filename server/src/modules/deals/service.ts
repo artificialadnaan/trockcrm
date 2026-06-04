@@ -51,6 +51,7 @@ import {
 import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
+import { listDealChangeOrders, sumDealChangeOrders } from "./change-order-service.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
@@ -1823,6 +1824,11 @@ export async function getDealDetail(
     .where(eq(changeOrders.dealId, dealId))
     .orderBy(asc(changeOrders.coNumber));
 
+  // CRM-native change orders (the dedicated deal_change_orders table) — distinct from the
+  // Procore-synced `changeOrders` above. Their sum adds to the displayed Current Contract Value.
+  const dealChangeOrderRows = await listDealChangeOrders(tenantDb, dealId);
+  const dealChangeOrderTotal = await sumDealChangeOrders(tenantDb, dealId);
+
   return {
     ...dealWithMetadata,
     atRisk: attachAtRiskResult(dealWithMetadata, atRiskViewerRole, currentStage?.slug ?? null).atRisk,
@@ -1831,6 +1837,8 @@ export async function getDealDetail(
     stageHistory,
     approvals,
     changeOrders: cos,
+    dealChangeOrders: dealChangeOrderRows,
+    dealChangeOrderTotal,
   };
 }
 
