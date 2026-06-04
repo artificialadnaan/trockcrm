@@ -36,6 +36,14 @@ const SCHEMA = "office_test";
 const DEAL = "00000000-0000-0000-0000-0000000000d1";
 const REQUESTER = "00000000-0000-0000-0000-000000000099";
 const REVIEWER = "00000000-0000-0000-0000-0000000000a1";
+// The deal's pre-callback stage (RFP) and the target stage the 'created' callback advances it to (Estimating).
+const STAGE_RFP = "00000000-0000-0000-0000-0000000000f1";
+const STAGE_ESTIMATING = "00000000-0000-0000-0000-0000000000f2";
+// A createdAt guaranteed to be >= any reviewed_at set by overrideApprove() — for created tests that aren't about
+// freshness (they just need the callback to pass the freshness guard).
+const FRESH = "2999-01-01T00:00:00.000Z";
+// A fixed stage_entered_at for the stage-transition helper (the value is irrelevant to the freshness guard).
+const STAGE_ENTERED_AT = "2026-06-04T00:00:00.000Z";
 
 let pg: PGlite | null = null;
 
@@ -75,6 +83,11 @@ async function setup(): Promise<PGlite> {
       procore_company_id text,
       is_bid_board_owned boolean DEFAULT false,
       bid_board_linked_at timestamptz,
+      stage_id uuid,
+      stage_entered_at timestamptz,
+      on_hold_started_at timestamptz,
+      on_hold_accumulated_seconds bigint,
+      on_hold_accumulated_seconds_at_stage_entry bigint,
       updated_at timestamptz
     );
   `);
@@ -90,9 +103,9 @@ async function setup(): Promise<PGlite> {
 async function insertDeclinedDeal(db: PGlite, requestId: number | null = 55): Promise<void> {
   await db.query(
     `INSERT INTO ${SCHEMA}.deals
-       (id, name, deal_number, rfp_approval_status, rfp_approval_request_id, rfp_declined_reason, rfp_approval_requested_by)
-     VALUES ($1, 'jasonn ranches', 'TR-1001', 'declined', $2, 'Margins too thin', $3)`,
-    [DEAL, requestId, REQUESTER],
+       (id, name, deal_number, rfp_approval_status, rfp_approval_request_id, rfp_declined_reason, rfp_approval_requested_by, stage_id)
+     VALUES ($1, 'jasonn ranches', 'TR-1001', 'declined', $2, 'Margins too thin', $3, $4)`,
+    [DEAL, requestId, REQUESTER, STAGE_RFP],
   );
 }
 
@@ -136,7 +149,7 @@ async function createdCallback(
             updated_at = now()
       WHERE id = $3
         AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
-        AND (rfp_override_reviewed_at IS NULL OR COALESCE($4::timestamptz, NOW()) >= rfp_override_reviewed_at)
+        AND (rfp_override_reviewed_at IS NULL OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_override_reviewed_at))
         AND (
           procore_bid_id IS DISTINCT FROM $1::bigint OR
           procore_company_id IS DISTINCT FROM $2 OR
@@ -149,6 +162,44 @@ async function createdCallback(
     [projectId, companyId, id, createdAt],
   );
   return res.affectedRows ?? 0;
+}
+
+/**
+ * bid-board-created 'created' stage-transition UPDATE (advance to estimating). It carries the SAME terminal-denial +
+ * override-flow freshness guard as the linkage UPDATE, but runs as a SEPARATE statement INDEPENDENTLY of whether the
+ * linkage row matched — so its $8 freshness guard is load-bearing on its own and must reject a stale / timestamp-less
+ * retry callback (mirrors internal-rfp/routes.ts stage UPDATE).
+ */
+async function createdStageTransition(
+  db: PGlite,
+  id: string,
+  toStageId: string,
+  fromStageId: string,
+  createdAt: string | null = null,
+): Promise<number> {
+  const res = await db.query(
+    `UPDATE ${SCHEMA}.deals
+        SET stage_id = $1::uuid,
+            stage_entered_at = $2::timestamptz,
+            on_hold_started_at = $3::timestamptz,
+            on_hold_accumulated_seconds = $4::bigint,
+            on_hold_accumulated_seconds_at_stage_entry = $5::bigint,
+            updated_at = now()
+      WHERE id = $6
+        AND stage_id = $7::uuid
+        AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+        AND (rfp_override_reviewed_at IS NULL OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_override_reviewed_at))`,
+    [toStageId, STAGE_ENTERED_AT, null, 0, 0, id, fromStageId, createdAt],
+  );
+  return res.affectedRows ?? 0;
+}
+
+async function stageOf(db: PGlite, id: string): Promise<string | null> {
+  const res = await db.query<{ stage_id: string | null }>(
+    `SELECT stage_id FROM ${SCHEMA}.deals WHERE id = $1`,
+    [id],
+  );
+  return res.rows[0]?.stage_id ?? null;
 }
 
 /** bid-board-created 'failed' UPDATE (declined-only, value-distinct, reconfirm-safe, freshness-guarded). */
@@ -229,14 +280,14 @@ describe("RFP override-approval flow vs migration 0148 decline trigger (real SQL
     await insertDeclinedDeal(pg);
     await overrideApprove(pg, DEAL); // state='approving'
 
-    expect(await createdCallback(pg, DEAL, "654321", "9001")).toBe(1);
+    expect(await createdCallback(pg, DEAL, "654321", "9001", FRESH)).toBe(1);
     const d = await dealState(pg, DEAL);
     expect(d.status).toBe("approved");
     expect(d.state).toBeNull();
     expect(await emailJobCount(pg)).toBe(0);
 
     // at-least-once re-delivery of the same 'created' callback -> no rows changed (no double-link/advance)
-    expect(await createdCallback(pg, DEAL, "654321", "9001")).toBe(0);
+    expect(await createdCallback(pg, DEAL, "654321", "9001", FRESH)).toBe(0);
     expect(await emailJobCount(pg)).toBe(0);
   });
 
@@ -257,7 +308,7 @@ describe("RFP override-approval flow vs migration 0148 decline trigger (real SQL
 
     // a reviewer retries -> approve again, then 'created' lands -> approved
     expect(await overrideApprove(pg, DEAL)).toBe(1); // failed -> approving (retry allowed)
-    expect(await createdCallback(pg, DEAL, "654321", "9001")).toBe(1);
+    expect(await createdCallback(pg, DEAL, "654321", "9001", FRESH)).toBe(1);
     expect((await dealState(pg, DEAL)).status).toBe("approved");
 
     // a STALE 'failed' arriving after approval is a no-op (declined-only guard) — never reverts an approved deal
@@ -309,6 +360,56 @@ describe("RFP override-approval flow vs migration 0148 decline trigger (real SQL
     expect((await dealState(pg, DEAL)).status).toBe("approved");
   });
 
+  it("a 'created' with a missing/unparseable createdAt during a retry-in-flight is NOT treated as fresh", async () => {
+    pg = await setup();
+    await insertDeclinedDeal(pg, 55);
+    // a retry is in flight (override-approve recorded a reviewed_at)
+    await pg.query(
+      `UPDATE ${SCHEMA}.deals SET rfp_override_state='approving', rfp_override_decision='override_approved', rfp_override_reviewed_at='2026-06-02T00:00:00Z' WHERE id=$1`,
+      [DEAL],
+    );
+    // a stale 'created' that carries NO parseable timestamp must NOT substitute NOW() and link the old project
+    expect(await createdCallback(pg, DEAL, "111111", "9001", null)).toBe(0);
+    const d = await dealState(pg, DEAL);
+    expect(d.status).toBe("declined"); // not linked/approved by the timestamp-less stale callback
+    expect(d.state).toBe("approving"); // the fresh in-flight retry state is preserved
+  });
+
+  it("the SEPARATE stage-transition UPDATE carries the same freshness guard: a stale / timestamp-less retry callback does NOT advance the stage", async () => {
+    pg = await setup();
+    await insertDeclinedDeal(pg, 55); // stage_id = STAGE_RFP
+    // a retry (attempt 2) is in flight: override-approve recorded a reviewed_at
+    await pg.query(
+      `UPDATE ${SCHEMA}.deals SET rfp_override_state='approving', rfp_override_decision='override_approved', rfp_override_reviewed_at='2026-06-02T00:00:00Z' WHERE id=$1`,
+      [DEAL],
+    );
+
+    // a stale 'created' from attempt 1 (older createdAt) must NOT advance the stage out from under the fresh retry
+    expect(await createdStageTransition(pg, DEAL, STAGE_ESTIMATING, STAGE_RFP, "2026-06-01T00:00:00Z")).toBe(0);
+    expect(await stageOf(pg, DEAL)).toBe(STAGE_RFP);
+
+    // a 'created' with NO parseable createdAt must NOT substitute NOW() and advance the stage during the retry
+    // (this is the Codex P2 — the stage UPDATE must require a real $8 just like the linkage UPDATE)
+    expect(await createdStageTransition(pg, DEAL, STAGE_ESTIMATING, STAGE_RFP, null)).toBe(0);
+    expect(await stageOf(pg, DEAL)).toBe(STAGE_RFP);
+
+    // the CURRENT attempt's 'created' (fresh createdAt >= reviewed_at) DOES advance to estimating
+    expect(await createdStageTransition(pg, DEAL, STAGE_ESTIMATING, STAGE_RFP, "2026-06-02T00:00:10Z")).toBe(1);
+    expect(await stageOf(pg, DEAL)).toBe(STAGE_ESTIMATING);
+  });
+
+  it("the stage-transition UPDATE never advances a deal the reviewers terminally re-confirmed", async () => {
+    pg = await setup();
+    await insertDeclinedDeal(pg, 55);
+    await overrideApprove(pg, DEAL);
+    await failedCallback(pg, DEAL, 55, "failed once");
+    expect(await reconfirm(pg, DEAL)).toBe(1); // terminal: decision='denial_reconfirmed'
+
+    // a (delayed) 'created' stage move for the same request id must NOT advance the re-confirmed denial
+    expect(await createdStageTransition(pg, DEAL, STAGE_ESTIMATING, STAGE_RFP, FRESH)).toBe(0);
+    expect(await stageOf(pg, DEAL)).toBe(STAGE_RFP);
+  });
+
   it("a 'created' callback does NOT approve a deal the reviewers have terminally re-confirmed", async () => {
     pg = await setup();
     await insertDeclinedDeal(pg, 55);
@@ -317,7 +418,7 @@ describe("RFP override-approval flow vs migration 0148 decline trigger (real SQL
     expect(await reconfirm(pg, DEAL)).toBe(1); // terminal: decision='denial_reconfirmed'
 
     // a (delayed) 'created' for the same request id must NOT override the re-confirmed denial
-    expect(await createdCallback(pg, DEAL, "654321", "9001")).toBe(0);
+    expect(await createdCallback(pg, DEAL, "654321", "9001", FRESH)).toBe(0);
     const d = await dealState(pg, DEAL);
     expect(d.status).toBe("declined");
     expect(d.decision).toBe("denial_reconfirmed");

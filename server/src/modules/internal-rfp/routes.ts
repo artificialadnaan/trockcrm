@@ -802,8 +802,11 @@ internalRfpRoutes.post(
             WHERE id = $3
               -- a re-confirmed denial is terminal; never let a (delayed) success callback override it
               AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
-              -- override-flow freshness: a stale 'created' from a prior attempt can't link/approve a fresh retry
-              AND (rfp_override_reviewed_at IS NULL OR COALESCE($4::timestamptz, NOW()) >= rfp_override_reviewed_at)
+              -- override-flow freshness: a stale 'created' from a prior attempt can't link/approve a fresh retry.
+              -- Require a REAL createdAt for the override flow (no NOW() substitution): a created with no parseable
+              -- timestamp is treated as not-fresh and ignored, never as current. The original (non-override) flow
+              -- has rfp_override_reviewed_at IS NULL and is unaffected.
+              AND (rfp_override_reviewed_at IS NULL OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_override_reviewed_at))
               AND (
                 procore_bid_id IS DISTINCT FROM $1::bigint OR
                 procore_company_id IS DISTINCT FROM $2 OR
@@ -864,7 +867,7 @@ internalRfpRoutes.post(
                 -- same guards as the linkage update: a re-confirmed denial (or a stale prior-attempt 'created')
                 -- must not advance the stage
                 AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
-                AND (rfp_override_reviewed_at IS NULL OR COALESCE($8::timestamptz, NOW()) >= rfp_override_reviewed_at)
+                AND (rfp_override_reviewed_at IS NULL OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_override_reviewed_at))
               RETURNING id`,
             [
               targetStage.id,

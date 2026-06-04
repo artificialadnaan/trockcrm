@@ -1,9 +1,14 @@
 // @vitest-environment jsdom
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import ReactDOMServer from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let reviewState: any;
 let authUser: any;
+let currentDealId = "deal-1";
 
 vi.mock("@/hooks/use-rfp-review", () => ({
   useRfpReview: () => ({ review: reviewState, loading: false, error: null, refetch: vi.fn(), applyOptimistic: vi.fn() }),
@@ -12,7 +17,7 @@ vi.mock("@/hooks/use-rfp-review", () => ({
 }));
 vi.mock("@/lib/auth", () => ({ useAuth: () => ({ user: authUser }) }));
 vi.mock("react-router-dom", () => ({
-  useParams: () => ({ dealId: "deal-1" }),
+  useParams: () => ({ dealId: currentDealId }),
   useSearchParams: () => [new URLSearchParams("officeId=o1"), vi.fn()],
   Link: ({ children }: any) => children,
 }));
@@ -104,5 +109,52 @@ describe("RfpReviewPage states", () => {
     const html = render();
     expect(html).toContain("re-confirmed");
     expect(html).not.toContain("Approve override (create Bid Board project)");
+  });
+});
+
+describe("RfpReviewPage — per-deal Procore-check confirmation reset", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    currentDealId = "deal-1";
+  });
+
+  function mount() {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(<RfpReviewPage />);
+    });
+  }
+  const reattemptBtn = () =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Confirmed no project")) as
+      | HTMLButtonElement
+      | undefined;
+
+  it("clears the confirmation when navigating to a different failed deal (no carried-over one-click re-attempt)", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ overrideState: "failed", overrideError: "x", actionable: true });
+    currentDealId = "deal-1";
+    mount();
+
+    // unverified → re-attempt disabled
+    expect(reattemptBtn()?.disabled).toBe(true);
+
+    // tick the Procore-check confirmation → enabled
+    act(() => {
+      (container.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+    });
+    expect(reattemptBtn()?.disabled).toBe(false);
+
+    // navigate to a DIFFERENT failed deal → the confirmation must reset → disabled again
+    currentDealId = "deal-2";
+    act(() => {
+      root.render(<RfpReviewPage />);
+    });
+    expect(reattemptBtn()?.disabled).toBe(true);
   });
 });

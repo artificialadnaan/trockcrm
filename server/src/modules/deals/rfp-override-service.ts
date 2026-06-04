@@ -17,7 +17,9 @@ export interface RfpOverrideActor {
 }
 
 export type RfpOverrideApprovalResult =
-  | { ok: true; status: "approving"; requestId: number }
+  // `unconfirmed` = the POST timed out (the request likely reached SyncHub but no 202 was seen); the deal is kept
+  // in 'approving' so a later callback can still resolve it (see the AbortError branch).
+  | { ok: true; status: "approving"; requestId: number; unconfirmed?: boolean }
   | { ok: false; reason: "not_actionable" }
   | { ok: false; reason: "missing_request_id" }
   | { ok: false; reason: "synchub_rejected"; syncHubStatus: number; message: string }
@@ -184,6 +186,14 @@ export async function requestOverrideApproval(
       signal: controller.signal,
     });
   } catch (err) {
+    // The abort timeout fired: the request was already sent, so SyncHub may have received it and will emit a
+    // callback. Rolling back here would drop rfp_override_reviewed_at (breaking the failed-callback freshness
+    // guard) and re-expose a one-click approve that risks a duplicate Procore project. Keep the deal 'approving'
+    // (unconfirmed) so a later callback resolves it; the page keeps polling. A definitive connection error (the
+    // request never left) stays a clean rollback so the reviewer can retry safely.
+    if (err instanceof Error && err.name === "AbortError") {
+      return { ok: true, status: "approving", requestId, unconfirmed: true };
+    }
     return {
       ok: false,
       reason: "synchub_unavailable",

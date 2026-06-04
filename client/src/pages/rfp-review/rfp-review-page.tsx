@@ -76,6 +76,12 @@ export function RfpReviewPage() {
   // blind retry risks a duplicate. The reviewer must confirm they checked Procore before re-attempting.
   const [confirmedNoProject, setConfirmedNoProject] = useState(false);
 
+  // Reset the per-deal Procore-check confirmation whenever the review target changes, so a confirmation made for
+  // one failed deal never carries over to a different deal (each must be verified in Procore independently).
+  useEffect(() => {
+    setConfirmedNoProject(false);
+  }, [dealId, officeId]);
+
   // While SyncHub is creating the Bid Board project, poll so the page flips to approved/failed when the
   // bid-board-created callback lands (no manual refresh needed).
   useEffect(() => {
@@ -142,8 +148,12 @@ export function RfpReviewPage() {
     if (!dealId) return;
     setSubmitting("approve");
     try {
-      await approveRfpOverride(dealId, { note, officeId });
-      toast.success("Override approved — SyncHub is creating the Bid Board project.");
+      const result = await approveRfpOverride(dealId, { note, officeId });
+      toast.success(
+        result.unconfirmed
+          ? "Override submitted — awaiting confirmation from SyncHub. Watch this page for the result."
+          : "Override approved — SyncHub is creating the Bid Board project."
+      );
       setNote("");
       setConfirmedNoProject(false); // require re-verification if this attempt also fails
       // Optimistically enter 'approving' so the progress panel + 5s poll start immediately — even if the
