@@ -21,6 +21,9 @@ export interface DealForCompanyCamPlan {
   dealNumber: string | null;
   projectNumber: string | null;
   companycamProjectId: string | null;
+  // Optional so the import script (which does not select on_hold) keeps compiling; the inventory
+  // run populates it so the plan can report which matches land on on-hold deals.
+  onHold?: boolean | null;
 }
 
 export interface CompanyCamImportPlanRow {
@@ -32,6 +35,8 @@ export interface CompanyCamImportPlanRow {
   matchedDealNumber: string | null;
   confidence: number;
   matchReason: string;
+  // on_hold status of the matched deal (null when unmatched, or when the caller did not load it).
+  matchedDealOnHold?: boolean | null;
 }
 
 export function normalizeCompanyCamProjectName(value: string): string {
@@ -59,6 +64,74 @@ function similarity(a: string, b: string): number {
   return 1 - rows[a.length][b.length] / Math.max(a.length, b.length);
 }
 
+// ─── Seed disposition (read-only classification of the agreed seed policy) ─────
+// Only the two RELIABLE tiers auto-seed, and never onto an on-hold deal:
+//   auto          = existing CompanyCam link OR project-number-in-name, AND deal not on hold
+//   manual_review = fuzzy (>=0.9) name guess, unmatched, OR matched to an on-hold deal
+// The seed itself stays behind the gate; this only classifies the plan so the report can show
+// how many photos would auto-seed vs. need human linking.
+export type CompanyCamPlanDisposition = "auto" | "manual_review";
+
+const AUTO_SEED_MATCH_REASONS = new Set(["existing_companycam_link", "project_number_in_name"]);
+const PLAN_TIERS = ["existing_companycam_link", "project_number_in_name", "fuzzy_project_name", "unmatched"] as const;
+type PlanTier = (typeof PLAN_TIERS)[number];
+
+export function companyCamPlanDisposition(row: CompanyCamImportPlanRow): CompanyCamPlanDisposition {
+  if (AUTO_SEED_MATCH_REASONS.has(row.matchReason) && row.matchedDealOnHold !== true) return "auto";
+  return "manual_review";
+}
+
+interface PlanBucket {
+  projects: number;
+  photos: number;
+}
+const emptyBucket = (): PlanBucket => ({ projects: 0, photos: 0 });
+function addToBucket(bucket: PlanBucket, photoCount: number): void {
+  bucket.projects += 1;
+  bucket.photos += photoCount;
+}
+
+export interface CompanyCamPlanSummary {
+  totalProjects: number;
+  totalPhotos: number;
+  matchedProjects: number;
+  unmatchedProjects: number;
+  byTier: Record<PlanTier, PlanBucket>;
+  onHoldExcluded: PlanBucket; // matched to an on-hold deal -> skipped by the seed, routed to manual review
+  autoSeed: PlanBucket; // reliable tier (link/number) + not on hold -> safe to auto-seed
+  manualReview: PlanBucket; // fuzzy + unmatched + on-hold matches -> human linking
+}
+
+export function summarizeCompanyCamPlan(rows: CompanyCamImportPlanRow[]): CompanyCamPlanSummary {
+  const summary: CompanyCamPlanSummary = {
+    totalProjects: rows.length,
+    totalPhotos: 0,
+    matchedProjects: 0,
+    unmatchedProjects: 0,
+    byTier: {
+      existing_companycam_link: emptyBucket(),
+      project_number_in_name: emptyBucket(),
+      fuzzy_project_name: emptyBucket(),
+      unmatched: emptyBucket(),
+    },
+    onHoldExcluded: emptyBucket(),
+    autoSeed: emptyBucket(),
+    manualReview: emptyBucket(),
+  };
+  for (const row of rows) {
+    summary.totalPhotos += row.photoCount;
+    if (row.matchedDealId) summary.matchedProjects += 1;
+    else summary.unmatchedProjects += 1;
+    const tier: PlanTier = (PLAN_TIERS as readonly string[]).includes(row.matchReason)
+      ? (row.matchReason as PlanTier)
+      : "unmatched";
+    addToBucket(summary.byTier[tier], row.photoCount);
+    if (row.matchedDealOnHold === true) addToBucket(summary.onHoldExcluded, row.photoCount);
+    addToBucket(companyCamPlanDisposition(row) === "auto" ? summary.autoSeed : summary.manualReview, row.photoCount);
+  }
+  return summary;
+}
+
 export function buildCompanyCamImportPlan(projects: CompanyCamProjectForPlan[], deals: DealForCompanyCamPlan[]) {
   const rows: CompanyCamImportPlanRow[] = projects.map((project) => {
     const embeddedProjectNumber = project.name.match(PROJECT_NUMBER_REGEX)?.[0]?.toLowerCase() ?? null;
@@ -84,17 +157,10 @@ export function buildCompanyCamImportPlan(projects: CompanyCamProjectForPlan[], 
       matchedDealNumber: match?.deal.dealNumber ?? null,
       confidence: match?.confidence ?? 0,
       matchReason: match?.reason ?? "unmatched",
+      matchedDealOnHold: match?.deal.onHold ?? null,
     };
   });
-  return {
-    rows,
-    totals: {
-      totalProjects: rows.length,
-      matchedProjects: rows.filter((row) => row.matchedDealId).length,
-      unmatchedProjects: rows.filter((row) => !row.matchedDealId).length,
-      totalPhotos: rows.reduce((sum, row) => sum + row.photoCount, 0),
-    },
-  };
+  return { rows, totals: summarizeCompanyCamPlan(rows) };
 }
 
 function quoteIdent(value: string): string {
@@ -111,10 +177,11 @@ function getConnectionString() {
   return selected;
 }
 
-async function loadDeals(client: pg.Client, tenant: string): Promise<DealForCompanyCamPlan[]> {
+export async function loadDeals(client: pg.Client, tenant: string): Promise<DealForCompanyCamPlan[]> {
   const schema = quoteIdent(tenant);
   const { rows } = await client.query(`
-    SELECT id::text, name, deal_number, project_number, companycam_project_id
+    SELECT id::text, name, deal_number, project_number, companycam_project_id,
+           COALESCE(on_hold, false) AS on_hold
     FROM ${schema}.deals
     WHERE is_active = true
   `);
@@ -124,6 +191,7 @@ async function loadDeals(client: pg.Client, tenant: string): Promise<DealForComp
     dealNumber: row.deal_number,
     projectNumber: row.project_number,
     companycamProjectId: row.companycam_project_id,
+    onHold: row.on_hold,
   }));
 }
 
@@ -134,7 +202,7 @@ function csvEscape(value: unknown) {
 export function writeCompanyCamPlanCsv(rows: CompanyCamImportPlanRow[], outputPath: string) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   const csvRows = [
-    ["companycam_project_id", "project_name", "photo_count", "matched_deal_id", "matched_deal_number", "matched_deal_name", "confidence", "match_reason"],
+    ["companycam_project_id", "project_name", "photo_count", "matched_deal_id", "matched_deal_number", "matched_deal_name", "confidence", "match_reason", "matched_deal_on_hold", "disposition"],
     ...rows.map((row) => [
       row.companyCamProjectId,
       row.companyCamProjectName,
@@ -144,6 +212,8 @@ export function writeCompanyCamPlanCsv(rows: CompanyCamImportPlanRow[], outputPa
       row.matchedDealName ?? "",
       String(row.confidence),
       row.matchReason,
+      row.matchedDealOnHold == null ? "" : String(row.matchedDealOnHold),
+      companyCamPlanDisposition(row),
     ]),
   ];
   fs.writeFileSync(outputPath, csvRows.map((row) => row.map(csvEscape).join(",")).join("\n"));
