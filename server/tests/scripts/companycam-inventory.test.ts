@@ -101,4 +101,13 @@ describe("companycam-inventory", () => {
     expect(byId.get("cc-null")).toMatchObject({ companyCamProjectName: "", matchedDealId: null, matchReason: "unmatched" });
     expect(byId.get("cc-fuzzy")?.matchedDealId).toBe("deal-fuzzy"); // a real-named project still matches alongside the null one
   });
+
+  it("does not fuzzy-match a null/empty-named project to a deal whose name normalizes to empty", () => {
+    const plan = buildCompanyCamImportPlan(
+      [{ id: "cc-null", name: null, photoCount: 9 }],
+      // "Project" normalizes to "" (the word is stripped) — must NOT tie at confidence 1 with a nameless project.
+      [{ id: "deal-empty", name: "Project", dealNumber: "D-0", projectNumber: null, companycamProjectId: null, onHold: false }],
+    );
+    expect(plan.rows[0]).toMatchObject({ matchedDealId: null, matchReason: "unmatched", confidence: 0 });
+  });
 });

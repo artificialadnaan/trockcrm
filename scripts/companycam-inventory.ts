@@ -51,8 +51,8 @@ export function normalizeCompanyCamProjectName(value: string | null | undefined)
 }
 
 function similarity(a: string, b: string): number {
+  if (!a || !b) return 0; // empty (e.g. a null/blank or "Project"/"Photos"-only name) is never a match
   if (a === b) return 1;
-  if (!a || !b) return 0;
   const rows = Array.from({ length: a.length + 1 }, (_, i) => [i]);
   for (let j = 1; j <= b.length; j++) rows[0][j] = j;
   for (let i = 1; i <= a.length; i++) {
@@ -142,9 +142,13 @@ export function buildCompanyCamImportPlan(projects: CompanyCamProjectForPlan[], 
       ? deals.find((deal) => deal.projectNumber?.toLowerCase() === embeddedProjectNumber)
       : null;
     const normalizedProject = normalizeCompanyCamProjectName(projectName);
-    const fuzzy = deals
-      .map((deal) => ({ deal, score: similarity(normalizedProject, normalizeCompanyCamProjectName(deal.name)) }))
-      .sort((a, b) => b.score - a.score)[0];
+    // A null/blank or strippable-only ("Project"/"Photos") name normalizes to "" — never fuzzy-match it
+    // (otherwise it would tie at confidence 1 with any deal whose name also normalizes to "").
+    const fuzzy = normalizedProject
+      ? deals
+          .map((deal) => ({ deal, score: similarity(normalizedProject, normalizeCompanyCamProjectName(deal.name)) }))
+          .sort((a, b) => b.score - a.score)[0]
+      : null;
     const match =
       linked ? { deal: linked, confidence: 1, reason: "existing_companycam_link" }
         : projectNumberMatch ? { deal: projectNumberMatch, confidence: 1, reason: "project_number_in_name" }
