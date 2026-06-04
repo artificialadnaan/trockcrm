@@ -138,6 +138,20 @@ describe("close-date v2 re-import (PGlite)", () => {
     expect(await dateOf("office_dallas", DEALS.futureDiff)).toBe(SHEET); // replaced
   });
 
+  it("rejects a sheet value in the PAST (un-usable forecast) as INVALID_DATE, writing nothing", async () => {
+    const report = await runReimport({
+      client,
+      rows: [{ tenantSchema: "office_dallas", dealId: DEALS.stale, rawDate: "2026-02-01" }], // past relative to TODAY
+      validSchemas: VALID,
+      mode: "commit",
+      overwriteExisting: false,
+      today: TODAY,
+    });
+    expect(report.counts.INVALID_DATE).toBe(1);
+    expect(report.counts.REFRESHED).toBe(0);
+    expect(await dateOf("office_dallas", DEALS.stale)).toBe("2026-01-01"); // unchanged — not falsely "refreshed"
+  });
+
   it("never throws on bad rows — the whole run completes and reports them", async () => {
     const report = await runReimport({
       client,

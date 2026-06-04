@@ -196,6 +196,9 @@ export function classifyImportRow(input: {
   if (parsed.status === "blank") return { outcome: "SKIPPED_BLANK", writeValue: null };
   // A filled-but-bad value is surfaced so the rep can fix it.
   if (parsed.status === "invalid") return { outcome: "INVALID_DATE", writeValue: null };
+  // A value before today is not a usable forecast — writing it would leave the deal
+  // un-maintained while the audit claims it was fixed. Reject it (rep must re-enter).
+  if (parsed.value < today) return { outcome: "INVALID_DATE", writeValue: null };
   // Locked key columns should be intact; a bad key means tampering/corruption.
   if (!keyValid) return { outcome: "INVALID_KEY", writeValue: null };
   if (!found) return { outcome: "UNMATCHED", writeValue: null };
@@ -327,7 +330,7 @@ export function buildMissingCloseDateSql(schema: string, today?: string): string
       COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue)::text AS "estimatedValue",
       to_char(d.expected_close_date, 'YYYY-MM-DD') AS "currentCloseDate",
       CASE WHEN d.expected_close_date IS NULL THEN 'missing' ELSE 'past_due' END AS "reason",
-      d.is_read_only_mirror                   AS "isBidBoardOwned",
+      (COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false)) AS "isBidBoardOwned",
       CASE WHEN u.id IS NULL THEN NULL ELSE d.assigned_rep_id::text END AS "assignedRepId",
       COALESCE(u.display_name, 'Unassigned')  AS "repName"
     FROM ${s}.deals d
@@ -502,7 +505,9 @@ async function resolveDeferredRow(
     overwriteExisting,
     today,
   });
-  return { ...row, outcome, value: writeValue, existing };
+  // The only way a parse-ok deferred row classifies INVALID_DATE is a past value.
+  const message = outcome === "INVALID_DATE" ? `entered date ${value} is in the past (must be today or later)` : undefined;
+  return { ...row, outcome, value: writeValue, existing, message };
 }
 
 /**

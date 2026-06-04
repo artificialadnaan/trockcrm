@@ -131,6 +131,15 @@ describe("classifyImportRow (v2: fill-or-refresh, protect a maintained future da
   it("a stale past date is REFRESHED even without the overwrite flag (the whole point of v2)", () => {
     expect(classifyImportRow({ ...base, parsed: ok("2026-09-15"), existing: "2025-12-31", overwriteExisting: false }).outcome).toBe("REFRESHED");
   });
+
+  it("rejects a sheet value in the PAST as INVALID_DATE (a past date isn't a usable forecast)", () => {
+    expect(classifyImportRow({ ...base, parsed: ok("2026-01-01"), existing: null }).outcome).toBe("INVALID_DATE");
+    expect(classifyImportRow({ ...base, parsed: ok("2026-01-01"), existing: "2025-12-01" }).outcome).toBe("INVALID_DATE");
+  });
+
+  it("accepts a sheet value == today (today-or-future is usable)", () => {
+    expect(classifyImportRow({ ...base, parsed: ok(TODAY), existing: null }).outcome).toBe("WRITTEN");
+  });
 });
 
 describe("repFileSlug", () => {

@@ -32,6 +32,7 @@ const D = {
   d10_orphan_stage: U("d10"),
   d11_inactive_rep: U("d11"),
   d12_today: U("d12"), // expected_close_date == today -> maintained -> excluded
+  d13_owned: U("d13"), // is_bid_board_owned=true, NOT a read-only mirror -> flag must be true
   a1_missing: U("a01"),
   a2_stale: U("a02"),
 };
@@ -48,7 +49,8 @@ function dealsDDL(schema: string): string {
       assigned_rep_id uuid, company_id uuid, expected_close_date date,
       awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
-      is_read_only_mirror boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
+      is_read_only_mirror boolean NOT NULL DEFAULT false, is_bid_board_owned boolean NOT NULL DEFAULT false,
+      on_hold boolean NOT NULL DEFAULT false,
       updated_at timestamptz NOT NULL DEFAULT now()
     );`;
 }
@@ -80,6 +82,8 @@ beforeAll(async () => {
 
     INSERT INTO office_dallas.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date) VALUES
       ('${D.d12_today}','DFW-1-00012-aa','Roof N','${ST.est}','${REP.alice}','${TODAY}'); -- excluded: dated exactly today (maintained)
+    INSERT INTO office_dallas.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date, is_bid_board_owned) VALUES
+      ('${D.d13_owned}','DFW-1-00013-aa','Roof O','${ST.est}','${REP.alice}', NULL, true); -- INCLUDED: Bid Board Owned (not a read-only mirror)
 
     INSERT INTO office_atlanta.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date, is_active) VALUES
       ('${D.a1_missing}','ATL-1-00001-aa','Roof L','${ST.est}','${REP.bob}',   NULL,         true),
@@ -92,7 +96,7 @@ afterAll(async () => {
 });
 
 const INCLUDED = [
-  D.d1_missing, D.d2_stale, D.d7_mirror_missing, D.d8_mirror_stale, D.d9_unassigned, D.d11_inactive_rep, D.a1_missing, D.a2_stale,
+  D.d1_missing, D.d2_stale, D.d7_mirror_missing, D.d8_mirror_stale, D.d9_unassigned, D.d11_inactive_rep, D.d13_owned, D.a1_missing, D.a2_stale,
 ];
 
 describe("close-date v2 export query (PGlite)", () => {
@@ -117,10 +121,11 @@ describe("close-date v2 export query (PGlite)", () => {
     expect(stale.currentCloseDate).toBe("2026-01-01");
   });
 
-  it("includes Bid Board Owned deals and flags them", async () => {
+  it("flags Bid Board Owned deals — both is_bid_board_owned and read-only mirrors", async () => {
     const deals = await fetchMissingCloseDateDeals(client, undefined, TODAY);
-    expect(deals.find((d) => d.dealId === D.d7_mirror_missing)!.isBidBoardOwned).toBe(true);
-    expect(deals.find((d) => d.dealId === D.d8_mirror_stale)!.isBidBoardOwned).toBe(true);
+    expect(deals.find((d) => d.dealId === D.d7_mirror_missing)!.isBidBoardOwned).toBe(true); // read-only mirror
+    expect(deals.find((d) => d.dealId === D.d8_mirror_stale)!.isBidBoardOwned).toBe(true); // read-only mirror
+    expect(deals.find((d) => d.dealId === D.d13_owned)!.isBidBoardOwned).toBe(true); // is_bid_board_owned, NOT a mirror
     expect(deals.find((d) => d.dealId === D.d1_missing)!.isBidBoardOwned).toBe(false);
   });
 
