@@ -821,6 +821,9 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
   const [data, setData] = useState<DealStagePageResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // The stage whose summary `data` currently holds — so stale-while-revalidate keeps the prior summary
+  // ONLY across filter/date refetches of the SAME stage, and resets when the stage target itself changes.
+  const lastStageIdRef = useRef(input.stageId);
 
   useEffect(() => {
     let cancelled = false;
@@ -855,7 +858,17 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
 
     setLoading(true);
     setError(null);
-    setData(null);
+    // Stale-while-revalidate: keep the prior summary visible while the new one loads, so a date/filter
+    // refetch never blanks the stage page. #619 wired the rep/date/filter window into this effect's deps, so
+    // it now re-runs on every filter change; nulling `data` here is what made the page's `!data` gate tear
+    // the whole page down to "Loading stage…" on each change (worst on a slow Custom-window query). A refetch
+    // FAILURE (the .catch below) likewise never nulls data, so a transient error can't blank the page either.
+    // EXCEPTION: when the stage TARGET changes, reset — the previous stage's totals must not show under a
+    // different stage (data.stage drives the title + list scope). First load starts at data=null (useState).
+    if (lastStageIdRef.current !== input.stageId) {
+      setData(null);
+      lastStageIdRef.current = input.stageId;
+    }
 
     void api<DealStagePageResponse>(`/deals/stages/${input.stageId}?${params.toString()}`)
       .then((result) => {

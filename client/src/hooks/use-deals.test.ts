@@ -197,6 +197,25 @@ function StageListFiltersProbe() {
   return null;
 }
 
+// Captures the useDealStagePage return so the stale-while-revalidate behavior (data preserved across a
+// refetch, and across a refetch FAILURE) is assertable. The window var lets a re-render change a dep so
+// the summary effect re-runs.
+let latestStageResult: ReturnType<typeof useDealStagePage> | null = null;
+let stageResultWonSince: string | undefined = "2026-04-01";
+let stageResultStageId = "stage-won";
+function StageResultProbe() {
+  latestStageResult = useDealStagePage({
+    stageId: stageResultStageId,
+    scope: "all",
+    page: 1,
+    pageSize: 25,
+    sort: "age_desc",
+    search: "",
+    filters: { staleOnly: false, wonSince: stageResultWonSince },
+  });
+  return null;
+}
+
 function DealsHookProbe() {
   latestDealsResult = useDeals(hookDealFilters);
   return null;
@@ -272,10 +291,41 @@ async function waitForIdle() {
   }
 }
 
+async function waitForStageIdle() {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (latestStageResult && !latestStageResult.loading) return;
+    await act(async () => {
+      await flushEffects();
+    });
+  }
+}
+
+const STAGE_SUMMARY_A = {
+  stage: { id: "stage-won", name: "Won", slug: "won" },
+  summary: { count: 2, totalValue: 400000, averageDaysInStage: 3 },
+  pagination: { page: 1, pageSize: 25, total: 2, totalPages: 1 },
+  rows: [],
+};
+
+async function renderStageResultProbe() {
+  const { document } = installFakeDom();
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container as unknown as Element);
+  await act(async () => {
+    root.render(createElement(StageResultProbe));
+    await flushEffects();
+  });
+  return root;
+}
+
 describe("normalizeDealBoardResponse", () => {
   beforeEach(() => {
     latestResult = null;
     latestDealsResult = null;
+    latestStageResult = null;
+    stageResultWonSince = "2026-04-01";
+    stageResultStageId = "stage-won";
     hookTerminalDateFilters = undefined;
     hookPreviewLimit = undefined;
     hookWonPeriodRange = undefined;
@@ -767,6 +817,115 @@ describe("normalizeDealBoardResponse", () => {
     });
     expect(apiMock).toHaveBeenCalledTimes(2);
     expect(String(apiMock.mock.calls[1]?.[0])).toContain("won_since=2026-01-01");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  // P0 (#619 regression): a date/filter change re-runs this effect. It must NOT null the prior summary
+  // while the new one is in flight, or the stage page's gate tears the whole page down to "Loading stage…".
+  // The prior summary stays visible (stale-while-revalidate) until the refetch lands.
+  it("keeps the prior stage summary visible while a refetch is in flight (no blank)", async () => {
+    const apiMock = vi.mocked(api);
+    let resolveSecond: (value: unknown) => void = () => {};
+    apiMock
+      .mockResolvedValueOnce(STAGE_SUMMARY_A)
+      .mockImplementationOnce(
+        () => new Promise((resolve) => { resolveSecond = resolve as (value: unknown) => void; }) as Promise<unknown>
+      );
+
+    stageResultWonSince = "2026-04-01";
+    const root = await renderStageResultProbe();
+    await waitForStageIdle();
+    expect(latestStageResult?.data?.summary.totalValue).toBe(400000);
+    expect(latestStageResult?.loading).toBe(false);
+
+    // Change ONLY the window → the summary effect re-runs; the refetch stays pending.
+    stageResultWonSince = "2026-01-01";
+    await act(async () => {
+      root.render(createElement(StageResultProbe));
+      await flushEffects();
+    });
+    // In flight: loading flips true, but the prior summary MUST remain (the fix: no setData(null)).
+    expect(latestStageResult?.loading).toBe(true);
+    expect(latestStageResult?.data?.summary.totalValue).toBe(400000);
+
+    // The refetch lands → the new summary replaces the prior one.
+    await act(async () => {
+      resolveSecond({ ...STAGE_SUMMARY_A, summary: { ...STAGE_SUMMARY_A.summary, totalValue: 99 } });
+      await flushEffects();
+    });
+    expect(latestStageResult?.loading).toBe(false);
+    expect(latestStageResult?.data?.summary.totalValue).toBe(99);
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the prior stage summary when a refetch FAILS (a transient error must not blank the page)", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce(STAGE_SUMMARY_A).mockRejectedValueOnce(new Error("refetch boom"));
+
+    stageResultWonSince = "2026-04-01";
+    const root = await renderStageResultProbe();
+    await waitForStageIdle();
+    expect(latestStageResult?.data?.summary.totalValue).toBe(400000);
+
+    // Change the window → the refetch runs and rejects.
+    stageResultWonSince = "2026-01-01";
+    await act(async () => {
+      root.render(createElement(StageResultProbe));
+      await flushEffects();
+    });
+    await waitForStageIdle();
+
+    expect(latestStageResult?.error).toBe("refetch boom");
+    expect(latestStageResult?.data?.summary.totalValue).toBe(400000); // prior summary preserved (no blank)
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  // Stale-while-revalidate is scoped to the SAME stage: when the stage TARGET changes (a different
+  // drill-down), the prior stage's summary must NOT linger — the page derives its title + list scope from
+  // data.stage, so showing the previous stage under a new id would be wrong. Reset to a clean load there.
+  it("resets the summary to a clean load when the stageId changes (does not show the prior stage)", async () => {
+    const apiMock = vi.mocked(api);
+    let resolveSecond: (value: unknown) => void = () => {};
+    apiMock
+      .mockResolvedValueOnce(STAGE_SUMMARY_A)
+      .mockImplementationOnce(
+        () => new Promise((resolve) => { resolveSecond = resolve as (value: unknown) => void; }) as Promise<unknown>
+      );
+
+    stageResultStageId = "stage-won";
+    const root = await renderStageResultProbe();
+    await waitForStageIdle();
+    expect(latestStageResult?.data?.stage.id).toBe("stage-won");
+
+    // Navigate to a DIFFERENT stage (same route, no remount) → the prior stage's summary must clear.
+    stageResultStageId = "stage-lost";
+    await act(async () => {
+      root.render(createElement(StageResultProbe));
+      await flushEffects();
+    });
+    expect(latestStageResult?.loading).toBe(true);
+    expect(latestStageResult?.data).toBeNull(); // NOT the prior "stage-won" summary
+
+    await act(async () => {
+      resolveSecond({ ...STAGE_SUMMARY_A, stage: { id: "stage-lost", name: "Lost", slug: "lost" } });
+      await flushEffects();
+    });
+    expect(latestStageResult?.data?.stage.id).toBe("stage-lost");
 
     await act(async () => {
       root.unmount();

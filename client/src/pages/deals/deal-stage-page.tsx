@@ -1,4 +1,5 @@
 import { Navigate, useLocation, useParams, useSearchParams } from "react-router-dom";
+import { Loader2 } from "lucide-react";
 import { useDealStagePage } from "@/hooks/use-deals";
 import { formatCurrencyCompact } from "@/lib/deal-utils";
 import { buildDealStageSummary } from "@/lib/pipeline-stage-summary";
@@ -163,11 +164,17 @@ export function DealStagePage() {
     const withDate = appendInheritedTerminalDateToBarSearch(barRedirect, searchParams);
     return <Navigate to={withDate ? `${location.pathname}?${withDate}` : location.pathname} replace />;
   }
-  if (error) return <div className="text-sm text-rose-600">{error}</div>;
-  // Wait while stages are LOADING (the terminal family broadening needs them). If they FAIL,
-  // stagesLoading is false and getStagePageListStageIds falls back to the route stage id, so the list
-  // stays scoped to the route stage instead of rendering unscoped (Codex P2) — never block on the error.
-  if (loading || stagesLoading || !data) return <div className="text-sm text-slate-500">Loading stage...</div>;
+  // Blank to the full error ONLY on a first-load failure (no prior summary to fall back to). A refetch
+  // error WITH a prior summary present keeps the page up and surfaces a non-blocking notice below, so a
+  // transient filter-change refetch never tears the page down (the P0 fix).
+  if (error && !data) return <div className="text-sm text-rose-600">{error}</div>;
+  // Blank to the full-page loader ONLY on the FIRST load (no summary yet) or while the stage list is
+  // loading (the terminal family broadening needs it). A REFETCH (loading=true WITH data present — e.g. a
+  // date/filter change, which #619 wired into the summary deps) keeps the page mounted and shows an
+  // in-flight indicator on the figure instead of blanking to "Loading stage…" (the regression). If stages
+  // FAIL, stagesLoading is false and getStagePageListStageIds falls back to the route stage id, so the
+  // list stays scoped to the route stage rather than rendering unscoped (Codex P2) — never block on error.
+  if (stagesLoading || !data) return <div className="text-sm text-slate-500">Loading stage...</div>;
 
   const stage = data.stage;
   // The list's stage scope = the SAME population the header counts: a Won/Lost stage broadens to its
@@ -176,6 +183,9 @@ export function DealStagePage() {
   // Won stages also exclude on-hold (migration parking-lot) deals — the Won summary does too, so the
   // list reconciles to the header count. Lost stages keep them (the summary doesn't exclude there).
   const excludeOnHold = isWonStagePageStage(stage.slug);
+  // A summary refetch is in flight when loading is true past the gate above (data is already present).
+  // Drives the non-blocking in-flight indicator on the metrics so a slow refresh isn't silent.
+  const isSummaryRefreshing = loading;
 
   return (
     <PipelineStagePageHeader
@@ -184,12 +194,29 @@ export function DealStagePage() {
       subtitle={`${summary.totalDealCount} total deal${summary.totalDealCount === 1 ? "" : "s"} in this stage · ${summary.totalCount} active`}
       summary={
         <>
-          <SummaryMetric label="Active / total" value={`${summary.totalCount}/${summary.totalDealCount}`} />
-          <SummaryMetric label="Stage value" value={formatCompactValue(summary.totalValue)} />
+          <SummaryMetric
+            label="Active / total"
+            value={`${summary.totalCount}/${summary.totalDealCount}`}
+            refreshing={isSummaryRefreshing}
+          />
+          <SummaryMetric
+            label="Stage value"
+            value={formatCompactValue(summary.totalValue)}
+            refreshing={isSummaryRefreshing}
+          />
           <SummaryMetric
             label="Avg. visible age"
             value={`${data.summary.averageDaysInStage ?? summary.averageAgeDays} days`}
+            refreshing={isSummaryRefreshing}
           />
+          {error ? (
+            // A refetch failed but the prior summary is still shown (data present). Surface it
+            // non-blockingly instead of tearing the page down — the totals are the last loaded values.
+            // Span the full summary grid (md:grid-cols-3) so it sits on its own row, not in a metric cell.
+            <p role="status" className="text-xs font-semibold text-rose-600 md:col-span-3">
+              Couldn’t refresh the totals — showing the last loaded values. {error}
+            </p>
+          ) : null}
         </>
       }
     >
@@ -230,11 +257,30 @@ export function DealStagePage() {
   );
 }
 
-function SummaryMetric({ label, value }: { label: string; value: string }) {
+function SummaryMetric({
+  label,
+  value,
+  refreshing,
+}: {
+  label: string;
+  value: string;
+  refreshing?: boolean;
+}) {
   return (
     <div className="space-y-1">
       <p className="text-[11px] font-black tracking-[0.18em] text-slate-500 uppercase">{label}</p>
-      <p className="text-[2rem] leading-none font-black tracking-tight text-slate-950">{value}</p>
+      {/* aria-busy + aria-live mark the figure as updating for AT during a refetch (mirrors the list's
+          Total card); the spinner is the visible, non-blocking cue. The prior value stays on screen. */}
+      <p
+        className="flex items-center gap-2 text-[2rem] leading-none font-black tracking-tight text-slate-950"
+        aria-busy={refreshing ? true : undefined}
+        aria-live="polite"
+      >
+        {value}
+        {refreshing ? (
+          <Loader2 className="h-4 w-4 animate-spin text-slate-400" aria-hidden="true" />
+        ) : null}
+      </p>
     </div>
   );
 }

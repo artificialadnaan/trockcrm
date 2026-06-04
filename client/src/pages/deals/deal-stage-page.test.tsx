@@ -84,6 +84,21 @@ function setStage(stage: { id: string; name: string; slug: string }) {
   });
 }
 
+/** A loaded useDealStagePage return (a prior summary present), with loading/error overridable — for the
+ *  P0 refetch-rendering tests where data is present but a refetch is in flight or just failed. */
+function loadedStageReturn(overrides: { loading?: boolean; error?: string | null } = {}) {
+  return {
+    loading: overrides.loading ?? false,
+    error: overrides.error ?? null,
+    data: {
+      stage: { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+      summary: { count: 1, totalValue: 15000, averageDaysInStage: 4 },
+      pagination: { page: 1, pageSize: 25, total: 1, totalPages: 1 },
+      rows: [],
+    },
+  };
+}
+
 describe("DealStagePage", () => {
   beforeEach(() => {
     mocks.dealsListSectionMock.mockReset();
@@ -235,6 +250,54 @@ describe("DealStagePage", () => {
     const calls = mocks.useDealStagePageMock.mock.calls;
     const lastCall = calls[calls.length - 1]?.[0];
     expect(lastCall.search).toBe("acme");
+  });
+
+  // ── P0: a date/filter change must NOT blank the whole page ──────────────────────────────────────────
+  // #619 made the header summary refetch on every date/filter change; useDealStagePage starts each refetch
+  // by nulling its data, and the old gate (`loading || !data`) then tore the ENTIRE page down to
+  // "Loading stage…" until the (slowest-for-Custom) summary round-tripped, re-blanking on each change. These
+  // lock the fix: blank only on the FIRST load; a refetch keeps the page mounted with an in-flight indicator.
+
+  it("does NOT blank to the full-page loader during a refetch when a prior summary is present (the exact regression)", () => {
+    mocks.useDealStagePageMock.mockReturnValue(loadedStageReturn({ loading: true }));
+    const html = renderStage();
+    expect(html).not.toContain("Loading stage...");
+    expect(html).toContain("Estimating"); // header stays mounted
+    expect(html).toContain("Stage value");
+    expect(mocks.dealsListSectionMock).toHaveBeenCalled(); // the list is NOT torn down
+  });
+
+  it("shows a non-blocking in-flight indicator (aria-busy) on the summary while a refetch runs", () => {
+    mocks.useDealStagePageMock.mockReturnValue(loadedStageReturn({ loading: true }));
+    expect(renderStage()).toContain('aria-busy="true"');
+  });
+
+  it("does not mark the summary busy when no refetch is in flight", () => {
+    mocks.useDealStagePageMock.mockReturnValue(loadedStageReturn({ loading: false }));
+    expect(renderStage()).not.toContain('aria-busy="true"');
+  });
+
+  it("still shows the full-page loader on the FIRST load (no summary data yet)", () => {
+    mocks.useDealStagePageMock.mockReturnValue({ loading: true, error: null, data: null });
+    const html = renderStage();
+    expect(html).toContain("Loading stage...");
+    expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
+  });
+
+  it("does not blank on a refetch error when a prior summary is present (surfaces a non-blocking notice)", () => {
+    mocks.useDealStagePageMock.mockReturnValue(loadedStageReturn({ error: "Failed to refresh totals" }));
+    const html = renderStage();
+    expect(html).toContain("Estimating"); // page stays up
+    expect(html).toContain("Stage value");
+    expect(mocks.dealsListSectionMock).toHaveBeenCalled(); // the list is NOT torn down
+    expect(html).toContain("Failed to refresh totals"); // error surfaced non-blocking
+  });
+
+  it("still blanks to the full error on a FIRST-load failure (no data to fall back to)", () => {
+    mocks.useDealStagePageMock.mockReturnValue({ loading: false, error: "Failed to load stage", data: null });
+    const html = renderStage();
+    expect(html).toContain("Failed to load stage");
+    expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
   });
 });
 
