@@ -222,7 +222,10 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       setError("Assigned sales rep is required");
       return;
     }
-    if (!formData.companyId || !formData.propertyId) {
+    // New direct-create deals must establish both relationships up front. Editing an existing deal is
+    // relaxed: a rep can save a single enrichment field (e.g. an expected close date) without first
+    // attaching both a company and a property — useful for Bid-Board-Owned deals that arrive without them.
+    if (!isEdit && (!formData.companyId || !formData.propertyId)) {
       setError("Company and property are required");
       return;
     }
@@ -239,8 +242,6 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     try {
       const payload: Record<string, unknown> = {
         name: formData.name.trim(),
-        companyId: formData.companyId,
-        propertyId: formData.propertyId,
         description: formData.description.trim() || null,
         propertyAddress: formData.propertyAddress.trim() || null,
         propertyCity: formData.propertyCity.trim() || null,
@@ -255,6 +256,16 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         winProbability: formData.winProbability ? parseInt(formData.winProbability, 10) : null,
         expectedCloseDate: formData.expectedCloseDate || null,
       };
+
+      // company_id / property_id are uuid columns server-side. Only send them when set so a partial
+      // enrichment save on a deal that still lacks a relationship omits the field entirely (an empty
+      // string would fail the uuid cast → 500; an explicit null is rejected as "cannot be cleared").
+      if (formData.companyId) {
+        payload.companyId = formData.companyId;
+      }
+      if (formData.propertyId) {
+        payload.propertyId = formData.propertyId;
+      }
 
       if (!isBidBoardOwned) {
         payload.ddEstimate = formData.ddEstimate || null;

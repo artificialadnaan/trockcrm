@@ -340,6 +340,87 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
     );
   });
 
+  // Piece A contract guard: the deal form now lets a rep save a single enrichment field on an existing
+  // deal (incl. Bid-Board-Owned) without attaching both a company and a property. The route must accept
+  // such a partial PATCH and never apply a "both required" gate to a single-field enrichment save.
+  it("accepts a close-date-only enrichment PATCH on a Bid-Board-Owned deal with no company or property", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(
+      baseDeal({ isBidBoardOwned: true, companyId: null, propertyId: null, sourceLeadId: null })
+    );
+
+    const { req, res, error } = await invokePatch(
+      { expectedCloseDate: "2026-09-01" },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({ expectedCloseDate: "2026-09-01" }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    // With no company/property in the body the route must not touch the uuid columns at all.
+    const [, , patch] = dealsServiceMocks.updateDeal.mock.calls[0];
+    expect(patch).not.toHaveProperty("companyId");
+    expect(patch).not.toHaveProperty("propertyId");
+  });
+
+  it("accepts a company-only relationship fill-in on a relationship-less deal without requiring a property", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(
+      baseDeal({ isBidBoardOwned: true, companyId: null, propertyId: null, sourceLeadId: null })
+    );
+
+    const { req, res, error } = await invokePatch(
+      { companyId: "company-1" },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({ companyId: "company-1" }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    const [, , patch] = dealsServiceMocks.updateDeal.mock.calls[0];
+    expect(patch).not.toHaveProperty("propertyId");
+  });
+
+  // Backend-tolerance guard: the route accepts a property-only partial PATCH even though the form UI
+  // requires a company before a property (PropertySelector is company-scoped). This keeps the route a
+  // permissive partial-PATCH endpoint regardless of how the client composes a single-field save.
+  it("accepts a property-only relationship fill-in on a relationship-less deal without requiring a company", async () => {
+    dealsServiceMocks.getDealById.mockResolvedValue(
+      baseDeal({ isBidBoardOwned: true, companyId: null, propertyId: null, sourceLeadId: null })
+    );
+
+    const { req, res, error } = await invokePatch(
+      { propertyId: "property-1" },
+      createUser("rep"),
+      { selectedProperty: { companyId: null, address: "1 A St", city: "Dallas", state: "TX", zip: "75201" } }
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledWith(
+      req.tenantDb,
+      "deal-1",
+      expect.objectContaining({ propertyId: "property-1" }),
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+    const [, , patch] = dealsServiceMocks.updateDeal.mock.calls[0];
+    expect(patch).not.toHaveProperty("companyId");
+  });
+
   it("rejects projectNumber updates from reps before calling updateDeal", async () => {
     const { error } = await invokePatch(
       { projectNumber: "DFW-1-12345-aa" },
