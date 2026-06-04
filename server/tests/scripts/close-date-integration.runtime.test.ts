@@ -25,6 +25,7 @@ const D2 = U("d02"); // left blank
 
 let pg: PGlite;
 let client: Queryable;
+let tmpDir: string;
 let tmpFile: string;
 
 beforeAll(async () => {
@@ -48,12 +49,13 @@ beforeAll(async () => {
       ('${D1}','DFW-1-00001-aa','Roof One','${ST}','${REP}', NULL),
       ('${D2}','DFW-1-00002-aa','Roof Two','${ST}','${REP}', NULL);
   `);
-  tmpFile = path.join(os.tmpdir(), "trockcrm-close-date-integration.xlsx");
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "trockcrm-cd-int-"));
+  tmpFile = path.join(tmpDir, "close-dates.xlsx");
 });
 
 afterAll(async () => {
   await pg?.close?.();
-  if (tmpFile && fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+  if (tmpDir && fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe("export -> fill file -> re-import (real files, PGlite)", () => {

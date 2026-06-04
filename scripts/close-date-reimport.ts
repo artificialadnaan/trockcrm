@@ -38,6 +38,7 @@ export type ReimportArgs = {
   overwriteExisting: boolean;
 };
 
+/** Parse the re-import CLI flags; requires exactly one of `--file`/`--dir`. */
 export function parseReimportArgs(argv: string[]): ReimportArgs {
   const file = argv.find((a) => a.startsWith("--file="))?.split("=")[1] ?? null;
   const dir = argv.find((a) => a.startsWith("--dir="))?.split("=")[1] ?? null;
@@ -51,6 +52,7 @@ export function parseReimportArgs(argv: string[]): ReimportArgs {
   };
 }
 
+/** Resolve the Postgres URL (Railway injects DATABASE_URL); enable SSL for a public proxy URL. */
 function resolveDatabaseUrl(): { url: string; ssl: boolean } {
   const url =
     process.env.DATABASE_URL?.trim() ||
@@ -69,6 +71,10 @@ function resolveDatabaseUrl(): { url: string; ssl: boolean } {
 export function resolveFiles(args: ReimportArgs): string[] {
   if (args.file) {
     if (!fs.existsSync(args.file)) throw new Error(`No such file: ${args.file}`);
+    if (!fs.statSync(args.file).isFile()) throw new Error(`--file must be a file, got: ${args.file}`);
+    if (path.extname(args.file).toLowerCase() !== ".xlsx") {
+      throw new Error(`--file must point to a .xlsx workbook, got: ${args.file}`);
+    }
     return [args.file];
   }
   const dir = args.dir as string;
@@ -90,11 +96,19 @@ export function resolveActorUserId(env = process.env): string | null {
   return raw;
 }
 
-function csvCell(value: unknown): string {
-  const s = value == null ? "" : String(value);
+/**
+ * Render a value as a CSV cell. Neutralizes CSV/formula injection: a cell that
+ * begins with =, +, -, @ (or a tab/CR that some apps strip to reveal one) is
+ * prefixed with a single quote so spreadsheet apps treat it as text, not a
+ * formula — workbook/rep-derived text (deal names, messages) lands in this CSV.
+ */
+export function csvCell(value: unknown): string {
+  let s = value == null ? "" : String(value);
+  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
+/** Write the per-row outcome audit CSV to docs/audit/ (git-ignored) and return its path. */
 function writeAuditCsv(rows: Array<ImportRowResult & { sourceFile: string }>): string {
   const auditDir = path.join("docs", "audit");
   fs.mkdirSync(auditDir, { recursive: true });
@@ -113,6 +127,7 @@ function writeAuditCsv(rows: Array<ImportRowResult & { sourceFile: string }>): s
   return file;
 }
 
+/** Run the re-import: read each filled workbook, apply rows, write the audit CSV, set the exit code. */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const args = parseReimportArgs(argv);
   const actorUserId = resolveActorUserId();

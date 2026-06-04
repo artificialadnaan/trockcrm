@@ -27,6 +27,7 @@ import { buildRepWorkbook, workbookToBuffer } from "./lib/close-date-xlsx.js";
 
 export type ExportArgs = { tenant: string | null; outDir: string | null; dryRun: boolean };
 
+/** Parse the export CLI flags (`--tenant=`, `--out=`, `--dry-run`). */
 export function parseExportArgs(argv: string[]): ExportArgs {
   const tenantArg = argv.find((a) => a.startsWith("--tenant="))?.split("=")[1] ?? null;
   const outArg = argv.find((a) => a.startsWith("--out="))?.split("=")[1] ?? null;
@@ -37,6 +38,7 @@ export function parseExportArgs(argv: string[]): ExportArgs {
   };
 }
 
+/** Resolve the Postgres URL (Railway injects DATABASE_URL); enable SSL for a public proxy URL. */
 function resolveDatabaseUrl(): { url: string; ssl: boolean } {
   const url =
     process.env.DATABASE_URL?.trim() ||
@@ -52,6 +54,7 @@ function resolveDatabaseUrl(): { url: string; ssl: boolean } {
   return { url, ssl };
 }
 
+/** Run the export: discover tenants, fetch missing-close-date deals, group per rep, write one workbook each. */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const args = parseExportArgs(argv);
   const { url, ssl } = resolveDatabaseUrl();

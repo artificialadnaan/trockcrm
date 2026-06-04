@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseExportArgs } from "../../../scripts/close-date-export.js";
-import { parseReimportArgs, resolveFiles, resolveActorUserId } from "../../../scripts/close-date-reimport.js";
+import { parseReimportArgs, resolveFiles, resolveActorUserId, csvCell } from "../../../scripts/close-date-reimport.js";
 
 /** CLI arg parsing + file/actor resolution for both scripts. */
 
@@ -68,6 +68,13 @@ describe("resolveFiles (existence checks, fail loud not silent)", () => {
   it("returns the single real --file", () => {
     expect(resolveFiles({ file: realFile, dir: null, mode: "dry-run", overwriteExisting: false })).toEqual([realFile]);
   });
+  it("throws when --file is not an .xlsx", () => {
+    const txt = path.join(dir, "notes.txt");
+    expect(() => resolveFiles({ file: txt, dir: null, mode: "dry-run", overwriteExisting: false })).toThrow(/\.xlsx/);
+  });
+  it("throws when --file points at a directory", () => {
+    expect(() => resolveFiles({ file: dir, dir: null, mode: "dry-run", overwriteExisting: false })).toThrow(/must be a file/);
+  });
   it("lists only real .xlsx files in --dir (skips ~$ lock files and non-xlsx)", () => {
     expect(resolveFiles({ file: null, dir, mode: "dry-run", overwriteExisting: false })).toEqual([realFile]);
   });
@@ -83,5 +90,20 @@ describe("resolveActorUserId", () => {
   });
   it("throws on a non-UUID value", () => {
     expect(() => resolveActorUserId({ CLOSE_DATE_ACTOR_USER_ID: "alice" } as NodeJS.ProcessEnv)).toThrow();
+  });
+});
+
+describe("csvCell formula-injection neutralization", () => {
+  it("prefixes a leading =,+,-,@ with a single quote so it isn't evaluated", () => {
+    expect(csvCell("=1+2")).toBe("'=1+2");
+    expect(csvCell("+44")).toBe("'+44");
+    expect(csvCell("@SUM(A1)")).toBe("'@SUM(A1)");
+    expect(csvCell("-cmd")).toBe("'-cmd");
+  });
+  it("still escapes embedded quotes/commas/newlines and leaves benign text alone", () => {
+    expect(csvCell("Acme, Inc")).toBe('"Acme, Inc"');
+    expect(csvCell('say "hi"')).toBe('"say ""hi"""');
+    expect(csvCell("DFW-1-00001-aa")).toBe("DFW-1-00001-aa");
+    expect(csvCell(null)).toBe("");
   });
 });

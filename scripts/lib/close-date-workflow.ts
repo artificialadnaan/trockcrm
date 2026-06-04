@@ -67,6 +67,7 @@ const EXCEL_EPOCH_UTC_MS = Date.UTC(1899, 11, 30); // Excel day 0 == 1899-12-30
 // Date parsing (pure)
 // ---------------------------------------------------------------------------
 
+/** Zero-pad a 1- or 2-digit number to two characters. */
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
@@ -303,8 +304,8 @@ export async function fetchMissingCloseDateDeals(
       out.push({
         tenantSchema: schema,
         dealId: String(row.dealId),
-        dealNumber: String(row.dealNumber),
-        dealName: String(row.dealName),
+        dealNumber: row.dealNumber == null ? "" : String(row.dealNumber),
+        dealName: row.dealName == null ? "" : String(row.dealName),
         companyName: row.companyName == null ? null : String(row.companyName),
         stageName: row.stageName == null ? null : String(row.stageName),
         estimatedValue: row.estimatedValue == null ? null : String(row.estimatedValue),
@@ -362,14 +363,17 @@ const ROW_OUTCOMES: RowOutcome[] = [
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** True for a canonical 8-4-4-4-12 hex UUID string. */
 export function isUuid(value: string): boolean {
   return UUID_RE.test(value);
 }
 
+/** Best-effort message from a thrown value. */
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** A zeroed counts record keyed by every RowOutcome plus `total`. */
 function emptyCounts(): ReimportCounts {
   const counts = { total: 0 } as ReimportCounts;
   for (const outcome of ROW_OUTCOMES) counts[outcome] = 0;
@@ -406,6 +410,7 @@ export async function applyCloseDate(
   );
 }
 
+/** Look up a deal's current date and classify the row (no write). */
 async function resolveDeferredRow(
   client: Queryable,
   row: ImportRowInput,

@@ -138,6 +138,7 @@ export async function workbookToBuffer(wb: ExcelJS.Workbook): Promise<Buffer> {
   return Buffer.from(buf as ArrayBuffer);
 }
 
+/** Coerce any exceljs cell value (string, number, Date, rich-text, formula) to trimmed text. */
 function cellText(value: ExcelJS.CellValue): string {
   if (value == null) return "";
   if (typeof value === "string") return value.trim();
