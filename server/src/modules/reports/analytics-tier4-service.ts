@@ -753,8 +753,25 @@ export async function getExecutiveTrendsReport(
     const wonValueExpr = aliasedEffectiveWonDealValueSql("d");
     const openValueExpr = aliasedEffectiveDealValueSql("d", aliasedOpenPipelineForecastFirstDealValueSql("d"));
     const previousPeriod = computePreviousPeriod(filters.from, filters.to);
+    // Canonical OUTCOME dates: Won = deals.won_closed_date; Lost = lost_at, else updated_at. Won/Lost are
+    // classified by the CURRENT stage_id (not deal_stage_history transitions), so a reopened deal counts
+    // ONCE — in the period of its canonical outcome date — never once per transition (CC2).
+    const wonDate = aliasedWonHsClosedWonDateSql("d");
+    const lostDate = sql`COALESCE(d.lost_at, d.updated_at)`;
+    // Lost outcome date as a UTC calendar date — the SAME basis the monthly lost bucket uses
+    // (TO_CHAR(${lostDate} AT TIME ZONE 'UTC', ...)). Using one UTC basis for BOTH the window and the
+    // bucket means the lost window and bucket agree under any session timezone, so the KPI lost count
+    // equals the monthly trend's lost sum (the win-rate unification holds on a non-UTC/Central session).
+    const lostDateUtc = sql`(${lostDate} AT TIME ZONE 'UTC')::date`;
+    const wonSlugs = sqlStringList(WON_STAGE_SLUGS);
+    const lostSlugs = sqlStringList(LOST_STAGE_SLUGS);
+    const wonInPeriod = (from: SQL, to: SQL) =>
+      sql`psc.slug IN (${wonSlugs}) AND ${aliasedHasUsableWonDateSql("d")} AND ${wonDate} >= ${from} AND ${wonDate} <= ${to}`;
+    const lostInPeriod = (from: SQL, to: SQL) =>
+      sql`psc.slug IN (${lostSlugs}) AND ${lostDateUtc} >= ${from} AND ${lostDateUtc} <= ${to}`;
 
-    const kpiRows = await tenantDb.execute(sql`
+    // Total Pipeline KPI: open value of deals CREATED in the period (is_active), current + previous.
+    const pipelineKpiRows = await tenantDb.execute(sql`
         WITH periods AS (
           SELECT 'current' AS metric, (${filters.from}::date AT TIME ZONE 'UTC') AS from_date, ((${filters.to}::date + INTERVAL '1 day') AT TIME ZONE 'UTC') AS to_date
           UNION ALL
@@ -762,18 +779,7 @@ export async function getExecutiveTrendsReport(
         )
         SELECT
           p.metric,
-          -- CC4: open pipeline excludes soft-deleted deals.
-          COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false AND d.is_active = true), 0)::numeric AS total_pipeline,
-          -- Win-rate counts stay on the created cohort (archived wins/losses included); this is the
-          -- created-cohort win rate, intentionally unchanged in this CC1/CC4 sweep.
-          COUNT(*) FILTER (
-            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
-              AND ${aliasedActiveDealCountFilterSql("d")}
-          )::int AS wins,
-          COUNT(*) FILTER (
-            WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
-              AND ${aliasedActiveDealCountFilterSql("d")}
-          )::int AS losses
+          COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false AND d.is_active = true), 0)::numeric AS total_pipeline
         FROM periods p
         LEFT JOIN deals d ON d.created_at >= p.from_date AND d.created_at < p.to_date
         LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -785,31 +791,37 @@ export async function getExecutiveTrendsReport(
         )
         GROUP BY p.metric
       `);
-    // CC1 — KPI Won Revenue + Avg Deal Size from the WON cohort: windowed/bucketed by canonical
-    // deals.won_closed_date (DATE-typed bounds), usable-won-date guard, archived wins included
-    // (requireActive:false). Previous period uses the same [previousFrom, period start) window as the
-    // created-at periods CTE, expressed as an inclusive date upper bound.
-    const wonKpiRows = await tenantDb.execute(sql`
-        WITH won_periods AS (
+    // UNIFIED OUTCOME KPI (current + previous): Won/Lost by CURRENT stage + canonical outcome date,
+    // COUNT(DISTINCT) so a reopened deal counts once. requireActive:false so archived terminal deals
+    // count. The KPI Win Rate (won/(won+lost)) is the SAME definition the monthly trend uses, so it
+    // equals the trend's period aggregate by construction. Won Revenue/Avg = the won-date cohort (CC1).
+    const outcomeKpiRows = await tenantDb.execute(sql`
+        WITH periods AS (
           SELECT 'current' AS metric, ${filters.from}::date AS from_date, ${filters.to}::date AS to_date
           UNION ALL
           SELECT 'previous' AS metric, ${previousPeriod.previousFrom}::date AS from_date, (${previousPeriod.previousToExclusive}::date - 1) AS to_date
         )
         SELECT
-          wp.metric,
-          COALESCE(SUM(${wonValueExpr}), 0)::numeric AS won_revenue,
-          COALESCE(AVG(${wonValueExpr}), 0)::numeric AS avg_deal_size
-        FROM won_periods wp
-        JOIN deals d
-          ON ${aliasedWonHsClosedWonDateSql("d")} >= wp.from_date
-          AND ${aliasedWonHsClosedWonDateSql("d")} <= wp.to_date
-        LEFT JOIN users u ON u.id = d.assigned_rep_id
+          p.metric,
+          COUNT(DISTINCT d.id) FILTER (WHERE ${wonInPeriod(sql`p.from_date`, sql`p.to_date`)})::int AS won_count,
+          COUNT(DISTINCT d.id) FILTER (WHERE ${lostInPeriod(sql`p.from_date`, sql`p.to_date`)})::int AS lost_count,
+          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE ${wonInPeriod(sql`p.from_date`, sql`p.to_date`)}), 0)::numeric AS won_revenue,
+          COALESCE(AVG(${wonValueExpr}) FILTER (WHERE ${wonInPeriod(sql`p.from_date`, sql`p.to_date`)}), 0)::numeric AS avg_deal_size
+        FROM periods p
+        JOIN deals d ON (
+          (${wonDate} >= p.from_date AND ${wonDate} <= p.to_date)
+          OR (${lostDateUtc} >= p.from_date AND ${lostDateUtc} <= p.to_date)
+        )
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        LEFT JOIN users u ON u.id = d.assigned_rep_id
         WHERE ${buildScopeWhere(filters, { requireActive: false })}
-          AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
-          AND ${aliasedHasUsableWonDateSql("d")}
-        GROUP BY wp.metric
+          AND psc.slug IN (${sqlStringList([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS])})
+        GROUP BY p.metric
       `);
+    // Monthly trend: new deals (created month), won (by won_closed_date month, current WON stage,
+    // COUNT DISTINCT + won_value), lost (by lost-date month, current LOST stage, COUNT DISTINCT) — all
+    // within [from,to] so they sum to the outcome KPI. No deal_stage_history (CC1 + CC2). Active pipeline
+    // is the current snapshot (disclosed below).
     const monthlyRows = await tenantDb.execute(sql`
         WITH months AS (
           SELECT TO_CHAR(month_start, 'YYYY-MM') AS month
@@ -825,64 +837,29 @@ export async function getExecutiveTrendsReport(
           FROM deals d
           LEFT JOIN users u ON u.id = d.assigned_rep_id
           WHERE ${where}
-          GROUP BY TO_CHAR(d.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
+          GROUP BY 1
         ),
-        won_history AS (
-          SELECT TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
-            COUNT(DISTINCT dsh.deal_id)::int AS won_deals
-          FROM deal_stage_history dsh
-          JOIN deals d ON d.id = dsh.deal_id
-          LEFT JOIN users u ON u.id = d.assigned_rep_id
-          JOIN pipeline_stage_config to_stage ON to_stage.id = dsh.to_stage_id
-          WHERE ${buildWhere(filters, sql`dsh.created_at`)}
-            AND to_stage.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
-          GROUP BY TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
-        ),
-        won_fallback AS (
-          SELECT TO_CHAR(${aliasedWonHsClosedWonDateSql("d")}, 'YYYY-MM') AS month,
-            COUNT(DISTINCT d.id)::int AS won_deals
+        won_by_month AS (
+          SELECT TO_CHAR(${wonDate}, 'YYYY-MM') AS month,
+            COUNT(DISTINCT d.id)::int AS won_deals,
+            COALESCE(SUM(${wonValueExpr}), 0)::numeric AS won_value
           FROM deals d
           LEFT JOIN users u ON u.id = d.assigned_rep_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
           WHERE ${buildWonClosedWhere(filters)}
-            AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+            AND psc.slug IN (${wonSlugs})
             AND ${aliasedHasUsableWonDateSql("d")}
-            AND NOT EXISTS (
-              SELECT 1
-              FROM deal_stage_history history
-              JOIN pipeline_stage_config history_stage ON history_stage.id = history.to_stage_id
-              WHERE history.deal_id = d.id
-                AND history_stage.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
-            )
-          GROUP BY TO_CHAR(${aliasedWonHsClosedWonDateSql("d")}, 'YYYY-MM')
+          GROUP BY 1
         ),
-        lost_history AS (
-          SELECT TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
-            COUNT(DISTINCT dsh.deal_id)::int AS lost_deals
-          FROM deal_stage_history dsh
-          JOIN deals d ON d.id = dsh.deal_id
-          LEFT JOIN users u ON u.id = d.assigned_rep_id
-          JOIN pipeline_stage_config to_stage ON to_stage.id = dsh.to_stage_id
-          WHERE ${buildWhere(filters, sql`dsh.created_at`)}
-            AND to_stage.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
-          GROUP BY TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
-        ),
-        lost_fallback AS (
-          SELECT TO_CHAR(COALESCE(d.lost_at, d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
+        lost_by_month AS (
+          SELECT TO_CHAR(${lostDate} AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
             COUNT(DISTINCT d.id)::int AS lost_deals
           FROM deals d
           LEFT JOIN users u ON u.id = d.assigned_rep_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${buildWhere(filters, sql`COALESCE(d.lost_at, d.updated_at)`)}
-            AND psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
-            AND NOT EXISTS (
-              SELECT 1
-              FROM deal_stage_history history
-              JOIN pipeline_stage_config history_stage ON history_stage.id = history.to_stage_id
-              WHERE history.deal_id = d.id
-                AND history_stage.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
-            )
-          GROUP BY TO_CHAR(COALESCE(d.lost_at, d.updated_at) AT TIME ZONE 'UTC', 'YYYY-MM')
+          WHERE ${buildScopeWhere(filters, { requireActive: false })}
+            AND ${lostInPeriod(sql`${filters.from}::date`, sql`${filters.to}::date`)}
+          GROUP BY 1
         ),
         current_pipeline AS (
           SELECT COALESCE(SUM(${openValueExpr}), 0)::numeric AS active_pipeline_value
@@ -895,62 +872,24 @@ export async function getExecutiveTrendsReport(
         SELECT
           months.month,
           COALESCE(new_deals.new_deals, 0)::int AS new_deals,
-          (COALESCE(won_history.won_deals, 0) + COALESCE(won_fallback.won_deals, 0))::int AS won_deals,
-          (COALESCE(lost_history.lost_deals, 0) + COALESCE(lost_fallback.lost_deals, 0))::int AS lost_deals,
+          COALESCE(won_by_month.won_deals, 0)::int AS won_deals,
+          COALESCE(won_by_month.won_value, 0)::numeric AS won_value,
+          COALESCE(lost_by_month.lost_deals, 0)::int AS lost_deals,
           current_pipeline.active_pipeline_value
         FROM months
         CROSS JOIN current_pipeline
         LEFT JOIN new_deals ON new_deals.month = months.month
-        LEFT JOIN won_history ON won_history.month = months.month
-        LEFT JOIN won_fallback ON won_fallback.month = months.month
-        LEFT JOIN lost_history ON lost_history.month = months.month
-        LEFT JOIN lost_fallback ON lost_fallback.month = months.month
+        LEFT JOIN won_by_month ON won_by_month.month = months.month
+        LEFT JOIN lost_by_month ON lost_by_month.month = months.month
         ORDER BY months.month ASC
       `);
-    const quarterlyRows = await tenantDb.execute(sql`
-        SELECT
-          CONCAT(EXTRACT(YEAR FROM d.created_at AT TIME ZONE 'UTC')::int, ' Q', EXTRACT(QUARTER FROM d.created_at AT TIME ZONE 'UTC')::int) AS quarter,
-          COUNT(DISTINCT d.id)::int AS deals_created,
-          COUNT(DISTINCT d.id) FILTER (
-            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
-              AND ${aliasedActiveDealCountFilterSql("d")}
-          )::int AS won,
-          COUNT(DISTINCT d.id) FILTER (
-            WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
-              AND ${aliasedActiveDealCountFilterSql("d")}
-          )::int AS lost,
-          COALESCE(AVG(${wonValueExpr}) FILTER (
-            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
-              AND ${aliasedActiveDealCountFilterSql("d")}
-          ), 0)::numeric AS avg_deal_size,
-          -- CC4: open pipeline excludes soft-deleted deals, matching the Total Pipeline KPI / current_pipeline.
-          COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false AND d.is_active = true), 0)::numeric AS pipeline_end_value
-        FROM deals d
-        LEFT JOIN users u ON u.id = d.assigned_rep_id
-        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE ${where}
-        GROUP BY quarter
-        ORDER BY quarter ASC
-      `);
-    const winRateRows = await tenantDb.execute(sql`
-        SELECT
-          TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month,
-          COUNT(*) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)}))::int AS wins,
-          COUNT(*) FILTER (WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)}))::int AS losses
-        FROM deal_stage_history dsh
-        JOIN deals d ON d.id = dsh.deal_id
-        LEFT JOIN users u ON u.id = d.assigned_rep_id
-        JOIN pipeline_stage_config psc ON psc.id = dsh.to_stage_id
-        WHERE ${buildWhere(filters, sql`dsh.created_at`)}
-          AND psc.is_terminal = true
-        GROUP BY TO_CHAR(dsh.created_at AT TIME ZONE 'UTC', 'YYYY-MM')
-        ORDER BY month ASC
-      `);
+    // Stage progression IS about movement, so it reads deal_stage_history — but COUNT(DISTINCT deal) so a
+    // deal that re-enters a stage counts once (CC2).
     const progressionRows = await tenantDb.execute(sql`
         SELECT
           COALESCE(from_stage.name, 'Initial') AS stage_name,
-          COUNT(*)::int AS entered_count,
-          COUNT(*) FILTER (WHERE to_stage.display_order > COALESCE(from_stage.display_order, -1))::int AS advanced_count
+          COUNT(DISTINCT dsh.deal_id)::int AS entered_count,
+          COUNT(DISTINCT dsh.deal_id) FILTER (WHERE to_stage.display_order > COALESCE(from_stage.display_order, -1))::int AS advanced_count
         FROM deal_stage_history dsh
         JOIN deals d ON d.id = dsh.deal_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -961,39 +900,37 @@ export async function getExecutiveTrendsReport(
         ORDER BY entered_count DESC
       `);
 
-    const periodRows = rowsFromExecute<any>(kpiRows);
-    const current = periodRows.find((row) => row.metric === "current") ?? {};
-    const previous = periodRows.find((row) => row.metric === "previous") ?? {};
-    const wonPeriodRows = rowsFromExecute<any>(wonKpiRows);
-    const currentWon = wonPeriodRows.find((row) => row.metric === "current") ?? {};
-    const previousWon = wonPeriodRows.find((row) => row.metric === "previous") ?? {};
-    const currentWins = numberFrom(current.wins);
-    const currentLosses = numberFrom(current.losses);
-    const previousWins = numberFrom(previous.wins);
-    const previousLosses = numberFrom(previous.losses);
+    const pipelinePeriods = rowsFromExecute<any>(pipelineKpiRows);
+    const currentPipe = pipelinePeriods.find((row) => row.metric === "current") ?? {};
+    const previousPipe = pipelinePeriods.find((row) => row.metric === "previous") ?? {};
+    const outcomePeriods = rowsFromExecute<any>(outcomeKpiRows);
+    const currentOutcome = outcomePeriods.find((row) => row.metric === "current") ?? {};
+    const previousOutcome = outcomePeriods.find((row) => row.metric === "previous") ?? {};
     const metrics = [
       {
         label: "Total Pipeline",
-        value: numberFrom(current.total_pipeline),
-        previous: numberFrom(previous.total_pipeline),
+        value: numberFrom(currentPipe.total_pipeline),
+        previous: numberFrom(previousPipe.total_pipeline),
         format: "currency" as const,
       },
       {
         label: "Won Revenue",
-        value: numberFrom(currentWon.won_revenue),
-        previous: numberFrom(previousWon.won_revenue),
+        value: numberFrom(currentOutcome.won_revenue),
+        previous: numberFrom(previousOutcome.won_revenue),
         format: "currency" as const,
       },
       {
+        // Single win-rate definition: won/(won+lost) by current stage + outcome date. Equals the period
+        // aggregate of the monthly winRateTrend (same predicates).
         label: "Win Rate",
-        value: percent(currentWins, currentWins + currentLosses),
-        previous: percent(previousWins, previousWins + previousLosses),
+        value: percent(numberFrom(currentOutcome.won_count), numberFrom(currentOutcome.won_count) + numberFrom(currentOutcome.lost_count)),
+        previous: percent(numberFrom(previousOutcome.won_count), numberFrom(previousOutcome.won_count) + numberFrom(previousOutcome.lost_count)),
         format: "percent" as const,
       },
       {
         label: "Avg Deal Size",
-        value: numberFrom(currentWon.avg_deal_size),
-        previous: numberFrom(previousWon.avg_deal_size),
+        value: numberFrom(currentOutcome.avg_deal_size),
+        previous: numberFrom(previousOutcome.avg_deal_size),
         format: "currency" as const,
       },
     ];
@@ -1004,18 +941,34 @@ export async function getExecutiveTrendsReport(
           month: String(row.month),
           newDeals: numberFrom(row.new_deals),
           wonDeals: numberFrom(row.won_deals),
+          wonValue: numberFrom(row.won_value),
           lostDeals: numberFrom(row.lost_deals),
           activePipelineValue: numberFrom(row.active_pipeline_value),
         },
       ])
     );
-    const winRateByKey = new Map(
-      rowsFromExecute<any>(winRateRows).map((row) => {
-        const wins = numberFrom(row.wins);
-        const losses = numberFrom(row.losses);
-        return [String(row.month), { month: String(row.month), winRate: percent(wins, wins + losses) }];
-      })
+    const months = monthRange(filters.from, filters.to);
+    const monthlySeries = months.map(
+      (month) => monthlyByKey.get(month) ?? { month, newDeals: 0, wonDeals: 0, wonValue: 0, lostDeals: 0, activePipelineValue: 0 }
     );
+    const activePipelineSnapshot = monthlySeries[0]?.activePipelineValue ?? 0;
+    // Quarterly comparison = the monthly series rolled up into quarters (same cohorts -> reconciles to the
+    // monthly trend and the KPI). Pipeline end = the current snapshot (consistent with the monthly active
+    // pipeline; see activePipelineNote).
+    const quarterToKey = (month: string) => {
+      const [year, monthPart] = month.split("-").map(Number);
+      return `${year} Q${Math.floor((monthPart - 1) / 3) + 1}`;
+    };
+    const quarterMap = new Map<string, { quarter: string; dealsCreated: number; won: number; wonValue: number; lost: number }>();
+    for (const m of monthlySeries) {
+      const key = quarterToKey(m.month);
+      const q = quarterMap.get(key) ?? { quarter: key, dealsCreated: 0, won: 0, wonValue: 0, lost: 0 };
+      q.dealsCreated += m.newDeals;
+      q.won += m.wonDeals;
+      q.wonValue += m.wonValue;
+      q.lost += m.lostDeals;
+      quarterMap.set(key, q);
+    }
 
     return {
       kpis: metrics.map((metric) => {
@@ -1028,32 +981,25 @@ export async function getExecutiveTrendsReport(
           format: metric.format,
         };
       }),
-      monthlyTrends: monthRange(filters.from, filters.to).map(
-        (month) =>
-          monthlyByKey.get(month) ?? {
-            month,
-            newDeals: 0,
-            wonDeals: 0,
-            lostDeals: 0,
-            activePipelineValue: 0,
-          }
-      ),
+      monthlyTrends: monthlySeries.map((m) => ({
+        month: m.month,
+        newDeals: m.newDeals,
+        wonDeals: m.wonDeals,
+        lostDeals: m.lostDeals,
+        activePipelineValue: m.activePipelineValue,
+      })),
       activePipelineNote:
         "Active pipeline is a current open-pipeline snapshot repeated across the selected months; historical month-end pipeline snapshots are not available.",
-      quarterlyComparison: rowsFromExecute<any>(quarterlyRows).map((row) => {
-        const won = numberFrom(row.won);
-        const lost = numberFrom(row.lost);
-        return {
-          quarter: String(row.quarter ?? ""),
-          dealsCreated: numberFrom(row.deals_created),
-          won,
-          lost,
-          winRate: percent(won, won + lost),
-          avgDealSize: numberFrom(row.avg_deal_size),
-          pipelineEndValue: numberFrom(row.pipeline_end_value),
-        };
-      }),
-      winRateTrend: monthRange(filters.from, filters.to).map((month) => winRateByKey.get(month) ?? { month, winRate: 0 }),
+      quarterlyComparison: [...quarterMap.values()].map((q) => ({
+        quarter: q.quarter,
+        dealsCreated: q.dealsCreated,
+        won: q.won,
+        lost: q.lost,
+        winRate: percent(q.won, q.won + q.lost),
+        avgDealSize: q.won ? Math.round(q.wonValue / q.won) : 0,
+        pipelineEndValue: activePipelineSnapshot,
+      })),
+      winRateTrend: monthlySeries.map((m) => ({ month: m.month, winRate: percent(m.wonDeals, m.wonDeals + m.lostDeals) })),
       stageProgression: rowsFromExecute<any>(progressionRows).map((row) => {
         const enteredCount = numberFrom(row.entered_count);
         const advancedCount = numberFrom(row.advanced_count);
