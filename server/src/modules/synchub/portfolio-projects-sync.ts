@@ -828,6 +828,22 @@ export function resolveSyncHubDatabaseUrl(): string {
   );
 }
 
+/**
+ * True when the resolved SyncHub URL is the same connection string as the CRM URL — a
+ * misconfiguration we refuse to run on. The CLI guards this directly (it holds both
+ * connection strings); the worker can't, because its CRM side is a pre-built pool, so it
+ * compares the SyncHub URL against the worker's DATABASE_URL via this helper. Defends
+ * against accidentally pointing the cross-DB read at the CRM database itself.
+ */
+export function syncHubUrlMatchesCrm(
+  syncHubUrl: string | null | undefined,
+  crmUrl: string | null | undefined
+): boolean {
+  const syncHub = syncHubUrl?.trim();
+  const crm = crmUrl?.trim();
+  return Boolean(syncHub) && Boolean(crm) && syncHub === crm;
+}
+
 export type GuardedRefreshOutcome =
   | { ok: true; result: PortfolioProjectValueRefreshResult }
   | { ok: false; error: unknown };

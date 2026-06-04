@@ -37,6 +37,7 @@ type PortfolioProjectValueRefreshResult = {
 // the server package (which is not a worker tsconfig reference), per the worker convention.
 type PortfolioSyncModule = {
   resolveSyncHubDatabaseUrl: () => string;
+  syncHubUrlMatchesCrm: (syncHubUrl: string | null | undefined, crmUrl: string | null | undefined) => boolean;
   runPortfolioProjectValueRefresh: (input: {
     mode: "commit" | "dry-run";
     crmClient: QueryClient;
@@ -83,6 +84,16 @@ export async function runPortfolioValueRefresh(): Promise<void> {
     return;
   }
 
+  // Defense-in-depth (mirrors the CLI's crm===synchub guard): never run the cross-DB read
+  // against the CRM database itself. The worker's CRM side is the pool on DATABASE_URL.
+  if (mod.syncHubUrlMatchesCrm(syncHubDatabaseUrl, process.env.DATABASE_URL)) {
+    console.error(
+      "[Worker:portfolio-value-refresh] SyncHub database URL equals the CRM DATABASE_URL — "
+      + "refusing to run. Set a distinct SYNCHUB_DATABASE_URL.",
+    );
+    return;
+  }
+
   const crmClient = await pool.connect();
   const syncHubClient = new Client({
     connectionString: syncHubDatabaseUrl,
@@ -101,7 +112,13 @@ export async function runPortfolioValueRefresh(): Promise<void> {
     // swallow any failure here too — a transient SyncHub outage must not crash the worker.
     console.error("[Worker:portfolio-value-refresh] refresh setup failed (will retry next interval):", error);
   } finally {
-    crmClient.release();
+    // Always free both connections, even if release() somehow throws, so the SyncHub
+    // client is never leaked and the pool (max 10) can't be exhausted over many cycles.
+    try {
+      crmClient.release();
+    } catch (releaseError) {
+      console.error("[Worker:portfolio-value-refresh] failed to release CRM client:", releaseError);
+    }
     await syncHubClient.end().catch(() => undefined);
   }
 }

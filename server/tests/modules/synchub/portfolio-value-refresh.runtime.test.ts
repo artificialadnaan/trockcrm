@@ -2,8 +2,12 @@ import { PGlite } from "@electric-sql/pglite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   resolveSyncHubDatabaseUrl,
+  runPortfolioProjectsSeed,
   runPortfolioProjectValueRefresh,
   runPortfolioValueRefreshGuarded,
+  splitSeedCandidates,
+  summarizeSyncHubValueFreshness,
+  syncHubUrlMatchesCrm,
   type PortfolioProjectValueRefreshResult,
   type ProcoreCompanyOfficeMapping,
 } from "../../../src/modules/synchub/portfolio-projects-sync.js";
@@ -151,14 +155,19 @@ async function insertPortfolio(input: {
 }
 
 async function readPortfolio(schema: string, procoreId: string) {
-  const result = await db.query<{ total_value: string | null; value_synced_at: string | Date | null }>(
-    `SELECT total_value, value_synced_at FROM ${schema}.portfolio_projects WHERE procore_project_id = $1`,
+  const result = await db.query<{
+    total_value: string | null;
+    value_synced_at: string | Date | null;
+    updated_at: string | Date | null;
+  }>(
+    `SELECT total_value, value_synced_at, updated_at FROM ${schema}.portfolio_projects WHERE procore_project_id = $1`,
     [procoreId],
   );
   const row = result.rows[0];
   return {
     totalValue: row?.total_value ?? null,
     valueSyncedAt: row?.value_synced_at ? new Date(row.value_synced_at).toISOString() : null,
+    updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null,
   };
 }
 
@@ -194,8 +203,16 @@ describe("portfolio value refresh — real SQL (PGlite)", () => {
     expect(row.valueSyncedAt).toBe("2026-06-01T00:00:00.000Z");
   });
 
-  it("stamps value_synced_at from SyncHub last_synced_at, NOT the cron run time", async () => {
-    await insertSource({ procoreId: "PJ1", companyId: "CO_DALLAS", totalValue: "500.00", lastSyncedAt: "2026-06-01T00:00:00.000Z" });
+  it("stamps value_synced_at from SyncHub last_synced_at — not updated_at, not the cron run time", async () => {
+    // Three distinct timestamps pin the precedence inside one row: last_synced_at must win
+    // over both updated_at and the injected run time.
+    await insertSource({
+      procoreId: "PJ1",
+      companyId: "CO_DALLAS",
+      totalValue: "500.00",
+      lastSyncedAt: "2026-06-01T00:00:00.000Z",
+      updatedAt: "2026-03-15T00:00:00.000Z",
+    });
     await insertPortfolio({ schema: "office_dallas", companyId: "CO_DALLAS", procoreId: "PJ1", totalValue: null, valueSyncedAt: null });
 
     const runTime = new Date("2026-12-31T23:59:59.000Z");
@@ -203,7 +220,8 @@ describe("portfolio value refresh — real SQL (PGlite)", () => {
 
     const row = await readPortfolio("office_dallas", "PJ1");
     expect(row.valueSyncedAt).toBe("2026-06-01T00:00:00.000Z");
-    expect(row.valueSyncedAt).not.toBe(runTime.toISOString());
+    expect(row.valueSyncedAt).not.toBe("2026-03-15T00:00:00.000Z"); // not updated_at
+    expect(row.valueSyncedAt).not.toBe(runTime.toISOString()); // not run time
     // refreshedAt is a label only; it must not leak into the freshness stamp.
     expect(result.refreshedAt).toBe(runTime.toISOString());
   });
@@ -223,14 +241,18 @@ describe("portfolio value refresh — real SQL (PGlite)", () => {
     await insertPortfolio({ schema: "office_dallas", companyId: "CO_DALLAS", procoreId: "PJ1", totalValue: null, valueSyncedAt: null });
 
     const first = await refresh();
+    const afterFirst = await readPortfolio("office_dallas", "PJ1");
     const second = await refresh();
+    const afterSecond = await readPortfolio("office_dallas", "PJ1");
 
     expect(first.crm.updated).toBe(1);
     expect(second.crm.updated).toBe(0);
     expect(second.crm.alreadyCurrent).toBeGreaterThanOrEqual(1);
-    const row = await readPortfolio("office_dallas", "PJ1");
-    expect(row.totalValue).toBe("999.99");
-    expect(row.valueSyncedAt).toBe("2026-06-01T00:00:00.000Z");
+    expect(afterSecond.totalValue).toBe("999.99");
+    expect(afterSecond.valueSyncedAt).toBe("2026-06-01T00:00:00.000Z");
+    // The IS DISTINCT FROM guard skips the row entirely on the second run, so even the
+    // updated_at = NOW() never fires — proving SQL-level idempotency, not just the counter.
+    expect(afterSecond.updatedAt).toBe(afterFirst.updatedAt);
   });
 
   it("refreshes every mapped office schema (per-tenant)", async () => {
@@ -278,10 +300,90 @@ describe("portfolio value refresh — real SQL (PGlite)", () => {
     expect(outcome.ok).toBe(false);
     expect(errors).toHaveLength(1);
   });
+
+  it("dry-run reports would-update without writing anything", async () => {
+    await insertSource({ procoreId: "PJ1", companyId: "CO_DALLAS", totalValue: "321.00", lastSyncedAt: "2026-06-01T00:00:00.000Z" });
+    await insertPortfolio({ schema: "office_dallas", companyId: "CO_DALLAS", procoreId: "PJ1", totalValue: null, valueSyncedAt: null });
+
+    const result = await refresh({ mode: "dry-run" });
+
+    expect(result.crm.wouldUpdate).toBe(1);
+    expect(result.crm.updated).toBe(0);
+    const row = await readPortfolio("office_dallas", "PJ1");
+    expect(row.totalValue).toBeNull();
+    expect(row.valueSyncedAt).toBeNull();
+  });
+
+  it("honors --limit by only reading the first N source rows", async () => {
+    for (const id of ["PJ1", "PJ2", "PJ3"]) {
+      await insertSource({ procoreId: id, companyId: "CO_DALLAS", totalValue: "10.00", lastSyncedAt: "2026-06-01T00:00:00.000Z" });
+      await insertPortfolio({ schema: "office_dallas", companyId: "CO_DALLAS", procoreId: id, totalValue: null, valueSyncedAt: null });
+    }
+
+    const result = await refresh({ limit: 1 });
+
+    expect(result.source.activeRowsRead).toBe(1);
+    expect(result.crm.updated).toBe(1);
+  });
+
+  it("counts missingOfficeSkipped for an unmapped company and still refreshes the rest", async () => {
+    await insertSource({ procoreId: "PJ1", companyId: "CO_DALLAS", totalValue: "10.00", lastSyncedAt: "2026-06-01T00:00:00.000Z" });
+    await insertSource({ procoreId: "PJ_X", companyId: "CO_UNMAPPED", totalValue: "20.00", lastSyncedAt: "2026-06-01T00:00:00.000Z" });
+    await insertPortfolio({ schema: "office_dallas", companyId: "CO_DALLAS", procoreId: "PJ1", totalValue: null, valueSyncedAt: null });
+
+    const result = await refresh();
+
+    expect(result.crm.updated).toBe(1);
+    expect(result.crm.missingOfficeSkipped).toBeGreaterThanOrEqual(1);
+  });
+
+  it("throws in commit mode when the office is missing the migration-0136 value columns (but not in dry-run)", async () => {
+    // An office_* schema whose portfolio_projects predates migration 0136 (no value columns).
+    await db.exec(`
+      INSERT INTO public.offices (id, slug, is_active, created_at)
+        VALUES ('o-austin', 'austin', true, '2026-01-03T00:00:00.000Z');
+      CREATE SCHEMA office_austin;
+      CREATE TABLE office_austin.portfolio_projects (
+        id text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        procore_company_id text NOT NULL,
+        procore_project_id text NOT NULL,
+        project_number text,
+        name text NOT NULL,
+        current_stage text NOT NULL,
+        current_stage_normalized text NOT NULL,
+        current_stage_entered_at timestamptz,
+        is_board_relevant boolean NOT NULL DEFAULT true,
+        UNIQUE (procore_company_id, procore_project_id)
+      );
+    `);
+    await insertSource({ procoreId: "PJA", companyId: "CO_AUSTIN", totalValue: "1.00", lastSyncedAt: "2026-06-01T00:00:00.000Z" });
+    await db.query(
+      `INSERT INTO office_austin.portfolio_projects
+         (procore_company_id, procore_project_id, project_number, name, current_stage, current_stage_normalized)
+       VALUES ('CO_AUSTIN', 'PJA', 'PN-PJA', 'Project A', 'Buy Out', 'buyout')`,
+    );
+    const austinMappings: ProcoreCompanyOfficeMapping[] = [{ procoreCompanyId: "CO_AUSTIN", officeSchema: "office_austin" }];
+
+    await expect(refresh({ mappings: austinMappings })).rejects.toThrow(/migration 0136/i);
+
+    // dry-run must NOT throw on a pre-0136 schema (advisory only).
+    const dry = await refresh({ mode: "dry-run", mappings: austinMappings });
+    expect(dry.crm.wouldUpdate).toBe(1);
+  });
 });
 
 describe("resolveSyncHubDatabaseUrl", () => {
-  const KEYS = ["SYNCHUB_DATABASE_PUBLIC_URL", "SYNCHUB_DATABASE_URL", "SYNCHUB_DATABASE_URI"] as const;
+  // Every env key the resolver reads (incl. the Railway-fallback branch) is saved/restored
+  // so these mutations cannot leak into other tests.
+  const KEYS = [
+    "SYNCHUB_DATABASE_PUBLIC_URL",
+    "SYNCHUB_DATABASE_URL",
+    "SYNCHUB_DATABASE_URI",
+    "RAILWAY_PROJECT_NAME",
+    "RAILWAY_SERVICE_NAME",
+    "DATABASE_PUBLIC_URL",
+    "DATABASE_URL",
+  ] as const;
   let saved: Record<string, string | undefined>;
 
   beforeEach(() => {
@@ -313,6 +415,31 @@ describe("resolveSyncHubDatabaseUrl", () => {
     process.env.SYNCHUB_DATABASE_URL = "postgres://private/synchub";
     expect(resolveSyncHubDatabaseUrl()).toBe("postgres://private/synchub");
   });
+
+  it("falls back to SYNCHUB_DATABASE_URI when both URL forms are absent", () => {
+    process.env.SYNCHUB_DATABASE_URI = "postgres://uri/synchub";
+    expect(resolveSyncHubDatabaseUrl()).toBe("postgres://uri/synchub");
+  });
+
+  it("uses DATABASE_URL ONLY when running inside the SyncHub Railway project", () => {
+    process.env.DATABASE_URL = "postgres://railway/synchub";
+    // Not in the SyncHub Railway project → no fallback (a CRM worker must not pick up its own DB).
+    expect(resolveSyncHubDatabaseUrl()).toBe("");
+    // Inside the SyncHub Railway project → the injected DATABASE_URL is the SyncHub DB.
+    process.env.RAILWAY_PROJECT_NAME = "T-Rock-Sync-Hub";
+    expect(resolveSyncHubDatabaseUrl()).toBe("postgres://railway/synchub");
+  });
+});
+
+describe("syncHubUrlMatchesCrm", () => {
+  it("is true only when both URLs are set and equal (trimmed)", () => {
+    expect(syncHubUrlMatchesCrm("postgres://db", "postgres://db")).toBe(true);
+    expect(syncHubUrlMatchesCrm("  postgres://db  ", "postgres://db")).toBe(true);
+    expect(syncHubUrlMatchesCrm("postgres://synchub", "postgres://crm")).toBe(false);
+    expect(syncHubUrlMatchesCrm("", "")).toBe(false);
+    expect(syncHubUrlMatchesCrm("postgres://db", undefined)).toBe(false);
+    expect(syncHubUrlMatchesCrm(undefined, "postgres://db")).toBe(false);
+  });
 });
 
 describe("runPortfolioValueRefreshGuarded", () => {
@@ -328,7 +455,8 @@ describe("runPortfolioValueRefreshGuarded", () => {
     });
 
     expect(outcome).toEqual({ ok: true, result: sampleResult });
-    expect(logs.length).toBeGreaterThanOrEqual(1);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/matched=3 updated=2 alreadyCurrent=1/);
   });
 
   it("swallows a thrown error, returns ok:false, and never rethrows", async () => {
@@ -348,9 +476,11 @@ describe("runPortfolioValueRefreshGuarded", () => {
 
 describe("manual CLI re-export surface stays intact", () => {
   it("the script re-exports the SAME moved core (manual run keeps working)", () => {
+    // Reference identity (not just typeof) proves the script's `export *` forwards the exact
+    // module bindings — a wrapper/shadow on any symbol would fail these.
     expect(refreshFromScript).toBe(runPortfolioProjectValueRefresh);
-    expect(typeof seedFromScript).toBe("function");
-    expect(typeof splitFromScript).toBe("function");
-    expect(typeof summarizeFromScript).toBe("function");
+    expect(seedFromScript).toBe(runPortfolioProjectsSeed);
+    expect(splitFromScript).toBe(splitSeedCandidates);
+    expect(summarizeFromScript).toBe(summarizeSyncHubValueFreshness);
   });
 });
