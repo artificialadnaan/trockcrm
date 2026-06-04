@@ -9,6 +9,9 @@ import {
   aliasedWonHsClosedWonDateSql,
 } from "../shared/deal-value-sql.js";
 import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+// CC3 (Wave 0): hold-aware effective stage age (days) — on-hold time is not counted toward
+// days-in-stage / the stuck threshold. Replaces raw NOW() - stage_entered_at.
+import { aliasedEffectiveStageAgeDaysSql } from "../deals/deal-filter-predicates.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -491,7 +494,7 @@ export async function getPipelineVelocityReport(
           d.stage_id,
           d.on_hold,
           ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
-          GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400))::int AS days_in_stage,
+          ${aliasedEffectiveStageAgeDaysSql("d")}::int AS days_in_stage,
           p.name AS stage_name,
           p.display_order AS stage_order
         FROM deals d
@@ -533,7 +536,7 @@ export async function getPipelineVelocityReport(
         SELECT
           d.on_hold,
           ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
-          GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400))::int AS days_in_stage
+          ${aliasedEffectiveStageAgeDaysSql("d")}::int AS days_in_stage
         FROM deals d
         JOIN pipeline_stage_config p ON p.id = d.stage_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -560,14 +563,14 @@ export async function getPipelineVelocityReport(
         d.name AS "dealName",
         COALESCE(u.display_name, 'Unassigned') AS "ownerName",
         p.name AS "stageName",
-        GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400))::int AS "daysInStage",
+        ${aliasedEffectiveStageAgeDaysSql("d")}::int AS "daysInStage",
         ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
       WHERE ${whereSql}
         AND p.slug NOT IN (${terminalSlugs})
-        AND GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - d.stage_entered_at)) / 86400)) > 30
+        AND ${aliasedEffectiveStageAgeDaysSql("d")} > 30
         AND ${aliasedActiveDealCountFilterSql("d")}
       ORDER BY "daysInStage" DESC, value DESC
       LIMIT 10

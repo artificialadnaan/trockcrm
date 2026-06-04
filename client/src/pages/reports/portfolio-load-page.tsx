@@ -3,6 +3,7 @@ import { ReportFilterBar, useReportFilters } from "@/components/reports/report-f
 import { usePortfolioLoadReport } from "@/hooks/use-reports";
 import { sheetsFromReport } from "@/lib/excel-export";
 import {
+  ActiveWorkNote,
   EmptyState,
   ErrorState,
   formatDate,
@@ -29,6 +30,7 @@ export function PortfolioLoadPage() {
       exportSheets={sheetsFromReport("Portfolio Load", data)}
     >
       <ReportFilterBar />
+      <ActiveWorkNote />
       {loading ? <LoadingState /> : null}
       {error ? <ErrorState message={error} /> : null}
       {!loading && !error && data ? (

@@ -3,6 +3,7 @@ import { ReportFilterBar, useReportFilters } from "@/components/reports/report-f
 import { useProjectReadinessReport } from "@/hooks/use-reports";
 import { sheetsFromReport } from "@/lib/excel-export";
 import {
+  ActiveWorkNote,
   DealLink,
   EmptyState,
   ErrorState,
@@ -28,6 +29,7 @@ export function ProjectReadinessPage() {
       exportSheets={sheetsFromReport("Project Readiness", data)}
     >
       <ReportFilterBar />
+      <ActiveWorkNote />
       {loading ? <LoadingState /> : null}
       {error ? <ErrorState message={error} /> : null}
       {!loading && !error && data ? (
