@@ -2,7 +2,7 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizePipelineScope, useNormalizedStageRoute, type PipelineEntity, type PipelineRole } from "./pipeline-scope";
 
@@ -190,6 +190,64 @@ describe("useNormalizedStageRoute", () => {
     expect(route.needsRedirect).toBe(needsRedirect);
     expect(route.redirectTo).toBe(redirectTo);
     cleanup();
+  });
+});
+
+// Codex P2: the stage table's pagination (route.onPageChange) must NOT push a history entry, otherwise
+// the now history-aware header "Back" (navigate(-1)) would step back to the previous PAGE of the same
+// cohort instead of up to the rep/dashboard the user drilled in from. Paging is intra-cohort state, so it
+// replaces in place — keeping the drill-down history one entry per genuine drill step.
+function PaginationProbe({ role }: { role: PipelineRole }) {
+  mocks.useAuthMock.mockReturnValue({ user: { id: "user-1", role } });
+  const route = useNormalizedStageRoute("deals", "stage-1");
+  const navigate = useNavigate();
+  const location = useLocation();
+  return createElement(
+    "div",
+    null,
+    createElement("span", { "data-testid": "loc" }, location.pathname + location.search),
+    createElement("button", { "data-testid": "page2", onClick: () => route.onPageChange(2) }),
+    createElement("button", { "data-testid": "back", onClick: () => navigate(-1) })
+  );
+}
+
+function renderPaginationProbe(initialEntries: string[], initialIndex: number) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root: Root | null = null;
+  act(() => {
+    root = createRoot(container);
+    root.render(
+      createElement(MemoryRouter, { initialEntries, initialIndex }, createElement(PaginationProbe, { role: "director" }))
+    );
+  });
+  const loc = () => container.querySelector('[data-testid="loc"]')?.textContent ?? "";
+  const click = (id: string) =>
+    act(() => {
+      (container.querySelector(`[data-testid="${id}"]`) as HTMLButtonElement).dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+    });
+  return { loc, click, cleanup: () => { act(() => root?.unmount()); container.remove(); } };
+}
+
+describe("useNormalizedStageRoute pagination history (Codex P2)", () => {
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = "";
+    mocks.useAuthMock.mockReset();
+  });
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("paginates in place (replace) so a single Back still steps up to the referrer, not to the previous page", () => {
+    const view = renderPaginationProbe(["/director/rep/REP1", "/deals/stages/stage-1?scope=mine"], 1);
+    view.click("page2");
+    expect(view.loc()).toContain("page=2"); // paged within the cohort
+    view.click("back");
+    expect(view.loc()).toBe("/director/rep/REP1"); // one level up the drill, NOT the cohort's page 1
+    view.cleanup();
   });
 });
 

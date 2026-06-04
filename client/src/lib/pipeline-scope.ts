@@ -106,7 +106,10 @@ export function useNormalizedStageRoute(entity: PipelineEntity, stageId: string)
       const params = new URLSearchParams(searchParams);
       params.set("scope", allowedScope);
       params.set("page", String(page));
-      setSearchParams(params);
+      // Paging is intra-cohort state, not a drill-down step: REPLACE in place so it never adds a history
+      // entry. Otherwise the history-aware header "Back" (navigate(-1)) would step back to the previous
+      // PAGE of this same cohort instead of up to the rep/dashboard the user drilled in from.
+      setSearchParams(params, { replace: true });
     },
   };
 }
