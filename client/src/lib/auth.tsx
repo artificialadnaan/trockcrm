@@ -14,6 +14,8 @@ interface User {
   onboardingPendingCount?: number;
   requiresOnboarding?: boolean;
   cleanupUrl?: string;
+  /** True iff this user may review declined RFPs (Takashi/Adam allowlist); gates the /rfp-review page. */
+  isRfpReviewer?: boolean;
 }
 
 interface AuthContextValue {
