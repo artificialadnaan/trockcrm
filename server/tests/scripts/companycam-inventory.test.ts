@@ -16,7 +16,7 @@ const PLAN_PROJECTS = [
   { id: "cc-link", name: "Linkville Tower", photoCount: 10 }, // existing link, not on hold -> auto
   { id: "cc-num", name: "DFW-2-08926-ab Roof", photoCount: 20 }, // number-in-name, not on hold -> auto
   { id: "cc-num-onhold", name: "DFW-3-00001-zz Siding", photoCount: 30 }, // number-in-name, on hold -> manual
-  { id: "cc-fuzzy", name: "North Campus Roofing", photoCount: 40 }, // fuzzy -> manual
+  { id: "cc-fuzzy", name: "North Campus Roofing", photoCount: 40 }, // exact + unique name -> auto (exact_unique_name)
   { id: "cc-unmatched", name: "Zzz Unmatchable Xyz", photoCount: 50 }, // unmatched -> manual
 ];
 
@@ -64,13 +64,13 @@ describe("companycam-inventory", () => {
     expect(byId.get("cc-link")).toMatchObject({ matchReason: "existing_companycam_link", matchedDealOnHold: false });
     expect(byId.get("cc-num")).toMatchObject({ matchReason: "project_number_in_name", matchedDealOnHold: false });
     expect(byId.get("cc-num-onhold")).toMatchObject({ matchReason: "project_number_in_name", matchedDealOnHold: true });
-    expect(byId.get("cc-fuzzy")).toMatchObject({ matchReason: "fuzzy_project_name", matchedDealOnHold: false });
+    expect(byId.get("cc-fuzzy")).toMatchObject({ matchReason: "exact_unique_name", matchedDealOnHold: false });
     expect(byId.get("cc-unmatched")).toMatchObject({ matchReason: "unmatched", matchedDealOnHold: null });
 
     expect(companyCamPlanDisposition(byId.get("cc-link")!)).toBe("auto");
     expect(companyCamPlanDisposition(byId.get("cc-num")!)).toBe("auto");
     expect(companyCamPlanDisposition(byId.get("cc-num-onhold")!)).toBe("manual_review"); // reliable tier but on hold
-    expect(companyCamPlanDisposition(byId.get("cc-fuzzy")!)).toBe("manual_review"); // fuzzy is never auto (Bid Board lesson)
+    expect(companyCamPlanDisposition(byId.get("cc-fuzzy")!)).toBe("auto"); // exact AND unique name -> reliable
     expect(companyCamPlanDisposition(byId.get("cc-unmatched")!)).toBe("manual_review");
   });
 
@@ -81,12 +81,44 @@ describe("companycam-inventory", () => {
     expect(summary).toMatchObject({ totalProjects: 5, totalPhotos: 150, matchedProjects: 4, unmatchedProjects: 1 });
     expect(summary.byTier.existing_companycam_link).toEqual({ projects: 1, photos: 10 });
     expect(summary.byTier.project_number_in_name).toEqual({ projects: 2, photos: 50 }); // cc-num + cc-num-onhold
-    expect(summary.byTier.fuzzy_project_name).toEqual({ projects: 1, photos: 40 });
+    expect(summary.byTier.exact_unique_name).toEqual({ projects: 1, photos: 40 }); // cc-fuzzy (exact + unique)
+    expect(summary.byTier.fuzzy_project_name).toEqual({ projects: 0, photos: 0 });
     expect(summary.byTier.unmatched).toEqual({ projects: 1, photos: 50 });
     expect(summary.onHoldExcluded).toEqual({ projects: 1, photos: 30 }); // cc-num-onhold
-    expect(summary.autoSeed).toEqual({ projects: 2, photos: 30 }); // cc-link + cc-num
-    expect(summary.manualReview).toEqual({ projects: 3, photos: 120 }); // on-hold + fuzzy + unmatched
+    expect(summary.autoSeed).toEqual({ projects: 3, photos: 70 }); // cc-link + cc-num + cc-fuzzy (exact-unique)
+    expect(summary.manualReview).toEqual({ projects: 2, photos: 80 }); // on-hold + unmatched
     expect(plan.totals).toEqual(summary); // buildCompanyCamImportPlan returns the same summary as totals
+  });
+
+  it("classifies exact-unique (auto), ambiguous name-collision (manual), and sub-1.0 fuzzy (manual)", () => {
+    const plan = buildCompanyCamImportPlan(
+      [
+        { id: "cc-uniq", name: "Winkler Apartments", photoCount: 11 }, // exact + unique -> auto
+        { id: "cc-collide", name: "Tides North Dallas", photoCount: 22 }, // exact but TWO deals -> manual
+        { id: "cc-near", name: "Watersong Villa", photoCount: 33 }, // ~0.94 fuzzy -> manual
+      ],
+      [
+        { id: "d-uniq", name: "Winkler Apartments", dealNumber: "W-1", projectNumber: null, companycamProjectId: null, onHold: false },
+        { id: "d-dup-a", name: "Tides North Dallas", dealNumber: "T-1", projectNumber: null, companycamProjectId: null, onHold: false },
+        { id: "d-dup-b", name: "Tides North Dallas", dealNumber: "T-2", projectNumber: null, companycamProjectId: null, onHold: false },
+        { id: "d-villas", name: "Watersong Villas", dealNumber: "V-1", projectNumber: null, companycamProjectId: null, onHold: false },
+      ],
+    );
+    const byId = new Map(plan.rows.map((row) => [row.companyCamProjectId, row]));
+
+    // exact AND unique -> reliable auto-link
+    expect(byId.get("cc-uniq")).toMatchObject({ matchReason: "exact_unique_name", matchedDealId: "d-uniq", confidence: 1 });
+    expect(companyCamPlanDisposition(byId.get("cc-uniq")!)).toBe("auto");
+
+    // exact name carried by TWO deals -> ambiguous collision, held for manual (NOT auto, even at confidence 1)
+    expect(byId.get("cc-collide")!.matchReason).toBe("fuzzy_project_name");
+    expect(companyCamPlanDisposition(byId.get("cc-collide")!)).toBe("manual_review");
+
+    // sub-1.0 fuzzy name guess -> manual
+    expect(byId.get("cc-near")!.matchReason).toBe("fuzzy_project_name");
+    expect(byId.get("cc-near")!.confidence).toBeGreaterThanOrEqual(0.9);
+    expect(byId.get("cc-near")!.confidence).toBeLessThan(1);
+    expect(companyCamPlanDisposition(byId.get("cc-near")!)).toBe("manual_review");
   });
 
   it("does not crash on a CompanyCam project with a null name (treats it as unmatched)", () => {

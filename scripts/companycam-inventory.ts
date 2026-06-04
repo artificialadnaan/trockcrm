@@ -66,15 +66,15 @@ function similarity(a: string, b: string): number {
 }
 
 // ─── Seed disposition (read-only classification of the agreed seed policy) ─────
-// Only the two RELIABLE tiers auto-seed, and never onto an on-hold deal:
-//   auto          = existing CompanyCam link OR project-number-in-name, AND deal not on hold
-//   manual_review = fuzzy (>=0.9) name guess, unmatched, OR matched to an on-hold deal
+// Only RELIABLE tiers auto-seed, and never onto an on-hold deal:
+//   auto          = existing CompanyCam link, project-number-in-name, OR exact-AND-unique name, AND not on hold
+//   manual_review = ambiguous-exact (name maps to >1 deal), sub-1.0 fuzzy, unmatched, OR on-hold
 // The seed itself stays behind the gate; this only classifies the plan so the report can show
 // how many photos would auto-seed vs. need human linking.
 export type CompanyCamPlanDisposition = "auto" | "manual_review";
 
-const AUTO_SEED_MATCH_REASONS = new Set(["existing_companycam_link", "project_number_in_name"]);
-const PLAN_TIERS = ["existing_companycam_link", "project_number_in_name", "fuzzy_project_name", "unmatched"] as const;
+const AUTO_SEED_MATCH_REASONS = new Set(["existing_companycam_link", "project_number_in_name", "exact_unique_name"]);
+const PLAN_TIERS = ["existing_companycam_link", "project_number_in_name", "exact_unique_name", "fuzzy_project_name", "unmatched"] as const;
 type PlanTier = (typeof PLAN_TIERS)[number];
 
 export function companyCamPlanDisposition(row: CompanyCamImportPlanRow): CompanyCamPlanDisposition {
@@ -112,6 +112,7 @@ export function summarizeCompanyCamPlan(rows: CompanyCamImportPlanRow[]): Compan
     byTier: {
       existing_companycam_link: emptyBucket(),
       project_number_in_name: emptyBucket(),
+      exact_unique_name: emptyBucket(),
       fuzzy_project_name: emptyBucket(),
       unmatched: emptyBucket(),
     },
@@ -134,6 +135,13 @@ export function summarizeCompanyCamPlan(rows: CompanyCamImportPlanRow[]): Compan
 }
 
 export function buildCompanyCamImportPlan(projects: CompanyCamProjectForPlan[], deals: DealForCompanyCamPlan[]) {
+  // How many deals share each normalized name — an exact (similarity 1) name match is reliable ONLY when
+  // that name maps to exactly one deal; a name shared by 2+ deals is an ambiguous collision (manual review).
+  const dealsByNormalizedName = new Map<string, number>();
+  for (const deal of deals) {
+    const normalized = normalizeCompanyCamProjectName(deal.name);
+    if (normalized) dealsByNormalizedName.set(normalized, (dealsByNormalizedName.get(normalized) ?? 0) + 1);
+  }
   const rows: CompanyCamImportPlanRow[] = projects.map((project) => {
     const projectName = project.name ?? "";
     const embeddedProjectNumber = projectName.match(PROJECT_NUMBER_REGEX)?.[0]?.toLowerCase() ?? null;
@@ -149,11 +157,15 @@ export function buildCompanyCamImportPlan(projects: CompanyCamProjectForPlan[], 
           .map((deal) => ({ deal, score: similarity(normalizedProject, normalizeCompanyCamProjectName(deal.name)) }))
           .sort((a, b) => b.score - a.score)[0]
       : null;
+    // Exact normalized-name match (similarity 1) is reliable ONLY if exactly one deal carries that name;
+    // if 2+ deals share it the best match is ambiguous and stays fuzzy (manual review).
+    const exactUnique = !!fuzzy && fuzzy.score === 1 && (dealsByNormalizedName.get(normalizedProject) ?? 0) === 1;
     const match =
       linked ? { deal: linked, confidence: 1, reason: "existing_companycam_link" }
         : projectNumberMatch ? { deal: projectNumberMatch, confidence: 1, reason: "project_number_in_name" }
-          : fuzzy && fuzzy.score >= AUTO_IMPORT_FUZZY_THRESHOLD ? { deal: fuzzy.deal, confidence: Number(fuzzy.score.toFixed(3)), reason: "fuzzy_project_name" }
-            : null;
+          : exactUnique ? { deal: fuzzy!.deal, confidence: 1, reason: "exact_unique_name" }
+            : fuzzy && fuzzy.score >= AUTO_IMPORT_FUZZY_THRESHOLD ? { deal: fuzzy.deal, confidence: Number(fuzzy.score.toFixed(3)), reason: "fuzzy_project_name" }
+              : null;
     return {
       companyCamProjectId: project.id,
       companyCamProjectName: projectName,
