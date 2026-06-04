@@ -88,4 +88,26 @@ describe("companycam-inventory", () => {
     expect(summary.manualReview).toEqual({ projects: 3, photos: 120 }); // on-hold + fuzzy + unmatched
     expect(plan.totals).toEqual(summary); // buildCompanyCamImportPlan returns the same summary as totals
   });
+
+  it("does not crash on a CompanyCam project with a null name (treats it as unmatched)", () => {
+    const plan = buildCompanyCamImportPlan(
+      [
+        { id: "cc-null", name: null, photoCount: 5 },
+        { id: "cc-fuzzy", name: "North Campus Roofing", photoCount: 7 },
+      ],
+      PLAN_DEALS,
+    );
+    const byId = new Map(plan.rows.map((row) => [row.companyCamProjectId, row]));
+    expect(byId.get("cc-null")).toMatchObject({ companyCamProjectName: "", matchedDealId: null, matchReason: "unmatched" });
+    expect(byId.get("cc-fuzzy")?.matchedDealId).toBe("deal-fuzzy"); // a real-named project still matches alongside the null one
+  });
+
+  it("does not fuzzy-match a null/empty-named project to a deal whose name normalizes to empty", () => {
+    const plan = buildCompanyCamImportPlan(
+      [{ id: "cc-null", name: null, photoCount: 9 }],
+      // "Project" normalizes to "" (the word is stripped) — must NOT tie at confidence 1 with a nameless project.
+      [{ id: "deal-empty", name: "Project", dealNumber: "D-0", projectNumber: null, companycamProjectId: null, onHold: false }],
+    );
+    expect(plan.rows[0]).toMatchObject({ matchedDealId: null, matchReason: "unmatched", confidence: 0 });
+  });
 });

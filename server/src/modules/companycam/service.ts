@@ -20,7 +20,7 @@ type ProgressCallback = (message: string) => void;
 
 export interface ProjectMapping {
   ccProjectId: string;
-  ccProjectName: string;
+  ccProjectName: string | null;
   ccPhotoCount: number;
   ccCity: string | null;
   dealId: string | null;
@@ -43,7 +43,8 @@ export interface SyncResult {
 /**
  * Normalize a project name for fuzzy matching.
  */
-function normalizeName(name: string): string {
+function normalizeName(name: string | null | undefined): string {
+  if (!name) return ""; // null/blank CompanyCam or deal names are not matchable
   return name
     .toLowerCase()
     .replace(/\(.*?\)/g, "")
@@ -172,7 +173,9 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
     }
 
     const normProjName = normalizeName(proj.name);
-    const fuzzyMatch = dealsByNormName.get(normProjName);
+    // Skip auto-matching a null/blank-named project (normalizes to "") — it would otherwise tie with
+    // any deal whose name also normalizes to "" (e.g. "Project"/"Photos").
+    const fuzzyMatch = normProjName ? dealsByNormName.get(normProjName) : undefined;
     if (fuzzyMatch) {
       mappings.push({
         ccProjectId: proj.id,
