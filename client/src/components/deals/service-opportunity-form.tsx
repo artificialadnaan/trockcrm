@@ -20,9 +20,8 @@ import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { createServiceOpportunity, type Deal } from "@/hooks/use-deals";
 import { useAuth } from "@/lib/auth";
 import {
-  buildOfficeSelectionOptions,
+  buildOfficeCodePrefixOptions,
   resolveDefaultOfficeCode,
-  type OfficeSelectionOption,
 } from "@/lib/office-selection";
 
 interface ServiceOpportunityFormProps {
@@ -40,7 +39,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const { hierarchy: projectTypeHierarchy } = useProjectTypes();
 
   const activeOfficeId = user?.activeOfficeId ?? user?.officeId ?? null;
-  const officeOptions = buildOfficeSelectionOptions(offices);
+  const officeOptions = buildOfficeCodePrefixOptions();
   const initialOfficeCode = resolveDefaultOfficeCode({
     offices,
     activeOfficeId,
@@ -65,8 +64,12 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
     officeCode: initialOfficeCode,
     expectedCloseDate: "",
   });
-  const selectedOffice = officeOptions.find((office) => office.code === formData.officeCode) ?? null;
-  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: selectedOffice?.officeId });
+  // The office picker is a project-number PREFIX only: pickers + create target the rep's HOME (active)
+  // office, so choosing DFW vs ATL never changes which companies/properties/reps are available nor where the
+  // opportunity is created — only the deal_number prefix.
+  const selectedOfficeLabel =
+    officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
+  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: activeOfficeId });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -87,11 +90,8 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
       if (field === "companyId") {
         next.propertyId = "";
       }
-      if (field === "officeCode") {
-        next.companyId = "";
-        next.propertyId = "";
-        next.assignedRepId = user?.role === "rep" ? user.id : "";
-      }
+      // officeCode is a cosmetic prefix that no longer rescopes the data, so changing it must NOT clear the
+      // company/property/rep selections (the pickers stay on the home office regardless of the prefix).
       return next;
     });
     setError(null);
@@ -112,8 +112,8 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
       setError("Assigned sales rep is required");
       return;
     }
-    if (!selectedOffice?.officeId || !formData.officeCode) {
-      setError("Cannot create opportunity: selected office is unavailable. Contact admin.");
+    if (!activeOfficeId || !formData.officeCode) {
+      setError("Cannot create opportunity: no active office. Contact admin.");
       return;
     }
     if (!serviceProjectType) {
@@ -132,11 +132,11 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
           assignedRepId: formData.assignedRepId,
           description: formData.description.trim() || null,
           expectedCloseDate: formData.expectedCloseDate || null,
-          officeCode: formData.officeCode,
+          officeCode: formData.officeCode, // cosmetic prefix; the record is created on the home office below
           projectType: "service",
           projectTypeId: serviceProjectType.id,
         },
-        { officeId: selectedOffice.officeId }
+        { officeId: activeOfficeId }
       );
 
       if (onSuccess) {
@@ -192,7 +192,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
               <CompanySelector
                 value={formData.companyId || null}
                 onChange={(companyId) => handleChange("companyId", companyId)}
-                officeId={selectedOffice?.officeId}
+                officeId={activeOfficeId ?? undefined}
                 required
               />
             </div>
@@ -202,7 +202,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
                 companyId={formData.companyId || null}
                 value={formData.propertyId || null}
                 onChange={(propertyId) => handleChange("propertyId", propertyId)}
-                officeId={selectedOffice?.officeId}
+                officeId={activeOfficeId ?? undefined}
                 required
               />
             </div>
@@ -239,14 +239,14 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
             >
               <SelectTrigger id="officeCode">
                 <SelectValue placeholder="Select office">
-                  {selectedOffice?.label ?? "Select office"}
+                  {selectedOfficeLabel}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {officeOptions.length === 0 ? (
                   <SelectItem value="none" disabled>No offices available</SelectItem>
                 ) : (
-                  officeOptions.map((office: OfficeSelectionOption) => (
+                  officeOptions.map((office) => (
                     <SelectItem key={office.code} value={office.code}>
                       {office.label}
                     </SelectItem>

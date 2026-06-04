@@ -255,28 +255,16 @@ async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: stri
   };
 }
 
-function buildLeadOfficeScopeCondition(
-  alias: string,
-  input: { activeOfficeId: string; officeCode: string | null; officeUserIds: string[] }
+export function buildLeadOfficeScopeCondition(
+  _alias: string,
+  _input: { activeOfficeId: string; officeCode: string | null; officeUserIds: string[] }
 ) {
-  const leadAlias = sql.raw(alias);
-  const assignedRepFallback =
-    input.activeOfficeId
-      ? sql`${leadAlias}.office_code is null and exists (
-          select 1
-          from ${users} assigned_rep
-          where assigned_rep.id = ${leadAlias}.assigned_rep_id
-            and assigned_rep.office_id = ${input.activeOfficeId}
-        )`
-      : sql`false`;
-
-  if (input.officeCode) {
-    return sql`(${leadAlias}.office_code = ${input.officeCode} or ${assignedRepFallback})`;
-  }
-
-  return input.officeUserIds.length > 0
-    ? sql`${leadAlias}.assigned_rep_id in (${sql.join(input.officeUserIds.map((id) => sql`${id}`), sql`, `)})`
-    : sql`false`;
+  // office_code is a cosmetic project-number prefix, NOT an access boundary. Leads are scoped by the
+  // active-office SCHEMA (search_path) alone, so the lead list shows every lead in the schema regardless
+  // of office_code — e.g. an ATL-prefixed lead created on the Dallas schema stays visible to the Dallas
+  // reps who created it. (Signature/call sites kept unchanged; the scope inputs are intentionally unused
+  // now.) Mine/team visibility is applied by a SEPARATE condition and is unaffected by this change.
+  return sql`true`;
 }
 
 const LEAD_POC_ROLE_VALUES = new Set<LeadPocRole>(LEAD_POC_ROLES);

@@ -499,25 +499,30 @@ describe("lead stage transition route", () => {
     );
   });
 
-  it("rejects lead officeCode when it disagrees with the selected office slug", async () => {
+  it("accepts a lead officeCode that differs from the active office (prefix is cosmetic, decoupled from the schema)", async () => {
     const leadRoutes = await loadLeadRoutes();
-
-    await expect(
-      invokeLeadCreateRoute(
-        {
-          companyId: "company-1",
-          propertyId: "property-1",
-          name: "Lead One",
-          officeCode: "DFW",
-        },
-        leadRoutes
-      )
-    ).rejects.toMatchObject({
-      statusCode: 400,
-      message: "Cannot create lead: officeCode must match the selected office.",
+    serviceMocks.createLead.mockResolvedValueOnce({
+      id: "lead-created",
+      verificationStatus: "not_required",
     });
 
-    expect(serviceMocks.createLead).not.toHaveBeenCalled();
+    // Active office is atlanta, but the requested DFW prefix is honored (no must-match) and normalized to
+    // lowercase — the lead is still created on the active (atlanta) schema; only its prefix is DFW.
+    const { res } = await invokeLeadCreateRoute(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        name: "Lead One",
+        officeCode: "DFW",
+      },
+      leadRoutes
+    );
+
+    expect(res.statusCode).toBe(201);
+    expect(serviceMocks.createLead).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ officeCode: "dfw" })
+    );
   });
 
   it("preserves every lead create prerequisite key in the structured 400 response", async () => {

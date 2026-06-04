@@ -320,7 +320,9 @@ describe("listLeads scope filtering", () => {
     ]);
   });
 
-  it("returns active direct reports in the active office for scope=team", async () => {
+  it("returns active direct reports' leads for scope=team", async () => {
+    // office_code is now cosmetic, so team scope = leads assigned to the director's active direct reports
+    // regardless of office_code (e.g. lead-legacy-office-other, assigned to an in-team rep, now appears).
     await expect(listIds({ role: "director", userId: "director-1", scope: "team" })).resolves.toEqual([
       "lead-team-1",
       "lead-team-2",
@@ -329,10 +331,11 @@ describe("listLeads scope filtering", () => {
       "lead-activity",
       "lead-subscribed",
       "lead-legacy-office-fallback",
+      "lead-legacy-office-other",
     ]);
   });
 
-  it("scope=all returns only leads from the active office", async () => {
+  it("scope=all returns every lead in the active-office schema (office_code no longer filters)", async () => {
     await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.toEqual([
       "lead-self",
       "lead-team-1",
@@ -344,19 +347,18 @@ describe("listLeads scope filtering", () => {
       "lead-activity",
       "lead-subscribed",
       "lead-legacy-office-fallback",
+      "lead-legacy-office-other",
+      "lead-legacy-office-unassigned",
     ]);
   });
 
-  it("scope=all excludes legacy null-office leads assigned to a rep in a different office", async () => {
-    await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.not.toContain(
-      "lead-legacy-office-other"
-    );
-  });
-
-  it("scope=all excludes legacy null-office leads with no assigned rep", async () => {
-    await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.not.toContain(
-      "lead-legacy-office-unassigned"
-    );
+  // office_code is a cosmetic prefix now (not an access boundary): scope=all surfaces EVERY lead in the
+  // active-office schema, including the legacy null-office and other-office-rep leads the old office
+  // filter used to hide. Access is bounded by the schema/search_path alone.
+  it("scope=all now includes legacy null-office and other-office leads (office_code is cosmetic)", async () => {
+    const ids = await listIds({ role: "director", userId: "director-1", scope: "all" });
+    expect(ids).toContain("lead-legacy-office-other");
+    expect(ids).toContain("lead-legacy-office-unassigned");
   });
 
   it("narrows team scope to a specific assigned rep when both filters are set", async () => {
@@ -383,6 +385,8 @@ describe("listLeads scope filtering", () => {
       "lead-activity",
       "lead-subscribed",
       "lead-legacy-office-fallback",
+      "lead-legacy-office-other",
+      "lead-legacy-office-unassigned",
     ]);
   });
 

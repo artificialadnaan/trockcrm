@@ -194,28 +194,16 @@ async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: stri
   };
 }
 
-function buildDealOfficeScopeCondition(
-  alias: string,
-  input: { activeOfficeId: string; officeCode: string | null; officeUserIds: string[] }
+export function buildDealOfficeScopeCondition(
+  _alias: string,
+  _input: { activeOfficeId: string; officeCode: string | null; officeUserIds: string[] }
 ) {
-  const dealAlias = sql.raw(alias);
-  const assignedRepFallback =
-    input.activeOfficeId
-      ? sql`${dealAlias}.office_code is null and exists (
-          select 1
-          from ${users} assigned_rep
-          where assigned_rep.id = ${dealAlias}.assigned_rep_id
-            and assigned_rep.office_id = ${input.activeOfficeId}
-        )`
-      : sql`false`;
-
-  if (input.officeCode) {
-    return sql`(${dealAlias}.office_code = ${input.officeCode} or ${assignedRepFallback})`;
-  }
-
-  return input.officeUserIds.length > 0
-    ? sql`${dealAlias}.assigned_rep_id in (${sqlList(input.officeUserIds)})`
-    : sql`false`;
+  // office_code is a cosmetic project-number prefix, NOT an access boundary. Deals are scoped by the
+  // active-office SCHEMA (search_path) alone, so the deal list/board shows every deal in the schema
+  // regardless of office_code — e.g. an ATL-prefixed deal created on the Dallas schema stays visible to
+  // the Dallas reps who created it. (Signature/call sites kept unchanged; the scope inputs are
+  // intentionally unused now.)
+  return sql`true`;
 }
 
 // Excludes seeded/demo rows from production-facing deal reads. Matches the

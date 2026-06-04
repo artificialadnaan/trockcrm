@@ -56,9 +56,8 @@ import { CATEGORY_LABELS } from "@/lib/contact-utils";
 import { isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import {
-  buildOfficeSelectionOptions,
+  buildOfficeCodePrefixOptions,
   resolveDefaultOfficeCode,
-  type OfficeSelectionOption,
 } from "@/lib/office-selection";
 import {
   LEAD_BUDGET_STATUS_LABELS,
@@ -752,7 +751,7 @@ function EditableLeadForm({
   const { offices } = useAccessibleOffices();
   const isCreate = mode === "create";
   const activeOfficeId = user?.activeOfficeId ?? user?.officeId ?? null;
-  const officeOptions = buildOfficeSelectionOptions(offices);
+  const officeOptions = buildOfficeCodePrefixOptions();
   const initialOfficeCode = resolveDefaultOfficeCode({
     offices,
     activeOfficeId,
@@ -768,19 +767,21 @@ function EditableLeadForm({
       user
     )
   );
-  const selectedOffice = officeOptions.find((office) => office.code === formData.officeCode) ?? null;
-  const { assignees } = useTaskAssignees({ officeId: isCreate ? selectedOffice?.officeId : null });
+  // The office picker is a project-number PREFIX only: pickers + create target the rep's HOME (active)
+  // office, so choosing DFW vs ATL never changes which companies/properties/contacts/reps are available nor
+  // where the lead is created — only the lead number prefix.
+  const { assignees } = useTaskAssignees({ officeId: isCreate ? activeOfficeId : null });
   const { properties } = useProperties(
     companyId ? { companyId, limit: 500 } : { limit: 0 },
-    { officeId: isCreate ? selectedOffice?.officeId : null }
+    { officeId: isCreate ? activeOfficeId : null }
   );
   const { contacts, loading: companyContactsLoading, refetch: refetchContacts } = useCompanyContacts(
     companyId ?? undefined,
-    { officeId: isCreate ? selectedOffice?.officeId : null }
+    { officeId: isCreate ? activeOfficeId : null }
   );
   const { property: resolvedSelectedProperty } = usePropertyDetail(
     isCreate && formData.propertyId ? formData.propertyId : undefined,
-    { officeId: isCreate ? selectedOffice?.officeId : null }
+    { officeId: isCreate ? activeOfficeId : null }
   );
   const { questionnaire: questionnaireTemplate, loading: questionnaireTemplateLoading } = useLeadQuestionnaireTemplate(
     isCreate ? (formData.projectTypeId || null) : null
@@ -1056,7 +1057,7 @@ function EditableLeadForm({
     }
     if (!formData.name.trim()) errors.set("name", "Lead name is required.");
     if (!formData.budgetStatus) errors.set("budgetStatus", "Budget status is required.");
-    if (!formData.officeCode || !selectedOffice?.officeId) errors.set("officeCode", "Office is required.");
+    if (!formData.officeCode || !activeOfficeId) errors.set("officeCode", "Office is required.");
     if (!formData.projectTypeId) errors.set("projectTypeId", "Project type is required.");
     if (!formData.bidDueDate) {
       errors.set("bidDueDate", "Bid Due Date is required.");
@@ -1092,7 +1093,7 @@ function EditableLeadForm({
     isCreate,
     maxPropertyBuildYear,
     selectedProperty,
-    selectedOffice?.officeId,
+    activeOfficeId,
     useV2Questionnaire,
     v2ScopeAppliesNodes,
   ]);
@@ -1171,24 +1172,9 @@ function EditableLeadForm({
   };
 
   const handleFieldChange = (field: keyof typeof formData, value: string) => {
-    if (field === "officeCode") {
-      setCompanyId(null);
-    }
-
-    setFormData((current) => {
-      if (field === "officeCode") {
-        return {
-          ...current,
-          officeCode: value,
-          companyId: "",
-          propertyId: "",
-          primaryContactId: "",
-          assignedRepId: user?.role === "rep" ? user.id : "",
-        };
-      }
-
-      return { ...current, [field]: value };
-    });
+    // officeCode is a cosmetic prefix that no longer rescopes the data, so changing it must NOT clear the
+    // company/property/contact/rep selections (the pickers stay on the home office regardless of the prefix).
+    setFormData((current) => ({ ...current, [field]: value }));
     clearCreateGateMissingKeysForField(field);
   };
 
@@ -1257,7 +1243,7 @@ function EditableLeadForm({
           companyId,
           skipDedupCheck: true,
         },
-        { officeId: isCreate ? selectedOffice?.officeId : null }
+        { officeId: isCreate ? activeOfficeId : null }
       );
 
       if (!result.contact) {
@@ -1532,8 +1518,8 @@ function EditableLeadForm({
       };
 
       if (isCreate) {
-        if (!selectedOffice?.officeId) {
-          setError("Cannot create lead: selected office is unavailable. Contact admin.");
+        if (!activeOfficeId) {
+          setError("Cannot create lead: no active office. Contact admin.");
           return;
         }
 
@@ -1574,7 +1560,7 @@ function EditableLeadForm({
           }
 
           try {
-            const result = await updateProperty(selectedProperty.id, propertyPatch, { officeId: selectedOffice.officeId });
+            const result = await updateProperty(selectedProperty.id, propertyPatch, { officeId: activeOfficeId });
             setRepairedProperties((current) => new Map(current).set(result.property.id, result.property));
           } catch (err) {
             setError(`Failed to update property: ${err instanceof Error ? err.message : "Unknown error"}`);
@@ -1601,7 +1587,7 @@ function EditableLeadForm({
             officeCode: formData.officeCode,
             ...workflowPayload,
           },
-          { officeId: selectedOffice.officeId }
+          { officeId: activeOfficeId }
         );
 
         try {
@@ -1705,7 +1691,7 @@ function EditableLeadForm({
                 <CompanySelector
                   value={companyId}
                   onChange={setCompanyId}
-                  officeId={selectedOffice?.officeId}
+                  officeId={activeOfficeId ?? undefined}
                   showOwnerLabel
                   required
                 />
@@ -1718,7 +1704,7 @@ function EditableLeadForm({
                     companyId={companyId}
                     value={formData.propertyId || null}
                     onChange={(propertyId) => handleFieldChange("propertyId", propertyId)}
-                    officeId={selectedOffice?.officeId}
+                    officeId={activeOfficeId ?? undefined}
                     required
                     requireLeadCreateFields
                     onPropertyRepaired={(property) => {
@@ -2153,7 +2139,7 @@ function EditableLeadForm({
                             No offices available
                           </SelectItem>
                         ) : (
-                          officeOptions.map((office: OfficeSelectionOption) => (
+                          officeOptions.map((office) => (
                             <SelectItem key={office.code} value={office.code}>
                               {office.label}
                             </SelectItem>

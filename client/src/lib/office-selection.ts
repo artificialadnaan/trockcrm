@@ -41,6 +41,16 @@ export function buildOfficeSelectionOptions(offices: OfficeSelectionSource[]): O
   });
 }
 
+/**
+ * The office picker is a cosmetic project-number PREFIX chooser (DFW-/ATL-), decoupled from which offices
+ * a rep can access and from the data schema: every rep may choose either code, and the choice only sets
+ * the deal/lead number prefix — companies/properties/contacts and the created record all stay on the rep's
+ * home (active) office. So the picker offers BOTH codes regardless of the rep's accessible offices.
+ */
+export function buildOfficeCodePrefixOptions(): { code: DealOfficeCode; label: string }[] {
+  return OFFICE_ORDER.map((code) => ({ code, label: OFFICE_LABELS[code] }));
+}
+
 export function resolveDefaultOfficeCode(input: {
   offices: OfficeSelectionSource[];
   activeOfficeId?: string | null;
