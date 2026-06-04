@@ -1412,3 +1412,79 @@ describe("PATCH /api/deals/:id reassignment authorization", () => {
     expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
   });
 });
+
+describe("PATCH /api/deals/:id empty-string uuid hardening", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", officeId: "office-1" });
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", officeId: "office-1" });
+    scopingServiceMocks.assertDealScopingWriteAllowed.mockResolvedValue({
+      adminOverride: false,
+      lockState: { locked: false, submittedAt: null, reason: null },
+    });
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal());
+    dealsServiceMocks.updateDeal.mockImplementation(async (_tenantDb, dealId, input) => ({
+      id: dealId,
+      ...baseDeal(),
+      ...input,
+    }));
+  });
+
+  // The third positional arg to updateDeal is the patch `input`.
+  function updateInput() {
+    return dealsServiceMocks.updateDeal.mock.calls[0]?.[2] as Record<string, unknown> | undefined;
+  }
+
+  it("omits an empty-string companyId from the updateDeal call (no 500, no unintended clear)", async () => {
+    const { res, error } = await invokePatch(
+      { companyId: "", expectedCloseDate: "2026-09-15" },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    expect(dealsServiceMocks.updateDeal).toHaveBeenCalledTimes(1);
+    const input = updateInput()!;
+    expect(input).not.toHaveProperty("companyId");
+    expect(input).toMatchObject({ expectedCloseDate: "2026-09-15" });
+  });
+
+  it("omits an empty-string propertyId without loading a property", async () => {
+    const { req, res, error } = await invokePatch(
+      { propertyId: "", expectedCloseDate: "2026-09-15" },
+      createUser("rep")
+    );
+
+    expect(error).toBeNull();
+    expect(res.statusCode).toBe(200);
+    // The stripped propertyId must not trigger the relationship/property-load
+    // branch (loadDealLocationFromProperty is the only tenantDb.select on this path).
+    expect(req.tenantDb.select).not.toHaveBeenCalled();
+    const input = updateInput()!;
+    expect(input).not.toHaveProperty("propertyId");
+  });
+
+  it("omits a whitespace-only uuid field", async () => {
+    await invokePatch({ assignedRepId: "   ", expectedCloseDate: "2026-09-15" }, createUser("rep"));
+    const input = updateInput()!;
+    expect(input).not.toHaveProperty("assignedRepId");
+  });
+
+  it("still forwards a genuine companyId unchanged", async () => {
+    await invokePatch({ companyId: "company-7" }, createUser("rep"));
+    const input = updateInput()!;
+    expect(input).toMatchObject({ companyId: "company-7" });
+  });
+
+  it("does not introduce a companyId key when the field is omitted entirely", async () => {
+    await invokePatch({ expectedCloseDate: "2026-09-15" }, createUser("rep"));
+    const input = updateInput()!;
+    expect(input).not.toHaveProperty("companyId");
+  });
+
+  it("forwards an explicit null companyId unchanged so the service still owns the clear rejection", async () => {
+    await invokePatch({ companyId: null }, createUser("rep"));
+    const input = updateInput()!;
+    expect(input).toHaveProperty("companyId", null);
+  });
+});
