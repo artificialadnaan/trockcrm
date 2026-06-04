@@ -21,4 +21,6 @@ export interface AuthenticatedUser {
   onboardingPendingCount?: number;
   requiresOnboarding?: boolean;
   cleanupUrl?: string;
+  /** True iff this user is a designated RFP override reviewer (RFP_REJECTION_EMAIL_RECIPIENTS allowlist). */
+  isRfpReviewer?: boolean;
 }

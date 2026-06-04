@@ -161,7 +161,32 @@ describe("buildRfpRejectionEmail link", () => {
       frontendUrl: "https://trockcrm.com",
     });
     expect(email.dealUrl).toBe(`https://trockcrm.com/deals/${DEAL}`);
+    expect(email.reviewUrl).toBe(`https://trockcrm.com/rfp-review/${DEAL}`);
     expect(email.html).toContain("No reason provided");
     expect(email.html).toContain("Pending");
+  });
+
+  it("includes the override review-page link + button so reviewers can approve or re-confirm", () => {
+    const email = buildRfpRejectionEmail({
+      dealId: DEAL,
+      dealName: "jasonn ranches",
+      dealNumber: "TR-1001",
+      declinedReason: "Margins too thin",
+      officeId: OFFICE,
+      frontendUrl: "https://trockcrm.com",
+    });
+    // primary CTA points at the dedicated review page for THIS deal, carrying officeId so it resolves
+    expect(email.reviewUrl).toBe(`https://trockcrm.com/rfp-review/${DEAL}?officeId=${OFFICE}`);
+    expect(email.reviewUrl.split("?")[1]).toBe(`officeId=${OFFICE}`);
+    expect(email.html).toContain(`https://trockcrm.com/rfp-review/${DEAL}?officeId=${OFFICE}`);
+    expect(email.html).toContain("Review &amp; Decide");
+    // the text fallback links to the review page too
+    expect(email.text).toContain(`https://trockcrm.com/rfp-review/${DEAL}?officeId=${OFFICE}`);
+    // the requester (who is NOT a reviewer) still gets a working primary "View Deal in CRM" action -
+    // the reviewer-only page must not become their only CTA (Codex P2).
+    expect(email.html).toContain("View Deal in CRM");
+    expect(email.html).toContain(`https://trockcrm.com/deals/${DEAL}?officeId=${OFFICE}`);
+    expect(email.text).toContain(`https://trockcrm.com/deals/${DEAL}?officeId=${OFFICE}`);
+    expect(email.html).not.toMatch(/trockconstruction\.com/);
   });
 });

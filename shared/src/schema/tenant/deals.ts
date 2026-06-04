@@ -187,6 +187,13 @@ export const deals = pgTable(
     rfpApprovalStatus: text("rfp_approval_status"),
     rfpDeclinedReason: text("rfp_declined_reason"),
     rfpDeclinedAt: timestamp("rfp_declined_at", { withTimezone: true }),
+    // Second-look override-review state (migration 0151). Set when Takashi/Adam review a declined RFP:
+    // approving re-submits it (and clears these back to NULL for the fresh cycle); re-confirming records
+    // 'denial_reconfirmed' so the decline is not perpetually re-flagged. See rfp-override-service.ts.
+    rfpOverrideReviewedAt: timestamp("rfp_override_reviewed_at", { withTimezone: true }),
+    rfpOverrideReviewedBy: uuid("rfp_override_reviewed_by"),
+    rfpOverrideDecision: text("rfp_override_decision"),
+    rfpOverrideNote: text("rfp_override_note"),
     rfpConflictReason: text("rfp_conflict_reason"),
     rfpConflictWith: jsonb("rfp_conflict_with"),
     rfpLastAttemptError: text("rfp_last_attempt_error"),

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
-import { requireRole } from "../../middleware/rbac.js";
+import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { assertOptionalIsoDateQueryParam } from "../../lib/date-query.js";
@@ -50,6 +50,11 @@ import {
   deleteLineItem,
 } from "./estimate-service.js";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
+import {
+  getRfpReviewDetail,
+  reconfirmRfpDecline,
+  resubmitDeclinedRfp,
+} from "./rfp-override-service.js";
 import {
   getPunchList,
   createPunchListItem,
@@ -1352,6 +1357,84 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
 
     await req.commitTransaction!();
     res.status(202).json({ success: true, status: "pending_outbox" });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Optional reviewer note: trim, treat blank as absent, cap length so it fits the history/audit columns.
+function normalizeRfpOverrideNote(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  return trimmed.slice(0, 2000);
+}
+
+// --- RFP override second-look review (gated to the designated reviewers: Takashi + Adam) ---
+// These three routes are reached from the "Review & Decide" link in the RFP-decline email. requireRfpReviewer
+// restricts them to the RFP_REJECTION_EMAIL_RECIPIENTS allowlist; a regular admin/director gets 403.
+
+// GET /api/deals/:id/rfp-review — page data for the override-review surface.
+router.get("/:id/rfp-review", requireRfpReviewer, async (req, res, next) => {
+  try {
+    const detail = await getRfpReviewDetail(req.tenantDb!, req.params.id as string);
+    if (!detail) throw new AppError(404, "Deal not found");
+    await req.commitTransaction!();
+    res.json({ review: detail });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/rfp-override/approve — override the no-go: re-submit the RFP to SyncHub.
+router.post("/:id/rfp-override/approve", requireRfpReviewer, async (req, res, next) => {
+  try {
+    // Approving re-submits to SyncHub, so it is gated on the same flag as the initial trigger: if the RFP
+    // delivery pipeline is disabled there is nothing to re-submit into.
+    if (!isOpportunityRfpEventEnabled()) {
+      throw new AppError(503, "Opportunity RFP delivery is disabled.", "RFP_EVENT_DISABLED");
+    }
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+    const result = await resubmitDeclinedRfp({
+      tenantDb: req.tenantDb!,
+      officeId,
+      dealId: req.params.id as string,
+      actor: { userId: req.user!.id, name: req.user!.displayName, role: req.user!.role },
+      note: normalizeRfpOverrideNote(req.body?.note),
+    });
+    if (!result.ok) {
+      // Nothing was written (the guarded UPDATE matched 0 rows). Throw so the tenant transaction rolls back.
+      throw new AppError(
+        409,
+        "This RFP is no longer awaiting review (it was already approved, re-submitted, or re-confirmed).",
+        "RFP_OVERRIDE_NOT_ACTIONABLE"
+      );
+    }
+    await req.commitTransaction!();
+    res.json({ success: true, status: result.status, jobId: result.jobId, eventId: result.eventId });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/rfp-override/reconfirm-decline — uphold the no-go (stays declined, marked reviewed).
+router.post("/:id/rfp-override/reconfirm-decline", requireRfpReviewer, async (req, res, next) => {
+  try {
+    const result = await reconfirmRfpDecline({
+      tenantDb: req.tenantDb!,
+      dealId: req.params.id as string,
+      actor: { userId: req.user!.id, name: req.user!.displayName, role: req.user!.role },
+      note: normalizeRfpOverrideNote(req.body?.note),
+    });
+    if (!result.ok) {
+      throw new AppError(
+        409,
+        "This RFP is no longer awaiting review (it was already approved, re-submitted, or re-confirmed).",
+        "RFP_OVERRIDE_NOT_ACTIONABLE"
+      );
+    }
+    await req.commitTransaction!();
+    res.json({ success: true, status: result.status, decision: result.decision });
   } catch (err) {
     next(err);
   }

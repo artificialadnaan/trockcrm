@@ -8,7 +8,8 @@
       "@trock-crm/shared/schema": ["../shared/dist/schema/index.d.ts"],
       "@trock-crm/shared/types": ["../shared/dist/types/index.d.ts"],
       "@trock-crm/shared/utils": ["../shared/dist/utils/normalize.d.ts"],
-      "@trock-crm/shared/lib/bidBoardStatusMap": ["../shared/dist/lib/bidBoardStatusMap.d.ts"]
+      "@trock-crm/shared/lib/bidBoardStatusMap": ["../shared/dist/lib/bidBoardStatusMap.d.ts"],
+      "@trock-crm/shared/lib/rfpReviewerEmails": ["../shared/dist/lib/rfpReviewerEmails.d.ts"]
     }
   },
   "include": ["src/**/*"],
