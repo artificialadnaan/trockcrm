@@ -49,6 +49,9 @@ function matchedDeal(overrides: Record<string, unknown> = {}) {
     project_number: null,
     bid_board_project_number: null,
     bid_estimate: null,
+    won_closed_date: null,
+    contract_signed_date: null,
+    contract_signed_at: null,
     ...overrides,
   };
 }
@@ -86,13 +89,14 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("stage_id = $1")) {
         expect(params[0]).toBe("stage-under-review");
         expect(params[1]).toBeInstanceOf(Date);
-        expect(params.slice(2, 10)).toEqual([
+        expect(params.slice(2, 11)).toEqual([
           null,
           0,
           0,
           "estimate_under_review",
           "estimating",
           "Estimate Under Review",
+          null, // won_closed_date — null for a non-Won target (lockstep)
           "deal-123",
           "stage-opportunity",
         ]);
@@ -354,13 +358,14 @@ describe("Bid Board sync stage writeback", () => {
         expect(params[0]).toBe("stage-under-review");
         expect(params[1]).toBeInstanceOf(Date);
         stageEnteredAtParam = params[1] as Date;
-        expect(params.slice(2, 10)).toEqual([
+        expect(params.slice(2, 11)).toEqual([
           null,
           0,
           0,
           "estimate_under_review",
           "estimating",
           "Estimate Under Review",
+          null, // won_closed_date — null for a non-Won target (lockstep)
           "deal-contract",
           "stage-contract",
         ]);
@@ -405,7 +410,8 @@ describe("Bid Board sync stage writeback", () => {
     expect(stageEnteredAtParam!.getTime()).toBeGreaterThan(new Date("2026-05-01T00:00:00.000Z").getTime());
   });
 
-  it("does not downgrade a terminal CRM deal from Bid Board export status", async () => {
+  it("mirrors a terminal CRM deal back to the Bid Board stage (terminal exit) and clears won_closed_date", async () => {
+    let stageHistoryParams: unknown[] | null = null;
     query.mockImplementation(async (sql: string, params: unknown[] = []) => {
       const base = successfulRunBase(sql);
       if (base) return base;
@@ -420,6 +426,7 @@ describe("Bid Board sync stage writeback", () => {
               stage_slug: "won",
               stage_display_order: 7,
               stage_is_terminal: true,
+              won_closed_date: "2026-05-01", // was Won; mirror must CLEAR it on exit
               deal_number: "DFW-5-99999-ab",
             }),
           ],
@@ -443,11 +450,17 @@ describe("Bid Board sync stage writeback", () => {
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
         return { rows: [], rowCount: 1 };
       }
+      // Bid Board is authoritative: the terminal Won deal IS mirrored back to its Bid Board stage,
+      // and won_closed_date is CLEARED in lockstep (the $9::date param is null for a non-Won target).
       if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("stage_id = $1")) {
-        throw new Error("terminal deals must not be downgraded by Bid Board sync");
+        expect(params[0]).toBe("stage-estimating");
+        expect(normalizedSql).toContain("won_closed_date = $9::date");
+        expect(params[8]).toBeNull();
+        return { rows: [{ id: "deal-won" }], rowCount: 1 };
       }
       if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) {
-        throw new Error("terminal downgrade skips must not write stage history");
+        stageHistoryParams = params;
+        return { rows: [], rowCount: 1 };
       }
       if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
         return { rows: [] };
@@ -468,9 +481,11 @@ describe("Bid Board sync stage writeback", () => {
     });
 
     expect(result.metrics.matched).toBe(1);
-    expect(result.metrics.stageUpdated).toBe(0);
-    expect(result.metrics.skippedTerminal).toBe(1);
-    expect(result.warnings.join("\n")).toContain("terminal");
+    expect(result.metrics.stageUpdated).toBe(1);
+    expect(result.metrics.appliedTerminalExit).toBe(1);
+    expect(result.metrics.skippedTerminal).toBe(0);
+    // won (order 7) -> estimating (order 3) is recorded as a backward move.
+    expect(stageHistoryParams?.[4]).toBe(true);
   });
 
   it("does not rewrite bid estimates for terminal CRM deals", async () => {
@@ -508,6 +523,15 @@ describe("Bid Board sync stage writeback", () => {
       }
       if (normalizedSql.includes("insert into office_dallas.deal_history")) {
         throw new Error("terminal estimate skips must not write deal history");
+      }
+      // The terminal Won deal is now MIRRORED to its Bid Board stage (terminal exit): the STAGE path
+      // writes the stage + deal_stage_history. The ESTIMATE path still skips terminal (the
+      // bid_estimate write above stays guarded and is never reached).
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("stage_id = $1")) {
+        return { rows: [{ id: "deal-terminal-estimate" }], rowCount: 1 };
+      }
+      if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) {
+        return { rows: [], rowCount: 1 };
       }
       if (normalizedSql.includes("from public.pipeline_stage_config")) {
         return { rows: [{ id: "stage-estimating", slug: "estimating", display_order: 3, is_terminal: false }], rowCount: 1 };
