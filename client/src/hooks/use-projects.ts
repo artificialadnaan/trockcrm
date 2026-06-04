@@ -19,6 +19,7 @@ export interface PortfolioProjectSummary {
 export interface PortfolioProjectBoardColumn {
   stage: string;
   label: string;
+  totalValue: number;
   projects: PortfolioProjectSummary[];
 }
 

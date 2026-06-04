@@ -111,6 +111,8 @@ export interface PortfolioProjectStageEntry {
 export interface PortfolioProjectBoardColumn {
   stage: PortfolioProjectBoardStage;
   label: string;
+  /** Sum of every project's contract value (total_value) in this stage column. */
+  totalValue: number;
   projects: PortfolioProjectSummary[];
 }
 
@@ -643,10 +645,21 @@ function toPortfolioStageEntry(row: any): PortfolioProjectStageEntry {
   };
 }
 
+/**
+ * Coerce a project's contract value to a finite number for summation. Null, undefined,
+ * non-numeric, NaN, and Infinity all collapse to 0 so a single missing or "not synced"
+ * value can never NaN a column subtotal.
+ */
+function coercePortfolioContractValue(value: unknown): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
 export function groupPortfolioProjectsForBoard(rows: any[]) {
   const columns: PortfolioProjectBoardColumn[] = PORTFOLIO_PROJECT_BOARD_STAGES.map((stage) => ({
     stage,
     label: stageLabel(stage),
+    totalValue: 0,
     projects: [],
   }));
   const columnByStage = new Map(columns.map((column) => [column.stage, column]));
@@ -657,6 +670,16 @@ export function groupPortfolioProjectsForBoard(rows: any[]) {
     if (!project) continue;
     projects.push(project);
     columnByStage.get(project.currentStageNormalized)?.projects.push(project);
+  }
+
+  // Subtotal each column from its own projects so the dollar total and the project
+  // count always describe the exact same set (stale/unsynced values still included;
+  // null / non-numeric values count as 0).
+  for (const column of columns) {
+    column.totalValue = column.projects.reduce(
+      (sum, project) => sum + coercePortfolioContractValue(project.totalValue),
+      0,
+    );
   }
 
   return { stages: columns, projects };
