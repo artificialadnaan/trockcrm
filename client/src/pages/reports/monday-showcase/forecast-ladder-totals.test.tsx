@@ -99,6 +99,16 @@ describe("B4 Forecast Ladder — office column totals row", () => {
     expect(text.toLowerCase()).toContain("all reps");
   });
 
+  it("renders the office totals as a HEADER above the per-rep rows (visible on open)", () => {
+    render();
+    const text = container.textContent ?? "";
+    const totalsAt = text.indexOf("All reps");
+    const firstRepAt = text.indexOf("Alice"); // first rep row
+    expect(totalsAt).toBeGreaterThanOrEqual(0);
+    expect(firstRepAt).toBeGreaterThanOrEqual(0);
+    expect(totalsAt).toBeLessThan(firstRepAt); // totals header precedes the rep rows
+  });
+
   it("shows the dated count per window in the totals row and $0 / 0 for an empty bucket (never NaN)", () => {
     render();
     const text = container.textContent ?? "";
