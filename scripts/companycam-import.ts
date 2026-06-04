@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { getAllProjects, getProjectPhotos, type CCPhoto } from "../server/src/modules/companycam/client.js";
 import { isR2Configured, putObject } from "../server/src/lib/r2-client.js";
-import { buildCompanyCamImportPlan, type DealForCompanyCamPlan } from "./companycam-inventory.js";
+import { buildCompanyCamImportPlan, companyCamPlanDisposition, type DealForCompanyCamPlan } from "./companycam-inventory.js";
 import type { CompanyCamImportPlanRow } from "./companycam-inventory.js";
 
 const DEFAULT_TENANT = "office_dallas";
@@ -97,7 +97,10 @@ export function prepareCompanyCamImportRows(
   planRows: CompanyCamImportPlanRow[],
   options: Pick<CompanyCamImportOptions, "projectId" | "limit"> = {}
 ) {
-  const candidates = planRows.filter((row) => row.matchedDealId && row.confidence >= 0.9);
+  // Auto-seed ONLY the reliable tiers (existing link, project-number, exact-AND-unique name), never an
+  // on-hold deal — i.e. the "auto" disposition. Ambiguous-exact collisions, sub-1.0 fuzzy guesses, and
+  // unmatched projects are left for the manual worklist.
+  const candidates = planRows.filter((row) => row.matchedDealId && companyCamPlanDisposition(row) === "auto");
   const byDealId = new Map<string, CompanyCamImportPlanRow[]>();
   for (const row of candidates) {
     byDealId.set(row.matchedDealId!, [...(byDealId.get(row.matchedDealId!) ?? []), row]);
@@ -165,12 +168,18 @@ function writeMatchConflictsCsv(conflicts: CompanyCamMatchConflict[], outputPath
   fs.writeFileSync(outputPath, rows.map((row) => row.map(csvEscape).join(",")).join("\n"));
 }
 
-async function loadDeals(client: pg.Client, tenant: string): Promise<DealForCompanyCamPlan[]> {
+export async function loadDeals(client: pg.Client, tenant: string): Promise<DealForCompanyCamPlan[]> {
   const schema = quoteIdent(tenant);
+  // On-hold deals are excluded here so they are never seed targets. As a consequence the
+  // exact-name uniqueness check (in the matcher) is evaluated over the non-on-hold deals only:
+  // a name shared by one active + one on-hold deal counts as unique and auto-links the active deal
+  // (the on-hold deal is not a viable target anyway). The read-only inventory loadDeals, by
+  // contrast, keeps on-hold deals so its report flags such names as ambiguous.
   const { rows } = await client.query(`
     SELECT id::text, name, deal_number, project_number, companycam_project_id
     FROM ${schema}.deals
     WHERE is_active = true
+      AND COALESCE(on_hold, false) = false
   `);
   return rows.map((row) => ({
     id: row.id,
@@ -214,7 +223,7 @@ function extension(contentType: string) {
   return ".jpg";
 }
 
-async function importPhoto(input: {
+export async function importPhoto(input: {
   client: pg.Client;
   tenant: string;
   projectId: string;
@@ -383,6 +392,9 @@ export async function runCompanyCamImport(argv = process.argv.slice(2)) {
       matchConflictsPath: prepared.conflicts.length > 0 ? conflictsPath : null,
       imported,
       skippedExisting: skipped,
+      autoSeedEligible: plan.totals.autoSeed,
+      leftForManualReview: plan.totals.manualReview,
+      byTier: plan.totals.byTier,
       fullRunRecommendation: plan.totals.totalPhotos > 10_000 ? "defer_full_run_post_go_live" : "eligible_after_pilot",
     }, null, 2));
   } finally {

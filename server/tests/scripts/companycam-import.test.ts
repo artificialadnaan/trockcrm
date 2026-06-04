@@ -16,7 +16,7 @@ function planRow(overrides: Partial<CompanyCamImportPlanRow>): CompanyCamImportP
     matchedDealName: "Default Deal",
     matchedDealNumber: "D-1",
     confidence: 1,
-    matchReason: "fuzzy_project_name",
+    matchReason: "exact_unique_name", // a reliable (auto) tier so the one-to-one dedup engages
     ...overrides,
   };
 }
@@ -109,5 +109,19 @@ describe("companycam-import", () => {
         keptCompanyCamProjectId: "cc-high",
       }),
     ]);
+  });
+
+  it("auto-seeds only the reliable (auto) tiers — skips fuzzy, on-hold, and unmatched", () => {
+    const result = prepareCompanyCamImportRows([
+      planRow({ companyCamProjectId: "cc-link", matchReason: "existing_companycam_link", matchedDealId: "d1" }),
+      planRow({ companyCamProjectId: "cc-num", matchReason: "project_number_in_name", matchedDealId: "d2" }),
+      planRow({ companyCamProjectId: "cc-exact", matchReason: "exact_unique_name", matchedDealId: "d3" }),
+      planRow({ companyCamProjectId: "cc-fuzzy", matchReason: "fuzzy_project_name", matchedDealId: "d4", confidence: 0.95 }), // sub/ambiguous -> manual
+      planRow({ companyCamProjectId: "cc-onhold", matchReason: "exact_unique_name", matchedDealId: "d5", matchedDealOnHold: true }), // on-hold -> manual
+      planRow({ companyCamProjectId: "cc-unmatched", matchReason: "unmatched", matchedDealId: null, confidence: 0 }), // unmatched -> manual
+    ]);
+
+    expect(result.rows.map((row) => row.companyCamProjectId).sort()).toEqual(["cc-exact", "cc-link", "cc-num"]);
+    expect(result.conflicts).toEqual([]); // each kept project maps to a distinct deal
   });
 });
