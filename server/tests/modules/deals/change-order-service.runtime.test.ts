@@ -86,11 +86,13 @@ describe("normalizeChangeOrderAmount", () => {
     expect(() => normalizeChangeOrderAmount("abc")).toThrow();
     expect(() => normalizeChangeOrderAmount(null)).toThrow();
   });
-  it("rejects a sub-cent positive amount (would round to 0.00 and trip the DB CHECK)", () => {
+  it("rejects sub-cent / extra-precision amounts (no silent float rounding into the DB)", () => {
     expect(() => normalizeChangeOrderAmount(0.004)).toThrow();
     expect(() => normalizeChangeOrderAmount("0.001")).toThrow();
-    // 0.005 rounds UP to a cent and is allowed.
-    expect(normalizeChangeOrderAmount(0.005)).toBe("0.01");
+    expect(() => normalizeChangeOrderAmount(0.005)).toThrow(); // >2 decimals -> rejected, not rounded
+    expect(() => normalizeChangeOrderAmount("1500.005")).toThrow();
+    // Decimal-safe at the ceiling: 999999999999.995 must NOT silently store 999999999999.99.
+    expect(() => normalizeChangeOrderAmount("999999999999.995")).toThrow();
   });
   it("rejects an amount past the NUMERIC(14,2) ceiling (would overflow the column as a 500)", () => {
     expect(() => normalizeChangeOrderAmount(10000000000000)).toThrow();
@@ -182,6 +184,13 @@ describe("sumDealChangeOrders", () => {
     await addDealChangeOrder(tdb, { dealId: DEAL_WON, signedDate: "2026-03-16", amount: "0.20", createdBy: USER });
     await addDealChangeOrder(tdb, { dealId: DEAL_WON, signedDate: "2026-03-17", amount: "1000000.00", createdBy: USER });
     expect(Number(await sumDealChangeOrders(tdb, DEAL_WON))).toBe(1000100.3);
+  });
+  it("does not overflow when the SUM of valid rows exceeds the per-row NUMERIC(14,2) ceiling", async () => {
+    // Each row is individually valid (<= 999,999,999,999.99); their SUM exceeds the per-row ceiling.
+    await addDealChangeOrder(tdb, { dealId: DEAL_WON, signedDate: "2026-03-15", amount: "999999999999.99", createdBy: USER });
+    await addDealChangeOrder(tdb, { dealId: DEAL_WON, signedDate: "2026-03-16", amount: "999999999999.99", createdBy: USER });
+    const total = await sumDealChangeOrders(tdb, DEAL_WON);
+    expect(Number(total)).toBeCloseTo(1999999999999.98, 2);
   });
 });
 

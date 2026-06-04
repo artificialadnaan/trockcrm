@@ -175,7 +175,7 @@ describe("DealEstimatesCard change orders", () => {
 
     expect(mocks.addDealChangeOrder).toHaveBeenCalledWith("deal-1", {
       signedDate: "2026-03-15",
-      amount: "1500.00",
+      amount: "1500",
       description: null,
     });
     expect(mocks.onChanged).toHaveBeenCalled();
@@ -192,10 +192,10 @@ describe("DealEstimatesCard change orders", () => {
       container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
     expect(mocks.addDealChangeOrder).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Amount must be at least 0.01");
+    expect(container.textContent).toContain("Enter a positive amount with at most 2 decimals");
   });
 
-  it("accepts a sub-cent amount that rounds up to a cent (0.005 -> 0.01), matching the server", async () => {
+  it("rejects an extra-precision amount client-side (mirrors the server), without calling the API", async () => {
     const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true, onChanged: mocks.onChanged });
     clickButtonByText(container, "Add Change Order");
     act(() => {
@@ -205,11 +205,8 @@ describe("DealEstimatesCard change orders", () => {
     await act(async () => {
       container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
-    expect(mocks.addDealChangeOrder).toHaveBeenCalledWith("deal-1", {
-      signedDate: "2026-03-15",
-      amount: "0.01",
-      description: null,
-    });
+    expect(mocks.addDealChangeOrder).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Enter a positive amount with at most 2 decimals");
   });
 
   it("edits an existing change order through the dialog (prefilled) and PATCHes it", async () => {
@@ -238,7 +235,7 @@ describe("DealEstimatesCard change orders", () => {
 
     expect(mocks.updateDealChangeOrder).toHaveBeenCalledWith("deal-1", "co-1", {
       signedDate: "2026-05-01",
-      amount: "2500.00",
+      amount: "2500",
       description: "punch list",
     });
     expect(mocks.onChanged).toHaveBeenCalled();

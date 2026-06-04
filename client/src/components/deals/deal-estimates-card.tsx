@@ -203,18 +203,14 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, onSaved }: Ch
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const numericAmount = parseFloat(amount);
-    // Validate on rounded cents to match the server (which rounds to 2dp): 0.005 -> 0.01 is allowed,
-    // 0.004 -> 0.00 is rejected. Send the rounded value so client and stored amount agree.
-    const roundedCents = Number.isFinite(numericAmount)
-      ? Math.round((numericAmount + Number.EPSILON) * 100)
-      : NaN;
+    const trimmedAmount = amount.trim();
     if (!signedDate) {
       setError("Signed date is required");
       return;
     }
-    if (!Number.isFinite(roundedCents) || roundedCents <= 0) {
-      setError("Amount must be at least 0.01");
+    // Mirror the server: a positive money value with at most 2 decimals (no sub-cent / silent rounding).
+    if (!/^\d{1,12}(\.\d{1,2})?$/.test(trimmedAmount) || Number(trimmedAmount) <= 0) {
+      setError("Enter a positive amount with at most 2 decimals");
       return;
     }
     setSubmitting(true);
@@ -222,7 +218,7 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, onSaved }: Ch
     try {
       const payload = {
         signedDate,
-        amount: (roundedCents / 100).toFixed(2),
+        amount: trimmedAmount,
         description: description.trim() || null,
       };
       if (existing) {
@@ -265,8 +261,8 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, onSaved }: Ch
             <Input
               id="co-amount"
               type="number"
-              min="0"
-              step="any"
+              min="0.01"
+              step="0.01"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
             />

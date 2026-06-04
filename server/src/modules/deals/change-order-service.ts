@@ -76,39 +76,44 @@ export async function assertDealEligibleForChangeOrder(
   return { id: row.id };
 }
 
-// The deal_change_orders.amount column is NUMERIC(14,2): max 12 integer digits + 2 decimals.
-const MAX_CHANGE_ORDER_AMOUNT = 999999999999.99;
+// Positive money string: 1-12 integer digits + up to 2 decimals. This bounds the value to the
+// deal_change_orders.amount NUMERIC(14,2) ceiling (999,999,999,999.99) by construction.
+const CHANGE_ORDER_AMOUNT_PATTERN = /^\d{1,12}(\.\d{1,2})?$/;
 
-/** Validate + normalize a change-order amount to a positive 2-decimal numeric string. */
+/**
+ * Validate + normalize a change-order amount to a positive 2-decimal numeric string.
+ *
+ * Decimal-safe by construction: it validates the string form (at most 2 decimals, at most 12 integer
+ * digits) and formats via string padding — never via Number.toFixed rounding. So sub-cent inputs
+ * (would round to 0.00 and trip the DB CHECK > 0), extra-precision inputs (would silently round the
+ * stored value), and over-ceiling inputs (would overflow NUMERIC(14,2)) are all rejected as a clean
+ * 400 rather than surfacing later as a DB 500.
+ */
 export function normalizeChangeOrderAmount(input: unknown): string {
-  const value =
-    typeof input === "number" ? input : typeof input === "string" ? Number(input.trim()) : NaN;
-  if (!Number.isFinite(value) || value <= 0) {
+  const raw =
+    typeof input === "number"
+      ? Number.isFinite(input)
+        ? String(input)
+        : ""
+      : typeof input === "string"
+        ? input.trim()
+        : "";
+  if (!CHANGE_ORDER_AMOUNT_PATTERN.test(raw)) {
     throw new AppError(
       400,
-      "Change order amount must be a positive number.",
+      "Change order amount must be a positive number with at most 2 decimals (max 999,999,999,999.99).",
       "CHANGE_ORDER_AMOUNT_INVALID"
     );
   }
-  const normalized = value.toFixed(2);
-  // A sub-cent positive value (e.g. 0.004) rounds to "0.00", which would trip the DB CHECK
-  // (amount > 0) as a 500 — reject it cleanly as a 400 here instead.
-  if (Number(normalized) <= 0) {
+  if (Number(raw) <= 0) {
     throw new AppError(
       400,
-      "Change order amount must be at least 0.01.",
+      "Change order amount must be greater than 0.",
       "CHANGE_ORDER_AMOUNT_INVALID"
     );
   }
-  // Reject values past the NUMERIC(14,2) ceiling as a clean 400 rather than a DB numeric-overflow 500.
-  if (Number(normalized) > MAX_CHANGE_ORDER_AMOUNT) {
-    throw new AppError(
-      400,
-      "Change order amount is too large.",
-      "CHANGE_ORDER_AMOUNT_INVALID"
-    );
-  }
-  return normalized;
+  const [intPart, fraction = ""] = raw.split(".");
+  return `${intPart}.${fraction.padEnd(2, "0")}`;
 }
 
 function normalizeSignedDate(input: unknown): string {
@@ -165,9 +170,12 @@ export async function getDealChangeOrderById(
 
 /** Sum of a deal's CRM change-order amounts, computed in SQL for cent-exact precision. */
 export async function sumDealChangeOrders(tenantDb: TenantDb, dealId: string): Promise<string> {
+  // Cast to a WIDE numeric, not numeric(14,2): each row is bounded to the per-row ceiling, but a deal
+  // with many change orders can have a SUM that exceeds it — recasting to numeric(14,2) here would
+  // overflow the read path (deal load / list) even though every row is individually valid.
   const [row] = await tenantDb
     .select({
-      total: sql<string>`COALESCE(SUM(${dealChangeOrders.amount}), 0)::numeric(14,2)`,
+      total: sql<string>`COALESCE(SUM(${dealChangeOrders.amount}), 0)::numeric(38,2)`,
     })
     .from(dealChangeOrders)
     .where(eq(dealChangeOrders.dealId, dealId));
