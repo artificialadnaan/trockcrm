@@ -30,7 +30,7 @@ const WON_SLUG = WON_STAGE_SLUGS[0];
 const LOST_SLUG = LOST_STAGE_SLUGS[0];
 const ST = { won: U("57001"), open: U("57002"), lost: U("57003") };
 const REP_A = U("a01");
-const CO = { mm: U("c0a"), cc: U("c0b"), et: U("c0c") };
+const CO = { mm: U("c0a"), cc: U("c0b"), et: U("c0c"), mmPlumbing: U("c0d") };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -61,7 +61,8 @@ beforeAll(async () => {
       ('${ST.lost}','${LOST_SLUG}', true, 95),
       ('${ST.open}','opportunity', false, 30);
     INSERT INTO companies (id, name, industry) VALUES
-      ('${CO.mm}','MM Co','Roofing'), ('${CO.cc}','CC Co','Roofing'), ('${CO.et}','ET Co','Roofing');
+      ('${CO.mm}','MM Co','Roofing'), ('${CO.cc}','CC Co','Roofing'), ('${CO.et}','ET Co','Roofing'),
+      ('${CO.mmPlumbing}','MM Plumbing Co','Plumbing');
 
     -- ===== MARKET MIX (2026) =====
     INSERT INTO deals (id, company_id, assigned_rep_id, stage_id, is_active, project_type, won_closed_date, created_at, awarded_amount, bid_estimate) VALUES
@@ -76,7 +77,13 @@ beforeAll(async () => {
       -- active open in period -> counts in deal_count, not Won
       (${`'${U("d2605")}'`}, '${CO.mm}','${REP_A}','${ST.open}', true, 'Roofing', NULL, '2026-02-10T00:00:00Z', NULL, 40000),
       -- inactive open (is_active false) -> excluded from deal_count (CC4)
-      (${`'${U("d2606")}'`}, '${CO.mm}','${REP_A}','${ST.open}', false, 'Roofing', NULL, '2026-02-12T00:00:00Z', NULL, 30000);
+      (${`'${U("d2606")}'`}, '${CO.mm}','${REP_A}','${ST.open}', false, 'Roofing', NULL, '2026-02-12T00:00:00Z', NULL, 30000),
+      -- WON-ONLY vertical (Plumbing): created BEFORE the window, won INSIDE it, no active-created deals
+      -- in range -> must still appear in the vertical mix with its Won value (Codex P2 union fix).
+      (${`'${U("d2607")}'`}, '${CO.mmPlumbing}','${REP_A}','${ST.won}', true, 'Plumbing', '2026-05-15', '2025-10-01T00:00:00Z', 25000, NULL),
+      -- LOST Roofing deal (created in window) -> the breakdown win-rate denominator; with the archived
+      -- Roofing win (d2604) it proves archived terminal deals stay in the win-rate counts (Codex P2).
+      (${`'${U("d2608")}'`}, '${CO.mm}','${REP_A}','${ST.lost}', true, 'Roofing', NULL, '2026-03-01T00:00:00Z', NULL, 20000);
 
     -- ===== CUSTOMER CONCENTRATION (2030; gap years 2029 keep "before-period" deals out of other windows) =====
     INSERT INTO deals (id, company_id, assigned_rep_id, stage_id, is_active, project_type, won_closed_date, created_at, awarded_amount, bid_estimate) VALUES
@@ -111,22 +118,34 @@ afterAll(async () => {
 describe("Market Mix — Won value uses won_closed_date (CC1) and is_active scopes only the active cohort (CC4)", () => {
   it("total Won value is won-date-windowed, archived wins included, and reconciles to the quarterly panel", async () => {
     const report = await getMarketMixReport(tdb, { from: "2026-01-01", to: "2026-12-31" });
-    // 100k (created-before/won-in) + 70k (archived, won-in). 200k won-before & 50k null-won excluded.
-    expect(report.kpis.totalWonValue).toBeCloseTo(170000, 2);
+    // Roofing: 100k (created-before/won-in) + 70k (archived, won-in) = 170k. Plumbing: 25k (won-only).
+    // 200k won-before & 50k null-won excluded.
+    expect(report.kpis.totalWonValue).toBeCloseTo(195000, 2);
     // Reconciliation: total Won value === sum of quarterly Won-by-vertical.
     const quarterlySum = report.quarterlyWonByVertical.reduce((acc, r) => acc + r.wonValue, 0);
-    expect(quarterlySum).toBeCloseTo(170000, 2);
+    expect(quarterlySum).toBeCloseTo(195000, 2);
     expect(report.kpis.totalWonValue).toBeCloseTo(quarterlySum, 2);
     // Vertical mix Won value uses the same won-date cohort.
     const roofing = report.verticalMix.find((r) => r.name === "Roofing");
     expect(roofing?.wonValue).toBeCloseTo(170000, 2);
+    // Codex P2: the won-only vertical (Plumbing — won in range, no active-created deals) still appears.
+    const plumbing = report.verticalMix.find((r) => r.name === "Plumbing");
+    expect(plumbing).toBeDefined();
+    expect(plumbing?.wonValue).toBeCloseTo(25000, 2);
+    expect(plumbing?.dealCount).toBe(0);
+    // Codex P2: breakdown win rate keeps the archived Roofing win. Roofing created-cohort wins = d2602 +
+    // d2603 (null-won but WON-stage) + d2604 (archived) = 3; losses = d2608 = 1 -> 3/4 = 75 (not 66.7,
+    // which is what excluding the archived win would give).
+    const roofingBreakdown = report.breakdown.find((r) => r.vertical === "Roofing");
+    expect(roofingBreakdown?.winRate).toBeCloseTo(75, 1);
   });
 
   it("active deal count excludes soft-deleted and out-of-window deals (CC4)", async () => {
     const report = await getMarketMixReport(tdb, { from: "2026-01-01", to: "2026-12-31" });
-    // created-in-window AND active: d2602 (won-before, still active), d2603 (null-won, active), d2605 (open).
-    // Excluded: d2601 (created 2025), d2604 (archived/inactive), d2606 (inactive open).
-    expect(report.kpis.totalDealCount).toBe(3);
+    // created-in-window AND active: d2602 (won-before, active), d2603 (null-won, active), d2605 (open),
+    // d2608 (lost, active). Excluded: d2601 (created 2025), d2604 (archived/inactive), d2606 (inactive
+    // open), d2607 (Plumbing created 2025).
+    expect(report.kpis.totalDealCount).toBe(4);
   });
 });
 

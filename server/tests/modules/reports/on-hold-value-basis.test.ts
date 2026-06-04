@@ -47,15 +47,16 @@ describe("on-hold value basis regressions", () => {
     // Wave-0 CC1: Won value is now computed from the WON cohort (won_closed_date window), not the
     // created_at-windowed total_won_value column. The value basis is still the awarded-first fallback
     // chain (effective Won value), never the best-estimate-first open value.
-    const queryText = (tenantDb.execute.mock.calls as unknown[][])
-      .map((call) => extractSqlText(call[0]))
-      .join("\n")
-      .toLowerCase();
-    expect(queryText).toContain("won_value");
-    expect(queryText).toContain("won_closed_date");
-    expect(queryText).toContain("awarded_amount");
-    expect(queryText).toContain("bid_board_total_sales");
-    expect(queryText).toContain("bid_estimate");
-    expect(queryText).toContain("dd_estimate");
+    const sqlCalls = (tenantDb.execute.mock.calls as unknown[][]).map((call) =>
+      extractSqlText(call[0]).toLowerCase()
+    );
+    // The won-cohort query must carry the awarded-first fallback chain AND the won_closed_date basis in
+    // the SAME statement — asserting across the joined text could pass with tokens from different queries.
+    const wonCohortSql = sqlCalls.find((s) => s.includes("won_value") && s.includes("won_closed_date"));
+    expect(wonCohortSql).toBeDefined();
+    expect(wonCohortSql!).toContain("awarded_amount");
+    expect(wonCohortSql!).toContain("bid_board_total_sales");
+    expect(wonCohortSql!).toContain("bid_estimate");
+    expect(wonCohortSql!).toContain("dd_estimate");
   });
 });
