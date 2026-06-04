@@ -63,7 +63,7 @@ describe("DealForm select labels", () => {
     expect(source).toContain("payload.officeCode = formData.officeCode;");
     // The office picker is a cosmetic prefix: the deal is created on the rep's HOME (active) office, not the
     // picked office, so the create request carries the home office id.
-    expect(source).toContain("{ officeId: activeOfficeId }");
+    expect(source).toContain("{ officeId: homeOfficeId }");
     expect(source).toContain("payload.projectType = selectedProjectType.name;");
   });
 });

@@ -53,16 +53,18 @@ export function buildOfficeCodePrefixOptions(): { code: DealOfficeCode; label: s
 
 export function resolveDefaultOfficeCode(input: {
   offices: OfficeSelectionSource[];
-  activeOfficeId?: string | null;
+  // The rep's STABLE home office id — the default prefix is the home office's code (the cosmetic prefix
+  // is decoupled from any switchable active office).
+  homeOfficeId?: string | null;
   currentOfficeCode?: string | null;
 }): DealOfficeCode | "" {
   if (input.currentOfficeCode === "dfw" || input.currentOfficeCode === "atl") {
     return input.currentOfficeCode;
   }
 
-  const activeOffice = input.offices.find((office) => office.id === input.activeOfficeId) ?? null;
-  const activeOfficeCode = resolveOfficeCodeFromOffice(activeOffice);
-  if (activeOfficeCode) return activeOfficeCode;
+  const homeOffice = input.offices.find((office) => office.id === input.homeOfficeId) ?? null;
+  const homeOfficeCode = resolveOfficeCodeFromOffice(homeOffice);
+  if (homeOfficeCode) return homeOfficeCode;
 
   return buildOfficeSelectionOptions(input.offices)[0]?.code ?? "";
 }

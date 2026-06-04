@@ -30,11 +30,11 @@ describe("office selection helpers", () => {
   });
 
   it("defaults to the active office code when the active office is known", () => {
-    expect(resolveDefaultOfficeCode({ offices, activeOfficeId: "office-atlanta", currentOfficeCode: "" })).toBe("atl");
+    expect(resolveDefaultOfficeCode({ offices, homeOfficeId: "office-atlanta", currentOfficeCode: "" })).toBe("atl");
   });
 
   it("keeps a user's manual selection stable after offices refetch", () => {
-    expect(resolveDefaultOfficeCode({ offices, activeOfficeId: "office-dallas", currentOfficeCode: "atl" })).toBe("atl");
+    expect(resolveDefaultOfficeCode({ offices, homeOfficeId: "office-dallas", currentOfficeCode: "atl" })).toBe("atl");
   });
 
   it("builds the tenant routing header from the selected office id", () => {

@@ -38,11 +38,13 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const { offices } = useAccessibleOffices();
   const { hierarchy: projectTypeHierarchy } = useProjectTypes();
 
-  const activeOfficeId = user?.activeOfficeId ?? user?.officeId ?? null;
+  // The STABLE home office (primary office), NOT the switchable active office — the cosmetic office prefix
+  // is decoupled from any session office switch, so pickers + create always use the rep's home data office.
+  const homeOfficeId = user?.officeId ?? null;
   const officeOptions = buildOfficeCodePrefixOptions();
   const initialOfficeCode = resolveDefaultOfficeCode({
     offices,
-    activeOfficeId,
+    homeOfficeId,
     currentOfficeCode: "",
   });
 
@@ -69,7 +71,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   // opportunity is created — only the deal_number prefix.
   const selectedOfficeLabel =
     officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
-  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: activeOfficeId });
+  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: homeOfficeId });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,12 +79,12 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
     setFormData((prev) => {
       const officeCode = resolveDefaultOfficeCode({
         offices,
-        activeOfficeId,
+        homeOfficeId,
         currentOfficeCode: prev.officeCode,
       });
       return officeCode === prev.officeCode ? prev : { ...prev, officeCode };
     });
-  }, [activeOfficeId, offices]);
+  }, [homeOfficeId, offices]);
 
   const handleChange = (field: keyof typeof formData, value: string) => {
     setFormData((prev) => {
@@ -112,7 +114,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
       setError("Assigned sales rep is required");
       return;
     }
-    if (!activeOfficeId || !formData.officeCode) {
+    if (!homeOfficeId || !formData.officeCode) {
       setError("Cannot create opportunity: no active office. Contact admin.");
       return;
     }
@@ -136,7 +138,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
           projectType: "service",
           projectTypeId: serviceProjectType.id,
         },
-        { officeId: activeOfficeId }
+        { officeId: homeOfficeId }
       );
 
       if (onSuccess) {
@@ -192,7 +194,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
               <CompanySelector
                 value={formData.companyId || null}
                 onChange={(companyId) => handleChange("companyId", companyId)}
-                officeId={activeOfficeId ?? undefined}
+                officeId={homeOfficeId ?? undefined}
                 required
               />
             </div>
@@ -202,7 +204,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
                 companyId={formData.companyId || null}
                 value={formData.propertyId || null}
                 onChange={(propertyId) => handleChange("propertyId", propertyId)}
-                officeId={activeOfficeId ?? undefined}
+                officeId={homeOfficeId ?? undefined}
                 required
               />
             </div>

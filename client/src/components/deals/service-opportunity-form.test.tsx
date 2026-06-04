@@ -139,7 +139,7 @@ describe("ServiceOpportunityForm", () => {
     expect(source).toContain("buildOfficeCodePrefixOptions");
     // The opportunity is created on the rep's HOME (active) office, NOT the picked office — the prefix is
     // cosmetic. (Pre-fix this passed the picked office's id, scoping create/pickers to it.)
-    expect(source).toContain("{ officeId: activeOfficeId }");
+    expect(source).toContain("{ officeId: homeOfficeId }");
     expect(source).not.toContain("selectedOffice?.officeId");
     expect(source).not.toContain("selectedOffice.officeId");
   });

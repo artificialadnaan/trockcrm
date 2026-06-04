@@ -750,11 +750,13 @@ function EditableLeadForm({
   const { projectTypes, hierarchy: projectTypeHierarchy } = useProjectTypes();
   const { offices } = useAccessibleOffices();
   const isCreate = mode === "create";
-  const activeOfficeId = user?.activeOfficeId ?? user?.officeId ?? null;
+  // The STABLE home office (primary office), NOT the switchable active office — the cosmetic office prefix
+  // is decoupled from any session office switch, so pickers + create always use the rep's home data office.
+  const homeOfficeId = user?.officeId ?? null;
   const officeOptions = buildOfficeCodePrefixOptions();
   const initialOfficeCode = resolveDefaultOfficeCode({
     offices,
-    activeOfficeId,
+    homeOfficeId,
     currentOfficeCode: lead?.officeCode === "atl" || lead?.officeCode === "dfw" ? lead.officeCode : "",
   });
   const [companyId, setCompanyId] = useState<string | null>(lead?.companyId ?? initialValues?.companyId ?? null);
@@ -770,18 +772,18 @@ function EditableLeadForm({
   // The office picker is a project-number PREFIX only: pickers + create target the rep's HOME (active)
   // office, so choosing DFW vs ATL never changes which companies/properties/contacts/reps are available nor
   // where the lead is created — only the lead number prefix.
-  const { assignees } = useTaskAssignees({ officeId: isCreate ? activeOfficeId : null });
+  const { assignees } = useTaskAssignees({ officeId: isCreate ? homeOfficeId : null });
   const { properties } = useProperties(
     companyId ? { companyId, limit: 500 } : { limit: 0 },
-    { officeId: isCreate ? activeOfficeId : null }
+    { officeId: isCreate ? homeOfficeId : null }
   );
   const { contacts, loading: companyContactsLoading, refetch: refetchContacts } = useCompanyContacts(
     companyId ?? undefined,
-    { officeId: isCreate ? activeOfficeId : null }
+    { officeId: isCreate ? homeOfficeId : null }
   );
   const { property: resolvedSelectedProperty } = usePropertyDetail(
     isCreate && formData.propertyId ? formData.propertyId : undefined,
-    { officeId: isCreate ? activeOfficeId : null }
+    { officeId: isCreate ? homeOfficeId : null }
   );
   const { questionnaire: questionnaireTemplate, loading: questionnaireTemplateLoading } = useLeadQuestionnaireTemplate(
     isCreate ? (formData.projectTypeId || null) : null
@@ -839,12 +841,12 @@ function EditableLeadForm({
     setFormData((current) => {
       const officeCode = resolveDefaultOfficeCode({
         offices,
-        activeOfficeId,
+        homeOfficeId,
         currentOfficeCode: current.officeCode,
       });
       return officeCode === current.officeCode ? current : { ...current, officeCode };
     });
-  }, [activeOfficeId, isCreate, offices]);
+  }, [homeOfficeId, isCreate, offices]);
 
   useEffect(() => {
     setFormData((current) => applyCreateRepDefault(current, isCreate, user));
@@ -1057,7 +1059,7 @@ function EditableLeadForm({
     }
     if (!formData.name.trim()) errors.set("name", "Lead name is required.");
     if (!formData.budgetStatus) errors.set("budgetStatus", "Budget status is required.");
-    if (!formData.officeCode || !activeOfficeId) errors.set("officeCode", "Office is required.");
+    if (!formData.officeCode || !homeOfficeId) errors.set("officeCode", "Office is required.");
     if (!formData.projectTypeId) errors.set("projectTypeId", "Project type is required.");
     if (!formData.bidDueDate) {
       errors.set("bidDueDate", "Bid Due Date is required.");
@@ -1093,7 +1095,7 @@ function EditableLeadForm({
     isCreate,
     maxPropertyBuildYear,
     selectedProperty,
-    activeOfficeId,
+    homeOfficeId,
     useV2Questionnaire,
     v2ScopeAppliesNodes,
   ]);
@@ -1243,7 +1245,7 @@ function EditableLeadForm({
           companyId,
           skipDedupCheck: true,
         },
-        { officeId: isCreate ? activeOfficeId : null }
+        { officeId: isCreate ? homeOfficeId : null }
       );
 
       if (!result.contact) {
@@ -1518,7 +1520,7 @@ function EditableLeadForm({
       };
 
       if (isCreate) {
-        if (!activeOfficeId) {
+        if (!homeOfficeId) {
           setError("Cannot create lead: no active office. Contact admin.");
           return;
         }
@@ -1560,7 +1562,7 @@ function EditableLeadForm({
           }
 
           try {
-            const result = await updateProperty(selectedProperty.id, propertyPatch, { officeId: activeOfficeId });
+            const result = await updateProperty(selectedProperty.id, propertyPatch, { officeId: homeOfficeId });
             setRepairedProperties((current) => new Map(current).set(result.property.id, result.property));
           } catch (err) {
             setError(`Failed to update property: ${err instanceof Error ? err.message : "Unknown error"}`);
@@ -1587,7 +1589,7 @@ function EditableLeadForm({
             officeCode: formData.officeCode,
             ...workflowPayload,
           },
-          { officeId: activeOfficeId }
+          { officeId: homeOfficeId }
         );
 
         try {
@@ -1691,7 +1693,7 @@ function EditableLeadForm({
                 <CompanySelector
                   value={companyId}
                   onChange={setCompanyId}
-                  officeId={activeOfficeId ?? undefined}
+                  officeId={homeOfficeId ?? undefined}
                   showOwnerLabel
                   required
                 />
@@ -1704,7 +1706,7 @@ function EditableLeadForm({
                     companyId={companyId}
                     value={formData.propertyId || null}
                     onChange={(propertyId) => handleFieldChange("propertyId", propertyId)}
-                    officeId={activeOfficeId ?? undefined}
+                    officeId={homeOfficeId ?? undefined}
                     required
                     requireLeadCreateFields
                     onPropertyRepaired={(property) => {
