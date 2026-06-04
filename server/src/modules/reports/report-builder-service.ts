@@ -232,6 +232,9 @@ function buildFilters(
   // deals still count — matching the canonical helper's all-time behavior.
   if (options.applyWonGuard) clauses.push(aliasedHasUsableWonDateSql("d"));
   const repId = effectiveReportRepId(input);
+  // Assigned-rep only (NOT estimator-aware): report-builder's "rep" dimension is user-selectable and
+  // groups by the assigned rep, so an estimator-OR filter would attribute an estimator-only person's
+  // deals to the owner's row (and drop the requested rep). See the rep-keyed-report exclusion.
   if (repId) clauses.push(sql`d.assigned_rep_id = ${repId}`);
 
   const stages = listFilter(filters.stage);

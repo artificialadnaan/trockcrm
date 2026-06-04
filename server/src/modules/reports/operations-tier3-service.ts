@@ -278,6 +278,9 @@ function withCache<T extends { filters: OperationsReportFilters }>(
   });
 }
 
+// Assigned-rep only (NOT estimator-aware): ownerFilter feeds getProjectReadinessReport, which returns a
+// per-rep ownerSummary rollup keyed by the assigned rep — an estimator-OR filter would misattribute an
+// estimator-only person's deals to the owner's row. See the rep-keyed-report exclusion.
 function ownerFilter(filters: OperationsReportFilters) {
   if (!filters.ownerIds.length && !filters.ownerNames.length) return sql`TRUE`;
   const clauses = [];

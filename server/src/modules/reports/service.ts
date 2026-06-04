@@ -30,6 +30,8 @@ import {
   reportableDealFilterSql,
 } from "../shared/deal-value-sql.js";
 import { aliasedHasUsableWonDateSql } from "../deals/service.js";
+// Estimator-aware rep filter (PR 2): assigned_rep OR estimator_user_id, the shared predicate from PR 1.
+import { buildAliasedInvolvedRepSql } from "../deals/deal-filter-predicates.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -367,6 +369,9 @@ function buildForecastVarianceFilterSql(filters: NormalizedAnalyticsFilters) {
     clauses.push(sql`d.region_id = ${filters.regionId}::uuid`);
   }
   if (filters.repId) {
+    // Assigned-rep only (NOT estimator-aware): getForecastVarianceOverview emits a per-rep rollup
+    // (GROUP BY assigned_rep_id). An estimator-OR filter would attribute an estimator-only person's
+    // deals to the OWNER's row and drop the requested rep — see the rep-keyed-report exclusion.
     clauses.push(sql`d.assigned_rep_id = ${filters.repId}::uuid`);
   }
   if (filters.source) {
@@ -626,7 +631,7 @@ export async function getPipelineSummary(
 
   // Active pipeline = current state, not time-bounded
   const repFilter = options.repId
-    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    ? sql`AND ${buildAliasedInvolvedRepSql("d", options.repId)}`
     : sql``;
 
   // Aggregate deal counts and values per stage
@@ -687,7 +692,7 @@ export async function getWeightedPipelineForecast(
   const { from, to } = defaultDateRange(options.from, options.to);
 
   const repFilter = options.repId
-    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    ? sql`AND ${buildAliasedInvolvedRepSql("d", options.repId)}`
     : sql``;
 
   const result = await tenantDb.execute(sql`
@@ -826,7 +831,7 @@ export async function getWinRateTrend(
   const { from, to } = defaultDateRange(options.from, options.to);
 
   const repFilter = options.repId
-    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    ? sql`AND ${buildAliasedInvolvedRepSql("d", options.repId)}`
     : sql``;
 
   const result = await tenantDb.execute(sql`
@@ -946,7 +951,7 @@ export async function getStaleDeals(
   options: { repId?: string; now?: Date | string } = {}
 ): Promise<StaleDealRow[]> {
   const repFilter = options.repId
-    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    ? sql`AND ${buildAliasedInvolvedRepSql("d", options.repId)}`
     : sql``;
   const now = normalizeNow(options.now);
 
@@ -972,7 +977,10 @@ export async function getStaleDeals(
       d.region_classification
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    JOIN users u ON u.id = d.assigned_rep_id
+    -- LEFT JOIN (not INNER): the estimator-aware repFilter can match a deal whose assigned_rep_id is
+    -- NULL (rep is only the estimator), and an INNER users join would silently drop it before
+    -- staleDealRowsFromEngine returns it. The row mapper already renders a null rep as "Unassigned".
+    LEFT JOIN users u ON u.id = d.assigned_rep_id
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}
@@ -1144,7 +1152,7 @@ export async function getLeadSourceROI(
     ? sql`AND d.region_id = ${filters.regionId}`
     : sql``;
   const repFilter = filters.repId
-    ? sql`AND d.assigned_rep_id = ${filters.repId}`
+    ? sql`AND ${buildAliasedInvolvedRepSql("d", filters.repId)}`
     : sql``;
   const sourceFilter = filters.source
     ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}`
@@ -1278,7 +1286,7 @@ export async function getDataMiningOverview(
         AND ${aliasedReportableDealFilterSql("d")}
         ${filters.officeId ? sql`AND dsi.office_id = ${filters.officeId}` : sql``}
         ${filters.regionId ? sql`AND d.region_id = ${filters.regionId}` : sql``}
-        ${filters.repId ? sql`AND d.assigned_rep_id = ${filters.repId}` : sql``}
+        ${filters.repId ? sql`AND ${buildAliasedInvolvedRepSql("d", filters.repId)}` : sql``}
         ${filters.source ? sql`AND COALESCE(NULLIF(TRIM(d.source), ''), 'Unknown') = ${filters.source}` : sql``}
     )
   `;
@@ -1599,6 +1607,9 @@ export async function getRegionalOwnershipOverview(
   const regionFilter = filters.regionId
     ? sql`AND d.region_id = ${filters.regionId}`
     : sql``;
+  // Assigned-rep only (NOT estimator-aware): getRegionalOwnershipOverview emits per-rep rollups
+  // (GROUP BY assigned_rep_id). Estimator-awareness would misattribute an estimator-only person's
+  // deals to the owner's row — see the rep-keyed-report exclusion.
   const repFilter = filters.repId
     ? sql`AND d.assigned_rep_id = ${filters.repId}`
     : sql``;
@@ -2018,6 +2029,9 @@ export async function getPipelineByRep(
   tenantDb: TenantDb,
   options: { repId?: string } = {}
 ): Promise<PipelineByRepRow[]> {
+  // Assigned-rep only (NOT estimator-aware): the entire report is a per-rep breakdown
+  // (SELECT assigned_rep_id AS rep_id, GROUP BY assigned_rep_id). An estimator-OR filter would
+  // return the OWNER's row when filtering by an estimator-only person (Codex P2) — see exclusion.
   const repFilter = options.repId
     ? sql`AND d.assigned_rep_id = ${options.repId}`
     : sql``;
@@ -2182,7 +2196,7 @@ export async function getUnifiedWorkflowOverview(
     ? sql`AND l.assigned_rep_id = ${options.repId}`
     : sql``;
   const dealRepFilter = options.repId
-    ? sql`AND d.assigned_rep_id = ${options.repId}`
+    ? sql`AND ${buildAliasedInvolvedRepSql("d", options.repId)}`
     : sql``;
   const activityRepFilter = options.repId
     ? sql`AND a.responsible_user_id = ${options.repId}`

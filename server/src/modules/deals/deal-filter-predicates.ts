@@ -103,6 +103,42 @@ export function buildAliasedInvolvedRepSql(alias: string, repId: string): SQL {
   return sql`(${repCol} = ${repId} OR ${estCol} = ${repId})`;
 }
 
+/**
+ * IN-list ("team" / multi-rep / owner) variant of the involved-rep predicate for aliased raw queries.
+ * Emits `(<alias>.assigned_rep_id IN (<ids>) OR <alias>.estimator_user_id IN (<ids>))` so a multi-rep
+ * filter surfaces deals any listed person OWNS or ESTIMATED — the IN-list generalization of
+ * buildAliasedInvolvedRepSql. The ids are parameterized; `alias` is validated (same identifier-injection
+ * guard). Returns undefined for an empty list so the caller OMITS the clause (never an empty IN, which
+ * would match nothing). There is NO Unassigned sentinel here: an unassigned deal has NULL assigned_rep_id
+ * which no id value matches, so Unassigned is simply not selectable via an id list — matching every
+ * existing IN-list owner-filter site's behavior.
+ *
+ * `cast` preserves each call site's existing literal/column cast so the refactor changes ONLY the added
+ * estimator OR-arm, never the assigned-rep arm's emitted SQL:
+ *   - "none"   -> col IN ($id, …)         implicit uuid<-text coercion   (sales-tier1)
+ *   - "value"  -> col IN ($id::uuid, …)   per-value uuid cast            (analytics-tier4)
+ *   - "column" -> col::text IN ($id, …)   column cast to text           (operations-tier3)
+ */
+export function buildAliasedInvolvedRepInListSql(
+  alias: string,
+  repIds: readonly string[],
+  cast: "none" | "value" | "column" = "none"
+): SQL | undefined {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new Error(`Invalid SQL alias for involved-rep IN-list predicate: ${alias}`);
+  }
+  if (repIds.length === 0) return undefined;
+  // A fresh value-list per column so each IN gets its own parameters (no shared-fragment aliasing).
+  const valueList = () =>
+    sql.join(repIds.map((id) => (cast === "value" ? sql`${id}::uuid` : sql`${id}`)), sql`, `);
+  const repCol = sql.raw(`${alias}.assigned_rep_id`);
+  const estCol = sql.raw(`${alias}.estimator_user_id`);
+  if (cast === "column") {
+    return sql`(${repCol}::text IN (${valueList()}) OR ${estCol}::text IN (${valueList()}))`;
+  }
+  return sql`(${repCol} IN (${valueList()}) OR ${estCol} IN (${valueList()}))`;
+}
+
 /** region — eq, or IS NULL for the Unassigned sentinel (region is very sparse). */
 export function buildRegionPredicate(input: DealFilterBarInput): SQL | undefined {
   if (!input.regionId) return undefined;
