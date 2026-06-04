@@ -59,8 +59,13 @@ function rowsFromExecute<T>(result: unknown): T[] {
   return ((result as { rows?: T[] })?.rows ?? []) as T[];
 }
 
-function num(value: unknown): number {
-  return Number(value ?? 0);
+// Coalesce a folded SQL value to a finite number. Null/undefined → 0 (the `?? 0`), and any
+// non-numeric / NaN / Infinity → 0 (the isFinite guard) so a single bad value can never NaN a
+// per-rep figure or the office total summed from them. (The band SQL already COALESCE(SUM(...),0)'s,
+// so this is defense-in-depth for the showcase's "every number adds up" guarantee.)
+export function num(value: unknown): number {
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) ? n : 0;
 }
 
 // ===================== payload types (the contract the 8 variants render) =====================
@@ -475,6 +480,25 @@ function emptyRepProjection(): RepProjection {
 }
 
 /**
+ * Office projection ladder = the per-rep ladders summed band-by-band (and coverage N/M summed). The
+ * office figure is DEFINED as this rollup — not a separate query — so the Forecast Ladder's office
+ * column totals always equal the sum of the per-rep rows (which are union-seeded from the same map).
+ */
+export function foldOfficeProjection(repProjection: Map<string | null, RepProjection>): RepProjection {
+  const office = emptyRepProjection();
+  for (const p of repProjection.values()) {
+    office.coverage.n += p.coverage.n;
+    office.coverage.m += p.coverage.m;
+    for (const cell of p.bands) {
+      const officeCell = office.bands.find((b) => b.band === cell.band)!;
+      officeCell.count += cell.count;
+      officeCell.value += cell.value;
+    }
+  }
+  return office;
+}
+
+/**
  * Build the full Monday-showcase payload for the office. Computes each canonical figure ONCE (Won via
  * the protected aggregate, Sent/Estimated via stage-entry cohorts, Projection via F2) and hands them to
  * assembleMondayShowcase, so every variant reconciles by construction.
@@ -555,16 +579,7 @@ export async function getMondayShowcaseData(
   for (const r of rowsFromExecute<{ rep_id: string | null; n: unknown; m: unknown }>(projCovRows)) {
     ensureRep(r.rep_id).coverage = { n: num(r.n), m: num(r.m) };
   }
-  const officeProjection: RepProjection = emptyRepProjection();
-  for (const p of repProjection.values()) {
-    officeProjection.coverage.n += p.coverage.n;
-    officeProjection.coverage.m += p.coverage.m;
-    for (const cell of p.bands) {
-      const officeCell = officeProjection.bands.find((b) => b.band === cell.band)!;
-      officeCell.count += cell.count;
-      officeCell.value += cell.value;
-    }
-  }
+  const officeProjection = foldOfficeProjection(repProjection);
 
   const leadStatus = new Map<string | null, LeadStatusCell[]>();
   for (const r of rowsFromExecute<{ rep_id: string | null; stage_label: string; cnt: unknown }>(leadRows)) {
