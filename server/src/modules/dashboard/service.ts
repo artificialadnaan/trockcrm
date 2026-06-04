@@ -46,6 +46,8 @@ import {
   buildAliasedLeadMineVisibilityCondition,
   resolveMineVisibilityFeatures,
 } from "../shared/mine-visibility.js";
+// Estimator-aware rep filter (PR 2): assigned_rep OR estimator_user_id, the shared predicate from PR 1.
+import { buildAliasedInvolvedRepSql } from "../deals/deal-filter-predicates.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateSql,
@@ -301,6 +303,10 @@ function dealScopeFilterSql(alias: string, options: DashboardScopeOptions) {
     })}`;
   }
   if (options.repId) {
+    // Assigned-rep only (NOT estimator-aware): this shared scope filter feeds getCanonicalRepWonSummary,
+    // which groups output by assigned_rep_id. An estimator-OR filter would attribute an estimator-only
+    // person's deal to the owner's row there — see the rep-keyed-report exclusion. Other dashboard
+    // KPIs that ARE estimator-aware (potential revenue, contracts signed) use the helper directly.
     return sql`AND ${sql.raw(alias)}.assigned_rep_id = ${options.repId}`;
   }
   return sql``;
@@ -1146,6 +1152,42 @@ function allocateDealCommissions(
   return rollups.filter((rollup) => rollup.earnedCommission > 0);
 }
 
+/**
+ * Contracts signed YTD + MTD for one rep (estimator-aware — PR 2: matches deals the rep owns OR
+ * estimated). Strict semantics: counts signed contracts (contract_signed_at, falling back to
+ * contract_signed_date) and sums awarded_amount only — a deal signed without an awarded_amount
+ * contributes to count but not totalValue, surfacing data-quality issues rather than blending in
+ * bid/dd estimates. The today guard rejects future-dated signing dates. Extracted + exported (behavior-
+ * identical to the prior inline query) so the runtime test can exercise it directly.
+ */
+export function buildRepContractsSignedSql(
+  userId: string,
+  yearStart: string,
+  monthStart: string,
+  today: string
+): SQL {
+  return sql`
+      SELECT
+        COUNT(*) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${yearStart}::date)::int AS ytd_count,
+        COALESCE(SUM(awarded_amount) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${yearStart}::date), 0)::numeric AS ytd_value,
+        COUNT(*) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${monthStart}::date)::int AS mtd_count,
+        COALESCE(SUM(awarded_amount) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${monthStart}::date), 0)::numeric AS mtd_value
+      FROM deals
+      WHERE ${buildAliasedInvolvedRepSql("deals", userId)}
+        AND is_active = true
+        AND COALESCE(is_test_data, false) = false
+        AND (contract_signed_at IS NOT NULL OR contract_signed_date IS NOT NULL)
+        AND COALESCE(contract_signed_at::date, contract_signed_date) <= ${today}::date
+        AND ${aliasedActiveDealCountFilterSql("deals")}
+  `;
+}
+
+// Open-pipeline potential revenue for one rep — ASSIGNED-rep only (NOT estimator-aware). The result
+// feeds getRepCommissionSummary's potentialCommission = (revenue − floor) × the REP's OWN rate, so an
+// estimator-OR would price deals the rep doesn't own at the wrong rate (and double-count the office
+// total when this is looped per-rep by the director table). A rep's potential commission is inherently
+// what they OWN. (getCommissionPotential, which prices each deal at its assigned rep's rate, IS
+// estimator-aware; this flat-rate projection cannot be.)
 async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promise<number> {
   const result = await tenantDb.execute(sql`
     SELECT
@@ -1618,27 +1660,8 @@ export async function getRepDashboard(
       commissionDateRange.to ?? today
     ),
 
-    // Contracts signed YTD + MTD for this rep. Strict semantics: we count
-    // signed contracts (contract_signed_at, falling back to contract_signed_date)
-    // and sum awarded_amount only — a deal signed without an awarded_amount
-    // contributes to count but not to totalValue, intentionally surfacing
-    // data-quality issues rather than blending in bid/dd estimates. The today
-    // guard rejects future-dated signing dates so misplaced future dates don't
-    // pollute either window.
-    () => tenantDb.execute(sql`
-      SELECT
-        COUNT(*) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${yearStart}::date)::int AS ytd_count,
-        COALESCE(SUM(awarded_amount) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${yearStart}::date), 0)::numeric AS ytd_value,
-        COUNT(*) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${monthStart}::date)::int AS mtd_count,
-        COALESCE(SUM(awarded_amount) FILTER (WHERE COALESCE(contract_signed_at::date, contract_signed_date) >= ${monthStart}::date), 0)::numeric AS mtd_value
-      FROM deals
-      WHERE assigned_rep_id = ${userId}
-        AND is_active = true
-        AND COALESCE(is_test_data, false) = false
-        AND (contract_signed_at IS NOT NULL OR contract_signed_date IS NOT NULL)
-        AND COALESCE(contract_signed_at::date, contract_signed_date) <= ${today}::date
-        AND ${aliasedActiveDealCountFilterSql("deals")}
-    `),
+    // Contracts signed YTD + MTD for this rep (estimator-aware — see buildRepContractsSignedSql).
+    () => tenantDb.execute(buildRepContractsSignedSql(userId, yearStart, monthStart, today)),
   ]);
 
   const alRows = (activeLeadResult as any).rows ?? activeLeadResult;
