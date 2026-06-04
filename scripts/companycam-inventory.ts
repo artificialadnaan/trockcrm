@@ -11,7 +11,7 @@ const AUTO_IMPORT_FUZZY_THRESHOLD = 0.9;
 
 export interface CompanyCamProjectForPlan {
   id: string;
-  name: string;
+  name: string | null; // CompanyCam occasionally returns a null project name
   photoCount: number;
 }
 
@@ -39,7 +39,8 @@ export interface CompanyCamImportPlanRow {
   matchedDealOnHold?: boolean | null;
 }
 
-export function normalizeCompanyCamProjectName(value: string): string {
+export function normalizeCompanyCamProjectName(value: string | null | undefined): string {
+  if (!value) return "";
   return value
     .toLowerCase()
     .replace(PROJECT_NUMBER_REGEX, " ")
@@ -134,12 +135,13 @@ export function summarizeCompanyCamPlan(rows: CompanyCamImportPlanRow[]): Compan
 
 export function buildCompanyCamImportPlan(projects: CompanyCamProjectForPlan[], deals: DealForCompanyCamPlan[]) {
   const rows: CompanyCamImportPlanRow[] = projects.map((project) => {
-    const embeddedProjectNumber = project.name.match(PROJECT_NUMBER_REGEX)?.[0]?.toLowerCase() ?? null;
+    const projectName = project.name ?? "";
+    const embeddedProjectNumber = projectName.match(PROJECT_NUMBER_REGEX)?.[0]?.toLowerCase() ?? null;
     const linked = deals.find((deal) => deal.companycamProjectId === project.id);
     const projectNumberMatch = embeddedProjectNumber
       ? deals.find((deal) => deal.projectNumber?.toLowerCase() === embeddedProjectNumber)
       : null;
-    const normalizedProject = normalizeCompanyCamProjectName(project.name);
+    const normalizedProject = normalizeCompanyCamProjectName(projectName);
     const fuzzy = deals
       .map((deal) => ({ deal, score: similarity(normalizedProject, normalizeCompanyCamProjectName(deal.name)) }))
       .sort((a, b) => b.score - a.score)[0];
@@ -150,7 +152,7 @@ export function buildCompanyCamImportPlan(projects: CompanyCamProjectForPlan[], 
             : null;
     return {
       companyCamProjectId: project.id,
-      companyCamProjectName: project.name,
+      companyCamProjectName: projectName,
       photoCount: project.photoCount,
       matchedDealId: match?.deal.id ?? null,
       matchedDealName: match?.deal.name ?? null,

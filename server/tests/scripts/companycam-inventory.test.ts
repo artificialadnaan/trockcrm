@@ -88,4 +88,17 @@ describe("companycam-inventory", () => {
     expect(summary.manualReview).toEqual({ projects: 3, photos: 120 }); // on-hold + fuzzy + unmatched
     expect(plan.totals).toEqual(summary); // buildCompanyCamImportPlan returns the same summary as totals
   });
+
+  it("does not crash on a CompanyCam project with a null name (treats it as unmatched)", () => {
+    const plan = buildCompanyCamImportPlan(
+      [
+        { id: "cc-null", name: null, photoCount: 5 },
+        { id: "cc-fuzzy", name: "North Campus Roofing", photoCount: 7 },
+      ],
+      PLAN_DEALS,
+    );
+    const byId = new Map(plan.rows.map((row) => [row.companyCamProjectId, row]));
+    expect(byId.get("cc-null")).toMatchObject({ companyCamProjectName: "", matchedDealId: null, matchReason: "unmatched" });
+    expect(byId.get("cc-fuzzy")?.matchedDealId).toBe("deal-fuzzy"); // a real-named project still matches alongside the null one
+  });
 });
