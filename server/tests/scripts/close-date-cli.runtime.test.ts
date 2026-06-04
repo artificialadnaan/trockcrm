@@ -106,4 +106,9 @@ describe("csvCell formula-injection neutralization", () => {
     expect(csvCell("DFW-1-00001-aa")).toBe("DFW-1-00001-aa");
     expect(csvCell(null)).toBe("");
   });
+  it("neutralizes AND quote-wraps when a formula-prefixed value also needs CSV escaping", () => {
+    expect(csvCell("=Acme, Inc")).toBe(`"'=Acme, Inc"`); // leading '=' neutralized, comma forces quoting
+    expect(csvCell("+1,234")).toBe(`"'+1,234"`);
+    expect(csvCell('=say "hi"')).toBe(`"'=say ""hi"""`); // prefix + escaped inner quotes
+  });
 });
