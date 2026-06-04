@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 
 function formatDateTime(value: string | null): string {
   if (!value) return "—";
@@ -65,12 +66,25 @@ export function RfpReviewPage() {
   const [searchParams] = useSearchParams();
   const officeId = searchParams.get("officeId");
   const { user } = useAuth();
-  const { review, loading, error, refetch } = useRfpReview(
+  const { review, loading, error, refetch, applyOptimistic } = useRfpReview(
     user?.isRfpReviewer ? dealId : undefined,
     officeId
   );
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState<null | "approve" | "reconfirm">(null);
+  // Gate for re-attempting after an UNCONFIRMED failure: SyncHub may have already created a Procore project, so a
+  // blind retry risks a duplicate. The reviewer must confirm they checked Procore before re-attempting.
+  const [confirmedNoProject, setConfirmedNoProject] = useState(false);
+
+  // While SyncHub is creating the Bid Board project, poll so the page flips to approved/failed when the
+  // bid-board-created callback lands (no manual refresh needed).
+  useEffect(() => {
+    if (review?.overrideState !== "approving") return;
+    const interval = setInterval(() => {
+      refetch();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [review?.overrideState, refetch]);
 
   // Hard-gate the page to the designated reviewers. The server enforces the same allowlist on every endpoint;
   // this just avoids loading a page the user can't act on.
@@ -129,8 +143,12 @@ export function RfpReviewPage() {
     setSubmitting("approve");
     try {
       await approveRfpOverride(dealId, { note, officeId });
-      toast.success("Override approved — the RFP was re-submitted for a fresh approval.");
+      toast.success("Override approved — SyncHub is creating the Bid Board project.");
       setNote("");
+      setConfirmedNoProject(false); // require re-verification if this attempt also fails
+      // Optimistically enter 'approving' so the progress panel + 5s poll start immediately — even if the
+      // authoritative refetch below blips (the deal IS approving server-side; SyncHub accepted the request).
+      applyOptimistic({ overrideState: "approving", overrideError: null, actionable: false });
       await refetch();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to approve the override");
@@ -146,6 +164,8 @@ export function RfpReviewPage() {
       await reconfirmRfpDecline(dealId, { note, officeId });
       toast.success("Denial re-confirmed — this RFP stays declined.");
       setNote("");
+      // Optimistically mark the terminal outcome so it sticks even if the follow-up refetch blips.
+      applyOptimistic({ reviewDecision: "denial_reconfirmed", overrideState: null, overrideError: null, actionable: false });
       await refetch();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to re-confirm the denial");
@@ -165,8 +185,8 @@ export function RfpReviewPage() {
             <div>
               <CardTitle>RFP override review</CardTitle>
               <CardDescription>
-                This RFP was declined in the first go/no-go round. Approve the override to re-submit it, or
-                re-confirm the denial.
+                This RFP was declined in the first go/no-go round. Approve the override to create the Bid Board
+                project (overriding the no-go), or re-confirm the denial.
               </CardDescription>
             </div>
             <StatusBadge review={review} />
@@ -175,7 +195,56 @@ export function RfpReviewPage() {
         <CardContent className="flex flex-col gap-4">
           <DealFacts review={review} />
 
-          {review.actionable ? (
+          {review.overrideState === "approving" ? (
+            <ApprovingPanel review={review} onRefresh={() => refetch()} />
+          ) : review.overrideState === "failed" ? (
+            <>
+              <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm">
+                <p className="font-medium text-destructive">Bid Board project creation couldn’t be confirmed.</p>
+                <p className="mt-1 text-muted-foreground">
+                  {review.overrideError ?? "SyncHub could not confirm the project was created."}
+                </p>
+                <p className="mt-2 font-medium text-foreground">
+                  ⚠️ A Procore project may already have been created. Open Procore and check whether a Bid Board
+                  project exists for this deal <span className="font-semibold">before</span> re-attempting — a
+                  blind retry would create a duplicate project.
+                </p>
+                <p className="mt-1 text-muted-foreground">
+                  If a project already exists, do <span className="font-semibold">not</span> re-attempt — re-confirm
+                  the denial here and have the existing project reconciled. Only re-attempt once you’ve confirmed
+                  no project was created.
+                </p>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="rfp-override-note">Note (optional)</Label>
+                <Textarea
+                  id="rfp-override-note"
+                  value={note}
+                  onChange={(event) => setNote(event.target.value)}
+                  placeholder="Why are you re-attempting or upholding this decision?"
+                  rows={3}
+                  disabled={busy}
+                />
+              </div>
+              <label className="flex items-start gap-2 text-sm text-foreground">
+                <Checkbox
+                  checked={confirmedNoProject}
+                  onCheckedChange={setConfirmedNoProject}
+                  disabled={busy}
+                  className="mt-0.5"
+                />
+                <span>I checked Procore and confirmed that no Bid Board project was created for this deal.</span>
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={onApprove} disabled={busy || !confirmedNoProject}>
+                  {submitting === "approve" ? "Submitting…" : "Confirmed no project — re-attempt"}
+                </Button>
+                <Button variant="destructive" onClick={onReconfirm} disabled={busy}>
+                  {submitting === "reconfirm" ? "Confirming…" : "Re-confirm denial"}
+                </Button>
+              </div>
+            </>
+          ) : review.actionable ? (
             <>
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="rfp-override-note">Note (optional)</Label>
@@ -190,7 +259,7 @@ export function RfpReviewPage() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button onClick={onApprove} disabled={busy}>
-                  {submitting === "approve" ? "Approving…" : "Approve override (re-submit RFP)"}
+                  {submitting === "approve" ? "Submitting…" : "Approve override (create Bid Board project)"}
                 </Button>
                 <Button variant="destructive" onClick={onReconfirm} disabled={busy}>
                   {submitting === "reconfirm" ? "Confirming…" : "Re-confirm denial"}
@@ -212,16 +281,40 @@ export function RfpReviewPage() {
 }
 
 function StatusBadge({ review }: { review: RfpReviewDetail }) {
+  if (review.overrideState === "approving") {
+    return <Badge variant="secondary">Creating project…</Badge>;
+  }
+  if (review.overrideState === "failed") {
+    return <Badge variant="destructive">Override failed</Badge>;
+  }
   if (review.reviewDecision === "denial_reconfirmed") {
     return <Badge variant="destructive">Denial re-confirmed</Badge>;
-  }
-  if (review.rfpApprovalStatus === "declined") {
-    return <Badge variant="destructive">Declined</Badge>;
   }
   if (review.rfpApprovalStatus === "approved") {
     return <Badge variant="default">Approved</Badge>;
   }
+  if (review.rfpApprovalStatus === "declined") {
+    return <Badge variant="destructive">Declined</Badge>;
+  }
   return <Badge variant="secondary">{review.rfpApprovalStatus ?? "Unknown"}</Badge>;
+}
+
+function ApprovingPanel({ review, onRefresh }: { review: RfpReviewDetail; onRefresh: () => void }) {
+  return (
+    <div className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
+      <p className="font-medium text-foreground">Creating the Bid Board project…</p>
+      <p className="mt-1 text-muted-foreground">
+        {review.reviewedByName ?? "A reviewer"} approved the override. SyncHub is creating the Procore Bid Board
+        project — this can take a minute. The deal will move to Estimating automatically when it’s done. If it
+        fails you’ll see a Retry option here.
+      </p>
+      <div className="mt-3">
+        <Button variant="outline" size="sm" onClick={onRefresh}>
+          Refresh
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function ReviewOutcome({ review }: { review: RfpReviewDetail }) {
@@ -236,15 +329,20 @@ function ReviewOutcome({ review }: { review: RfpReviewDetail }) {
       </div>
     );
   }
+  if (review.rfpApprovalStatus === "approved") {
+    return (
+      <div className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
+        <p className="font-medium text-foreground">Approved — the Bid Board project was created.</p>
+        <p className="mt-1 text-muted-foreground">
+          The deal is linked to Procore and has advanced to Estimating.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
-      <p className="font-medium text-foreground">
-        This RFP is no longer awaiting a second-look review.
-      </p>
-      <p className="mt-1 text-muted-foreground">
-        Its current status is “{review.rfpApprovalStatus ?? "unknown"}”. If it was approved/re-submitted, it
-        will proceed through the normal RFP approval pipeline.
-      </p>
+      <p className="font-medium text-foreground">This RFP is no longer awaiting a second-look review.</p>
+      <p className="mt-1 text-muted-foreground">Its current status is “{review.rfpApprovalStatus ?? "unknown"}”.</p>
     </div>
   );
 }

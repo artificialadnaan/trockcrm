@@ -97,9 +97,26 @@ function buildAddress(deal: RfpPayloadSourceDeal): NormalizedRfpRequestBody["dea
   };
 }
 
+export function resolveSyncHubBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return (env.SYNCHUB_BASE_URL ?? env.SYNC_HUB_BASE_URL ?? env.SYNCHUB_URL ?? "http://localhost:5000").replace(
+    /\/+$/,
+    ""
+  );
+}
+
 export function resolveSyncHubRfpRequestUrl(env: NodeJS.ProcessEnv = process.env): string {
-  const base = env.SYNCHUB_BASE_URL ?? env.SYNC_HUB_BASE_URL ?? env.SYNCHUB_URL ?? "http://localhost:5000";
-  return `${base.replace(/\/+$/, "")}/api/rfp-requests`;
+  return `${resolveSyncHubBaseUrl(env)}/api/rfp-requests`;
+}
+
+/**
+ * SyncHub's authoritative override-approve endpoint for a previously-declined RFP request.
+ * `requestId` is the SyncHub rfp_approval_requests.id (the integer the CRM stored as rfp_approval_request_id).
+ */
+export function resolveSyncHubOverrideApproveUrl(
+  requestId: number,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return `${resolveSyncHubBaseUrl(env)}/api/rfp-requests/${encodeURIComponent(String(requestId))}/override-approve`;
 }
 
 export function buildNormalizedRfpRequestBody(input: {

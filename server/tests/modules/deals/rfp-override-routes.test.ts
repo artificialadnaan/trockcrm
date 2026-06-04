@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const overrideMocks = vi.hoisted(() => ({
-  resubmitDeclinedRfp: vi.fn(),
+  requestOverrideApproval: vi.fn(),
   reconfirmRfpDecline: vi.fn(),
   getRfpReviewDetail: vi.fn(),
 }));
@@ -144,8 +144,8 @@ describe("RFP override-review routes", () => {
   });
 
   describe("POST /:id/rfp-override/approve", () => {
-    it("re-submits and returns the new status + job when a reviewer approves an actionable RFP", async () => {
-      overrideMocks.resubmitDeclinedRfp.mockResolvedValue({ ok: true, jobId: 42, eventId: "evt", status: "pending_outbox" });
+    it("parks the deal 'approving' (with the reviewer's email as approver) and returns the requestId on success", async () => {
+      overrideMocks.requestOverrideApproval.mockResolvedValue({ ok: true, status: "approving", requestId: 77 });
       const commit = vi.fn(async () => {});
       const req = { params: { id: "deal-1" }, body: { note: "rescue" }, tenantDb: {}, user: reviewer(), commitTransaction: commit } as any;
       const res = makeRes();
@@ -153,23 +153,79 @@ describe("RFP override-review routes", () => {
       const err = await runRoute("post", "/:id/rfp-override/approve", req, res);
 
       expect(err).toBeUndefined();
-      expect(overrideMocks.resubmitDeclinedRfp).toHaveBeenCalledWith(
-        expect.objectContaining({ dealId: "deal-1", officeId: "office-1", note: "rescue", actor: expect.objectContaining({ userId: "rev-1" }) })
+      expect(overrideMocks.requestOverrideApproval).toHaveBeenCalledWith(
+        expect.objectContaining({
+          dealId: "deal-1",
+          approverEmail: TAKASHI, // the reviewer's real email — named accountability
+          note: "rescue",
+          actor: expect.objectContaining({ userId: "rev-1" }),
+        })
       );
-      expect(res.body).toMatchObject({ success: true, status: "pending_outbox", jobId: 42 });
+      expect(res.body).toMatchObject({ success: true, status: "approving", requestId: 77 });
       expect(commit).toHaveBeenCalledTimes(1);
     });
 
     it("returns 409 (and does not commit) when the RFP is no longer actionable", async () => {
-      overrideMocks.resubmitDeclinedRfp.mockResolvedValue({ ok: false, reason: "not_actionable" });
+      overrideMocks.requestOverrideApproval.mockResolvedValue({ ok: false, reason: "not_actionable" });
       const commit = vi.fn(async () => {});
       const req = { params: { id: "deal-1" }, body: {}, tenantDb: {}, user: reviewer(), commitTransaction: commit } as any;
       const res = makeRes();
 
       const err = await runRoute("post", "/:id/rfp-override/approve", req, res);
 
-      expect(err).toMatchObject({ statusCode: 409 });
+      expect(err).toMatchObject({ statusCode: 409, code: "RFP_OVERRIDE_NOT_ACTIONABLE" });
       expect(commit).not.toHaveBeenCalled();
+    });
+
+    it("surfaces a SyncHub rejection as an error (rolls back — no commit)", async () => {
+      overrideMocks.requestOverrideApproval.mockResolvedValue({
+        ok: false,
+        reason: "synchub_rejected",
+        syncHubStatus: 409,
+        message: "not declined",
+      });
+      const commit = vi.fn(async () => {});
+      const req = { params: { id: "deal-1" }, body: {}, tenantDb: {}, user: reviewer(), commitTransaction: commit } as any;
+      const res = makeRes();
+
+      const err = await runRoute("post", "/:id/rfp-override/approve", req, res);
+
+      expect(err).toMatchObject({ statusCode: 409, code: "RFP_OVERRIDE_SYNCHUB_REJECTED" });
+      expect(commit).not.toHaveBeenCalled();
+    });
+
+    it("surfaces SyncHub being unreachable as a 502 (rolls back)", async () => {
+      overrideMocks.requestOverrideApproval.mockResolvedValue({ ok: false, reason: "synchub_unavailable", message: "ECONNREFUSED" });
+      const commit = vi.fn(async () => {});
+      const req = { params: { id: "deal-1" }, body: {}, tenantDb: {}, user: reviewer(), commitTransaction: commit } as any;
+      const res = makeRes();
+
+      const err = await runRoute("post", "/:id/rfp-override/approve", req, res);
+
+      expect(err).toMatchObject({ statusCode: 502, code: "RFP_OVERRIDE_SYNCHUB_UNAVAILABLE" });
+      expect(commit).not.toHaveBeenCalled();
+    });
+
+    it("maps missing_request_id to 409 RFP_OVERRIDE_NO_REQUEST (no commit)", async () => {
+      overrideMocks.requestOverrideApproval.mockResolvedValue({ ok: false, reason: "missing_request_id" });
+      const commit = vi.fn(async () => {});
+      const req = { params: { id: "deal-1" }, body: {}, tenantDb: {}, user: reviewer(), commitTransaction: commit } as any;
+      const res = makeRes();
+
+      const err = await runRoute("post", "/:id/rfp-override/approve", req, res);
+
+      expect(err).toMatchObject({ statusCode: 409, code: "RFP_OVERRIDE_NO_REQUEST" });
+      expect(commit).not.toHaveBeenCalled();
+    });
+
+    it("maps a SyncHub 404 to a 409 (the RFP request is gone) and a 500 to a retryable 502", async () => {
+      overrideMocks.requestOverrideApproval.mockResolvedValueOnce({ ok: false, reason: "synchub_rejected", syncHubStatus: 404, message: "not found" });
+      let err = await runRoute("post", "/:id/rfp-override/approve", { params: { id: "deal-1" }, body: {}, tenantDb: {}, user: reviewer(), commitTransaction: vi.fn() } as any, makeRes());
+      expect(err).toMatchObject({ statusCode: 409, code: "RFP_OVERRIDE_SYNCHUB_REJECTED" });
+
+      overrideMocks.requestOverrideApproval.mockResolvedValueOnce({ ok: false, reason: "synchub_rejected", syncHubStatus: 500, message: "boom" });
+      err = await runRoute("post", "/:id/rfp-override/approve", { params: { id: "deal-1" }, body: {}, tenantDb: {}, user: reviewer(), commitTransaction: vi.fn() } as any, makeRes());
+      expect(err).toMatchObject({ statusCode: 502, code: "RFP_OVERRIDE_SYNCHUB_REJECTED" });
     });
 
     it("403s a non-reviewer admin and never calls the service", async () => {
@@ -179,7 +235,7 @@ describe("RFP override-review routes", () => {
       const err = await runRoute("post", "/:id/rfp-override/approve", req, res);
 
       expect(err).toMatchObject({ statusCode: 403 });
-      expect(overrideMocks.resubmitDeclinedRfp).not.toHaveBeenCalled();
+      expect(overrideMocks.requestOverrideApproval).not.toHaveBeenCalled();
     });
 
     it("503s (and never calls the service) when the RFP delivery pipeline is disabled", async () => {
@@ -190,7 +246,7 @@ describe("RFP override-review routes", () => {
       const err = await runRoute("post", "/:id/rfp-override/approve", req, res);
 
       expect(err).toMatchObject({ statusCode: 503, code: "RFP_EVENT_DISABLED" });
-      expect(overrideMocks.resubmitDeclinedRfp).not.toHaveBeenCalled();
+      expect(overrideMocks.requestOverrideApproval).not.toHaveBeenCalled();
     });
   });
 
@@ -226,22 +282,26 @@ describe("RFP override-review routes", () => {
   });
 
   describe("GET /:id/rfp-review", () => {
-    it("returns the review detail for a reviewer", async () => {
+    it("returns the review detail for a reviewer and commits the read transaction", async () => {
       const detail = { dealId: "deal-1", dealName: "Acme", actionable: true };
       overrideMocks.getRfpReviewDetail.mockResolvedValue(detail);
-      const req = { params: { id: "deal-1" }, tenantDb: {}, user: reviewer() } as any;
+      const commit = vi.fn(async () => {});
+      const req = { params: { id: "deal-1" }, tenantDb: {}, user: reviewer(), commitTransaction: commit } as any;
       const res = makeRes();
       const err = await runRoute("get", "/:id/rfp-review", req, res);
       expect(err).toBeUndefined();
       expect(res.body).toEqual({ review: detail });
+      expect(commit).toHaveBeenCalledTimes(1);
     });
 
-    it("404s when the deal is missing", async () => {
+    it("404s (and does not commit) when the deal is missing", async () => {
       overrideMocks.getRfpReviewDetail.mockResolvedValue(null);
-      const req = { params: { id: "missing" }, tenantDb: {}, user: reviewer() } as any;
+      const commit = vi.fn(async () => {});
+      const req = { params: { id: "missing" }, tenantDb: {}, user: reviewer(), commitTransaction: commit } as any;
       const res = makeRes();
       const err = await runRoute("get", "/:id/rfp-review", req, res);
       expect(err).toMatchObject({ statusCode: 404 });
+      expect(commit).not.toHaveBeenCalled();
     });
 
     it("403s a non-reviewer", async () => {

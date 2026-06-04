@@ -1,12 +1,14 @@
-import { randomUUID } from "node:crypto";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import crypto from "node:crypto";
+import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { insertOpportunityRfpRequestJob } from "./rfp-enqueue.js";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
+import { resolveSyncHubOverrideApproveUrl } from "./rfp-payload.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+const SYNCHUB_OVERRIDE_TIMEOUT_MS = 8000;
 
 export interface RfpOverrideActor {
   userId: string;
@@ -14,9 +16,17 @@ export interface RfpOverrideActor {
   role: string;
 }
 
-export type RfpResubmitResult =
-  | { ok: true; jobId: number; eventId: string; status: "pending_outbox" }
-  | { ok: false; reason: "not_actionable" };
+export type RfpOverrideApprovalResult =
+  | { ok: true; status: "approving"; requestId: number }
+  | { ok: false; reason: "not_actionable" }
+  | { ok: false; reason: "missing_request_id" }
+  | { ok: false; reason: "synchub_rejected"; syncHubStatus: number; message: string }
+  | { ok: false; reason: "synchub_unavailable"; message: string };
+
+export interface RfpOverrideApprovalDeps {
+  fetchImpl?: typeof fetch;
+  env?: NodeJS.ProcessEnv;
+}
 
 export type RfpReconfirmResult =
   | { ok: true; status: "declined"; decision: "denial_reconfirmed" }
@@ -40,69 +50,94 @@ export interface RfpReviewDetail {
   reviewedByName: string | null;
   reviewDecision: string | null;
   reviewNote: string | null;
-  /** True only while the deal is freshly declined and not yet second-look-reviewed (i.e. the actions are live). */
+  /** Override-approval delivery state: null | 'approving' (SyncHub creating the project) | 'failed' (retryable). */
+  overrideState: string | null;
+  overrideError: string | null;
+  /** True when a reviewer can act now: declined, not currently approving, and not already a re-confirmed denial. */
   actionable: boolean;
 }
 
+function signBody(rawBody: string, secret: string): string {
+  return `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+}
+
+// declined AND not currently approving AND not already a re-confirmed denial. (state IS NULL OR 'failed' so a
+// failed override is retryable; a re-confirmed denial is terminal; an in-flight 'approving' is locked.)
+function overrideActionableConditions() {
+  return [
+    eq(deals.rfpApprovalStatus, "declined"),
+    or(isNull(deals.rfpOverrideState), eq(deals.rfpOverrideState, "failed"))!,
+    or(isNull(deals.rfpOverrideDecision), ne(deals.rfpOverrideDecision, "denial_reconfirmed"))!,
+  ];
+}
+
 /**
- * Approve the override: re-open a DECLINED RFP and re-submit it to SyncHub for a fresh approval cycle.
+ * Approve the override → trigger SyncHub's authoritative Bid Board project creation.
  *
- * The deal's RFP fields reset to 'pending_outbox' (new request event id, declined-cycle + prior override
- * markers cleared) and an `rfp_request_delivery` job is enqueued via the same machinery as the initial trigger,
- * so the rescue flows through the REAL approval pipeline (SyncHub re-evaluates; a bid-board-created callback
- * then links Procore and advances the deal to estimating). The requesting rep (rfp_approval_requested_by) is
- * intentionally preserved so a re-decline still notifies them.
+ * The deal is parked in rfp_override_state='approving' (still rfp_approval_status='declined') and the CRM POSTs
+ * an HMAC-signed override-approve to SyncHub, which runs the Playwright project creation asynchronously (202).
+ * SyncHub later posts a bid-board-created callback — status 'created' (→ linked + advanced to estimating +
+ * state cleared) or 'failed' (→ rfp_override_state='failed', retryable). The original requesting rep
+ * (rfp_approval_requested_by) is untouched.
  *
- * The guarded UPDATE (status='declined' AND not yet reviewed) makes this idempotent: a second call, or a call
- * on an already-approved/re-confirmed deal, matches 0 rows and returns { ok: false } with no enqueue.
+ * Returns a discriminated result; on any { ok: false } the calling route throws so the tenant transaction rolls
+ * back (the 'approving' write is undone and the deal stays declined + retryable). Idempotent: a second click,
+ * or a click while approving / after a re-confirmed denial, matches 0 rows → not_actionable, no SyncHub call.
  */
-export async function resubmitDeclinedRfp(input: {
-  tenantDb: TenantDb;
-  officeId: string | null;
-  dealId: string;
-  actor: RfpOverrideActor;
-  note: string | null;
-}): Promise<RfpResubmitResult> {
-  const eventId = randomUUID();
+export async function requestOverrideApproval(
+  input: {
+    tenantDb: TenantDb;
+    dealId: string;
+    actor: RfpOverrideActor;
+    approverEmail: string;
+    note: string | null;
+  },
+  deps: RfpOverrideApprovalDeps = {}
+): Promise<RfpOverrideApprovalResult> {
+  const env = deps.env ?? process.env;
+  const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
+
+  // Capture the prior override state so the audit records the real transition (null -> approving on a first
+  // approval, 'failed' -> approving on a retry) rather than a hard-coded null.
+  const [prior] = await input.tenantDb
+    .select({ state: deals.rfpOverrideState })
+    .from(deals)
+    .where(eq(deals.id, input.dealId))
+    .limit(1);
+  const priorOverrideState = prior?.state ?? null;
+
   const [reset] = await input.tenantDb
     .update(deals)
     .set({
-      rfpApprovalStatus: "pending_outbox",
-      rfpApprovalRequestId: null,
-      rfpApprovalToken: null,
-      rfpApprovalRequestEventId: eventId,
-      rfpApprovalRequestedAt: new Date(),
-      rfpDeclinedReason: null,
-      rfpDeclinedAt: null,
-      rfpLastAttemptError: null,
-      rfpConflictReason: null,
-      rfpConflictWith: null,
-      rfpOverrideReviewedAt: null,
-      rfpOverrideReviewedBy: null,
-      rfpOverrideDecision: null,
-      rfpOverrideNote: null,
+      rfpOverrideState: "approving",
+      rfpOverrideError: null,
+      rfpOverrideReviewedAt: new Date(),
+      rfpOverrideReviewedBy: input.actor.userId,
+      rfpOverrideDecision: "override_approved",
+      rfpOverrideNote: input.note,
       updatedAt: new Date(),
     })
-    .where(
-      and(
-        eq(deals.id, input.dealId),
-        eq(deals.rfpApprovalStatus, "declined"),
-        isNull(deals.rfpOverrideReviewedAt)
-      )
-    )
+    .where(and(eq(deals.id, input.dealId), ...overrideActionableConditions()))
     .returning();
 
   if (!reset) {
     return { ok: false, reason: "not_actionable" };
   }
 
+  const requestId = reset.rfpApprovalRequestId;
+  if (typeof requestId !== "number" || !Number.isInteger(requestId) || requestId <= 0) {
+    // Declined deals that ran the pipeline always carry the SyncHub request id; guard defensively so the route
+    // rolls back rather than POSTing to a `/null/override-approve` URL.
+    return { ok: false, reason: "missing_request_id" };
+  }
+
   await writeOverrideHistory(input.tenantDb, {
     dealId: input.dealId,
-    fieldName: "rfp_approval_status",
-    oldValue: "declined",
-    newValue: "pending_outbox",
+    fieldName: "rfp_override_state",
+    oldValue: priorOverrideState,
+    newValue: "approving",
     changedBy: input.actor.userId,
-    source: "rfp_override_resubmit",
+    source: "rfp_override_approve",
     reason: input.note,
   });
 
@@ -118,28 +153,69 @@ export async function resubmitDeclinedRfp(input: {
       secondaryIdSnapshot: (reset.projectNumber ?? reset.dealNumber ?? null) as string | null,
     },
     fieldChanges: {
-      rfpApprovalStatus: { from: "declined", to: "pending_outbox" },
-      rfpOverrideDecision: { from: null, to: "resubmitted_to_synchub" },
+      rfpOverrideState: { from: priorOverrideState, to: "approving" },
     },
-    metadata: { rfpOverrideNote: input.note, rfpOverrideReviewedBy: input.actor.userId, eventId },
+    metadata: {
+      rfpOverrideAction: "override_approve_requested",
+      approverEmail: input.approverEmail,
+      rfpApprovalRequestId: requestId,
+      rfpOverrideNote: input.note,
+    },
   });
 
-  const { jobId } = await insertOpportunityRfpRequestJob({
-    tenantDb: input.tenantDb,
-    deal: reset,
-    officeId: input.officeId,
-    eventId,
-  });
+  const secret = env.SYNCHUB_SHARED_SECRET;
+  if (!secret) {
+    return { ok: false, reason: "synchub_unavailable", message: "SYNCHUB_SHARED_SECRET is not configured" };
+  }
 
-  return { ok: true, jobId, eventId, status: "pending_outbox" };
+  const url = resolveSyncHubOverrideApproveUrl(requestId, env);
+  const rawBody = JSON.stringify({ approverEmail: input.approverEmail });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SYNCHUB_OVERRIDE_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-rfp-request-signature": signBody(rawBody, secret),
+      },
+      body: rawBody,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "synchub_unavailable",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // 202 = accepted (a concurrent duplicate also returns 202 per the contract — both mean "creation in flight").
+  if (response.status === 202) {
+    return { ok: true, status: "approving", requestId };
+  }
+
+  let message = `SyncHub returned ${response.status}`;
+  try {
+    const body = (await response.json()) as { message?: unknown; error?: unknown };
+    if (typeof body?.message === "string") message = body.message;
+    else if (typeof body?.error === "string") message = body.error;
+  } catch {
+    /* non-JSON body; keep the status message */
+  }
+  return { ok: false, reason: "synchub_rejected", syncHubStatus: response.status, message };
 }
 
 /**
- * Re-confirm the denial: record that the reviewers looked again and upheld the no-go.
+ * Re-confirm the denial: the reviewers looked again and upheld the no-go.
  *
- * Leaves rfp_approval_status = 'declined' untouched (so the decline-email trigger never re-fires) and stamps the
- * rfp_override_* review columns so the deal is not perpetually re-flagged. The same guarded WHERE makes a second
- * review a graceful no-op.
+ * Leaves rfp_approval_status = 'declined' (so the decline-email trigger never re-fires), clears any prior
+ * override-approval state, and records decision='denial_reconfirmed' so the decline is not perpetually
+ * re-flagged. Allowed on a fresh declined RFP or after a FAILED override (the reviewers give up); blocked
+ * while an override is in flight ('approving') or once already re-confirmed.
  */
 export async function reconfirmRfpDecline(input: {
   tenantDb: TenantDb;
@@ -147,23 +223,18 @@ export async function reconfirmRfpDecline(input: {
   actor: RfpOverrideActor;
   note: string | null;
 }): Promise<RfpReconfirmResult> {
-  const reviewedAt = new Date();
   const [updated] = await input.tenantDb
     .update(deals)
     .set({
-      rfpOverrideReviewedAt: reviewedAt,
+      rfpOverrideReviewedAt: new Date(),
       rfpOverrideReviewedBy: input.actor.userId,
       rfpOverrideDecision: "denial_reconfirmed",
       rfpOverrideNote: input.note,
+      rfpOverrideState: null,
+      rfpOverrideError: null,
       updatedAt: new Date(),
     })
-    .where(
-      and(
-        eq(deals.id, input.dealId),
-        eq(deals.rfpApprovalStatus, "declined"),
-        isNull(deals.rfpOverrideReviewedAt)
-      )
-    )
+    .where(and(eq(deals.id, input.dealId), ...overrideActionableConditions()))
     .returning();
 
   if (!updated) {
@@ -200,7 +271,7 @@ export async function reconfirmRfpDecline(input: {
   return { ok: true, status: "declined", decision: "denial_reconfirmed" };
 }
 
-/** Page data for the review surface: the declined RFP + requesting rep + any recorded review outcome. */
+/** Page data for the review surface: the declined RFP + requesting rep + recorded review outcome + override state. */
 export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Promise<RfpReviewDetail | null> {
   const result = await tenantDb.execute(sql`
     SELECT d.id AS "dealId",
@@ -219,7 +290,9 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
            d.rfp_override_reviewed_by AS "reviewedById",
            rev.display_name AS "reviewedByName",
            d.rfp_override_decision AS "reviewDecision",
-           d.rfp_override_note AS "reviewNote"
+           d.rfp_override_note AS "reviewNote",
+           d.rfp_override_state AS "overrideState",
+           d.rfp_override_error AS "overrideError"
       FROM deals d
       LEFT JOIN public.users req ON req.id = d.rfp_approval_requested_by
       LEFT JOIN public.users rev ON rev.id = d.rfp_override_reviewed_by
@@ -248,7 +321,12 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
     reviewedByName: row.reviewedByName ?? null,
     reviewDecision: row.reviewDecision ?? null,
     reviewNote: row.reviewNote ?? null,
-    actionable: row.rfpApprovalStatus === "declined" && row.reviewedAt == null,
+    overrideState: row.overrideState ?? null,
+    overrideError: row.overrideError ?? null,
+    actionable:
+      row.rfpApprovalStatus === "declined" &&
+      row.overrideState !== "approving" &&
+      row.reviewDecision !== "denial_reconfirmed",
   };
 }
 

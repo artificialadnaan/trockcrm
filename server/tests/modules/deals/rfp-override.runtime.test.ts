@@ -3,22 +3,20 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
 /**
- * REAL-SQL (PGlite) proof that the RFP override-review actions interact safely with migration 0148's
- * `deals_rfp_rejected_email_trg` (which emails the rep + leadership on pending -> declined).
+ * REAL-SQL (PGlite) proof for the RFP override-approval flow (CRM PR #2). It installs the ACTUAL migration-0148
+ * decline-email trigger on a throwaway tenant schema whose deals table carries the 0151 + 0152 override columns,
+ * then drives the SAME column writes the service + bid-board-created callback handler perform, locking:
  *
- * The override page exposes two actions on a DECLINED deal:
- *   - APPROVE (override)  -> re-submit: the deal's RFP fields reset to 'pending_outbox' for a fresh cycle;
- *   - RE-CONFIRM denial   -> only the rfp_override_* columns are written; rfp_approval_status stays 'declined'.
+ *   - approve override (rfp_override_state='approving', status untouched)  -> NO decline email (trigger is
+ *                                                                            AFTER UPDATE OF rfp_approval_status);
+ *   - 'created' callback (declined -> approved, clears override state)      -> NO email (NEW != 'declined') AND
+ *                                                                            idempotent on at-least-once re-delivery;
+ *   - 'failed' callback (rfp_override_state='failed', declined-only)        -> NO email, idempotent, and a no-op
+ *                                                                            after the deal is already approved;
+ *   - re-confirm denial (status untouched)                                 -> NO email;
+ *   - the actionable guard locks a second approve while 'approving'.
  *
- * This installs the ACTUAL 0148 trigger function (extracted from the migration) on a throwaway tenant schema
- * whose deals table carries the migration-0151 override columns, then drives the two override transitions with
- * the SAME column writes the service performs, locking these invariants:
- *   - approve/override (declined -> pending_outbox)         -> NO rfp_rejected_email job (not a fresh decline);
- *   - re-confirm denial (status untouched, override cols)    -> NO job (the UPDATE OF rfp_approval_status filter);
- *   - a genuine re-open (override) then a NEW-cycle decline   -> a NEW job, proving the rescue still flows through
- *                                                               the real SyncHub decline pipeline on a re-decline.
- *
- * Inverting any guard (e.g. firing the email when leadership re-opens a deal) breaks these assertions.
+ * Inverting any guard (firing the email on an override, or double-applying a duplicate callback) breaks these.
  */
 
 const MIGRATION_SQL = readFileSync(
@@ -65,16 +63,19 @@ async function setup(): Promise<PGlite> {
       deal_number text NOT NULL,
       rfp_approval_status text,
       rfp_approval_request_id integer,
-      rfp_approval_request_event_id uuid,
-      rfp_approval_requested_at timestamptz,
       rfp_approval_requested_by uuid,
       rfp_declined_reason text,
-      rfp_declined_at timestamptz,
-      rfp_last_attempt_error text,
       rfp_override_reviewed_at timestamptz,
       rfp_override_reviewed_by uuid,
       rfp_override_decision text,
-      rfp_override_note text
+      rfp_override_note text,
+      rfp_override_state text,
+      rfp_override_error text,
+      procore_bid_id bigint,
+      procore_company_id text,
+      is_bid_board_owned boolean DEFAULT false,
+      bid_board_linked_at timestamptz,
+      updated_at timestamptz
     );
   `);
   await db.exec(FN);
@@ -86,161 +87,289 @@ async function setup(): Promise<PGlite> {
   return db;
 }
 
-async function insertDeclinedDeal(db: PGlite, requestId: number | null): Promise<void> {
+async function insertDeclinedDeal(db: PGlite, requestId: number | null = 55): Promise<void> {
   await db.query(
     `INSERT INTO ${SCHEMA}.deals
-       (id, name, deal_number, rfp_approval_status, rfp_approval_request_id, rfp_declined_reason, rfp_declined_at, rfp_approval_requested_by)
-     VALUES ($1, 'jasonn ranches', 'TR-1001', 'declined', $2, 'Margins too thin', now(), $3)`,
+       (id, name, deal_number, rfp_approval_status, rfp_approval_request_id, rfp_declined_reason, rfp_approval_requested_by)
+     VALUES ($1, 'jasonn ranches', 'TR-1001', 'declined', $2, 'Margins too thin', $3)`,
     [DEAL, requestId, REQUESTER],
   );
 }
 
-/** The exact column writes the override-approve (re-submit) service performs. */
-async function overrideApproveResubmit(db: PGlite, id: string): Promise<number> {
+/** requestOverrideApproval's guarded UPDATE. */
+async function overrideApprove(db: PGlite, id: string): Promise<number> {
   const res = await db.query(
     `UPDATE ${SCHEMA}.deals
-        SET rfp_approval_status = 'pending_outbox',
-            rfp_approval_request_id = NULL,
-            rfp_approval_request_event_id = gen_random_uuid(),
-            rfp_approval_requested_at = now(),
-            rfp_declined_reason = NULL,
-            rfp_declined_at = NULL,
-            rfp_last_attempt_error = NULL,
-            rfp_override_reviewed_at = NULL,
-            rfp_override_reviewed_by = NULL,
-            rfp_override_decision = NULL,
-            rfp_override_note = NULL
-      WHERE id = $1
-        AND rfp_approval_status = 'declined'
-        AND rfp_override_reviewed_at IS NULL`,
-    [id],
-  );
-  return res.affectedRows ?? 0;
-}
-
-/** The exact column writes the re-confirm-denial service performs (status column NOT in the SET list). */
-async function reconfirmDenial(db: PGlite, id: string): Promise<number> {
-  const res = await db.query(
-    `UPDATE ${SCHEMA}.deals
-        SET rfp_override_reviewed_at = now(),
+        SET rfp_override_state = 'approving',
+            rfp_override_error = NULL,
+            rfp_override_reviewed_at = now(),
             rfp_override_reviewed_by = $2,
-            rfp_override_decision = 'denial_reconfirmed',
-            rfp_override_note = 'Confirmed no-go'
+            rfp_override_decision = 'override_approved',
+            rfp_override_note = NULL,
+            updated_at = now()
       WHERE id = $1
         AND rfp_approval_status = 'declined'
-        AND rfp_override_reviewed_at IS NULL`,
+        AND (rfp_override_state IS NULL OR rfp_override_state = 'failed')
+        AND (rfp_override_decision IS NULL OR rfp_override_decision <> 'denial_reconfirmed')`,
     [id, REVIEWER],
   );
   return res.affectedRows ?? 0;
 }
 
-async function emailJobs(db: PGlite): Promise<Array<{ payload: any }>> {
-  const res = await db.query<{ payload: any }>(
-    `SELECT payload FROM public.job_queue WHERE job_type = 'rfp_rejected_email' ORDER BY id`,
+/** bid-board-created 'created' linkage UPDATE (declined -> approved, clears override state; freshness-guarded). */
+async function createdCallback(
+  db: PGlite,
+  id: string,
+  projectId: string,
+  companyId: string,
+  createdAt: string | null = null,
+): Promise<number> {
+  const res = await db.query(
+    `UPDATE ${SCHEMA}.deals
+        SET procore_bid_id = $1::bigint,
+            procore_company_id = $2,
+            is_bid_board_owned = true,
+            rfp_approval_status = 'approved',
+            bid_board_linked_at = now(),
+            rfp_override_state = NULL,
+            rfp_override_error = NULL,
+            updated_at = now()
+      WHERE id = $3
+        AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+        AND (rfp_override_reviewed_at IS NULL OR COALESCE($4::timestamptz, NOW()) >= rfp_override_reviewed_at)
+        AND (
+          procore_bid_id IS DISTINCT FROM $1::bigint OR
+          procore_company_id IS DISTINCT FROM $2 OR
+          is_bid_board_owned IS DISTINCT FROM true OR
+          rfp_approval_status IS DISTINCT FROM 'approved' OR
+          bid_board_linked_at IS NULL OR
+          rfp_override_state IS NOT NULL OR
+          rfp_override_error IS NOT NULL
+        )`,
+    [projectId, companyId, id, createdAt],
   );
-  return res.rows;
+  return res.affectedRows ?? 0;
 }
 
-describe("RFP override-review actions vs migration 0148 decline-email trigger (real SQL)", () => {
-  it("approve/override (declined -> pending_outbox) does NOT enqueue a decline email", async () => {
+/** bid-board-created 'failed' UPDATE (declined-only, value-distinct, reconfirm-safe, freshness-guarded). */
+async function failedCallback(
+  db: PGlite,
+  id: string,
+  requestId: number,
+  error: string,
+  createdAt: string | null = null,
+): Promise<number> {
+  const res = await db.query(
+    `UPDATE ${SCHEMA}.deals
+        SET rfp_override_state = 'failed',
+            rfp_override_error = $1,
+            updated_at = now()
+      WHERE id = $2
+        AND rfp_approval_status = 'declined'
+        AND rfp_approval_request_id = $3
+        AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+        AND COALESCE($4::timestamptz, NOW()) >= rfp_override_reviewed_at
+        AND (rfp_override_state IS DISTINCT FROM 'failed' OR rfp_override_error IS DISTINCT FROM $1)`,
+    [error, id, requestId, createdAt],
+  );
+  return res.affectedRows ?? 0;
+}
+
+/** reconfirmRfpDecline's guarded UPDATE. */
+async function reconfirm(db: PGlite, id: string): Promise<number> {
+  const res = await db.query(
+    `UPDATE ${SCHEMA}.deals
+        SET rfp_override_reviewed_at = now(),
+            rfp_override_reviewed_by = $2,
+            rfp_override_decision = 'denial_reconfirmed',
+            rfp_override_note = NULL,
+            rfp_override_state = NULL,
+            rfp_override_error = NULL,
+            updated_at = now()
+      WHERE id = $1
+        AND rfp_approval_status = 'declined'
+        AND (rfp_override_state IS NULL OR rfp_override_state = 'failed')
+        AND (rfp_override_decision IS NULL OR rfp_override_decision <> 'denial_reconfirmed')`,
+    [id, REVIEWER],
+  );
+  return res.affectedRows ?? 0;
+}
+
+async function emailJobCount(db: PGlite): Promise<number> {
+  const res = await db.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM public.job_queue WHERE job_type = 'rfp_rejected_email'`,
+  );
+  return res.rows[0]?.n ?? 0;
+}
+
+async function dealState(db: PGlite, id: string) {
+  const res = await db.query<{ status: string; state: string | null; error: string | null; decision: string | null }>(
+    `SELECT rfp_approval_status AS status, rfp_override_state AS state, rfp_override_error AS error,
+            rfp_override_decision AS decision
+       FROM ${SCHEMA}.deals WHERE id = $1`,
+    [id],
+  );
+  return res.rows[0];
+}
+
+describe("RFP override-approval flow vs migration 0148 decline trigger (real SQL)", () => {
+  it("approve parks the deal in 'approving' (status stays declined) and fires NO decline email", async () => {
     pg = await setup();
-    await insertDeclinedDeal(pg, 55);
+    await insertDeclinedDeal(pg);
 
-    const affected = await overrideApproveResubmit(pg, DEAL);
-
-    expect(affected).toBe(1);
-    expect(await emailJobs(pg)).toHaveLength(0);
-    const [{ status }] = (
-      await pg.query<{ status: string }>(`SELECT rfp_approval_status AS status FROM ${SCHEMA}.deals WHERE id = $1`, [DEAL])
-    ).rows;
-    expect(status).toBe("pending_outbox");
+    expect(await overrideApprove(pg, DEAL)).toBe(1);
+    expect(await emailJobCount(pg)).toBe(0);
+    const d = await dealState(pg, DEAL);
+    expect(d.status).toBe("declined");
+    expect(d.state).toBe("approving");
   });
 
-  it("re-confirm denial (override columns only, status stays 'declined') does NOT enqueue a decline email", async () => {
+  it("a 'created' callback flips declined->approved, clears the override state, fires NO email, and is idempotent", async () => {
     pg = await setup();
-    await insertDeclinedDeal(pg, 55);
+    await insertDeclinedDeal(pg);
+    await overrideApprove(pg, DEAL); // state='approving'
 
-    const affected = await reconfirmDenial(pg, DEAL);
+    expect(await createdCallback(pg, DEAL, "654321", "9001")).toBe(1);
+    const d = await dealState(pg, DEAL);
+    expect(d.status).toBe("approved");
+    expect(d.state).toBeNull();
+    expect(await emailJobCount(pg)).toBe(0);
 
-    expect(affected).toBe(1);
-    expect(await emailJobs(pg)).toHaveLength(0);
-    const [row] = (
-      await pg.query<{ status: string; decision: string; reviewed_at: string | null }>(
-        `SELECT rfp_approval_status AS status, rfp_override_decision AS decision, rfp_override_reviewed_at AS reviewed_at
-           FROM ${SCHEMA}.deals WHERE id = $1`,
-        [DEAL],
-      )
-    ).rows;
-    expect(row.status).toBe("declined");
-    expect(row.decision).toBe("denial_reconfirmed");
-    expect(row.reviewed_at).not.toBeNull();
+    // at-least-once re-delivery of the same 'created' callback -> no rows changed (no double-link/advance)
+    expect(await createdCallback(pg, DEAL, "654321", "9001")).toBe(0);
+    expect(await emailJobCount(pg)).toBe(0);
   });
 
-  it("a re-confirmed deal is not actionable twice (the WHERE guard blocks a second review)", async () => {
+  it("a 'failed' callback marks the override failed (declined stays), fires NO email, is idempotent, and a no-op after approval", async () => {
     pg = await setup();
     await insertDeclinedDeal(pg, 55);
-    await reconfirmDenial(pg, DEAL);
+    await overrideApprove(pg, DEAL);
 
-    // Second attempts (either action) must no-op: already reviewed.
-    expect(await reconfirmDenial(pg, DEAL)).toBe(0);
-    expect(await overrideApproveResubmit(pg, DEAL)).toBe(0);
-    expect(await emailJobs(pg)).toHaveLength(0);
+    expect(await failedCallback(pg, DEAL, 55, "Procore form timed out")).toBe(1);
+    let d = await dealState(pg, DEAL);
+    expect(d.status).toBe("declined");
+    expect(d.state).toBe("failed");
+    expect(d.error).toBe("Procore form timed out");
+    expect(await emailJobCount(pg)).toBe(0);
+
+    // duplicate identical 'failed' delivery -> no-op
+    expect(await failedCallback(pg, DEAL, 55, "Procore form timed out")).toBe(0);
+
+    // a reviewer retries -> approve again, then 'created' lands -> approved
+    expect(await overrideApprove(pg, DEAL)).toBe(1); // failed -> approving (retry allowed)
+    expect(await createdCallback(pg, DEAL, "654321", "9001")).toBe(1);
+    expect((await dealState(pg, DEAL)).status).toBe("approved");
+
+    // a STALE 'failed' arriving after approval is a no-op (declined-only guard) — never reverts an approved deal
+    expect(await failedCallback(pg, DEAL, 55, "late failure")).toBe(0);
+    expect((await dealState(pg, DEAL)).status).toBe("approved");
+    expect(await emailJobCount(pg)).toBe(0);
   });
 
-  it("a genuine re-open (override) then a NEW-cycle decline still emails (rescue flows through the real pipeline)", async () => {
+  it("a late 'failed' retry does NOT resurrect 'failed' on a deal the reviewers already re-confirmed", async () => {
     pg = await setup();
     await insertDeclinedDeal(pg, 55);
+    await overrideApprove(pg, DEAL);
+    expect(await failedCallback(pg, DEAL, 55, "first failure")).toBe(1); // state='failed'
+    // the reviewers give up and uphold the denial -> terminal: decision='denial_reconfirmed', state cleared
+    expect(await reconfirm(pg, DEAL)).toBe(1);
 
-    // Leadership approves the override -> re-submit (declined -> pending_outbox), no email.
-    await overrideApproveResubmit(pg, DEAL);
-    expect(await emailJobs(pg)).toHaveLength(0);
+    // a stale at-least-once retry of the OLD failed callback (same request id) arrives hours later
+    expect(await failedCallback(pg, DEAL, 55, "first failure")).toBe(0);
+    const d = await dealState(pg, DEAL);
+    expect(d.state).toBeNull(); // NOT resurrected to 'failed'
+    expect(d.decision).toBe("denial_reconfirmed"); // terminal review outcome preserved
+    expect(await emailJobCount(pg)).toBe(0);
+  });
 
-    // Worker delivers to SyncHub -> pending with a NEW request id.
+  it("the original (non-override) flow is unaffected: a 'created' on a deal with no override attempt still links/approves", async () => {
+    pg = await setup();
+    await insertDeclinedDeal(pg, 55); // rfp_override_reviewed_at IS NULL (no override attempt)
+    // even with a null createdAt, the freshness guard escapes (reviewed_at IS NULL) so the project still links
+    expect(await createdCallback(pg, DEAL, "654321", "9001", null)).toBe(1);
+    expect((await dealState(pg, DEAL)).status).toBe("approved");
+  });
+
+  it("a stale 'created' from a prior attempt does NOT link/approve a fresh in-flight retry", async () => {
+    pg = await setup();
+    await insertDeclinedDeal(pg, 55);
+    // a retry (attempt 2) is in flight, started at a known time
     await pg.query(
-      `UPDATE ${SCHEMA}.deals SET rfp_approval_status = 'pending', rfp_approval_request_id = 56 WHERE id = $1`,
+      `UPDATE ${SCHEMA}.deals SET rfp_override_state='approving', rfp_override_decision='override_approved', rfp_override_reviewed_at='2026-06-02T00:00:00Z' WHERE id=$1`,
       [DEAL],
     );
-    // SyncHub declines the new cycle -> a fresh decline email for request id 56.
+    // a stale 'created' from attempt 1 (older createdAt, the old attempt's project) arrives -> ignored
+    expect(await createdCallback(pg, DEAL, "111111", "9001", "2026-06-01T00:00:00Z")).toBe(0);
+    let d = await dealState(pg, DEAL);
+    expect(d.status).toBe("declined");
+    expect(d.state).toBe("approving"); // fresh retry state preserved, not linked to the stale project
+
+    // the CURRENT attempt's 'created' (newer) links + approves
+    expect(await createdCallback(pg, DEAL, "222222", "9001", "2026-06-02T00:00:10Z")).toBe(1);
+    expect((await dealState(pg, DEAL)).status).toBe("approved");
+  });
+
+  it("a 'created' callback does NOT approve a deal the reviewers have terminally re-confirmed", async () => {
+    pg = await setup();
+    await insertDeclinedDeal(pg, 55);
+    await overrideApprove(pg, DEAL);
+    await failedCallback(pg, DEAL, 55, "failed once");
+    expect(await reconfirm(pg, DEAL)).toBe(1); // terminal: decision='denial_reconfirmed'
+
+    // a (delayed) 'created' for the same request id must NOT override the re-confirmed denial
+    expect(await createdCallback(pg, DEAL, "654321", "9001")).toBe(0);
+    const d = await dealState(pg, DEAL);
+    expect(d.status).toBe("declined");
+    expect(d.decision).toBe("denial_reconfirmed");
+  });
+
+  it("a stale 'failed' retry from a prior attempt does NOT clobber a fresh in-flight retry", async () => {
+    pg = await setup();
+    await insertDeclinedDeal(pg, 55);
+    // attempt 1 started at a known earlier time, then failed
     await pg.query(
-      `UPDATE ${SCHEMA}.deals SET rfp_approval_status = 'declined', rfp_declined_reason = 'Still no' WHERE id = $1`,
+      `UPDATE ${SCHEMA}.deals SET rfp_override_state='approving', rfp_override_decision='override_approved', rfp_override_reviewed_at='2026-06-01T00:00:00Z' WHERE id=$1`,
+      [DEAL],
+    );
+    expect(await failedCallback(pg, DEAL, 55, "attempt 1 failed", "2026-06-01T00:00:10Z")).toBe(1);
+    expect((await dealState(pg, DEAL)).state).toBe("failed");
+
+    // the reviewer RETRIES -> attempt 2 starts later and is in flight ('approving')
+    await pg.query(
+      `UPDATE ${SCHEMA}.deals SET rfp_override_state='approving', rfp_override_reviewed_at='2026-06-02T00:00:00Z' WHERE id=$1`,
       [DEAL],
     );
 
-    const jobs = await emailJobs(pg);
-    expect(jobs).toHaveLength(1);
-    expect(jobs[0].payload.rfpApprovalRequestId).toBe(56);
-    // the original requester was preserved through the rescue, so the re-decline still notifies them
-    expect(jobs[0].payload.requestedByUserId).toBe(REQUESTER);
+    // a stale duplicate of attempt 1's failed callback (older createdAt) arrives -> ignored (freshness guard)
+    expect(await failedCallback(pg, DEAL, 55, "attempt 1 failed", "2026-06-01T00:00:10Z")).toBe(0);
+    expect((await dealState(pg, DEAL)).state).toBe("approving"); // NOT clobbered
+
+    // attempt 2's own failure (newer createdAt) DOES apply
+    expect(await failedCallback(pg, DEAL, 55, "attempt 2 failed", "2026-06-02T00:00:10Z")).toBe(1);
+    expect((await dealState(pg, DEAL)).state).toBe("failed");
   });
 
-  it("approve is a no-op once the deal is already re-submitted (status guard, not just the reviewed guard)", async () => {
+  it("the actionable guard locks a second approve while one is already in flight ('approving')", async () => {
     pg = await setup();
-    await insertDeclinedDeal(pg, 55);
-    expect(await overrideApproveResubmit(pg, DEAL)).toBe(1); // declined -> pending_outbox
+    await insertDeclinedDeal(pg);
 
-    // Second approve: rfp_override_reviewed_at is back to NULL, so ONLY the status='declined' clause blocks it.
-    expect(await overrideApproveResubmit(pg, DEAL)).toBe(0);
-    expect(await emailJobs(pg)).toHaveLength(0);
-    const [{ status }] = (
-      await pg.query<{ status: string }>(`SELECT rfp_approval_status AS status FROM ${SCHEMA}.deals WHERE id = $1`, [DEAL])
-    ).rows;
-    expect(status).toBe("pending_outbox");
+    expect(await overrideApprove(pg, DEAL)).toBe(1);
+    // already 'approving' -> a duplicate click is a no-op (no second SyncHub call upstream)
+    expect(await overrideApprove(pg, DEAL)).toBe(0);
+    expect(await emailJobCount(pg)).toBe(0);
   });
 
-  it("neither action touches a non-declined RFP (e.g. already approved) — no double-trigger", async () => {
+  it("re-confirm denial fires NO email and is blocked while an override is in flight", async () => {
     pg = await setup();
-    await pg.query(
-      `INSERT INTO ${SCHEMA}.deals (id, name, deal_number, rfp_approval_status, rfp_approval_request_id, rfp_approval_requested_by)
-       VALUES ($1, 'approved deal', 'TR-2', 'approved', 55, $2)`,
-      [DEAL, REQUESTER],
-    );
+    await insertDeclinedDeal(pg);
 
-    expect(await overrideApproveResubmit(pg, DEAL)).toBe(0);
-    expect(await reconfirmDenial(pg, DEAL)).toBe(0);
-    expect(await emailJobs(pg)).toHaveLength(0);
-    const [{ status }] = (
-      await pg.query<{ status: string }>(`SELECT rfp_approval_status AS status FROM ${SCHEMA}.deals WHERE id = $1`, [DEAL])
-    ).rows;
-    expect(status).toBe("approved");
+    expect(await reconfirm(pg, DEAL)).toBe(1);
+    expect(await emailJobCount(pg)).toBe(0);
+    expect((await dealState(pg, DEAL)).status).toBe("declined");
+
+    // a fresh declined deal that is mid-approval cannot be re-confirmed underneath the in-flight approval
+    await pg.query(`UPDATE ${SCHEMA}.deals SET rfp_approval_status='declined', rfp_override_decision=NULL, rfp_override_reviewed_at=NULL WHERE id=$1`, [DEAL]);
+    await overrideApprove(pg, DEAL); // state='approving'
+    expect(await reconfirm(pg, DEAL)).toBe(0);
   });
 });
