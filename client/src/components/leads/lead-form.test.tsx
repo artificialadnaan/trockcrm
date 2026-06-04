@@ -1096,9 +1096,10 @@ describe("LeadForm", () => {
     expect(html).toContain("<button type=\"submit\">Create Lead</button>");
   });
 
-  it("sends the selected ATL office code and tenant header when creating a lead", async () => {
+  it("stamps the chosen ATL prefix but still creates on the rep's home office (prefix is cosmetic)", async () => {
     renderCreateForm();
 
+    // ATL is offered as a pure project-number prefix regardless of accessible offices.
     await clickButton(findButton("ATL (Atlanta)")!);
     await clickButton(findButton("Select Acme")!);
     await clickButton(findButton("Select Palm Villas")!);
@@ -1109,7 +1110,32 @@ describe("LeadForm", () => {
       expect.objectContaining({
         officeCode: "atl",
       }),
-      { officeId: "office-atlanta" }
+      // Tenant header stays the rep's home office — the ATL choice only sets the lead number prefix, not
+      // the data schema the lead is created on.
+      { officeId: "office-dallas" }
+    );
+  });
+
+  it("keeps the company/property/contact selections when the office prefix changes (no reset)", async () => {
+    renderCreateForm();
+
+    // Select the relationships FIRST, then switch the office prefix. Because office_code no longer rescopes
+    // the data, changing the prefix must NOT clear company/property/contact (pre-fix it wiped them, which
+    // would block the create on the now-missing company).
+    await clickButton(findButton("Select Acme")!);
+    await clickButton(findButton("Select Palm Villas")!);
+    await clickButton(container.querySelector<HTMLButtonElement>('button[data-value="contact-1"]')!);
+    await clickButton(findButton("ATL (Atlanta)")!);
+    await submitForm();
+
+    expect(leadHookMocks.createLead).toHaveBeenCalledWith(
+      expect.objectContaining({
+        officeCode: "atl",
+        companyId: "company-1",
+        propertyId: "property-1",
+        primaryContactId: "contact-1",
+      }),
+      { officeId: "office-dallas" }
     );
   });
 

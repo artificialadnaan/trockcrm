@@ -1,6 +1,5 @@
-import { and, eq } from "drizzle-orm";
-import { deals, leads, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
-import { resolveOfficeCodeFromOffice } from "@trock-crm/shared/types";
+import { eq } from "drizzle-orm";
+import { deals, leads, users } from "@trock-crm/shared/schema";
 import { AppError } from "../middleware/error-handler.js";
 
 type TenantDb = any;
@@ -31,55 +30,13 @@ export function getViewerOfficeId(viewer: Viewer) {
   return viewer.activeOfficeId ?? viewer.officeId ?? null;
 }
 
-async function getViewerOfficeCode(tenantDb: TenantDb, viewer: Viewer) {
-  const viewerOfficeId = getViewerOfficeId(viewer);
-  if (!viewerOfficeId) {
-    return null;
-  }
-
-  const [office] = await tenantDb
-    .select({
-      slug: offices.slug,
-      name: offices.name,
-    })
-    .from(offices)
-    .where(eq(offices.id, viewerOfficeId))
-    .limit(1);
-
-  return resolveOfficeCodeFromOffice(office ?? null);
-}
-
-async function viewerMatchesRecordOffice(
-  tenantDb: TenantDb,
-  viewer: Viewer,
-  input: { officeCode?: string | null; assignedRepId?: string | null; assigneeOfficeId?: string | null }
-) {
-  const viewerOfficeId = getViewerOfficeId(viewer);
-  if (!viewerOfficeId) {
-    return false;
-  }
-
-  const recordOfficeCode = resolveOfficeCodeFromOffice(input.officeCode ?? null);
-  if (recordOfficeCode) {
-    const viewerOfficeCode = await getViewerOfficeCode(tenantDb, viewer);
-    return viewerOfficeCode === recordOfficeCode;
-  }
-
-  if (!input.assignedRepId) {
-    return true;
-  }
-
-  if (input.assigneeOfficeId === viewerOfficeId) {
-    return true;
-  }
-
-  const [officeAccess] = await tenantDb
-    .select({ officeId: userOfficeAccess.officeId })
-    .from(userOfficeAccess)
-    .where(and(eq(userOfficeAccess.userId, input.assignedRepId), eq(userOfficeAccess.officeId, viewerOfficeId)))
-    .limit(1);
-
-  return officeAccess?.officeId === viewerOfficeId;
+// office_code is a cosmetic project-number prefix, NOT an access boundary. A record reached here was
+// fetched from the viewer's tenant schema (search_path), so it already belongs to the viewer's office —
+// any office member may collaborate on it regardless of its office_code or its assigned rep's office (an
+// ATL-prefixed deal created by a Dallas rep stays accessible to Dallas reps). Owner-only mutations are
+// enforced separately by assertDeal/LeadOwnerAccess. Deny only when the viewer has no office at all.
+function viewerMatchesRecordOffice(viewer: Viewer): boolean {
+  return getViewerOfficeId(viewer) !== null;
 }
 
 export function normalizeCollaborativeScope(
@@ -138,7 +95,7 @@ export async function assertDealCollaboratorAccess(tenantDb: TenantDb, dealId: s
     throw new AppError(404, "Deal not found");
   }
 
-  const officeMatch = await viewerMatchesRecordOffice(tenantDb, viewer, row);
+  const officeMatch = viewerMatchesRecordOffice(viewer);
   if (!officeMatch) {
     throw new AppError(403, "Access denied: deal is outside your office.");
   }
@@ -152,7 +109,7 @@ export async function assertLeadCollaboratorAccess(tenantDb: TenantDb, leadId: s
     throw new AppError(404, "Lead not found");
   }
 
-  const officeMatch = await viewerMatchesRecordOffice(tenantDb, viewer, row);
+  const officeMatch = viewerMatchesRecordOffice(viewer);
   if (!officeMatch) {
     throw new AppError(403, "Access denied: lead is outside your office.");
   }

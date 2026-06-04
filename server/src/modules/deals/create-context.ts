@@ -4,10 +4,6 @@ function noActiveOfficeError(recordType: string) {
   return `Cannot create ${recordType}: no active office. Contact admin.`;
 }
 
-function officeMismatchError(recordType: string) {
-  return `Cannot create ${recordType}: officeCode must match the selected office.`;
-}
-
 export function resolveCreateOfficeCode(input: {
   requestedOfficeCode?: unknown;
   officeSlug?: string | null;
@@ -24,12 +20,9 @@ export function resolveCreateOfficeCode(input: {
     const normalizedRequestedOfficeCode = requestedOfficeCode.toLowerCase();
 
     if (normalizedRequestedOfficeCode === "dfw" || normalizedRequestedOfficeCode === "atl") {
-      if (!activeOfficeCode) {
-        return { error: noActiveOfficeError(recordType) };
-      }
-      if (normalizedRequestedOfficeCode !== activeOfficeCode) {
-        return { error: officeMismatchError(recordType) };
-      }
+      // The office code is a cosmetic project-number PREFIX, decoupled from the active office / data
+      // schema: a Dallas-active rep may stamp ATL (and vice-versa) without changing which records they
+      // access. Accept any valid requested code regardless of the active office (no must-match).
       return { officeCode: normalizedRequestedOfficeCode };
     }
 

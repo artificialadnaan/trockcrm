@@ -179,7 +179,7 @@ describe("listLeadBoard", () => {
     expect(result.columns[0]?.cards).toHaveLength(10);
   });
 
-  it("scopes board queries to the active office even for admin all scope", async () => {
+  it("does not office-scope the admin all-scope board (office_code is cosmetic; the schema scopes)", async () => {
     dbState.stageRows = [{ id: "stage-new", slug: "new_lead", name: "New Lead", displayOrder: 1, isTerminal: false, isActivePipeline: true }];
     dbState.defaultConversionRows = [{ id: "deal-stage-1" }];
 
@@ -197,8 +197,11 @@ describe("listLeadBoard", () => {
     });
 
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    // The users join stays (for rep display), but office_code no longer gates the board: an admin's
+    // all-scope board shows every lead in the active-office schema, so there is no office-user
+    // (assigned_rep_id IN …) filter. Access is bounded by the schema/search_path alone.
     expect(queryText).toContain("left join users u on u.id = l.assigned_rep_id");
-    expect(queryText).toContain("assigned_rep_id in");
+    expect(queryText).not.toContain("assigned_rep_id in");
   });
 
   it("uses direct active reports in the active office for team-scoped board queries", async () => {

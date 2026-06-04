@@ -396,7 +396,9 @@ describe("getDeals scope filtering", () => {
     ]);
   });
 
-  it("returns active direct reports in the active office for scope=team", async () => {
+  it("returns active direct reports' deals for scope=team", async () => {
+    // office_code is now cosmetic, so team scope = deals assigned to the director's active direct reports
+    // regardless of office_code (e.g. deal-legacy-office-other, assigned to an in-team rep, now appears).
     await expect(listIds({ role: "director", userId: "director-1", scope: "team" })).resolves.toEqual([
       "deal-team-1",
       "deal-team-2",
@@ -405,11 +407,12 @@ describe("getDeals scope filtering", () => {
       "deal-activity",
       "deal-subscribed",
       "deal-legacy-office-fallback",
+      "deal-legacy-office-other",
       "deal-company",
     ]);
   });
 
-  it("scope=all returns only deals from the active office", async () => {
+  it("scope=all returns every deal in the active-office schema (office_code no longer filters)", async () => {
     await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.toEqual([
       "deal-self",
       "deal-team-1",
@@ -422,6 +425,8 @@ describe("getDeals scope filtering", () => {
       "deal-activity",
       "deal-subscribed",
       "deal-legacy-office-fallback",
+      "deal-legacy-office-other",
+      "deal-legacy-office-unassigned",
       "deal-company",
     ]);
   });
@@ -432,28 +437,20 @@ describe("getDeals scope filtering", () => {
     expect(ids).not.toContain("deal-test-data");
   });
 
-  it("scope=all excludes legacy null-office deals assigned to a rep in a different office", async () => {
-    await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.not.toContain(
-      "deal-legacy-office-other"
-    );
-  });
-
-  it("scope=all excludes legacy null-office deals with no assigned rep", async () => {
-    await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.not.toContain(
-      "deal-legacy-office-unassigned"
-    );
+  // office_code is a cosmetic prefix now (not an access boundary): scope=all surfaces EVERY deal in the
+  // active-office schema, including the legacy null-office and other-office-rep deals the old office
+  // filter used to hide. Access is bounded by the schema/search_path alone (which this DB mock does not
+  // simulate — so the old "no deals when active office has no users" filter assertion no longer applies).
+  it("scope=all now includes legacy null-office and other-office deals (office_code is cosmetic)", async () => {
+    const ids = await listIds({ role: "director", userId: "director-1", scope: "all" });
+    expect(ids).toContain("deal-legacy-office-other");
+    expect(ids).toContain("deal-legacy-office-unassigned");
   });
 
   it("getDeals includes unassigned deals when scope filter is active", async () => {
     await expect(listIds({ role: "director", userId: "director-1", scope: "all" })).resolves.toContain(
       "deal-unassigned"
     );
-  });
-
-  it("getDeals returns no deals when active office has no users", async () => {
-    await expect(
-      listIds({ role: "director", userId: "director-1", scope: "all", activeOfficeId: "office-empty" })
-    ).resolves.toEqual([]);
   });
 
   it("allows reps to request all-office scope explicitly", async () => {
@@ -469,6 +466,8 @@ describe("getDeals scope filtering", () => {
       "deal-activity",
       "deal-subscribed",
       "deal-legacy-office-fallback",
+      "deal-legacy-office-other",
+      "deal-legacy-office-unassigned",
       "deal-company",
     ]);
   });

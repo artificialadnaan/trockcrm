@@ -256,7 +256,7 @@ describe("getDealsForPipeline", () => {
     expect(wonCardsChain?.limit).toHaveBeenCalledWith(8);
   });
 
-  it("applies office scope to every stage query when an active office is set", async () => {
+  it("does not office_code-filter the per-stage board queries (office_code is a cosmetic prefix; the schema scopes)", async () => {
     dbState.responses = [
       [
         { id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 1, isTerminal: false, isActivePipeline: true },
@@ -290,7 +290,9 @@ describe("getDealsForPipeline", () => {
       .filter((text) => text.includes("stage_id"));
     expect(stageWhereSql.length).toBeGreaterThan(0);
     for (const sqlText of stageWhereSql) {
-      expect(sqlText).toContain("office_code");
+      // office_code no longer gates the board: deals are scoped by the active-office schema (search_path),
+      // so an ATL-prefixed deal on the Dallas schema appears on the Dallas board.
+      expect(sqlText).not.toContain("office_code");
     }
   });
 

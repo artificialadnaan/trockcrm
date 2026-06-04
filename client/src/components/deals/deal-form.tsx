@@ -23,9 +23,8 @@ import { useAuth } from "@/lib/auth";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import {
-  buildOfficeSelectionOptions,
+  buildOfficeCodePrefixOptions,
   resolveDefaultOfficeCode,
-  type OfficeSelectionOption,
 } from "@/lib/office-selection";
 import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
 
@@ -58,11 +57,15 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     { id: parent.id, name: parent.name },
     ...parent.children.map((child) => ({ id: child.id, name: child.name })),
   ]);
-  const activeOfficeId = user?.activeOfficeId ?? user?.officeId ?? null;
-  const officeOptions = buildOfficeSelectionOptions(offices);
+  // The STABLE home office (primary office), NOT the switchable active office. The office picker is a
+  // cosmetic project-number prefix, so pickers + create always operate on the rep's home data office —
+  // even if their session active office was switched via x-office-id, the deal is never created in a
+  // different (possibly empty) schema.
+  const homeOfficeId = user?.officeId ?? null;
+  const officeOptions = buildOfficeCodePrefixOptions();
   const initialOfficeCode = resolveDefaultOfficeCode({
     offices,
-    activeOfficeId,
+    homeOfficeId,
     currentOfficeCode: deal?.officeCode === "atl" || deal?.officeCode === "dfw" ? deal.officeCode : "",
   });
   const initialSource = deal?.source ?? initialValues?.source ?? "";
@@ -97,8 +100,12 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const [closeDateWarning, setCloseDateWarning] = useState<string | null>(null);
   const [regionManuallyOverridden, setRegionManuallyOverridden] = useState(() => Boolean(deal?.regionId));
   const isPropertyAddressManaged = Boolean(formData.propertyId);
-  const selectedOffice = officeOptions.find((office) => office.code === formData.officeCode) ?? null;
-  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: !isEdit ? selectedOffice?.officeId : null });
+  const selectedOfficeLabel =
+    officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
+  // The office picker is a project-number PREFIX only. Pickers + create target the rep's HOME (active)
+  // office, so choosing DFW vs ATL never changes which companies/properties/reps are available nor where the
+  // record is created — only the deal_number prefix.
+  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: !isEdit ? homeOfficeId : null });
   const assigneeOptions = assignees.map((assignee) => ({ id: assignee.id, name: assignee.displayName }));
 
   // Default stageId when activeStages finishes loading and form stageId is still empty
@@ -113,12 +120,12 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     setFormData((prev) => {
       const officeCode = resolveDefaultOfficeCode({
         offices,
-        activeOfficeId,
+        homeOfficeId,
         currentOfficeCode: prev.officeCode,
       });
       return officeCode === prev.officeCode ? prev : { ...prev, officeCode };
     });
-  }, [activeOfficeId, isEdit, offices]);
+  }, [homeOfficeId, isEdit, offices]);
 
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => {
@@ -126,11 +133,8 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       if (field === "companyId") {
         next.propertyId = "";
       }
-      if (field === "officeCode") {
-        next.companyId = "";
-        next.propertyId = "";
-        next.assignedRepId = user?.role === "rep" ? user.id : "";
-      }
+      // officeCode is a cosmetic prefix that no longer rescopes the data, so changing it must NOT clear the
+      // company/property/rep selections (the pickers stay on the home office regardless of the prefix).
       if (field === "source" && value !== "Other") {
         next.sourceDetail = "";
       }
@@ -266,8 +270,12 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         const resp = await updateDeal(deal.id, payload as Partial<Deal>);
         result = resp.deal;
       } else {
-        if (!formData.officeCode || !selectedOffice?.officeId) {
-          setError("Cannot create deal: selected office is unavailable. Contact admin.");
+        if (!formData.officeCode) {
+          setError("Cannot create deal: select an office (project-number prefix).");
+          return;
+        }
+        if (!homeOfficeId) {
+          setError("Cannot create deal: no active office. Contact admin.");
           return;
         }
 
@@ -282,7 +290,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         payload.creationContext = "direct";
         const resp = await createDeal(
           payload as Partial<Deal> & { name: string; stageId: string },
-          { officeId: selectedOffice.officeId }
+          { officeId: homeOfficeId }
         );
         result = resp.deal;
       }
@@ -333,7 +341,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 <CompanySelector
                   value={formData.companyId || null}
                   onChange={(companyId) => handleChange("companyId", companyId)}
-                  officeId={selectedOffice?.officeId}
+                  officeId={homeOfficeId ?? undefined}
                   required
                 />
               </div>
@@ -343,7 +351,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                   companyId={formData.companyId || null}
                   value={formData.propertyId || null}
                   onChange={(propertyId) => handleChange("propertyId", propertyId)}
-                  officeId={selectedOffice?.officeId}
+                  officeId={homeOfficeId ?? undefined}
                   required
                   repairIncompleteAddressOnSelect
                   onPropertySelected={(property) => {
@@ -493,7 +501,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               >
                 <SelectTrigger id="officeCode">
                   <SelectValue placeholder="Select office">
-                    {selectedOffice?.label ?? "Select office"}
+                    {selectedOfficeLabel}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
@@ -502,7 +510,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                       No offices available
                     </SelectItem>
                   ) : (
-                    officeOptions.map((office: OfficeSelectionOption) => (
+                    officeOptions.map((office) => (
                       <SelectItem key={office.code} value={office.code}>
                         {office.label}
                       </SelectItem>

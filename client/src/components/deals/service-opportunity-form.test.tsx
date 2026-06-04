@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ServiceOpportunityForm } from "./service-opportunity-form";
+import serviceOpportunityFormSource from "./service-opportunity-form.tsx?raw";
 
 const mocks = vi.hoisted(() => ({
   createServiceOpportunity: vi.fn(),
@@ -130,6 +131,17 @@ describe("ServiceOpportunityForm", () => {
     }
     roots = [];
     containers = [];
+  });
+
+  it("treats office as a cosmetic prefix: fixed DFW/ATL options, create + pickers on the HOME office", () => {
+    const source = serviceOpportunityFormSource.replace(/\s+/g, " ");
+    // Office Select offers the fixed prefix options (both DFW and ATL) rather than only accessible offices.
+    expect(source).toContain("buildOfficeCodePrefixOptions");
+    // The opportunity is created on the rep's HOME (active) office, NOT the picked office — the prefix is
+    // cosmetic. (Pre-fix this passed the picked office's id, scoping create/pickers to it.)
+    expect(source).toContain("{ officeId: homeOfficeId }");
+    expect(source).not.toContain("selectedOffice?.officeId");
+    expect(source).not.toContain("selectedOffice.officeId");
   });
 
   it("locks Project Type to Service and links non-Service work to the Lead form", async () => {

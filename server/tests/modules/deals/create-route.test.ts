@@ -238,14 +238,22 @@ describe("POST /api/deals create context", () => {
     );
   });
 
-  it("rejects explicit officeCode when it disagrees with the selected office slug", async () => {
+  it("accepts an explicit officeCode that differs from the active office (prefix is cosmetic, decoupled from the schema)", async () => {
+    // Active office is dallas, but the requested ATL prefix is honored (no must-match) and normalized — the
+    // deal is still created on the dallas schema (officeId office-dallas); only its number prefix is ATL.
     const res = await request(createApp("dallas"))
       .post("/api/deals")
       .send(validBody({ officeCode: "ATL" }));
 
-    expect(res.status).toBe(400);
-    expect(res.body.error.message).toBe("Cannot create deal: officeCode must match the selected office.");
-    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+    expect(res.status).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeCode: "atl",
+        officeId: "office-dallas",
+        creationContext: "direct",
+      })
+    );
   });
 
   it.each([null, 123, {}])("rejects malformed explicit officeCode %j instead of inferring", async (officeCode) => {

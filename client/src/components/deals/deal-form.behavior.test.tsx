@@ -311,7 +311,10 @@ describe("DealForm direct-create context", () => {
     );
   }, 30000);
 
-  it("blocks frontend create while selected-office tenant metadata is unresolved", async () => {
+  // The office picker is a cosmetic prefix decoupled from accessible-offices, so create no longer needs the
+  // selected office's tenant metadata. But when accessible-offices is still loading there is no resolved
+  // default prefix, so create must block until the rep picks one (the picker offers DFW/ATL regardless).
+  it("blocks create until an office prefix is selected while accessible-offices is still loading", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [],
       loading: true,
@@ -329,11 +332,11 @@ describe("DealForm direct-create context", () => {
 
     await submit(container);
 
-    expect(container.textContent).toContain("Cannot create deal: selected office is unavailable. Contact admin.");
+    expect(container.textContent).toContain("Cannot create deal: select an office (project-number prefix).");
     expect(mocks.createDeal).not.toHaveBeenCalled();
   }, 30000);
 
-  it("blocks frontend create when accessible-office loading fails", async () => {
+  it("blocks create until an office prefix is selected when accessible-offices fails to load", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [],
       loading: false,
@@ -351,7 +354,7 @@ describe("DealForm direct-create context", () => {
 
     await submit(container);
 
-    expect(container.textContent).toContain("Cannot create deal: selected office is unavailable. Contact admin.");
+    expect(container.textContent).toContain("Cannot create deal: select an office (project-number prefix).");
     expect(mocks.createDeal).not.toHaveBeenCalled();
   }, 30000);
 
