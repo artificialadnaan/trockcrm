@@ -20,7 +20,10 @@ export interface Queryable {
   query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
 }
 
-/** One open deal that is missing an expected close date. */
+/** Why a deal is in the export: no date at all, or a stale (past) one. */
+export type CloseDateReason = "missing" | "past_due";
+
+/** One open deal whose expected close date is un-maintained (NULL or past). */
 export type MissingCloseDateDeal = {
   tenantSchema: string;
   dealId: string;
@@ -29,6 +32,11 @@ export type MissingCloseDateDeal = {
   companyName: string | null;
   stageName: string | null;
   estimatedValue: string | null;
+  /** The existing (stale) date, or null when there is none — shown so the rep knows it's a refresh. */
+  currentCloseDate: string | null;
+  reason: CloseDateReason;
+  /** True for Bid Board Owned (read-only mirror) deals. */
+  isBidBoardOwned: boolean;
   assignedRepId: string | null;
   repName: string;
 };
@@ -50,6 +58,7 @@ export type ParsedDate =
 /** Per-row outcome for the re-import. */
 export type RowOutcome =
   | "WRITTEN"
+  | "REFRESHED"
   | "OVERWRITTEN"
   | "NOOP"
   | "CONFLICT"
@@ -62,6 +71,29 @@ export type RowOutcome =
 const MIN_YEAR = 2000;
 const MAX_YEAR = 2100;
 const EXCEL_EPOCH_UTC_MS = Date.UTC(1899, 11, 30); // Excel day 0 == 1899-12-30
+
+/** "Today" in the business timezone, matching the app's forecast/coverage scope. */
+const CT_TODAY_SQL = "(now() AT TIME ZONE 'America/Chicago')::date";
+
+/** A safe SQL date expression: the CT business day, or a validated literal (for tests). */
+function todayDateExpr(today?: string): string {
+  if (today === undefined) return CT_TODAY_SQL;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) {
+    throw new Error(`today must be a YYYY-MM-DD date, got: ${JSON.stringify(today)}`);
+  }
+  return `DATE '${today}'`;
+}
+
+/**
+ * Today's date in the business timezone (America/Chicago) as YYYY-MM-DD — the JS
+ * counterpart to {@link CT_TODAY_SQL}. Used by the re-import to classify stale-past
+ * vs maintained-future, and by the export CLI to stamp its output folder so the
+ * label matches the CT-anchored scope. `en-CA` yields zero-padded YYYY-MM-DD, so a
+ * lexicographic `existing < today` comparison is chronologically correct.
+ */
+export function businessToday(now: Date = new Date()): string {
+  return now.toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+}
 
 // ---------------------------------------------------------------------------
 // Date parsing (pure)
@@ -142,26 +174,40 @@ export function parseExpectedCloseDate(cell: unknown): ParsedDate {
 // Row classification (pure) — safe default: never clobber, flag conflicts
 // ---------------------------------------------------------------------------
 
+/**
+ * v2 fill-or-refresh classification, today-aware (`today` = YYYY-MM-DD business day):
+ *   - empty CRM date           -> WRITTEN
+ *   - same as the sheet date   -> NOOP (idempotent)
+ *   - existing date in the PAST (stale) and differs -> REFRESHED (replaced by default)
+ *   - existing FUTURE date (maintained) and differs -> CONFLICT, unless overwrite -> OVERWRITTEN
+ * A maintained (today-or-future) forecast is never clobbered without --overwrite-existing.
+ */
 export function classifyImportRow(input: {
   parsed: ParsedDate;
   keyValid: boolean;
   found: boolean;
   existing: string | null;
   overwriteExisting: boolean;
+  today: string;
 }): { outcome: RowOutcome; writeValue: string | null } {
-  const { parsed, keyValid, found, existing, overwriteExisting } = input;
+  const { parsed, keyValid, found, existing, overwriteExisting, today } = input;
 
   // No value filled in -> nothing to do, regardless of key/match state.
   if (parsed.status === "blank") return { outcome: "SKIPPED_BLANK", writeValue: null };
   // A filled-but-bad value is surfaced so the rep can fix it.
   if (parsed.status === "invalid") return { outcome: "INVALID_DATE", writeValue: null };
+  // A value before today is not a usable forecast — writing it would leave the deal
+  // un-maintained while the audit claims it was fixed. Reject it (rep must re-enter).
+  if (parsed.value < today) return { outcome: "INVALID_DATE", writeValue: null };
   // Locked key columns should be intact; a bad key means tampering/corruption.
   if (!keyValid) return { outcome: "INVALID_KEY", writeValue: null };
   if (!found) return { outcome: "UNMATCHED", writeValue: null };
 
   if (existing === null) return { outcome: "WRITTEN", writeValue: parsed.value };
   if (existing === parsed.value) return { outcome: "NOOP", writeValue: null };
-  // existing differs from the sheet value -> never silently clobber.
+  // A stale (past) date is not a maintained forecast -> refresh it by default.
+  if (existing < today) return { outcome: "REFRESHED", writeValue: parsed.value };
+  // A today-or-future date is maintained -> never clobber without the explicit flag.
   if (overwriteExisting) return { outcome: "OVERWRITTEN", writeValue: parsed.value };
   return { outcome: "CONFLICT", writeValue: null };
 }
@@ -255,17 +301,22 @@ export async function discoverDealTenants(client: Queryable): Promise<string[]> 
 }
 
 /**
- * SELECT for one tenant of the open, rep-actionable deals that still need an
- * expected close date. Scope is deliberately narrow so reps only ever see deals
- * a forecast date makes sense for:
- *   - expected_close_date IS NULL  (the whole point)
- *   - is_active = true             (not archived / closed out)
- *   - is_test_data = false         (never export seeded test deals)
- *   - is_read_only_mirror = false  (Bid-Board mirrors aren't rep-owned in the CRM)
- *   - stage is not terminal        (Won/Lost don't need a forecast date)
+ * SELECT for one tenant of the open deals whose expected close date is
+ * UN-MAINTAINED, matching the app's forecast-coverage / at-risk scope so the
+ * export reconciles to the coverage caption (M − N):
+ *   - NOT future-dated  → expected_close_date IS NULL ('missing') OR < today ('past_due')
+ *   - is_active = true              (not archived / closed out)
+ *   - is_test_data = false          (never export seeded test deals)
+ *   - on_hold = false               (the canonical reportable-deal filter)
+ *   - stage is not terminal         (Won/Lost don't need a forecast date)
+ * Bid Board Owned (read-only mirror) deals ARE included (they count toward
+ * coverage and a close-date write on them persists + shows in the ladder); the
+ * `isBidBoardOwned` flag surfaces them. `today` is the CT business day by default
+ * and an injected literal in tests.
  */
-export function buildMissingCloseDateSql(schema: string): string {
+export function buildMissingCloseDateSql(schema: string, today?: string): string {
   const s = quoteIdent(schema);
+  const t = todayDateExpr(today);
   // Join the rep only when ACTIVE: a deal owned by a deactivated rep (or a stale
   // assigned_rep_id with no matching user) has no one to fill its file, so it is
   // routed to the single Unassigned bucket (key nulled) rather than an orphan file.
@@ -277,30 +328,40 @@ export function buildMissingCloseDateSql(schema: string): string {
       c.name                                  AS "companyName",
       psc.name                                AS "stageName",
       COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue)::text AS "estimatedValue",
+      to_char(d.expected_close_date, 'YYYY-MM-DD') AS "currentCloseDate",
+      CASE WHEN d.expected_close_date IS NULL THEN 'missing' ELSE 'past_due' END AS "reason",
+      (COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false)) AS "isBidBoardOwned",
       CASE WHEN u.id IS NULL THEN NULL ELSE d.assigned_rep_id::text END AS "assignedRepId",
       COALESCE(u.display_name, 'Unassigned')  AS "repName"
     FROM ${s}.deals d
     LEFT JOIN public.users u ON u.id = d.assigned_rep_id AND u.is_active = true
     LEFT JOIN ${s}.companies c ON c.id = d.company_id
     JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-    WHERE d.expected_close_date IS NULL
-      AND d.is_active = true
-      AND d.is_test_data = false
-      AND d.is_read_only_mirror = false
+    WHERE d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
       AND COALESCE(d.on_hold, false) = false
       AND psc.is_terminal = false
+      AND NOT (d.expected_close_date IS NOT NULL AND d.expected_close_date >= ${t})
     ORDER BY d.deal_number ASC, d.id ASC`;
 }
 
-/** Fetch + normalise the missing-close-date deals across all (or the given) tenants. */
+function toBool(v: unknown): boolean {
+  return v === true || v === "t" || v === "true" || v === 1;
+}
+
+/**
+ * Fetch + normalise the un-maintained deals across all (or the given) tenants.
+ * `today` defaults to the CT business day (real runs); tests inject a literal.
+ */
 export async function fetchMissingCloseDateDeals(
   client: Queryable,
   schemas?: string[],
+  today?: string,
 ): Promise<MissingCloseDateDeal[]> {
   const tenants = schemas ?? (await discoverDealTenants(client));
   const out: MissingCloseDateDeal[] = [];
   for (const schema of tenants) {
-    const { rows } = await client.query(buildMissingCloseDateSql(schema));
+    const { rows } = await client.query(buildMissingCloseDateSql(schema, today));
     for (const row of rows) {
       out.push({
         tenantSchema: schema,
@@ -310,6 +371,9 @@ export async function fetchMissingCloseDateDeals(
         companyName: row.companyName == null ? null : String(row.companyName),
         stageName: row.stageName == null ? null : String(row.stageName),
         estimatedValue: row.estimatedValue == null ? null : String(row.estimatedValue),
+        currentCloseDate: row.currentCloseDate == null ? null : String(row.currentCloseDate),
+        reason: row.reason === "past_due" ? "past_due" : "missing",
+        isBidBoardOwned: toBool(row.isBidBoardOwned),
         assignedRepId: row.assignedRepId == null ? null : String(row.assignedRepId),
         repName: String(row.repName),
       });
@@ -352,6 +416,7 @@ export type ReimportReport = {
 
 const ROW_OUTCOMES: RowOutcome[] = [
   "WRITTEN",
+  "REFRESHED",
   "OVERWRITTEN",
   "NOOP",
   "CONFLICT",
@@ -397,20 +462,27 @@ export async function fetchDealExistingCloseDate(
 }
 
 /**
- * Write expected_close_date. `onlyIfNull` guards the fill-only case against a
- * concurrent edit. Returns whether a row was actually persisted (via RETURNING,
- * which is driver-agnostic) so the caller never reports a write the guard skipped.
+ * Write expected_close_date, returning whether a row actually persisted (via
+ * RETURNING, driver-agnostic). Guard modes:
+ *   - "null_or_stale": only when the CRM date is empty OR already past (< today).
+ *     A maintained today-or-future date makes this affect 0 rows, so a concurrent
+ *     edit that set a real forecast is detected and never clobbered.
+ *   - "none": unconditional (for an explicit --overwrite-existing of a future date).
  */
 export async function applyCloseDate(
   client: Queryable,
   schema: string,
   dealId: string,
   value: string,
-  opts: { onlyIfNull: boolean },
+  opts: { guard: "null_or_stale" | "none"; today?: string },
 ): Promise<boolean> {
-  const guard = opts.onlyIfNull ? " AND expected_close_date IS NULL" : "";
+  let guardSql = "";
+  if (opts.guard === "null_or_stale") {
+    if (!opts.today) throw new Error("today is required for the null_or_stale guard");
+    guardSql = ` AND (expected_close_date IS NULL OR expected_close_date < ${todayDateExpr(opts.today)})`;
+  }
   const { rows } = await client.query(
-    `UPDATE ${quoteIdent(schema)}.deals SET expected_close_date = $1::date, updated_at = NOW() WHERE id = $2${guard} RETURNING id`,
+    `UPDATE ${quoteIdent(schema)}.deals SET expected_close_date = $1::date, updated_at = NOW() WHERE id = $2${guardSql} RETURNING id`,
     [value, dealId],
   );
   return rows.length > 0;
@@ -422,6 +494,7 @@ async function resolveDeferredRow(
   row: ImportRowInput,
   value: string,
   overwriteExisting: boolean,
+  today: string,
 ): Promise<ImportRowResult> {
   const { found, existing } = await fetchDealExistingCloseDate(client, row.tenantSchema, row.dealId);
   const { outcome, writeValue } = classifyImportRow({
@@ -430,8 +503,11 @@ async function resolveDeferredRow(
     found,
     existing,
     overwriteExisting,
+    today,
   });
-  return { ...row, outcome, value: writeValue, existing };
+  // The only way a parse-ok deferred row classifies INVALID_DATE is a past value.
+  const message = outcome === "INVALID_DATE" ? `entered date ${value} is in the past (must be today or later)` : undefined;
+  return { ...row, outcome, value: writeValue, existing, message };
 }
 
 /**
@@ -448,10 +524,12 @@ export async function runReimport(input: {
   validSchemas: Set<string>;
   mode: ReimportMode;
   overwriteExisting: boolean;
+  /** Business day (YYYY-MM-DD) used to classify stale-past vs maintained-future. */
+  today: string;
   /** Optional UUID used to attribute the audit_log rows (sets app.current_user_id). */
   actorUserId?: string | null;
 }): Promise<ReimportReport> {
-  const { client, rows, validSchemas, mode, overwriteExisting, actorUserId } = input;
+  const { client, rows, validSchemas, mode, overwriteExisting, actorUserId, today } = input;
   const results: ImportRowResult[] = new Array(rows.length);
   const deferred: Array<{ index: number; row: ImportRowInput; value: string }> = [];
 
@@ -484,7 +562,7 @@ export async function runReimport(input: {
   if (mode === "dry-run") {
     for (const { index, row, value } of deferred) {
       try {
-        results[index] = await resolveDeferredRow(client, row, value, overwriteExisting);
+        results[index] = await resolveDeferredRow(client, row, value, overwriteExisting, today);
       } catch (err) {
         results[index] = { ...row, outcome: "ERROR", value: null, existing: null, message: errMessage(err) };
       }
@@ -507,19 +585,18 @@ export async function runReimport(input: {
         for (const { index, row, value } of items) {
           await client.query("SAVEPOINT cd_row");
           try {
-            let res = await resolveDeferredRow(client, row, value, overwriteExisting);
-            if (res.outcome === "WRITTEN" || res.outcome === "OVERWRITTEN") {
-              if (overwriteExisting) {
-                // Force mode: write unconditionally so the sheet value wins even if a
-                // concurrent edit set a date after our read (no fill-only guard, so no
-                // value race). Only a vanished row fails to persist.
-                const persisted = await applyCloseDate(client, row.tenantSchema, row.dealId, value, { onlyIfNull: false });
-                if (!persisted) res = { ...row, outcome: "UNMATCHED", value: null, existing: null };
+            let res = await resolveDeferredRow(client, row, value, overwriteExisting, today);
+            const isWrite = (o: RowOutcome) => o === "WRITTEN" || o === "REFRESHED" || o === "OVERWRITTEN";
+            if (isWrite(res.outcome)) {
+              if (res.outcome === "OVERWRITTEN") {
+                // Explicit force over a maintained future date: write unconditionally.
+                const persisted = await applyCloseDate(client, row.tenantSchema, row.dealId, value, { guard: "none" });
+                if (!persisted) res = { ...row, outcome: "UNMATCHED", value: null, existing: res.existing };
               } else {
-                // Safe mode: fill only if still empty. If a concurrent writer set a date
-                // between our read and this guarded write, re-read and report the truth
-                // (NOOP/CONFLICT) — never clobber, never claim an unpersisted write.
-                const persisted = await applyCloseDate(client, row.tenantSchema, row.dealId, value, { onlyIfNull: true });
+                // WRITTEN (empty) or REFRESHED (stale): write only while still empty-or-stale,
+                // so a concurrent edit that set a real future forecast is detected (0 rows) and
+                // never clobbered — re-read and report the truth.
+                const persisted = await applyCloseDate(client, row.tenantSchema, row.dealId, value, { guard: "null_or_stale", today });
                 if (!persisted) {
                   const recheck = await fetchDealExistingCloseDate(client, row.tenantSchema, row.dealId);
                   const reclass = classifyImportRow({
@@ -527,12 +604,21 @@ export async function runReimport(input: {
                     keyValid: true,
                     found: recheck.found,
                     existing: recheck.existing,
-                    overwriteExisting: false,
+                    overwriteExisting,
+                    today,
                   });
-                  res =
-                    reclass.outcome === "WRITTEN"
-                      ? { ...row, outcome: "ERROR", value: null, existing: recheck.existing, message: "guarded update affected 0 rows" }
-                      : { ...row, outcome: reclass.outcome, value: reclass.writeValue, existing: recheck.existing };
+                  if (reclass.outcome === "OVERWRITTEN") {
+                    // It became a future date and the operator opted to overwrite -> force it.
+                    const forced = await applyCloseDate(client, row.tenantSchema, row.dealId, value, { guard: "none" });
+                    res = forced
+                      ? { ...row, outcome: "OVERWRITTEN", value, existing: recheck.existing }
+                      : { ...row, outcome: "UNMATCHED", value: null, existing: recheck.existing };
+                  } else if (reclass.outcome === "WRITTEN" || reclass.outcome === "REFRESHED") {
+                    // Shouldn't happen after a null_or_stale 0-row; backstop so we never claim an unpersisted write.
+                    res = { ...row, outcome: "ERROR", value: null, existing: recheck.existing, message: "guarded update affected 0 rows" };
+                  } else {
+                    res = { ...row, outcome: reclass.outcome, value: reclass.writeValue, existing: recheck.existing };
+                  }
                 }
               }
             }

@@ -19,6 +19,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 import {
+  businessToday,
   discoverDealTenants,
   fetchMissingCloseDateDeals,
   groupDealsByRep,
@@ -87,7 +88,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       return;
     }
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = businessToday(); // CT business day, matching the CT-anchored deal scope
     const outDir = args.outDir ?? path.join("close-date-exports", today);
     fs.mkdirSync(outDir, { recursive: true });
 
