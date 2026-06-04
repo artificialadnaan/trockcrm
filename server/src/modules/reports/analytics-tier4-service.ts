@@ -147,9 +147,13 @@ function sqlStringList(values: readonly string[]) {
   return sql.join(values.map((value) => sql`${value}`), sql`, `);
 }
 
-function buildWhere(filters: ReturnType<typeof normalizeFilters>, dateColumn: SQL = sql`d.created_at`) {
+function buildWhere(
+  filters: ReturnType<typeof normalizeFilters>,
+  dateColumn: SQL = sql`d.created_at`,
+  options: { requireActive?: boolean } = {}
+) {
   return sql`
-    ${buildScopeWhere(filters)}
+    ${buildScopeWhere(filters, options)}
     AND ${dateColumn} >= (${filters.from}::date AT TIME ZONE 'UTC')
     AND ${dateColumn} < ((${filters.to}::date + INTERVAL '1 day') AT TIME ZONE 'UTC')
   `;
@@ -190,17 +194,95 @@ export function buildOwnerScopeSql(
     : sql``;
 }
 
-function buildScopeWhere(filters: ReturnType<typeof normalizeFilters>) {
+// CC4 (Wave 0): `requireActive` adds `d.is_active = true` to scope the ACTIVE/open cohort (deal counts,
+// pipeline) so soft-deleted deals are excluded. It DEFAULTS OFF: the WON cohort (buildWonClosedWhere /
+// buildWonByDimensionSql) and any historical deal_stage_history cohort must NOT require is_active —
+// terminal wins get archived (is_active=false) and the canonical getWonCloseSummary still counts them, so
+// forcing is_active on a Won figure would undercount it (see report-builder-service.ts:226-229 and the
+// dashboard getWonCloseSummary). Active call sites pass { requireActive: true } explicitly.
+function buildScopeWhere(
+  filters: ReturnType<typeof normalizeFilters>,
+  options: { requireActive?: boolean } = {}
+) {
   const ownerFilter = buildOwnerScopeSql(filters);
   const officeClause = buildOfficeExistsMatcher(filters.office);
   const officeFilter = officeClause ? sql`AND ${officeClause}` : sql``;
+  const activeFilter = options.requireActive ? sql`AND d.is_active = true` : sql``;
 
   return sql`
     COALESCE(d.is_test_data, false) = false
     AND ${aliasedReportableDealFilterSql("d")}
+    ${activeFilter}
     ${ownerFilter}
     ${officeFilter}
   `;
+}
+
+interface WonDimensionEntry {
+  wonValue: number;
+  avgWon: number;
+  wonCount: number;
+}
+
+// WON cohort aggregated by a dimension expression. The WHERE is byte-identical to the dashboard
+// getWonCloseSummary (scope, requireActive:false → archived wins included, WON stage gate, usable-won-date
+// guard, canonical deals.won_closed_date window with DATE-typed bounds) — so the Won figures it feeds
+// reconcile to the quarterly Won-by-vertical panel by construction (CC1).
+function buildWonByDimensionSql(filters: ReturnType<typeof normalizeFilters>, dimensionExpr: SQL): SQL {
+  const wonValue = aliasedEffectiveWonDealValueSql("d");
+  return sql`
+    SELECT ${dimensionExpr} AS name,
+      COALESCE(SUM(${wonValue}), 0)::numeric AS won_value,
+      COALESCE(AVG(${wonValue}), 0)::numeric AS avg_won_value,
+      COUNT(DISTINCT d.id)::int AS won_count
+    FROM deals d
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN properties p ON p.id = d.property_id
+    LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN users u ON u.id = d.assigned_rep_id
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    WHERE ${buildWonClosedWhere(filters)}
+      AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+      AND ${aliasedHasUsableWonDateSql("d")}
+    GROUP BY ${dimensionExpr}
+  `;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wonDimensionMap(rows: ExecuteRows<any>): Map<string, WonDimensionEntry> {
+  const map = new Map<string, WonDimensionEntry>();
+  for (const row of rowsFromExecute<any>(rows)) {
+    map.set(String(row.name ?? "Uncategorized"), {
+      wonValue: numberFrom(row.won_value),
+      avgWon: numberFrom(row.avg_won_value),
+      wonCount: numberFrom(row.won_count),
+    });
+  }
+  return map;
+}
+
+// A Market Mix slice = the active-cohort dimension rows UNIONed with the WON cohort, so a dimension with
+// Won value in the period but no active deals CREATED in it (a "won-only" dimension — created earlier,
+// won in range) still appears, keeping the per-slice output consistent with the KPI total / quarterly
+// panel (Codex P2). Ranked by active volume, then Won value.
+function buildMixSlice(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  activeRows: ExecuteRows<any>,
+  wonMap: Map<string, WonDimensionEntry>,
+  limit: number
+): Array<{ name: string; dealCount: number; wonValue: number }> {
+  const byKey = new Map<string, { name: string; dealCount: number; wonValue: number }>();
+  for (const row of rowsFromExecute<any>(activeRows)) {
+    const key = String(row.name ?? "Uncategorized");
+    byKey.set(key, { name: key, dealCount: numberFrom(row.deal_count), wonValue: wonMap.get(key)?.wonValue ?? 0 });
+  }
+  for (const [key, entry] of wonMap) {
+    if (!byKey.has(key)) byKey.set(key, { name: key, dealCount: 0, wonValue: entry.wonValue });
+  }
+  return [...byKey.values()]
+    .sort((a, b) => b.dealCount - a.dealCount || b.wonValue - a.wonValue || a.name.localeCompare(b.name))
+    .slice(0, limit)
+    .map((entry) => ({ name: formatLabel(entry.name), dealCount: entry.dealCount, wonValue: entry.wonValue }));
 }
 
 async function cached<T>(tenantDb: TenantDb, key: string, loader: () => Promise<T>): Promise<T> {
@@ -287,7 +369,14 @@ export async function getMarketMixReport(
 ): Promise<MarketMixReport> {
   const filters = normalizeFilters(input);
   return cached(tenantDb, cacheKey("market-mix", filters), async () => {
-    const where = buildWhere(filters);
+    // ACTIVE/open cohort (deal counts, market breadth): created-in-period AND is_active (CC4 — exclude
+    // soft-deleted). Won VALUE figures do NOT live in this cohort (see the WON cohort below).
+    const where = buildWhere(filters, sql`d.created_at`, { requireActive: true });
+    // Created cohort WITHOUT is_active — for the breakdown win-rate counts (wins/losses), which are
+    // terminal-outcome counts: archived (is_active=false) terminal deals must stay in the win-rate
+    // denominator, consistent with the Executive Trends terminal counts (Codex P2). is_active is applied
+    // only to the breakdown's active_deals field below, never its terminal counts.
+    const whereNoActive = buildWhere(filters, sql`d.created_at`, { requireActive: false });
     // Quarterly Won value is won-only (psc.slug IN WON below), so window + bucket by the canonical
     // deals.won_closed_date. The old COALESCE(actual_close_date, lost_at, updated_at) counted
     // reseed-contaminated / touched-in-period wins into the wrong quarter.
@@ -297,10 +386,25 @@ export async function getMarketMixReport(
     const propertyTypeExpr = sql`COALESCE(NULLIF(p.property_type, ''), NULLIF(p.type::text, ''), 'Uncategorized')`;
     const wonValueExpr = aliasedEffectiveWonDealValueSql("d");
 
+    // CC1 — every Won VALUE figure (KPI total, per-vertical/property/region, breakdown won/avg) comes from
+    // the WON cohort (canonical won_closed_date window + usable-won-date guard, archived wins included),
+    // NOT the created_at-windowed active cohort. By construction this reconciles to quarterlyWonByVertical.
+    const [wonVerticalRows, wonPropertyRows, wonRegionRows] = await Promise.all([
+      tenantDb.execute(buildWonByDimensionSql(filters, verticalExpr)),
+      tenantDb.execute(buildWonByDimensionSql(filters, propertyTypeExpr)),
+      tenantDb.execute(buildWonByDimensionSql(filters, regionExpr)),
+    ]);
+    const wonVerticalMap = wonDimensionMap(wonVerticalRows);
+    const wonPropertyMap = wonDimensionMap(wonPropertyRows);
+    const wonRegionMap = wonDimensionMap(wonRegionRows);
+    // Total Won value === sum over ALL verticals (every won deal buckets into a vertical) === the sum of
+    // the quarterly panel. Summed from the un-limited won-by-vertical aggregate (not the LIMIT 12 mix).
+    let totalWonValue = 0;
+    for (const entry of wonVerticalMap.values()) totalWonValue += entry.wonValue;
+
     const kpiRows = await tenantDb.execute(sql`
         SELECT
           COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS total_deal_count,
-          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS total_won_value,
           COUNT(DISTINCT ${verticalExpr}) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS active_markets,
           COALESCE((
             SELECT ${regionExpr}
@@ -320,53 +424,43 @@ export async function getMarketMixReport(
         LEFT JOIN properties p ON p.id = d.property_id
         LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
-        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
       `);
     const verticalRows = await tenantDb.execute(sql`
         SELECT ${verticalExpr} AS name,
-          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
-          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_value
+          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
         LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
-        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
         GROUP BY ${verticalExpr}
-        ORDER BY deal_count DESC, won_value DESC
-        LIMIT 12
+        ORDER BY deal_count DESC, name ASC
       `);
     const propertyRows = await tenantDb.execute(sql`
         SELECT ${propertyTypeExpr} AS name,
-          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
-          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_value
+          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
         LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
-        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
         GROUP BY ${propertyTypeExpr}
-        ORDER BY deal_count DESC, won_value DESC
-        LIMIT 12
+        ORDER BY deal_count DESC, name ASC
       `);
     const regionRows = await tenantDb.execute(sql`
         SELECT ${regionExpr} AS name,
-          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
-          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_value
+          COUNT(DISTINCT d.id) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
         LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
-        LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
         WHERE ${where}
         GROUP BY ${regionExpr}
-        ORDER BY deal_count DESC, won_value DESC
-        LIMIT 12
+        ORDER BY deal_count DESC, name ASC
       `);
     const quarterlyRows = await tenantDb.execute(sql`
         SELECT
@@ -385,13 +479,17 @@ export async function getMarketMixReport(
         GROUP BY quarter, ${verticalExpr}
         ORDER BY quarter ASC, won_value DESC
       `);
+    // Breakdown: active_deals is the active cohort (is_active); the created-cohort win-rate counts
+    // (wins/losses) are terminal-outcome counts that KEEP archived (is_active=false) deals — so the outer
+    // scope is whereNoActive and is_active is applied only to active_deals (Codex P2). The Won VALUE
+    // columns (wonLastYear, avgDealSize) come from the WON cohort map below.
     const breakdownRows = await tenantDb.execute(sql`
         SELECT ${verticalExpr} AS vertical,
           COUNT(DISTINCT d.id) FILTER (
             WHERE psc.is_terminal = false
+              AND d.is_active = true
               AND ${aliasedActiveDealCountFilterSql("d")}
           )::int AS active_deals,
-          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_last_year,
           COUNT(DISTINCT d.id) FILTER (
             WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
               AND ${aliasedActiveDealCountFilterSql("d")}
@@ -399,62 +497,64 @@ export async function getMarketMixReport(
           COUNT(DISTINCT d.id) FILTER (
             WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
               AND ${aliasedActiveDealCountFilterSql("d")}
-          )::int AS losses,
-          COALESCE(AVG(${wonValueExpr}) FILTER (
-            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
-              AND ${aliasedActiveDealCountFilterSql("d")}
-          ), 0)::numeric AS avg_deal_size
+          )::int AS losses
         FROM deals d
         LEFT JOIN companies c ON c.id = d.company_id
         LEFT JOIN properties p ON p.id = d.property_id
         LEFT JOIN region_config rc ON rc.id = d.region_id
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        WHERE ${where}
+        WHERE ${whereNoActive}
         GROUP BY ${verticalExpr}
-        ORDER BY won_last_year DESC, active_deals DESC
-        LIMIT 20
+        ORDER BY active_deals DESC, vertical ASC
       `);
 
     const kpis = rowsFromExecute<any>(kpiRows)[0] ?? {};
+
+    // Breakdown = active/created-cohort rows (active_deals + created-cohort wins/losses) UNIONed with
+    // won-only verticals (Codex P2), so a vertical won in-range but with no active-created deals still
+    // shows its Won value. Ranked by active volume, then Won value.
+    const breakdownByVertical = new Map<string, { vertical: string; activeDeals: number; wins: number; losses: number }>();
+    for (const row of rowsFromExecute<any>(breakdownRows)) {
+      const key = String(row.vertical ?? "Uncategorized");
+      breakdownByVertical.set(key, {
+        vertical: key,
+        activeDeals: numberFrom(row.active_deals),
+        wins: numberFrom(row.wins),
+        losses: numberFrom(row.losses),
+      });
+    }
+    for (const key of wonVerticalMap.keys()) {
+      if (!breakdownByVertical.has(key)) breakdownByVertical.set(key, { vertical: key, activeDeals: 0, wins: 0, losses: 0 });
+    }
+    const breakdown = [...breakdownByVertical.values()]
+      .map((entry) => ({ ...entry, won: wonVerticalMap.get(entry.vertical) }))
+      .sort((a, b) => b.activeDeals - a.activeDeals || (b.won?.wonValue ?? 0) - (a.won?.wonValue ?? 0) || a.vertical.localeCompare(b.vertical))
+      .slice(0, 20)
+      .map((entry) => ({
+        vertical: formatLabel(entry.vertical),
+        activeDeals: entry.activeDeals,
+        wonLastYear: entry.won?.wonValue ?? 0,
+        winRate: percent(entry.wins, entry.wins + entry.losses),
+        avgDealSize: entry.won?.avgWon ?? 0,
+      }));
+
     return {
       kpis: {
         totalDealCount: numberFrom(kpis.total_deal_count),
-        totalWonValue: numberFrom(kpis.total_won_value),
+        totalWonValue,
         activeMarkets: numberFrom(kpis.active_markets),
         mostActiveRegion: formatLabel(kpis.most_active_region),
       },
-      verticalMix: rowsFromExecute<any>(verticalRows).map((row) => ({
-        name: formatLabel(row.name),
-        dealCount: numberFrom(row.deal_count),
-        wonValue: numberFrom(row.won_value),
-      })),
-      propertyTypeMix: rowsFromExecute<any>(propertyRows).map((row) => ({
-        name: formatLabel(row.name),
-        dealCount: numberFrom(row.deal_count),
-        wonValue: numberFrom(row.won_value),
-      })),
-      regionMix: rowsFromExecute<any>(regionRows).map((row) => ({
-        name: formatLabel(row.name),
-        dealCount: numberFrom(row.deal_count),
-        wonValue: numberFrom(row.won_value),
-      })),
+      verticalMix: buildMixSlice(verticalRows, wonVerticalMap, 12),
+      propertyTypeMix: buildMixSlice(propertyRows, wonPropertyMap, 12),
+      regionMix: buildMixSlice(regionRows, wonRegionMap, 12),
       quarterlyWonByVertical: rowsFromExecute<any>(quarterlyRows).map((row) => ({
         quarter: String(row.quarter ?? ""),
         vertical: formatLabel(row.vertical),
         wonValue: numberFrom(row.won_value),
       })),
-      breakdown: rowsFromExecute<any>(breakdownRows).map((row) => {
-        const wins = numberFrom(row.wins);
-        const losses = numberFrom(row.losses);
-        return {
-          vertical: formatLabel(row.vertical),
-          activeDeals: numberFrom(row.active_deals),
-          wonLastYear: numberFrom(row.won_last_year),
-          winRate: percent(wins, wins + losses),
-          avgDealSize: numberFrom(row.avg_deal_size),
-        };
-      }),
+      breakdown,
       proxyNotes: [
         "Vertical uses company industry when present; deal project type is the fallback proxy.",
         "Region uses company region, configured deal region, then property/deal geography fallback.",
@@ -469,9 +569,31 @@ export async function getCustomerConcentrationReport(
 ): Promise<CustomerConcentrationReport> {
   const filters = normalizeFilters(input);
   return cached(tenantDb, cacheKey("customer-concentration", filters), async () => {
-    const where = buildWhere(filters);
+    // ACTIVE/open cohort (active customers, open value, distribution, stale): created-in-period AND
+    // is_active (CC4).
+    const where = buildWhere(filters, sql`d.created_at`, { requireActive: true });
     const wonValueExpr = aliasedEffectiveWonDealValueSql("d");
     const openValueExpr = aliasedEffectiveDealValueSql("d", aliasedOpenPipelineForecastFirstDealValueSql("d"));
+
+    // CC1 — won lifetime per customer comes from the WON cohort (canonical won_closed_date window +
+    // usable-won-date guard, archived wins included), NOT the created_at window. Merged onto the
+    // top-customer rows by company_id below.
+    const wonByCompanyRows = await tenantDb.execute(sql`
+        SELECT d.company_id::text AS company_id,
+          COALESCE(SUM(${wonValueExpr}), 0)::numeric AS won_value
+        FROM deals d
+        LEFT JOIN users u ON u.id = d.assigned_rep_id
+        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE ${buildWonClosedWhere(filters)}
+          AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+          AND ${aliasedHasUsableWonDateSql("d")}
+          AND d.company_id IS NOT NULL
+        GROUP BY d.company_id
+      `);
+    const wonByCompany = new Map<string, number>();
+    for (const row of rowsFromExecute<any>(wonByCompanyRows)) {
+      wonByCompany.set(String(row.company_id), numberFrom(row.won_value));
+    }
 
     const kpiRows = await tenantDb.execute(sql`
         WITH open_customers AS (
@@ -500,7 +622,6 @@ export async function getCustomerConcentrationReport(
               AND ${aliasedActiveDealCountFilterSql("d")}
           )::int AS active_deals,
           COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false), 0)::numeric AS total_open_value,
-          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS total_won_lifetime,
           MAX(COALESCE(d.last_activity_at, c.last_activity_at, a.last_activity_at, d.updated_at)) AS last_activity_at,
           COALESCE(STRING_AGG(DISTINCT rep.display_name, ', ' ORDER BY rep.display_name) FILTER (WHERE rep.display_name IS NOT NULL), 'Unassigned') AS account_owners
         FROM deals d
@@ -581,7 +702,7 @@ export async function getCustomerConcentrationReport(
       companyName: String(row.company_name ?? "Unassigned Account"),
       activeDeals: numberFrom(row.active_deals),
       totalOpenValue: numberFrom(row.total_open_value),
-      totalWonLifetime: numberFrom(row.total_won_lifetime),
+      totalWonLifetime: wonByCompany.get(String(row.company_id)) ?? 0,
       lastActivityAt: row.last_activity_at ? new Date(row.last_activity_at).toISOString() : null,
       accountOwners: String(row.account_owners ?? "Unassigned"),
     }));
@@ -641,8 +762,10 @@ export async function getExecutiveTrendsReport(
         )
         SELECT
           p.metric,
-          COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false), 0)::numeric AS total_pipeline,
-          COALESCE(SUM(${wonValueExpr}) FILTER (WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})), 0)::numeric AS won_revenue,
+          -- CC4: open pipeline excludes soft-deleted deals.
+          COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false AND d.is_active = true), 0)::numeric AS total_pipeline,
+          -- Win-rate counts stay on the created cohort (archived wins/losses included); this is the
+          -- created-cohort win rate, intentionally unchanged in this CC1/CC4 sweep.
           COUNT(*) FILTER (
             WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
               AND ${aliasedActiveDealCountFilterSql("d")}
@@ -650,11 +773,7 @@ export async function getExecutiveTrendsReport(
           COUNT(*) FILTER (
             WHERE psc.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
               AND ${aliasedActiveDealCountFilterSql("d")}
-          )::int AS losses,
-          COALESCE(AVG(${wonValueExpr}) FILTER (
-            WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
-              AND ${aliasedActiveDealCountFilterSql("d")}
-          ), 0)::numeric AS avg_deal_size
+          )::int AS losses
         FROM periods p
         LEFT JOIN deals d ON d.created_at >= p.from_date AND d.created_at < p.to_date
         LEFT JOIN users u ON u.id = d.assigned_rep_id
@@ -665,6 +784,31 @@ export async function getExecutiveTrendsReport(
           AND d.created_at < p.to_date
         )
         GROUP BY p.metric
+      `);
+    // CC1 — KPI Won Revenue + Avg Deal Size from the WON cohort: windowed/bucketed by canonical
+    // deals.won_closed_date (DATE-typed bounds), usable-won-date guard, archived wins included
+    // (requireActive:false). Previous period uses the same [previousFrom, period start) window as the
+    // created-at periods CTE, expressed as an inclusive date upper bound.
+    const wonKpiRows = await tenantDb.execute(sql`
+        WITH won_periods AS (
+          SELECT 'current' AS metric, ${filters.from}::date AS from_date, ${filters.to}::date AS to_date
+          UNION ALL
+          SELECT 'previous' AS metric, ${previousPeriod.previousFrom}::date AS from_date, (${previousPeriod.previousToExclusive}::date - 1) AS to_date
+        )
+        SELECT
+          wp.metric,
+          COALESCE(SUM(${wonValueExpr}), 0)::numeric AS won_revenue,
+          COALESCE(AVG(${wonValueExpr}), 0)::numeric AS avg_deal_size
+        FROM won_periods wp
+        JOIN deals d
+          ON ${aliasedWonHsClosedWonDateSql("d")} >= wp.from_date
+          AND ${aliasedWonHsClosedWonDateSql("d")} <= wp.to_date
+        LEFT JOIN users u ON u.id = d.assigned_rep_id
+        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        WHERE ${buildScopeWhere(filters, { requireActive: false })}
+          AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
+          AND ${aliasedHasUsableWonDateSql("d")}
+        GROUP BY wp.metric
       `);
     const monthlyRows = await tenantDb.execute(sql`
         WITH months AS (
@@ -745,7 +889,7 @@ export async function getExecutiveTrendsReport(
           FROM deals d
           LEFT JOIN users u ON u.id = d.assigned_rep_id
           JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-          WHERE ${buildScopeWhere(filters)}
+          WHERE ${buildScopeWhere(filters, { requireActive: true })}
             AND psc.is_terminal = false
         )
         SELECT
@@ -779,7 +923,8 @@ export async function getExecutiveTrendsReport(
             WHERE psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
               AND ${aliasedActiveDealCountFilterSql("d")}
           ), 0)::numeric AS avg_deal_size,
-          COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false), 0)::numeric AS pipeline_end_value
+          -- CC4: open pipeline excludes soft-deleted deals, matching the Total Pipeline KPI / current_pipeline.
+          COALESCE(SUM(${openValueExpr}) FILTER (WHERE psc.is_terminal = false AND d.is_active = true), 0)::numeric AS pipeline_end_value
         FROM deals d
         LEFT JOIN users u ON u.id = d.assigned_rep_id
         LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
@@ -819,6 +964,9 @@ export async function getExecutiveTrendsReport(
     const periodRows = rowsFromExecute<any>(kpiRows);
     const current = periodRows.find((row) => row.metric === "current") ?? {};
     const previous = periodRows.find((row) => row.metric === "previous") ?? {};
+    const wonPeriodRows = rowsFromExecute<any>(wonKpiRows);
+    const currentWon = wonPeriodRows.find((row) => row.metric === "current") ?? {};
+    const previousWon = wonPeriodRows.find((row) => row.metric === "previous") ?? {};
     const currentWins = numberFrom(current.wins);
     const currentLosses = numberFrom(current.losses);
     const previousWins = numberFrom(previous.wins);
@@ -832,8 +980,8 @@ export async function getExecutiveTrendsReport(
       },
       {
         label: "Won Revenue",
-        value: numberFrom(current.won_revenue),
-        previous: numberFrom(previous.won_revenue),
+        value: numberFrom(currentWon.won_revenue),
+        previous: numberFrom(previousWon.won_revenue),
         format: "currency" as const,
       },
       {
@@ -844,8 +992,8 @@ export async function getExecutiveTrendsReport(
       },
       {
         label: "Avg Deal Size",
-        value: numberFrom(current.avg_deal_size),
-        previous: numberFrom(previous.avg_deal_size),
+        value: numberFrom(currentWon.avg_deal_size),
+        previous: numberFrom(previousWon.avg_deal_size),
         format: "currency" as const,
       },
     ];
