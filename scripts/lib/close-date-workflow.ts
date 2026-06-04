@@ -107,7 +107,8 @@ export function parseExpectedCloseDate(cell: unknown): ParsedDate {
 
   if (typeof cell === "number") {
     if (!Number.isFinite(cell)) return { status: "invalid", reason: "non-finite number" };
-    const ms = EXCEL_EPOCH_UTC_MS + Math.round(cell) * 86_400_000;
+    // Truncate (not round) so a serial carrying a time fraction maps to its calendar day.
+    const ms = EXCEL_EPOCH_UTC_MS + Math.floor(cell) * 86_400_000;
     const dt = new Date(ms);
     return fromYmd(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
   }
@@ -116,11 +117,19 @@ export function parseExpectedCloseDate(cell: unknown): ParsedDate {
     const s = cell.trim();
     if (s === "") return { status: "blank" };
 
-    let m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(s); // ISO-ish: YYYY-MM-DD or YYYY/M/D
-    if (m) return fromYmd(Number(m[1]), Number(m[2]), Number(m[3]));
+    // ISO-ish, 4-digit year first (YYYY-MM-DD or YYYY/M/D); both separators must match.
+    let m = /^(\d{4})([-/])(\d{1,2})\2(\d{1,2})$/.exec(s);
+    if (m) return fromYmd(Number(m[1]), Number(m[3]), Number(m[4]));
 
-    m = /^(\d{1,2})[/-](\d{1,2})[-/](\d{4})$/.exec(s); // US: M/D/YYYY or M-D-YYYY
-    if (m) return fromYmd(Number(m[3]), Number(m[1]), Number(m[2]));
+    // US, month first, with a 2- or 4-digit year (M/D/YYYY, M-D-YY); separators must match.
+    // NOTE: string US dates assume a US locale (M before D). Excel date-formatted cells
+    // deliver a serial/Date (parsed above), so this string path is the fallback.
+    m = /^(\d{1,2})([-/])(\d{1,2})\2(\d{2}|\d{4})$/.exec(s);
+    if (m) {
+      const rawYear = Number(m[4]);
+      const year = m[4].length === 2 ? 2000 + rawYear : rawYear;
+      return fromYmd(year, Number(m[1]), Number(m[3]));
+    }
 
     return { status: "invalid", reason: "unrecognised date format" };
   }
@@ -256,6 +265,9 @@ export async function discoverDealTenants(client: Queryable): Promise<string[]> 
  */
 export function buildMissingCloseDateSql(schema: string): string {
   const s = quoteIdent(schema);
+  // Join the rep only when ACTIVE: a deal owned by a deactivated rep (or a stale
+  // assigned_rep_id with no matching user) has no one to fill its file, so it is
+  // routed to the single Unassigned bucket (key nulled) rather than an orphan file.
   return `
     SELECT
       d.id::text                              AS "dealId",
@@ -264,10 +276,10 @@ export function buildMissingCloseDateSql(schema: string): string {
       c.name                                  AS "companyName",
       psc.name                                AS "stageName",
       COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, d.forecast_revenue)::text AS "estimatedValue",
-      d.assigned_rep_id::text                 AS "assignedRepId",
+      CASE WHEN u.id IS NULL THEN NULL ELSE d.assigned_rep_id::text END AS "assignedRepId",
       COALESCE(u.display_name, 'Unassigned')  AS "repName"
     FROM ${s}.deals d
-    LEFT JOIN public.users u ON u.id = d.assigned_rep_id
+    LEFT JOIN public.users u ON u.id = d.assigned_rep_id AND u.is_active = true
     LEFT JOIN ${s}.companies c ON c.id = d.company_id
     LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE d.expected_close_date IS NULL
@@ -425,8 +437,10 @@ export async function runReimport(input: {
   validSchemas: Set<string>;
   mode: ReimportMode;
   overwriteExisting: boolean;
+  /** Optional UUID used to attribute the audit_log rows (sets app.current_user_id). */
+  actorUserId?: string | null;
 }): Promise<ReimportReport> {
-  const { client, rows, validSchemas, mode, overwriteExisting } = input;
+  const { client, rows, validSchemas, mode, overwriteExisting, actorUserId } = input;
   const results: ImportRowResult[] = new Array(rows.length);
   const deferred: Array<{ index: number; row: ImportRowInput; value: string }> = [];
 
@@ -472,9 +486,13 @@ export async function runReimport(input: {
       else byTenant.set(item.row.tenantSchema, [item]);
     }
 
+    const attribute = actorUserId && isUuid(actorUserId) ? actorUserId : null;
     for (const [, items] of byTenant) {
       try {
         await client.query("BEGIN");
+        // Attribute audit_log rows to the operator (txn-local). Only a valid UUID is
+        // set, since the audit trigger casts app.current_user_id to ::uuid.
+        if (attribute) await client.query("SELECT set_config('app.current_user_id', $1, true)", [attribute]);
         for (const { index, row, value } of items) {
           await client.query("SAVEPOINT cd_row");
           try {
@@ -499,10 +517,17 @@ export async function runReimport(input: {
         } catch {
           /* ignore */
         }
+        // The whole tenant transaction rolled back, so EVERY row in this batch is
+        // unpersisted — overwrite any provisional WRITTEN/NOOP/etc. with ERROR so
+        // the totals and audit CSV never claim a write that did not survive.
         for (const { index, row } of items) {
-          if (!results[index]) {
-            results[index] = { ...row, outcome: "ERROR", value: null, existing: null, message: errMessage(err) };
-          }
+          results[index] = {
+            ...row,
+            outcome: "ERROR",
+            value: null,
+            existing: null,
+            message: `tenant transaction rolled back: ${errMessage(err)}`,
+          };
         }
       }
     }

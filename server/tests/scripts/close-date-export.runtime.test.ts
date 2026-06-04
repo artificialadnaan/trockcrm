@@ -14,7 +14,7 @@ import {
  * bucket per rep (NULL rep -> Unassigned), spanning offices.
  */
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
-const REP = { alice: U("a11ce"), bob: U("b0b") };
+const REP = { alice: U("a11ce"), bob: U("b0b"), gone: U("90e"), ghost: U("9805") };
 const CO = { acme: U("c0a11e") };
 const ST = { est: U("57e57"), won: U("57007") };
 const D = {
@@ -28,6 +28,8 @@ const D = {
   d8_unassigned: U("d08"),
   d9_alice_atlanta: U("d09"),
   d10_bob_atlanta: U("d10"),
+  d11_inactive_rep: U("d11"),
+  d12_orphan_rep: U("d12"),
 };
 
 let pg: PGlite;
@@ -60,7 +62,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text NOT NULL, is_active boolean NOT NULL DEFAULT true);
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL, name text NOT NULL, is_terminal boolean NOT NULL DEFAULT false);
-    INSERT INTO users (id, display_name) VALUES ('${REP.alice}','Alice'), ('${REP.bob}','Bob');
+    INSERT INTO users (id, display_name, is_active) VALUES ('${REP.alice}','Alice', true), ('${REP.bob}','Bob', true), ('${REP.gone}','Gary Gone', false);
     INSERT INTO pipeline_stage_config (id, slug, name, is_terminal) VALUES
       ('${ST.est}','estimating','Estimating', false), ('${ST.won}','won','Won', true);
     ${dealsDDL("office_dallas")}
@@ -75,7 +77,9 @@ beforeAll(async () => {
       ('${D.d5_test_data}',   'DFW-1-00005-aa','Roof E','${ST.est}','${REP.alice}', NULL,        NULL, NULL, true, true,  false),         -- excluded: test data
       ('${D.d6_inactive}',    'DFW-1-00006-aa','Roof F','${ST.est}','${REP.alice}', NULL,        NULL, NULL, false, false, false),        -- excluded: inactive
       ('${D.d7_mirror}',      'DFW-1-00007-aa','Roof G','${ST.est}','${REP.alice}', NULL,        NULL, NULL, true, false, true),          -- excluded: read-only mirror
-      ('${D.d8_unassigned}',  'DFW-1-00008-aa','Roof H','${ST.est}', NULL,          NULL,        NULL, NULL, true, false, false);         -- INCLUDED (unassigned)
+      ('${D.d8_unassigned}',  'DFW-1-00008-aa','Roof H','${ST.est}', NULL,          NULL,        NULL, NULL, true, false, false),          -- INCLUDED (unassigned)
+      ('${D.d11_inactive_rep}','DFW-1-00011-aa','Roof K','${ST.est}','${REP.gone}',  NULL,        NULL, NULL, true, false, false),          -- INCLUDED -> Unassigned (rep inactive)
+      ('${D.d12_orphan_rep}', 'DFW-1-00012-aa','Roof L','${ST.est}','${REP.ghost}', NULL,        NULL, NULL, true, false, false);          -- INCLUDED -> Unassigned (rep row missing)
 
     INSERT INTO office_atlanta.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date, is_active) VALUES
       ('${D.d9_alice_atlanta}', 'ATL-1-00009-aa','Roof I','${ST.est}','${REP.alice}', NULL, true),  -- INCLUDED (alice spans offices)
@@ -97,8 +101,31 @@ describe("close-date export query (PGlite)", () => {
     const deals = await fetchMissingCloseDateDeals(client);
     const ids = deals.map((d) => d.dealId).sort();
     expect(ids).toEqual(
-      [D.d1_alice_dallas, D.d3_bob_dallas, D.d8_unassigned, D.d9_alice_atlanta, D.d10_bob_atlanta].sort(),
+      [
+        D.d1_alice_dallas,
+        D.d3_bob_dallas,
+        D.d8_unassigned,
+        D.d9_alice_atlanta,
+        D.d10_bob_atlanta,
+        D.d11_inactive_rep,
+        D.d12_orphan_rep,
+      ].sort(),
     );
+  });
+
+  it("routes deals owned by an inactive or missing rep into the single Unassigned bucket", async () => {
+    const deals = await fetchMissingCloseDateDeals(client);
+    const inactive = deals.find((d) => d.dealId === D.d11_inactive_rep)!;
+    const orphan = deals.find((d) => d.dealId === D.d12_orphan_rep)!;
+    // both are treated as unassigned (no active owner to fill the file)
+    expect(inactive.assignedRepId).toBeNull();
+    expect(inactive.repName).toBe("Unassigned");
+    expect(orphan.assignedRepId).toBeNull();
+    expect(orphan.repName).toBe("Unassigned");
+
+    const groups = groupDealsByRep(deals);
+    const unassignedGroups = groups.filter((g) => g.repName === "Unassigned");
+    expect(unassignedGroups).toHaveLength(1); // exactly one Unassigned file, not one per orphan
   });
 
   it("resolves rep name, company, stage and tenant schema for each row", async () => {
@@ -129,6 +156,8 @@ describe("close-date export query (PGlite)", () => {
     expect(new Set(alice.deals.map((d) => d.tenantSchema))).toEqual(new Set(["office_dallas", "office_atlanta"]));
 
     const unassigned = groups.find((g) => g.repName === "Unassigned")!;
-    expect(unassigned.deals.map((d) => d.dealId)).toEqual([D.d8_unassigned]);
+    expect(unassigned.deals.map((d) => d.dealId).sort()).toEqual(
+      [D.d8_unassigned, D.d11_inactive_rep, D.d12_orphan_rep].sort(),
+    );
   });
 });

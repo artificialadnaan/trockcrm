@@ -54,6 +54,21 @@ describe("parseExpectedCloseDate", () => {
     expect(parseExpectedCloseDate("next quarter").status).toBe("invalid");
     expect(parseExpectedCloseDate(true).status).toBe("invalid");
   });
+
+  it("accepts a US 2-digit year and pivots into 2000-2099", () => {
+    expect(parseExpectedCloseDate("9/15/26")).toEqual({ status: "ok", value: "2026-09-15" });
+    expect(parseExpectedCloseDate("1/1/00")).toEqual({ status: "ok", value: "2000-01-01" });
+    expect(parseExpectedCloseDate("12/31/99")).toEqual({ status: "ok", value: "2099-12-31" });
+  });
+
+  it("truncates an Excel serial that carries a time fraction to its calendar day (no round-up)", () => {
+    expect(parseExpectedCloseDate(46280.6)).toEqual({ status: "ok", value: "2026-09-15" });
+  });
+
+  it("rejects mixed separators (the two separators must match)", () => {
+    expect(parseExpectedCloseDate("9-5/2026").status).toBe("invalid");
+    expect(parseExpectedCloseDate("2026/9-15").status).toBe("invalid");
+  });
 });
 
 describe("classifyImportRow (safe-default: never clobber, flag conflicts)", () => {

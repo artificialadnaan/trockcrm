@@ -139,34 +139,140 @@ describe("close-date re-import (PGlite)", () => {
   });
 });
 
+describe("re-import fault isolation (real DB errors + commit failure)", () => {
+  let fpg: PGlite;
+  let fclient: Queryable;
+  const A = U("fa1");
+  const B = U("fb2"); // its write violates a CHECK -> real mid-transaction PG error
+  const C = U("fc3");
+
+  beforeAll(async () => {
+    fpg = new PGlite();
+    fclient = { query: (text: string, params?: unknown[]) => fpg.query(text, params) };
+    await fpg.exec(`
+      CREATE SCHEMA office_dallas;
+      CREATE TABLE office_dallas.deals (
+        id uuid PRIMARY KEY, expected_close_date date, updated_at timestamptz DEFAULT now(),
+        CONSTRAINT no_sentinel CHECK (expected_close_date <> DATE '2099-12-31')
+      );
+    `);
+  });
+  afterAll(async () => {
+    await fpg?.close?.();
+  });
+  beforeEach(async () => {
+    await fpg.exec(`DELETE FROM office_dallas.deals;
+      INSERT INTO office_dallas.deals (id) VALUES ('${A}'), ('${B}'), ('${C}');`);
+  });
+
+  function dateOfF(id: string) {
+    return fpg
+      .query<{ d: string | null }>(`SELECT to_char(expected_close_date,'YYYY-MM-DD') AS d FROM office_dallas.deals WHERE id = $1`, [id])
+      .then((r) => r.rows[0]?.d ?? null);
+  }
+
+  it("a real per-row DB error rolls back ONLY that row (SAVEPOINT) and the rest commit", async () => {
+    const report = await runReimport({
+      client: fclient,
+      rows: [
+        { tenantSchema: "office_dallas", dealId: A, rawDate: "2026-09-15" }, // ok
+        { tenantSchema: "office_dallas", dealId: B, rawDate: "2099-12-31" }, // violates CHECK
+        { tenantSchema: "office_dallas", dealId: C, rawDate: "2026-10-01" }, // ok
+      ],
+      validSchemas: new Set(["office_dallas"]),
+      mode: "commit",
+      overwriteExisting: false,
+    });
+
+    expect(report.counts.WRITTEN).toBe(2);
+    expect(report.counts.ERROR).toBe(1);
+    expect(report.results.find((r) => r.dealId === B)!.outcome).toBe("ERROR");
+    expect(await dateOfF(A)).toBe("2026-09-15");
+    expect(await dateOfF(B)).toBeNull(); // failed row rolled back
+    expect(await dateOfF(C)).toBe("2026-10-01"); // sibling still committed
+  });
+
+  it("a COMMIT failure marks the ENTIRE rolled-back tenant batch as ERROR (no false WRITTEN in the audit)", async () => {
+    const failing: Queryable = {
+      query: async (text: string, params?: unknown[]) => {
+        if (text.trim().toUpperCase() === "COMMIT") throw new Error("injected commit failure");
+        return fpg.query(text, params);
+      },
+    };
+
+    const report = await runReimport({
+      client: failing,
+      rows: [
+        { tenantSchema: "office_dallas", dealId: A, rawDate: "2026-09-15" },
+        { tenantSchema: "office_dallas", dealId: C, rawDate: "2026-10-01" },
+      ],
+      validSchemas: new Set(["office_dallas"]),
+      mode: "commit",
+      overwriteExisting: false,
+    });
+
+    // Everything rolled back -> nothing may be reported as written.
+    expect(report.counts.WRITTEN).toBe(0);
+    expect(report.counts.ERROR).toBe(2);
+    expect(await dateOfF(A)).toBeNull();
+    expect(await dateOfF(C)).toBeNull();
+  });
+});
+
 describe("re-import is side-effect-safe under the guarded deal triggers", () => {
   let tpg: PGlite;
   let tclient: Queryable;
   const DEAL = U("aa1");
   const STAGE = U("57a6e");
   const REP = U("4ec");
+  const ACTOR = U("ac70"); // operator UUID for audit attribution
 
   beforeAll(async () => {
     tpg = new PGlite();
     tclient = { query: (text: string, params?: unknown[]) => tpg.query(text, params) };
-    // Reproduce the two triggers that fire on a GENERIC deals UPDATE in production
-    // (migrations 0143 record_stage_history + 0001 reset_stage_entered_at). Both are
-    // guarded on a stage_id change, so a close-date-only update must be inert.
+    // Reproduce the FULL set of deals triggers whose firing matters for a
+    // close-date-only write:
+    //   - record_stage_history (0143) + reset_stage_entered_at (0001): generic
+    //     UPDATE triggers, guarded on a stage_id change -> must be inert here.
+    //   - the three notification triggers (0138 project_number / 0147 stage_id /
+    //     0148 rfp_approval_status): AFTER UPDATE OF <col>, so a close-date-only
+    //     write must enqueue ZERO jobs. This regression-guards the no-spam claim.
+    //   - audit trigger: writes one audit_log row attributed to app.current_user_id.
     await tpg.exec(`
       CREATE SCHEMA office_dallas;
       CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text, name text, display_order int);
       CREATE TABLE office_dallas.deals (
         id uuid PRIMARY KEY, stage_id uuid NOT NULL, assigned_rep_id uuid, created_by_user_id uuid,
+        project_number text, rfp_approval_status text,
         expected_close_date date, stage_entered_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz DEFAULT now()
       );
       CREATE TABLE office_dallas.deal_stage_history (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, from_stage_id uuid, to_stage_id uuid,
         changed_by uuid NOT NULL, is_backward_move boolean, duration_in_previous_stage interval, created_at timestamptz
       );
+      CREATE TABLE office_dallas.job_queue (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), kind text, deal_id uuid);
+      CREATE TABLE office_dallas.audit_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), record_id uuid, action text, changed_by uuid);
 
       CREATE OR REPLACE FUNCTION reset_stage_entered_at() RETURNS TRIGGER AS $$
       BEGIN
         IF OLD.stage_id IS DISTINCT FROM NEW.stage_id THEN NEW.stage_entered_at = NOW(); END IF;
+        RETURN NEW;
+      END; $$ LANGUAGE plpgsql;
+
+      -- Stand-in notification trigger: enqueues a job whenever it fires. Production
+      -- versions are AFTER UPDATE OF <specific column>, so a close-date-only write
+      -- must never reach them.
+      CREATE OR REPLACE FUNCTION test_enqueue_job() RETURNS TRIGGER AS $$
+      BEGIN
+        INSERT INTO office_dallas.job_queue (kind, deal_id) VALUES (TG_ARGV[0], NEW.id);
+        RETURN NEW;
+      END; $$ LANGUAGE plpgsql;
+
+      -- Stand-in audit trigger mirroring the real changed_by attribution.
+      CREATE OR REPLACE FUNCTION test_audit() RETURNS TRIGGER AS $$
+      BEGIN
+        INSERT INTO office_dallas.audit_log (record_id, action, changed_by)
+          VALUES (NEW.id, 'update', NULLIF(current_setting('app.current_user_id', true), '')::uuid);
         RETURN NEW;
       END; $$ LANGUAGE plpgsql;
 
@@ -192,6 +298,10 @@ describe("re-import is side-effect-safe under the guarded deal triggers", () => 
 
       CREATE TRIGGER set_reset_stage BEFORE UPDATE ON office_dallas.deals FOR EACH ROW EXECUTE FUNCTION reset_stage_entered_at();
       CREATE TRIGGER stage_history_trigger AFTER INSERT OR UPDATE ON office_dallas.deals FOR EACH ROW EXECUTE FUNCTION public.record_stage_history();
+      CREATE TRIGGER email_project_number AFTER UPDATE OF project_number ON office_dallas.deals FOR EACH ROW EXECUTE FUNCTION test_enqueue_job('project_number');
+      CREATE TRIGGER email_stage AFTER UPDATE OF stage_id ON office_dallas.deals FOR EACH ROW EXECUTE FUNCTION test_enqueue_job('stage');
+      CREATE TRIGGER email_rfp AFTER UPDATE OF rfp_approval_status ON office_dallas.deals FOR EACH ROW EXECUTE FUNCTION test_enqueue_job('rfp');
+      CREATE TRIGGER audit_deals AFTER UPDATE ON office_dallas.deals FOR EACH ROW EXECUTE FUNCTION test_audit();
 
       INSERT INTO pipeline_stage_config (id, slug, name, display_order) VALUES ('${STAGE}','estimating','Estimating', 2);
       INSERT INTO office_dallas.deals (id, stage_id, assigned_rep_id, expected_close_date, stage_entered_at)
@@ -203,10 +313,10 @@ describe("re-import is side-effect-safe under the guarded deal triggers", () => 
     await tpg?.close?.();
   });
 
-  it("writing expected_close_date inserts NO stage-history row and leaves stage_entered_at untouched", async () => {
+  it("writing expected_close_date fires no notifications, no stage-history, leaves stage_entered_at, and attributes the audit row", async () => {
     // The seed INSERT legitimately recorded the deal's initial stage (production
     // behavior). Clear it so we measure ONLY the close-date UPDATE's side effects.
-    await tpg.exec(`DELETE FROM office_dallas.deal_stage_history`);
+    await tpg.exec(`DELETE FROM office_dallas.deal_stage_history; DELETE FROM office_dallas.job_queue; DELETE FROM office_dallas.audit_log;`);
     const before = await tpg.query<{ se: string }>(`SELECT stage_entered_at::text AS se FROM office_dallas.deals WHERE id = $1`, [DEAL]);
 
     const report = await runReimport({
@@ -215,6 +325,7 @@ describe("re-import is side-effect-safe under the guarded deal triggers", () => 
       validSchemas: new Set(["office_dallas"]),
       mode: "commit",
       overwriteExisting: false,
+      actorUserId: ACTOR,
     });
     expect(report.counts.WRITTEN).toBe(1);
 
@@ -224,7 +335,16 @@ describe("re-import is side-effect-safe under the guarded deal triggers", () => 
     const history = await tpg.query<{ n: number }>(`SELECT count(*)::int AS n FROM office_dallas.deal_stage_history`);
     expect(history.rows[0].n).toBe(0); // no spurious stage-history row
 
+    const jobs = await tpg.query<{ n: number }>(`SELECT count(*)::int AS n FROM office_dallas.job_queue`);
+    expect(jobs.rows[0].n).toBe(0); // NO notification enqueued (column-scoped triggers don't fire)
+
     const after = await tpg.query<{ se: string }>(`SELECT stage_entered_at::text AS se FROM office_dallas.deals WHERE id = $1`, [DEAL]);
     expect(after.rows[0].se).toBe(before.rows[0].se); // stage_entered_at unchanged
+
+    const audit = await tpg.query<{ n: number; changed_by: string | null }>(
+      `SELECT count(*)::int AS n, max(changed_by::text) AS changed_by FROM office_dallas.audit_log`,
+    );
+    expect(audit.rows[0].n).toBe(1); // one benign audit row
+    expect(audit.rows[0].changed_by).toBe(ACTOR); // attributed to the operator
   });
 });

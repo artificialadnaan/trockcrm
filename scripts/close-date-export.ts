@@ -63,6 +63,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const deals = await fetchMissingCloseDateDeals(client, tenants);
     const groups = groupDealsByRep(deals);
 
+    // Guard against any residual filename collision so one rep's workbook can never
+    // silently overwrite another's (groupDealsByRep already id-suffixes name clashes).
+    const slugCounts = new Map<string, number>();
+    for (const g of groups) slugCounts.set(g.fileSlug, (slugCounts.get(g.fileSlug) ?? 0) + 1);
+    const collisions = [...slugCounts.entries()].filter(([, n]) => n > 1).map(([s]) => s);
+    if (collisions.length > 0) {
+      throw new Error(`Duplicate export filenames would collide (${collisions.join(", ")}); aborting to avoid overwriting a rep's file.`);
+    }
+
     console.log(`close-date export | tenants: ${tenants.join(", ") || "(none)"}`);
     console.log(`Found ${deals.length} open deal(s) missing an expected close date across ${groups.length} rep(s).`);
 

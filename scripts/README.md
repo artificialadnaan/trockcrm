@@ -58,10 +58,13 @@ Two-way workflow to fill in missing `expected_close_date` values: export one Exc
 **Export** (read-only) writes one `close-dates-<rep>.xlsx` per rep to `close-date-exports/<date>/` (git-ignored — real customer data). Scope is open, rep-actionable deals only: `expected_close_date IS NULL`, active, non-test, non-mirror, non-terminal stage.
 
 ```bash
-railway run --service=Postgres npx tsx scripts/close-date-export.ts                 # all offices
+railway run --service=Postgres npx tsx scripts/close-date-export.ts                 # all offices -> close-date-exports/<date>/
 railway run --service=Postgres npx tsx scripts/close-date-export.ts --tenant=office_dallas
+railway run --service=Postgres npx tsx scripts/close-date-export.ts --out=./out      # custom output directory
 railway run --service=Postgres npx tsx scripts/close-date-export.ts --dry-run        # per-rep counts, write no files
 ```
+
+Deals owned by a deactivated rep (or a stale `assigned_rep_id` with no matching user) are routed to the single `close-dates-unassigned.xlsx` so a manager can fill or reassign them.
 
 Each workbook hides + locks the matching-key columns (`Deal ID` = deal UUID, `Office` = tenant schema) and protects the sheet so reps can only edit the highlighted **Expected Close Date** column. The UUID is the foolproof match key — `deal_number`/`project_number` are mutable and frequently null, so they are never used to match.
 
@@ -72,6 +75,12 @@ railway run --service=Postgres npx tsx scripts/close-date-reimport.ts --dir=./fi
 railway run --service=Postgres npx tsx scripts/close-date-reimport.ts --dir=./filled --commit    # write
 railway run --service=Postgres npx tsx scripts/close-date-reimport.ts --file=close-dates-alice.xlsx --commit
 railway run --service=Postgres npx tsx scripts/close-date-reimport.ts --dir=./filled --commit --overwrite-existing
+```
+
+Set `CLOSE_DATE_ACTOR_USER_ID=<a public.users UUID>` to attribute the re-import's `audit_log` rows to a known operator (otherwise `changed_by` is NULL). Example:
+
+```bash
+railway run --service=Postgres CLOSE_DATE_ACTOR_USER_ID=<uuid> npx tsx scripts/close-date-reimport.ts --dir=./filled --commit
 ```
 
 Shared logic lives in `scripts/lib/close-date-workflow.ts` (queries, classification) and `scripts/lib/close-date-xlsx.ts` (workbook IO); both are covered by `server/tests/scripts/close-date-*.runtime.test.ts`.

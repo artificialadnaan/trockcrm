@@ -24,6 +24,7 @@ import { pathToFileURL } from "node:url";
 import pg from "pg";
 import {
   discoverDealTenants,
+  isUuid,
   runReimport,
   type ImportRowResult,
   type ReimportMode,
@@ -65,14 +66,28 @@ function resolveDatabaseUrl(): { url: string; ssl: boolean } {
   return { url, ssl };
 }
 
-function resolveFiles(args: ReimportArgs): string[] {
-  if (args.file) return [args.file];
+export function resolveFiles(args: ReimportArgs): string[] {
+  if (args.file) {
+    if (!fs.existsSync(args.file)) throw new Error(`No such file: ${args.file}`);
+    return [args.file];
+  }
   const dir = args.dir as string;
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+    throw new Error(`No such directory: ${dir}`);
+  }
   return fs
     .readdirSync(dir)
     .filter((f) => f.toLowerCase().endsWith(".xlsx") && !f.startsWith("~$"))
     .sort()
     .map((f) => path.join(dir, f));
+}
+
+/** Optional operator UUID (env CLOSE_DATE_ACTOR_USER_ID) used to attribute audit rows. */
+export function resolveActorUserId(env = process.env): string | null {
+  const raw = env.CLOSE_DATE_ACTOR_USER_ID?.trim();
+  if (!raw) return null;
+  if (!isUuid(raw)) throw new Error(`CLOSE_DATE_ACTOR_USER_ID must be a UUID, got: ${raw}`);
+  return raw;
 }
 
 function csvCell(value: unknown): string {
@@ -100,9 +115,11 @@ function writeAuditCsv(rows: Array<ImportRowResult & { sourceFile: string }>): s
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const args = parseReimportArgs(argv);
+  const actorUserId = resolveActorUserId();
   const files = resolveFiles(args);
   if (files.length === 0) {
-    console.log("No .xlsx files found to import.");
+    console.warn("No .xlsx files found to import (folder contained no .xlsx files).");
+    process.exitCode = 1;
     return;
   }
 
@@ -113,10 +130,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   try {
     const validSchemas = new Set(await discoverDealTenants(client));
     console.log(`close-date re-import | mode: ${args.mode.toUpperCase()}${args.overwriteExisting ? " | OVERWRITE-EXISTING" : ""}`);
-    console.log(`Tenants: ${[...validSchemas].join(", ") || "(none)"} | files: ${files.length}`);
+    console.log(`Tenants: ${[...validSchemas].join(", ") || "(none)"} | files: ${files.length}${actorUserId ? ` | actor: ${actorUserId}` : ""}`);
 
     const allResults: Array<ImportRowResult & { sourceFile: string }> = [];
     const totals: Record<string, number> = {};
+    let filesSkipped = 0;
 
     for (const filePath of files) {
       let rows;
@@ -124,6 +142,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         rows = await readWorkbookRows(filePath);
       } catch (err) {
         console.error(`  ${path.basename(filePath)}: SKIPPED — ${err instanceof Error ? err.message : err}`);
+        filesSkipped += 1;
         continue;
       }
       const report = await runReimport({
@@ -132,6 +151,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         validSchemas,
         mode: args.mode,
         overwriteExisting: args.overwriteExisting,
+        actorUserId,
       });
       for (const r of report.results) {
         allResults.push({ ...r, sourceFile: path.basename(filePath) });
@@ -157,8 +177,20 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       console.log("\nCommit complete.");
     }
 
-    // Surface genuine failures (not conflicts/unmatched, which are informational) to the exit code.
-    if ((totals.ERROR ?? 0) > 0) process.exitCode = 1;
+    // Surface genuine failures to the exit code: per-row ERRORs, files that failed
+    // to read, or a run that imported nothing at all (likely an operator mistake).
+    if ((totals.ERROR ?? 0) > 0) {
+      console.error(`\n${totals.ERROR} row(s) ERRORED — see the audit CSV.`);
+      process.exitCode = 1;
+    }
+    if (filesSkipped > 0) {
+      console.error(`\n${filesSkipped} file(s) could not be read and were skipped.`);
+      process.exitCode = 1;
+    }
+    if (allResults.length === 0) {
+      console.error("\nNo rows were processed from any file — nothing was imported.");
+      process.exitCode = 1;
+    }
   } finally {
     await client.end();
   }
