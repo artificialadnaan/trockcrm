@@ -1,4 +1,4 @@
--- Migration 0152: deal_change_orders (CRM-native, dated change orders)
+-- Migration 0153: deal_change_orders (CRM-native, dated change orders)
 --
 -- A dedicated per-office table for CRM change orders captured against Won / Bid-Board-Owned
 -- deals AFTER they close. Distinct from the Procore-synced `change_orders` table — these rows

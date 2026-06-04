@@ -6,7 +6,7 @@ import { PGlite } from "@electric-sql/pglite";
 // indexes, idempotency). The migration's static block targets office_dallas; the DO-loop targets
 // every office_* schema — both create the table here, exercising both paths idempotently.
 const MIGRATION_SQL = readFileSync(
-  new URL("../../../../migrations/0152_deal_change_orders.sql", import.meta.url),
+  new URL("../../../../migrations/0153_deal_change_orders.sql", import.meta.url),
   "utf8",
 );
 
@@ -34,7 +34,7 @@ async function setup(): Promise<PGlite> {
   return db;
 }
 
-describe("migration 0152 — deal_change_orders (runtime, PGlite)", () => {
+describe("migration 0153 — deal_change_orders (runtime, PGlite)", () => {
   it("creates the table and accepts a positive-amount change order", async () => {
     pg = await setup();
     await pg.query(
