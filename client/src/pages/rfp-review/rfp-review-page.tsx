@@ -161,11 +161,17 @@ export function RfpReviewPage() {
       );
       setNote("");
       setConfirmedNoProject(false); // require re-verification if this attempt also fails
-      // Optimistically enter 'approving' so the progress panel + 5s poll start immediately — even if the
-      // authoritative refetch below blips. On an unconfirmed timeout the deal IS kept 'approving' server-side
-      // (re-approve stays blocked to avoid a duplicate; a stuck deal is escapable via Re-confirm denial).
+      // Optimistically enter 'approving' so the progress panel + 5s poll start immediately. On an unconfirmed
+      // timeout the deal IS kept 'approving' server-side (re-approve stays blocked to avoid a duplicate; a stuck
+      // deal is escapable via Re-confirm denial).
       applyOptimistic({ overrideState: "approving", overrideError: null, actionable: false });
-      await refetch();
+      // The action already succeeded above. Isolate the best-effort authoritative refresh so a transient refresh
+      // blip can never surface as an approval failure (the optimistic state + 5s poll already reconcile).
+      try {
+        await refetch();
+      } catch {
+        /* ignore — the poll reconciles the authoritative state */
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to approve the override");
     } finally {
@@ -180,9 +186,15 @@ export function RfpReviewPage() {
       await reconfirmRfpDecline(dealId, { note, officeId });
       toast.success("Denial re-confirmed — this RFP stays declined.");
       setNote("");
-      // Optimistically mark the terminal outcome so it sticks even if the follow-up refetch blips.
+      // Optimistically mark the terminal outcome so it sticks even if the follow-up refresh blips.
       applyOptimistic({ reviewDecision: "denial_reconfirmed", overrideState: null, overrideError: null, actionable: false });
-      await refetch();
+      // Best-effort refresh, isolated so a refresh blip can't read as a re-confirm failure (the optimistic
+      // terminal outcome already holds; the next load reconciles).
+      try {
+        await refetch();
+      } catch {
+        /* ignore — the next load reconciles the authoritative state */
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to re-confirm the denial");
     } finally {

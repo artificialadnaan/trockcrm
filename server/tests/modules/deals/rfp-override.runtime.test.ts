@@ -471,7 +471,8 @@ describe("RFP override-approval flow vs migration 0148 decline trigger (real SQL
     // an 'approving' deal whose callback never arrives (e.g. an unconfirmed POST timeout) is NOT locked: upholding
     // the denial is allowed (it creates no project, so it's duplicate-safe even mid-flight) and clears the state.
     await pg.query(`UPDATE ${SCHEMA}.deals SET rfp_approval_status='declined', rfp_override_decision=NULL, rfp_override_reviewed_at=NULL WHERE id=$1`, [DEAL]);
-    await overrideApprove(pg, DEAL); // state='approving'
+    expect(await overrideApprove(pg, DEAL)).toBe(1); // genuinely enters the in-flight state...
+    expect((await dealState(pg, DEAL)).state).toBe("approving"); // ...so the next line really tests approving->reconfirm
     expect(await reconfirm(pg, DEAL)).toBe(1);
     const d = await dealState(pg, DEAL);
     expect(d.state).toBeNull(); // 'approving' cleared
