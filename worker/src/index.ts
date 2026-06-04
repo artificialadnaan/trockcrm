@@ -15,6 +15,7 @@ import { runWeeklyDigest } from "./jobs/weekly-digest.js";
 import { runColdLeadWarming } from "./jobs/cold-lead-warming.js";
 import { runBidDeadlineCountdown } from "./jobs/bid-deadline.js";
 import { runProcoreSync, runScheduledCatalogSync } from "./jobs/procore-sync.js";
+import { runPortfolioValueRefresh } from "./jobs/portfolio-value-refresh.js";
 import { runAiDisconnectDigest } from "./jobs/ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./jobs/ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./jobs/ai-disconnect-admin-tasks.js";
@@ -195,6 +196,22 @@ async function main() {
     }
   });
   console.log("[Worker] Cron scheduled: public Procore catalog refresh every 6 hours");
+
+  // Portfolio Contract Value refresh: every 4 hours at minute 23.
+  // Pulls SyncHub Procore values (public.procore_projects) into office_*.portfolio_projects
+  // (total_value / value_synced_at) so the Projects board Contract Values stay well within
+  // the client's 7-day staleness window. Cross-DB read — needs SYNCHUB_DATABASE_URL /
+  // SYNCHUB_DATABASE_PUBLIC_URL on the worker; the job skips (logs) when it is unset and
+  // never throws, so a SyncHub outage cannot take down the worker or its other crons.
+  cron.schedule("23 */4 * * *", async () => {
+    console.log("[Worker:cron] Running portfolio value refresh...");
+    try {
+      await runPortfolioValueRefresh();
+    } catch (err) {
+      console.error("[Worker:cron] Portfolio value refresh failed:", err);
+    }
+  });
+  console.log("[Worker] Cron scheduled: portfolio value refresh every 4 hours");
 
   // Reports execution stub: every 5 minutes. Real execution is post-rollout.
   cron.schedule("*/5 * * * *", async () => {
