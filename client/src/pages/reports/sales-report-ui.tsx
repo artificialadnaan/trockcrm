@@ -215,6 +215,7 @@ export function TrendChart({
   lineKey,
   barName,
   lineName,
+  leftFormat = "number",
 }: {
   data: Array<Record<string, unknown>>;
   xKey: string;
@@ -222,16 +223,30 @@ export function TrendChart({
   lineKey?: string;
   barName: string;
   lineName?: string;
+  // "currency" formats the left (barKey) axis + its tooltip as dollars ($Xk axis, $ tooltip), matching
+  // ValueBarChart. Default "number" keeps the plain axis (e.g. lead-conversion's Leads count).
+  leftFormat?: "currency" | "number";
 }) {
+  const isCurrency = leftFormat === "currency";
   return (
     <div className="h-80 w-full">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data} margin={{ top: 10, right: 24, left: 12, bottom: 20 }}>
           <CartesianGrid strokeDasharray="3 3" vertical={false} />
           <XAxis dataKey={xKey} tick={{ fontSize: 12 }} />
-          <YAxis yAxisId="left" tick={{ fontSize: 12 }} />
+          <YAxis
+            yAxisId="left"
+            tick={{ fontSize: 12 }}
+            tickFormatter={isCurrency ? (value) => `$${Math.round(Number(value) / 1000)}k` : undefined}
+          />
           {lineKey ? <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 12 }} /> : null}
-          <Tooltip />
+          <Tooltip
+            formatter={
+              isCurrency
+                ? (value, name) => (name === barName ? formatCurrency(Number(value)) : value)
+                : undefined
+            }
+          />
           <Legend />
           <Line yAxisId="left" type="monotone" dataKey={barKey} name={barName} stroke="#CC0000" strokeWidth={3} />
           {lineKey ? <Line yAxisId="right" type="monotone" dataKey={lineKey} name={lineName} stroke="#2563eb" strokeWidth={3} /> : null}

@@ -317,7 +317,7 @@ export interface ClosedWonRevenueOverview {
     avgDealSize: number;
     largestWonDeal: { dealId: string | null; dealName: string; value: number };
   }>;
-  byOffice: Array<{ officeId: string | null; officeName: string; wonDeals: number; totalRevenue: number; avgDealSize: number; percentOfTotal: number }>;
+  byRegion: Array<{ regionName: string; wonDeals: number; totalRevenue: number; percentOfTotal: number }>;
   byWorkflowFamily: Array<{ workflowFamily: string; workflowFamilyName: string; wonDeals: number; totalRevenue: number }>;
   topDeals: Array<{ dealId: string; dealName: string; ownerName: string; value: number; wonAt: string }>;
 }
@@ -347,7 +347,7 @@ export function buildClosedWonRevenueOverviewFromRows(input: {
     largestWonDealName: string | null;
     largestWonDealValue: number | string | null;
   }>;
-  officeRows: Array<{ officeId: string | null; officeName: string; wonDeals: number | string; totalRevenue: number | string | null }>;
+  regionRows: Array<{ regionName: string; wonDeals: number | string; totalRevenue: number | string | null }>;
   workflowRows: Array<{ workflowFamily: string; wonDeals: number | string; totalRevenue: number | string | null }>;
   monthlyRows: Array<{ month: string; totalRevenue: number | string | null; wonDeals: number | string }>;
   topDeals: Array<{ dealId: string; dealName: string; ownerName: string; value: number | string | null; wonAt: string }>;
@@ -386,15 +386,13 @@ export function buildClosedWonRevenueOverviewFromRows(input: {
         },
       };
     }),
-    byOffice: input.officeRows.map((row) => {
+    byRegion: input.regionRows.map((row) => {
       const wonDeals = numberValue(row.wonDeals);
       const totalRevenue = numberValue(row.totalRevenue);
       return {
-        officeId: row.officeId,
-        officeName: row.officeName || "Unassigned Office",
+        regionName: row.regionName || "Unassigned Region",
         wonDeals,
         totalRevenue,
-        avgDealSize: wonDeals ? round(totalRevenue / wonDeals) : 0,
         percentOfTotal: totalBookedRevenue ? round((totalRevenue / totalBookedRevenue) * 100, 1) : 0,
       };
     }),
@@ -632,20 +630,25 @@ export async function getClosedWonRevenueReport(
       ORDER BY "totalRevenue" DESC
     `));
 
-    const officeRows = rowsFromExecute<any>(await tenantDb.execute(sql`
+    // By REGION (region_classification, then property city/state), grouped on the single region
+    // expression so one region = one row — a single office no longer fragments into multiple rows the
+    // way the old byOffice GROUP BY (o.id, o.name, d.office_code) did.
+    const regionRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT
-        o.id::text AS "officeId",
-        COALESCE(o.name, d.office_code, 'Unassigned Office') AS "officeName",
+        COALESCE(
+          NULLIF(TRIM(d.region_classification), ''),
+          NULLIF(TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), ''),
+          'Unassigned Region'
+        ) AS "regionName",
         COUNT(*)::int AS "wonDeals",
         COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS "totalRevenue"
       FROM deals d
       JOIN pipeline_stage_config p ON p.id = d.stage_id
       LEFT JOIN users u ON u.id = d.assigned_rep_id
-      LEFT JOIN offices o ON o.id = u.office_id
       WHERE ${whereSql}
         AND p.slug IN (${wonSlugs})
         AND ${aliasedActiveDealCountFilterSql("d")}
-      GROUP BY o.id, o.name, d.office_code
+      GROUP BY 1
       ORDER BY "totalRevenue" DESC
     `));
 
@@ -696,7 +699,7 @@ export async function getClosedWonRevenueReport(
       LIMIT 10
     `));
 
-    return buildClosedWonRevenueOverviewFromRows({ summaryRows, ownerRows, officeRows, workflowRows, monthlyRows, topDeals });
+    return buildClosedWonRevenueOverviewFromRows({ summaryRows, ownerRows, regionRows, workflowRows, monthlyRows, topDeals });
   });
 }
 

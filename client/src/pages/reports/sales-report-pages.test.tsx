@@ -50,7 +50,7 @@ vi.mock("@/hooks/use-reports", async (importOriginal) => {
             largestWonDeal: { dealId: "deal-1", dealName: "North Plaza Roof", value: 425000 },
           },
         ],
-        byOffice: [{ officeId: "office-1", officeName: "Dallas", wonDeals: 2, totalRevenue: 600000, avgDealSize: 300000, percentOfTotal: 100 }],
+        byRegion: [{ regionName: "Dallas, TX", wonDeals: 2, totalRevenue: 600000, percentOfTotal: 100 }],
         byWorkflowFamily: [{ workflowFamily: "standard_deal", workflowFamilyName: "Standard Deal", wonDeals: 2, totalRevenue: 600000 }],
         topDeals: [{ dealId: "deal-1", dealName: "North Plaza Roof", ownerName: "Jordan Lee", value: 425000, wonAt: "2026-05-08" }],
       },

@@ -30,7 +30,7 @@ export function ClosedWonRevenuePage() {
     <ReportShell
       eyebrow="Sales Reports"
       title="Closed Won Revenue"
-      description="Booked revenue by rep, office, workflow family, and period."
+      description="Booked revenue by rep, region, workflow family, and period."
       loading={loading}
       error={error}
       hasData={hasRows}
@@ -50,10 +50,10 @@ export function ClosedWonRevenuePage() {
 
           <div className="grid gap-6 xl:grid-cols-2">
             <Panel title="Monthly Booked Revenue" description="Booked revenue trend by month.">
-              <TrendChart data={data.monthlyRevenue.map((row) => ({ label: row.label, revenue: row.totalRevenue }))} xKey="label" barKey="revenue" barName="Revenue" />
+              <TrendChart data={data.monthlyRevenue.map((row) => ({ label: row.label, revenue: row.totalRevenue }))} xKey="label" barKey="revenue" barName="Revenue" leftFormat="currency" />
             </Panel>
-            <Panel title="Revenue by Office" description="Share of total booked revenue.">
-              <ValueBarChart data={data.byOffice.map((row) => ({ officeName: row.officeName, totalRevenue: row.totalRevenue }))} xKey="officeName" yKey="totalRevenue" name="Revenue" />
+            <Panel title="Revenue by Region" description="Share of total booked revenue.">
+              <ValueBarChart data={data.byRegion.map((row) => ({ regionName: row.regionName, totalRevenue: row.totalRevenue }))} xKey="regionName" yKey="totalRevenue" name="Revenue" />
             </Panel>
           </div>
 
@@ -89,23 +89,23 @@ export function ClosedWonRevenuePage() {
           </Panel>
 
           <div className="grid gap-6 xl:grid-cols-2">
-            <Panel title="By Office">
+            <Panel title="By Region">
               <DataTable>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Office</TableHead>
+                    <TableHead>Region</TableHead>
                     <TableHead className="text-right">Won Deals</TableHead>
                     <TableHead className="text-right">Revenue</TableHead>
                     <TableHead className="text-right">% of Total</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {data.byOffice.map((office) => (
-                    <TableRow key={office.officeId ?? office.officeName}>
-                      <TableCell className="font-semibold text-slate-950">{office.officeName}</TableCell>
-                      <TableCell className="text-right">{office.wonDeals}</TableCell>
-                      <TableCell className="text-right">{formatCurrency(office.totalRevenue)}</TableCell>
-                      <TableCell className="text-right">{formatPercent(office.percentOfTotal)}</TableCell>
+                  {data.byRegion.map((region) => (
+                    <TableRow key={region.regionName}>
+                      <TableCell className="font-semibold text-slate-950">{region.regionName}</TableCell>
+                      <TableCell className="text-right">{region.wonDeals}</TableCell>
+                      <TableCell className="text-right">{formatCurrency(region.totalRevenue)}</TableCell>
+                      <TableCell className="text-right">{formatPercent(region.percentOfTotal)}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

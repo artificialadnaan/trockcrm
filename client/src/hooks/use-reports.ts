@@ -180,7 +180,7 @@ export interface ClosedWonRevenueOverview {
     avgDealSize: number;
     largestWonDeal: { dealId: string | null; dealName: string; value: number };
   }>;
-  byOffice: Array<{ officeId: string | null; officeName: string; wonDeals: number; totalRevenue: number; avgDealSize: number; percentOfTotal: number }>;
+  byRegion: Array<{ regionName: string; wonDeals: number; totalRevenue: number; percentOfTotal: number }>;
   byWorkflowFamily: Array<{ workflowFamily: string; workflowFamilyName: string; wonDeals: number; totalRevenue: number }>;
   topDeals: Array<{ dealId: string; dealName: string; ownerName: string; value: number; wonAt: string }>;
 }
