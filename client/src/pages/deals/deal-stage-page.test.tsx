@@ -38,7 +38,7 @@ vi.mock("@/components/pipeline/pipeline-stage-page-header", () => ({
     summary?: ReactNode;
   }) => (
     <div>
-      <a href={backTo}>Back to board</a>
+      <a href={backTo}>Back</a>
       <h1>{title}</h1>
       {subtitle ? <p>{subtitle}</p> : null}
       {summary}
@@ -127,7 +127,7 @@ describe("DealStagePage", () => {
 
   it("keeps the stage summary header + back link (whole-stage totals)", () => {
     const html = renderStage();
-    expect(html).toContain("Back to board");
+    expect(html).toContain(">Back<");
     expect(html).toContain("/deals?scope=team");
     expect(html).toContain("Estimating");
     expect(html).toContain("Stage value");

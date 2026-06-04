@@ -30,7 +30,7 @@ vi.mock("@/components/pipeline/pipeline-stage-page-header", () => ({
     summary?: ReactNode;
   }) => (
     <div>
-      <a href={backTo}>Back to board</a>
+      <a href={backTo}>Back</a>
       <h1>{title}</h1>
       {subtitle ? <p>{subtitle}</p> : null}
       {summary}
@@ -90,7 +90,7 @@ describe("LeadStagePage", () => {
       </MemoryRouter>
     );
 
-    expect(html).toContain("Back to board");
+    expect(html).toContain(">Back<");
     expect(html).toContain("/leads?scope=mine");
     expect(html).toContain("Qualified pressure");
     expect(html).toContain("Avg. visible age");
