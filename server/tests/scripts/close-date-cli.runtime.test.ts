@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseExportArgs } from "../../../scripts/close-date-export.js";
 import { parseReimportArgs, resolveFiles, resolveActorUserId, csvCell } from "../../../scripts/close-date-reimport.js";
+import { resolveScriptDatabaseUrl } from "../../../scripts/lib/resolve-database-url.js";
 
 /** CLI arg parsing + file/actor resolution for both scripts. */
 
@@ -41,6 +42,9 @@ describe("parseReimportArgs", () => {
   });
   it("--commit switches to commit mode", () => {
     expect(parseReimportArgs(["--dir=./filled", "--commit"]).mode).toBe("commit");
+  });
+  it("preserves '=' inside a path (slices the prefix, not split on '=')", () => {
+    expect(parseReimportArgs(["--dir=/mnt/exports/batch=2026-06-04"]).dir).toBe("/mnt/exports/batch=2026-06-04");
   });
   it("--overwrite-existing opts into clobbering", () => {
     expect(parseReimportArgs(["--file=a.xlsx", "--overwrite-existing"]).overwriteExisting).toBe(true);
@@ -96,6 +100,29 @@ describe("resolveActorUserId", () => {
   });
   it("throws on a non-UUID value", () => {
     expect(() => resolveActorUserId({ CLOSE_DATE_ACTOR_USER_ID: "alice" } as NodeJS.ProcessEnv)).toThrow();
+  });
+});
+
+describe("resolveScriptDatabaseUrl", () => {
+  const E = (o: Record<string, string>) => o as unknown as NodeJS.ProcessEnv;
+
+  it("prefers the public/external URL over the internal DATABASE_URL (so local `railway run` works)", () => {
+    const r = resolveScriptDatabaseUrl(
+      E({ DATABASE_URL: "postgresql://u:p@postgres.railway.internal:5432/db", DATABASE_PUBLIC_URL: "postgresql://u:p@x.proxy.rlwy.net:1234/db" }),
+    );
+    expect(r.url).toBe("postgresql://u:p@x.proxy.rlwy.net:1234/db");
+    expect(r.ssl).toBe(true);
+  });
+  it("prefers CRM_DATABASE_URL first", () => {
+    expect(resolveScriptDatabaseUrl(E({ CRM_DATABASE_URL: "postgresql://crm", DATABASE_PUBLIC_URL: "postgresql://pub", DATABASE_URL: "postgresql://int" })).url).toBe("postgresql://crm");
+  });
+  it("falls back to the internal URL with SSL off", () => {
+    const r = resolveScriptDatabaseUrl(E({ DATABASE_URL: "postgresql://u:p@postgres.railway.internal:5432/db" }));
+    expect(r.url).toContain("railway.internal");
+    expect(r.ssl).toBe(false);
+  });
+  it("throws when no URL is set", () => {
+    expect(() => resolveScriptDatabaseUrl(E({}))).toThrow();
   });
 });
 

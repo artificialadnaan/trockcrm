@@ -282,13 +282,13 @@ export function buildMissingCloseDateSql(schema: string): string {
     FROM ${s}.deals d
     LEFT JOIN public.users u ON u.id = d.assigned_rep_id AND u.is_active = true
     LEFT JOIN ${s}.companies c ON c.id = d.company_id
-    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE d.expected_close_date IS NULL
       AND d.is_active = true
       AND d.is_test_data = false
       AND d.is_read_only_mirror = false
       AND COALESCE(d.on_hold, false) = false
-      AND COALESCE(psc.is_terminal, false) = false
+      AND psc.is_terminal = false
     ORDER BY d.deal_number ASC, d.id ASC`;
 }
 
@@ -509,25 +509,31 @@ export async function runReimport(input: {
           try {
             let res = await resolveDeferredRow(client, row, value, overwriteExisting);
             if (res.outcome === "WRITTEN" || res.outcome === "OVERWRITTEN") {
-              const persisted = await applyCloseDate(client, row.tenantSchema, row.dealId, value, {
-                onlyIfNull: res.outcome === "WRITTEN",
-              });
-              if (!persisted) {
-                // The deal changed between the read and the guarded write (date set
-                // concurrently, or the row vanished) — re-read and report the truth
-                // so the audit never claims a write that did not persist.
-                const recheck = await fetchDealExistingCloseDate(client, row.tenantSchema, row.dealId);
-                const reclass = classifyImportRow({
-                  parsed: { status: "ok", value },
-                  keyValid: true,
-                  found: recheck.found,
-                  existing: recheck.existing,
-                  overwriteExisting,
-                });
-                res =
-                  reclass.outcome === "WRITTEN" || reclass.outcome === "OVERWRITTEN"
-                    ? { ...row, outcome: "ERROR", value: null, existing: recheck.existing, message: "guarded update affected 0 rows" }
-                    : { ...row, outcome: reclass.outcome, value: reclass.writeValue, existing: recheck.existing };
+              if (overwriteExisting) {
+                // Force mode: write unconditionally so the sheet value wins even if a
+                // concurrent edit set a date after our read (no fill-only guard, so no
+                // value race). Only a vanished row fails to persist.
+                const persisted = await applyCloseDate(client, row.tenantSchema, row.dealId, value, { onlyIfNull: false });
+                if (!persisted) res = { ...row, outcome: "UNMATCHED", value: null, existing: null };
+              } else {
+                // Safe mode: fill only if still empty. If a concurrent writer set a date
+                // between our read and this guarded write, re-read and report the truth
+                // (NOOP/CONFLICT) — never clobber, never claim an unpersisted write.
+                const persisted = await applyCloseDate(client, row.tenantSchema, row.dealId, value, { onlyIfNull: true });
+                if (!persisted) {
+                  const recheck = await fetchDealExistingCloseDate(client, row.tenantSchema, row.dealId);
+                  const reclass = classifyImportRow({
+                    parsed: { status: "ok", value },
+                    keyValid: true,
+                    found: recheck.found,
+                    existing: recheck.existing,
+                    overwriteExisting: false,
+                  });
+                  res =
+                    reclass.outcome === "WRITTEN"
+                      ? { ...row, outcome: "ERROR", value: null, existing: recheck.existing, message: "guarded update affected 0 rows" }
+                      : { ...row, outcome: reclass.outcome, value: reclass.writeValue, existing: recheck.existing };
+                }
               }
             }
             await client.query("RELEASE SAVEPOINT cd_row");

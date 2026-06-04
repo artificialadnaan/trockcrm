@@ -16,7 +16,7 @@ import {
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const REP = { alice: U("a11ce"), bob: U("b0b"), gone: U("90e"), ghost: U("9805") };
 const CO = { acme: U("c0a11e") };
-const ST = { est: U("57e57"), won: U("57007") };
+const ST = { est: U("57e57"), won: U("57007"), orphan: U("57bad") }; // orphan: no pipeline_stage_config row
 const D = {
   d1_alice_dallas: U("d01"),
   d2_has_date: U("d02"),
@@ -31,6 +31,7 @@ const D = {
   d11_inactive_rep: U("d11"),
   d12_orphan_rep: U("d12"),
   d13_on_hold: U("d13"),
+  d14_orphan_stage: U("d14"),
 };
 
 let pg: PGlite;
@@ -84,6 +85,8 @@ beforeAll(async () => {
       ('${D.d12_orphan_rep}', 'DFW-1-00012-aa','Roof L','${ST.est}','${REP.ghost}', NULL,        NULL, NULL, true, false, false);          -- INCLUDED -> Unassigned (rep row missing)
     INSERT INTO office_dallas.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date, on_hold) VALUES
       ('${D.d13_on_hold}','DFW-1-00013-aa','Roof M','${ST.est}','${REP.alice}', NULL, true);       -- excluded: on hold (paused / non-reportable)
+    INSERT INTO office_dallas.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date) VALUES
+      ('${D.d14_orphan_stage}','DFW-1-00014-aa','Roof N','${ST.orphan}','${REP.alice}', NULL);     -- excluded: stage_id has no pipeline_stage_config row
 
     INSERT INTO office_atlanta.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date, is_active) VALUES
       ('${D.d9_alice_atlanta}', 'ATL-1-00009-aa','Roof I','${ST.est}','${REP.alice}', NULL, true),  -- INCLUDED (alice spans offices)
@@ -120,6 +123,11 @@ describe("close-date export query (PGlite)", () => {
   it("excludes on-hold deals (deliberately paused / non-reportable)", async () => {
     const deals = await fetchMissingCloseDateDeals(client);
     expect(deals.find((d) => d.dealId === D.d13_on_hold)).toBeUndefined();
+  });
+
+  it("excludes deals whose stage_id has no pipeline_stage_config row (aligns with the forecast report's inner join)", async () => {
+    const deals = await fetchMissingCloseDateDeals(client);
+    expect(deals.find((d) => d.dealId === D.d14_orphan_stage)).toBeUndefined();
   });
 
   it("routes deals owned by an inactive or missing rep into the single Unassigned bucket", async () => {

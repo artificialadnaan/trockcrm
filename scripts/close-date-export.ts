@@ -24,6 +24,7 @@ import {
   groupDealsByRep,
 } from "./lib/close-date-workflow.js";
 import { buildRepWorkbook, workbookToBuffer } from "./lib/close-date-xlsx.js";
+import { resolveScriptDatabaseUrl } from "./lib/resolve-database-url.js";
 
 export type ExportArgs = { tenant: string | null; outDir: string | null; dryRun: boolean };
 
@@ -51,26 +52,10 @@ function readFlag(argv: string[], flag: string): string | null {
   return value;
 }
 
-/** Resolve the Postgres URL (Railway injects DATABASE_URL); enable SSL for a public proxy URL. */
-function resolveDatabaseUrl(): { url: string; ssl: boolean } {
-  const url =
-    process.env.DATABASE_URL?.trim() ||
-    process.env.CRM_DATABASE_URL?.trim() ||
-    process.env.DATABASE_PUBLIC_URL?.trim() ||
-    "";
-  if (!url) {
-    throw new Error(
-      "Missing database URL. Run via: railway run --service=Postgres npx tsx scripts/close-date-export.ts",
-    );
-  }
-  const ssl = /proxy\.rlwy\.net|\.rlwy\.net/.test(url) || url === process.env.DATABASE_PUBLIC_URL?.trim();
-  return { url, ssl };
-}
-
 /** Run the export: discover tenants, fetch missing-close-date deals, group per rep, write one workbook each. */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const args = parseExportArgs(argv);
-  const { url, ssl } = resolveDatabaseUrl();
+  const { url, ssl } = resolveScriptDatabaseUrl();
   const client = new pg.Client({ connectionString: url, ssl: ssl ? { rejectUnauthorized: false } : undefined });
   await client.connect();
 

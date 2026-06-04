@@ -30,6 +30,7 @@ import {
   type ReimportMode,
 } from "./lib/close-date-workflow.js";
 import { readWorkbookRows } from "./lib/close-date-xlsx.js";
+import { resolveScriptDatabaseUrl } from "./lib/resolve-database-url.js";
 
 export type ReimportArgs = {
   file: string | null;
@@ -40,8 +41,11 @@ export type ReimportArgs = {
 
 /** Parse the re-import CLI flags; requires exactly one of `--file`/`--dir`. */
 export function parseReimportArgs(argv: string[]): ReimportArgs {
-  const file = argv.find((a) => a.startsWith("--file="))?.split("=")[1] ?? null;
-  const dir = argv.find((a) => a.startsWith("--dir="))?.split("=")[1] ?? null;
+  // slice() the flag prefix (not split("=")) so a path containing '=' survives intact.
+  const fileArg = argv.find((a) => a.startsWith("--file="));
+  const dirArg = argv.find((a) => a.startsWith("--dir="));
+  const file = fileArg ? fileArg.slice("--file=".length) : null;
+  const dir = dirArg ? dirArg.slice("--dir=".length) : null;
   if (!file && !dir) throw new Error("Provide --file=<path> or --dir=<folder> of filled .xlsx files.");
   if (file && dir) throw new Error("Provide only one of --file or --dir, not both.");
   return {
@@ -50,22 +54,6 @@ export function parseReimportArgs(argv: string[]): ReimportArgs {
     mode: argv.includes("--commit") ? "commit" : "dry-run",
     overwriteExisting: argv.includes("--overwrite-existing"),
   };
-}
-
-/** Resolve the Postgres URL (Railway injects DATABASE_URL); enable SSL for a public proxy URL. */
-function resolveDatabaseUrl(): { url: string; ssl: boolean } {
-  const url =
-    process.env.DATABASE_URL?.trim() ||
-    process.env.CRM_DATABASE_URL?.trim() ||
-    process.env.DATABASE_PUBLIC_URL?.trim() ||
-    "";
-  if (!url) {
-    throw new Error(
-      "Missing database URL. Run via: railway run --service=Postgres npx tsx scripts/close-date-reimport.ts",
-    );
-  }
-  const ssl = /proxy\.rlwy\.net|\.rlwy\.net/.test(url) || url === process.env.DATABASE_PUBLIC_URL?.trim();
-  return { url, ssl };
 }
 
 export function resolveFiles(args: ReimportArgs): string[] {
@@ -138,7 +126,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  const { url, ssl } = resolveDatabaseUrl();
+  const { url, ssl } = resolveScriptDatabaseUrl();
   const client = new pg.Client({ connectionString: url, ssl: ssl ? { rejectUnauthorized: false } : undefined });
   await client.connect();
 
