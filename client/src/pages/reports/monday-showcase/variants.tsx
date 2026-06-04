@@ -444,6 +444,41 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
       <div className="rounded-xl border border-violet-200 bg-gradient-to-r from-violet-50 to-white p-3 text-sm text-violet-900">
         <span className="font-semibold">Office forecast coverage:</span> {data.officeProjection.coverageCaption}
       </div>
+
+      {/* Office column totals (HEADER): the canonical officeProjection ladder, surfaced at the top so the
+          office forecast is the first thing visible. It equals the sum of the per-rep rows below BY
+          CONSTRUCTION — the rep rows are union-seeded from the same per-rep projection map and
+          officeProjection = Σ per-rep — so each window's $ and dated count always reconcile with the rows
+          below (the showcase's one-source-of-truth guarantee). Distinct styling marks it the total. */}
+      <div className="rounded-xl border-2 border-slate-300 bg-[#f7f8fb] p-3.5 font-semibold">
+        <div className="mb-2 flex items-baseline justify-between">
+          <span className="text-sm font-black uppercase tracking-wide text-slate-700">All reps · office total</span>
+          <span className="text-xs font-bold tabular-nums text-slate-600">
+            {usd(data.officeProjection.bands.reduce((sum, b) => sum + b.value, 0))} projected
+          </span>
+        </div>
+        <div className="grid grid-cols-4 gap-2">
+          {data.officeProjection.bands.map((b) => (
+            <DrillNumber
+              key={b.band}
+              request={{ metric: "projection", band: b.band, title: `Projected ${PROJECTION_BAND_LABEL[b.band]} — office` }}
+              className="block"
+            >
+              <div className="rounded-lg border border-slate-300 bg-white p-2 text-center">
+                <div className="flex items-center justify-center gap-1">
+                  <span className={`h-1.5 w-1.5 rounded-full ${BAND_BAR[b.band]}`} />
+                  <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{PROJECTION_BAND_LABEL[b.band]}</span>
+                </div>
+                <div className="mt-0.5 text-sm font-black tabular-nums text-slate-900">{usd(b.value)}</div>
+                <div className="mt-1 inline-block rounded bg-slate-200 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-600">
+                  {int(b.count)} dated
+                </div>
+              </div>
+            </DrillNumber>
+          ))}
+        </div>
+      </div>
+
       {data.reps.map((rep) => {
         // Each rung's count is the dated subset in that horizon; the coverage (how much of the rep's open
         // book has a maintained close date) is stated ONCE below the ladder, not repeated per rung — so the
@@ -484,39 +519,6 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
           </div>
         );
       })}
-
-      {/* Office column totals: the canonical officeProjection ladder. It equals the sum of the per-rep
-          rows above BY CONSTRUCTION — the rep rows are union-seeded from the same per-rep projection map
-          and officeProjection = Σ per-rep — so each window's $ and dated count always reconcile with the
-          rows above (the showcase's one-source-of-truth guarantee). Distinct styling marks it the total. */}
-      <div className="rounded-xl border-2 border-slate-300 bg-[#f7f8fb] p-3.5 font-semibold">
-        <div className="mb-2 flex items-baseline justify-between">
-          <span className="text-sm font-black uppercase tracking-wide text-slate-700">All reps · office total</span>
-          <span className="text-xs font-bold tabular-nums text-slate-600">
-            {usd(data.officeProjection.bands.reduce((sum, b) => sum + b.value, 0))} projected
-          </span>
-        </div>
-        <div className="grid grid-cols-4 gap-2">
-          {data.officeProjection.bands.map((b) => (
-            <DrillNumber
-              key={b.band}
-              request={{ metric: "projection", band: b.band, title: `Projected ${PROJECTION_BAND_LABEL[b.band]} — office` }}
-              className="block"
-            >
-              <div className="rounded-lg border border-slate-300 bg-white p-2 text-center">
-                <div className="flex items-center justify-center gap-1">
-                  <span className={`h-1.5 w-1.5 rounded-full ${BAND_BAR[b.band]}`} />
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{PROJECTION_BAND_LABEL[b.band]}</span>
-                </div>
-                <div className="mt-0.5 text-sm font-black tabular-nums text-slate-900">{usd(b.value)}</div>
-                <div className="mt-1 inline-block rounded bg-slate-200 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-600">
-                  {int(b.count)} dated
-                </div>
-              </div>
-            </DrillNumber>
-          ))}
-        </div>
-      </div>
     </div>
   );
 }
