@@ -46,6 +46,10 @@ export function DealEstimatesCard({
   const [editing, setEditing] = useState<DealChangeOrder | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
+  // Only offer mutations when a refresh callback is wired — otherwise a successful write would leave
+  // the card showing stale totals/rows.
+  const canMutate = canManage && Boolean(onChanged);
+
   const crmTotal =
     changeOrderTotal ??
     String(changeOrders.reduce((sum, co) => sum + (parseFloat(co.amount) || 0), 0));
@@ -85,7 +89,7 @@ export function DealEstimatesCard({
     <Card>
       <CardHeader className="pb-3 flex flex-row items-center justify-between space-y-0">
         <CardTitle className="text-sm font-medium text-muted-foreground">Estimates</CardTitle>
-        {canManage && (
+        {canMutate && (
           <Button size="sm" variant="outline" onClick={openAdd}>
             <Plus className="h-3.5 w-3.5 mr-1" /> Add Change Order
           </Button>
@@ -130,7 +134,7 @@ export function DealEstimatesCard({
                     <span className="text-muted-foreground"> · {co.description}</span>
                   ) : null}
                 </div>
-                {canManage && (
+                {canMutate && (
                   <div className="flex items-center gap-1 shrink-0">
                     <Button
                       size="icon"

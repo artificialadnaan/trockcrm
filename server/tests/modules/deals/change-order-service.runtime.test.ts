@@ -86,6 +86,12 @@ describe("normalizeChangeOrderAmount", () => {
     expect(() => normalizeChangeOrderAmount("abc")).toThrow();
     expect(() => normalizeChangeOrderAmount(null)).toThrow();
   });
+  it("rejects a sub-cent positive amount (would round to 0.00 and trip the DB CHECK)", () => {
+    expect(() => normalizeChangeOrderAmount(0.004)).toThrow();
+    expect(() => normalizeChangeOrderAmount("0.001")).toThrow();
+    // 0.005 rounds UP to a cent and is allowed.
+    expect(normalizeChangeOrderAmount(0.005)).toBe("0.01");
+  });
 });
 
 describe("assertDealEligibleForChangeOrder", () => {
@@ -144,6 +150,11 @@ describe("addDealChangeOrder", () => {
     await expect(
       addDealChangeOrder(tdb, { dealId: DEAL_WON, signedDate: "2026-03-15", amount: -10, createdBy: USER }),
     ).rejects.toMatchObject({ statusCode: 400 });
+    // Sub-cent: must surface a clean 400, NOT a DB CHECK 500, and persist nothing.
+    await expect(
+      addDealChangeOrder(tdb, { dealId: DEAL_WON, signedDate: "2026-03-15", amount: "0.004", createdBy: USER }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect((await listDealChangeOrders(tdb, DEAL_WON)).length).toBe(0);
   });
   it("rejects a malformed signed date", async () => {
     await expect(

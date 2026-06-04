@@ -131,16 +131,24 @@ describe("DealEstimatesCard change orders", () => {
     expect(container.textContent).toContain("punch list");
   });
 
-  it("shows the Add / edit / remove controls only when the viewer can manage", () => {
-    const adminContainer = render({ deal: baseDeal, changeOrders: crmChangeOrders, changeOrderTotal: "5000", canManage: true });
+  it("shows the Add / edit / remove controls only when the viewer can manage (and a refresh is wired)", () => {
+    const adminContainer = render({ deal: baseDeal, changeOrders: crmChangeOrders, changeOrderTotal: "5000", canManage: true, onChanged: mocks.onChanged });
     expect(Array.from(adminContainer.querySelectorAll("button")).some((b) => b.textContent?.includes("Add Change Order"))).toBe(true);
     expect(adminContainer.querySelector('[aria-label="Edit change order"]')).not.toBeNull();
     expect(adminContainer.querySelector('[aria-label="Remove change order"]')).not.toBeNull();
 
-    const repContainer = render({ deal: baseDeal, changeOrders: crmChangeOrders, changeOrderTotal: "5000", canManage: false });
+    const repContainer = render({ deal: baseDeal, changeOrders: crmChangeOrders, changeOrderTotal: "5000", canManage: false, onChanged: mocks.onChanged });
     expect(Array.from(repContainer.querySelectorAll("button")).some((b) => b.textContent?.includes("Add Change Order"))).toBe(false);
     expect(repContainer.querySelector('[aria-label="Edit change order"]')).toBeNull();
     expect(repContainer.querySelector('[aria-label="Remove change order"]')).toBeNull();
+  });
+
+  it("hides mutation controls when canManage but no onChanged refresh is wired (avoids stale UI)", () => {
+    const container = render({ deal: baseDeal, changeOrders: crmChangeOrders, changeOrderTotal: "5000", canManage: true });
+    expect(Array.from(container.querySelectorAll("button")).some((b) => b.textContent?.includes("Add Change Order"))).toBe(false);
+    expect(container.querySelector('[aria-label="Edit change order"]')).toBeNull();
+    // The totals/list still render read-only.
+    expect(container.querySelectorAll('[data-testid="change-order-row"]').length).toBe(2);
   });
 
   it("adds a change order through the dialog and calls onChanged", async () => {
@@ -174,7 +182,7 @@ describe("DealEstimatesCard change orders", () => {
   });
 
   it("blocks a non-positive amount in the dialog without calling the API", async () => {
-    const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true });
+    const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true, onChanged: mocks.onChanged });
     clickButtonByText(container, "Add Change Order");
     act(() => {
       setValue(container.querySelector<HTMLInputElement>("#co-signed-date")!, "2026-03-15");

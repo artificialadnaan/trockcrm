@@ -87,7 +87,17 @@ export function normalizeChangeOrderAmount(input: unknown): string {
       "CHANGE_ORDER_AMOUNT_INVALID"
     );
   }
-  return value.toFixed(2);
+  const normalized = value.toFixed(2);
+  // A sub-cent positive value (e.g. 0.004) rounds to "0.00", which would trip the DB CHECK
+  // (amount > 0) as a 500 — reject it cleanly as a 400 here instead.
+  if (Number(normalized) <= 0) {
+    throw new AppError(
+      400,
+      "Change order amount must be at least 0.01.",
+      "CHANGE_ORDER_AMOUNT_INVALID"
+    );
+  }
+  return normalized;
 }
 
 function normalizeSignedDate(input: unknown): string {
