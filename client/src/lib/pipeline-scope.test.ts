@@ -249,6 +249,21 @@ describe("useNormalizedStageRoute pagination history (Codex P2)", () => {
     expect(view.loc()).toBe("/director/rep/REP1"); // one level up the drill, NOT the cohort's page 1
     view.cleanup();
   });
+
+  // Codex P2 (deep-link variant): a directly-opened stage with no drill-down referrer must keep its board
+  // fallback after paging. Because pagination now REPLACES, it stays the first/only history entry — in the
+  // real app window.history idx stays 0, so the header's hasInAppReferrer() is false and Back falls back to
+  // the board href instead of returning to the previous page. (Pre-fix it pushed, fabricating a referrer.)
+  it("a deep-linked, paged stage stays the first entry so paging never fabricates an in-app referrer", () => {
+    const view = renderPaginationProbe(["/deals/stages/stage-1?scope=mine"], 0);
+    view.click("page2");
+    expect(view.loc()).toContain("page=2"); // paged in place
+    view.click("back");
+    // Replace kept it the sole entry: Back cannot leave via history and the page is unchanged. (Pre-fix this
+    // would have stepped back to page 1 — proof that paging had wrongly pushed a second entry.)
+    expect(view.loc()).toContain("page=2");
+    view.cleanup();
+  });
 });
 
 describe("normalizePipelineScope", () => {
