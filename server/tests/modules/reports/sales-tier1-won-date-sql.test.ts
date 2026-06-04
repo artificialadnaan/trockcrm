@@ -50,8 +50,9 @@ describe("sales-tier1 Won-date basis wired into getClosedWonRevenueReport", () =
 
     // FIX-2: the WON (ELSE) arm of terminalOutcomeDateSql now resolves to the canonical column.
     expect(text).toContain("else d.won_closed_date::timestamptz");
-    // LOST arm intentionally preserved.
-    expect(text).toContain("coalesce(d.actual_close_date::timestamptz, d.stage_entered_at)");
+    // PR-E: LOST arm now uses the canonical lost_at, falling back to the legacy actual_close_date /
+    // stage_entered_at only for older lost deals whose lost_at was never stamped.
+    expect(text).toContain("coalesce(d.lost_at, d.actual_close_date::timestamptz, d.stage_entered_at)");
     // FIX-4: the top-Won-deals display date is the canonical won date (matches its selection basis).
     expect(text).toContain('d.won_closed_date::date::text as "wonat"');
     // The legacy WON-window tail is gone (no contract_signed_at/updated_at fallback in the won arm).

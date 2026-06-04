@@ -40,7 +40,7 @@ beforeAll(async () => {
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, stage_id uuid NOT NULL,
-      won_closed_date date, actual_close_date date,
+      won_closed_date date, actual_close_date date, lost_at timestamptz,
       contract_signed_at timestamptz, stage_entered_at timestamptz, updated_at timestamptz
     );
     INSERT INTO pipeline_stage_config (id, slug) VALUES ('${ST.won}','${WON_SLUG}'), ('${ST.lost}','${LOST_SLUG}');
@@ -53,7 +53,7 @@ beforeAll(async () => {
       ('${D.wonTouched}','${ST.won}', NULL, '2026-03-09', '2026-03-09T00:00:00Z', '2026-03-09T00:00:00Z', '2026-03-09T00:00:00Z'),
       -- won, canonical OUTSIDE window, legacy fields in-window -> NOT counted
       ('${D.wonOut}','${ST.won}','2026-02-01', '2026-03-09', '2026-03-09T00:00:00Z', '2026-03-09T00:00:00Z', '2026-03-09T00:00:00Z'),
-      -- lost, LOST arm (actual_close_date) in-window -> counted (unchanged)
+      -- lost, null lost_at -> LOST arm falls back to actual_close_date (in-window) -> counted (PR-E)
       ('${D.lostIn}','${ST.lost}', NULL, '2026-03-12', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
       -- lost, LOST arm out-of-window -> NOT counted
       ('${D.lostOut}','${ST.lost}', NULL, '2026-01-05', NULL, '2026-01-05T00:00:00Z', '2026-01-05T00:00:00Z');
@@ -65,7 +65,7 @@ afterAll(async () => {
 });
 
 describe("sales-tier1 FIX-2: terminalOutcomeDateSql WON arm = canonical won_closed_date", () => {
-  it("won outcome date is won_closed_date; lost arm stays on actual_close_date", async () => {
+  it("won outcome date is won_closed_date; lost arm falls back to actual_close_date when lost_at is null", async () => {
     const rows = await execRows(sql`
       SELECT d.id::text AS id, p.slug, (${terminalOutcomeDateSql()})::date::text AS outcome_date
       FROM deals d JOIN pipeline_stage_config p ON p.id = d.stage_id
@@ -73,7 +73,7 @@ describe("sales-tier1 FIX-2: terminalOutcomeDateSql WON arm = canonical won_clos
     const byId = Object.fromEntries(rows.map((r) => [r.id, r.outcome_date]));
     expect(byId[D.wonIn]).toBe("2026-03-15"); // won_closed_date, not contract_signed_at/updated_at
     expect(byId[D.wonOut]).toBe("2026-02-01"); // canonical, ignoring the in-window legacy fields
-    expect(byId[D.lostIn]).toBe("2026-03-12"); // LOST arm unchanged (actual_close_date)
+    expect(byId[D.lostIn]).toBe("2026-03-12"); // null lost_at -> LOST arm falls back to actual_close_date
   });
 
   it("won_at window counts won by won_closed_date (touched-not-won excluded); lost preserved", async () => {
