@@ -10,11 +10,6 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 const SYNCHUB_OVERRIDE_TIMEOUT_MS = 8000;
 
-// Reason stamped on the deal when the override POST aborts (timeout). Kept in sync with the client's optimistic
-// copy (SYNCHUB_TIMEOUT_NOTE) so the refetched panel matches what was shown immediately.
-const SYNCHUB_OVERRIDE_TIMEOUT_ERROR =
-  "SyncHub did not confirm the override in time. A Bid Board project may or may not have been created — check Procore before re-attempting.";
-
 export interface RfpOverrideActor {
   userId: string;
   name: string;
@@ -22,11 +17,10 @@ export interface RfpOverrideActor {
 }
 
 export type RfpOverrideApprovalResult =
-  // status 'approving' = SyncHub accepted the request (202). status 'failed' with `unconfirmed: true` = the POST
-  // timed out (the request may have reached SyncHub, but no 202 was seen): the deal is parked 'failed' (retryable,
-  // gated behind the page's Procore check) rather than locked in 'approving', while rfp_override_reviewed_at is
-  // preserved so a late callback can still resolve it (see the AbortError branch).
-  | { ok: true; status: "approving" | "failed"; requestId: number; unconfirmed?: boolean }
+  // `unconfirmed` = the POST timed out (the request may have reached SyncHub, but no 202 was seen). The deal is
+  // kept 'approving' (NOT made retryable — re-approve would risk a duplicate against a possibly-in-flight first
+  // attempt) so a later callback can resolve it; a stuck 'approving' is escapable by re-confirming the denial.
+  | { ok: true; status: "approving"; requestId: number; unconfirmed?: boolean }
   | { ok: false; reason: "not_actionable" }
   | { ok: false; reason: "missing_request_id" }
   | { ok: false; reason: "synchub_rejected"; syncHubStatus: number; message: string }
@@ -70,12 +64,20 @@ function signBody(rawBody: string, secret: string): string {
   return `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
 }
 
-// declined AND not currently approving AND not already a re-confirmed denial. (state IS NULL OR 'failed' so a
-// failed override is retryable; a re-confirmed denial is terminal; an in-flight 'approving' is locked.)
-function overrideActionableConditions() {
+// declined AND not already a re-confirmed denial AND in an allowed override state.
+//   - approve (default): state IS NULL OR 'failed'. A re-approve is BLOCKED while 'approving' so a retry can never
+//     fire a second Bid Board creation against a first attempt that may still be in flight (duplicate risk); a
+//     'failed' override is retryable (the attempt is definitively finished).
+//   - reconfirm (allowApproving): also allows 'approving'. Upholding the denial creates NO project, so it's
+//     duplicate-safe even mid-flight, and it lets a reviewer escape an 'approving' deal whose callback never
+//     arrives (e.g. an unconfirmed POST timeout) instead of being locked out forever.
+function overrideActionableConditions(opts: { allowApproving?: boolean } = {}) {
+  const allowedStates = opts.allowApproving
+    ? or(isNull(deals.rfpOverrideState), eq(deals.rfpOverrideState, "failed"), eq(deals.rfpOverrideState, "approving"))!
+    : or(isNull(deals.rfpOverrideState), eq(deals.rfpOverrideState, "failed"))!;
   return [
     eq(deals.rfpApprovalStatus, "declined"),
-    or(isNull(deals.rfpOverrideState), eq(deals.rfpOverrideState, "failed"))!,
+    allowedStates,
     or(isNull(deals.rfpOverrideDecision), ne(deals.rfpOverrideDecision, "denial_reconfirmed"))!,
   ];
 }
@@ -194,36 +196,20 @@ export async function requestOverrideApproval(
     });
   } catch (err) {
     // The abort timeout fired. This is genuinely ambiguous: the request was already sent, so SyncHub MAY have
-    // received it (a callback may still arrive) — but it also may never have left (DNS/TCP/TLS setup, a blackholed
-    // host), in which case NO callback ever comes. We must not do either unsafe thing:
-    //   - a clean rollback would drop rfp_override_reviewed_at (breaking the failed-callback freshness guard) and
-    //     re-expose an UN-gated one-click approve that risks a duplicate Procore project;
-    //   - leaving the deal 'approving' would lock it forever if no callback arrives (the actionable guard excludes
-    //     'approving', so the reviewer loses every control).
-    // So park it 'failed' (retryable) with a clear reason, PRESERVING rfp_override_reviewed_at (set by the UPDATE
-    // above) so a real in-flight callback still passes its freshness guard and can resolve the deal. The page's
-    // 'failed' panel gates the re-attempt behind a Procore check, so there is no blind one-click re-approve.
+    // received it (a callback will resolve the deal) — but it also may never have left (DNS/TCP/TLS setup, a
+    // blackholed host), in which case no callback ever comes. Keep the deal 'approving' (unconfirmed):
+    //   - we must NOT make it immediately retryable. A re-approve while the first attempt may still be creating
+    //     the Procore project would race it into a DUPLICATE. Re-approve is blocked while 'approving' and only
+    //     unlocks after a definitive 'failed' callback (the attempt is then known finished), so we never fire a
+    //     second create against a possibly-in-flight first one;
+    //   - we must NOT roll back. That would drop rfp_override_reviewed_at (breaking the failed-callback freshness
+    //     guard) and re-expose an un-gated one-click approve.
+    // Keeping 'approving' preserves rfp_override_reviewed_at so a real in-flight callback still resolves the deal,
+    // and the page keeps polling. If no callback ever arrives, the deal is NOT permanently locked: re-confirming
+    // the denial is allowed from 'approving' (it creates no project, so it's duplicate-safe) and lets the reviewer
+    // escape a stuck attempt.
     if (err instanceof Error && err.name === "AbortError") {
-      await input.tenantDb
-        .update(deals)
-        .set({
-          rfpOverrideState: "failed",
-          rfpOverrideError: SYNCHUB_OVERRIDE_TIMEOUT_ERROR,
-          updatedAt: new Date(),
-        })
-        .where(eq(deals.id, input.dealId));
-      // Complete the trail: the reviewer's approve was recorded (-> approving) above; record the timeout that
-      // auto-parked it 'failed' so the override history isn't left mid-flight.
-      await writeOverrideHistory(input.tenantDb, {
-        dealId: input.dealId,
-        fieldName: "rfp_override_state",
-        oldValue: "approving",
-        newValue: "failed",
-        changedBy: input.actor.userId,
-        source: "rfp_override_approve_timeout",
-        reason: SYNCHUB_OVERRIDE_TIMEOUT_ERROR,
-      });
-      return { ok: true, status: "failed", requestId, unconfirmed: true };
+      return { ok: true, status: "approving", requestId, unconfirmed: true };
     }
     return {
       ok: false,
@@ -255,8 +241,9 @@ export async function requestOverrideApproval(
  *
  * Leaves rfp_approval_status = 'declined' (so the decline-email trigger never re-fires), clears any prior
  * override-approval state, and records decision='denial_reconfirmed' so the decline is not perpetually
- * re-flagged. Allowed on a fresh declined RFP or after a FAILED override (the reviewers give up); blocked
- * while an override is in flight ('approving') or once already re-confirmed.
+ * re-flagged. Allowed on a fresh declined RFP, after a FAILED override (the reviewers give up), or from an
+ * 'approving' deal (it creates no project, so upholding the denial is duplicate-safe even mid-flight — this is
+ * the escape hatch for an 'approving' deal whose callback never arrives). Blocked only once already re-confirmed.
  */
 export async function reconfirmRfpDecline(input: {
   tenantDb: TenantDb;
@@ -275,7 +262,7 @@ export async function reconfirmRfpDecline(input: {
       rfpOverrideError: null,
       updatedAt: new Date(),
     })
-    .where(and(eq(deals.id, input.dealId), ...overrideActionableConditions()))
+    .where(and(eq(deals.id, input.dealId), ...overrideActionableConditions({ allowApproving: true })))
     .returning();
 
   if (!updated) {

@@ -71,13 +71,15 @@ describe("RfpReviewPage states", () => {
     expect(html).toContain("Re-confirm denial");
   });
 
-  it("an in-flight override shows the creating-project panel and hides the action buttons", () => {
+  it("an in-flight override shows the creating-project panel, hides re-approve, but offers the duplicate-safe denial escape", () => {
     authUser = { isRfpReviewer: true };
     reviewState = baseReview({ actionable: false, overrideState: "approving", reviewedByName: "Takashi" });
     const html = render();
     expect(html).toContain("Creating the Bid Board project");
+    // re-approve is NOT offered while approving (it could race a possibly-in-flight attempt into a duplicate)
     expect(html).not.toContain("Approve override (create Bid Board project)");
-    expect(html).not.toContain("Re-confirm denial");
+    // ...but a stuck 'approving' is escapable: upholding the denial creates no project, so it's always safe
+    expect(html).toContain("Uphold the denial instead");
   });
 
   it("a failed override warns about a possible duplicate Procore project and gates the re-attempt behind verification", () => {
@@ -188,19 +190,20 @@ describe("RfpReviewPage — approve override result handling (optimistic state)"
       | HTMLButtonElement
       | undefined;
 
-  it("an ambiguous timeout (status 'failed') optimistically parks the page in the gated failed panel, not 'approving'", async () => {
+  it("an unconfirmed timeout still optimistically enters 'approving' (kept non-retryable, not failed)", async () => {
     authUser = { isRfpReviewer: true };
     reviewState = baseReview(); // fresh + actionable
-    approveMock.mockResolvedValue({ success: true, status: "failed", requestId: 77, unconfirmed: true });
+    approveMock.mockResolvedValue({ success: true, status: "approving", requestId: 77, unconfirmed: true });
     mount();
 
     await act(async () => {
       approveBtn()!.click();
     });
 
-    // the page must NOT enter the locked 'approving' panel; it shows the gated 'failed' panel (retryable)
-    expect(applyOptimisticMock).toHaveBeenCalledWith(expect.objectContaining({ overrideState: "failed", actionable: true }));
-    expect(applyOptimisticMock).not.toHaveBeenCalledWith(expect.objectContaining({ overrideState: "approving" }));
+    // a timeout keeps the deal 'approving' server-side (re-approve blocked); the page must reflect that, NOT flip
+    // to a retryable 'failed' panel (which would let a fast re-attempt race a possibly-in-flight first attempt)
+    expect(applyOptimisticMock).toHaveBeenCalledWith(expect.objectContaining({ overrideState: "approving", actionable: false }));
+    expect(applyOptimisticMock).not.toHaveBeenCalledWith(expect.objectContaining({ overrideState: "failed" }));
   });
 
   it("a confirmed acceptance (status 'approving') optimistically enters the creating-project panel", async () => {

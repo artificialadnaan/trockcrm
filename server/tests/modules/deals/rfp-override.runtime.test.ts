@@ -226,7 +226,7 @@ async function failedCallback(
   return res.affectedRows ?? 0;
 }
 
-/** reconfirmRfpDecline's guarded UPDATE. */
+/** reconfirmRfpDecline's guarded UPDATE (allowApproving: reconfirm is permitted from 'approving' too). */
 async function reconfirm(db: PGlite, id: string): Promise<number> {
   const res = await db.query(
     `UPDATE ${SCHEMA}.deals
@@ -239,7 +239,7 @@ async function reconfirm(db: PGlite, id: string): Promise<number> {
             updated_at = now()
       WHERE id = $1
         AND rfp_approval_status = 'declined'
-        AND (rfp_override_state IS NULL OR rfp_override_state = 'failed')
+        AND (rfp_override_state IS NULL OR rfp_override_state = 'failed' OR rfp_override_state = 'approving')
         AND (rfp_override_decision IS NULL OR rfp_override_decision <> 'denial_reconfirmed')`,
     [id, REVIEWER],
   );
@@ -460,7 +460,7 @@ describe("RFP override-approval flow vs migration 0148 decline trigger (real SQL
     expect(await emailJobCount(pg)).toBe(0);
   });
 
-  it("re-confirm denial fires NO email and is blocked while an override is in flight", async () => {
+  it("re-confirm denial fires NO email and is the duplicate-safe escape from a stuck 'approving' deal", async () => {
     pg = await setup();
     await insertDeclinedDeal(pg);
 
@@ -468,9 +468,19 @@ describe("RFP override-approval flow vs migration 0148 decline trigger (real SQL
     expect(await emailJobCount(pg)).toBe(0);
     expect((await dealState(pg, DEAL)).status).toBe("declined");
 
-    // a fresh declined deal that is mid-approval cannot be re-confirmed underneath the in-flight approval
+    // an 'approving' deal whose callback never arrives (e.g. an unconfirmed POST timeout) is NOT locked: upholding
+    // the denial is allowed (it creates no project, so it's duplicate-safe even mid-flight) and clears the state.
     await pg.query(`UPDATE ${SCHEMA}.deals SET rfp_approval_status='declined', rfp_override_decision=NULL, rfp_override_reviewed_at=NULL WHERE id=$1`, [DEAL]);
     await overrideApprove(pg, DEAL); // state='approving'
-    expect(await reconfirm(pg, DEAL)).toBe(0);
+    expect(await reconfirm(pg, DEAL)).toBe(1);
+    const d = await dealState(pg, DEAL);
+    expect(d.state).toBeNull(); // 'approving' cleared
+    expect(d.decision).toBe("denial_reconfirmed"); // terminal denial recorded
+    expect(d.status).toBe("declined");
+    expect(await emailJobCount(pg)).toBe(0);
+
+    // re-approve, by contrast, stays BLOCKED while 'approving' (a retry must not race a possibly-in-flight attempt)
+    await pg.query(`UPDATE ${SCHEMA}.deals SET rfp_override_decision='override_approved', rfp_override_state='approving' WHERE id=$1`, [DEAL]);
+    expect(await overrideApprove(pg, DEAL)).toBe(0);
   });
 });

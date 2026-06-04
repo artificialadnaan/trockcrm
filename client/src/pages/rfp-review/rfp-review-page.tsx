@@ -61,11 +61,6 @@ function DealFacts({ review }: { review: RfpReviewDetail }) {
   );
 }
 
-// Shown when SyncHub doesn't confirm the override in time (the POST aborted). The server parks the deal 'failed'
-// with this same reason; using the identical copy here keeps the optimistic panel from flickering on refetch.
-const SYNCHUB_TIMEOUT_NOTE =
-  "SyncHub did not confirm the override in time. A Bid Board project may or may not have been created — check Procore before re-attempting.";
-
 export function RfpReviewPage() {
   const { dealId } = useParams<{ dealId: string }>();
   const [searchParams] = useSearchParams();
@@ -159,20 +154,17 @@ export function RfpReviewPage() {
     setSubmitting("approve");
     try {
       const result = await approveRfpOverride(dealId, { note, officeId });
+      toast.success(
+        result.unconfirmed
+          ? "Override submitted — awaiting confirmation from SyncHub. Watch this page for the result."
+          : "Override approved — SyncHub is creating the Bid Board project."
+      );
       setNote("");
       setConfirmedNoProject(false); // require re-verification if this attempt also fails
-      if (result.status === "failed") {
-        // Ambiguous timeout: SyncHub didn't confirm in time, so the server parked the deal 'failed' (retryable)
-        // rather than locking it in 'approving'. Surface the failed panel (gated behind the Procore check) so the
-        // reviewer can act; a late callback can still resolve it server-side.
-        toast.warning("SyncHub did not confirm the override in time — check Procore before re-attempting.");
-        applyOptimistic({ overrideState: "failed", overrideError: SYNCHUB_TIMEOUT_NOTE, actionable: true });
-      } else {
-        toast.success("Override approved — SyncHub is creating the Bid Board project.");
-        // Optimistically enter 'approving' so the progress panel + 5s poll start immediately — even if the
-        // authoritative refetch below blips (the deal IS approving server-side; SyncHub accepted the request).
-        applyOptimistic({ overrideState: "approving", overrideError: null, actionable: false });
-      }
+      // Optimistically enter 'approving' so the progress panel + 5s poll start immediately — even if the
+      // authoritative refetch below blips. On an unconfirmed timeout the deal IS kept 'approving' server-side
+      // (re-approve stays blocked to avoid a duplicate; a stuck deal is escapable via Re-confirm denial).
+      applyOptimistic({ overrideState: "approving", overrideError: null, actionable: false });
       await refetch();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to approve the override");
@@ -220,7 +212,13 @@ export function RfpReviewPage() {
           <DealFacts review={review} />
 
           {review.overrideState === "approving" ? (
-            <ApprovingPanel review={review} onRefresh={() => refetch()} />
+            <ApprovingPanel
+              review={review}
+              onRefresh={() => refetch()}
+              onReconfirm={onReconfirm}
+              busy={busy}
+              reconfirming={submitting === "reconfirm"}
+            />
           ) : review.overrideState === "failed" ? (
             <>
               <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm">
@@ -323,7 +321,19 @@ function StatusBadge({ review }: { review: RfpReviewDetail }) {
   return <Badge variant="secondary">{review.rfpApprovalStatus ?? "Unknown"}</Badge>;
 }
 
-function ApprovingPanel({ review, onRefresh }: { review: RfpReviewDetail; onRefresh: () => void }) {
+function ApprovingPanel({
+  review,
+  onRefresh,
+  onReconfirm,
+  busy,
+  reconfirming,
+}: {
+  review: RfpReviewDetail;
+  onRefresh: () => void;
+  onReconfirm: () => void;
+  busy: boolean;
+  reconfirming: boolean;
+}) {
   return (
     <div className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
       <p className="font-medium text-foreground">Creating the Bid Board project…</p>
@@ -332,9 +342,23 @@ function ApprovingPanel({ review, onRefresh }: { review: RfpReviewDetail; onRefr
         project — this can take a minute. The deal will move to Estimating automatically when it’s done. If it
         fails you’ll see a Retry option here.
       </p>
-      <div className="mt-3">
-        <Button variant="outline" size="sm" onClick={onRefresh}>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button variant="outline" size="sm" onClick={onRefresh} disabled={busy}>
           Refresh
+        </Button>
+      </div>
+      {/*
+        Escape hatch: a re-approve is intentionally NOT offered here (it would risk a duplicate Procore project
+        against a first attempt that may still be in flight). But if SyncHub never picked the request up, this would
+        otherwise be stuck forever — so allow upholding the denial, which creates no project and is always safe.
+      */}
+      <div className="mt-3 border-t border-border/60 pt-3">
+        <p className="text-muted-foreground">
+          Taking much longer than a minute? SyncHub may not have received the request. You can uphold the denial
+          instead — only do this if no Bid Board project was created (if one was, it’ll be reconciled separately).
+        </p>
+        <Button variant="ghost" size="sm" className="mt-2" onClick={onReconfirm} disabled={busy}>
+          {reconfirming ? "Confirming…" : "Uphold the denial instead"}
         </Button>
       </div>
     </div>

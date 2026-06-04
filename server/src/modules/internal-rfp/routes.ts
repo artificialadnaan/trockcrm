@@ -752,13 +752,22 @@ internalRfpRoutes.post(
       // rfp_override_reviewed_at IS NULL, so this never gates it.
       const createdCallbackAt = asDateOrNull(payload.createdAt);
 
-      // For the OVERRIDE flow (rfp_override_reviewed_at set), a 'created' callback MUST carry a parseable createdAt:
-      // the freshness guard below needs it, so a timestamp-less success would silently no-op the linkage while this
-      // handler still returns 200. SyncHub treats a 200 as delivered and stops retrying — leaving the deal stuck
-      // declined/'approving' even though a Procore project may already exist. Reject it as 422 (like the failed path)
-      // so SyncHub retries with a well-formed callback. The original (non-override) flow has reviewed_at NULL and is
-      // exempt (its pre-override callbacks legitimately carry no createdAt and link via the IS NULL escape).
-      if (found.deal.rfp_override_reviewed_at != null && !createdCallbackAt) {
+      // For an ACTIVE override (rfp_override_reviewed_at set, still declined, not re-confirmed) a 'created' callback
+      // MUST carry a parseable createdAt: the freshness guard below needs it, so a timestamp-less success would
+      // silently no-op the linkage while this handler still returns 200. SyncHub treats a 200 as delivered and
+      // stops retrying — leaving the deal stuck declined/'approving' even though a Procore project may already
+      // exist. Reject it as 422 (like the failed path) so SyncHub retries with a well-formed callback.
+      // Scope it carefully so we don't make SyncHub retry an UNPROCESSABLE callback forever:
+      //   - the original (non-override) flow has reviewed_at NULL and is exempt (its pre-override callbacks
+      //     legitimately carry no createdAt and link via the IS NULL escape);
+      //   - a terminally re-confirmed denial, or an already-approved deal, would no-op the linkage anyway, so a
+      //     malformed late 'created' there is acknowledged as an idempotent no-op (falls through to the 200 path)
+      //     rather than 422'd into an endless retry.
+      const overrideAwaitingCreated =
+        found.deal.rfp_override_reviewed_at != null &&
+        found.deal.rfp_approval_status === "declined" &&
+        found.deal.rfp_override_decision !== "denial_reconfirmed";
+      if (overrideAwaitingCreated && !createdCallbackAt) {
         console.warn(
           `[RFP callback] override 'created' for deal ${sourceDealId} (request ${currentRequestId}) is missing a parseable createdAt; returning 422 so SyncHub retries instead of silently dropping it`
         );
