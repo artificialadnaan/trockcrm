@@ -10,8 +10,10 @@ let reviewState: any;
 let authUser: any;
 let currentDealId = "deal-1";
 
+const applyOptimisticMock = vi.hoisted(() => vi.fn());
+
 vi.mock("@/hooks/use-rfp-review", () => ({
-  useRfpReview: () => ({ review: reviewState, loading: false, error: null, refetch: vi.fn(), applyOptimistic: vi.fn() }),
+  useRfpReview: () => ({ review: reviewState, loading: false, error: null, refetch: vi.fn(), applyOptimistic: applyOptimisticMock }),
   approveRfpOverride: vi.fn(),
   reconfirmRfpDecline: vi.fn(),
 }));
@@ -21,8 +23,10 @@ vi.mock("react-router-dom", () => ({
   useSearchParams: () => [new URLSearchParams("officeId=o1"), vi.fn()],
   Link: ({ children }: any) => children,
 }));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
 import { RfpReviewPage } from "./rfp-review-page";
+import { approveRfpOverride } from "@/hooks/use-rfp-review";
 
 function baseReview(overrides: Record<string, unknown> = {}) {
   return {
@@ -156,5 +160,59 @@ describe("RfpReviewPage — per-deal Procore-check confirmation reset", () => {
       root.render(<RfpReviewPage />);
     });
     expect(reattemptBtn()?.disabled).toBe(true);
+  });
+});
+
+describe("RfpReviewPage — approve override result handling (optimistic state)", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  const approveMock = approveRfpOverride as unknown as ReturnType<typeof vi.fn>;
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    applyOptimisticMock.mockClear();
+    approveMock.mockReset();
+  });
+
+  function mount() {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(<RfpReviewPage />);
+    });
+  }
+  const approveBtn = () =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Approve override")) as
+      | HTMLButtonElement
+      | undefined;
+
+  it("an ambiguous timeout (status 'failed') optimistically parks the page in the gated failed panel, not 'approving'", async () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview(); // fresh + actionable
+    approveMock.mockResolvedValue({ success: true, status: "failed", requestId: 77, unconfirmed: true });
+    mount();
+
+    await act(async () => {
+      approveBtn()!.click();
+    });
+
+    // the page must NOT enter the locked 'approving' panel; it shows the gated 'failed' panel (retryable)
+    expect(applyOptimisticMock).toHaveBeenCalledWith(expect.objectContaining({ overrideState: "failed", actionable: true }));
+    expect(applyOptimisticMock).not.toHaveBeenCalledWith(expect.objectContaining({ overrideState: "approving" }));
+  });
+
+  it("a confirmed acceptance (status 'approving') optimistically enters the creating-project panel", async () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview();
+    approveMock.mockResolvedValue({ success: true, status: "approving", requestId: 77, unconfirmed: false });
+    mount();
+
+    await act(async () => {
+      approveBtn()!.click();
+    });
+
+    expect(applyOptimisticMock).toHaveBeenCalledWith(expect.objectContaining({ overrideState: "approving", actionable: false }));
   });
 });

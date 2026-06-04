@@ -10,6 +10,11 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 const SYNCHUB_OVERRIDE_TIMEOUT_MS = 8000;
 
+// Reason stamped on the deal when the override POST aborts (timeout). Kept in sync with the client's optimistic
+// copy (SYNCHUB_TIMEOUT_NOTE) so the refetched panel matches what was shown immediately.
+const SYNCHUB_OVERRIDE_TIMEOUT_ERROR =
+  "SyncHub did not confirm the override in time. A Bid Board project may or may not have been created — check Procore before re-attempting.";
+
 export interface RfpOverrideActor {
   userId: string;
   name: string;
@@ -17,9 +22,11 @@ export interface RfpOverrideActor {
 }
 
 export type RfpOverrideApprovalResult =
-  // `unconfirmed` = the POST timed out (the request likely reached SyncHub but no 202 was seen); the deal is kept
-  // in 'approving' so a later callback can still resolve it (see the AbortError branch).
-  | { ok: true; status: "approving"; requestId: number; unconfirmed?: boolean }
+  // status 'approving' = SyncHub accepted the request (202). status 'failed' with `unconfirmed: true` = the POST
+  // timed out (the request may have reached SyncHub, but no 202 was seen): the deal is parked 'failed' (retryable,
+  // gated behind the page's Procore check) rather than locked in 'approving', while rfp_override_reviewed_at is
+  // preserved so a late callback can still resolve it (see the AbortError branch).
+  | { ok: true; status: "approving" | "failed"; requestId: number; unconfirmed?: boolean }
   | { ok: false; reason: "not_actionable" }
   | { ok: false; reason: "missing_request_id" }
   | { ok: false; reason: "synchub_rejected"; syncHubStatus: number; message: string }
@@ -186,13 +193,37 @@ export async function requestOverrideApproval(
       signal: controller.signal,
     });
   } catch (err) {
-    // The abort timeout fired: the request was already sent, so SyncHub may have received it and will emit a
-    // callback. Rolling back here would drop rfp_override_reviewed_at (breaking the failed-callback freshness
-    // guard) and re-expose a one-click approve that risks a duplicate Procore project. Keep the deal 'approving'
-    // (unconfirmed) so a later callback resolves it; the page keeps polling. A definitive connection error (the
-    // request never left) stays a clean rollback so the reviewer can retry safely.
+    // The abort timeout fired. This is genuinely ambiguous: the request was already sent, so SyncHub MAY have
+    // received it (a callback may still arrive) — but it also may never have left (DNS/TCP/TLS setup, a blackholed
+    // host), in which case NO callback ever comes. We must not do either unsafe thing:
+    //   - a clean rollback would drop rfp_override_reviewed_at (breaking the failed-callback freshness guard) and
+    //     re-expose an UN-gated one-click approve that risks a duplicate Procore project;
+    //   - leaving the deal 'approving' would lock it forever if no callback arrives (the actionable guard excludes
+    //     'approving', so the reviewer loses every control).
+    // So park it 'failed' (retryable) with a clear reason, PRESERVING rfp_override_reviewed_at (set by the UPDATE
+    // above) so a real in-flight callback still passes its freshness guard and can resolve the deal. The page's
+    // 'failed' panel gates the re-attempt behind a Procore check, so there is no blind one-click re-approve.
     if (err instanceof Error && err.name === "AbortError") {
-      return { ok: true, status: "approving", requestId, unconfirmed: true };
+      await input.tenantDb
+        .update(deals)
+        .set({
+          rfpOverrideState: "failed",
+          rfpOverrideError: SYNCHUB_OVERRIDE_TIMEOUT_ERROR,
+          updatedAt: new Date(),
+        })
+        .where(eq(deals.id, input.dealId));
+      // Complete the trail: the reviewer's approve was recorded (-> approving) above; record the timeout that
+      // auto-parked it 'failed' so the override history isn't left mid-flight.
+      await writeOverrideHistory(input.tenantDb, {
+        dealId: input.dealId,
+        fieldName: "rfp_override_state",
+        oldValue: "approving",
+        newValue: "failed",
+        changedBy: input.actor.userId,
+        source: "rfp_override_approve_timeout",
+        reason: SYNCHUB_OVERRIDE_TIMEOUT_ERROR,
+      });
+      return { ok: true, status: "failed", requestId, unconfirmed: true };
     }
     return {
       ok: false,

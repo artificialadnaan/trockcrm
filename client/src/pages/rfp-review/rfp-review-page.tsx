@@ -61,6 +61,11 @@ function DealFacts({ review }: { review: RfpReviewDetail }) {
   );
 }
 
+// Shown when SyncHub doesn't confirm the override in time (the POST aborted). The server parks the deal 'failed'
+// with this same reason; using the identical copy here keeps the optimistic panel from flickering on refetch.
+const SYNCHUB_TIMEOUT_NOTE =
+  "SyncHub did not confirm the override in time. A Bid Board project may or may not have been created — check Procore before re-attempting.";
+
 export function RfpReviewPage() {
   const { dealId } = useParams<{ dealId: string }>();
   const [searchParams] = useSearchParams();
@@ -76,11 +81,16 @@ export function RfpReviewPage() {
   // blind retry risks a duplicate. The reviewer must confirm they checked Procore before re-attempting.
   const [confirmedNoProject, setConfirmedNoProject] = useState(false);
 
-  // Reset the per-deal Procore-check confirmation whenever the review target changes, so a confirmation made for
-  // one failed deal never carries over to a different deal (each must be verified in Procore independently).
-  useEffect(() => {
+  // Reset the per-deal Procore-check confirmation SYNCHRONOUSLY (during render, via React's "adjust state on prop
+  // change" pattern) the moment the review target changes — NOT in a passive effect. An effect would leave a
+  // one-frame window where, right after navigating to another failed deal, the re-attempt button is still enabled
+  // from the previous deal's confirmation and a fast click could approve the NEW deal ungated (duplicate risk).
+  const targetKey = `${dealId ?? ""}|${officeId ?? ""}`;
+  const [confirmedForKey, setConfirmedForKey] = useState(targetKey);
+  if (confirmedForKey !== targetKey) {
+    setConfirmedForKey(targetKey);
     setConfirmedNoProject(false);
-  }, [dealId, officeId]);
+  }
 
   // While SyncHub is creating the Bid Board project, poll so the page flips to approved/failed when the
   // bid-board-created callback lands (no manual refresh needed).
@@ -149,16 +159,20 @@ export function RfpReviewPage() {
     setSubmitting("approve");
     try {
       const result = await approveRfpOverride(dealId, { note, officeId });
-      toast.success(
-        result.unconfirmed
-          ? "Override submitted — awaiting confirmation from SyncHub. Watch this page for the result."
-          : "Override approved — SyncHub is creating the Bid Board project."
-      );
       setNote("");
       setConfirmedNoProject(false); // require re-verification if this attempt also fails
-      // Optimistically enter 'approving' so the progress panel + 5s poll start immediately — even if the
-      // authoritative refetch below blips (the deal IS approving server-side; SyncHub accepted the request).
-      applyOptimistic({ overrideState: "approving", overrideError: null, actionable: false });
+      if (result.status === "failed") {
+        // Ambiguous timeout: SyncHub didn't confirm in time, so the server parked the deal 'failed' (retryable)
+        // rather than locking it in 'approving'. Surface the failed panel (gated behind the Procore check) so the
+        // reviewer can act; a late callback can still resolve it server-side.
+        toast.warning("SyncHub did not confirm the override in time — check Procore before re-attempting.");
+        applyOptimistic({ overrideState: "failed", overrideError: SYNCHUB_TIMEOUT_NOTE, actionable: true });
+      } else {
+        toast.success("Override approved — SyncHub is creating the Bid Board project.");
+        // Optimistically enter 'approving' so the progress panel + 5s poll start immediately — even if the
+        // authoritative refetch below blips (the deal IS approving server-side; SyncHub accepted the request).
+        applyOptimistic({ overrideState: "approving", overrideError: null, actionable: false });
+      }
       await refetch();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to approve the override");

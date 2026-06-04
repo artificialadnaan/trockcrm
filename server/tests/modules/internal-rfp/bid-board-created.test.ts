@@ -361,4 +361,67 @@ describe("POST /api/internal/bid-board-created", () => {
     const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).not.toContain("rfp_override_state = 'failed'");
   });
+
+  it("rejects an OVERRIDE-flow 'created' callback that omits createdAt as 422 (don't silently ACK; let SyncHub retry)", async () => {
+    // override flow in progress: rfp_override_reviewed_at is set, the deal is declined + 'approving'
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM pg_namespace")) return { rows: [{ nspname: "office_dallas" }] };
+      if (sql.includes('FROM "office_dallas".deals') && sql.includes("LEFT JOIN")) {
+        return {
+          rows: [{
+            id: "deal-1",
+            name: "Austin Center",
+            deal_number: "DFW-4-12345-aa",
+            project_number: null,
+            stage_id: "stage-1",
+            company_id: null,
+            primary_contact_id: null,
+            procore_bid_id: null,
+            procore_company_id: null,
+            is_bid_board_owned: false,
+            rfp_approval_status: "declined",
+            rfp_override_state: "approving",
+            rfp_override_decision: "override_approved",
+            rfp_override_reviewed_at: "2026-06-04T00:00:00.000Z",
+            bid_board_linked_at: null,
+            assigned_rep_id: "rep-1",
+            rfp_approval_requested_by: "user-rfp",
+            rfp_approval_request_id: 77,
+            workflow_route: "normal",
+            stage_entered_at: "2026-05-01T00:00:00.000Z",
+            on_hold: false,
+            on_hold_started_at: null,
+            on_hold_accumulated_seconds: 0,
+            on_hold_accumulated_seconds_at_stage_entry: 0,
+            stage_slug: "opportunity",
+            stage_display_order: 2,
+            stage_is_terminal: false,
+          }],
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // a 'created' for the CURRENT attempt (request id matches) but carrying NO createdAt
+    const { raw, signature } = sign({
+      status: "created",
+      sourceDealId: "deal-1",
+      rfpApprovalRequestId: 77,
+      bidboardProjectId: "123456",
+      procoreCompanyId: "598134325683880",
+    });
+
+    const res = await request(app())
+      .post("/api/internal/bid-board-created")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(422);
+    const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
+    // never linked/advanced — the malformed success is surfaced, not silently applied
+    expect(sqlText).not.toContain("procore_bid_id = $1::bigint");
+    expect(sqlText).not.toContain("stage_id = $1::uuid");
+    warnSpy.mockRestore();
+  });
 });

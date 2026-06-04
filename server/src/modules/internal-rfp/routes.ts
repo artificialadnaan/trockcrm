@@ -89,6 +89,7 @@ async function findDeal(sourceDealId: string) {
               d.rfp_override_state,
               d.rfp_override_error,
               d.rfp_override_decision,
+              d.rfp_override_reviewed_at,
               d.bid_board_linked_at,
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
@@ -750,6 +751,20 @@ internalRfpRoutes.post(
       // old attempt's project / clear the fresh 'approving' state. The original (non-override) RFP-approval flow has
       // rfp_override_reviewed_at IS NULL, so this never gates it.
       const createdCallbackAt = asDateOrNull(payload.createdAt);
+
+      // For the OVERRIDE flow (rfp_override_reviewed_at set), a 'created' callback MUST carry a parseable createdAt:
+      // the freshness guard below needs it, so a timestamp-less success would silently no-op the linkage while this
+      // handler still returns 200. SyncHub treats a 200 as delivered and stops retrying — leaving the deal stuck
+      // declined/'approving' even though a Procore project may already exist. Reject it as 422 (like the failed path)
+      // so SyncHub retries with a well-formed callback. The original (non-override) flow has reviewed_at NULL and is
+      // exempt (its pre-override callbacks legitimately carry no createdAt and link via the IS NULL escape).
+      if (found.deal.rfp_override_reviewed_at != null && !createdCallbackAt) {
+        console.warn(
+          `[RFP callback] override 'created' for deal ${sourceDealId} (request ${currentRequestId}) is missing a parseable createdAt; returning 422 so SyncHub retries instead of silently dropping it`
+        );
+        res.status(422).json({ success: false, error: "invalid_payload" });
+        return;
+      }
 
       const existingBidId = found.deal.procore_bid_id == null ? null : String(found.deal.procore_bid_id);
       if (existingBidId && existingBidId !== bidboardProjectId) {

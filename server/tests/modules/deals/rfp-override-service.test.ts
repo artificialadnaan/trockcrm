@@ -131,8 +131,8 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
     expect(result).toMatchObject({ ok: false, reason: "synchub_unavailable" });
   });
 
-  it("keeps the deal 'approving' (unconfirmed) on an abort/timeout — the request may have reached SyncHub", async () => {
-    const { tenantDb } = makeTenantDb([DEAL]);
+  it("parks the deal 'failed' (retryable, unconfirmed) on an abort/timeout instead of locking it in 'approving'", async () => {
+    const { tenantDb, setArgs } = makeTenantDb([DEAL]);
     const fetchImpl = vi.fn(async () => {
       const err = new Error("The operation was aborted");
       err.name = "AbortError";
@@ -142,8 +142,16 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
       { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
       { fetchImpl: fetchImpl as any, env: ENV }
     );
-    // NOT rolled back: a later callback can still resolve it (and rfp_override_reviewed_at is preserved)
-    expect(result).toMatchObject({ ok: true, status: "approving", requestId: 77, unconfirmed: true });
+    // Ambiguous timeout: NOT a clean rollback (that would drop rfp_override_reviewed_at and re-expose an un-gated
+    // one-click approve) and NOT left locked in 'approving' (no reviewer controls) — it's marked 'failed', which is
+    // retryable behind the page's Procore-check gate, and a late callback can still resolve it.
+    expect(result).toMatchObject({ ok: true, status: "failed", requestId: 77, unconfirmed: true });
+    // first UPDATE parked it 'approving' (+ reviewed_at); the timeout UPDATE flips it to 'failed' with a reason and
+    // does NOT rewrite rfp_override_reviewed_at (so the freshness guard for a late callback still holds).
+    expect(setArgs[0].rfpOverrideState).toBe("approving");
+    expect(setArgs[1].rfpOverrideState).toBe("failed");
+    expect(setArgs[1].rfpOverrideError).toMatch(/Procore/i);
+    expect(setArgs[1].rfpOverrideReviewedAt).toBeUndefined();
   });
 });
 
