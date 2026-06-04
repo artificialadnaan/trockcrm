@@ -865,6 +865,11 @@ export function buildForecastAccuracyFromRows(input: {
 }
 
 export async function getForecastAccuracyReport(db: TenantDb, filters: PerformanceReportFilters, tenantKey: string) {
+  // Change Orders Part 2: intentionally NOT folded into won_actual. Although won_actual is a
+  // won_closed_date-cohort sum, this is a forecast-quality report (won_actual vs commit/best-case
+  // forecast). Change orders are signed AFTER the win and were never forecastable, so adding them to
+  // "actual" would make forecasts read systematically low. Kept consistent with Forecast Variance.
+  // (Decision confirmed: COs apply only to won_closed_date-cohort revenue reports, not forecast-quality.)
   return withReportCache(cacheKey("forecast-accuracy", tenantKey, "director", filters), async () => {
     const dealScope = buildDealScopeSql(filters);
     const archivedWonDealScope = buildArchivedWonDealScopeSql(filters);

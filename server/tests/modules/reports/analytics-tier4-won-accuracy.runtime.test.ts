@@ -55,6 +55,10 @@ beforeAll(async () => {
       updated_at timestamptz, created_at timestamptz,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric
     );
+    CREATE TABLE deal_change_orders (
+      id uuid PRIMARY KEY, deal_id uuid NOT NULL, signed_date date NOT NULL,
+      amount numeric(14,2) NOT NULL, description text, created_at timestamptz NOT NULL DEFAULT NOW()
+    );
     INSERT INTO users (id, display_name) VALUES ('${REP_A}','Alice');
     INSERT INTO pipeline_stage_config (id, slug, is_terminal, display_order) VALUES
       ('${ST.won}','${WON_SLUG}', true, 90),
