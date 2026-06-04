@@ -20,6 +20,10 @@
     "./lib/bidBoardStatusMap": {
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
+    },
+    "./lib/rfpReviewerEmails": {
+      "types": "./dist/lib/rfpReviewerEmails.d.ts",
+      "default": "./dist/lib/rfpReviewerEmails.js"
     }
   },
   "scripts": {

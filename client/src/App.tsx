@@ -6,6 +6,7 @@ import { ForcePasswordChangeScreen } from "@/components/auth/force-password-chan
 import { RequireRole } from "@/components/auth/require-role";
 import { AppShell } from "@/components/layout/app-shell";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
+import { RfpReviewPage } from "@/pages/rfp-review/rfp-review-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
 import { ServiceOpportunityNewPage } from "@/pages/deals/service-opportunity-new-page";
@@ -214,6 +215,7 @@ export function App() {
               <Route path="/deals/:id/photos" element={<DealDetailPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
+              <Route path="/rfp-review/:dealId" element={<RfpReviewPage />} />
               <Route path="/leads" element={<LeadListPage />} />
               <Route path="/leads/board" element={<BoardAliasRedirect entity="leads" />} />
               <Route path="/leads/stages/:stageId" element={<LeadStagePage />} />

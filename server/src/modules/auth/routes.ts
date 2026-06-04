@@ -15,6 +15,7 @@ import { authMiddleware } from "../../middleware/auth.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
+import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import {
   exchangeCodeForTokens,
   getConsentUrl,
@@ -156,7 +157,7 @@ function graphOAuthExchangeErrorRedirect(error: unknown) {
   return `${frontendUrl}/email?error=${encodeURIComponent(code)}`;
 }
 
-async function withOnboardingGate<T extends { id: string; officeId: string; activeOfficeId?: string; role: string }>(user: T) {
+async function withOnboardingGate<T extends { id: string; email: string; officeId: string; activeOfficeId?: string; role: string }>(user: T) {
   const gate = await getUserOnboardingGateStatus({
     userId: user.id,
     officeId: user.activeOfficeId ?? user.officeId,
@@ -168,6 +169,9 @@ async function withOnboardingGate<T extends { id: string; officeId: string; acti
     onboardingPendingCount: gate.onboardingPendingCount,
     requiresOnboarding: gate.requiresOnboarding,
     cleanupUrl: gate.cleanupUrl,
+    // Whether this user is one of the designated RFP override reviewers (Takashi/Adam). Lets the frontend gate
+    // the /rfp-review page; the server endpoints enforce the same allowlist as the hard boundary.
+    isRfpReviewer: isRfpReviewerEmail(user.email, process.env),
   };
 }
 

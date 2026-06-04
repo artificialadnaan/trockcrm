@@ -3,6 +3,12 @@ import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/
 // Reuse #611's now-merged frontend-URL + branded-template primitives so the RFP-decline email points at
 // trockcrm.com (never the old crm.trockconstruction.com) and matches the project-number email's look.
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+// Single source of truth shared with the server's override-review gate: the notified leadership set and the
+// authorized-reviewer set both derive from RFP_REJECTION_EMAIL_RECIPIENTS, so they can never drift apart.
+import {
+  resolveRfpReviewerEmails,
+  DEFAULT_NON_PROD_RFP_REVIEWER,
+} from "@trock-crm/shared/lib/rfpReviewerEmails";
 
 export const RFP_REJECTED_JOB = "rfp_rejected_email";
 
@@ -185,30 +191,18 @@ export async function handleRfpRejectedEmail(
   }
 }
 
-export const DEFAULT_NON_PROD_RFP_REJECTION_RECIPIENTS = "adnaan.iqbal@gmail.com";
-
-const DEV_FALLBACK_NODE_ENVS = new Set(["development", "test"]);
-
-function isDevFallbackContext(env: NodeJS.ProcessEnv): boolean {
-  return typeof env.NODE_ENV === "string" && DEV_FALLBACK_NODE_ENVS.has(env.NODE_ENV);
-}
+export const DEFAULT_NON_PROD_RFP_REJECTION_RECIPIENTS = DEFAULT_NON_PROD_RFP_REVIEWER;
 
 /**
  * Leadership recipients (Takashi + Adam Shaw) from RFP_REJECTION_EMAIL_RECIPIENTS — comma-separated,
  * trimmed, de-duplicated, never hardcoded. In dev/test only, falls back to a single dev address so
  * local runs work; in any other env (incl. a misconfigured prod) it returns [] so the handler fails loudly.
+ *
+ * Delegates to the shared resolver so this notified set stays identical to the server-side reviewer
+ * allowlist (one config, RFP_REJECTION_EMAIL_RECIPIENTS).
  */
 export function resolveRfpRejectionRecipients(env: NodeJS.ProcessEnv): string[] {
-  const configured = normalizeText(env.RFP_REJECTION_EMAIL_RECIPIENTS);
-  if (configured) {
-    return dedupeEmails(
-      configured
-        .split(",")
-        .map((part) => part.trim())
-        .filter((part) => part.length > 0)
-    );
-  }
-  return isDevFallbackContext(env) ? [DEFAULT_NON_PROD_RFP_REJECTION_RECIPIENTS] : [];
+  return resolveRfpReviewerEmails(env);
 }
 
 export function buildRfpRejectionEmail(input: {
@@ -224,8 +218,14 @@ export function buildRfpRejectionEmail(input: {
   // cross-office) - without it /deals/{id} queries the recipient's default office and 404s a cross-office
   // deal. This mirrors #611's project-number link builder (its Codex P1 fix); it appends ONLY officeId.
   const officeParam = input.officeId ? `?officeId=${encodeURIComponent(input.officeId)}` : "";
-  const dealUrl = `${input.frontendUrl.replace(/\/+$/, "")}/deals/${encodeURIComponent(input.dealId)}${officeParam}`;
+  const baseUrl = input.frontendUrl.replace(/\/+$/, "");
+  const dealUrl = `${baseUrl}/deals/${encodeURIComponent(input.dealId)}${officeParam}`;
   const safeDealUrl = escapeHtml(dealUrl);
+  // Primary CTA: the dedicated override-review page for THIS deal. Takashi & Adam land here to approve the
+  // override (re-submit the RFP to SyncHub) or re-confirm the denial. officeId carries the deal's tenant so
+  // a cross-office reviewer doesn't 404 (same #611 rationale as the deal link above).
+  const reviewUrl = `${baseUrl}/rfp-review/${encodeURIComponent(input.dealId)}${officeParam}`;
+  const safeReviewUrl = escapeHtml(reviewUrl);
 
   const subject = input.dealNumber
     ? `RFP declined: ${input.dealNumber} (${input.dealName})`
@@ -278,7 +278,7 @@ export function buildRfpRejectionEmail(input: {
           </tr>
           <tr>
             <td align="center" style="padding:6px 24px 16px 24px;">
-              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#64748b;">An RFP was declined. Open the deal to examine why.</p>
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#64748b;">An RFP was declined. Open the deal to see why. RFP reviewers can approve the override or re-confirm the denial on the review page.</p>
             </td>
           </tr>
           <tr>
@@ -288,7 +288,7 @@ export function buildRfpRejectionEmail(input: {
             </td>
           </tr>
           <tr>
-            <td align="center" style="padding:24px 24px 28px 24px;">
+            <td align="center" style="padding:24px 24px 8px 24px;">
               <!--[if mso]>
               <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="${safeDealUrl}" style="height:44px;v-text-anchor:middle;width:240px;" arcsize="9%" stroke="f" fillcolor="#CC0000">
                 <w:anchorlock/>
@@ -298,6 +298,24 @@ export function buildRfpRejectionEmail(input: {
               <!--[if !mso]><!-- -->
               <a href="${safeDealUrl}" style="display:inline-block;background-color:#CC0000;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:240px;border-radius:4px;">View Deal in CRM</a>
               <!--<![endif]-->
+            </td>
+          </tr>
+          <tr>
+            <td align="center" style="padding:4px 24px 4px 24px;">
+              <!--[if mso]>
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="${safeReviewUrl}" style="height:44px;v-text-anchor:middle;width:240px;" arcsize="9%" stroke="t" strokecolor="#CC0000" fillcolor="#ffffff">
+                <w:anchorlock/>
+                <center style="color:#CC0000;font-family:Arial,sans-serif;font-size:15px;font-weight:bold;">Review &amp; Decide</center>
+              </v:roundrect>
+              <![endif]-->
+              <!--[if !mso]><!-- -->
+              <a href="${safeReviewUrl}" style="display:inline-block;background-color:#ffffff;color:#CC0000;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:42px;text-align:center;text-decoration:none;width:238px;border:1px solid #CC0000;border-radius:4px;">Review &amp; Decide</a>
+              <!--<![endif]-->
+            </td>
+          </tr>
+          <tr>
+            <td align="center" style="padding:0 24px 24px 24px;">
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#94a3b8;">&ldquo;Review &amp; Decide&rdquo; is for the designated RFP reviewers (Takashi &amp; Adam).</p>
             </td>
           </tr>
           <tr>
@@ -315,8 +333,9 @@ export function buildRfpRejectionEmail(input: {
 
   const text =
     rows.map(([label, value]) => `${label}: ${value}`).join("\n") +
-    `\n\nExamine the declined RFP in the CRM: ${dealUrl}`;
-  return { subject, html, text, dealUrl, dealNumber: input.dealNumber };
+    `\n\nView the deal in the CRM: ${dealUrl}` +
+    `\n\nRFP reviewers (Takashi & Adam) — approve the override or re-confirm the denial: ${reviewUrl}`;
+  return { subject, html, text, dealUrl, reviewUrl, dealNumber: input.dealNumber };
 }
 
 // --- small local utilities (mirror the private helpers in project-number-email.ts) ---
