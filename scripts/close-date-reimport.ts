@@ -23,6 +23,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 import {
+  businessToday,
   discoverDealTenants,
   isUuid,
   runReimport,
@@ -119,6 +120,7 @@ function writeAuditCsv(rows: Array<ImportRowResult & { sourceFile: string }>): s
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const args = parseReimportArgs(argv);
   const actorUserId = resolveActorUserId();
+  const today = businessToday();
   const files = resolveFiles(args);
   if (files.length === 0) {
     console.warn("No .xlsx files found to import (folder contained no .xlsx files).");
@@ -155,6 +157,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         mode: args.mode,
         overwriteExisting: args.overwriteExisting,
         actorUserId,
+        today,
       });
       for (const r of report.results) {
         allResults.push({ ...r, sourceFile: path.basename(filePath) });
@@ -163,7 +166,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       const c = report.counts;
       console.log(
         `  ${path.basename(filePath).padEnd(40)} ` +
-          `written:${c.WRITTEN} overwritten:${c.OVERWRITTEN} noop:${c.NOOP} conflict:${c.CONFLICT} ` +
+          `written:${c.WRITTEN} refreshed:${c.REFRESHED} overwritten:${c.OVERWRITTEN} noop:${c.NOOP} conflict:${c.CONFLICT} ` +
           `blank:${c.SKIPPED_BLANK} invalid-date:${c.INVALID_DATE} invalid-key:${c.INVALID_KEY} unmatched:${c.UNMATCHED} error:${c.ERROR}`,
       );
     }

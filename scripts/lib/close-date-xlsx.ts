@@ -16,7 +16,10 @@ export const DEAL_NUMBER_HEADER = "Deal #";
 export const DEAL_NAME_HEADER = "Deal Name";
 export const COMPANY_HEADER = "Company";
 export const STAGE_HEADER = "Stage";
+export const BID_BOARD_HEADER = "Bid Board Owned";
 export const VALUE_HEADER = "Est. Value";
+export const STATUS_HEADER = "Status";
+export const CURRENT_CLOSE_DATE_HEADER = "Current Close Date";
 export const EXPECTED_CLOSE_DATE_HEADER = "Expected Close Date";
 
 const WORKSHEET_NAME = "Expected Close Dates";
@@ -36,12 +39,16 @@ const COLUMNS: ColumnDef[] = [
   { header: DEAL_NAME_HEADER, width: 42, value: (d) => d.dealName },
   { header: COMPANY_HEADER, width: 28, value: (d) => d.companyName ?? "" },
   { header: STAGE_HEADER, width: 18, value: (d) => d.stageName ?? "" },
+  { header: BID_BOARD_HEADER, width: 16, value: (d) => (d.isBidBoardOwned ? "Yes" : "") },
   { header: VALUE_HEADER, width: 16, value: (d) => (d.estimatedValue == null ? "" : Number(d.estimatedValue)) },
+  { header: STATUS_HEADER, width: 12, value: (d) => (d.reason === "past_due" ? "Past-due" : "Missing") },
+  { header: CURRENT_CLOSE_DATE_HEADER, width: 18, value: (d) => d.currentCloseDate ?? "" },
   { header: EXPECTED_CLOSE_DATE_HEADER, width: 22, editable: true, value: () => null },
 ];
 
 const INSTRUCTION =
   'Fill in the highlighted "Expected Close Date" column for each deal, then save and email this file back. ' +
+  'Rows marked "Past-due" already have an old date in "Current Close Date" — please replace it with the new expected date. ' +
   "Use a real calendar date (e.g. 9/15/2026). Leave a row blank if you don't know yet. " +
   "Please don't edit, move, or delete the other columns — they're how each row is matched back to the deal.";
 

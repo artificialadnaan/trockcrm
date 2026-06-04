@@ -17,11 +17,13 @@ import { buildRepWorkbook, workbookToBuffer, readWorkbookRows, EXPECTED_CLOSE_DA
  * re-import -> verify the DB. Exercises the file-path read branch and the exact
  * data path Adnaan runs.
  */
+const TODAY = "2026-06-04";
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const REP = U("a11ce");
 const ST = U("57e57");
-const D1 = U("d01"); // will be filled
-const D2 = U("d02"); // left blank
+const D1 = U("d01"); // empty -> filled (WRITTEN)
+const D2 = U("d02"); // empty -> left blank in the sheet
+const D3 = U("d03"); // stale past date -> refreshed (REFRESHED)
 
 let pg: PGlite;
 let client: Queryable;
@@ -48,7 +50,8 @@ beforeAll(async () => {
     INSERT INTO pipeline_stage_config (id, slug, name) VALUES ('${ST}','estimating','Estimating');
     INSERT INTO office_dallas.deals (id, deal_number, name, stage_id, assigned_rep_id, expected_close_date) VALUES
       ('${D1}','DFW-1-00001-aa','Roof One','${ST}','${REP}', NULL),
-      ('${D2}','DFW-1-00002-aa','Roof Two','${ST}','${REP}', NULL);
+      ('${D2}','DFW-1-00002-aa','Roof Two','${ST}','${REP}', NULL),
+      ('${D3}','DFW-1-00003-aa','Roof Three','${ST}','${REP}', '2026-01-01');
   `);
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "trockcrm-cd-int-"));
   tmpFile = path.join(tmpDir, "close-dates.xlsx");
@@ -62,7 +65,7 @@ afterAll(async () => {
 describe("export -> fill file -> re-import (real files, PGlite)", () => {
   it("round-trips a filled workbook on disk and commits the date to the right deal", async () => {
     // EXPORT
-    const groups = groupDealsByRep(await fetchMissingCloseDateDeals(client, ["office_dallas"]));
+    const groups = groupDealsByRep(await fetchMissingCloseDateDeals(client, ["office_dallas"], TODAY));
     expect(groups).toHaveLength(1);
     const wb = await buildRepWorkbook(groups[0]);
 
@@ -77,27 +80,32 @@ describe("export -> fill file -> re-import (real files, PGlite)", () => {
         if (cell.value === "Deal ID") idCol = cn;
       });
     });
-    // find D1's data row and set its date
+    // REP fills D1 (was empty) and D3 (was stale) with a future date; leaves D2 blank.
     for (let r = headerRow + 1; r <= ws.rowCount; r++) {
-      if (ws.getCell(r, idCol).value === D1) ws.getCell(r, dateCol).value = new Date(Date.UTC(2026, 10, 30));
+      const id = ws.getCell(r, idCol).value;
+      if (id === D1 || id === D3) ws.getCell(r, dateCol).value = new Date(Date.UTC(2026, 10, 30));
     }
     fs.writeFileSync(tmpFile, await workbookToBuffer(wb));
 
     // RE-IMPORT from the path (dry-run first: nothing written)
     const rowsFromFile = await readWorkbookRows(tmpFile);
-    const dry = await runReimport({ client, rows: rowsFromFile, validSchemas: new Set(["office_dallas"]), mode: "dry-run", overwriteExisting: false });
-    expect(dry.counts.WRITTEN).toBe(1);
-    expect(dry.counts.SKIPPED_BLANK).toBe(1);
-    const stillNull = await pg.query<{ d: string | null }>(`SELECT to_char(expected_close_date,'YYYY-MM-DD') AS d FROM office_dallas.deals WHERE id = $1`, [D1]);
-    expect(stillNull.rows[0].d).toBeNull(); // dry-run wrote nothing
+    const dry = await runReimport({ client, rows: rowsFromFile, validSchemas: new Set(["office_dallas"]), mode: "dry-run", overwriteExisting: false, today: TODAY });
+    expect(dry.counts.WRITTEN).toBe(1); // D1
+    expect(dry.counts.REFRESHED).toBe(1); // D3 (stale)
+    expect(dry.counts.SKIPPED_BLANK).toBe(1); // D2
+    const stillStale = await pg.query<{ d: string | null }>(`SELECT to_char(expected_close_date,'YYYY-MM-DD') AS d FROM office_dallas.deals WHERE id = $1`, [D3]);
+    expect(stillStale.rows[0].d).toBe("2026-01-01"); // dry-run wrote nothing
 
     // COMMIT
-    const committed = await runReimport({ client, rows: rowsFromFile, validSchemas: new Set(["office_dallas"]), mode: "commit", overwriteExisting: false });
+    const committed = await runReimport({ client, rows: rowsFromFile, validSchemas: new Set(["office_dallas"]), mode: "commit", overwriteExisting: false, today: TODAY });
     expect(committed.counts.WRITTEN).toBe(1);
+    expect(committed.counts.REFRESHED).toBe(1);
 
     const d1 = await pg.query<{ d: string | null }>(`SELECT to_char(expected_close_date,'YYYY-MM-DD') AS d FROM office_dallas.deals WHERE id = $1`, [D1]);
     const d2 = await pg.query<{ d: string | null }>(`SELECT to_char(expected_close_date,'YYYY-MM-DD') AS d FROM office_dallas.deals WHERE id = $1`, [D2]);
-    expect(d1.rows[0].d).toBe("2026-11-30"); // filled deal updated
+    const d3 = await pg.query<{ d: string | null }>(`SELECT to_char(expected_close_date,'YYYY-MM-DD') AS d FROM office_dallas.deals WHERE id = $1`, [D3]);
+    expect(d1.rows[0].d).toBe("2026-11-30"); // empty -> filled
     expect(d2.rows[0].d).toBeNull(); // blank row left untouched
+    expect(d3.rows[0].d).toBe("2026-11-30"); // stale -> refreshed
   });
 });

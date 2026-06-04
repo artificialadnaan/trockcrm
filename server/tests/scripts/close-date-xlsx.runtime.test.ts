@@ -7,6 +7,9 @@ import {
   DEAL_ID_HEADER,
   OFFICE_HEADER,
   EXPECTED_CLOSE_DATE_HEADER,
+  STATUS_HEADER,
+  CURRENT_CLOSE_DATE_HEADER,
+  BID_BOARD_HEADER,
 } from "../../../scripts/lib/close-date-xlsx.js";
 import { parseExpectedCloseDate, type RepGroup } from "../../../scripts/lib/close-date-workflow.js";
 
@@ -24,8 +27,8 @@ const group: RepGroup = {
   assignedRepId: "00000000-0000-4000-8000-0000000000a1",
   fileSlug: "alice",
   deals: [
-    { tenantSchema: "office_dallas", dealId: ID1, dealNumber: "DFW-1", dealName: "Roof A", companyName: "Acme", stageName: "Estimating", estimatedValue: "125000", assignedRepId: "a1", repName: "Alice" },
-    { tenantSchema: "office_atlanta", dealId: ID2, dealNumber: "ATL-2", dealName: "Roof B", companyName: null, stageName: "Estimating", estimatedValue: null, assignedRepId: "a1", repName: "Alice" },
+    { tenantSchema: "office_dallas", dealId: ID1, dealNumber: "DFW-1", dealName: "Roof A", companyName: "Acme", stageName: "Estimating", estimatedValue: "125000", currentCloseDate: null, reason: "missing", isBidBoardOwned: false, assignedRepId: "a1", repName: "Alice" },
+    { tenantSchema: "office_atlanta", dealId: ID2, dealNumber: "ATL-2", dealName: "Roof B", companyName: null, stageName: "Estimating", estimatedValue: null, currentCloseDate: "2026-01-15", reason: "past_due", isBidBoardOwned: true, assignedRepId: "a1", repName: "Alice" },
   ],
 };
 
@@ -70,6 +73,20 @@ describe("buildRepWorkbook structure", () => {
     expect(ws.getCell(headerRow + 1, cols[OFFICE_HEADER]).value).toBe("office_dallas");
     expect(ws.getCell(headerRow + 2, cols[DEAL_ID_HEADER]).value).toBe(ID2);
     expect(ws.getCell(headerRow + 2, cols[OFFICE_HEADER]).value).toBe("office_atlanta");
+  });
+
+  it("renders the v2 context columns (Status / Current Close Date / Bid Board Owned)", async () => {
+    const wb = await buildRepWorkbook(group);
+    const ws = wb.worksheets[0];
+    const { headerRow, cols } = headerColumns(ws);
+    // missing deal
+    expect(ws.getCell(headerRow + 1, cols[STATUS_HEADER]).value).toBe("Missing");
+    expect(ws.getCell(headerRow + 1, cols[CURRENT_CLOSE_DATE_HEADER]).value ?? "").toBeFalsy();
+    expect(ws.getCell(headerRow + 1, cols[BID_BOARD_HEADER]).value ?? "").toBeFalsy();
+    // past-due, Bid Board Owned deal
+    expect(ws.getCell(headerRow + 2, cols[STATUS_HEADER]).value).toBe("Past-due");
+    expect(ws.getCell(headerRow + 2, cols[CURRENT_CLOSE_DATE_HEADER]).value).toBe("2026-01-15");
+    expect(ws.getCell(headerRow + 2, cols[BID_BOARD_HEADER]).value).toBe("Yes");
   });
 });
 

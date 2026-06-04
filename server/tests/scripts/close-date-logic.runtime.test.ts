@@ -4,6 +4,8 @@ import {
   classifyImportRow,
   repFileSlug,
   groupDealsByRep,
+  businessToday,
+  buildMissingCloseDateSql,
   type MissingCloseDateDeal,
 } from "../../../scripts/lib/close-date-workflow.js";
 
@@ -71,55 +73,63 @@ describe("parseExpectedCloseDate", () => {
   });
 });
 
-describe("classifyImportRow (safe-default: never clobber, flag conflicts)", () => {
+describe("classifyImportRow (v2: fill-or-refresh, protect a maintained future date)", () => {
   const ok = (value: string) => ({ status: "ok", value }) as const;
+  const TODAY = "2026-06-04";
+  const base = { keyValid: true, found: true, overwriteExisting: false, today: TODAY } as const;
 
   it("BLANK date is skipped before anything else", () => {
-    expect(
-      classifyImportRow({ parsed: { status: "blank" }, keyValid: true, found: true, existing: null, overwriteExisting: false }).outcome,
-    ).toBe("SKIPPED_BLANK");
+    expect(classifyImportRow({ ...base, parsed: { status: "blank" }, existing: null }).outcome).toBe("SKIPPED_BLANK");
   });
 
   it("INVALID date is reported (a filled-but-bad value), not silently dropped", () => {
-    expect(
-      classifyImportRow({ parsed: { status: "invalid", reason: "x" }, keyValid: true, found: true, existing: null, overwriteExisting: false }).outcome,
-    ).toBe("INVALID_DATE");
+    expect(classifyImportRow({ ...base, parsed: { status: "invalid", reason: "x" }, existing: null }).outcome).toBe("INVALID_DATE");
   });
 
   it("INVALID key (tampered/corrupt UUID or unknown office) is reported", () => {
-    expect(
-      classifyImportRow({ parsed: ok("2026-09-15"), keyValid: false, found: false, existing: null, overwriteExisting: false }).outcome,
-    ).toBe("INVALID_KEY");
+    expect(classifyImportRow({ ...base, parsed: ok("2026-09-15"), keyValid: false, found: false, existing: null }).outcome).toBe("INVALID_KEY");
   });
 
   it("UNMATCHED when the deal is not found", () => {
-    expect(
-      classifyImportRow({ parsed: ok("2026-09-15"), keyValid: true, found: false, existing: null, overwriteExisting: false }).outcome,
-    ).toBe("UNMATCHED");
+    expect(classifyImportRow({ ...base, parsed: ok("2026-09-15"), found: false, existing: null }).outcome).toBe("UNMATCHED");
   });
 
   it("WRITTEN when the deal currently has no expected close date", () => {
-    const r = classifyImportRow({ parsed: ok("2026-09-15"), keyValid: true, found: true, existing: null, overwriteExisting: false });
+    const r = classifyImportRow({ ...base, parsed: ok("2026-09-15"), existing: null });
     expect(r.outcome).toBe("WRITTEN");
     expect(r.writeValue).toBe("2026-09-15");
   });
 
+  it("REFRESHED when the existing date is in the PAST (stale) — refreshed by default, no flag needed", () => {
+    const r = classifyImportRow({ ...base, parsed: ok("2026-09-15"), existing: "2026-01-01" });
+    expect(r.outcome).toBe("REFRESHED");
+    expect(r.writeValue).toBe("2026-09-15");
+  });
+
   it("NOOP (idempotent) when the existing date already equals the sheet date", () => {
-    const r = classifyImportRow({ parsed: ok("2026-09-15"), keyValid: true, found: true, existing: "2026-09-15", overwriteExisting: false });
+    const r = classifyImportRow({ ...base, parsed: ok("2026-09-15"), existing: "2026-09-15" });
     expect(r.outcome).toBe("NOOP");
     expect(r.writeValue).toBeNull();
   });
 
-  it("CONFLICT (skipped) when an existing date differs and overwrite is OFF", () => {
-    const r = classifyImportRow({ parsed: ok("2026-09-15"), keyValid: true, found: true, existing: "2026-01-01", overwriteExisting: false });
+  it("CONFLICT (skipped) when an existing FUTURE date differs and overwrite is OFF", () => {
+    const r = classifyImportRow({ ...base, parsed: ok("2026-09-15"), existing: "2026-12-01" });
     expect(r.outcome).toBe("CONFLICT");
     expect(r.writeValue).toBeNull();
   });
 
-  it("OVERWRITTEN only when an existing date differs AND overwrite is explicitly ON", () => {
-    const r = classifyImportRow({ parsed: ok("2026-09-15"), keyValid: true, found: true, existing: "2026-01-01", overwriteExisting: true });
+  it("treats an existing date == today as maintained (future), so a differing value is a CONFLICT not a refresh", () => {
+    expect(classifyImportRow({ ...base, parsed: ok("2026-09-15"), existing: TODAY }).outcome).toBe("CONFLICT");
+  });
+
+  it("OVERWRITTEN only when an existing FUTURE date differs AND overwrite is explicitly ON", () => {
+    const r = classifyImportRow({ ...base, parsed: ok("2026-09-15"), existing: "2026-12-01", overwriteExisting: true });
     expect(r.outcome).toBe("OVERWRITTEN");
     expect(r.writeValue).toBe("2026-09-15");
+  });
+
+  it("a stale past date is REFRESHED even without the overwrite flag (the whole point of v2)", () => {
+    expect(classifyImportRow({ ...base, parsed: ok("2026-09-15"), existing: "2025-12-31", overwriteExisting: false }).outcome).toBe("REFRESHED");
   });
 });
 
@@ -143,6 +153,9 @@ describe("groupDealsByRep", () => {
     companyName: null,
     stageName: "Estimating",
     estimatedValue: null,
+    currentCloseDate: null,
+    reason: "missing",
+    isBidBoardOwned: false,
     assignedRepId: "00000000-0000-4000-8000-0000000000a1",
     repName: "Alice",
     ...over,
@@ -181,5 +194,25 @@ describe("groupDealsByRep", () => {
     const slugs = groups.map((g) => g.fileSlug);
     expect(new Set(slugs).size).toBe(2); // no collision
     expect(slugs.every((s) => s.startsWith("john-smith"))).toBe(true);
+  });
+});
+
+describe("businessToday (America/Chicago, YYYY-MM-DD)", () => {
+  it("formats a zero-padded YYYY-MM-DD (so existing < today is chronologically safe)", () => {
+    expect(businessToday(new Date("2026-06-04T18:00:00Z"))).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+  it("tracks the CT calendar day across the UTC-midnight boundary (CDT = UTC-5 in June)", () => {
+    expect(businessToday(new Date("2026-06-04T04:59:00Z"))).toBe("2026-06-03"); // 23:59 CDT prev day
+    expect(businessToday(new Date("2026-06-04T05:01:00Z"))).toBe("2026-06-04"); // 00:01 CDT same day
+  });
+});
+
+describe("buildMissingCloseDateSql today validation (injection guard)", () => {
+  it("throws on a non-YYYY-MM-DD today before it ever reaches the SQL literal", () => {
+    expect(() => buildMissingCloseDateSql("office_dallas", "2026/06/04")).toThrow();
+    expect(() => buildMissingCloseDateSql("office_dallas", "x'); DROP TABLE deals;--")).toThrow();
+  });
+  it("accepts a valid today + schema", () => {
+    expect(buildMissingCloseDateSql("office_dallas", "2026-06-04")).toContain("office_dallas");
   });
 });

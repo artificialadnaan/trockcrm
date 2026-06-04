@@ -53,9 +53,9 @@ Close dates are normalized deterministically for cutover comparison. Date-only I
 
 ## Per-rep expected-close-date export / re-import
 
-Two-way workflow to fill in missing `expected_close_date` values: export one Excel file per rep listing their open deals that lack a forecast close date, send each rep their file, then re-import the filled files.
+Two-way workflow to fix **un-maintained** `expected_close_date` values: export one Excel file per rep listing their open deals whose forecast close date is missing or stale, send each rep their file, then re-import the filled files.
 
-**Export** (read-only) writes one `close-dates-<rep>.xlsx` per rep to `close-date-exports/<date>/` (git-ignored — real customer data). Scope is open, rep-actionable deals only: `expected_close_date IS NULL`, active, non-test, non-mirror, non-terminal stage.
+**Export** (read-only) writes one `close-dates-<rep>.xlsx` per rep to `close-date-exports/<date>/` (git-ignored — real customer data). Scope matches the app's forecast-coverage / at-risk definition so the counts reconcile to the coverage caption (M − N): a deal is included when it is **NOT future-dated** — `expected_close_date IS NULL` (`Missing`) **or** in the past (`Past-due`) — and is `is_active`, non-test, not on-hold, and in a non-terminal stage. **Bid Board Owned** (read-only mirror) deals are included and flagged (a close-date write on them persists and shows in the forecast ladder); `today` is the `America/Chicago` business day. Each row carries its existing stale date in a `Current Close Date` column and a `Status` (`Missing`/`Past-due`).
 
 ```bash
 railway run --service=Postgres npx tsx scripts/close-date-export.ts                 # all offices -> close-date-exports/<date>/
@@ -68,7 +68,7 @@ Deals owned by a deactivated rep (or a stale `assigned_rep_id` with no matching 
 
 Each workbook hides + locks the matching-key columns (`Deal ID` = deal UUID, `Office` = tenant schema) and protects the sheet so reps can only edit the highlighted **Expected Close Date** column. The UUID is the foolproof match key — `deal_number`/`project_number` are mutable and frequently null, so they are never used to match.
 
-**Re-import** is **dry-run by default**; pass `--commit` to write. It reads the locked key columns to update the exact deal and writes only `expected_close_date`. An existing date is **never** overwritten (reported as `CONFLICT`) unless `--overwrite-existing` is passed; blank rows are skipped; bad dates / bad keys / unmatched rows are reported (the run never crashes on one bad row); re-running is idempotent. Writing only the close date is side-effect-safe — the deal stage-history / `stage_entered_at` triggers are guarded on stage changes and the close-date email triggers are column-scoped elsewhere. A per-row audit CSV is written to `docs/audit/close-date-reimport-<timestamp>.csv` (git-ignored).
+**Re-import** is **dry-run by default**; pass `--commit` to write. It reads the locked key columns to update the exact deal and writes only `expected_close_date`, **fill-or-refresh**: it fills an empty date (`WRITTEN`) and replaces a stale/past one (`REFRESHED`) by default. A **maintained today-or-future** date is never clobbered — a different future value is reported as `CONFLICT` unless `--overwrite-existing` is passed (`OVERWRITTEN`). Blank rows are skipped; bad dates / bad keys / unmatched rows are reported (the run never crashes on one bad row); re-running performs no further writes (already-applied rows report `NOOP`; an un-overwritten future `CONFLICT` persists). Writing only the close date is side-effect-safe — the deal stage-history / `stage_entered_at` triggers are guarded on stage changes, the close-date email triggers are column-scoped elsewhere, and the same holds for Bid Board Owned deals (their Procore/SyncHub sync never writes `expected_close_date`). A per-row audit CSV is written to `docs/audit/close-date-reimport-<timestamp>.csv` (git-ignored).
 
 ```bash
 railway run --service=Postgres npx tsx scripts/close-date-reimport.ts --dir=./filled            # preview a folder
