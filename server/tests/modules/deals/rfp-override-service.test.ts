@@ -1,30 +1,27 @@
+import crypto from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const enqueueMock = vi.hoisted(() => vi.fn(async () => ({ jobId: 777 })));
 const logActivityMock = vi.hoisted(() => vi.fn(async () => {}));
-
-vi.mock("../../../src/modules/deals/rfp-enqueue.js", () => ({
-  insertOpportunityRfpRequestJob: enqueueMock,
-}));
-
 vi.mock("../../../src/modules/audit/audit-logger.js", () => ({
   logActivity: logActivityMock,
   buildAuditActorFromUser: (input: any) => ({ type: "user", ...input }),
 }));
 
-const { resubmitDeclinedRfp, reconfirmRfpDecline, getRfpReviewDetail } = await import(
+const { requestOverrideApproval, reconfirmRfpDecline, getRfpReviewDetail } = await import(
   "../../../src/modules/deals/rfp-override-service.js"
 );
 
 const ACTOR = { userId: "rev-1", name: "Takashi", role: "director" };
+const APPROVER = "ashaw@trockgc.com";
+const ENV = { SYNCHUB_SHARED_SECRET: "s3cret", SYNCHUB_BASE_URL: "https://synchub.example.com" } as NodeJS.ProcessEnv;
 
-/**
- * Mock tenantDb: update().set(captured).where().returning(resolves to `rows`), plus execute() capture.
- */
-function makeTenantDb(rows: any[]) {
+function makeTenantDb(rows: any[], priorOverrideState: string | null = null) {
   const setArgs: any[] = [];
   const executed: any[] = [];
   const tenantDb = {
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({ where: vi.fn(() => ({ limit: vi.fn(async () => [{ state: priorOverrideState }]) })) })),
+    })),
     update: vi.fn(() => ({
       set: vi.fn((value: any) => {
         setArgs.push(value);
@@ -39,88 +36,123 @@ function makeTenantDb(rows: any[]) {
   return { tenantDb: tenantDb as any, setArgs, executed };
 }
 
-describe("resubmitDeclinedRfp (approve / override → re-submit)", () => {
+function fetchReturning(status: number, body: any = {}) {
+  return vi.fn(async () => ({ status, json: async () => body, text: async () => JSON.stringify(body) }) as any);
+}
+
+describe("requestOverrideApproval (approve override → call SyncHub override-approve)", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("resets the RFP fields to pending_outbox and enqueues a fresh SyncHub delivery when the deal was declined", async () => {
-    const resetDeal = { id: "deal-1", name: "Acme", dealNumber: "TR-1", projectNumber: "P-9", rfpApprovalStatus: "pending_outbox" };
-    const { tenantDb, setArgs } = makeTenantDb([resetDeal]);
+  const DEAL = { id: "deal-1", name: "Acme", dealNumber: "TR-1", projectNumber: "P-9", rfpApprovalRequestId: 77 };
 
-    const result = await resubmitDeclinedRfp({
-      tenantDb,
-      officeId: "office-1",
-      dealId: "deal-1",
-      actor: ACTOR,
-      note: "Rescuing this one",
-    });
+  it("parks the deal in 'approving' and POSTs an HMAC-signed override-approve to SyncHub on 202", async () => {
+    const { tenantDb, setArgs } = makeTenantDb([DEAL]);
+    const fetchImpl = fetchReturning(202, { success: true, queued: true });
 
-    expect(result).toMatchObject({ ok: true, jobId: 777, status: "pending_outbox" });
-    // the reset clears the declined cycle + any prior override markers and re-opens for a new cycle
-    const set = setArgs[0];
-    expect(set.rfpApprovalStatus).toBe("pending_outbox");
-    expect(set.rfpApprovalRequestId).toBeNull();
-    expect(set.rfpDeclinedReason).toBeNull();
-    expect(set.rfpDeclinedAt).toBeNull();
-    expect(set.rfpOverrideReviewedAt).toBeNull();
-    expect(set.rfpOverrideDecision).toBeNull();
-    expect(set.rfpApprovalRequestEventId).toEqual(expect.any(String));
-    // the original requester is preserved (NOT reset), so a later re-decline still notifies the rep
-    expect(set.rfpApprovalRequestedBy).toBeUndefined();
-    // enqueues the delivery for the reset deal, threading the new event id
-    expect(enqueueMock).toHaveBeenCalledTimes(1);
-    expect(enqueueMock).toHaveBeenCalledWith(
-      expect.objectContaining({ tenantDb, deal: resetDeal, officeId: "office-1", eventId: set.rfpApprovalRequestEventId })
+    const result = await requestOverrideApproval(
+      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: "rescue" },
+      { fetchImpl, env: ENV }
     );
+
+    expect(result).toMatchObject({ ok: true, status: "approving", requestId: 77 });
+    const set = setArgs[0];
+    expect(set.rfpOverrideState).toBe("approving");
+    expect(set.rfpOverrideDecision).toBe("override_approved");
+    expect(set.rfpOverrideReviewedBy).toBe("rev-1");
+    expect(set.rfpOverrideError).toBeNull();
+    // deal stays declined while SyncHub works — status is NOT touched here
+    expect(set.rfpApprovalStatus).toBeUndefined();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, opts] = (fetchImpl as any).mock.calls[0];
+    expect(url).toBe("https://synchub.example.com/api/rfp-requests/77/override-approve");
+    expect(opts.method).toBe("POST");
+    // the signature is a CORRECT HMAC-SHA256 of the EXACT sent body under SYNCHUB_SHARED_SECRET (not just shape)
+    const expectedSig = `sha256=${crypto.createHmac("sha256", "s3cret").update(opts.body).digest("hex")}`;
+    expect(opts.headers["x-rfp-request-signature"]).toBe(expectedSig);
+    expect(JSON.parse(opts.body)).toEqual({ approverEmail: APPROVER });
     expect(logActivityMock).toHaveBeenCalledTimes(1);
   });
 
-  it("is a graceful no-op (not_actionable) and does NOT enqueue when the deal is not a fresh declined RFP", async () => {
-    const { tenantDb } = makeTenantDb([]); // guarded UPDATE matched 0 rows
+  it("records the real prior override state in the retry audit ('failed' -> approving)", async () => {
+    const { tenantDb } = makeTenantDb([DEAL], "failed"); // prior state = failed (a retry)
+    const fetchImpl = fetchReturning(202);
+    await requestOverrideApproval(
+      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { fetchImpl, env: ENV }
+    );
+    expect(logActivityMock).toHaveBeenCalledTimes(1);
+    const auditArg = logActivityMock.mock.calls[0][0] as any;
+    expect(auditArg.fieldChanges.rfpOverrideState).toEqual({ from: "failed", to: "approving" });
+  });
 
-    const result = await resubmitDeclinedRfp({
-      tenantDb,
-      officeId: "office-1",
-      dealId: "deal-1",
-      actor: ACTOR,
-      note: null,
-    });
-
+  it("is a graceful no-op (not_actionable) and does NOT call SyncHub when the deal isn't override-actionable", async () => {
+    const { tenantDb } = makeTenantDb([]);
+    const fetchImpl = fetchReturning(202);
+    const result = await requestOverrideApproval(
+      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { fetchImpl, env: ENV }
+    );
     expect(result).toEqual({ ok: false, reason: "not_actionable" });
-    expect(enqueueMock).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
     expect(logActivityMock).not.toHaveBeenCalled();
+  });
+
+  it("reports missing_request_id (no SyncHub call) when the declined deal has no rfp_approval_request_id", async () => {
+    const { tenantDb } = makeTenantDb([{ ...DEAL, rfpApprovalRequestId: null }]);
+    const fetchImpl = fetchReturning(202);
+    const result = await requestOverrideApproval(
+      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { fetchImpl, env: ENV }
+    );
+    expect(result).toEqual({ ok: false, reason: "missing_request_id" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("maps a SyncHub 409 to synchub_rejected (route rolls back the 'approving' write)", async () => {
+    const { tenantDb } = makeTenantDb([DEAL]);
+    const fetchImpl = fetchReturning(409, { error: "not declined" });
+    const result = await requestOverrideApproval(
+      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { fetchImpl, env: ENV }
+    );
+    expect(result).toMatchObject({ ok: false, reason: "synchub_rejected", syncHubStatus: 409 });
+  });
+
+  it("maps a network error to synchub_unavailable", async () => {
+    const { tenantDb } = makeTenantDb([DEAL]);
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+    const result = await requestOverrideApproval(
+      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { fetchImpl: fetchImpl as any, env: ENV }
+    );
+    expect(result).toMatchObject({ ok: false, reason: "synchub_unavailable" });
   });
 });
 
-describe("reconfirmRfpDecline (re-confirm denial)", () => {
+describe("reconfirmRfpDecline (re-confirm denial — unchanged outcome, guard allows retry-after-failed)", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("marks the declined deal reviewed with decision 'denial_reconfirmed' and leaves the status declined", async () => {
-    const reviewedDeal = { id: "deal-1", name: "Acme", dealNumber: "TR-1", projectNumber: "P-9" };
-    const { tenantDb, setArgs } = makeTenantDb([reviewedDeal]);
-
-    const result = await reconfirmRfpDecline({ tenantDb, dealId: "deal-1", actor: ACTOR, note: "Confirmed no-go" });
-
+  it("marks the declined deal denial_reconfirmed, clears any override state, leaves status declined", async () => {
+    const { tenantDb, setArgs } = makeTenantDb([{ id: "deal-1", name: "Acme", dealNumber: "TR-1", projectNumber: "P-9" }]);
+    const result = await reconfirmRfpDecline({ tenantDb, dealId: "deal-1", actor: ACTOR, note: "no-go" });
     expect(result).toMatchObject({ ok: true, decision: "denial_reconfirmed" });
     const set = setArgs[0];
     expect(set.rfpOverrideDecision).toBe("denial_reconfirmed");
-    expect(set.rfpOverrideReviewedBy).toBe("rev-1");
-    expect(set.rfpOverrideReviewedAt).toBeInstanceOf(Date);
-    expect(set.rfpOverrideNote).toBe("Confirmed no-go");
-    // it must NOT touch rfp_approval_status (so the decline-email trigger never fires)
+    expect(set.rfpOverrideState).toBeNull();
     expect(set.rfpApprovalStatus).toBeUndefined();
-    expect(enqueueMock).not.toHaveBeenCalled();
-    expect(logActivityMock).toHaveBeenCalledTimes(1);
   });
 
-  it("is a graceful no-op (not_actionable) when the deal is not a fresh declined RFP", async () => {
+  it("is a graceful no-op when not actionable", async () => {
     const { tenantDb } = makeTenantDb([]);
     const result = await reconfirmRfpDecline({ tenantDb, dealId: "deal-1", actor: ACTOR, note: null });
     expect(result).toEqual({ ok: false, reason: "not_actionable" });
-    expect(logActivityMock).not.toHaveBeenCalled();
   });
 });
 
-describe("getRfpReviewDetail (review-page data + actionable flag)", () => {
+describe("getRfpReviewDetail (adds override state/error + actionable)", () => {
   function makeReadDb(row: any | null) {
     return { execute: vi.fn(async () => ({ rows: row ? [row] : [] })) } as any;
   }
@@ -130,46 +162,60 @@ describe("getRfpReviewDetail (review-page data + actionable flag)", () => {
     dealNumber: "TR-1",
     projectNumber: "P-9",
     rfpApprovalStatus: "declined",
-    rfpApprovalRequestId: 5,
+    rfpApprovalRequestId: 77,
     requestedAt: null,
     requestedById: "u1",
     requestedByName: "Rep One",
     requestedByEmail: "rep@x.com",
-    declinedReason: "Margins too thin",
+    declinedReason: "thin",
     declinedAt: null,
     reviewedAt: null,
     reviewedById: null,
     reviewedByName: null,
     reviewDecision: null,
     reviewNote: null,
+    overrideState: null,
+    overrideError: null,
   };
 
-  it("maps the joined requester fields and marks a freshly-declined, unreviewed RFP actionable", async () => {
+  it("a fresh declined RFP is actionable with no override state", async () => {
     const detail = await getRfpReviewDetail(makeReadDb(baseRow), "deal-1");
-    expect(detail).toMatchObject({
-      dealId: "deal-1",
-      requestedByName: "Rep One",
-      requestedByEmail: "rep@x.com",
-      declinedReason: "Margins too thin",
-      actionable: true,
-    });
+    expect(detail).toMatchObject({ actionable: true, overrideState: null });
   });
 
-  it("is NOT actionable once the denial has been re-confirmed (reviewed)", async () => {
+  it("an in-flight override ('approving') is NOT actionable and surfaces the state", async () => {
     const detail = await getRfpReviewDetail(
-      makeReadDb({ ...baseRow, reviewedAt: "2026-06-04T00:00:00.000Z", reviewDecision: "denial_reconfirmed", reviewedByName: "Takashi" }),
+      makeReadDb({ ...baseRow, reviewedAt: "2026-06-04T00:00:00Z", reviewDecision: "override_approved", overrideState: "approving" }),
       "deal-1"
     );
     expect(detail?.actionable).toBe(false);
-    expect(detail?.reviewDecision).toBe("denial_reconfirmed");
+    expect(detail?.overrideState).toBe("approving");
   });
 
-  it("is NOT actionable when the RFP is no longer declined (e.g. re-submitted)", async () => {
-    const detail = await getRfpReviewDetail(makeReadDb({ ...baseRow, rfpApprovalStatus: "pending_outbox" }), "deal-1");
+  it("a failed override is actionable again (Retry) and surfaces the error", async () => {
+    const detail = await getRfpReviewDetail(
+      makeReadDb({ ...baseRow, reviewedAt: "2026-06-04T00:00:00Z", reviewDecision: "override_approved", overrideState: "failed", overrideError: "Procore form timed out" }),
+      "deal-1"
+    );
+    expect(detail?.actionable).toBe(true);
+    expect(detail?.overrideState).toBe("failed");
+    expect(detail?.overrideError).toBe("Procore form timed out");
+  });
+
+  it("a re-confirmed denial is terminal (not actionable)", async () => {
+    const detail = await getRfpReviewDetail(
+      makeReadDb({ ...baseRow, reviewedAt: "2026-06-04T00:00:00Z", reviewDecision: "denial_reconfirmed" }),
+      "deal-1"
+    );
     expect(detail?.actionable).toBe(false);
   });
 
-  it("returns null when the deal is not found", async () => {
+  it("an approved deal is not actionable", async () => {
+    const detail = await getRfpReviewDetail(makeReadDb({ ...baseRow, rfpApprovalStatus: "approved" }), "deal-1");
+    expect(detail?.actionable).toBe(false);
+  });
+
+  it("returns null when the deal is missing", async () => {
     expect(await getRfpReviewDetail(makeReadDb(null), "missing")).toBeNull();
   });
 });

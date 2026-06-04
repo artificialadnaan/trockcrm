@@ -194,6 +194,10 @@ export const deals = pgTable(
     rfpOverrideReviewedBy: uuid("rfp_override_reviewed_by"),
     rfpOverrideDecision: text("rfp_override_decision"),
     rfpOverrideNote: text("rfp_override_note"),
+    // Override-approval delivery state (migration 0152): NULL | 'approving' (SyncHub Playwright creating the
+    // Bid Board project) | 'failed' (creation failed, retryable). See rfp-override-service.ts.
+    rfpOverrideState: text("rfp_override_state"),
+    rfpOverrideError: text("rfp_override_error"),
     rfpConflictReason: text("rfp_conflict_reason"),
     rfpConflictWith: jsonb("rfp_conflict_with"),
     rfpLastAttemptError: text("rfp_last_attempt_error"),

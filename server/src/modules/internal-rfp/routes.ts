@@ -86,6 +86,9 @@ async function findDeal(sourceDealId: string) {
               d.rfp_approval_status,
               d.rfp_declined_reason,
               d.rfp_declined_at,
+              d.rfp_override_state,
+              d.rfp_override_error,
+              d.rfp_override_decision,
               d.bid_board_linked_at,
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
@@ -639,15 +642,13 @@ internalRfpRoutes.post(
       }
 
       const sourceDealId = asStringOrNull(payload.sourceDealId);
-      const bidboardProjectId = asStringOrNull(payload.bidboardProjectId);
-      const procoreCompanyId = asStringOrNull(payload.procoreCompanyId);
-      if (
-        !sourceDealId ||
-        !bidboardProjectId ||
-        !/^\d+$/.test(bidboardProjectId) ||
-        !procoreCompanyId ||
-        typeof payload.rfpApprovalRequestId !== "number"
-      ) {
+      // Absent `status` defaults to 'created' for backward-compatibility with pre-override callbacks.
+      const callbackStatus = asStringOrNull(payload.status) ?? "created";
+      if (callbackStatus !== "created" && callbackStatus !== "failed") {
+        res.status(422).json({ success: false, error: "invalid_payload" });
+        return;
+      }
+      if (!sourceDealId || typeof payload.rfpApprovalRequestId !== "number") {
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
       }
@@ -658,7 +659,8 @@ internalRfpRoutes.post(
         return;
       }
 
-      const existingBidId = found.deal.procore_bid_id == null ? null : String(found.deal.procore_bid_id);
+      // Stale-callback guard (both statuses): the callback must reference the deal's current RFP cycle. The
+      // callback is at-least-once, so a duplicate (same request id, same resulting state) is a safe no-op below.
       const currentRequestId = Number(found.deal.rfp_approval_request_id);
       if (!Number.isFinite(currentRequestId) || payload.rfpApprovalRequestId !== currentRequestId) {
         console.warn(
@@ -668,6 +670,88 @@ internalRfpRoutes.post(
         return;
       }
 
+      // Failure callback: the Playwright Bid Board creation failed. Mark the override retryable and leave the
+      // deal declined. The declined-only + value-distinct guards make it idempotent and order-safe — a stale
+      // 'failed' arriving after a 'created' finds an already-approved deal and is a no-op.
+      if (callbackStatus === "failed") {
+        // Cap the free-text reason so an oversized SyncHub error can't bloat the column / audit log.
+        const overrideError = (asStringOrNull(payload.error) ?? "Bid Board project creation failed").slice(0, 2000);
+        // The callback's createdAt is required for the freshness guard below (it's compared against the current
+        // attempt's start, rfp_override_reviewed_at). Reject a missing/unparseable timestamp rather than defaulting
+        // to NOW() — a NOW() default would always look "fresh" and let a stale failed clobber a fresh retry.
+        const callbackCreatedAt = asDateOrNull(payload.createdAt);
+        if (!callbackCreatedAt) {
+          res.status(422).json({ success: false, error: "invalid_payload" });
+          return;
+        }
+        let failedApplied = false;
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          const failedUpdate = await client.query(
+            `UPDATE ${quoteIdent(found.schemaName)}.deals
+                SET rfp_override_state = 'failed',
+                    rfp_override_error = $1,
+                    updated_at = NOW()
+              WHERE id = $2
+                AND rfp_approval_status = 'declined'
+                AND rfp_approval_request_id = $3
+                -- never resurrect 'failed' onto a deal the reviewers have terminally re-confirmed (a late
+                -- at-least-once retry of an old failed callback must not regress the review state)
+                AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+                -- freshness: ignore a stale failed callback from a PRIOR attempt (same request id) so a
+                -- duplicate of the old failure can't flip a fresh retry (a newer 'approving') back to failed.
+                AND COALESCE($4::timestamptz, NOW()) >= rfp_override_reviewed_at
+                AND (rfp_override_state IS DISTINCT FROM 'failed' OR rfp_override_error IS DISTINCT FROM $1)`,
+            [overrideError, sourceDealId, currentRequestId, callbackCreatedAt]
+          );
+          failedApplied = (failedUpdate.rowCount ?? 0) > 0;
+          if (failedApplied) {
+            console.warn(`[RFP callback] override approval FAILED for deal ${sourceDealId}: ${overrideError}`);
+            await logActivityWithPgClient({
+              client,
+              schemaName: found.schemaName,
+              actor: buildAuditActorFromSystem({ systemProcess: INTERNAL_RFP_RECEIVER }),
+              action: "update",
+              entity: {
+                tableName: "deals",
+                entityType: "deal",
+                recordId: sourceDealId,
+                nameSnapshot: String(found.deal.name ?? "Deal"),
+                secondaryIdSnapshot: (found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
+              },
+              fieldChanges: {
+                rfpOverrideState: { from: found.deal.rfp_override_state ?? null, to: "failed" },
+                rfpOverrideError: { from: found.deal.rfp_override_error ?? null, to: overrideError },
+              },
+              metadata: { rfpApprovalRequestId: currentRequestId },
+            });
+          }
+          await client.query("COMMIT");
+        } catch (err) {
+          await client.query("ROLLBACK").catch(() => {});
+          throw err;
+        } finally {
+          client.release();
+        }
+        res.json({ success: true, status: "failed", dealId: sourceDealId, applied: failedApplied });
+        return;
+      }
+
+      // Success callback ('created'): validate the project linkage fields, then link + advance to estimating.
+      const bidboardProjectId = asStringOrNull(payload.bidboardProjectId);
+      const procoreCompanyId = asStringOrNull(payload.procoreCompanyId);
+      if (!bidboardProjectId || !/^\d+$/.test(bidboardProjectId) || !procoreCompanyId) {
+        res.status(422).json({ success: false, error: "invalid_payload" });
+        return;
+      }
+      // Freshness for the OVERRIDE flow only: if an override attempt is in flight, ignore a stale 'created' from
+      // a prior attempt (createdAt older than the current attempt's rfp_override_reviewed_at) so it can't link the
+      // old attempt's project / clear the fresh 'approving' state. The original (non-override) RFP-approval flow has
+      // rfp_override_reviewed_at IS NULL, so this never gates it.
+      const createdCallbackAt = asDateOrNull(payload.createdAt);
+
+      const existingBidId = found.deal.procore_bid_id == null ? null : String(found.deal.procore_bid_id);
       if (existingBidId && existingBidId !== bidboardProjectId) {
         console.warn(
           `[RFP callback] Deal ${sourceDealId} already had procore_bid_id=${existingBidId}; updating to ${bidboardProjectId}`
@@ -712,17 +796,25 @@ internalRfpRoutes.post(
                   is_bid_board_owned = true,
                   rfp_approval_status = 'approved',
                   bid_board_linked_at = NOW(),
+                  rfp_override_state = NULL,
+                  rfp_override_error = NULL,
                   updated_at = NOW()
             WHERE id = $3
+              -- a re-confirmed denial is terminal; never let a (delayed) success callback override it
+              AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+              -- override-flow freshness: a stale 'created' from a prior attempt can't link/approve a fresh retry
+              AND (rfp_override_reviewed_at IS NULL OR COALESCE($4::timestamptz, NOW()) >= rfp_override_reviewed_at)
               AND (
                 procore_bid_id IS DISTINCT FROM $1::bigint OR
                 procore_company_id IS DISTINCT FROM $2 OR
                 is_bid_board_owned IS DISTINCT FROM true OR
                 rfp_approval_status IS DISTINCT FROM 'approved' OR
-                bid_board_linked_at IS NULL
+                bid_board_linked_at IS NULL OR
+                rfp_override_state IS NOT NULL OR
+                rfp_override_error IS NOT NULL
               )
             RETURNING id, name, deal_number, project_number, bid_board_linked_at`,
-          [bidboardProjectId, procoreCompanyId, sourceDealId]
+          [bidboardProjectId, procoreCompanyId, sourceDealId, createdCallbackAt]
         );
         if ((linkageUpdate.rowCount ?? 0) > 0) {
           const linkedDeal = linkageUpdate.rows[0] ?? found.deal;
@@ -769,6 +861,10 @@ internalRfpRoutes.post(
                     updated_at = NOW()
               WHERE id = $6
                 AND stage_id = $7::uuid
+                -- same guards as the linkage update: a re-confirmed denial (or a stale prior-attempt 'created')
+                -- must not advance the stage
+                AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+                AND (rfp_override_reviewed_at IS NULL OR COALESCE($8::timestamptz, NOW()) >= rfp_override_reviewed_at)
               RETURNING id`,
             [
               targetStage.id,
@@ -778,6 +874,7 @@ internalRfpRoutes.post(
               stageEntryHoldState.onHoldAccumulatedSecondsAtStageEntry,
               sourceDealId,
               found.deal.stage_id,
+              createdCallbackAt,
             ]
           );
 

@@ -53,7 +53,8 @@ import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
 import {
   getRfpReviewDetail,
   reconfirmRfpDecline,
-  resubmitDeclinedRfp,
+  requestOverrideApproval,
+  type RfpOverrideApprovalResult,
 } from "./rfp-override-service.js";
 import {
   getPunchList,
@@ -1370,6 +1371,37 @@ function normalizeRfpOverrideNote(value: unknown): string | null {
   return trimmed.slice(0, 2000);
 }
 
+// Map an override-approval failure to an AppError. Thrown by the route so the tenant transaction rolls back the
+// 'approving' write — leaving the deal declined + retryable — and surfaces a clear reason to the reviewer.
+function mapOverrideApprovalFailure(result: Extract<RfpOverrideApprovalResult, { ok: false }>): AppError {
+  switch (result.reason) {
+    case "not_actionable":
+      return new AppError(
+        409,
+        "This RFP is no longer awaiting review (it was already approved, is being approved, or was re-confirmed).",
+        "RFP_OVERRIDE_NOT_ACTIONABLE"
+      );
+    case "missing_request_id":
+      return new AppError(
+        409,
+        "No SyncHub RFP request is linked to this deal, so it can't be override-approved.",
+        "RFP_OVERRIDE_NO_REQUEST"
+      );
+    case "synchub_rejected":
+      return new AppError(
+        result.syncHubStatus === 404 ? 409 : result.syncHubStatus === 409 ? 409 : 502,
+        `SyncHub could not approve this RFP: ${result.message}. The deal's state may have changed (e.g. no longer in Opportunity, or already linked).`,
+        "RFP_OVERRIDE_SYNCHUB_REJECTED"
+      );
+    case "synchub_unavailable":
+      return new AppError(
+        502,
+        "Couldn't reach SyncHub to start the Bid Board project. Please retry.",
+        "RFP_OVERRIDE_SYNCHUB_UNAVAILABLE"
+      );
+  }
+}
+
 // --- RFP override second-look review (gated to the designated reviewers: Takashi + Adam) ---
 // These three routes are reached from the "Review & Decide" link in the RFP-decline email. requireRfpReviewer
 // restricts them to the RFP_REJECTION_EMAIL_RECIPIENTS allowlist; a regular admin/director gets 403.
@@ -1379,38 +1411,36 @@ router.get("/:id/rfp-review", requireRfpReviewer, async (req, res, next) => {
   try {
     const detail = await getRfpReviewDetail(req.tenantDb!, req.params.id as string);
     if (!detail) throw new AppError(404, "Deal not found");
+    await req.commitTransaction!();
     res.json({ review: detail });
   } catch (err) {
     next(err);
   }
 });
 
-// POST /api/deals/:id/rfp-override/approve — override the no-go: re-submit the RFP to SyncHub.
+// POST /api/deals/:id/rfp-override/approve — override the no-go: ask SyncHub to authoritatively approve the
+// declined RFP, which creates the Bid Board project (Playwright) and calls back bid-board-created. The deal is
+// parked in rfp_override_state='approving' until that callback lands.
 router.post("/:id/rfp-override/approve", requireRfpReviewer, async (req, res, next) => {
   try {
-    // Approving re-submits to SyncHub, so it is gated on the same flag as the initial trigger: if the RFP
-    // delivery pipeline is disabled there is nothing to re-submit into.
+    // Gated on the same flag as the initial RFP trigger: if the RFP pipeline is disabled there is no SyncHub
+    // integration to approve through.
     if (!isOpportunityRfpEventEnabled()) {
       throw new AppError(503, "Opportunity RFP delivery is disabled.", "RFP_EVENT_DISABLED");
     }
-    const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
-    const result = await resubmitDeclinedRfp({
+    const result = await requestOverrideApproval({
       tenantDb: req.tenantDb!,
-      officeId,
       dealId: req.params.id as string,
       actor: { userId: req.user!.id, name: req.user!.displayName, role: req.user!.role },
+      approverEmail: req.user!.email, // named accountability — the reviewer's real email is the SyncHub approver
       note: normalizeRfpOverrideNote(req.body?.note),
     });
     if (!result.ok) {
-      // Nothing was written (the guarded UPDATE matched 0 rows). Throw so the tenant transaction rolls back.
-      throw new AppError(
-        409,
-        "This RFP is no longer awaiting review (it was already approved, re-submitted, or re-confirmed).",
-        "RFP_OVERRIDE_NOT_ACTIONABLE"
-      );
+      // Nothing should persist on failure — throw so the tenant transaction rolls back the 'approving' write.
+      throw mapOverrideApprovalFailure(result);
     }
     await req.commitTransaction!();
-    res.json({ success: true, status: result.status, jobId: result.jobId, eventId: result.eventId });
+    res.json({ success: true, status: result.status, requestId: result.requestId });
   } catch (err) {
     next(err);
   }
