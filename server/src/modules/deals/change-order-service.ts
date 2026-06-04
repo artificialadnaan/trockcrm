@@ -76,6 +76,9 @@ export async function assertDealEligibleForChangeOrder(
   return { id: row.id };
 }
 
+// The deal_change_orders.amount column is NUMERIC(14,2): max 12 integer digits + 2 decimals.
+const MAX_CHANGE_ORDER_AMOUNT = 999999999999.99;
+
 /** Validate + normalize a change-order amount to a positive 2-decimal numeric string. */
 export function normalizeChangeOrderAmount(input: unknown): string {
   const value =
@@ -94,6 +97,14 @@ export function normalizeChangeOrderAmount(input: unknown): string {
     throw new AppError(
       400,
       "Change order amount must be at least 0.01.",
+      "CHANGE_ORDER_AMOUNT_INVALID"
+    );
+  }
+  // Reject values past the NUMERIC(14,2) ceiling as a clean 400 rather than a DB numeric-overflow 500.
+  if (Number(normalized) > MAX_CHANGE_ORDER_AMOUNT) {
+    throw new AppError(
+      400,
+      "Change order amount is too large.",
       "CHANGE_ORDER_AMOUNT_INVALID"
     );
   }

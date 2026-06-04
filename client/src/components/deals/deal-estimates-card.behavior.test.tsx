@@ -175,7 +175,7 @@ describe("DealEstimatesCard change orders", () => {
 
     expect(mocks.addDealChangeOrder).toHaveBeenCalledWith("deal-1", {
       signedDate: "2026-03-15",
-      amount: "1500",
+      amount: "1500.00",
       description: null,
     });
     expect(mocks.onChanged).toHaveBeenCalled();
@@ -192,7 +192,24 @@ describe("DealEstimatesCard change orders", () => {
       container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
     expect(mocks.addDealChangeOrder).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Amount must be a positive number");
+    expect(container.textContent).toContain("Amount must be at least 0.01");
+  });
+
+  it("accepts a sub-cent amount that rounds up to a cent (0.005 -> 0.01), matching the server", async () => {
+    const container = render({ deal: baseDeal, changeOrders: [], changeOrderTotal: "0", canManage: true, onChanged: mocks.onChanged });
+    clickButtonByText(container, "Add Change Order");
+    act(() => {
+      setValue(container.querySelector<HTMLInputElement>("#co-signed-date")!, "2026-03-15");
+      setValue(container.querySelector<HTMLInputElement>("#co-amount")!, "0.005");
+    });
+    await act(async () => {
+      container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(mocks.addDealChangeOrder).toHaveBeenCalledWith("deal-1", {
+      signedDate: "2026-03-15",
+      amount: "0.01",
+      description: null,
+    });
   });
 
   it("edits an existing change order through the dialog (prefilled) and PATCHes it", async () => {
@@ -221,7 +238,7 @@ describe("DealEstimatesCard change orders", () => {
 
     expect(mocks.updateDealChangeOrder).toHaveBeenCalledWith("deal-1", "co-1", {
       signedDate: "2026-05-01",
-      amount: "2500",
+      amount: "2500.00",
       description: "punch list",
     });
     expect(mocks.onChanged).toHaveBeenCalled();

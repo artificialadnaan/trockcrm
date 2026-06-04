@@ -204,18 +204,27 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, onSaved }: Ch
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const numericAmount = parseFloat(amount);
+    // Validate on rounded cents to match the server (which rounds to 2dp): 0.005 -> 0.01 is allowed,
+    // 0.004 -> 0.00 is rejected. Send the rounded value so client and stored amount agree.
+    const roundedCents = Number.isFinite(numericAmount)
+      ? Math.round((numericAmount + Number.EPSILON) * 100)
+      : NaN;
     if (!signedDate) {
       setError("Signed date is required");
       return;
     }
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-      setError("Amount must be a positive number");
+    if (!Number.isFinite(roundedCents) || roundedCents <= 0) {
+      setError("Amount must be at least 0.01");
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      const payload = { signedDate, amount, description: description.trim() || null };
+      const payload = {
+        signedDate,
+        amount: (roundedCents / 100).toFixed(2),
+        description: description.trim() || null,
+      };
       if (existing) {
         await updateDealChangeOrder(dealId, existing.id, payload);
         toast.success("Change order updated");
@@ -256,8 +265,8 @@ function ChangeOrderDialog({ dealId, open, onOpenChange, existing, onSaved }: Ch
             <Input
               id="co-amount"
               type="number"
-              min="0.01"
-              step="0.01"
+              min="0"
+              step="any"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
             />

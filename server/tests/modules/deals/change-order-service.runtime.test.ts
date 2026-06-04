@@ -92,6 +92,12 @@ describe("normalizeChangeOrderAmount", () => {
     // 0.005 rounds UP to a cent and is allowed.
     expect(normalizeChangeOrderAmount(0.005)).toBe("0.01");
   });
+  it("rejects an amount past the NUMERIC(14,2) ceiling (would overflow the column as a 500)", () => {
+    expect(() => normalizeChangeOrderAmount(10000000000000)).toThrow();
+    expect(() => normalizeChangeOrderAmount("10000000000000.00")).toThrow();
+    // The exact ceiling is allowed.
+    expect(normalizeChangeOrderAmount("999999999999.99")).toBe("999999999999.99");
+  });
 });
 
 describe("assertDealEligibleForChangeOrder", () => {
@@ -153,6 +159,10 @@ describe("addDealChangeOrder", () => {
     // Sub-cent: must surface a clean 400, NOT a DB CHECK 500, and persist nothing.
     await expect(
       addDealChangeOrder(tdb, { dealId: DEAL_WON, signedDate: "2026-03-15", amount: "0.004", createdBy: USER }),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    // Over NUMERIC(14,2) ceiling: clean 400, NOT a DB numeric-overflow 500.
+    await expect(
+      addDealChangeOrder(tdb, { dealId: DEAL_WON, signedDate: "2026-03-15", amount: "10000000000000", createdBy: USER }),
     ).rejects.toMatchObject({ statusCode: 400 });
     expect((await listDealChangeOrders(tdb, DEAL_WON)).length).toBe(0);
   });
