@@ -2011,14 +2011,16 @@ export async function getClosedWonSummary(
   const repResult = await tenantDb.execute(sql`
       SELECT
         d.assigned_rep_id AS rep_id,
-        u.display_name AS rep_name,
+        COALESCE(u.display_name, 'Unassigned') AS rep_name,
         COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
         COALESCE(SUM(
           ${aliasedEffectiveWonDealValueSql("d")}
         ), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      JOIN users u ON u.id = d.assigned_rep_id
+      -- LEFT JOIN so rep-less won deals land in an 'Unassigned' bucket (symmetric with byProjectType's
+      -- 'Unspecified'), keeping totalWonValue == Σ byRep even with unassigned parents + their COs.
+      LEFT JOIN users u ON u.id = d.assigned_rep_id
       WHERE COALESCE(d.is_test_data, false) = false
         AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
         AND ${aliasedHasUsableWonDateSql("d")}
@@ -2049,13 +2051,14 @@ export async function getClosedWonSummary(
 
   // Part 2: change-order value (by signed_date) folded into each Won total below — disjoint from the
   // won_closed_date base. Each CO query mirrors its base query's join shape so the CO term reconciles the
-  // same way (the total includes null-rep COs; byRep INNER-joins users like its base; byType LEFT-joins ptc).
+  // same way: the ungrouped total includes rep-less and type-less COs; byRep and byType each LEFT-join so
+  // those COs land in an 'Unassigned'/'Unspecified' bucket — keeping totalWonValue == Σ byRep == Σ byType.
   const coTotalResult = await tenantDb.execute(buildChangeOrderRevenueSql({ from, to }));
   const coRepResult = await tenantDb.execute(
     buildChangeOrderRevenueSql({
-      selectExpr: sql`d.assigned_rep_id AS rep_id, u.display_name AS rep_name`,
+      selectExpr: sql`d.assigned_rep_id AS rep_id, COALESCE(u.display_name, 'Unassigned') AS rep_name`,
       groupExpr: sql`d.assigned_rep_id, u.display_name`,
-      extraJoins: sql`JOIN users u ON u.id = d.assigned_rep_id`,
+      extraJoins: sql`LEFT JOIN users u ON u.id = d.assigned_rep_id`,
       from,
       to,
     })
@@ -2080,9 +2083,9 @@ export async function getClosedWonSummary(
   const t = totalsRows[0] ?? {};
 
   // byRep: fold COs into the matching rep's value; append CO-only reps (COs signed in-period on a rep's
-  // earlier-won deal) so a rep whose only in-period revenue is a change order still appears. (Rep-less
-  // deals' value lands in totalWonValue only, never byRep — identical to the base repResult, which also
-  // INNER-joins users; the CO term inherits that behavior rather than introducing a new divergence.)
+  // earlier-won deal) so a rep whose only in-period revenue is a change order still appears. Both base and
+  // CO rep queries LEFT-join users into an 'Unassigned' bucket (keyed on a null rep_id), so rep-less wins
+  // and their COs are represented here too → Σ byRep == totalWonValue holds even with unassigned parents.
   const byRep = new Map<string, { repId: any; repName: any; dealCount: number; totalValue: number }>();
   for (const r of repRows)
     byRep.set(String(r.rep_id ?? ""), {

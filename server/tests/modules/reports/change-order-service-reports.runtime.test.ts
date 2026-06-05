@@ -19,7 +19,7 @@ const REP_B = U("a02");
 const PT_R = U("70001"); // Roofing
 const PT_P = U("70002"); // Plumbing
 const PT_G = U("70003"); // Glazing — isolated 2040 window for the null-won-date edge
-const D = { a: U("d00a"), b: U("d00b"), c: U("d00c"), nullwon: U("d00d") };
+const D = { a: U("d00a"), b: U("d00b"), c: U("d00c"), nullwon: U("d00d"), unassigned: U("d00e") };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -56,13 +56,16 @@ beforeAll(async () => {
       ('${D.a}','${REP_A}','${ST.won}','${PT_R}', false, '2026-06-01','2026-05-01T00:00:00Z', 100000),
       ('${D.b}','${REP_B}','${ST.won}','${PT_P}', false, '2025-06-01','2025-05-01T00:00:00Z', 50000),
       ('${D.c}','${REP_A}','${ST.won}','${PT_R}', true,  '2026-04-01','2026-03-01T00:00:00Z', 999999),
-      ('${D.nullwon}','${REP_A}','${ST.won}','${PT_G}', false, NULL, '2040-04-01T00:00:00Z', 60000);
+      ('${D.nullwon}','${REP_A}','${ST.won}','${PT_G}', false, NULL, '2040-04-01T00:00:00Z', 60000),
+      -- UNASSIGNED: rep-less WON deal (2045) → base + CO must reconcile into an 'Unassigned' byRep bucket.
+      ('${D.unassigned}', NULL, '${ST.won}','${PT_R}', false, '2045-06-01','2045-05-01T00:00:00Z', 20000);
     INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES
       ('${U("a0c1")}','${D.a}','2026-07-01', 10000),
       ('${U("a0c2")}','${D.a}','2025-01-01', 5000),
       ('${U("b0c1")}','${D.b}','2026-03-01', 8000),
       ('${U("c0c1")}','${D.c}','2026-05-01', 88888),
-      ('${U("d0c1")}','${D.nullwon}','2040-05-01', 4000);
+      ('${U("d0c1")}','${D.nullwon}','2040-05-01', 4000),
+      ('${U("e0c1")}','${D.unassigned}','2045-07-01', 3000);
   `);
   tdb = drizzle(pg);
 });
@@ -86,6 +89,17 @@ describe("getClosedWonSummary folds change orders by signed_date (disjoint, reco
     // Breakdowns reconcile to the total (complete disjoint sum).
     expect(r.byRep.reduce((s, x) => s + x.totalValue, 0)).toBeCloseTo(r.totalWonValue, 2);
     expect(r.byProjectType.reduce((s, x) => s + x.totalValue, 0)).toBeCloseTo(r.totalWonValue, 2);
+  });
+
+  it("rep-less won deals + their COs reconcile into an 'Unassigned' byRep bucket (Σ byRep == total)", async () => {
+    const s = await getClosedWonSummary(tdb, { from: "2045-01-01", to: "2045-12-31" });
+    // The only 2045 activity is the rep-less deal: base 20000 + CO 3000 = 23000.
+    expect(s.totalWonValue).toBeCloseTo(23000, 2);
+    const unassigned = s.byRep.find((x) => x.repName === "Unassigned");
+    expect(unassigned?.totalValue).toBeCloseTo(23000, 2);
+    // The invariant CodeRabbit flagged: the breakdown must still sum to the total with an unassigned parent.
+    expect(s.byRep.reduce((acc, x) => acc + x.totalValue, 0)).toBeCloseTo(s.totalWonValue, 2);
+    expect(s.byProjectType.reduce((acc, x) => acc + x.totalValue, 0)).toBeCloseTo(s.totalWonValue, 2);
   });
 
   it("disjoint partition: 2025 + 2026 == combined window total, each dollar once", async () => {
