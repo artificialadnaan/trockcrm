@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { dealChangeOrders, deals, pipelineStageConfig } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -6,6 +6,7 @@ import { isGenuineWonDealStageSlug, type WorkflowRoute } from "@trock-crm/shared
 import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
+import { calculateCommissionForDeal } from "../commissions/service.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -196,7 +197,7 @@ export interface CreateChangeOrderChildInput {
 export async function createChangeOrderChildDeal(
   tenantDb: TenantDb,
   input: CreateChangeOrderChildInput
-): Promise<{ id: string; dealNumber: string; name: string }> {
+): Promise<ChangeOrderRecord> {
   const parent = await loadParentForChildCreate(tenantDb, input.parentDealId);
   const amount = normalizeChangeOrderAmount(input.amount);
   const signedDate = normalizeSignedDate(input.signedDate);
@@ -246,13 +247,14 @@ export async function createChangeOrderChildDeal(
       ${parent.regionId}, 'change_order', ${description}, ${input.createdBy ?? null},
       ${parent.workflowRoute ?? "normal"}, true, false, false, ${createdAt}, ${createdAt}, ${createdAt}
     )
-    RETURNING id, deal_number, name
+    RETURNING id, deal_number, created_at, updated_at
   `);
   const childRow = (
     (Array.isArray(inserted) ? inserted : (inserted as { rows?: unknown[] }).rows ?? []) as Array<{
       id: string;
       deal_number: string;
-      name: string;
+      created_at: Date | string;
+      updated_at: Date | string;
     }>
   )[0];
 
@@ -272,7 +274,19 @@ export async function createChangeOrderChildDeal(
     },
   });
 
-  return { id: childRow.id, dealNumber: childRow.deal_number, name: childRow.name };
+  // Return the API ChangeOrderRecord shape (dealId = the PARENT), so the routes + #642 Estimates card
+  // keep working unchanged while the value lives in the child deal.
+  return {
+    id: childRow.id,
+    dealId: parent.id,
+    signedDate,
+    amount,
+    description,
+    createdBy: input.createdBy ?? null,
+    updatedBy: input.createdBy ?? null,
+    createdAt: childRow.created_at,
+    updatedAt: childRow.updated_at,
+  };
 }
 
 // Positive money string: 1-12 integer digits + up to 2 decimals. This bounds the value to the
@@ -341,17 +355,66 @@ function normalizeDescription(input: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+// Columns drizzle selects for a CO child deal, mapped to the ChangeOrderRecord API shape.
+const childChangeOrderColumns = {
+  id: deals.id,
+  dealId: deals.parentDealId,
+  signedDate: deals.wonClosedDate,
+  amount: deals.awardedAmount,
+  description: deals.description,
+  createdBy: deals.createdByUserId,
+  createdAt: deals.createdAt,
+  updatedAt: deals.updatedAt,
+} as const;
+
+interface ChildCoRow {
+  id: string;
+  dealId: string | null;
+  signedDate: string | null;
+  amount: string | null;
+  description: string | null;
+  createdBy: string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+function childRowToChangeOrderRecord(r: ChildCoRow): ChangeOrderRecord {
+  return {
+    id: r.id,
+    dealId: r.dealId ?? "",
+    signedDate: r.signedDate ?? "",
+    amount: r.amount ?? "0",
+    description: r.description,
+    createdBy: r.createdBy,
+    updatedBy: null, // CO children don't track a separate updatedBy; edits are admin-only.
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  };
+}
+
+// A change order's value lives in its child deal (new model). During the migration window, some COs may
+// still be legacy deal_change_orders rows (until PR4 converts them). The reads below return the UNION —
+// each CO appears EXACTLY ONCE (a CO is a child OR a legacy row, never both; PR4 deletes the row as it
+// creates the child), so totals never double-count and never vanish.
 export async function listDealChangeOrders(
   tenantDb: TenantDb,
   dealId: string
 ): Promise<ChangeOrderRecord[]> {
-  return tenantDb
+  const childRows = (await tenantDb
+    .select(childChangeOrderColumns)
+    .from(deals)
+    .where(and(eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true)))) as ChildCoRow[];
+  const legacyRows = (await tenantDb
     .select()
     .from(dealChangeOrders)
-    .where(eq(dealChangeOrders.dealId, dealId))
-    .orderBy(desc(dealChangeOrders.signedDate), desc(dealChangeOrders.createdAt)) as Promise<
-    ChangeOrderRecord[]
-  >;
+    .where(eq(dealChangeOrders.dealId, dealId))) as ChangeOrderRecord[];
+  const records = [...childRows.map(childRowToChangeOrderRecord), ...legacyRows];
+  records.sort(
+    (a, b) =>
+      String(b.signedDate).localeCompare(String(a.signedDate)) ||
+      new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+  return records;
 }
 
 export async function getDealChangeOrderById(
@@ -359,90 +422,112 @@ export async function getDealChangeOrderById(
   id: string,
   dealId: string
 ): Promise<ChangeOrderRecord | null> {
-  const [row] = await tenantDb
+  const [child] = (await tenantDb
+    .select(childChangeOrderColumns)
+    .from(deals)
+    .where(and(eq(deals.id, id), eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true)))
+    .limit(1)) as ChildCoRow[];
+  if (child) return childRowToChangeOrderRecord(child);
+  const [legacy] = await tenantDb
     .select()
     .from(dealChangeOrders)
     .where(and(eq(dealChangeOrders.id, id), eq(dealChangeOrders.dealId, dealId)))
     .limit(1);
-  return (row as ChangeOrderRecord) ?? null;
+  return (legacy as ChangeOrderRecord) ?? null;
 }
 
-/** Sum of a deal's CRM change-order amounts, computed in SQL for cent-exact precision. */
+/** Sum of a deal's change-order value (child deals + un-migrated legacy rows), cent-exact, counted once. */
 export async function sumDealChangeOrders(tenantDb: TenantDb, dealId: string): Promise<string> {
-  // Cast to a WIDE numeric, not numeric(14,2): each row is bounded to the per-row ceiling, but a deal
-  // with many change orders can have a SUM that exceeds it — recasting to numeric(14,2) here would
-  // overflow the read path (deal load / list) even though every row is individually valid.
-  const [row] = await tenantDb
-    .select({
-      total: sql<string>`COALESCE(SUM(${dealChangeOrders.amount}), 0)::numeric(38,2)`,
-    })
-    .from(dealChangeOrders)
-    .where(eq(dealChangeOrders.dealId, dealId));
-  return row?.total ?? "0";
+  // Wide numeric(38,2): each row is bounded to the per-row ceiling, but a multi-CO sum can exceed it.
+  const result = await tenantDb.execute(sql`
+    SELECT (
+      (SELECT COALESCE(SUM(awarded_amount), 0) FROM deals WHERE parent_deal_id = ${dealId} AND is_change_order = true)
+      + (SELECT COALESCE(SUM(amount), 0) FROM deal_change_orders WHERE deal_id = ${dealId})
+    )::numeric(38,2) AS total
+  `);
+  const rows = (Array.isArray(result) ? result : (result as { rows?: Array<{ total?: string }> }).rows ?? []);
+  return rows[0]?.total ?? "0";
 }
 
 export async function addDealChangeOrder(
   tenantDb: TenantDb,
   input: AddChangeOrderInput
 ): Promise<ChangeOrderRecord> {
-  await assertDealEligibleForChangeOrder(tenantDb, input.dealId);
-  const amount = normalizeChangeOrderAmount(input.amount);
-  const signedDate = normalizeSignedDate(input.signedDate);
-  const description = normalizeDescription(input.description);
-
-  const [row] = await tenantDb
-    .insert(dealChangeOrders)
-    .values({
-      dealId: input.dealId,
-      signedDate,
-      amount,
-      description,
-      createdBy: input.createdBy ?? null,
-      updatedBy: input.createdBy ?? null,
-    })
-    .returning();
-  return row as ChangeOrderRecord;
+  const record = await createChangeOrderChildDeal(tenantDb, {
+    parentDealId: input.dealId,
+    signedDate: input.signedDate,
+    amount: input.amount,
+    description: input.description,
+    createdBy: input.createdBy,
+  });
+  // A change order is signed work, so the rep earns commission on it (decision: COs earn commission).
+  // Resilient: a commission-config gap must never block creating the CO child — log and continue.
+  if (input.createdBy) {
+    try {
+      await calculateCommissionForDeal(tenantDb, {
+        dealId: record.id,
+        contractSignedDate: record.signedDate,
+        triggeredByUserId: input.createdBy,
+      });
+    } catch (err) {
+      console.error(`[ChangeOrders] commission calc failed for CO child ${record.id}:`, err);
+    }
+  }
+  return record;
 }
 
 export async function updateDealChangeOrder(
   tenantDb: TenantDb,
   input: UpdateChangeOrderInput
 ): Promise<ChangeOrderRecord> {
-  const updates: Record<string, unknown> = {
+  // Child deal (new model) first.
+  const childUpdates: Record<string, unknown> = { updatedAt: new Date() };
+  if (input.amount !== undefined) childUpdates.awardedAmount = normalizeChangeOrderAmount(input.amount);
+  if (input.signedDate !== undefined) childUpdates.wonClosedDate = normalizeSignedDate(input.signedDate);
+  if (input.description !== undefined) childUpdates.description = normalizeDescription(input.description);
+  const [child] = (await tenantDb
+    .update(deals)
+    .set(childUpdates)
+    .where(and(eq(deals.id, input.id), eq(deals.parentDealId, input.dealId), eq(deals.isChangeOrder, true)))
+    .returning(childChangeOrderColumns)) as ChildCoRow[];
+  if (child) return childRowToChangeOrderRecord(child);
+
+  // Legacy fallback: an un-migrated deal_change_orders row.
+  const legacyUpdates: Record<string, unknown> = {
     updatedAt: new Date(),
     updatedBy: input.updatedBy ?? null,
   };
-  if (input.amount !== undefined) {
-    updates.amount = normalizeChangeOrderAmount(input.amount);
-  }
-  if (input.signedDate !== undefined) {
-    updates.signedDate = normalizeSignedDate(input.signedDate);
-  }
-  if (input.description !== undefined) {
-    updates.description = normalizeDescription(input.description);
-  }
-
-  const [row] = await tenantDb
+  if (input.amount !== undefined) legacyUpdates.amount = normalizeChangeOrderAmount(input.amount);
+  if (input.signedDate !== undefined) legacyUpdates.signedDate = normalizeSignedDate(input.signedDate);
+  if (input.description !== undefined) legacyUpdates.description = normalizeDescription(input.description);
+  const [legacy] = await tenantDb
     .update(dealChangeOrders)
-    .set(updates)
+    .set(legacyUpdates)
     .where(and(eq(dealChangeOrders.id, input.id), eq(dealChangeOrders.dealId, input.dealId)))
     .returning();
-  if (!row) {
+  if (!legacy) {
     throw new AppError(404, "Change order not found");
   }
-  return row as ChangeOrderRecord;
+  return legacy as ChangeOrderRecord;
 }
 
 export async function deleteDealChangeOrder(
   tenantDb: TenantDb,
   input: { id: string; dealId: string }
 ): Promise<ChangeOrderRecord> {
-  const [row] = await tenantDb
+  // Deleting a CO child removes its deal row. Try the child first, then a legacy row.
+  const [child] = (await tenantDb
+    .delete(deals)
+    .where(and(eq(deals.id, input.id), eq(deals.parentDealId, input.dealId), eq(deals.isChangeOrder, true)))
+    .returning(childChangeOrderColumns)) as ChildCoRow[];
+  if (child) return childRowToChangeOrderRecord(child);
+
+  const [legacy] = await tenantDb
     .delete(dealChangeOrders)
     .where(and(eq(dealChangeOrders.id, input.id), eq(dealChangeOrders.dealId, input.dealId)))
     .returning();
-  if (!row) {
+  if (!legacy) {
     throw new AppError(404, "Change order not found");
   }
-  return row as ChangeOrderRecord;
+  return legacy as ChangeOrderRecord;
 }
