@@ -138,18 +138,19 @@ function buildLeadOwnerIdentitySql(filters: Pick<SalesReportFilters, "ownerIds" 
 }
 
 export function terminalOutcomeDateSql() {
-  // Terminal outcome date, split by outcome. The WON (ELSE) arm is migrated to the canonical
-  // app-owned deals.won_closed_date column (the protected 191 / $9,778,045.90 basis) — the old
-  // COALESCE(contract_signed_at, actual_close_date, stage_entered_at, updated_at) tail counted
-  // touched-in-period (updated_at) and reseed-contaminated (actual_close_date) deals as won-in-
-  // period. Because the CASE already separates LOST from WON by slug, this is a clean Won-only
-  // swap: won deals window/bucket by won_closed_date, the win/loss summary's lost count stays on
-  // its own arm (no denominator shift). The LOST arm (actual_close_date / stage_entered_at) is
-  // intentionally LEFT untouched — migrating it to lost_at is a separate Lost-unification pass.
+  // Terminal outcome date, split by outcome, each on its CANONICAL date so the win-rate compares deals
+  // that reached an outcome in the same period:
+  //   - WON arm: deals.won_closed_date (the protected 191 / $9,778,045.90 basis).
+  //   - LOST arm: deals.lost_at (the canonical lost date, set when the deal enters a Lost stage), with a
+  //     COALESCE fallback to the legacy actual_close_date / stage_entered_at ONLY for older lost deals
+  //     whose lost_at was never stamped (so none silently disappear from the denominator). This is the
+  //     Lost-unification pass (PR-E): the old LOST arm windowed on reseed-contaminated actual_close_date
+  //     (and stage_entered_at, not a close date at all), skewing the win-rate denominator vs the
+  //     canonical WON numerator.
   return sql`
     CASE
       WHEN p.slug IN (${sqlStringList(LOST_STAGE_SLUGS)})
-        THEN COALESCE(d.actual_close_date::timestamptz, d.stage_entered_at)
+        THEN COALESCE(d.lost_at, d.actual_close_date::timestamptz, d.stage_entered_at)
       ELSE ${aliasedWonHsClosedWonDateSql("d")}::timestamptz
     END
   `;
