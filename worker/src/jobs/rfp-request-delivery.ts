@@ -70,6 +70,17 @@ async function updateDealPending(
             rfp_conflict_reason = NULL,
             rfp_conflict_with = NULL,
             rfp_last_attempt_error = NULL,
+            -- Start the new RFP cycle with CLEAN override-review state. A re-opened deal carries the prior
+            -- cycle's rfp_override_* fields, and a stale 'denial_reconfirmed' makes reconfirmRfpDecline's guard
+            -- match 0 rows -> it silently SUPPRESSES the new cycle's re-confirm + email (#651); a stale
+            -- 'override_approved' was the #653 risk. The prior cycle's decisions remain in deal_history +
+            -- audit_log, so clearing the LIVE fields loses no history.
+            rfp_override_decision = NULL,
+            rfp_override_reviewed_at = NULL,
+            rfp_override_reviewed_by = NULL,
+            rfp_override_note = NULL,
+            rfp_override_state = NULL,
+            rfp_override_error = NULL,
             updated_at = NOW()
       WHERE id = $3`,
     [body.requestId ?? body.id ?? null, body.token ?? null, dealId]

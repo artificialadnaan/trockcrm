@@ -50,6 +50,25 @@ describe("handleRfpRequestDelivery", () => {
     expect(db.query.mock.calls.at(-1)?.[1]).toEqual([123, "tok", "deal-1"]);
   });
 
+  it("clears the override-cycle fields when a new RFP cycle starts (stale override state can't leak across cycles)", async () => {
+    const db = makeDb();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ requestId: 56, token: "tok" }), { status: 201 }));
+
+    await handleRfpRequestDelivery(makePayload(), "office-1", { db, fetchImpl: fetchImpl as any, secret: "secret" });
+
+    const pendingUpdate = db.query.mock.calls.map((c) => String(c[0])).find((s) => s.includes("rfp_approval_status = 'pending'"));
+    expect(pendingUpdate).toBeDefined();
+    // A re-opened deal must start its new cycle with CLEAN override state. Otherwise a stale 'denial_reconfirmed'
+    // makes reconfirmRfpDecline's guard match 0 rows and suppresses the new cycle's re-confirm email (#651), and a
+    // stale 'override_approved' was the #653 risk. Clear every override-cycle field here.
+    expect(pendingUpdate).toContain("rfp_override_decision = NULL");
+    expect(pendingUpdate).toContain("rfp_override_reviewed_at = NULL");
+    expect(pendingUpdate).toContain("rfp_override_reviewed_by = NULL");
+    expect(pendingUpdate).toContain("rfp_override_note = NULL");
+    expect(pendingUpdate).toContain("rfp_override_state = NULL");
+    expect(pendingUpdate).toContain("rfp_override_error = NULL");
+  });
+
   it("marks the deal conflict on SyncHub 409 and completes successfully", async () => {
     const db = makeDb();
     const conflict = { sourceSystem: "hubspot", sourceDealId: "hs-1" };
