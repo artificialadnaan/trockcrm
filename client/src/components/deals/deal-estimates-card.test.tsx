@@ -4,7 +4,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { DealEstimatesCard } from "./deal-estimates-card";
 import type { Deal, DealChangeOrder } from "@/hooks/use-deals";
 
-function makeDeal(overrides: Partial<Deal> = {}): Deal {
+// DealEstimatesCard reads only these deal fields (via currentContractValue / combinedChangeOrderTotal).
+// The Pick keeps the fixture type-checked against the real Deal shape; the cast is the narrow boundary
+// for the component's `deal: Deal` prop.
+type EstimatesDeal = Pick<
+  Deal,
+  "id" | "name" | "ddEstimate" | "bidEstimate" | "awardedAmount" | "changeOrderTotal"
+>;
+
+function makeDeal(overrides: Partial<EstimatesDeal> = {}): Deal {
   return {
     id: "parent-1",
     name: "Palm Villas",
@@ -13,7 +21,7 @@ function makeDeal(overrides: Partial<Deal> = {}): Deal {
     awardedAmount: "500000",
     changeOrderTotal: null,
     ...overrides,
-  } as Deal;
+  } satisfies EstimatesDeal as Deal;
 }
 
 function makeChangeOrder(overrides: Partial<DealChangeOrder> = {}): DealChangeOrder {
@@ -43,8 +51,9 @@ describe("DealEstimatesCard — a parent's change-order children", () => {
     );
 
     expect((html.match(/data-testid="change-order-row"/g) ?? []).length).toBe(2);
-    expect(html).toContain("Added perimeter gate");
-    expect(html).toContain("2026-05-01");
+    expect(html).toContain("Added perimeter gate"); // first child's description
+    expect(html).toContain("2026-05-01"); // first child's signed date
+    expect(html).toContain("2026-05-10"); // second child's distinct signed date
   });
 
   it("renders no change-order rows when the parent has no change orders", () => {
