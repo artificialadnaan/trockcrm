@@ -176,13 +176,18 @@ function buildActivityScopeSql(filters: PerformanceReportFilters, ownerIds = fil
 // ZONE 'UTC', updated_at) tail counted touched-in-period (updated_at) and reseed-
 // contaminated (actual_close_date) deals as won-in-period.
 //
-// The non-WON (lost/open) branch is INTENTIONALLY left on the legacy window: this
-// predicate also scopes the win-rate DENOMINATOR cohort (won + lost) in the director/
-// rep/office CTEs, and migrating the Lost side to lost_at is a separate Lost-unification
-// pass outside this Won sweep. Keeping it byte-identical means the lost-side denominator
-// is unchanged — only the WON numerator/count/value move to the canonical basis. (At the
-// forecast won-only call site the cohort is already psc.slug IN wonSlugs, so the non-WON
-// branch is unreachable there and the window is purely canonical.)
+// The non-WON (lost/open) branch now LEADS with the canonical deals.lost_at — this is the
+// Tier-2 Lost-unification pass (PR-F), the direct extension of #648 which fixed the identical
+// contaminated denominator in Tier-1 getClosedWonRevenueReport. This predicate also scopes the
+// win-rate DENOMINATOR cohort (won + lost) in the director/rep/office CTEs, so windowing the
+// LOST side on lost_at makes the rate compare deals that reached an outcome in the SAME period
+// on each side's CANONICAL date (won_closed_date vs lost_at). The legacy
+// COALESCE(contract_signed_at, actual_close_date AT TIME ZONE 'UTC', updated_at) tail is kept as a
+// FALLBACK ONLY for older lost deals whose lost_at was never stamped, so none silently disappear
+// from the denominator — but it no longer leads (it counted touched-in-period (updated_at) and
+// reseed-contaminated (actual_close_date) deals as lost-in-period). (At the forecast won-only call
+// site the cohort is already psc.slug IN wonSlugs, so the non-WON branch is unreachable there and
+// the window is purely canonical.)
 export function buildWonDateSql(filters: PerformanceReportFilters) {
   const wonClosed = aliasedWonHsClosedWonDateSql("d");
   const wonSlugList = sqlStringList([...WON_STAGE_SLUGS]);
@@ -197,8 +202,8 @@ export function buildWonDateSql(filters: PerformanceReportFilters) {
       OR
       (
         psc.slug NOT IN (${wonSlugList})
-        AND COALESCE(d.contract_signed_at, (d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) >= ${filters.dateFrom}::date
-        AND COALESCE(d.contract_signed_at, (d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) < (${filters.dateTo}::date + INTERVAL '1 day')
+        AND COALESCE(d.lost_at, d.contract_signed_at, (d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) >= ${filters.dateFrom}::date
+        AND COALESCE(d.lost_at, d.contract_signed_at, (d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at) < (${filters.dateTo}::date + INTERVAL '1 day')
       )
     )
   `;
