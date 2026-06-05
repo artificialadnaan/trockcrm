@@ -84,6 +84,24 @@ describe("PipelineRecordCard", () => {
     expect(html).not.toContain("At Risk");
   });
 
+  it("flags a change-order child deal record with the Change Order badge", () => {
+    expect(render(makeRecord({ isChangeOrder: true }))).toContain('data-change-order="true"');
+  });
+
+  it("does not flag a regular deal record", () => {
+    expect(render(makeRecord())).not.toContain('data-change-order="true"');
+  });
+
+  it("never shows the Change Order badge on a non-deal (lead) record", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <PipelineRecordCard entity="lead" record={makeRecord({ isChangeOrder: true })} />
+      </MemoryRouter>
+    );
+
+    expect(html).not.toContain('data-change-order="true"');
+  });
+
   it("uses the engine effective stage age for the record age label when supplied", () => {
     const html = render(
       makeRecord({

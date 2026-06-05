@@ -40,6 +40,8 @@ import {
 } from "@/components/layout/detail-page-shell";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
+import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
+import { ChangeOrderParentLink } from "@/components/deals/change-order-parent-link";
 import { OwnerLabel } from "@/components/shared/owner-label";
 import { DealEmailTab } from "@/components/email/deal-email-tab";
 import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
@@ -694,6 +696,7 @@ export function DealDetailPage() {
         </span>
       ) : null}
       <AtRiskBadge atRisk={deal.atRisk} />
+      <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} />
     </>
   );
   const headerDisplayNumber = formatDealDisplayNumber(deal);
@@ -705,6 +708,9 @@ export function DealDetailPage() {
       >
         {headerDisplayNumber.label}
       </span>
+      {deal.parentDealId ? (
+        <ChangeOrderParentLink parentDealId={deal.parentDealId} parentLabel={deal.projectNumber} />
+      ) : null}
       {deal.intendedProjectNumber ? (
         <span className="inline-flex items-center gap-1 font-mono text-xs text-slate-500">
           Intended {deal.intendedProjectNumber}

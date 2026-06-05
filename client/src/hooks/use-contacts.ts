@@ -196,6 +196,9 @@ export interface ContactDealAssociation {
     name: string;
     stageId: string;
     isActive: boolean;
+    // CO-child model (BLUE PR1); the association serializes the full deal row, so this rides the wire
+    // once the column lands. Optional/undefined-tolerant until then.
+    isChangeOrder?: boolean | null;
   };
 }
 

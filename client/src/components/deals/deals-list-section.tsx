@@ -38,6 +38,7 @@ import { formatCurrency, parseDisplayDate } from "@/lib/deal-utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
+import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
 import { useFilterState } from "@/components/filters/use-filter-state";
 import { FilterBar, type FilterDimension, type FilterBarOptions, type FilterBarDateControl } from "@/components/filters/filter-bar";
 import {
@@ -1077,6 +1078,7 @@ export function DealsListSection({
               {propertyLabel}
             </p>
             <AtRiskBadge atRisk={deal.atRisk} compact />
+            <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
           </div>
         );
       },
@@ -1441,6 +1443,7 @@ export function DealsListSection({
                         <div className="flex flex-wrap items-center gap-2">
                           {renderStageChip(stageLabel)}
                           <AtRiskBadge atRisk={deal.atRisk} compact />
+                          <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
                         </div>
                       </div>
 
