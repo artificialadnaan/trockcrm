@@ -233,10 +233,21 @@ export const deals = pgTable(
     proposalRevisionCount: integer("proposal_revision_count").default(0),
     proposalNotes: text("proposal_notes"),
     isTestData: boolean("is_test_data").default(false).notNull(),
+    // Change Orders model (PR1): a change order is a real CHILD deal — value=CO amount, stage=Won,
+    // won_closed_date=CO date, parent_deal_id set, is_change_order=true. It SHARES the parent's
+    // project_number (the partial-unique index below exempts is_change_order rows) and is CRM-only
+    // (the Bid Board sync skips is_change_order deals). parent_deal_id FK is in the SQL migration
+    // (self-reference, like the other cross-schema FKs handled there).
+    isChangeOrder: boolean("is_change_order").default(false).notNull(),
+    parentDealId: uuid("parent_deal_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    uniqueIndex("deals_project_number_uidx").on(table.projectNumber).where(sql`${table.projectNumber} IS NOT NULL`),
+    // Project number is unique among NON-change-order deals only. CO children intentionally share the
+    // parent's project_number, so they are exempted here (and from the live DB index in the migration).
+    uniqueIndex("deals_project_number_uidx")
+      .on(table.projectNumber)
+      .where(sql`${table.projectNumber} IS NOT NULL AND ${table.isChangeOrder} = false`),
   ]
 );
