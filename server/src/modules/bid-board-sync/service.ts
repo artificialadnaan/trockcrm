@@ -406,7 +406,13 @@ function dealMatchSelectSql(schemaName: string): string {
            psc.is_terminal AS stage_is_terminal
       FROM ${schemaName}.deals d
       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-     WHERE d.is_active = true`;
+     -- Change-order CHILD deals are CRM-only and MUST never be matched/synced to Bid Board: they
+     -- share the parent's project_number, so without this exemption the project_number tier below would
+     -- return parent+child as a multi-match and silently skip the PARENT's writeback (the Onyx desync
+     -- class). This base WHERE feeds all three match tiers (procore_bid_id, project_number/deal_number,
+     -- name+date), so the one predicate covers every path that keys on project_number.
+     WHERE d.is_active = true
+       AND COALESCE(d.is_change_order, false) = false`;
 }
 
 async function findDealMatches(
