@@ -253,7 +253,8 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     await deleteDealChangeOrder(tdb, { id: child.id, dealId: p });
     const soft = await fetchDeal(child.id);
     expect(soft).toBeDefined(); // child deal row REMAINS (soft-delete, not hard-delete)
-    expect(soft.is_active).toBe(false); // voided → excluded from Won totals (which filter is_active=true)
+    expect(soft.is_active).toBe(false); // canonical delete marker (drives CO list/sum/search exclusion)
+    expect(soft.on_hold).toBe(true); // tombstone: drops it from the on_hold-only Won rollups too
     // Legacy deal_change_orders rows are value-only (no deal triggers/FKs) → still hard-removed.
     await pg.exec(`INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES ('${U("e1c03")}','${p}','2026-03-01', 700)`);
     const removed = await deleteDealChangeOrder(tdb, { id: U("e1c03"), dealId: p });
@@ -393,8 +394,11 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     const c2 = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-05-01", amount: "2000", createdBy: REP });
     const ids = await softDeleteChangeOrderChildren(tdb, p);
     expect(ids.slice().sort()).toEqual([c1.id, c2.id].sort());
-    expect((await fetchDeal(c1.id)).is_active).toBe(false);
-    expect((await fetchDeal(c2.id)).is_active).toBe(false);
+    const [r1, r2] = [await fetchDeal(c1.id), await fetchDeal(c2.id)];
+    expect(r1.is_active).toBe(false);
+    expect(r2.is_active).toBe(false);
+    expect(r1.on_hold).toBe(true); // tombstone on cascade-voided children too
+    expect(r2.on_hold).toBe(true);
   });
 
   it("rejects adding a change order to a soft-deleted (inactive) parent", async () => {

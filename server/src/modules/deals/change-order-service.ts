@@ -633,15 +633,23 @@ export async function deleteDealChangeOrder(
   tenantDb: TenantDb,
   input: { id: string; dealId: string; deletedBy?: string | null }
 ): Promise<ChangeOrderRecord> {
-  // Deleting a CO child SOFT-deletes its deal row (is_active=false), never a hard row delete: a CO child
-  // is a real deal that accrues dependent rows referencing deals(id) without ON DELETE CASCADE (the
-  // stage_history backstop today; tasks/notes/photos under full-deal treatment), so a hard delete would
-  // FK-violate. Soft-delete is FK-immune, audit-preserving, and drops the CO from Won totals (which filter
-  // is_active=true) and from the counted-once reads above (which now filter is_active=true). Try the child
-  // first, then fall back to an un-migrated legacy row (value-only — safe to hard-delete).
+  // Deleting a CO child SOFT-deletes its deal row, never a hard row delete: a CO child is a real deal that
+  // accrues dependent rows referencing deals(id) without ON DELETE CASCADE (the stage_history backstop
+  // today; tasks/notes/photos under full-deal treatment), so a hard delete would FK-violate. Soft-delete is
+  // FK-immune + audit-preserving, and removes the CO from the counted-once CO reads above (is_active filter).
+  //
+  // We set TWO markers on delete:
+  //   - is_active=false : the canonical "deleted" marker (drives the CO list/sum/getById exclusion + search).
+  //   - on_hold=true    : a TOMBSTONE. Not all Won rollups filter is_active (e.g. getClosedWonSummary uses
+  //     the on_hold-only reportable predicate), so a voided CO would otherwise keep inflating Won count +
+  //     value. They DO all exclude on_hold (reportable predicate) and zero on_hold value
+  //     (aliasedEffectiveWonDealValueSql), so on_hold=true reuses that to drop the voided CO from every Won
+  //     rollup with no predicate change. It is invisible to on-hold surfaces (they require is_active=true).
+  //     (The full normal-deal is_active fix in the reportable predicate is the separate report-accuracy PR.)
+  // Try the child first, then fall back to an un-migrated legacy row (value-only — safe to hard-delete).
   const [child] = (await tenantDb
     .update(deals)
-    .set({ isActive: false, updatedAt: new Date() })
+    .set({ isActive: false, onHold: true, updatedAt: new Date() })
     .where(
       and(
         eq(deals.id, input.id),
@@ -692,8 +700,10 @@ export async function softDeleteChangeOrderChildren(
   deletedBy?: string | null
 ): Promise<string[]> {
   const rows = (await tenantDb
+    // is_active=false = canonical delete marker; on_hold=true = tombstone so the on_hold-only Won rollups
+    // (which don't all filter is_active) also drop the voided child — same mechanism as deleteDealChangeOrder.
     .update(deals)
-    .set({ isActive: false, updatedAt: new Date() })
+    .set({ isActive: false, onHold: true, updatedAt: new Date() })
     .where(
       and(
         eq(deals.parentDealId, parentDealId),
