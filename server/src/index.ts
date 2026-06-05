@@ -17,14 +17,14 @@ if (devAuthProductionWarning) console.warn(devAuthProductionWarning);
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const app = createApp();
 
-await ensureAuditLogPhase1Columns(pool);
-
 const server = app.listen(PORT, () => {
   console.log(`[API] T Rock CRM server running on port ${PORT}`);
 
   // Configure R2 CORS for browser uploads (idempotent, runs once on startup)
   configureR2Cors(getAllowedR2CorsOrigins());
 });
+
+await ensureAuditLogPhase1Columns(pool);
 
 function gracefulShutdown(signal: string) {
   console.log(`[API] Received ${signal}, shutting down gracefully...`);
