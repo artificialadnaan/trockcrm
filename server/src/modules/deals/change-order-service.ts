@@ -21,6 +21,10 @@ export interface ChangeOrderRecord {
   updatedBy: string | null;
   createdAt: Date | string;
   updatedAt: Date | string;
+  // Discriminator for the transition window (children ∪ un-migrated legacy rows): the real child deal's
+  // id when this CO is a child deal (deep-linkable to /deals/{childDealId}), null for a legacy
+  // deal_change_orders row (no deal to link). Naturally all-non-null once PR4 migrates the legacy rows.
+  childDealId: string | null;
 }
 
 export interface AddChangeOrderInput {
@@ -311,6 +315,7 @@ export async function createChangeOrderChildDeal(
     updatedBy: input.createdBy ?? null,
     createdAt: childRow.created_at,
     updatedAt: childRow.updated_at,
+    childDealId: childRow.id, // a real child deal — deep-linkable to /deals/{id}
   };
 }
 
@@ -414,7 +419,13 @@ function childRowToChangeOrderRecord(r: ChildCoRow): ChangeOrderRecord {
     updatedBy: null, // CO children don't track a separate updatedBy; edits are admin-only.
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    childDealId: r.id, // a real child deal — deep-linkable to /deals/{id}
   };
+}
+
+// A legacy (un-migrated) deal_change_orders row is value-only: no backing deal, so childDealId is null.
+function legacyRowToChangeOrderRecord(r: Record<string, unknown>): ChangeOrderRecord {
+  return { ...(r as Omit<ChangeOrderRecord, "childDealId">), childDealId: null };
 }
 
 // A change order's value lives in its child deal (new model). During the migration window, some COs may
@@ -428,12 +439,17 @@ export async function listDealChangeOrders(
   const childRows = (await tenantDb
     .select(childChangeOrderColumns)
     .from(deals)
-    .where(and(eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true)))) as ChildCoRow[];
+    .where(
+      and(eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true), eq(deals.isActive, true))
+    )) as ChildCoRow[];
   const legacyRows = (await tenantDb
     .select()
     .from(dealChangeOrders)
-    .where(eq(dealChangeOrders.dealId, dealId))) as ChangeOrderRecord[];
-  const records = [...childRows.map(childRowToChangeOrderRecord), ...legacyRows];
+    .where(eq(dealChangeOrders.dealId, dealId))) as Array<Record<string, unknown>>;
+  const records = [
+    ...childRows.map(childRowToChangeOrderRecord),
+    ...legacyRows.map(legacyRowToChangeOrderRecord),
+  ];
   records.sort(
     (a, b) =>
       String(b.signedDate).localeCompare(String(a.signedDate)) ||
@@ -450,7 +466,14 @@ export async function getDealChangeOrderById(
   const [child] = (await tenantDb
     .select(childChangeOrderColumns)
     .from(deals)
-    .where(and(eq(deals.id, id), eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true)))
+    .where(
+      and(
+        eq(deals.id, id),
+        eq(deals.parentDealId, dealId),
+        eq(deals.isChangeOrder, true),
+        eq(deals.isActive, true)
+      )
+    )
     .limit(1)) as ChildCoRow[];
   if (child) return childRowToChangeOrderRecord(child);
   const [legacy] = await tenantDb
@@ -458,7 +481,7 @@ export async function getDealChangeOrderById(
     .from(dealChangeOrders)
     .where(and(eq(dealChangeOrders.id, id), eq(dealChangeOrders.dealId, dealId)))
     .limit(1);
-  return (legacy as ChangeOrderRecord) ?? null;
+  return legacy ? legacyRowToChangeOrderRecord(legacy as Record<string, unknown>) : null;
 }
 
 // Add two non-negative money strings ("<int>.<2dp>" or integer) as integer cents via BigInt — exact at
@@ -481,7 +504,9 @@ export async function sumDealChangeOrders(tenantDb: TenantDb, dealId: string): P
   const [childSum] = await tenantDb
     .select({ total: sql<string>`COALESCE(SUM(${deals.awardedAmount}), 0)::numeric(38,2)` })
     .from(deals)
-    .where(and(eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true)));
+    .where(
+      and(eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true), eq(deals.isActive, true))
+    );
   const [legacySum] = await tenantDb
     .select({ total: sql<string>`COALESCE(SUM(${dealChangeOrders.amount}), 0)::numeric(38,2)` })
     .from(dealChangeOrders)
@@ -534,7 +559,14 @@ export async function updateDealChangeOrder(
   const [child] = (await tenantDb
     .update(deals)
     .set(childUpdates)
-    .where(and(eq(deals.id, input.id), eq(deals.parentDealId, input.dealId), eq(deals.isChangeOrder, true)))
+    .where(
+      and(
+        eq(deals.id, input.id),
+        eq(deals.parentDealId, input.dealId),
+        eq(deals.isChangeOrder, true),
+        eq(deals.isActive, true)
+      )
+    )
     .returning(childChangeOrderColumns)) as ChildCoRow[];
   if (child) {
     // A change order earns commission, so commission must track the CURRENT CO value. When the amount or
@@ -572,17 +604,30 @@ export async function updateDealChangeOrder(
   if (!legacy) {
     throw new AppError(404, "Change order not found");
   }
-  return legacy as ChangeOrderRecord;
+  return legacyRowToChangeOrderRecord(legacy as Record<string, unknown>);
 }
 
 export async function deleteDealChangeOrder(
   tenantDb: TenantDb,
   input: { id: string; dealId: string }
 ): Promise<ChangeOrderRecord> {
-  // Deleting a CO child removes its deal row. Try the child first, then a legacy row.
+  // Deleting a CO child SOFT-deletes its deal row (is_active=false), never a hard row delete: a CO child
+  // is a real deal that accrues dependent rows referencing deals(id) without ON DELETE CASCADE (the
+  // stage_history backstop today; tasks/notes/photos under full-deal treatment), so a hard delete would
+  // FK-violate. Soft-delete is FK-immune, audit-preserving, and drops the CO from Won totals (which filter
+  // is_active=true) and from the counted-once reads above (which now filter is_active=true). Try the child
+  // first, then fall back to an un-migrated legacy row (value-only — safe to hard-delete).
   const [child] = (await tenantDb
-    .delete(deals)
-    .where(and(eq(deals.id, input.id), eq(deals.parentDealId, input.dealId), eq(deals.isChangeOrder, true)))
+    .update(deals)
+    .set({ isActive: false, updatedAt: new Date() })
+    .where(
+      and(
+        eq(deals.id, input.id),
+        eq(deals.parentDealId, input.dealId),
+        eq(deals.isChangeOrder, true),
+        eq(deals.isActive, true)
+      )
+    )
     .returning(childChangeOrderColumns)) as ChildCoRow[];
   if (child) return childRowToChangeOrderRecord(child);
 
@@ -593,5 +638,30 @@ export async function deleteDealChangeOrder(
   if (!legacy) {
     throw new AppError(404, "Change order not found");
   }
-  return legacy as ChangeOrderRecord;
+  return legacyRowToChangeOrderRecord(legacy as Record<string, unknown>);
+}
+
+/**
+ * Soft-delete every active change-order CHILD of a parent deal (is_active=false), returning their ids.
+ * Called by deleteDeal when a parent is soft-deleted: the DB self-FK ON DELETE CASCADE only fires on a
+ * hard row delete, so without this a parent's soft-delete would leave its CO children as orphaned active
+ * Won deals (their value lingering in Won reports). Returns the affected child ids so the caller can also
+ * dismiss their open tasks, mirroring the parent's own cleanup.
+ */
+export async function softDeleteChangeOrderChildren(
+  tenantDb: TenantDb,
+  parentDealId: string
+): Promise<string[]> {
+  const rows = (await tenantDb
+    .update(deals)
+    .set({ isActive: false, updatedAt: new Date() })
+    .where(
+      and(
+        eq(deals.parentDealId, parentDealId),
+        eq(deals.isChangeOrder, true),
+        eq(deals.isActive, true)
+      )
+    )
+    .returning({ id: deals.id })) as Array<{ id: string }>;
+  return rows.map((r) => r.id);
 }

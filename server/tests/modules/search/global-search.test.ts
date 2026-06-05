@@ -180,3 +180,19 @@ describe("globalSearch — relevance ordering covers every matched own field (no
     expect(orderText("properties")).toContain("state");
   });
 });
+
+describe("globalSearch — change-order child deals are flagged for badging", () => {
+  it("surfaces isChangeOrder on deal results so PR3 can badge CO children (and never on plain deals)", async () => {
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const select = vi.fn(() => chainable([]));
+    select.mockReturnValueOnce(
+      chainable([
+        { id: "deal-co", name: "Acme Tower — Change Order 1", dealNumber: "D-11", projectNumber: "P-1", propertyCity: "Dallas", propertyState: "TX", stageSlug: WON_SLUG, onHold: false, isChangeOrder: true, relevance: 2 },
+        { id: "deal-plain", name: "Acme Plaza", dealNumber: "D-10", projectNumber: null, propertyCity: "Dallas", propertyState: "TX", stageSlug: null, onHold: false, isChangeOrder: false, relevance: 1 },
+      ])
+    ); // searchDeals
+    const result = await globalSearch({ execute, select } as any, "acme");
+    expect(result.deals.find((d) => d.id === "deal-co")?.isChangeOrder).toBe(true);
+    expect(result.deals.find((d) => d.id === "deal-plain")?.isChangeOrder).toBe(false);
+  });
+});

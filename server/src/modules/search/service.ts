@@ -33,6 +33,8 @@ export interface SearchResult {
   officeSlug?: string;
   deepLink: string;
   rank: number;
+  // True when this deal result is a change-order child deal, so the UI can badge it. Deal results only.
+  isChangeOrder?: boolean;
 }
 
 export interface SearchResponse {
@@ -352,6 +354,7 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
       propertyCity: deals.propertyCity,
       propertyState: deals.propertyState,
       onHold: deals.onHold,
+      isChangeOrder: deals.isChangeOrder,
       stageSlug: pipelineStageConfig.slug,
       relevance,
     })
@@ -382,6 +385,7 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
     status: deriveDealStatus(r.stageSlug, r.onHold),
     deepLink: `/deals/${r.id}`,
     rank: Number(r.relevance ?? 0),
+    isChangeOrder: r.isChangeOrder === true,
   }));
 }
 

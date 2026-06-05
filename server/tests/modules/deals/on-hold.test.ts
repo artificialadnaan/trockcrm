@@ -197,7 +197,16 @@ describe("updateDeal on hold foundation", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
   });
 
-  it("does NOT block a safe field edit (name) on a change-order child — only amount/hold are locked", async () => {
+  it("rejects reassigning a change-order child's rep via the normal deal edit (commission attribution stays put)", async () => {
+    // Reassigning would move Won credit (assigned_rep_id) but leave the commission under the original rep.
+    // A CO's rep is set at creation (inherited from the parent); it is not reassignable via the normal path.
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, assignedRepId: "rep-1" }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { assignedRepId: "rep-2" }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("does NOT block a safe field edit (name) on a change-order child — only amount/hold/rep are locked", async () => {
     // Full-deal treatment: non-report-affecting fields stay editable on a CO child.
     const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true }));
     await expect(

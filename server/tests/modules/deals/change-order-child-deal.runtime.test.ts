@@ -8,6 +8,7 @@ import {
   deleteDealChangeOrder,
   getDealChangeOrderById,
   listDealChangeOrders,
+  softDeleteChangeOrderChildren,
   sumDealChangeOrders,
   updateDealChangeOrder,
 } from "../../../src/modules/deals/change-order-service.js";
@@ -84,6 +85,25 @@ beforeAll(async () => {
       created_by uuid, created_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id)
     );
+    -- Prod-faithful stage-history backstop: migration 0143 attaches an AFTER INSERT trigger on deals that
+    -- writes a deal_stage_history row, and that FK to deals(id) has NO ON DELETE CASCADE. So an app-created
+    -- CO child always has a dependent history row → a hard row-delete would FK-violate. This reproduces the
+    -- gap that masked P2c: deleteDealChangeOrder must SOFT-delete (is_active=false), never hard-delete.
+    CREATE TABLE deal_stage_history (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL REFERENCES deals(id),
+      from_stage_id uuid, to_stage_id uuid NOT NULL, changed_by uuid NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE OR REPLACE FUNCTION record_stage_history_test() RETURNS trigger AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' AND COALESCE(NEW.assigned_rep_id, NEW.created_by_user_id) IS NOT NULL THEN
+        INSERT INTO deal_stage_history (deal_id, from_stage_id, to_stage_id, changed_by)
+          VALUES (NEW.id, NULL, NEW.stage_id, COALESCE(NEW.assigned_rep_id, NEW.created_by_user_id));
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    CREATE TRIGGER stage_history_trigger AFTER INSERT ON deals FOR EACH ROW EXECUTE FUNCTION record_stage_history_test();
     INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES
       ('${ST.won}','Won','${WON_SLUG}', 90, true), ('${ST.open}','Opportunity','opportunity', 30, false);
     INSERT INTO users (id, display_name) VALUES ('${REP}','Alice');
@@ -222,12 +242,15 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     expect(Number(legacyUpdated.amount)).toBeCloseTo(800, 2);
   });
 
-  it("delete is dual-path: removes a child deal row, and falls back to a legacy row", async () => {
+  it("delete is dual-path: SOFT-deletes a child deal (audit-preserving), and hard-removes a legacy row", async () => {
     const p = U("e1003");
     await seedWonParent(p, "DFW-9-20003-aa", 100000);
     const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-06-01", amount: "1000", createdBy: REP });
     await deleteDealChangeOrder(tdb, { id: child.id, dealId: p });
-    expect(await fetchDeal(child.id)).toBeUndefined(); // child deal row removed
+    const soft = await fetchDeal(child.id);
+    expect(soft).toBeDefined(); // child deal row REMAINS (soft-delete, not hard-delete)
+    expect(soft.is_active).toBe(false); // voided → excluded from Won totals (which filter is_active=true)
+    // Legacy deal_change_orders rows are value-only (no deal triggers/FKs) → still hard-removed.
     await pg.exec(`INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES ('${U("e1c03")}','${p}','2026-03-01', 700)`);
     const removed = await deleteDealChangeOrder(tdb, { id: U("e1c03"), dealId: p });
     expect(Number(removed.amount)).toBeCloseTo(700, 2);
@@ -325,5 +348,48 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     const after = await readCommissions();
     expect(after.length).toBe(1); // recomputed in place — no second row
     expect(Number(after[0].amount)).toBeCloseTo(2500, 2); // $25,000 × 10%
+  });
+
+  it("a CO child carries a deal_stage_history row (trigger), so it is soft-deleted not hard-deleted (FK-safe)", async () => {
+    const p = U("e1011");
+    await seedWonParent(p, "DFW-9-20011-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    const hist = (await tdb.execute(sql`SELECT count(*)::int AS n FROM deal_stage_history WHERE deal_id = ${child.id}`)) as any;
+    expect(Number((Array.isArray(hist) ? hist : hist.rows)[0].n)).toBeGreaterThanOrEqual(1); // trigger fired on insert
+    await expect(tdb.execute(sql`DELETE FROM deals WHERE id = ${child.id}`)).rejects.toThrow(); // hard delete → FK violation
+    await deleteDealChangeOrder(tdb, { id: child.id, dealId: p }); // soft-delete sidesteps the FK
+    expect((await fetchDeal(child.id)).is_active).toBe(false);
+  });
+
+  it("a soft-deleted CO child drops out of list/sum/getById (counted-once stays correct)", async () => {
+    const p = U("e1013");
+    await seedWonParent(p, "DFW-9-20013-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1500", createdBy: REP });
+    expect((await listDealChangeOrders(tdb, p)).length).toBe(1);
+    await deleteDealChangeOrder(tdb, { id: child.id, dealId: p });
+    expect((await listDealChangeOrders(tdb, p)).length).toBe(0);
+    expect(Number(await sumDealChangeOrders(tdb, p))).toBeCloseTo(0, 2);
+    expect(await getDealChangeOrderById(tdb, child.id, p)).toBeNull();
+  });
+
+  it("exposes childDealId on the list: real child deals carry it (deep-linkable), legacy rows are null", async () => {
+    const p = U("e1012");
+    await seedWonParent(p, "DFW-9-20012-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    await pg.exec(`INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES ('${U("e1c12")}','${p}','2026-03-01', 500)`);
+    const list = await listDealChangeOrders(tdb, p);
+    expect(list.find((r) => r.id === child.id)?.childDealId).toBe(child.id); // real child → /deals/{childDealId}
+    expect(list.find((r) => r.id === U("e1c12"))?.childDealId).toBeNull(); // legacy row → no-op link
+  });
+
+  it("soft-deleting a parent cascades is_active=false to its CO children (no orphaned active Won; #19)", async () => {
+    const p = U("e1014");
+    await seedWonParent(p, "DFW-9-20014-aa", 100000);
+    const c1 = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    const c2 = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-05-01", amount: "2000", createdBy: REP });
+    const ids = await softDeleteChangeOrderChildren(tdb, p);
+    expect(ids.slice().sort()).toEqual([c1.id, c2.id].sort());
+    expect((await fetchDeal(c1.id)).is_active).toBe(false);
+    expect((await fetchDeal(c2.id)).is_active).toBe(false);
   });
 });

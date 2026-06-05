@@ -51,7 +51,7 @@ import {
 import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
-import { listDealChangeOrders, sumDealChangeOrders } from "./change-order-service.js";
+import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
@@ -764,6 +764,7 @@ type DealStageWorkspaceRow = {
   updated_at: string;
   stage_entered_at: string;
   is_bid_board_owned: boolean;
+  is_change_order: boolean;
   bid_board_stage_slug: string | null;
   bid_board_stage_entered_at: string | null;
   on_hold: boolean;
@@ -1277,6 +1278,7 @@ function mapDealStageWorkspaceRow(
     updatedAt: row.updated_at,
     stageEnteredAt: row.stage_entered_at,
     isBidBoardOwned: row.is_bid_board_owned,
+    isChangeOrder: row.is_change_order,
     bidBoardStageSlug: row.bid_board_stage_slug,
     bidBoardStageEnteredAt: row.bid_board_stage_entered_at,
     onHold: row.on_hold,
@@ -2011,20 +2013,24 @@ export async function updateDeal(
     throw new AppError(404, "Deal not found");
   }
 
-  // A change-order child deal is managed only through the change-order endpoints. Block the two
-  // report-affecting mutations here — its awarded amount (which also drives commission, recomputed only on
-  // the CO endpoint) and its hold state (on-hold zeroes a deal's effective Won value) — so a CO can never
-  // be edited out of its Won-total membership via the normal deal-update path. Other fields stay editable.
+  // A change-order child deal is managed only through the change-order endpoints. Block the report-affecting
+  // mutations here — its awarded amount (which also drives commission, recomputed only on the CO endpoint),
+  // its hold state (on-hold zeroes a deal's effective Won value), and its rep (reassignment would move Won
+  // credit but leave the commission under the original rep) — so a CO can never be edited out of its
+  // Won-total membership or its commission attribution via the normal deal-update path. A CO's rep is
+  // inherited from the parent at creation and is not reassignable here. Other fields stay editable.
   if (existing.isChangeOrder === true) {
     const touchesAmount =
       input.awardedAmount !== undefined &&
       String(input.awardedAmount ?? "") !== String(existing.awardedAmount ?? "");
     const touchesHold =
       input.onHold !== undefined && Boolean(input.onHold) !== Boolean(existing.onHold);
-    if (touchesAmount || touchesHold) {
+    const touchesRep =
+      input.assignedRepId !== undefined && input.assignedRepId !== existing.assignedRepId;
+    if (touchesAmount || touchesHold || touchesRep) {
       throw new AppError(
         409,
-        "A change order's amount and hold state are managed through the change-order endpoints, not the normal deal edit.",
+        "A change order's amount, hold state, and rep are managed through the change-order endpoints, not the normal deal edit.",
         "CHANGE_ORDER_FIELD_LOCKED"
       );
     }
@@ -2516,13 +2522,18 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
     throw new AppError(404, "Deal not found");
   }
 
-  // Auto-dismiss pending/in-progress tasks when deal is soft-deleted
+  // Cascade the soft-delete to this deal's change-order children: they are real Won child deals, so leaving
+  // them active after the parent is voided would orphan their value in Won reports. The DB self-FK ON DELETE
+  // CASCADE only fires on a hard row delete, not this is_active=false soft-delete, so cascade it explicitly.
+  const childCoIds = await softDeleteChangeOrderChildren(tenantDb, dealId);
+
+  // Auto-dismiss pending/in-progress tasks for the deal AND its now-voided CO children.
   await tenantDb
     .update(tasks)
     .set({ status: "dismissed", isOverdue: false })
     .where(
       and(
-        eq(tasks.dealId, dealId),
+        inArray(tasks.dealId, [dealId, ...childCoIds]),
         inArray(tasks.status, ["pending", "in_progress"]),
       )
     );
@@ -2954,6 +2965,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.updated_at,
       d.stage_entered_at,
       d.is_bid_board_owned,
+      d.is_change_order,
       d.bid_board_stage_slug,
       d.bid_board_stage_entered_at,
       d.on_hold,

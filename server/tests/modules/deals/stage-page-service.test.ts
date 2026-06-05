@@ -221,6 +221,34 @@ describe("listDealStagePage", () => {
     expect(executedSql).toContain("(d.last_activity_at is null or d.last_activity_at < now() - interval '14 days')");
   });
 
+  it("selects is_change_order on the stage-page rows so CO children can be badged in the drill-down", async () => {
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "0", active_count: "0", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+      sort: "newest",
+    } as any);
+
+    // The row query (2nd execute) must select is_change_order so PR3 can badge CO children in the drill-down.
+    const rowSql = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
+    expect(rowSql).toContain("d.is_change_order");
+  });
+
   it("excludes test-data deals from the count and row queries", async () => {
     dbState.responses = [
       [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
