@@ -44,6 +44,7 @@ import {
 } from "./saved-reports-service.js";
 import { runReportBuilder } from "./report-builder-service.js";
 import {
+  DIRECTOR_EVIDENCE_METRICS,
   getDirectorScorecard,
   getDirectorScorecardEvidence,
   getForecastAccuracyReport,
@@ -505,9 +506,9 @@ router.get("/director-scorecard", requireDirector, async (req, res, next) => {
 // Drill-to-evidence: the supporting deal rows behind ONE Director Scorecard number, with a total that
 // EQUALS that number (same cohort predicate as getDirectorScorecard). repId absent -> office-wide (so it
 // reconciles to the office figure); otherwise a real rep UUID. There is no Unassigned bucket -- the
-// scorecard INNER-joins users, so unassigned deals contribute to no headline number.
-const DIRECTOR_EVIDENCE_METRICS = ["won", "lost", "pipeline", "commit", "best_case"] as const;
-
+// scorecard INNER-joins users, so unassigned deals contribute to no headline number. The allowed-metric
+// set is imported from the service (DIRECTOR_EVIDENCE_METRICS) so route validation stays in lockstep with
+// the DirectorEvidenceMetric type.
 export function parseDirectorEvidenceParams(query: Record<string, unknown>): DirectorScorecardEvidenceOptions {
   const metricRaw = pickQueryValue(query.metric);
   if (!metricRaw || !DIRECTOR_EVIDENCE_METRICS.includes(metricRaw as DirectorEvidenceMetric)) {
