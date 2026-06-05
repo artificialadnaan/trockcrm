@@ -1,11 +1,13 @@
 import crypto from "crypto";
 import {
   getHoldStateAtStageEntry,
+  isGenuineWonDealStageSlug,
   isTerminalWorkflowStage,
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 import { bidBoardStatusToCrmStage, normalizeBidBoardStatus } from "@trock-crm/shared/lib/bidBoardStatusMap";
 import { pool } from "../../db.js";
+import { effectiveContractSignedDate, resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
@@ -62,6 +64,7 @@ interface IngestionMetrics {
   skippedUnmappedStatus: number;
   skippedTemplate: number;
   appliedBackward: number;
+  appliedTerminalExit: number;
   skippedTerminal: number;
   skippedNoStageChange: number;
   estimateUpdated: number;
@@ -106,6 +109,12 @@ interface DealMatch {
   bid_board_stage_status: string | null;
   bid_board_last_updated_at: string | null;
   bid_estimate: string | null;
+  // Won-period reporting basis (migration 0141): the bid-board mirror keeps won_closed_date in
+  // lockstep with Won status. contract_signed_* are the accounting override fed into the canonical
+  // resolveWonClosedDateWriteThrough — same convention as changeDealStage.
+  won_closed_date: string | null;
+  contract_signed_date: string | null;
+  contract_signed_at: string | null;
 }
 
 type BidBoardAuditDeal = Pick<DealMatch, "id" | "name" | "deal_number" | "project_number">;
@@ -389,6 +398,9 @@ function dealMatchSelectSql(schemaName: string): string {
            d.bid_board_stage_status,
            d.bid_board_last_updated_at,
            d.bid_estimate,
+           d.won_closed_date,
+           d.contract_signed_date,
+           d.contract_signed_at,
            psc.slug AS stage_slug,
            psc.display_order AS stage_display_order,
            psc.is_terminal AS stage_is_terminal
@@ -487,6 +499,18 @@ function stageOrder(value: number | string | null | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/**
+ * The deal's stored won_closed_date as YYYY-MM-DD — the stage-driven won date that is PRESERVED
+ * verbatim when a deal moves between Won stages (matches changeDealStage / setDealContractSignedDate).
+ * Tolerates either a date-only string (node-pg DATE) or a Date/timestamp.
+ */
+function toDateOnlyString(value: unknown): string | null {
+  if (value == null) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
+  const text = String(value);
+  return text.length >= 10 ? text.slice(0, 10) : text || null;
+}
+
 function stageFamilyForSlug(slug: string): string {
   switch (slug) {
     case "estimating":
@@ -573,6 +597,7 @@ interface StageWritebackResult {
   updated: boolean;
   skippedNoStageChange: boolean;
   appliedBackward: boolean;
+  appliedTerminalExit: boolean;
   skippedTerminal: boolean;
   warning: string | null;
 }
@@ -710,7 +735,7 @@ async function writeEstimateIfNeeded(
   };
 }
 
-async function writeStageIfSafe(
+export async function writeStageIfSafe(
   client: { query: Function },
   schemaName: string,
   deal: DealMatch,
@@ -728,29 +753,30 @@ async function writeStageIfSafe(
         updated: false,
         skippedNoStageChange: false,
         appliedBackward: false,
+        appliedTerminalExit: false,
         skippedTerminal: false,
         warning: `Skipped Bid Board stage metadata refresh for deal ${deal.id}: stage changed during sync`,
       };
     }
-    return { updated: false, skippedNoStageChange: true, appliedBackward: false, skippedTerminal: false, warning: null };
-  }
-
-  if (deal.stage_is_terminal || isTerminalWorkflowStage(deal.stage_slug, route)) {
     return {
       updated: false,
-      skippedNoStageChange: false,
+      skippedNoStageChange: true,
       appliedBackward: false,
-      skippedTerminal: true,
-      warning: `Skipped terminal Bid Board stage update for deal ${deal.id}: CRM=${deal.stage_slug}, Bid Board=${row.bidBoardStatus ?? "unknown"}`,
+      appliedTerminalExit: false,
+      skippedTerminal: false,
+      warning: null,
     };
   }
 
-  // Bid Board is the source of truth for stage: a backward move (target display_order < current,
-  // among NON-terminal stages — the terminal lock above already protects Won/Lost) is APPLIED,
-  // not pinned. We still detect the direction so it is recorded on the stage-history row
-  // (is_backward_move) and surfaced via the appliedBackward metric/log. The stage UPDATE below
-  // stamps a fresh stage_entered_at on every move, so the SLA clock resets on re-entry exactly as
-  // it does for a forward move.
+  // Bid Board is the AUTHORITATIVE source of truth for a bid-board-owned deal's stage. We mirror it
+  // even OUT of a terminal Won/Lost stage (a terminal exit) and even backward (target display_order
+  // < current) — both are APPLIED, not pinned, because the Bid Board, not the CRM, owns these deals.
+  // We detect the direction so it is recorded on the stage-history row (is_backward_move) and
+  // surfaced via the appliedBackward / appliedTerminalExit metrics + logs. The stage UPDATE below
+  // stamps a fresh stage_entered_at on every move (the SLA clock resets exactly as for a forward
+  // move) and keeps the terminal fields (won_closed_date / actual_close_date / lost_at) in lockstep
+  // with the new stage — set on entry, cleared on exit — matching changeDealStage.
+  const isTerminalExit = Boolean(deal.stage_is_terminal) || isTerminalWorkflowStage(deal.stage_slug, route);
   const currentOrder = stageOrder(deal.stage_display_order);
   const targetOrder = stageOrder(targetStage.display_order);
   const isBackwardMove = currentOrder != null && targetOrder != null && targetOrder < currentOrder;
@@ -760,10 +786,25 @@ async function writeStageIfSafe(
       updated: false,
       skippedNoStageChange: false,
       appliedBackward: false,
+      appliedTerminalExit: false,
       skippedTerminal: false,
       warning: `Skipped Bid Board stage update for deal ${deal.id}: no active admin/director user available for audit history`,
     };
   }
+
+  // Keep won_closed_date (migration 0141 Won-period basis) in lockstep with Won status, EXACTLY as
+  // changeDealStage does: a present contract-signed date wins; otherwise the stage-driven won date —
+  // which PRESERVES the existing value (including NULL) when moving between Won stages and stamps
+  // today ONLY on a fresh entry to Won. Any non-Won target clears it (null). Never fabricate today
+  // for an already-won deal (that would shift it into the current reporting period).
+  const targetIsWon = isGenuineWonDealStageSlug(targetSlug, route);
+  const alreadyWon = isGenuineWonDealStageSlug(deal.stage_slug, route);
+  const nextWonClosedDate = targetIsWon
+    ? resolveWonClosedDateWriteThrough({
+        contractSignedDate: effectiveContractSignedDate(deal.contract_signed_date, deal.contract_signed_at),
+        stageDrivenWonDate: alreadyWon ? toDateOnlyString(deal.won_closed_date) : new Date().toISOString().split("T")[0],
+      })
+    : null;
 
   const stageFamily = stageFamilyForSlug(targetSlug);
   const status = row.bidBoardStatus ?? targetSlug;
@@ -789,12 +830,18 @@ async function writeStageIfSafe(
             bid_board_stage_status = $8::text,
             bid_board_stage_entered_at = NOW(),
             read_only_synced_at = NOW(),
-            actual_close_date = CASE WHEN $6::text = 'won' THEN COALESCE(actual_close_date, CURRENT_DATE) ELSE actual_close_date END,
-            lost_at = CASE WHEN $6::text = 'lost' THEN COALESCE(lost_at, NOW()) ELSE lost_at END,
-            bid_board_loss_outcome = CASE WHEN $6::text = 'lost' THEN COALESCE(bid_board_loss_outcome, $8::text) ELSE bid_board_loss_outcome END,
+            won_closed_date = $9::date,
+            actual_close_date = CASE WHEN $6::text = 'won' THEN COALESCE(actual_close_date, CURRENT_DATE) ELSE NULL END,
+            lost_at = CASE WHEN $6::text = 'lost' THEN COALESCE(lost_at, NOW()) ELSE NULL END,
+            bid_board_loss_outcome = CASE WHEN $6::text = 'lost' THEN COALESCE(bid_board_loss_outcome, $8::text) ELSE NULL END,
+            -- Clear ALL stale loss details when the deal leaves Lost (parity with changeDealStage's
+            -- "clear all terminal fields"); a reopened Lost deal must not keep its lost reason/notes.
+            lost_reason_id = CASE WHEN $6::text = 'lost' THEN lost_reason_id ELSE NULL END,
+            lost_notes = CASE WHEN $6::text = 'lost' THEN lost_notes ELSE NULL END,
+            lost_competitor = CASE WHEN $6::text = 'lost' THEN lost_competitor ELSE NULL END,
             updated_at = NOW()
-      WHERE id = $9
-        AND stage_id = $10
+      WHERE id = $10
+        AND stage_id = $11
       RETURNING id`,
     [
       targetStage.id,
@@ -805,6 +852,7 @@ async function writeStageIfSafe(
       targetSlug,
       stageFamily,
       status,
+      nextWonClosedDate,
       deal.id,
       deal.stage_id,
     ]
@@ -815,6 +863,7 @@ async function writeStageIfSafe(
       updated: false,
       skippedNoStageChange: false,
       appliedBackward: false,
+      appliedTerminalExit: false,
       skippedTerminal: false,
       warning: `Skipped Bid Board stage update for deal ${deal.id}: stage changed during sync`,
     };
@@ -845,7 +894,14 @@ async function writeStageIfSafe(
     readOnlySyncedAt: { from: null, to: "now" },
   }, { source: "stage_writeback", bidBoardStatus: row.bidBoardStatus });
 
-  return { updated: true, skippedNoStageChange: false, appliedBackward: isBackwardMove, skippedTerminal: false, warning: null };
+  return {
+    updated: true,
+    skippedNoStageChange: false,
+    appliedBackward: isBackwardMove,
+    appliedTerminalExit: isTerminalExit,
+    skippedTerminal: false,
+    warning: null,
+  };
 }
 
 export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
@@ -876,6 +932,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     skippedUnmappedStatus: 0,
     skippedTemplate: 0,
     appliedBackward: 0,
+    appliedTerminalExit: 0,
     skippedTerminal: 0,
     skippedNoStageChange: 0,
     estimateUpdated: 0,
@@ -1044,6 +1101,12 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         metrics.appliedBackward++;
         console.info(
           `[BidBoardSync] Applied backward stage move for deal ${matches[0].id}: ${matches[0].stage_slug} -> ${targetStage.slug} (Bid Board is source of truth)`
+        );
+      }
+      if (stageResult.appliedTerminalExit) {
+        metrics.appliedTerminalExit++;
+        console.info(
+          `[BidBoardSync] Applied terminal-exit stage move for deal ${matches[0].id}: ${matches[0].stage_slug} -> ${targetStage.slug} (Bid Board is source of truth; won_closed_date kept in lockstep)`
         );
       }
       if (stageResult.skippedTerminal) metrics.skippedTerminal++;
