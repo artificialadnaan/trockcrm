@@ -6,7 +6,7 @@ import { isGenuineWonDealStageSlug, type WorkflowRoute } from "@trock-crm/shared
 import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
-import { calculateCommissionForDeal } from "../commissions/service.js";
+import { calculateCommissionForDeal, recalculateCommissionForDeal } from "../commissions/service.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -95,6 +95,8 @@ interface ParentForChildCreate {
   projectType: string | null;
   projectTypeId: string | null;
   regionId: string | null;
+  pipelineTypeSnapshot: string; // NOT NULL in schema (default 'normal')
+  estimatorUserId: string | null;
 }
 
 // Load the parent deal (with the fields a CO child inherits) and assert eligibility in one pass.
@@ -119,6 +121,10 @@ async function loadParentForChildCreate(
       projectType: deals.projectType,
       projectTypeId: deals.projectTypeId,
       regionId: deals.regionId,
+      // Inherit the parent's reporting classification so a CO of a service deal classifies as service
+      // (not the default 'normal') and an estimator-attributed CO still appears in estimator-filtered reports.
+      pipelineTypeSnapshot: deals.pipelineTypeSnapshot,
+      estimatorUserId: deals.estimatorUserId,
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
@@ -255,13 +261,14 @@ export async function createChangeOrderChildDeal(
     INSERT INTO deals (
       deal_number, name, stage_id, is_change_order, parent_deal_id, assigned_rep_id, company_id, property_id,
       awarded_amount, won_closed_date, contract_signed_date, project_number, office_code, project_type,
-      project_type_id, region_id, source, description, created_by_user_id, workflow_route,
+      project_type_id, region_id, pipeline_type_snapshot, estimator_user_id, source, description,
+      created_by_user_id, workflow_route,
       is_active, on_hold, is_test_data, stage_entered_at, created_at, updated_at
     ) VALUES (
       ${dealNumber}, ${childName}, ${wonStage.id}, true, ${parent.id}, ${parent.assignedRepId},
       ${parent.companyId}, ${parent.propertyId}, ${amount}, ${signedDate}, ${signedDate},
       ${parent.projectNumber}, ${parent.officeCode}, ${parent.projectType}, ${parent.projectTypeId},
-      ${parent.regionId}, 'change_order', ${description}, ${input.createdBy ?? null},
+      ${parent.regionId}, ${parent.pipelineTypeSnapshot}, ${parent.estimatorUserId}, 'change_order', ${description}, ${input.createdBy ?? null},
       ${parent.workflowRoute ?? "normal"}, true, false, false, ${createdAt}, ${createdAt}, ${createdAt}
     )
     RETURNING id, deal_number, created_at, updated_at
@@ -529,7 +536,25 @@ export async function updateDealChangeOrder(
     .set(childUpdates)
     .where(and(eq(deals.id, input.id), eq(deals.parentDealId, input.dealId), eq(deals.isChangeOrder, true)))
     .returning(childChangeOrderColumns)) as ChildCoRow[];
-  if (child) return childRowToChangeOrderRecord(child);
+  if (child) {
+    // A change order earns commission, so commission must track the CURRENT CO value. When the amount or
+    // signed date changes, recompute the child's commission (delete + re-create atomically) so the payout
+    // reflects the edit — never a stale amount, never a duplicate row. child.signedDate is the child's
+    // won_closed_date, which we keep equal to contract_signed_date, so it is the correct signing date.
+    // Resilient: a commission-config gap must not block the edit (mirrors addDealChangeOrder).
+    if ((input.amount !== undefined || input.signedDate !== undefined) && input.updatedBy && child.signedDate) {
+      try {
+        await recalculateCommissionForDeal(tenantDb, {
+          dealId: child.id,
+          contractSignedDate: String(child.signedDate),
+          triggeredByUserId: input.updatedBy,
+        });
+      } catch (err) {
+        console.error(`[ChangeOrders] commission recompute failed for CO child ${child.id}:`, err);
+      }
+    }
+    return childRowToChangeOrderRecord(child);
+  }
 
   // Legacy fallback: an un-migrated deal_change_orders row.
   const legacyUpdates: Record<string, unknown> = {

@@ -2011,6 +2011,25 @@ export async function updateDeal(
     throw new AppError(404, "Deal not found");
   }
 
+  // A change-order child deal is managed only through the change-order endpoints. Block the two
+  // report-affecting mutations here — its awarded amount (which also drives commission, recomputed only on
+  // the CO endpoint) and its hold state (on-hold zeroes a deal's effective Won value) — so a CO can never
+  // be edited out of its Won-total membership via the normal deal-update path. Other fields stay editable.
+  if (existing.isChangeOrder === true) {
+    const touchesAmount =
+      input.awardedAmount !== undefined &&
+      String(input.awardedAmount ?? "") !== String(existing.awardedAmount ?? "");
+    const touchesHold =
+      input.onHold !== undefined && Boolean(input.onHold) !== Boolean(existing.onHold);
+    if (touchesAmount || touchesHold) {
+      throw new AppError(
+        409,
+        "A change order's amount and hold state are managed through the change-order endpoints, not the normal deal edit.",
+        "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
+  }
+
   if (input.assignedRepId !== undefined && input.assignedRepId !== existing.assignedRepId) {
     const isDirectorOrAdmin = userRole === "admin" || userRole === "director";
     if (!isDirectorOrAdmin && existing.assignedRepId !== userId) {

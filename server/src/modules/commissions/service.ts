@@ -177,3 +177,45 @@ export async function calculateCommissionForDeal(
     sourceValueKind: sourceValue.kind,
   };
 }
+
+/**
+ * Recompute a deal's commission from its CURRENT values: delete any existing commission row(s) for the
+ * deal (audited), then re-run calculateCommissionForDeal so the snapshot reflects the new source value.
+ *
+ * calculateCommissionForDeal is idempotent (it short-circuits on an existing (deal_id, rep_user_id) row),
+ * so a stale commission can only be corrected by removing the old row first. Used when a change order's
+ * amount/date is edited — a stale commission after a CO amount edit is a real payout error. The delete +
+ * re-insert run in the caller's per-request transaction, so there is never a duplicate row and never a
+ * committed window with no row. Returns the same status discriminator as a fresh calc.
+ */
+export async function recalculateCommissionForDeal(
+  tenantDb: TenantDb,
+  input: {
+    dealId: string;
+    contractSignedDate: string;
+    triggeredByUserId: string;
+  }
+): Promise<CalculateCommissionResult> {
+  const removed = await tenantDb
+    .delete(dealSignedCommissions)
+    .where(eq(dealSignedCommissions.dealId, input.dealId))
+    .returning({
+      id: dealSignedCommissions.id,
+      amount: dealSignedCommissions.amount,
+      repUserId: dealSignedCommissions.repUserId,
+    });
+  for (const row of removed) {
+    await writeAuditLog(tenantDb, {
+      tableName: "deal_signed_commissions",
+      recordId: row.id,
+      action: "delete",
+      changedBy: input.triggeredByUserId,
+      changes: {
+        amount: { from: row.amount, to: null },
+        repUserId: { from: row.repUserId, to: null },
+        dealId: { from: input.dealId, to: null },
+      },
+    });
+  }
+  return calculateCommissionForDeal(tenantDb, input);
+}

@@ -61,6 +61,7 @@ type FakeDeal = {
   workflowRoute: "normal" | "service";
   assignedRepId: string;
   isBidBoardOwned: boolean;
+  isChangeOrder: boolean;
   bidBoardStageSlug: string | null;
   readOnlySyncedAt: Date | null;
   bidBoardProjectNumber: string | null;
@@ -112,6 +113,7 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
         workflowRoute: "normal" as const,
         assignedRepId: "user-1",
         isBidBoardOwned: false,
+        isChangeOrder: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
         bidBoardProjectNumber: null,
@@ -285,6 +287,24 @@ describe("changeDealStage", () => {
       readiness: { status: "ready" },
     } as never);
     vi.mocked(createStageTimers).mockResolvedValue(undefined as never);
+  });
+
+  it("rejects a stage change on a change-order child deal (a CO is a Won child that never moves stages)", async () => {
+    // A CO child is a real, editable deal. Moving it off Won via the normal stage route would silently
+    // drop its value from every Won report — so the stage path must reject is_change_order deals outright.
+    const tenantDb = createTenantDb({ isChangeOrder: true });
+    await expect(
+      changeDealStage(tenantDb as never, {
+        dealId: "deal-1",
+        targetStageId: "stage-dd",
+        userId: "user-1",
+        userRole: "admin",
+      })
+    ).rejects.toMatchObject<Partial<AppError>>({
+      statusCode: 409,
+      code: "CHANGE_ORDER_STAGE_LOCKED",
+    });
+    expect(tenantDb.state.stageHistory).toHaveLength(0);
   });
 
   it("rejects moving a deal into an inactive target stage with a typed validation error", async () => {

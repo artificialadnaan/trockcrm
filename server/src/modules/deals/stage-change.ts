@@ -154,6 +154,17 @@ export async function changeDealStage(
     throw new AppError(404, "Deal not found");
   }
 
+  // A change order is a Won child deal that must never move stages — moving it off Won would silently drop
+  // its value from every Won report. It is managed only via the change-order endpoints, so reject any stage
+  // change on an is_change_order deal here (before the same-stage no-op, which would otherwise let it pass).
+  if (currentDeal[0].isChangeOrder === true) {
+    throw new AppError(
+      409,
+      "A change order is a Won child deal and cannot change stage.",
+      "CHANGE_ORDER_STAGE_LOCKED"
+    );
+  }
+
   // Rep ownership check: reps can only modify their own deals.
   // Must happen before the same-stage no-op to prevent probing other reps' deals.
   if (userRole === "rep" && currentDeal[0].assignedRepId !== userId) {

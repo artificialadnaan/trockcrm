@@ -48,8 +48,9 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_number varchar(50) UNIQUE NOT NULL, name varchar(500) NOT NULL,
       stage_id uuid NOT NULL, assigned_rep_id uuid, company_id uuid, property_id uuid, source_lead_id uuid,
-      awarded_amount numeric(14,2), won_closed_date date, contract_signed_date date,
+      awarded_amount numeric(14,2), bid_estimate numeric(14,2), dd_estimate numeric(14,2), won_closed_date date, contract_signed_date date,
       project_number text, office_code text, project_type text, project_type_id uuid, region_id uuid,
+      pipeline_type_snapshot text NOT NULL DEFAULT 'normal', estimator_user_id uuid,
       source varchar(100), workflow_route text NOT NULL DEFAULT 'normal', created_by_user_id uuid,
       is_change_order boolean NOT NULL DEFAULT false, parent_deal_id uuid,
       is_bid_board_owned boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
@@ -71,6 +72,17 @@ beforeAll(async () => {
       entity_name_snapshot text, entity_secondary_id_snapshot text, impersonator_id uuid,
       changes jsonb, field_changes_jsonb jsonb, full_row jsonb, visibility_scope text,
       ip_address text, user_agent varchar(500), created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE user_commission_settings (
+      user_id uuid PRIMARY KEY, commission_rate numeric(7,6) NOT NULL DEFAULT 0, is_active boolean NOT NULL DEFAULT true
+    );
+    CREATE TABLE deal_signed_commissions (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
+      rep_user_id uuid NOT NULL, source_value_kind text NOT NULL,
+      source_value_amount numeric(14,2) NOT NULL, applied_rate numeric(7,6) NOT NULL, amount numeric(14,2) NOT NULL,
+      contract_signed_date_at_signing date NOT NULL, calculated_at timestamptz NOT NULL DEFAULT now(),
+      created_by uuid, created_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id)
     );
     INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES
       ('${ST.won}','Won','${WON_SLUG}', 90, true), ('${ST.open}','Opportunity','opportunity', 30, false);
@@ -151,6 +163,24 @@ describe("createChangeOrderChildDeal — a change order is its own Won child dea
   it("rejects a non-positive amount and an ineligible parent", async () => {
     await expect(createChangeOrderChildDeal(tdb, { parentDealId: PARENT, signedDate: "2026-03-15", amount: "0", createdBy: REP })).rejects.toThrow();
     await expect(createChangeOrderChildDeal(tdb, { parentDealId: U("deadbeef"), signedDate: "2026-03-15", amount: "100", createdBy: REP })).rejects.toThrow();
+  });
+
+  it("inherits the parent's service pipeline_type_snapshot + estimator attribution (report classification)", async () => {
+    // A service-routed parent attributed to an estimator: the CO child must classify as 'service' (not the
+    // default 'normal') and carry the same estimator, or report-builder (COALESCE(pipeline_type_snapshot,
+    // workflow_route)) misclassifies the CO and estimator-filtered reports omit its revenue.
+    const sp = U("e2001");
+    const est = U("a02");
+    await pg.exec(`INSERT INTO users (id, display_name) VALUES ('${est}','Estimator Eve')`);
+    await pg.exec(
+      `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned, pipeline_type_snapshot, estimator_user_id) VALUES ` +
+        `('${sp}','DFW-9-30001-aa','Service Parent','${ST.won}','${REP}','${CO_NS}','${PROP}', 100000, '2025-07-01','DFW-9-30001-aa','DFW','Roofing','service', false, 'service', '${est}')`
+    );
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: sp, signedDate: "2026-04-01", amount: "5000", createdBy: REP });
+    const row = await fetchDeal(child.id);
+    expect(row.pipeline_type_snapshot).toBe("service");
+    expect(row.estimator_user_id).toBe(est);
+    expect(row.workflow_route).toBe("service"); // sanity: route inherited too
   });
 });
 
@@ -271,5 +301,29 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     row = await fetchDeal(child.id);
     expect(row.won_closed_date).toBe("2026-06-15");
     expect(row.contract_signed_date).toBe("2026-06-15"); // update moves both together
+  });
+
+  it("editing a CO amount recomputes the child's commission to the new value (one row, not a duplicate)", async () => {
+    // A change order earns commission (decision). Commission must track the CURRENT CO value: a stale
+    // commission after a CO amount edit is a real payout error. The recompute deletes + re-creates the
+    // row atomically, so the edit yields exactly ONE row at the new amount — never a stale or duplicate row.
+    const p = U("e1010");
+    await seedWonParent(p, "DFW-9-20010-aa", 100000);
+    await pg.exec(
+      `INSERT INTO user_commission_settings (user_id, commission_rate, is_active) VALUES ('${REP}', 0.100000, true) ` +
+        `ON CONFLICT (user_id) DO UPDATE SET commission_rate = EXCLUDED.commission_rate, is_active = true`
+    );
+    const child = await addDealChangeOrder(tdb, { dealId: p, signedDate: "2026-04-01", amount: "10000", createdBy: REP });
+    const readCommissions = async () => {
+      const r = (await tdb.execute(sql`SELECT amount FROM deal_signed_commissions WHERE deal_id = ${child.id}`)) as any;
+      return (Array.isArray(r) ? r : r.rows) as Array<{ amount: string }>;
+    };
+    const before = await readCommissions();
+    expect(before.length).toBe(1);
+    expect(Number(before[0].amount)).toBeCloseTo(1000, 2); // $10,000 × 10%
+    await updateDealChangeOrder(tdb, { id: child.id, dealId: p, amount: "25000", updatedBy: REP });
+    const after = await readCommissions();
+    expect(after.length).toBe(1); // recomputed in place — no second row
+    expect(Number(after[0].amount)).toBeCloseTo(2500, 2); // $25,000 × 10%
   });
 });
