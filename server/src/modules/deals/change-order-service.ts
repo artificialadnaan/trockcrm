@@ -234,6 +234,11 @@ export async function createChangeOrderChildDeal(
   // these; everything else takes its DB default. CRM-only — no source lead, no geocode, no assignment
   // task. The child shares the parent's project_number (the unique index exempts is_change_order rows).
   const childName = `${parent.name} — Change Order ${ordinal}`;
+  // Suppress the project-number-first-set email (migration 0138 trigger) for this insert: a CO child
+  // shares the parent's project_number, so it is NOT a first project-number assignment. Transaction-local
+  // (the per-request connection runs in one transaction — middleware/tenant.ts), reset right after the
+  // insert so other writes in the same request still notify normally. A no-op in PGlite auto-commit.
+  await tenantDb.execute(sql`SELECT set_config('app.skip_project_number_email', 'true', true)`);
   const inserted = await tenantDb.execute(sql`
     INSERT INTO deals (
       deal_number, name, stage_id, is_change_order, parent_deal_id, assigned_rep_id, company_id, property_id,
@@ -249,6 +254,7 @@ export async function createChangeOrderChildDeal(
     )
     RETURNING id, deal_number, created_at, updated_at
   `);
+  await tenantDb.execute(sql`SELECT set_config('app.skip_project_number_email', '', true)`);
   const childRow = (
     (Array.isArray(inserted) ? inserted : (inserted as { rows?: unknown[] }).rows ?? []) as Array<{
       id: string;
