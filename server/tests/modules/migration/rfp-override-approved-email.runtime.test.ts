@@ -161,4 +161,15 @@ describe("migration 0155 — rfp_override_approved_email trigger (real SQL)", ()
     await createdCallback(pg, DEAL);
     expect(await approvedJobs(pg)).toHaveLength(0);
   });
+
+  it("does NOT enqueue when a LATER cycle is approved NORMALLY carrying a STALE override_approved decision", async () => {
+    pg = await setup();
+    // a deal that succeeded via override in a PRIOR cycle, then re-opened: the re-open (rfp-request-delivery.ts)
+    // set status back to 'pending' under a new request id but did NOT clear rfp_override_decision, so it carries
+    // a stale 'override_approved'. The new cycle is then approved NORMALLY (pending -> approved, no override).
+    await insertDeal(pg, { status: "pending", decision: "override_approved", requestId: 56 });
+    await createdCallback(pg, DEAL); // pending -> approved (OLD <> 'declined') — NOT an override this cycle
+    // gating on the cycle-current transition (OLD='declined') keeps the stale decision from firing a bogus email
+    expect(await approvedJobs(pg)).toHaveLength(0);
+  });
 });

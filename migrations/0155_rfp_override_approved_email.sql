@@ -14,11 +14,13 @@
 --
 -- DESIGN INVARIANTS (mirrors migrations 0148/0154):
 --   * CONFIRMED OVERRIDE-SUCCESS ONLY. Attached AFTER UPDATE OF rfp_approval_status; the function enqueues only
---     when NEW.rfp_approval_status='approved' AND OLD is DISTINCT FROM it AND NEW.rfp_override_decision=
+--     when NEW.rfp_approval_status='approved' AND OLD.rfp_approval_status='declined' (the cycle-current override
+--     transition — only the override path flips declined->approved) AND NEW.rfp_override_decision=
 --     'override_approved'. The approve click and the failure callback never touch rfp_approval_status (so the
---     UPDATE OF filter excludes them); an ORIGINAL (non-override) approval reaches 'approved' with a NULL
---     decision and is excluded by the decision guard. All gating is IN THE FUNCTION (no WHEN clause), so the
---     runtime test exercises the real gating and inverting any guard breaks it (load-bearing).
+--     UPDATE OF filter excludes them); an ORIGINAL (non-override) approval reaches 'approved' from
+--     'pending'/'requested' (OLD<>'declined') and is excluded. Gating on OLD='declined' (not the decision alone)
+--     is what makes a STALE rfp_override_decision from a re-opened prior cycle harmless. All gating is IN THE
+--     FUNCTION (no WHEN clause), so the runtime test exercises the real gating and inverting any guard breaks it.
 --   * ONCE PER RFP CYCLE. The cycle's identity is rfp_approval_request_id. The receipts ledger
 --     (public.rfp_override_approved_email_receipts, keyed (tenant_schema, deal_id, rfp_approval_request_id)) is
 --     the worker's exactly-once guard. A duplicate/replayed `created` callback makes no transition (OLD already
@@ -46,13 +48,22 @@ BEGIN
   IF NEW.rfp_approval_status IS DISTINCT FROM 'approved' THEN
     RETURN NEW;
   END IF;
-  IF OLD.rfp_approval_status IS NOT DISTINCT FROM 'approved' THEN
-    -- Already approved (a duplicate/replayed created callback) -> not a fresh success.
+  -- A declined -> approved transition is the override-approve success signal, and it must be CYCLE-CURRENT.
+  -- The override flow keeps the deal 'declined' until the `created` callback flips it to 'approved'; a normal
+  -- RFP approval (and a duplicate/replayed `created`) reaches 'approved' from 'pending'/'requested'/'approved',
+  -- never 'declined'. Gating on OLD='declined' — the actual transition — rather than on rfp_override_decision
+  -- alone is essential: a re-open (rfp-request-delivery.ts) starts a NEW cycle by setting only
+  -- rfp_approval_request_id/token/status and does NOT clear rfp_override_decision, so a deal that succeeded via
+  -- override in a PRIOR cycle carries a stale 'override_approved' into the next cycle. A later NORMAL
+  -- pending -> approved would then satisfy a decision-only guard and fire a bogus override email; OLD='declined'
+  -- excludes it (that approval comes from 'pending', not 'declined'). It also subsumes the duplicate/replayed
+  -- created case (approved -> approved has OLD='approved').
+  IF OLD.rfp_approval_status IS DISTINCT FROM 'declined' THEN
     RETURN NEW;
   END IF;
-  -- OVERRIDE flow only: the approve click stamped rfp_override_decision='override_approved' and the `created`
-  -- callback leaves it set. An ORIGINAL (non-override) approval reaches 'approved' with a NULL decision -> skip
-  -- (that happy path has no override and is out of scope for this notification).
+  -- Belt-and-suspenders: confirm the override decision is recorded for this approval. The approve click stamps
+  -- rfp_override_decision='override_approved' and the `created` callback leaves it set; only the override path
+  -- flips declined -> approved, so this is normally implied by OLD='declined' but makes the intent explicit.
   IF NEW.rfp_override_decision IS DISTINCT FROM 'override_approved' THEN
     RETURN NEW;
   END IF;
