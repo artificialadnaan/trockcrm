@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { dealChangeOrders, deals, pipelineStageConfig } from "@trock-crm/shared/schema";
+import { dealChangeOrders, deals, pipelineStageConfig, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { isGenuineWonDealStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
 import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
@@ -655,6 +655,12 @@ export async function deleteDealChangeOrder(
     } catch (err) {
       console.error(`[ChangeOrders] commission removal failed for soft-deleted CO child ${child.id}:`, err);
     }
+    // Dismiss the child's open tasks (getTasks doesn't filter inactive deals, so they'd otherwise linger in
+    // queues for a deleted CO). The parent-delete cascade already dismisses child tasks; do the same here.
+    await tenantDb
+      .update(tasks)
+      .set({ status: "dismissed", isOverdue: false })
+      .where(and(eq(tasks.dealId, child.id), inArray(tasks.status, ["pending", "in_progress"])));
     return childRowToChangeOrderRecord(child);
   }
 

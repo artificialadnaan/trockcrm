@@ -104,6 +104,10 @@ beforeAll(async () => {
     END;
     $$ LANGUAGE plpgsql;
     CREATE TRIGGER stage_history_trigger AFTER INSERT ON deals FOR EACH ROW EXECUTE FUNCTION record_stage_history_test();
+    CREATE TABLE tasks (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid,
+      status text NOT NULL DEFAULT 'pending', is_overdue boolean NOT NULL DEFAULT false
+    );
     INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES
       ('${ST.won}','Won','${WON_SLUG}', 90, true), ('${ST.open}','Opportunity','opportunity', 30, false);
     INSERT INTO users (id, display_name) VALUES ('${REP}','Alice');
@@ -437,5 +441,19 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     expect(await countCommissions(cc.id)).toBe(1);
     await softDeleteChangeOrderChildren(tdb, p2, REP);
     expect(await countCommissions(cc.id)).toBe(0);
+  });
+
+  it("dismisses the CO child's open tasks when it is deleted via the change-order endpoint", async () => {
+    const p = U("e1019");
+    await seedWonParent(p, "DFW-9-20019-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    await pg.exec(
+      `INSERT INTO tasks (id, deal_id, status) VALUES ('${U("70a")}','${child.id}','pending'),('${U("70b")}','${child.id}','in_progress')`
+    );
+    await deleteDealChangeOrder(tdb, { id: child.id, dealId: p, deletedBy: REP });
+    const r = (await tdb.execute(sql`SELECT status FROM tasks WHERE deal_id = ${child.id}`)) as any;
+    const statuses = (Array.isArray(r) ? r : r.rows).map((x: { status: string }) => x.status);
+    expect(statuses.length).toBe(2);
+    expect(statuses.every((s: string) => s === "dismissed")).toBe(true);
   });
 });

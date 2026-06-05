@@ -364,6 +364,9 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
       and(
         buildDealSearchCondition(query),
         or(eq(deals.isActive, true), inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])),
+        // A soft-deleted change-order child is a (terminal) Won deal, so the terminal-findable rule above
+        // would keep it searchable + deep-linkable to a deleted CO. Exclude inactive CO children explicitly.
+        sql`NOT (${deals.isChangeOrder} = true AND ${deals.isActive} = false)`,
       ),
     )
     // Status tier FIRST (active < on_hold < terminal) so the per-entity cap can't fill up with

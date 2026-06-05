@@ -36,7 +36,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
-import { calculateCommissionForDeal } from "../commissions/service.js";
+import { calculateCommissionForDeal, removeCommissionForDeal } from "../commissions/service.js";
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
@@ -2538,6 +2538,13 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
       )
     );
 
+  // If the deleted deal is ITSELF a change-order child (deletable via this route now that COs are real,
+  // deep-linkable deals), remove its own commission — the cascade above only covers descendants, and
+  // earned-commission report queries don't all filter is_active, so a voided CO's commission would linger.
+  if (existing.isChangeOrder === true) {
+    await removeCommissionForDeal(tenantDb, dealId, userId ?? null);
+  }
+
   return result[0];
 }
 
@@ -3079,6 +3086,17 @@ export async function setDealContractSignedDate(
       .limit(1)
       .for("update");
     if (!existing) return null;
+
+    // A change order's signed/won date is managed only via the change-order endpoint (updateDealChangeOrder,
+    // which also recomputes commission). Editing it here would move won_closed_date/attribution WITHOUT the
+    // commission recompute and could enqueue the contract-signed Procore handoff for a CRM-only child.
+    if (existing.isChangeOrder === true) {
+      throw new AppError(
+        409,
+        "A change order's signed date is managed through the change-order endpoints, not the contract-signed-date path.",
+        "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
 
     const oldValue = existing.contractSignedDate ?? null;
     const newValue = contractSignedDate ?? null;
