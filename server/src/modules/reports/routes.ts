@@ -509,6 +509,7 @@ router.get("/director-scorecard", requireDirector, async (req, res, next) => {
 // scorecard INNER-joins users, so unassigned deals contribute to no headline number. The allowed-metric
 // set is imported from the service (DIRECTOR_EVIDENCE_METRICS) so route validation stays in lockstep with
 // the DirectorEvidenceMetric type.
+/** Parse + validate the evidence query: a whitelisted metric (required) and an optional rep UUID (office-wide when absent). */
 export function parseDirectorEvidenceParams(query: Record<string, unknown>): DirectorScorecardEvidenceOptions {
   const metricRaw = pickQueryValue(query.metric);
   if (!metricRaw || !DIRECTOR_EVIDENCE_METRICS.includes(metricRaw as DirectorEvidenceMetric)) {

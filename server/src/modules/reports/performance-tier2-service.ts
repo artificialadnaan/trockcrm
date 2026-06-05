@@ -1101,6 +1101,12 @@ function directorEvidenceRowSelectSql(valueSql: SQL, cohortDateSql: SQL): SQL {
   `;
 }
 
+/**
+ * Build the row-select query for one evidence metric, reusing the SAME cohort predicate as the matching
+ * getDirectorScorecard aggregate: won/lost share the win-rate cohort (closedDealScope AND buildWonDateSql,
+ * split by terminal slug); pipeline/commit/best_case slice the open-inventory cohort by stage slug. So the
+ * returned rows reconcile to the headline number by construction.
+ */
 function buildDirectorEvidenceQuery(
   filters: PerformanceReportFilters,
   options: DirectorScorecardEvidenceOptions
