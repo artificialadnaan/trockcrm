@@ -249,4 +249,27 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-02-01", amount: "999999999999.99", createdBy: REP });
     expect(Number(await sumDealChangeOrders(tdb, p))).toBeCloseTo(1999999999999.98, 2);
   });
+
+  it("rejects nesting: a change order cannot be added to another change order (one level only)", async () => {
+    const p = U("e1008");
+    await seedWonParent(p, "DFW-9-20008-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    // The child is itself a Won deal (would pass eligibility) — but COs must not nest.
+    await expect(
+      createChangeOrderChildDeal(tdb, { parentDealId: child.id, signedDate: "2026-05-01", amount: "500", createdBy: REP })
+    ).rejects.toThrow();
+  });
+
+  it("update keeps contract_signed_date in sync with won_closed_date (matches create)", async () => {
+    const p = U("e1009");
+    await seedWonParent(p, "DFW-9-20009-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    let row = await fetchDeal(child.id);
+    expect(row.won_closed_date).toBe("2026-04-01");
+    expect(row.contract_signed_date).toBe("2026-04-01"); // create sets both
+    await updateDealChangeOrder(tdb, { id: child.id, dealId: p, signedDate: "2026-06-15" });
+    row = await fetchDeal(child.id);
+    expect(row.won_closed_date).toBe("2026-06-15");
+    expect(row.contract_signed_date).toBe("2026-06-15"); // update moves both together
+  });
 });

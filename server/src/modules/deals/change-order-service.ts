@@ -107,6 +107,7 @@ async function loadParentForChildCreate(
       id: deals.id,
       name: deals.name,
       isBidBoardOwned: deals.isBidBoardOwned,
+      isChangeOrder: deals.isChangeOrder,
       workflowRoute: deals.workflowRoute,
       stageId: deals.stageId,
       stageSlug: pipelineStageConfig.slug,
@@ -126,6 +127,15 @@ async function loadParentForChildCreate(
 
   if (!row) {
     throw new AppError(404, "Deal not found");
+  }
+  // One-level invariant: a CO child is itself a Won deal (so it would PASS the eligibility check below),
+  // but change orders must never nest — reject adding a CO to another CO.
+  if (row.isChangeOrder === true) {
+    throw new AppError(
+      409,
+      "A change order cannot be added to another change order.",
+      "DEAL_IS_CHANGE_ORDER"
+    );
   }
   const eligible =
     row.isBidBoardOwned === true || isGenuineWonDealStageSlug(row.stageSlug, row.workflowRoute);
@@ -494,7 +504,13 @@ export async function updateDealChangeOrder(
   // Child deal (new model) first.
   const childUpdates: Record<string, unknown> = { updatedAt: new Date() };
   if (input.amount !== undefined) childUpdates.awardedAmount = normalizeChangeOrderAmount(input.amount);
-  if (input.signedDate !== undefined) childUpdates.wonClosedDate = normalizeSignedDate(input.signedDate);
+  if (input.signedDate !== undefined) {
+    const normalized = normalizeSignedDate(input.signedDate);
+    // Keep BOTH signed-date fields in sync, exactly as createChangeOrderChildDeal sets them — else an
+    // edit would leave contract_signed_date stale vs won_closed_date.
+    childUpdates.wonClosedDate = normalized;
+    childUpdates.contractSignedDate = normalized;
+  }
   if (input.description !== undefined) childUpdates.description = normalizeDescription(input.description);
   const [child] = (await tenantDb
     .update(deals)
