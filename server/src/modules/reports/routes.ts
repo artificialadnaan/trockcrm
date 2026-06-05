@@ -44,10 +44,14 @@ import {
 } from "./saved-reports-service.js";
 import { runReportBuilder } from "./report-builder-service.js";
 import {
+  DIRECTOR_EVIDENCE_METRICS,
   getDirectorScorecard,
+  getDirectorScorecardEvidence,
   getForecastAccuracyReport,
   getRepActivityReport,
   normalizePerformanceReportFilters,
+  type DirectorEvidenceMetric,
+  type DirectorScorecardEvidenceOptions,
 } from "./performance-tier2-service.js";
 import {
   getCustomerConcentrationReport,
@@ -490,6 +494,41 @@ router.get("/director-scorecard", requireDirector, async (req, res, next) => {
       req.tenantDb!,
       normalizePerformanceReportFilters(req.query as Record<string, unknown>),
       req.officeSlug ?? req.user!.activeOfficeId
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/director-scorecard/evidence?metric=won&dateFrom=2026-02-01&dateTo=2026-02-28&office=dallas&repId=<uuid>
+// Drill-to-evidence: the supporting deal rows behind ONE Director Scorecard number, with a total that
+// EQUALS that number (same cohort predicate as getDirectorScorecard). repId absent -> office-wide (so it
+// reconciles to the office figure); otherwise a real rep UUID. There is no Unassigned bucket -- the
+// scorecard INNER-joins users, so unassigned deals contribute to no headline number. The allowed-metric
+// set is imported from the service (DIRECTOR_EVIDENCE_METRICS) so route validation stays in lockstep with
+// the DirectorEvidenceMetric type.
+/** Parse + validate the evidence query: a whitelisted metric (required) and an optional rep UUID (office-wide when absent). */
+export function parseDirectorEvidenceParams(query: Record<string, unknown>): DirectorScorecardEvidenceOptions {
+  const metricRaw = pickQueryValue(query.metric);
+  if (!metricRaw || !DIRECTOR_EVIDENCE_METRICS.includes(metricRaw as DirectorEvidenceMetric)) {
+    throw new AppError(400, `metric must be one of: ${DIRECTOR_EVIDENCE_METRICS.join(", ")}`);
+  }
+  const metric = metricRaw as DirectorEvidenceMetric;
+
+  const repIdRaw = pickQueryValue(query.repId);
+  const repId = repIdRaw === undefined ? undefined : requireUuid(repIdRaw, "repId");
+
+  return { metric, repId };
+}
+
+router.get("/director-scorecard/evidence", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getDirectorScorecardEvidence(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      parseDirectorEvidenceParams(req.query as Record<string, unknown>)
     );
     await req.commitTransaction!();
     res.json({ data });
