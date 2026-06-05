@@ -978,7 +978,10 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
 // === aggregate). users/offices are INNER-joined exactly as the aggregate joins them, so the evidence
 // cohort is row-identical (unassigned / office-less deals are dropped on both sides).
 
-export type DirectorEvidenceMetric = "won" | "lost" | "pipeline" | "commit" | "best_case";
+// Single source of truth for the evidence metric set: the route validation imports this array so the
+// allowed metrics and the DirectorEvidenceMetric type can never drift apart.
+export const DIRECTOR_EVIDENCE_METRICS = ["won", "lost", "pipeline", "commit", "best_case"] as const;
+export type DirectorEvidenceMetric = (typeof DIRECTOR_EVIDENCE_METRICS)[number];
 
 /** A single supporting deal row behind a Director Scorecard number. */
 export interface DirectorEvidenceRecord {
