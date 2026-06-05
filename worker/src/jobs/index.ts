@@ -33,6 +33,7 @@ import {
 } from "./project-number-email.js";
 import { handleRfpRejectedEmail, RFP_REJECTED_JOB } from "./rfp-rejection-email.js";
 import { handleRfpReconfirmDenialEmail, RFP_RECONFIRM_DENIAL_JOB } from "./rfp-reconfirm-denial-email.js";
+import { handleRfpOverrideApprovedEmail, RFP_OVERRIDE_APPROVED_JOB } from "./rfp-override-approved-email.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -126,6 +127,7 @@ export function registerAllJobs() {
   registerJobHandler(DEAL_OPPORTUNITY_FIRST_ENTRY_JOB, handleDealOpportunityFirstEntryEmail);
   registerJobHandler(RFP_REJECTED_JOB, handleRfpRejectedEmail);
   registerJobHandler(RFP_RECONFIRM_DENIAL_JOB, handleRfpReconfirmDenialEmail);
+  registerJobHandler(RFP_OVERRIDE_APPROVED_JOB, handleRfpOverrideApprovedEmail);
 
   registerJobHandler("reports_execution", async () => {
     await runReportsExecutionTick();
