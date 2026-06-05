@@ -32,7 +32,7 @@ const OPEN_SLUG = "opportunity";
 const ST = { won: U("57001"), lost: U("57002"), open: U("57003") };
 const D = {
   wonIn: U("11001"), wonTouched: U("11002"), wonOut: U("11003"),
-  lostIn: U("11004"), lostOut: U("11005"), openIn: U("11006"), lostByLostAt: U("11007"),
+  lostIn: U("11004"), lostOut: U("11005"), openIn: U("11006"), lostByLostAt: U("11007"), lostTouchedOnly: U("11008"),
   bWon: U("12001"), bOpen: U("12002"), bFallback: U("12003"), bReopened: U("12004"),
 };
 
@@ -80,6 +80,13 @@ beforeAll(async () => {
     INSERT INTO deals (id, stage_id, won_closed_date, actual_close_date, lost_at, contract_signed_at, updated_at) VALUES
       ('${D.lostByLostAt}','${ST.lost}', NULL, '2026-01-05', '2026-03-12T00:00:00Z', NULL, '2026-01-05T00:00:00Z');
 
+    -- PR-F Lost-unification (over-count removal): a deal lost OUT of window by canonical lost_at
+    -- (Jan 2026) but merely TOUCHED in-window (updated_at = March). The old arm windowed on updated_at
+    -- -> wrongly counted in the denominator; the new arm leads with lost_at -> correctly EXCLUDED. This
+    -- pins the COALESCE ORDER (lost_at first), guarding against a regression that re-leads with updated_at.
+    INSERT INTO deals (id, stage_id, won_closed_date, actual_close_date, lost_at, contract_signed_at, updated_at) VALUES
+      ('${D.lostTouchedOnly}','${ST.lost}', NULL, NULL, '2026-01-20T00:00:00Z', NULL, '2026-03-10T00:00:00Z');
+
     -- FIX-3 month-bucket cases
     INSERT INTO deals (id, stage_id, won_closed_date, expected_close_date, updated_at) VALUES
       ('${D.bWon}','${ST.won}','2026-02-15','2026-03-20','2026-05-01T00:00:00Z'),
@@ -116,9 +123,11 @@ describe("perf-tier2 FIX-1: buildWonDateSql windows WON by canonical won_closed_
     //  - lostIn: lost_at NULL, legacy basis (actual_close_date) in-window -> still matches (fallback preserved).
     //  - lostOut: lost_at NULL, legacy basis out-of-window -> still no match.
     //  - lostByLostAt: lost_at in-window but legacy basis OUT -> now matches on the canonical date (the fix).
+    //  - lostTouchedOnly: lost_at OUT but updated_at in-window -> now correctly EXCLUDED (over-count removed).
     expect(ids.has(D.lostIn)).toBe(true);
     expect(ids.has(D.lostOut)).toBe(false);
     expect(ids.has(D.lostByLostAt)).toBe(true);
+    expect(ids.has(D.lostTouchedOnly)).toBe(false);
   });
 });
 
