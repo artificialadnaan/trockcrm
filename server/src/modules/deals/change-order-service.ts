@@ -454,11 +454,23 @@ export async function getDealChangeOrderById(
   return (legacy as ChangeOrderRecord) ?? null;
 }
 
+// Add two non-negative money strings ("<int>.<2dp>" or integer) as integer cents via BigInt — exact at
+// ANY magnitude (no IEEE-754 rounding even for a pathological multi-CO total beyond 2^53 cents).
+function addMoneyStrings(a: string, b: string): string {
+  const toCents = (s: string): bigint => {
+    const [intPart, frac = ""] = s.split(".");
+    return BigInt(intPart || "0") * 100n + BigInt((frac + "00").slice(0, 2) || "0");
+  };
+  const cents = toCents(a) + toCents(b);
+  return `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
+}
+
 /** Sum of a deal's change-order value (child deals + un-migrated legacy rows), counted exactly once. */
 export async function sumDealChangeOrders(tenantDb: TenantDb, dealId: string): Promise<string> {
   // Two SQL sums (each wide numeric(38,2), cent-exact) added once. Uses .select (not .execute) so it
   // composes with the same query surface as listDealChangeOrders. A CO is a child OR a legacy row, never
-  // both (PR4 converts row→child atomically), so adding the two sums counts every CO exactly once.
+  // both (PR4 converts row→child atomically), so adding the two sums counts every CO exactly once. The
+  // cross-source add is done in integer cents (BigInt) so it stays cent-exact at any magnitude.
   const [childSum] = await tenantDb
     .select({ total: sql<string>`COALESCE(SUM(${deals.awardedAmount}), 0)::numeric(38,2)` })
     .from(deals)
@@ -467,9 +479,7 @@ export async function sumDealChangeOrders(tenantDb: TenantDb, dealId: string): P
     .select({ total: sql<string>`COALESCE(SUM(${dealChangeOrders.amount}), 0)::numeric(38,2)` })
     .from(dealChangeOrders)
     .where(eq(dealChangeOrders.dealId, dealId));
-  const child = Number(childSum?.total ?? 0);
-  const legacy = Number(legacySum?.total ?? 0);
-  return ((Number.isFinite(child) ? child : 0) + (Number.isFinite(legacy) ? legacy : 0)).toFixed(2);
+  return addMoneyStrings(childSum?.total ?? "0", legacySum?.total ?? "0");
 }
 
 export async function addDealChangeOrder(
