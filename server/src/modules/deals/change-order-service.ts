@@ -1,8 +1,11 @@
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { dealChangeOrders, deals, pipelineStageConfig } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
+import { isGenuineWonDealStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
+import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { generateDealNumberForProject } from "../../services/projectNumber.js";
+import { writeAuditLog } from "../../lib/audit-log.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -74,6 +77,202 @@ export async function assertDealEligibleForChangeOrder(
   }
 
   return { id: row.id };
+}
+
+interface ParentForChildCreate {
+  id: string;
+  name: string;
+  isBidBoardOwned: boolean;
+  workflowRoute: WorkflowRoute | null;
+  stageId: string;
+  stageSlug: string | null;
+  companyId: string | null;
+  propertyId: string | null;
+  assignedRepId: string | null;
+  projectNumber: string | null;
+  officeCode: string | null;
+  projectType: string | null;
+  projectTypeId: string | null;
+  regionId: string | null;
+}
+
+// Load the parent deal (with the fields a CO child inherits) and assert eligibility in one pass.
+async function loadParentForChildCreate(
+  tenantDb: TenantDb,
+  dealId: string
+): Promise<ParentForChildCreate> {
+  const [row] = await tenantDb
+    .select({
+      id: deals.id,
+      name: deals.name,
+      isBidBoardOwned: deals.isBidBoardOwned,
+      workflowRoute: deals.workflowRoute,
+      stageId: deals.stageId,
+      stageSlug: pipelineStageConfig.slug,
+      companyId: deals.companyId,
+      propertyId: deals.propertyId,
+      assignedRepId: deals.assignedRepId,
+      projectNumber: deals.projectNumber,
+      officeCode: deals.officeCode,
+      projectType: deals.projectType,
+      projectTypeId: deals.projectTypeId,
+      regionId: deals.regionId,
+    })
+    .from(deals)
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+    .where(eq(deals.id, dealId))
+    .limit(1);
+
+  if (!row) {
+    throw new AppError(404, "Deal not found");
+  }
+  const eligible =
+    row.isBidBoardOwned === true || isGenuineWonDealStageSlug(row.stageSlug, row.workflowRoute);
+  if (!eligible) {
+    throw new AppError(
+      409,
+      "Change orders can only be added to Won or Bid-Board-owned deals.",
+      "DEAL_NOT_CHANGE_ORDER_ELIGIBLE"
+    );
+  }
+  return row as ParentForChildCreate;
+}
+
+// The CO child is always Won. Prefer the parent's own stage when it is genuinely Won (the common case);
+// otherwise (a Bid-Board-Owned parent that isn't in a Won stage) resolve a canonical Won stage so the
+// child still counts — it must never be born outside a Won stage (silent-vanish guard).
+async function resolveChildWonStage(
+  tenantDb: TenantDb,
+  parent: ParentForChildCreate
+): Promise<{ id: string; slug: string }> {
+  if (parent.stageSlug && isGenuineWonDealStageSlug(parent.stageSlug, parent.workflowRoute)) {
+    return { id: parent.stageId, slug: parent.stageSlug };
+  }
+  const [won] = await tenantDb
+    .select({ id: pipelineStageConfig.id, slug: pipelineStageConfig.slug })
+    .from(pipelineStageConfig)
+    .where(inArray(pipelineStageConfig.slug, [...WON_STAGE_SLUGS]))
+    .orderBy(asc(pipelineStageConfig.displayOrder))
+    .limit(1);
+  if (!won) {
+    throw new AppError(
+      500,
+      "No Won stage is configured to create a change-order child deal.",
+      "CHANGE_ORDER_WON_STAGE_MISSING"
+    );
+  }
+  return won;
+}
+
+// 1-based ordinal for the child's display name ("… — Change Order N").
+async function nextChildOrdinal(tenantDb: TenantDb, parentDealId: string): Promise<number> {
+  const [row] = await tenantDb
+    .select({ n: sql<number>`COUNT(*)::int` })
+    .from(deals)
+    .where(and(eq(deals.parentDealId, parentDealId), eq(deals.isChangeOrder, true)));
+  return Number(row?.n ?? 0) + 1;
+}
+
+export interface CreateChangeOrderChildInput {
+  parentDealId: string;
+  signedDate: unknown;
+  amount: unknown;
+  description?: unknown;
+  createdBy?: string | null;
+}
+
+/**
+ * Create a change order as its own real CHILD deal: stage = Won, won_closed_date = the CO's date,
+ * awarded_amount = the CO amount, parent_deal_id + is_change_order set, company/property/rep inherited,
+ * sharing the parent's project_number (the unique index exempts is_change_order rows). CRM-only — it is
+ * never synced to Bid Board/Procore, and geocode + assignment-task side-effects are intentionally NOT
+ * fired for a child. Commission is wired by the caller (addDealChangeOrder), per the comp decision.
+ *
+ * SILENT-VANISH GUARD (hard): every child is created with a Won stage + a usable won date + a positive
+ * awarded amount + not on-hold + not test-data — the exact set every Won total requires. We control all
+ * of these and assert the load-bearing ones before insert, so a child can never be born in a state that
+ * drops it out of the Won reports/counts.
+ */
+export async function createChangeOrderChildDeal(
+  tenantDb: TenantDb,
+  input: CreateChangeOrderChildInput
+): Promise<{ id: string; dealNumber: string; name: string }> {
+  const parent = await loadParentForChildCreate(tenantDb, input.parentDealId);
+  const amount = normalizeChangeOrderAmount(input.amount);
+  const signedDate = normalizeSignedDate(input.signedDate);
+  const description = normalizeDescription(input.description);
+  const wonStage = await resolveChildWonStage(tenantDb, parent);
+
+  // Hard silent-vanish asserts (defensive — all of these are values we set/resolve above).
+  if (!isGenuineWonDealStageSlug(wonStage.slug, parent.workflowRoute)) {
+    throw new AppError(
+      500,
+      "Refusing to create a change-order child outside a Won stage.",
+      "CHANGE_ORDER_CHILD_NOT_WON"
+    );
+  }
+  if (!signedDate || !(Number(amount) > 0)) {
+    throw new AppError(
+      500,
+      "Refusing to create a change-order child without a won date and positive amount.",
+      "CHANGE_ORDER_CHILD_INVALID"
+    );
+  }
+
+  const ordinal = await nextChildOrdinal(tenantDb, parent.id);
+  const createdAt = new Date();
+  const dealNumber = await generateDealNumberForProject(tenantDb, {
+    id: "new",
+    officeCode: parent.officeCode,
+    projectType: parent.projectType,
+    workflowRoute: parent.workflowRoute ?? "normal",
+    createdAt,
+  });
+
+  // Explicit column list (not drizzle .values, which emits every schema column): a CO child sets only
+  // these; everything else takes its DB default. CRM-only — no source lead, no geocode, no assignment
+  // task. The child shares the parent's project_number (the unique index exempts is_change_order rows).
+  const childName = `${parent.name} — Change Order ${ordinal}`;
+  const inserted = await tenantDb.execute(sql`
+    INSERT INTO deals (
+      deal_number, name, stage_id, is_change_order, parent_deal_id, assigned_rep_id, company_id, property_id,
+      awarded_amount, won_closed_date, contract_signed_date, project_number, office_code, project_type,
+      project_type_id, region_id, source, description, created_by_user_id, workflow_route,
+      is_active, on_hold, is_test_data, stage_entered_at, created_at, updated_at
+    ) VALUES (
+      ${dealNumber}, ${childName}, ${wonStage.id}, true, ${parent.id}, ${parent.assignedRepId},
+      ${parent.companyId}, ${parent.propertyId}, ${amount}, ${signedDate}, ${signedDate},
+      ${parent.projectNumber}, ${parent.officeCode}, ${parent.projectType}, ${parent.projectTypeId},
+      ${parent.regionId}, 'change_order', ${description}, ${input.createdBy ?? null},
+      ${parent.workflowRoute ?? "normal"}, true, false, false, ${createdAt}, ${createdAt}, ${createdAt}
+    )
+    RETURNING id, deal_number, name
+  `);
+  const childRow = (
+    (Array.isArray(inserted) ? inserted : (inserted as { rows?: unknown[] }).rows ?? []) as Array<{
+      id: string;
+      deal_number: string;
+      name: string;
+    }>
+  )[0];
+
+  await writeAuditLog(tenantDb, {
+    tableName: "deals",
+    recordId: childRow.id,
+    action: "insert",
+    changedBy: input.createdBy ?? null,
+    entityType: "deal",
+    fullRow: {
+      id: childRow.id,
+      dealNumber: childRow.deal_number,
+      isChangeOrder: true,
+      parentDealId: parent.id,
+      awardedAmount: amount,
+      wonClosedDate: signedDate,
+    },
+  });
+
+  return { id: childRow.id, dealNumber: childRow.deal_number, name: childRow.name };
 }
 
 // Positive money string: 1-12 integer digits + up to 2 decimals. This bounds the value to the
