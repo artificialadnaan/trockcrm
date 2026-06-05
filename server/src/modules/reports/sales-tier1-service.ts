@@ -481,7 +481,11 @@ export async function getPipelineVelocityReport(
   scopeKey = "default"
 ): Promise<PipelineVelocityOverview> {
   return withReportCache(cacheKey("pipeline-velocity", scopeKey, filters), async () => {
-    const whereSql = buildDealFilterSql(filters, "created_at");
+    // CURRENT open inventory — NOT windowed on created_at (PR-D). Velocity is a snapshot of the pipeline
+    // aged by stage; a deal created before the selected range but still open today belongs in the
+    // stage-aging / stuck views. Windowing on created_at silently dropped old-but-stuck inventory.
+    // (The date range does not apply to this report; the page shows a caption to that effect.)
+    const whereSql = buildDealFilterSql(filters);
     const terminalSlugs = sqlStringList(TERMINAL_STAGE_SLUGS);
 
     const stageRows = rowsFromExecute<PipelineVelocityStageRow>(await tenantDb.execute<PipelineVelocityStageRow>(sql`

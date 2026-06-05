@@ -39,6 +39,9 @@ export function PipelineVelocityPage() {
     >
       {data ? (
         <div className="space-y-6">
+          <p role="note" className="text-xs font-medium text-slate-500">
+            Showing the current open pipeline — the date range is not applied to this report.
+          </p>
           <KpiStrip>
             <KpiCard label="Avg Deal Age" value={`${formatInteger(data.kpis.avgDealAgeDays)} days`} helper="Open pipeline" />
             <KpiCard label="Total Open Value" value={formatCurrency(data.kpis.totalOpenValue)} helper="Active opportunities" />
