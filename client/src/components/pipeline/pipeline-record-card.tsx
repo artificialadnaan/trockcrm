@@ -10,6 +10,7 @@ import {
   type AtRiskResult,
 } from "@trock-crm/shared/types";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
+import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
 
 export interface PipelineRecordCardData {
   id: string;
@@ -34,6 +35,9 @@ export interface PipelineRecordCardData {
   onHoldAccumulatedSecondsAtStageEntry?: number | null;
   workflowRoute?: string | null;
   atRisk?: AtRiskResult | null;
+  // CO-child model (BLUE PR1). Deal board cards are full Deal objects passed structurally as this
+  // narrow type, so the flag flows through once it lands; only ever set/shown for deal records.
+  isChangeOrder?: boolean | null;
 }
 
 interface PipelineRecordCardProps {
@@ -104,6 +108,9 @@ export function PipelineRecordCard({
                 </span>
               ) : null}
               {entity === "deal" ? <AtRiskBadge atRisk={record.atRisk} compact /> : null}
+              {entity === "deal" ? (
+                <ChangeOrderBadge isChangeOrder={record.isChangeOrder} compact />
+              ) : null}
               <p className="line-clamp-2 text-[15px] leading-5 font-semibold text-slate-900">{record.name}</p>
             </div>
             {value ? (

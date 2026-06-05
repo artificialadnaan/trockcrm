@@ -201,6 +201,16 @@ describe("KanbanDealCard", () => {
 
     expect(html).not.toContain("At Risk");
   });
+
+  it("flags a change-order child deal with the Change Order badge", () => {
+    const html = render(makeDeal({ isChangeOrder: true }));
+
+    expect(html).toContain('data-change-order="true"');
+  });
+
+  it("does not flag a regular deal as a change order", () => {
+    expect(render(makeDeal())).not.toContain('data-change-order="true"');
+  });
 });
 
 describe("getDealDisplayNumber", () => {

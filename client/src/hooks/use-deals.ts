@@ -92,6 +92,11 @@ export interface Deal {
   dealNumber: string;
   projectNumber?: string | null;
   name: string;
+  // Change-Order child-deal model (BLUE PR1, migration 0156). Defensive/optional: both are absent on
+  // the wire until PR1 lands, after which they auto-flow on every deal surface that selects the full
+  // row (list/detail/board/contact). `isChangeOrder` flags a CO child; `parentDealId` points at its parent.
+  isChangeOrder?: boolean | null;
+  parentDealId?: string | null;
   stageId: string;
   pipelineDisposition: DealPipelineDisposition;
   workflowRoute: WorkflowRoute | null;

@@ -292,4 +292,15 @@ describe("DecoratedKanbanCard", () => {
     expect(html).not.toContain("At Risk");
     expect(html).not.toContain("data-at-risk-severity");
   });
+
+  it("flags a change-order child deal with the Change Order badge", () => {
+    const html = renderDeal(makeDeal({ isChangeOrder: true, stageId: "stage-won" }), "won");
+
+    expect(html).toContain('data-change-order="true"');
+  });
+
+  it("does not flag a regular deal as a change order", () => {
+    expect(renderDeal(makeDeal())).not.toContain('data-change-order="true"');
+    expect(renderDeal(makeDeal({ isChangeOrder: false }))).not.toContain('data-change-order="true"');
+  });
 });
