@@ -2498,7 +2498,7 @@ export async function startProposalDraft(
  * Soft-delete a deal.
  * Only admins can delete primary deal rows.
  */
-export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: string) {
+export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: string, userId?: string | null) {
   if (userRole !== "admin") {
     throw new AppError(403, "Only admins can delete deals");
   }
@@ -2525,7 +2525,7 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
   // Cascade the soft-delete to this deal's change-order children: they are real Won child deals, so leaving
   // them active after the parent is voided would orphan their value in Won reports. The DB self-FK ON DELETE
   // CASCADE only fires on a hard row delete, not this is_active=false soft-delete, so cascade it explicitly.
-  const childCoIds = await softDeleteChangeOrderChildren(tenantDb, dealId);
+  const childCoIds = await softDeleteChangeOrderChildren(tenantDb, dealId, userId ?? null);
 
   // Auto-dismiss pending/in-progress tasks for the deal AND its now-voided CO children.
   await tenantDb

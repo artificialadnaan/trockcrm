@@ -6,7 +6,11 @@ import { isGenuineWonDealStageSlug, type WorkflowRoute } from "@trock-crm/shared
 import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
-import { calculateCommissionForDeal, recalculateCommissionForDeal } from "../commissions/service.js";
+import {
+  calculateCommissionForDeal,
+  recalculateCommissionForDeal,
+  removeCommissionForDeal,
+} from "../commissions/service.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -101,6 +105,8 @@ interface ParentForChildCreate {
   regionId: string | null;
   pipelineTypeSnapshot: string; // NOT NULL in schema (default 'normal')
   estimatorUserId: string | null;
+  isActive: boolean;
+  isTestData: boolean;
 }
 
 // Load the parent deal (with the fields a CO child inherits) and assert eligibility in one pass.
@@ -129,6 +135,8 @@ async function loadParentForChildCreate(
       // (not the default 'normal') and an estimator-attributed CO still appears in estimator-filtered reports.
       pipelineTypeSnapshot: deals.pipelineTypeSnapshot,
       estimatorUserId: deals.estimatorUserId,
+      isActive: deals.isActive,
+      isTestData: deals.isTestData,
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
@@ -137,6 +145,15 @@ async function loadParentForChildCreate(
 
   if (!row) {
     throw new AppError(404, "Deal not found");
+  }
+  // A soft-deleted (or never-active) parent must not spawn a CO child: the child would be born an active
+  // Won deal under a removed parent and surface independently in active lists/search/Won reports.
+  if (row.isActive === false) {
+    throw new AppError(
+      409,
+      "Change orders cannot be added to a deleted deal.",
+      "DEAL_NOT_CHANGE_ORDER_ELIGIBLE"
+    );
   }
   // One-level invariant: a CO child is itself a Won deal (so it would PASS the eligibility check below),
   // but change orders must never nest — reject adding a CO to another CO.
@@ -273,7 +290,7 @@ export async function createChangeOrderChildDeal(
       ${parent.companyId}, ${parent.propertyId}, ${amount}, ${signedDate}, ${signedDate},
       ${parent.projectNumber}, ${parent.officeCode}, ${parent.projectType}, ${parent.projectTypeId},
       ${parent.regionId}, ${parent.pipelineTypeSnapshot}, ${parent.estimatorUserId}, 'change_order', ${description}, ${input.createdBy ?? null},
-      ${parent.workflowRoute ?? "normal"}, true, false, false, ${createdAt}, ${createdAt}, ${createdAt}
+      ${parent.workflowRoute ?? "normal"}, true, false, ${parent.isTestData}, ${createdAt}, ${createdAt}, ${createdAt}
     )
     RETURNING id, deal_number, created_at, updated_at
   `);
@@ -609,7 +626,7 @@ export async function updateDealChangeOrder(
 
 export async function deleteDealChangeOrder(
   tenantDb: TenantDb,
-  input: { id: string; dealId: string }
+  input: { id: string; dealId: string; deletedBy?: string | null }
 ): Promise<ChangeOrderRecord> {
   // Deleting a CO child SOFT-deletes its deal row (is_active=false), never a hard row delete: a CO child
   // is a real deal that accrues dependent rows referencing deals(id) without ON DELETE CASCADE (the
@@ -629,7 +646,17 @@ export async function deleteDealChangeOrder(
       )
     )
     .returning(childChangeOrderColumns)) as ChildCoRow[];
-  if (child) return childRowToChangeOrderRecord(child);
+  if (child) {
+    // A voided CO must not leave an earned commission behind: some earned-commission report queries join
+    // deals without an is_active filter, so a soft-deleted CO's commission would otherwise linger in payout
+    // totals. Resilient: a commission-cleanup failure must not block the delete.
+    try {
+      await removeCommissionForDeal(tenantDb, child.id, input.deletedBy ?? null);
+    } catch (err) {
+      console.error(`[ChangeOrders] commission removal failed for soft-deleted CO child ${child.id}:`, err);
+    }
+    return childRowToChangeOrderRecord(child);
+  }
 
   const [legacy] = await tenantDb
     .delete(dealChangeOrders)
@@ -650,7 +677,8 @@ export async function deleteDealChangeOrder(
  */
 export async function softDeleteChangeOrderChildren(
   tenantDb: TenantDb,
-  parentDealId: string
+  parentDealId: string,
+  deletedBy?: string | null
 ): Promise<string[]> {
   const rows = (await tenantDb
     .update(deals)
@@ -663,5 +691,14 @@ export async function softDeleteChangeOrderChildren(
       )
     )
     .returning({ id: deals.id })) as Array<{ id: string }>;
-  return rows.map((r) => r.id);
+  const ids = rows.map((r) => r.id);
+  // A voided CO must not leave an earned commission behind (see deleteDealChangeOrder). Resilient per child.
+  for (const id of ids) {
+    try {
+      await removeCommissionForDeal(tenantDb, id, deletedBy ?? null);
+    } catch (err) {
+      console.error(`[ChangeOrders] commission removal failed for cascade-voided CO child ${id}:`, err);
+    }
+  }
+  return ids;
 }

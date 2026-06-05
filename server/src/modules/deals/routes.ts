@@ -2075,6 +2075,7 @@ router.delete("/:id/change-orders/:changeOrderId", requireRole("admin"), async (
     const removed = await deleteDealChangeOrder(req.tenantDb!, {
       id: changeOrderId,
       dealId,
+      deletedBy: req.user!.id,
     });
     await writeAuditLog(req.tenantDb!, {
       tableName: "deal_change_orders",
@@ -3213,7 +3214,7 @@ router.delete("/:id", async (req, res, next) => {
       allowAdmin: true,
       message: "Only the assigned rep or an admin can delete this deal",
     });
-    const deal = await deleteDeal(req.tenantDb!, dealId, "admin");
+    const deal = await deleteDeal(req.tenantDb!, dealId, "admin", req.user!.id);
     if (deal) {
       const auditContext = buildRouteAuditContext(req);
       await logActivity({

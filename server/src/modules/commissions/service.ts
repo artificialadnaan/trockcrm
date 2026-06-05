@@ -188,17 +188,20 @@ export async function calculateCommissionForDeal(
  * re-insert run in the caller's per-request transaction, so there is never a duplicate row and never a
  * committed window with no row. Returns the same status discriminator as a fresh calc.
  */
-export async function recalculateCommissionForDeal(
+/**
+ * Delete every commission row for a deal (each audited), returning the count removed. Used both by the
+ * recompute (delete + re-create) and when a change order is deleted — a voided CO must not leave an earned
+ * commission behind (some earned-commission report queries join deals without an is_active filter, so a
+ * soft-deleted CO's commission would otherwise linger). changedBy may be null for a system/cascade actor.
+ */
+export async function removeCommissionForDeal(
   tenantDb: TenantDb,
-  input: {
-    dealId: string;
-    contractSignedDate: string;
-    triggeredByUserId: string;
-  }
-): Promise<CalculateCommissionResult> {
+  dealId: string,
+  triggeredByUserId: string | null
+): Promise<number> {
   const removed = await tenantDb
     .delete(dealSignedCommissions)
-    .where(eq(dealSignedCommissions.dealId, input.dealId))
+    .where(eq(dealSignedCommissions.dealId, dealId))
     .returning({
       id: dealSignedCommissions.id,
       amount: dealSignedCommissions.amount,
@@ -209,13 +212,25 @@ export async function recalculateCommissionForDeal(
       tableName: "deal_signed_commissions",
       recordId: row.id,
       action: "delete",
-      changedBy: input.triggeredByUserId,
+      changedBy: triggeredByUserId,
       changes: {
         amount: { from: row.amount, to: null },
         repUserId: { from: row.repUserId, to: null },
-        dealId: { from: input.dealId, to: null },
+        dealId: { from: dealId, to: null },
       },
     });
   }
+  return removed.length;
+}
+
+export async function recalculateCommissionForDeal(
+  tenantDb: TenantDb,
+  input: {
+    dealId: string;
+    contractSignedDate: string;
+    triggeredByUserId: string;
+  }
+): Promise<CalculateCommissionResult> {
+  await removeCommissionForDeal(tenantDb, input.dealId, input.triggeredByUserId);
   return calculateCommissionForDeal(tenantDb, input);
 }

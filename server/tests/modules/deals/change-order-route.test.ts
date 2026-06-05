@@ -241,7 +241,7 @@ describe("deal change-order routes — RBAC + wiring", () => {
     expect(res.status).toBe(200);
     expect(coServiceMocks.deleteDealChangeOrder).toHaveBeenCalledWith(
       expect.any(Object),
-      { id: "co-1", dealId: "deal-1" },
+      { id: "co-1", dealId: "deal-1", deletedBy: "admin-1" },
     );
     expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
       expect.any(Object),

@@ -392,4 +392,50 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     expect((await fetchDeal(c1.id)).is_active).toBe(false);
     expect((await fetchDeal(c2.id)).is_active).toBe(false);
   });
+
+  it("rejects adding a change order to a soft-deleted (inactive) parent", async () => {
+    const p = U("e1015");
+    await pg.exec(
+      `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned, is_active) VALUES ` +
+        `('${p}','DFW-9-20015-aa','Deleted Parent','${ST.won}','${REP}', 100000, '2025-07-01','DFW-9-20015-aa','DFW','Roofing','normal', false, false)`
+    );
+    await expect(
+      createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP })
+    ).rejects.toThrow();
+  });
+
+  it("inherits the parent's test-data flag so a test parent's CO never leaks into real reports", async () => {
+    const p = U("e1016");
+    await pg.exec(
+      `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned, is_test_data) VALUES ` +
+        `('${p}','DFW-9-20016-aa','Test Parent','${ST.won}','${REP}', 100000, '2025-07-01','DFW-9-20016-aa','DFW','Roofing','normal', false, true)`
+    );
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    expect((await fetchDeal(child.id)).is_test_data).toBe(true);
+  });
+
+  it("removes the CO child's commission when it is soft-deleted, and on parent cascade (no lingering payout)", async () => {
+    const countCommissions = async (id: string) => {
+      const r = (await tdb.execute(sql`SELECT count(*)::int AS n FROM deal_signed_commissions WHERE deal_id = ${id}`)) as any;
+      return Number((Array.isArray(r) ? r : r.rows)[0].n);
+    };
+    await pg.exec(
+      `INSERT INTO user_commission_settings (user_id, commission_rate, is_active) VALUES ('${REP}', 0.100000, true) ` +
+        `ON CONFLICT (user_id) DO UPDATE SET commission_rate = EXCLUDED.commission_rate, is_active = true`
+    );
+    // Direct CO delete removes its commission.
+    const p1 = U("e1017");
+    await seedWonParent(p1, "DFW-9-20017-aa", 100000);
+    const c = await addDealChangeOrder(tdb, { dealId: p1, signedDate: "2026-04-01", amount: "10000", createdBy: REP });
+    expect(await countCommissions(c.id)).toBe(1);
+    await deleteDealChangeOrder(tdb, { id: c.id, dealId: p1, deletedBy: REP });
+    expect(await countCommissions(c.id)).toBe(0);
+    // Parent soft-delete cascade also removes the children's commissions.
+    const p2 = U("e1018");
+    await seedWonParent(p2, "DFW-9-20018-aa", 100000);
+    const cc = await addDealChangeOrder(tdb, { dealId: p2, signedDate: "2026-04-01", amount: "5000", createdBy: REP });
+    expect(await countCommissions(cc.id)).toBe(1);
+    await softDeleteChangeOrderChildren(tdb, p2, REP);
+    expect(await countCommissions(cc.id)).toBe(0);
+  });
 });
