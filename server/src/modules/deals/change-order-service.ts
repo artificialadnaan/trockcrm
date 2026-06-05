@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { dealChangeOrders, deals, pipelineStageConfig } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -163,7 +163,9 @@ async function resolveChildWonStage(
     .select({ id: pipelineStageConfig.id, slug: pipelineStageConfig.slug })
     .from(pipelineStageConfig)
     .where(inArray(pipelineStageConfig.slug, [...WON_STAGE_SLUGS]))
-    .orderBy(asc(pipelineStageConfig.displayOrder))
+    // Prefer an ACTIVE-pipeline Won stage (don't resolve a child into a deprecated stage); fall back to
+    // any Won stage if none is active.
+    .orderBy(desc(pipelineStageConfig.isActivePipeline), asc(pipelineStageConfig.displayOrder))
     .limit(1);
   if (!won) {
     throw new AppError(
