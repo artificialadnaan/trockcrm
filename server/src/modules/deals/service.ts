@@ -2503,7 +2503,10 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
     throw new AppError(403, "Only admins can delete deals");
   }
 
-  const [existing] = await tenantDb.select().from(deals).where(eq(deals.id, dealId)).limit(1);
+  // Lock the deal row FOR UPDATE so a concurrent change-order create on this parent serializes against the
+  // delete (loadParentForChildCreate takes the same lock) — otherwise a CO create could insert an active
+  // Won child AFTER this delete's cascade runs but before the child exists, orphaning it under a deleted parent.
+  const [existing] = await tenantDb.select().from(deals).where(eq(deals.id, dealId)).limit(1).for("update");
   if (!existing) {
     throw new AppError(404, "Deal not found");
   }

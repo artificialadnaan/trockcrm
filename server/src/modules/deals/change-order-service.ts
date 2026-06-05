@@ -114,6 +114,11 @@ async function loadParentForChildCreate(
   tenantDb: TenantDb,
   dealId: string
 ): Promise<ParentForChildCreate> {
+  // Lock the parent row FOR UPDATE before the eligibility read so a concurrent parent-delete serializes
+  // against this create (deleteDeal takes the same lock). Raw SQL — FOR UPDATE can't be applied to the
+  // nullable side of the pipelineStageConfig LEFT JOIN below. Closes the race where a delete cascades
+  // before this child exists, orphaning an active Won CO under a now-deleted parent.
+  await tenantDb.execute(sql`SELECT id FROM deals WHERE id = ${dealId} FOR UPDATE`);
   const [row] = await tenantDb
     .select({
       id: deals.id,
