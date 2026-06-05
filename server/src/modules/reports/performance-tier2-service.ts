@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { getDealAtRiskResult, type UserRole, type WorkflowRoute } from "@trock-crm/shared/types";
@@ -883,14 +883,10 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
     const wonSlugs = [...WON_STAGE_SLUGS];
     const terminalSlugs = [...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS];
 
-    const forecastValue = aliasedEffectiveDealValueSql("d", aliasedForecastFirstDealValueSql("d"));
-    const weightedValue = sql`(${forecastValue}) * CASE
-      WHEN psc.slug = 'opportunity' THEN 0.10
-      WHEN psc.slug IN ('estimating', 'estimate_in_progress', 'service_estimating', 'estimate_under_review', 'service_estimate_under_review') THEN 0.25
-      WHEN psc.slug IN ('estimate_sent_to_client', 'service_estimate_sent_to_client') THEN 0.50
-      WHEN psc.slug IN ('contract', 'contract_signed', 'service_contract_signed') THEN 0.75
-      ELSE COALESCE(d.win_probability, 10)::numeric / 100
-    END`;
+    // forecast-first $ + the stage-weighted value via the SHARED helpers, so the summary and the
+    // pipeline_weighted drill-to-evidence always use byte-identical expressions.
+    const forecastValue = forecastFirstValueSql("d");
+    const weightedValue = forecastWeightedValueSql("d");
 
     const summary = await db.execute(sql`
         WITH won_period AS (
@@ -966,4 +962,375 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
       atRiskRows: rowsFromExecute<ForecastAtRiskRow>(atRisk),
     });
   });
+}
+
+// ===================== DRILL-TO-EVIDENCE (Director Scorecard, PR-F Part 2a) =====================
+// Every Director Scorecard headline number is clickable -> the supporting deal ROWS. Each builder below is
+// a row-select over the SAME cohort predicate as its KPI aggregate in getDirectorScorecard, returning PER
+// ROW the same value the aggregate summed -- so COUNT(rows) === the count and SUM(value) === the number, by
+// construction (the gold-standard reuse-the-aggregate-predicate pattern, mirroring the Monday Showcase
+// evidence). The win rate decomposes into the won + lost cohorts: winRate === won.count / (won.count +
+// lost.count). Locked by director-scorecard-evidence-reconciliation.runtime.test.ts (real-SQL: evidence
+// === aggregate). users/offices are INNER-joined exactly as the aggregate joins them, so the evidence
+// cohort is row-identical (unassigned / office-less deals are dropped on both sides).
+
+// Single source of truth for the evidence metric set: the route validation imports this array so the
+// allowed metrics and the DirectorEvidenceMetric type can never drift apart.
+export const DIRECTOR_EVIDENCE_METRICS = ["won", "lost", "pipeline", "commit", "best_case"] as const;
+export type DirectorEvidenceMetric = (typeof DIRECTOR_EVIDENCE_METRICS)[number];
+
+/** A single supporting deal row behind a Tier-2 report number (Director Scorecard or Forecast Accuracy). */
+export interface ReportEvidenceRecord {
+  id: string;
+  dealNumber: string | null;
+  name: string;
+  repId: string | null;
+  repName: string;
+  stageLabel: string;
+  /** this row's contribution in the metric's $ basis (won = awarded-first, else best-estimate). */
+  value: number | null;
+  /** the canonical date this row sits on for THIS metric (won close / lost date / expected close). */
+  cohortDate: string | null;
+  companyName: string | null;
+  region: string | null;
+  dealType: string | null;
+  daysInStage: number | null;
+}
+
+export interface ReportEvidenceTotal {
+  count: number;
+  /** SUM of the rows' value in the metric's basis. For won/lost the win rate reconciles on COUNT. */
+  value: number | null;
+  basisLabel: string | null;
+}
+
+export interface DirectorScorecardEvidence {
+  metric: DirectorEvidenceMetric;
+  metricLabel: string;
+  /** the honest per-metric date axis the rows sit on (never a bare list). */
+  dateAxisLabel: string;
+  scope: EvidenceScope;
+  total: ReportEvidenceTotal;
+  records: ReportEvidenceRecord[];
+}
+
+export interface DirectorScorecardEvidenceOptions {
+  metric: DirectorEvidenceMetric;
+  // undefined = office-wide (no rep predicate -> reconciles to the office number); a string = that rep UUID.
+  // There is NO Unassigned bucket: getDirectorScorecard INNER-joins users on assigned_rep_id, so unassigned
+  // deals contribute to NO headline number and there is nothing to drill into.
+  repId?: string;
+}
+
+interface ReportEvidenceRow {
+  id: string;
+  deal_number: string | null;
+  name: string;
+  rep_id: string | null;
+  rep_name: string;
+  stage_label: string;
+  value: string | number | null;
+  cohort_date: unknown;
+  company_name: string | null;
+  region: string | null;
+  deal_type: string | null;
+  days_in_stage: unknown;
+}
+
+const DIRECTOR_EVIDENCE_METRIC_LABEL: Record<DirectorEvidenceMetric, string> = {
+  won: "Won",
+  lost: "Lost",
+  pipeline: "Open pipeline",
+  commit: "Commit",
+  best_case: "Best case",
+};
+const DIRECTOR_EVIDENCE_DATE_AXIS_LABEL: Record<DirectorEvidenceMetric, string> = {
+  won: "Won close date",
+  lost: "Lost date",
+  pipeline: "Expected close date",
+  commit: "Expected close date",
+  best_case: "Expected close date",
+};
+const DIRECTOR_EVIDENCE_BASIS_LABEL: Record<DirectorEvidenceMetric, string> = {
+  won: "Awarded-first won value",
+  lost: "Best-estimate value",
+  pipeline: "Best-estimate open value",
+  commit: "Best-estimate open value",
+  best_case: "Best-estimate open value",
+};
+
+/** Optional per-rep narrowing: undefined = office-wide; a string = that rep UUID. */
+function reportEvidenceRepScopeSql(repId?: string): SQL {
+  if (repId === undefined) return sql``;
+  return sql` AND d.assigned_rep_id = ${repId}::uuid`;
+}
+
+/**
+ * Shared deal-row projection + joins for Director evidence: identity + owner/stage/value/cohort-date PLUS
+ * the director's drill columns (company, region, deal type, days-in-stage). users/offices are INNER-joined
+ * exactly as getDirectorScorecard joins them; companies/region_config/project_type_config are additive
+ * LEFT JOINs (FK->PK 1:1) that never change the cohort row set, so COUNT(rows)/SUM(value) stay the
+ * aggregate's.
+ */
+function reportEvidenceRowSelectSql(valueSql: SQL, cohortDateSql: SQL): SQL {
+  return sql`
+    SELECT
+      d.id AS id,
+      d.deal_number AS deal_number,
+      d.name AS name,
+      d.assigned_rep_id AS rep_id,
+      COALESCE(u.display_name, '') AS rep_name,
+      COALESCE(psc.name, '') AS stage_label,
+      COALESCE(${valueSql}, 0)::numeric AS value,
+      (${cohortDateSql})::date AS cohort_date,
+      COALESCE(c.name, '') AS company_name,
+      COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), '') AS region,
+      COALESCE(NULLIF(ptc.name, ''), NULLIF(d.project_type, ''), '') AS deal_type,
+      ((now() AT TIME ZONE 'America/Chicago')::date - (d.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    JOIN users u ON u.id = d.assigned_rep_id
+    JOIN offices o ON o.id = u.office_id
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
+  `;
+}
+
+/** Drill scope header: office-wide (reconciles to the office figure) or a single rep. */
+export type EvidenceScope = { kind: "office" } | { kind: "rep"; repId: string; repName: string };
+
+/** Map a raw evidence SQL row to the typed record (shared by every Tier-2 report's evidence). */
+function mapEvidenceRow(r: ReportEvidenceRow): ReportEvidenceRecord {
+  return {
+    id: String(r.id),
+    dealNumber: r.deal_number == null ? null : String(r.deal_number),
+    name: r.name,
+    repId: r.rep_id == null ? null : String(r.rep_id),
+    repName: r.rep_name || (r.rep_id ? "Unknown rep" : "Unassigned"),
+    stageLabel: r.stage_label,
+    value: numberValue(r.value),
+    cohortDate: r.cohort_date == null ? null : String(r.cohort_date).slice(0, 10),
+    companyName: r.company_name ? String(r.company_name) : null,
+    region: r.region ? String(r.region) : null,
+    dealType: r.deal_type ? String(r.deal_type) : null,
+    daysInStage: r.days_in_stage == null ? null : Number(r.days_in_stage),
+  };
+}
+
+/** Resolve the drill scope: office-wide when no rep; else the rep (name taken from the rows, or looked up if empty). */
+async function resolveEvidenceScope(
+  db: TenantDb,
+  repId: string | undefined,
+  records: ReportEvidenceRecord[]
+): Promise<EvidenceScope> {
+  if (repId === undefined) return { kind: "office" };
+  const repName = records.find((rec) => rec.repId === repId)?.repName ?? (await resolveEvidenceRepName(db, repId));
+  return { kind: "rep", repId, repName };
+}
+
+/**
+ * Build the row-select query for one evidence metric, reusing the SAME cohort predicate as the matching
+ * getDirectorScorecard aggregate: won/lost share the win-rate cohort (closedDealScope AND buildWonDateSql,
+ * split by terminal slug); pipeline/commit/best_case slice the open-inventory cohort by stage slug. So the
+ * returned rows reconcile to the headline number by construction.
+ */
+function buildDirectorEvidenceQuery(
+  filters: PerformanceReportFilters,
+  options: DirectorScorecardEvidenceOptions
+): SQL {
+  const { metric, repId } = options;
+  const repScope = reportEvidenceRepScopeSql(repId);
+  const openValue = aliasedEffectiveDealValueSql("d");
+  const order = sql` ORDER BY value DESC, d.name`;
+
+  // won / lost share the win-rate cohort: closedDealScope AND buildWonDateSql, split by terminal slug.
+  if (metric === "won" || metric === "lost") {
+    const closedScope = buildClosedDealScopeSql(filters);
+    const wonDate = buildWonDateSql(filters);
+    if (metric === "won") {
+      const select = reportEvidenceRowSelectSql(aliasedEffectiveWonDealValueSql("d"), sql`d.won_closed_date`);
+      return sql`${select} WHERE ${closedScope} AND ${wonDate} AND psc.slug IN (${sqlStringList([...WON_STAGE_SLUGS])})${repScope}${order}`;
+    }
+    // lost cohort date mirrors buildWonDateSql's non-WON window basis (canonical lost_at first).
+    const lostCohortDate = sql`COALESCE(d.lost_at, d.contract_signed_at, (d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at)`;
+    const select = reportEvidenceRowSelectSql(openValue, lostCohortDate);
+    return sql`${select} WHERE ${closedScope} AND ${wonDate} AND psc.slug IN (${sqlStringList([...LOST_STAGE_SLUGS])})${repScope}${order}`;
+  }
+
+  // pipeline / commit / best_case are slices of the open-inventory cohort: dealScope AND non-terminal AND
+  // reportable, narrowed by stage slug (commit / commit+best_case), valued on the same effective basis.
+  const openScope = buildDealScopeSql(filters);
+  const reportable = aliasedActiveDealCountFilterSql("d");
+  const select = reportEvidenceRowSelectSql(openValue, sql`d.expected_close_date`);
+  const slugClause =
+    metric === "pipeline"
+      ? sql`psc.slug NOT IN (${sqlStringList([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS])})`
+      : metric === "commit"
+        ? sql`psc.slug IN (${sqlStringList([...COMMIT_STAGE_SLUGS])})`
+        : sql`psc.slug IN (${sqlStringList([...COMMIT_STAGE_SLUGS, ...BEST_CASE_STAGE_SLUGS])})`;
+  return sql`${select} WHERE ${openScope} AND ${slugClause} AND ${reportable}${repScope}${order}`;
+}
+
+/**
+ * Build the drill-to-evidence for one Director Scorecard number: the supporting deal rows + a total that
+ * EQUALS the headline (won/lost reconcile on COUNT for the win rate; pipeline/commit/best_case on SUM).
+ */
+export async function getDirectorScorecardEvidence(
+  db: TenantDb,
+  filters: PerformanceReportFilters,
+  options: DirectorScorecardEvidenceOptions
+): Promise<DirectorScorecardEvidence> {
+  const { metric } = options;
+  const rows = rowsFromExecute<ReportEvidenceRow>(await db.execute(buildDirectorEvidenceQuery(filters, options)));
+  const records = rows.map(mapEvidenceRow);
+  const total: ReportEvidenceTotal = {
+    count: records.length,
+    value: records.reduce((sum, rec) => sum + (rec.value ?? 0), 0),
+    basisLabel: DIRECTOR_EVIDENCE_BASIS_LABEL[metric],
+  };
+  const scope = await resolveEvidenceScope(db, options.repId, records);
+
+  return {
+    metric,
+    metricLabel: DIRECTOR_EVIDENCE_METRIC_LABEL[metric],
+    dateAxisLabel: DIRECTOR_EVIDENCE_DATE_AXIS_LABEL[metric],
+    scope,
+    total,
+    records,
+  };
+}
+
+/** Resolve a rep's display name for the scope header when the drill returned no rows. */
+async function resolveEvidenceRepName(db: TenantDb, repId: string): Promise<string> {
+  const rows = rowsFromExecute<{ name: string }>(
+    await db.execute(sql`SELECT display_name AS name FROM users WHERE id = ${repId}::uuid`)
+  );
+  return rows[0]?.name ?? "Unknown rep";
+}
+
+// ===================== DRILL-TO-EVIDENCE (Forecast Accuracy, PR-F Part 2b) =====================
+// Same reuse-the-aggregate-predicate guarantee as the Director evidence above, for getForecastAccuracyReport's
+// four headline numbers. The won_actual basis is the awarded-first, CO-FREE Won value -- change orders are
+// deliberately excluded from the forecast-vs-actual metric, so the forecast Won baseline stays as-forecasted.
+// Locked by forecast-accuracy-evidence-reconciliation.runtime.test.ts.
+
+export const FORECAST_EVIDENCE_METRICS = ["commit", "best_case", "pipeline_weighted", "won_actual"] as const;
+export type ForecastEvidenceMetric = (typeof FORECAST_EVIDENCE_METRICS)[number];
+
+const FORECAST_EVIDENCE_METRIC_LABEL: Record<ForecastEvidenceMetric, string> = {
+  commit: "Commit",
+  best_case: "Best case",
+  pipeline_weighted: "Weighted pipeline",
+  won_actual: "Won (actual)",
+};
+const FORECAST_EVIDENCE_DATE_AXIS_LABEL: Record<ForecastEvidenceMetric, string> = {
+  commit: "Expected close date",
+  best_case: "Expected close date",
+  pipeline_weighted: "Expected close date",
+  won_actual: "Won close date",
+};
+const FORECAST_EVIDENCE_BASIS_LABEL: Record<ForecastEvidenceMetric, string> = {
+  commit: "Forecast-first value",
+  best_case: "Forecast-first value",
+  pipeline_weighted: "Stage-weighted forecast value",
+  won_actual: "Awarded-first won value (CO-free)",
+};
+
+export interface ForecastAccuracyEvidence {
+  metric: ForecastEvidenceMetric;
+  metricLabel: string;
+  dateAxisLabel: string;
+  scope: EvidenceScope;
+  total: ReportEvidenceTotal;
+  records: ReportEvidenceRecord[];
+}
+
+export interface ForecastAccuracyEvidenceOptions {
+  metric: ForecastEvidenceMetric;
+  /** undefined = office-wide; a string = that rep UUID. No Unassigned bucket (the report INNER-joins users). */
+  repId?: string;
+}
+
+/**
+ * Build the row-select query for one Forecast Accuracy evidence metric, reusing the SAME predicate + $ basis
+ * as getForecastAccuracyReport: commit/best_case/pipeline_weighted are open-inventory slices (dealScope) on
+ * the forecast-first / stage-weighted basis; won_actual is the archivedWonDealScope Won cohort on the
+ * awarded-first (CO-free) basis. So SUM(rows.value) === the headline number by construction.
+ */
+function buildForecastEvidenceQuery(
+  filters: PerformanceReportFilters,
+  options: ForecastAccuracyEvidenceOptions
+): SQL {
+  const { metric, repId } = options;
+  const repScope = reportEvidenceRepScopeSql(repId);
+  const order = sql` ORDER BY value DESC, d.name`;
+
+  // won_actual: the as-forecasted Won baseline (archivedWonDealScope AND Won slug AND buildWonDateSql), valued
+  // on the awarded-first basis -- NO change-order value (the forecast-vs-actual metric stays CO-free).
+  if (metric === "won_actual") {
+    const select = reportEvidenceRowSelectSql(aliasedEffectiveWonDealValueSql("d"), sql`d.won_closed_date`);
+    const archivedWonScope = buildArchivedWonDealScopeSql(filters);
+    return sql`${select} WHERE ${archivedWonScope} AND psc.slug IN (${sqlStringList([...WON_STAGE_SLUGS])}) AND ${buildWonDateSql(filters)}${repScope}${order}`;
+  }
+
+  // commit / best_case / pipeline_weighted: slices of the dealScope open inventory (the forecast summary's
+  // WHERE), each valued exactly as its FILTERed aggregate.
+  const openScope = buildDealScopeSql(filters);
+  if (metric === "pipeline_weighted") {
+    const select = reportEvidenceRowSelectSql(forecastWeightedValueSql("d"), sql`d.expected_close_date`);
+    return sql`${select} WHERE ${openScope} AND psc.slug NOT IN (${sqlStringList([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS])})${repScope}${order}`;
+  }
+  const select = reportEvidenceRowSelectSql(forecastFirstValueSql("d"), sql`d.expected_close_date`);
+  const slugClause =
+    metric === "commit"
+      ? sql`psc.slug IN (${sqlStringList([...COMMIT_STAGE_SLUGS])})`
+      : sql`psc.slug IN (${sqlStringList([...COMMIT_STAGE_SLUGS, ...BEST_CASE_STAGE_SLUGS])})`;
+  return sql`${select} WHERE ${openScope} AND ${slugClause}${repScope}${order}`;
+}
+
+/** Build the drill-to-evidence for one Forecast Accuracy number: the supporting rows + a total that EQUALS it. */
+export async function getForecastAccuracyEvidence(
+  db: TenantDb,
+  filters: PerformanceReportFilters,
+  options: ForecastAccuracyEvidenceOptions
+): Promise<ForecastAccuracyEvidence> {
+  const { metric } = options;
+  const rows = rowsFromExecute<ReportEvidenceRow>(await db.execute(buildForecastEvidenceQuery(filters, options)));
+  const records = rows.map(mapEvidenceRow);
+  const total: ReportEvidenceTotal = {
+    count: records.length,
+    value: records.reduce((sum, rec) => sum + (rec.value ?? 0), 0),
+    basisLabel: FORECAST_EVIDENCE_BASIS_LABEL[metric],
+  };
+  const scope = await resolveEvidenceScope(db, options.repId, records);
+  return {
+    metric,
+    metricLabel: FORECAST_EVIDENCE_METRIC_LABEL[metric],
+    dateAxisLabel: FORECAST_EVIDENCE_DATE_AXIS_LABEL[metric],
+    scope,
+    total,
+    records,
+  };
+}
+
+/** Forecast-first effective deal value (forecast_revenue first), the basis the forecast summary sums. */
+function forecastFirstValueSql(alias: string): SQL {
+  return aliasedEffectiveDealValueSql(alias, aliasedForecastFirstDealValueSql(alias));
+}
+
+/**
+ * Stage-weighted forecast value -- the SINGLE source for the weighted-pipeline formula, used by both the
+ * getForecastAccuracyReport summary and the pipeline_weighted evidence so they can never diverge. Requires
+ * pipeline_stage_config joined as `psc` (always the case at both call sites).
+ */
+function forecastWeightedValueSql(alias: string): SQL {
+  const a = sql.raw(alias);
+  return sql`(${forecastFirstValueSql(alias)}) * CASE
+      WHEN psc.slug = 'opportunity' THEN 0.10
+      WHEN psc.slug IN ('estimating', 'estimate_in_progress', 'service_estimating', 'estimate_under_review', 'service_estimate_under_review') THEN 0.25
+      WHEN psc.slug IN ('estimate_sent_to_client', 'service_estimate_sent_to_client') THEN 0.50
+      WHEN psc.slug IN ('contract', 'contract_signed', 'service_contract_signed') THEN 0.75
+      ELSE COALESCE(${a}.win_probability, 10)::numeric / 100
+    END`;
 }
