@@ -40,6 +40,10 @@ beforeAll(async () => {
       created_at timestamptz, won_closed_date date, lost_at timestamptz, updated_at timestamptz,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric
     );
+    CREATE TABLE deal_change_orders (
+      id uuid PRIMARY KEY, deal_id uuid NOT NULL, signed_date date NOT NULL,
+      amount numeric(14,2) NOT NULL, description text, created_at timestamptz NOT NULL DEFAULT NOW()
+    );
     INSERT INTO users (id, display_name) VALUES ('${REP}','Alice');
     INSERT INTO pipeline_stage_config (id, slug, name, is_terminal, display_order) VALUES
       ('${ST.won}','${WON}','Won', true, 90),
@@ -138,6 +142,10 @@ describe("Executive Trends — win-rate unification holds under a Central sessio
         is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
         created_at timestamptz, won_closed_date date, lost_at timestamptz, updated_at timestamptz,
         awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric
+      );
+      CREATE TABLE deal_change_orders (
+        id uuid PRIMARY KEY, deal_id uuid NOT NULL, signed_date date NOT NULL,
+        amount numeric(14,2) NOT NULL, description text, created_at timestamptz NOT NULL DEFAULT NOW()
       );
       INSERT INTO pipeline_stage_config (id, slug, name, is_terminal, display_order) VALUES
         ('${ST.won}','${WON}','Won', true, 90), ('${ST.lost}','${LOST}','Lost', true, 95), ('${ST.open}','opportunity','Opportunity', false, 30);

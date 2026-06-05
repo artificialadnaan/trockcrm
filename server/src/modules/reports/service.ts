@@ -1,4 +1,4 @@
-import { eq, and, sql, gte, lte, inArray, isNull, not, asc, desc } from "drizzle-orm";
+import { eq, and, sql, gte, lte, inArray, isNull, not, asc, desc, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   companies,
@@ -408,6 +408,11 @@ export async function getForecastVarianceOverview(
   tenantDb: TenantDb,
   input: AnalyticsFilterInput = {}
 ): Promise<ForecastVarianceOverview> {
+  // Change Orders Part 2: intentionally NOT folded here. The won value (awarded_amount) is the ANCHOR
+  // each milestone forecast is measured against (variance = |awarded − forecast|), not a period revenue
+  // total. Change orders are signed AFTER the win and were never forecastable at the initial/qualified/
+  // estimating milestones, so adding them would inflate every variance for reasons unrelated to forecast
+  // quality. (Decision confirmed: COs apply only to won_closed_date-cohort revenue reports.)
   const filters = normalizeAnalyticsFilters(input);
   const whereSql = buildForecastVarianceFilterSql(filters);
 
@@ -1083,6 +1088,36 @@ export interface RevenueByProjectTypeRow {
   totalRevenue: number;
 }
 
+// --- Change Orders Part 2: additive signed-date attribution (won_closed_date-cohort revenue reports) --
+// A CRM change order (deal_change_orders) is additional signed work on a Won deal. For reporting, its
+// value attributes to the period of its OWN signed_date — NOT the parent deal's won_closed_date. So a
+// report's Won-value figure becomes a DISJOINT sum: base awarded by won_closed_date ⊕ CO amount by
+// signed_date, each dollar counted once (awarded_amount never contains CO value). Parent must be a
+// non-test-data WON-stage deal, not on hold (matching the base cohort's on-hold value-zeroing). The SUM
+// is cast to numeric(38,2) so a many-CO sum can't overflow the per-row NUMERIC(14,2) ceiling.
+function buildChangeOrderRevenueSql(opts: {
+  selectExpr?: SQL;
+  groupExpr?: SQL;
+  extraJoins?: SQL;
+  from: string;
+  to: string;
+}): SQL {
+  const projection = opts.selectExpr ? sql`${opts.selectExpr}, ` : sql``;
+  return sql`
+    SELECT ${projection}COALESCE(SUM(co.amount), 0)::numeric(38,2) AS co_value
+    FROM deal_change_orders co
+    JOIN deals d ON d.id = co.deal_id
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    ${opts.extraJoins ?? sql``}
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
+      AND COALESCE(d.on_hold, false) = false
+      AND co.signed_date >= ${opts.from}::date
+      AND co.signed_date <= ${opts.to}::date
+    ${opts.groupExpr ? sql`GROUP BY ${opts.groupExpr}` : sql``}
+  `;
+}
+
 /**
  * Revenue from closed-won deals grouped by project type.
  */
@@ -1111,14 +1146,43 @@ export async function getRevenueByProjectType(
     GROUP BY d.project_type_id, ptc.name
     ORDER BY total_revenue DESC
   `);
+  // Part 2: change orders by signed_date + project type, folded into total_revenue (disjoint from the
+  // won_closed_date base above). CO-only project types (COs signed in-period, no base win in-period) are
+  // appended so the breakdown stays a complete sum.
+  const coResult = await tenantDb.execute(
+    buildChangeOrderRevenueSql({
+      selectExpr: sql`d.project_type_id, COALESCE(ptc.name, 'Unspecified') AS project_type_name`,
+      groupExpr: sql`d.project_type_id, ptc.name`,
+      extraJoins: sql`LEFT JOIN project_type_config ptc ON ptc.id = d.project_type_id`,
+      from,
+      to,
+    })
+  );
 
   const rows = (result as any).rows ?? result;
-  return rows.map((r: any) => ({
-    projectTypeId: r.project_type_id,
-    projectTypeName: r.project_type_name,
-    dealCount: Number(r.deal_count ?? 0),
-    totalRevenue: Number(r.total_revenue ?? 0),
-  }));
+  const coRows = (coResult as any).rows ?? coResult;
+  const byType = new Map<string, RevenueByProjectTypeRow>();
+  for (const r of rows) {
+    byType.set(String(r.project_type_id ?? ""), {
+      projectTypeId: r.project_type_id,
+      projectTypeName: r.project_type_name,
+      dealCount: Number(r.deal_count ?? 0),
+      totalRevenue: Number(r.total_revenue ?? 0),
+    });
+  }
+  for (const r of coRows) {
+    const key = String(r.project_type_id ?? "");
+    const existing = byType.get(key);
+    if (existing) existing.totalRevenue += Number(r.co_value ?? 0);
+    else
+      byType.set(key, {
+        projectTypeId: r.project_type_id,
+        projectTypeName: r.project_type_name,
+        dealCount: 0,
+        totalRevenue: Number(r.co_value ?? 0),
+      });
+  }
+  return [...byType.values()].sort((a, b) => b.totalRevenue - a.totalRevenue);
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,6 +1208,10 @@ export async function getLeadSourceROI(
   tenantDb: TenantDb,
   options: AnalyticsFilterInput = {}
 ): Promise<LeadSourceROIRow[]> {
+  // Change Orders Part 2: intentionally NOT folded here. This report's won_value is a CREATED-cohort
+  // figure — won value of deals whose created_at falls in the window (the whole query windows on
+  // d.created_at, not won_closed_date) — so a signed-date CO term has no coherent period axis to attach
+  // to. (Decision confirmed: COs apply only to won_closed_date-cohort revenue reports.)
   const filters = normalizeAnalyticsFilters(options);
   const officeFilter = filters.officeId
     ? sql`AND dsi.office_id = ${filters.officeId}`
@@ -1943,14 +2011,16 @@ export async function getClosedWonSummary(
   const repResult = await tenantDb.execute(sql`
       SELECT
         d.assigned_rep_id AS rep_id,
-        u.display_name AS rep_name,
+        COALESCE(u.display_name, 'Unassigned') AS rep_name,
         COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
         COALESCE(SUM(
           ${aliasedEffectiveWonDealValueSql("d")}
         ), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-      JOIN users u ON u.id = d.assigned_rep_id
+      -- LEFT JOIN so rep-less won deals land in an 'Unassigned' bucket (symmetric with byProjectType's
+      -- 'Unspecified'), keeping totalWonValue == Σ byRep even with unassigned parents + their COs.
+      LEFT JOIN users u ON u.id = d.assigned_rep_id
       WHERE COALESCE(d.is_test_data, false) = false
         AND psc.slug IN (${sqlSlugList(WON_OUTCOME_STAGE_SLUGS)})
         AND ${aliasedHasUsableWonDateSql("d")}
@@ -1979,28 +2049,85 @@ export async function getClosedWonSummary(
       ORDER BY total_value DESC
     `);
 
+  // Part 2: change-order value (by signed_date) folded into each Won total below — disjoint from the
+  // won_closed_date base. Each CO query mirrors its base query's join shape so the CO term reconciles the
+  // same way: the ungrouped total includes rep-less and type-less COs; byRep and byType each LEFT-join so
+  // those COs land in an 'Unassigned'/'Unspecified' bucket — keeping totalWonValue == Σ byRep == Σ byType.
+  const coTotalResult = await tenantDb.execute(buildChangeOrderRevenueSql({ from, to }));
+  const coRepResult = await tenantDb.execute(
+    buildChangeOrderRevenueSql({
+      selectExpr: sql`d.assigned_rep_id AS rep_id, COALESCE(u.display_name, 'Unassigned') AS rep_name`,
+      groupExpr: sql`d.assigned_rep_id, u.display_name`,
+      extraJoins: sql`LEFT JOIN users u ON u.id = d.assigned_rep_id`,
+      from,
+      to,
+    })
+  );
+  const coTypeResult = await tenantDb.execute(
+    buildChangeOrderRevenueSql({
+      selectExpr: sql`d.project_type_id, COALESCE(ptc.name, 'Unspecified') AS project_type_name`,
+      groupExpr: sql`d.project_type_id, ptc.name`,
+      extraJoins: sql`LEFT JOIN project_type_config ptc ON ptc.id = d.project_type_id`,
+      from,
+      to,
+    })
+  );
+
   const totalsRows = (totalsResult as any).rows ?? totalsResult;
   const repRows = (repResult as any).rows ?? repResult;
   const typeRows = (typeResult as any).rows ?? typeResult;
+  const coTotal = Number(((coTotalResult as any).rows ?? coTotalResult)[0]?.co_value ?? 0);
+  const coRepRows = (coRepResult as any).rows ?? coRepResult;
+  const coTypeRows = (coTypeResult as any).rows ?? coTypeResult;
 
   const t = totalsRows[0] ?? {};
 
-  return {
-    totalWonDeals: Number(t.total_won_deals ?? 0),
-    totalWonValue: Number(t.total_won_value ?? 0),
-    avgCycleTimeDays: Math.round(Number(t.avg_cycle_time_days ?? 0)),
-    byRep: repRows.map((r: any) => ({
+  // byRep: fold COs into the matching rep's value; append CO-only reps (COs signed in-period on a rep's
+  // earlier-won deal) so a rep whose only in-period revenue is a change order still appears. Both base and
+  // CO rep queries LEFT-join users into an 'Unassigned' bucket (keyed on a null rep_id), so rep-less wins
+  // and their COs are represented here too → Σ byRep == totalWonValue holds even with unassigned parents.
+  const byRep = new Map<string, { repId: any; repName: any; dealCount: number; totalValue: number }>();
+  for (const r of repRows)
+    byRep.set(String(r.rep_id ?? ""), {
       repId: r.rep_id,
       repName: r.rep_name,
       dealCount: Number(r.deal_count ?? 0),
       totalValue: Number(r.total_value ?? 0),
-    })),
-    byProjectType: typeRows.map((r: any) => ({
+    });
+  for (const r of coRepRows) {
+    const key = String(r.rep_id ?? "");
+    const existing = byRep.get(key);
+    if (existing) existing.totalValue += Number(r.co_value ?? 0);
+    else byRep.set(key, { repId: r.rep_id, repName: r.rep_name, dealCount: 0, totalValue: Number(r.co_value ?? 0) });
+  }
+  // byProjectType: same fold + CO-only types.
+  const byType = new Map<string, { projectTypeId: any; projectTypeName: any; dealCount: number; totalValue: number }>();
+  for (const r of typeRows)
+    byType.set(String(r.project_type_id ?? ""), {
       projectTypeId: r.project_type_id,
       projectTypeName: r.project_type_name,
       dealCount: Number(r.deal_count ?? 0),
       totalValue: Number(r.total_value ?? 0),
-    })),
+    });
+  for (const r of coTypeRows) {
+    const key = String(r.project_type_id ?? "");
+    const existing = byType.get(key);
+    if (existing) existing.totalValue += Number(r.co_value ?? 0);
+    else
+      byType.set(key, {
+        projectTypeId: r.project_type_id,
+        projectTypeName: r.project_type_name,
+        dealCount: 0,
+        totalValue: Number(r.co_value ?? 0),
+      });
+  }
+
+  return {
+    totalWonDeals: Number(t.total_won_deals ?? 0),
+    totalWonValue: Number(t.total_won_value ?? 0) + coTotal,
+    avgCycleTimeDays: Math.round(Number(t.avg_cycle_time_days ?? 0)),
+    byRep: [...byRep.values()].sort((a, b) => b.totalValue - a.totalValue),
+    byProjectType: [...byType.values()].sort((a, b) => b.totalValue - a.totalValue),
   };
 }
 
@@ -2856,6 +2983,10 @@ export async function getRepPerformanceComparison(
 ): Promise<RepPerformanceComparisonResult> {
   const { current, previous, labels } = getPeriodRanges(period);
 
+  // Change Orders Part 2: intentionally NOT folded here. The won value is bucketed by the terminal
+  // STAGE-TRANSITION date (dsh.created_at), not won_closed_date — and change orders have no stage
+  // transition — so a signed-date CO term can't attach to this report's period axis. (Decision
+  // confirmed: COs apply only to won_closed_date-cohort revenue reports.)
   // Query deals won/lost and avg days to close for both periods in one query
   const dealResult = await tenantDb.execute(sql`
     SELECT
