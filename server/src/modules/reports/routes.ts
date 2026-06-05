@@ -45,13 +45,17 @@ import {
 import { runReportBuilder } from "./report-builder-service.js";
 import {
   DIRECTOR_EVIDENCE_METRICS,
+  FORECAST_EVIDENCE_METRICS,
   getDirectorScorecard,
   getDirectorScorecardEvidence,
+  getForecastAccuracyEvidence,
   getForecastAccuracyReport,
   getRepActivityReport,
   normalizePerformanceReportFilters,
   type DirectorEvidenceMetric,
   type DirectorScorecardEvidenceOptions,
+  type ForecastAccuracyEvidenceOptions,
+  type ForecastEvidenceMetric,
 } from "./performance-tier2-service.js";
 import {
   getCustomerConcentrationReport,
@@ -560,6 +564,37 @@ router.get("/forecast-accuracy", requireDirector, async (req, res, next) => {
       req.tenantDb!,
       normalizePerformanceReportFilters(req.query as Record<string, unknown>),
       req.officeSlug ?? req.user!.activeOfficeId
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/forecast-accuracy/evidence?metric=commit&dateFrom=2026-02-01&dateTo=2026-02-28&office=dallas&repId=<uuid>
+// Drill-to-evidence: the supporting deal rows behind ONE Forecast Accuracy number, with a total that EQUALS
+// that number (same cohort predicate + $ basis as getForecastAccuracyReport). won_actual stays CO-free
+// (awarded-first). repId absent -> office-wide; otherwise a real rep UUID (no Unassigned bucket).
+export function parseForecastEvidenceParams(query: Record<string, unknown>): ForecastAccuracyEvidenceOptions {
+  const metricRaw = pickQueryValue(query.metric);
+  if (!metricRaw || !FORECAST_EVIDENCE_METRICS.includes(metricRaw as ForecastEvidenceMetric)) {
+    throw new AppError(400, `metric must be one of: ${FORECAST_EVIDENCE_METRICS.join(", ")}`);
+  }
+  const metric = metricRaw as ForecastEvidenceMetric;
+
+  const repIdRaw = pickQueryValue(query.repId);
+  const repId = repIdRaw === undefined ? undefined : requireUuid(repIdRaw, "repId");
+
+  return { metric, repId };
+}
+
+router.get("/forecast-accuracy/evidence", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getForecastAccuracyEvidence(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      parseForecastEvidenceParams(req.query as Record<string, unknown>)
     );
     await req.commitTransaction!();
     res.json({ data });
