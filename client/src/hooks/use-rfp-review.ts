@@ -86,8 +86,8 @@ export function useRfpReview(dealId: string | undefined, officeId?: string | nul
 export async function approveRfpOverride(
   dealId: string,
   input: { note?: string | null; officeId?: string | null }
-): Promise<{ success: boolean; status: string; requestId: number }> {
-  return api<{ success: boolean; status: string; requestId: number }>(
+): Promise<{ success: boolean; status: string; requestId: number; unconfirmed?: boolean }> {
+  return api<{ success: boolean; status: string; requestId: number; unconfirmed?: boolean }>(
     `/deals/${dealId}/rfp-override/approve`,
     { method: "POST", json: { note: input.note ?? null }, ...getOfficeRequestOptions(input.officeId) }
   );

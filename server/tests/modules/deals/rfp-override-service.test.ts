@@ -130,6 +130,27 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
     );
     expect(result).toMatchObject({ ok: false, reason: "synchub_unavailable" });
   });
+
+  it("keeps the deal 'approving' (unconfirmed) on an abort/timeout — NOT retryable, but a late callback can resolve it", async () => {
+    const { tenantDb, setArgs } = makeTenantDb([DEAL]);
+    const fetchImpl = vi.fn(async () => {
+      const err = new Error("The operation was aborted");
+      err.name = "AbortError";
+      throw err;
+    });
+    const result = await requestOverrideApproval(
+      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { fetchImpl: fetchImpl as any, env: ENV }
+    );
+    // Ambiguous timeout: kept 'approving' (unconfirmed). NOT a rollback (that would drop rfp_override_reviewed_at
+    // and re-expose an un-gated one-click approve) and NOT flipped to a retryable 'failed' (a re-approve could race
+    // a still-in-flight first attempt into a duplicate). re-approve stays blocked; a late callback still resolves
+    // it; a stuck deal is escapable via Re-confirm denial.
+    expect(result).toMatchObject({ ok: true, status: "approving", requestId: 77, unconfirmed: true });
+    // only the single 'approving' write happened — the timeout does not issue a second state-changing UPDATE
+    expect(setArgs).toHaveLength(1);
+    expect(setArgs[0].rfpOverrideState).toBe("approving");
+  });
 });
 
 describe("reconfirmRfpDecline (re-confirm denial — unchanged outcome, guard allows retry-after-failed)", () => {

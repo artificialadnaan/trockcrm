@@ -1449,7 +1449,7 @@ router.post("/:id/rfp-override/approve", requireRfpReviewer, async (req, res, ne
       throw mapOverrideApprovalFailure(result);
     }
     await req.commitTransaction!();
-    res.json({ success: true, status: result.status, requestId: result.requestId });
+    res.json({ success: true, status: result.status, requestId: result.requestId, unconfirmed: result.unconfirmed ?? false });
   } catch (err) {
     next(err);
   }

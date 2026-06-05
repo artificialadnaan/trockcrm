@@ -89,6 +89,7 @@ async function findDeal(sourceDealId: string) {
               d.rfp_override_state,
               d.rfp_override_error,
               d.rfp_override_decision,
+              d.rfp_override_reviewed_at,
               d.bid_board_linked_at,
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
@@ -751,6 +752,29 @@ internalRfpRoutes.post(
       // rfp_override_reviewed_at IS NULL, so this never gates it.
       const createdCallbackAt = asDateOrNull(payload.createdAt);
 
+      // For an ACTIVE override (rfp_override_reviewed_at set, still declined, not re-confirmed) a 'created' callback
+      // MUST carry a parseable createdAt: the freshness guard below needs it, so a timestamp-less success would
+      // silently no-op the linkage while this handler still returns 200. SyncHub treats a 200 as delivered and
+      // stops retrying — leaving the deal stuck declined/'approving' even though a Procore project may already
+      // exist. Reject it as 422 (like the failed path) so SyncHub retries with a well-formed callback.
+      // Scope it carefully so we don't make SyncHub retry an UNPROCESSABLE callback forever:
+      //   - the original (non-override) flow has reviewed_at NULL and is exempt (its pre-override callbacks
+      //     legitimately carry no createdAt and link via the IS NULL escape);
+      //   - a terminally re-confirmed denial, or an already-approved deal, would no-op the linkage anyway, so a
+      //     malformed late 'created' there is acknowledged as an idempotent no-op (falls through to the 200 path)
+      //     rather than 422'd into an endless retry.
+      const overrideAwaitingCreated =
+        found.deal.rfp_override_reviewed_at != null &&
+        found.deal.rfp_approval_status === "declined" &&
+        found.deal.rfp_override_decision !== "denial_reconfirmed";
+      if (overrideAwaitingCreated && !createdCallbackAt) {
+        console.warn(
+          `[RFP callback] override 'created' for deal ${sourceDealId} (request ${currentRequestId}) is missing a parseable createdAt; returning 422 so SyncHub retries instead of silently dropping it`
+        );
+        res.status(422).json({ success: false, error: "invalid_payload" });
+        return;
+      }
+
       const existingBidId = found.deal.procore_bid_id == null ? null : String(found.deal.procore_bid_id);
       if (existingBidId && existingBidId !== bidboardProjectId) {
         console.warn(
@@ -802,8 +826,11 @@ internalRfpRoutes.post(
             WHERE id = $3
               -- a re-confirmed denial is terminal; never let a (delayed) success callback override it
               AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
-              -- override-flow freshness: a stale 'created' from a prior attempt can't link/approve a fresh retry
-              AND (rfp_override_reviewed_at IS NULL OR COALESCE($4::timestamptz, NOW()) >= rfp_override_reviewed_at)
+              -- override-flow freshness: a stale 'created' from a prior attempt can't link/approve a fresh retry.
+              -- Require a REAL createdAt for the override flow (no NOW() substitution): a created with no parseable
+              -- timestamp is treated as not-fresh and ignored, never as current. The original (non-override) flow
+              -- has rfp_override_reviewed_at IS NULL and is unaffected.
+              AND (rfp_override_reviewed_at IS NULL OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_override_reviewed_at))
               AND (
                 procore_bid_id IS DISTINCT FROM $1::bigint OR
                 procore_company_id IS DISTINCT FROM $2 OR
@@ -864,7 +891,7 @@ internalRfpRoutes.post(
                 -- same guards as the linkage update: a re-confirmed denial (or a stale prior-attempt 'created')
                 -- must not advance the stage
                 AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
-                AND (rfp_override_reviewed_at IS NULL OR COALESCE($8::timestamptz, NOW()) >= rfp_override_reviewed_at)
+                AND (rfp_override_reviewed_at IS NULL OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_override_reviewed_at))
               RETURNING id`,
             [
               targetStage.id,
