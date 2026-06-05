@@ -74,9 +74,11 @@ export function formatCurrencyCompact(value: string | number | null | undefined)
 /**
  * Calculate current contract value: awarded_amount + Procore change_order_total + CRM change orders.
  *
- * `change_order_total` is the Procore-synced approved-CO rollup; `crmChangeOrderTotal` is the sum of
- * the CRM-native deal_change_orders (passed from the deal detail). Both are added so the displayed
- * Current Contract Value reflects every change order on the deal.
+ * `change_order_total` is the Procore-synced approved-CO rollup; `crmChangeOrderTotal` is the deal
+ * detail's `dealChangeOrderTotal`, i.e. the server's sumDealChangeOrders — the CRM change-order value
+ * counted EXACTLY ONCE (CO child deals + any not-yet-migrated legacy deal_change_orders rows, no
+ * overlap). So this CCV agrees with the deal detail's CO list/total by construction (same source) and
+ * the parent's awarded base never contains CO value. Both rollups are added so CCV reflects every CO.
  */
 export function currentContractValue(
   deal: {

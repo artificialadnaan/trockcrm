@@ -436,17 +436,22 @@ export async function getDealChangeOrderById(
   return (legacy as ChangeOrderRecord) ?? null;
 }
 
-/** Sum of a deal's change-order value (child deals + un-migrated legacy rows), cent-exact, counted once. */
+/** Sum of a deal's change-order value (child deals + un-migrated legacy rows), counted exactly once. */
 export async function sumDealChangeOrders(tenantDb: TenantDb, dealId: string): Promise<string> {
-  // Wide numeric(38,2): each row is bounded to the per-row ceiling, but a multi-CO sum can exceed it.
-  const result = await tenantDb.execute(sql`
-    SELECT (
-      (SELECT COALESCE(SUM(awarded_amount), 0) FROM deals WHERE parent_deal_id = ${dealId} AND is_change_order = true)
-      + (SELECT COALESCE(SUM(amount), 0) FROM deal_change_orders WHERE deal_id = ${dealId})
-    )::numeric(38,2) AS total
-  `);
-  const rows = (Array.isArray(result) ? result : (result as { rows?: Array<{ total?: string }> }).rows ?? []);
-  return rows[0]?.total ?? "0";
+  // Two SQL sums (each wide numeric(38,2), cent-exact) added once. Uses .select (not .execute) so it
+  // composes with the same query surface as listDealChangeOrders. A CO is a child OR a legacy row, never
+  // both (PR4 converts row→child atomically), so adding the two sums counts every CO exactly once.
+  const [childSum] = await tenantDb
+    .select({ total: sql<string>`COALESCE(SUM(${deals.awardedAmount}), 0)::numeric(38,2)` })
+    .from(deals)
+    .where(and(eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true)));
+  const [legacySum] = await tenantDb
+    .select({ total: sql<string>`COALESCE(SUM(${dealChangeOrders.amount}), 0)::numeric(38,2)` })
+    .from(dealChangeOrders)
+    .where(eq(dealChangeOrders.dealId, dealId));
+  const child = Number(childSum?.total ?? 0);
+  const legacy = Number(legacySum?.total ?? 0);
+  return ((Number.isFinite(child) ? child : 0) + (Number.isFinite(legacy) ? legacy : 0)).toFixed(2);
 }
 
 export async function addDealChangeOrder(

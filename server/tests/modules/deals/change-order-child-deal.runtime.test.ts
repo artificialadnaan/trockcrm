@@ -1,8 +1,16 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
-import { createChangeOrderChildDeal } from "../../../src/modules/deals/change-order-service.js";
+import {
+  addDealChangeOrder,
+  createChangeOrderChildDeal,
+  deleteDealChangeOrder,
+  getDealChangeOrderById,
+  listDealChangeOrders,
+  sumDealChangeOrders,
+  updateDealChangeOrder,
+} from "../../../src/modules/deals/change-order-service.js";
 import { WON_STAGE_SLUGS } from "../../../src/modules/shared/pipeline-terminal-stages.js";
 
 /**
@@ -52,6 +60,11 @@ beforeAll(async () => {
     CREATE UNIQUE INDEX deals_project_number_uidx ON deals (project_number)
       WHERE project_number IS NOT NULL AND is_change_order = false;
     CREATE TABLE deal_number_daily_sequences (day_key text PRIMARY KEY, last_suffix text, updated_at timestamptz DEFAULT now());
+    CREATE TABLE deal_change_orders (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, signed_date date NOT NULL,
+      amount numeric(14,2) NOT NULL CHECK (amount > 0), description text,
+      created_by uuid, updated_by uuid, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+    );
     CREATE TABLE audit_log (
       id bigserial PRIMARY KEY, table_name text NOT NULL, record_id uuid NOT NULL, action text NOT NULL,
       changed_by uuid, actor_name text, actor_role text, actor_system_process text, entity_type text,
@@ -138,5 +151,78 @@ describe("createChangeOrderChildDeal — a change order is its own Won child dea
   it("rejects a non-positive amount and an ineligible parent", async () => {
     await expect(createChangeOrderChildDeal(tdb, { parentDealId: PARENT, signedDate: "2026-03-15", amount: "0", createdBy: REP })).rejects.toThrow();
     await expect(createChangeOrderChildDeal(tdb, { parentDealId: U("deadbeef"), signedDate: "2026-03-15", amount: "100", createdBy: REP })).rejects.toThrow();
+  });
+});
+
+async function seedWonParent(id: string, projectNumber: string, awarded: number) {
+  await pg.exec(
+    `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned) VALUES ` +
+      `('${id}','${projectNumber}','Parent ${id.slice(-4)}','${ST.won}','${REP}','${CO_NS}','${PROP}', ${awarded}, '2025-07-01','${projectNumber}','DFW','Roofing','normal', false)`
+  );
+}
+
+describe("CO CRUD on the child-deal model (counted exactly once across child + legacy rows)", () => {
+  it("list + sum include child deals AND un-migrated legacy rows, each once; parent base never mutated", async () => {
+    const p = U("e1001");
+    await seedWonParent(p, "DFW-9-20001-aa", 300000);
+    await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-02-01", amount: "1000", createdBy: REP });
+    await pg.exec(`INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES ('${U("e1c01")}','${p}','2026-03-01', 2500)`);
+    const list = await listDealChangeOrders(tdb, p);
+    expect(list.length).toBe(2); // child + legacy, no overlap
+    const sum = await sumDealChangeOrders(tdb, p);
+    expect(Number(sum)).toBeCloseTo(3500, 2); // 1000 (child) + 2500 (legacy), counted once
+    // sum === Σ(list) → CCV (= base + sum) agrees with the list by construction.
+    expect(list.reduce((s, r) => s + Number(r.amount), 0)).toBeCloseTo(Number(sum), 2);
+    // The parent's awarded base is untouched by COs → CCV = base + Σ COs, each dollar once.
+    expect(Number((await fetchDeal(p)).awarded_amount)).toBeCloseTo(300000, 2);
+  });
+
+  it("update is dual-path: edits a child deal in place, and falls back to a legacy row", async () => {
+    const p = U("e1002");
+    await seedWonParent(p, "DFW-9-20002-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    const updated = await updateDealChangeOrder(tdb, { id: child.id, dealId: p, amount: "1500", signedDate: "2026-05-01" });
+    expect(Number(updated.amount)).toBeCloseTo(1500, 2);
+    expect(updated.signedDate).toBe("2026-05-01");
+    const row = await fetchDeal(child.id);
+    expect(Number(row.awarded_amount)).toBeCloseTo(1500, 2);
+    expect(row.won_closed_date).toBe("2026-05-01");
+    await pg.exec(`INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES ('${U("e1c02")}','${p}','2026-03-01', 700)`);
+    const legacyUpdated = await updateDealChangeOrder(tdb, { id: U("e1c02"), dealId: p, amount: "800" });
+    expect(Number(legacyUpdated.amount)).toBeCloseTo(800, 2);
+  });
+
+  it("delete is dual-path: removes a child deal row, and falls back to a legacy row", async () => {
+    const p = U("e1003");
+    await seedWonParent(p, "DFW-9-20003-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-06-01", amount: "1000", createdBy: REP });
+    await deleteDealChangeOrder(tdb, { id: child.id, dealId: p });
+    expect(await fetchDeal(child.id)).toBeUndefined(); // child deal row removed
+    await pg.exec(`INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES ('${U("e1c03")}','${p}','2026-03-01', 700)`);
+    const removed = await deleteDealChangeOrder(tdb, { id: U("e1c03"), dealId: p });
+    expect(Number(removed.amount)).toBeCloseTo(700, 2);
+  });
+
+  it("getDealChangeOrderById returns a child (mapped) scoped to its parent", async () => {
+    const p = U("e1004");
+    await seedWonParent(p, "DFW-9-20004-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1234", createdBy: REP });
+    const got = await getDealChangeOrderById(tdb, child.id, p);
+    expect(got?.id).toBe(child.id);
+    expect(Number(got?.amount)).toBeCloseTo(1234, 2);
+    expect(got?.dealId).toBe(p);
+    expect(await getDealChangeOrderById(tdb, child.id, PARENT)).toBeNull(); // wrong parent
+  });
+
+  it("addDealChangeOrder creates the child even if commission calc is unavailable (resilient)", async () => {
+    const p = U("e1005");
+    await seedWonParent(p, "DFW-9-20005-aa", 100000);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // No commission config in this harness → calculateCommissionForDeal throws → caught; the CO is still created.
+    const record = await addDealChangeOrder(tdb, { dealId: p, signedDate: "2026-07-01", amount: "2000", createdBy: REP });
+    expect(record.dealId).toBe(p);
+    expect(Number(record.amount)).toBeCloseTo(2000, 2);
+    expect((await fetchDeal(record.id)).is_change_order).toBe(true);
+    errSpy.mockRestore();
   });
 });
