@@ -32,7 +32,7 @@ function extractSqlText(value: unknown): string {
 const compact = (value: string) => value.toLowerCase().replace(/\s+/g, " ");
 
 describe("perf-tier2 Won-date basis is wired into the live report queries", () => {
-  it("getDirectorScorecard win-rate CTEs window WON by canonical won_closed_date, LOST unchanged", async () => {
+  it("getDirectorScorecard win-rate CTEs window WON by canonical won_closed_date, LOST by canonical lost_at", async () => {
     const { getDirectorScorecard } = await import("../../../src/modules/reports/performance-tier2-service.js");
     const db = createMockTenantDb([[], [], [], [], []]);
     await getDirectorScorecard(
@@ -46,8 +46,9 @@ describe("perf-tier2 Won-date basis is wired into the live report queries", () =
     expect(text).toContain("d.won_closed_date is not null");
     expect(text).toContain("d.won_closed_date >=");
     expect(text).toContain("d.won_closed_date <=");
-    // LOST/denominator side intentionally left on the legacy window (Lost-unification is out of scope).
-    expect(text).toContain("coalesce(d.contract_signed_at, (d.actual_close_date at time zone 'utc'), d.updated_at)");
+    // LOST/denominator side now LEADS with the canonical lost_at (PR-F Lost-unification), with the
+    // legacy window kept only as a FALLBACK for older lost deals whose lost_at was never stamped.
+    expect(text).toContain("coalesce(d.lost_at, d.contract_signed_at, (d.actual_close_date at time zone 'utc'), d.updated_at)");
   });
 
   it("getForecastAccuracyReport: won_period on canonical basis + month-bucket leads with won_closed_date", async () => {

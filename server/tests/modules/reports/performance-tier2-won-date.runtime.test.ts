@@ -14,8 +14,11 @@ import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../../../src/modules/shared/p
  * FIX-1 (buildWonDateSql): the WON cohort is now windowed by the canonical app-owned
  * column deals.won_closed_date (mirroring dashboard getWonCloseSummary: IS NOT NULL +
  * >= from + <= to), so a deal merely TOUCHED in-period (updated_at) or reseed-contaminated
- * (actual_close_date) is no longer counted as won-in-period. The non-WON (lost) branch is
- * intentionally left on the legacy window so the win-rate DENOMINATOR is unchanged.
+ * (actual_close_date) is no longer counted as won-in-period. The non-WON (lost) branch now
+ * LEADS with the canonical deals.lost_at (PR-F Lost-unification), with the legacy
+ * COALESCE(contract_signed_at, actual_close_date, updated_at) kept only as a FALLBACK for older
+ * lost deals whose lost_at was never stamped — so a deal lost in-period by lost_at (legacy basis
+ * out of window) is now counted in the win-rate DENOMINATOR, and no stamped-null lost deal drops.
  *
  * FIX-3 (buildForecastMonthBucketDateSql): a WON-STAGE deal lands in the month of its canonical
  * won_closed_date (not its expected/plan close month); every non-Won-stage deal — INCLUDING a
@@ -29,7 +32,7 @@ const OPEN_SLUG = "opportunity";
 const ST = { won: U("57001"), lost: U("57002"), open: U("57003") };
 const D = {
   wonIn: U("11001"), wonTouched: U("11002"), wonOut: U("11003"),
-  lostIn: U("11004"), lostOut: U("11005"), openIn: U("11006"),
+  lostIn: U("11004"), lostOut: U("11005"), openIn: U("11006"), lostByLostAt: U("11007"),
   bWon: U("12001"), bOpen: U("12002"), bFallback: U("12003"), bReopened: U("12004"),
 };
 
@@ -51,7 +54,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY, stage_id uuid NOT NULL,
       won_closed_date date, expected_close_date date, actual_close_date date,
-      contract_signed_at timestamptz, contract_signed_date date, updated_at timestamptz
+      lost_at timestamptz, contract_signed_at timestamptz, contract_signed_date date, updated_at timestamptz
     );
     INSERT INTO pipeline_stage_config (id, slug) VALUES
       ('${ST.won}','${WON_SLUG}'), ('${ST.lost}','${LOST_SLUG}'), ('${ST.open}','${OPEN_SLUG}');
@@ -70,6 +73,12 @@ beforeAll(async () => {
       ('${D.lostOut}','${ST.lost}', NULL, '2026-01-05', NULL, '2026-01-05T00:00:00Z'),
       -- open, touched in-window -> matches non-won branch (filtered by slug in real metrics)
       ('${D.openIn}','${ST.open}', NULL, NULL, NULL, '2026-03-10T00:00:00Z');
+
+    -- PR-F Lost-unification: a deal lost in-window by canonical lost_at, with its legacy basis
+    -- (actual_close_date / updated_at) OUTSIDE the window. The old legacy-only lost arm placed it in
+    -- Jan 2026 -> NO MATCH; the new arm leads with lost_at -> MATCH (counted in the denominator).
+    INSERT INTO deals (id, stage_id, won_closed_date, actual_close_date, lost_at, contract_signed_at, updated_at) VALUES
+      ('${D.lostByLostAt}','${ST.lost}', NULL, '2026-01-05', '2026-03-12T00:00:00Z', NULL, '2026-01-05T00:00:00Z');
 
     -- FIX-3 month-bucket cases
     INSERT INTO deals (id, stage_id, won_closed_date, expected_close_date, updated_at) VALUES
@@ -103,9 +112,13 @@ describe("perf-tier2 FIX-1: buildWonDateSql windows WON by canonical won_closed_
     // A won deal whose canonical date is outside the window is not counted (no updated_at leak).
     expect(ids.has(D.wonOut)).toBe(false);
 
-    // LOST side is byte-identical to today (denominator preserved): legacy-basis-in-window still matches.
+    // LOST side now LEADS with canonical lost_at (PR-F), with the legacy chain as fallback:
+    //  - lostIn: lost_at NULL, legacy basis (actual_close_date) in-window -> still matches (fallback preserved).
+    //  - lostOut: lost_at NULL, legacy basis out-of-window -> still no match.
+    //  - lostByLostAt: lost_at in-window but legacy basis OUT -> now matches on the canonical date (the fix).
     expect(ids.has(D.lostIn)).toBe(true);
     expect(ids.has(D.lostOut)).toBe(false);
+    expect(ids.has(D.lostByLostAt)).toBe(true);
   });
 });
 
