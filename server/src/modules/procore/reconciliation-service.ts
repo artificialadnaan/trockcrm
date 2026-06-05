@@ -284,7 +284,10 @@ async function defaultListActiveDeals(tenantDb: TenantDb): Promise<CrmDealCandid
       updatedAt: deals.updatedAt,
     })
     .from(deals)
-    .where(eq(deals.isActive, true))
+    // CO children are CRM-only and must never be linked/synced to Procore (Safety Req A) — exclude them
+    // from the reconciliation candidate pool so a CRM-only child can't surface as an unmatched/CRM-only
+    // Procore candidate or enter fuzzy matching.
+    .where(and(eq(deals.isActive, true), eq(deals.isChangeOrder, false)))
     .then((rows) =>
       rows.map((row) => ({
         ...row,

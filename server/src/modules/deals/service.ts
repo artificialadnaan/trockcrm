@@ -2027,10 +2027,15 @@ export async function updateDeal(
       input.onHold !== undefined && Boolean(input.onHold) !== Boolean(existing.onHold);
     const touchesRep =
       input.assignedRepId !== undefined && input.assignedRepId !== existing.assignedRepId;
-    if (touchesAmount || touchesHold || touchesRep) {
+    // Lock the workflow route too: a CO child inherits the parent's route, and changing it would move the CO
+    // between service/normal buckets that filters + reports key on (buildWorkflowRouteCondition / pipeline
+    // type) without going through the change-order endpoint.
+    const touchesRoute =
+      input.workflowRoute !== undefined && input.workflowRoute !== existing.workflowRoute;
+    if (touchesAmount || touchesHold || touchesRep || touchesRoute) {
       throw new AppError(
         409,
-        "A change order's amount, hold state, and rep are managed through the change-order endpoints, not the normal deal edit.",
+        "A change order's amount, hold state, rep, and workflow route are managed through the change-order endpoints, not the normal deal edit.",
         "CHANGE_ORDER_FIELD_LOCKED"
       );
     }

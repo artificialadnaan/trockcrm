@@ -206,7 +206,15 @@ describe("updateDeal on hold foundation", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
   });
 
-  it("does NOT block a safe field edit (name) on a change-order child — only amount/hold/rep are locked", async () => {
+  it("rejects changing a change-order child's workflow route via the normal deal edit (bucket integrity)", async () => {
+    // workflowRoute drives the service/normal report buckets + filters; a CO inherits the parent's route.
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, workflowRoute: "normal" }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { workflowRoute: "service" }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("does NOT block a safe field edit (name) on a change-order child — only amount/hold/rep/route are locked", async () => {
     // Full-deal treatment: non-report-affecting fields stay editable on a CO child.
     const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true }));
     await expect(
