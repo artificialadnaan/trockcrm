@@ -1,4 +1,4 @@
--- Migration 0155: Change Orders become real CHILD deals (reverses the value-only model of 0153)
+-- Migration 0156: Change Orders become real CHILD deals (reverses the value-only model of 0153)
 --
 -- A change order is now a real row in `deals`: is_change_order = true, parent_deal_id -> the parent,
 -- stage = Won, won_closed_date = the CO's date, awarded_amount = the CO amount. It is created Won and

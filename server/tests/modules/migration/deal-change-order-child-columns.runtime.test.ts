@@ -7,7 +7,7 @@ import { PGlite } from "@electric-sql/pglite";
 // across every office_* schema. The migration ALTERs an existing deals table that already carries the
 // pre-0155 (non-exempted) project_number unique index, so the DROP/recreate path is exercised.
 const MIGRATION_SQL = readFileSync(
-  new URL("../../../../migrations/0155_deal_change_order_child_columns.sql", import.meta.url),
+  new URL("../../../../migrations/0156_deal_change_order_child_columns.sql", import.meta.url),
   "utf8"
 );
 
@@ -34,7 +34,7 @@ async function setup(): Promise<PGlite> {
   return db;
 }
 
-describe("migration 0155 — CO child-deal columns + project_number exemption (runtime, PGlite)", () => {
+describe("migration 0156 — CO child-deal columns + project_number exemption (runtime, PGlite)", () => {
   it("adds is_change_order (default false) and parent_deal_id", async () => {
     pg = await setup();
     const cols = await pg.query<{ column_name: string }>(

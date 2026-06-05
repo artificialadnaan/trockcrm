@@ -225,4 +225,28 @@ describe("CO CRUD on the child-deal model (counted exactly once across child + l
     expect((await fetchDeal(record.id)).is_change_order).toBe(true);
     errSpy.mockRestore();
   });
+
+  it("update/delete 404 when the change order is scoped to a different parent", async () => {
+    const p = U("e1006");
+    await seedWonParent(p, "DFW-9-20006-aa", 100000);
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    await expect(updateDealChangeOrder(tdb, { id: child.id, dealId: PARENT, amount: "1500" })).rejects.toThrow(); // wrong parent
+    await expect(deleteDealChangeOrder(tdb, { id: child.id, dealId: PARENT })).rejects.toThrow();
+    expect((await getDealChangeOrderById(tdb, child.id, p))?.id).toBe(child.id); // untouched under the right parent
+  });
+
+  it("rejects a malformed signed date", async () => {
+    await expect(createChangeOrderChildDeal(tdb, { parentDealId: PARENT, signedDate: "March 5", amount: "100", createdBy: REP })).rejects.toThrow();
+    await expect(createChangeOrderChildDeal(tdb, { parentDealId: PARENT, signedDate: "2026-13-40", amount: "100", createdBy: REP })).rejects.toThrow();
+  });
+
+  it("sum does not overflow when the total exceeds the per-row NUMERIC(14,2) ceiling", async () => {
+    const p = U("e1007");
+    await seedWonParent(p, "DFW-9-20007-aa", 100000);
+    // Two near-ceiling COs (each valid per-row); their sum exceeds the per-row ceiling — the wide
+    // numeric(38,2) cast must absorb it rather than overflow.
+    await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-01-01", amount: "999999999999.99", createdBy: REP });
+    await createChangeOrderChildDeal(tdb, { parentDealId: p, signedDate: "2026-02-01", amount: "999999999999.99", createdBy: REP });
+    expect(Number(await sumDealChangeOrders(tdb, p))).toBeCloseTo(1999999999999.98, 2);
+  });
 });
