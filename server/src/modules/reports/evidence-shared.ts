@@ -150,11 +150,15 @@ export async function resolveEvidenceScope(
   return { kind: "rep", repId: repId ?? null, repName };
 }
 
-/** Resolve a rep's display name for the scope header when the drill returned no rows. */
+/**
+ * Resolve a rep's display name for the scope header when the drill returned no rows. A NULL / blank /
+ * whitespace-only display_name normalizes to "Unknown rep" — matching mapEvidenceRow's populated-row fallback,
+ * so the scope header is consistent whether or not the drill returned rows.
+ */
 export async function resolveEvidenceRepName(db: TenantDb, repId: string | null): Promise<string> {
   if (repId == null) return "Unassigned";
-  const rows = rowsFromExecute<{ name: string }>(
-    await db.execute(sql`SELECT display_name AS name FROM users WHERE id = ${repId}::uuid`)
+  const rows = rowsFromExecute<{ name: string | null }>(
+    await db.execute(sql`SELECT NULLIF(BTRIM(display_name), '') AS name FROM users WHERE id = ${repId}::uuid`)
   );
   return rows[0]?.name ?? "Unknown rep";
 }

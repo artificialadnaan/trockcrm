@@ -81,6 +81,10 @@ beforeAll(async () => {
       ('${U("d12")}','X-2','Test','${ST.opp}','${ALICE}','${CO.a}','2026-02-11T12:00:00Z', true, false, true, 99000,'2026-02-11T12:00:00Z'),
       ('${U("d13")}','X-3','OutOfWindow','${ST.opp}','${ALICE}','${CO.a}','2026-01-15T12:00:00Z', true, false, false, 99000,'2026-01-15T12:00:00Z'),
       ('${U("d14")}','X-4','Inactive','${ST.opp}','${ALICE}','${CO.a}','2026-02-11T12:00:00Z', false, false, false, 99000,'2026-02-11T12:00:00Z');
+    -- M-7 (unassigned) carries a dallas office_code, so an office='dallas' drill keeps it via the office
+    -- matcher's deal-code arm even though it has no rep — locking that office-filtered evidence reuses the
+    -- report's office scope and doesn't drop in-office unassigned deals.
+    UPDATE deals SET office_code = 'dallas' WHERE deal_number = 'M-7';
   `);
   tdb = drizzle(pg);
 });
@@ -130,5 +134,15 @@ describe("Analytics drill-to-evidence reconciles to the headline KPIs (PR-F Part
     expect((ovAlice.total.value ?? 0) + (ovUnassigned.total.value ?? 0)).toBeCloseTo(ovOffice.total.value ?? 0, 2);
     expect(ovAlice.total.value).toBeCloseTo(150000, 2);
     expect(ovUnassigned.total.value).toBeCloseTo(20000, 2);
+  });
+
+  it("office-filtered drill reuses the report office scope: reconciles and keeps the in-office unassigned deal", async () => {
+    const officeFilters = { ...FILTERS, office: "dallas" };
+    const report = await getMarketMixReport(tdb, officeFilters);
+    const dc = await getAnalyticsEvidence(tdb, officeFilters, { metric: "deal_count" } as never);
+    // Evidence reuses the report's buildWhere (incl. buildOfficeExistsMatcher), so it reconciles for ANY office.
+    expect(dc.total.count).toBe(report.kpis.totalDealCount);
+    // M-7 (unassigned) belongs to dallas via its office_code -> stays in-scope under the office filter.
+    expect(dc.records.map((r) => r.dealNumber)).toContain("M-7");
   });
 });
