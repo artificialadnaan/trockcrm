@@ -2520,9 +2520,17 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
     return null;
   }
 
+  // If the deleted deal is itself a CO child, apply the same on_hold TOMBSTONE the change-order delete path
+  // uses: several Won rollups filter on_hold but not is_active, so without it a CO child voided via this
+  // deep-linked deal route would keep inflating Won value/count. (is_active=false stays the canonical marker.)
+  const softDeleteValues: { isActive: boolean; onHold?: boolean } = { isActive: false };
+  if (existing.isChangeOrder === true) {
+    softDeleteValues.onHold = true;
+  }
+
   const result = await tenantDb
     .update(deals)
-    .set({ isActive: false })
+    .set(softDeleteValues)
     .where(eq(deals.id, dealId))
     .returning();
 
