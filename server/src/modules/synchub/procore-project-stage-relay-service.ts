@@ -389,6 +389,9 @@ async function findMatchesByProcoreProjectId(
         WHERE procore_project_id = $1
           AND procore_company_id = $5
           AND is_active = true
+          -- Defense-in-depth: CO children are CRM-only and carry no procore_project_id today, but never
+          -- match them here either (so a future change copying the parent's id onto a child can't desync).
+          AND COALESCE(is_change_order, false) = false
         LIMIT 2`,
       [procoreProjectId, office.id, office.slug, schemaName, procoreCompanyId]
     );
@@ -419,6 +422,9 @@ async function findMatchesByProjectNumber(
         WHERE (deal_number = $1 OR project_number = $1)
           AND procore_company_id = $5
           AND is_active = true
+          -- CO child deals share the parent's project_number; never match them in the SyncHub stage
+          -- relay — a multi-match would silently skip the PARENT's stage writeback (Onyx desync class).
+          AND COALESCE(is_change_order, false) = false
         LIMIT 2`,
       [projectNumber, office.id, office.slug, schemaName, procoreCompanyId]
     );

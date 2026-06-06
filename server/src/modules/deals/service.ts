@@ -36,7 +36,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
-import { calculateCommissionForDeal } from "../commissions/service.js";
+import { calculateCommissionForDeal, removeCommissionForDeal } from "../commissions/service.js";
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
@@ -51,7 +51,7 @@ import {
 import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
-import { listDealChangeOrders, sumDealChangeOrders } from "./change-order-service.js";
+import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
@@ -764,6 +764,7 @@ type DealStageWorkspaceRow = {
   updated_at: string;
   stage_entered_at: string;
   is_bid_board_owned: boolean;
+  is_change_order: boolean;
   bid_board_stage_slug: string | null;
   bid_board_stage_entered_at: string | null;
   on_hold: boolean;
@@ -1277,6 +1278,7 @@ function mapDealStageWorkspaceRow(
     updatedAt: row.updated_at,
     stageEnteredAt: row.stage_entered_at,
     isBidBoardOwned: row.is_bid_board_owned,
+    isChangeOrder: row.is_change_order,
     bidBoardStageSlug: row.bid_board_stage_slug,
     bidBoardStageEnteredAt: row.bid_board_stage_entered_at,
     onHold: row.on_hold,
@@ -2011,6 +2013,42 @@ export async function updateDeal(
     throw new AppError(404, "Deal not found");
   }
 
+  // A change-order child deal is managed only through the change-order endpoints. Block the report-affecting
+  // mutations here — its awarded amount (which also drives commission, recomputed only on the CO endpoint),
+  // its hold state (on-hold zeroes a deal's effective Won value), and its rep (reassignment would move Won
+  // credit but leave the commission under the original rep) — so a CO can never be edited out of its
+  // Won-total membership or its commission attribution via the normal deal-update path. A CO's rep is
+  // inherited from the parent at creation and is not reassignable here. Other fields stay editable.
+  if (existing.isChangeOrder === true) {
+    const touchesAmount =
+      input.awardedAmount !== undefined &&
+      String(input.awardedAmount ?? "") !== String(existing.awardedAmount ?? "");
+    const touchesHold =
+      input.onHold !== undefined && Boolean(input.onHold) !== Boolean(existing.onHold);
+    const touchesRep =
+      input.assignedRepId !== undefined && input.assignedRepId !== existing.assignedRepId;
+    // Lock the workflow route too: a CO child inherits the parent's route, and changing it would move the CO
+    // between service/normal buckets that filters + reports key on (buildWorkflowRouteCondition / pipeline
+    // type) without going through the change-order endpoint.
+    const touchesRoute =
+      input.workflowRoute !== undefined && input.workflowRoute !== existing.workflowRoute;
+    // Lock the inherited reporting dimensions too (project type + region): reports group/filter directly on
+    // d.project_type_id / d.region_id, so editing them here would move ONLY the CO's revenue into a different
+    // bucket, breaking the parent-inherited classification without going through the change-order workflow.
+    const touchesProjectType =
+      (input.projectType !== undefined && input.projectType !== existing.projectType) ||
+      (input.projectTypeId !== undefined && input.projectTypeId !== existing.projectTypeId);
+    const touchesRegion =
+      input.regionId !== undefined && input.regionId !== existing.regionId;
+    if (touchesAmount || touchesHold || touchesRep || touchesRoute || touchesProjectType || touchesRegion) {
+      throw new AppError(
+        409,
+        "A change order's amount, hold state, rep, workflow route, project type, and region are managed through the change-order endpoints, not the normal deal edit.",
+        "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
+  }
+
   if (input.assignedRepId !== undefined && input.assignedRepId !== existing.assignedRepId) {
     const isDirectorOrAdmin = userRole === "admin" || userRole === "director";
     if (!isDirectorOrAdmin && existing.assignedRepId !== userId) {
@@ -2473,12 +2511,15 @@ export async function startProposalDraft(
  * Soft-delete a deal.
  * Only admins can delete primary deal rows.
  */
-export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: string) {
+export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: string, userId?: string | null) {
   if (userRole !== "admin") {
     throw new AppError(403, "Only admins can delete deals");
   }
 
-  const [existing] = await tenantDb.select().from(deals).where(eq(deals.id, dealId)).limit(1);
+  // Lock the deal row FOR UPDATE so a concurrent change-order create on this parent serializes against the
+  // delete (loadParentForChildCreate takes the same lock) — otherwise a CO create could insert an active
+  // Won child AFTER this delete's cascade runs but before the child exists, orphaning it under a deleted parent.
+  const [existing] = await tenantDb.select().from(deals).where(eq(deals.id, dealId)).limit(1).for("update");
   if (!existing) {
     throw new AppError(404, "Deal not found");
   }
@@ -2487,9 +2528,17 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
     return null;
   }
 
+  // If the deleted deal is itself a CO child, apply the same on_hold TOMBSTONE the change-order delete path
+  // uses: several Won rollups filter on_hold but not is_active, so without it a CO child voided via this
+  // deep-linked deal route would keep inflating Won value/count. (is_active=false stays the canonical marker.)
+  const softDeleteValues: { isActive: boolean; onHold?: boolean } = { isActive: false };
+  if (existing.isChangeOrder === true) {
+    softDeleteValues.onHold = true;
+  }
+
   const result = await tenantDb
     .update(deals)
-    .set({ isActive: false })
+    .set(softDeleteValues)
     .where(eq(deals.id, dealId))
     .returning();
 
@@ -2497,16 +2546,28 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
     throw new AppError(404, "Deal not found");
   }
 
-  // Auto-dismiss pending/in-progress tasks when deal is soft-deleted
+  // Cascade the soft-delete to this deal's change-order children: they are real Won child deals, so leaving
+  // them active after the parent is voided would orphan their value in Won reports. The DB self-FK ON DELETE
+  // CASCADE only fires on a hard row delete, not this is_active=false soft-delete, so cascade it explicitly.
+  const childCoIds = await softDeleteChangeOrderChildren(tenantDb, dealId, userId ?? null);
+
+  // Auto-dismiss pending/in-progress tasks for the deal AND its now-voided CO children.
   await tenantDb
     .update(tasks)
     .set({ status: "dismissed", isOverdue: false })
     .where(
       and(
-        eq(tasks.dealId, dealId),
+        inArray(tasks.dealId, [dealId, ...childCoIds]),
         inArray(tasks.status, ["pending", "in_progress"]),
       )
     );
+
+  // If the deleted deal is ITSELF a change-order child (deletable via this route now that COs are real,
+  // deep-linkable deals), remove its own commission — the cascade above only covers descendants, and
+  // earned-commission report queries don't all filter is_active, so a voided CO's commission would linger.
+  if (existing.isChangeOrder === true) {
+    await removeCommissionForDeal(tenantDb, dealId, userId ?? null);
+  }
 
   return result[0];
 }
@@ -2935,6 +2996,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.updated_at,
       d.stage_entered_at,
       d.is_bid_board_owned,
+      d.is_change_order,
       d.bid_board_stage_slug,
       d.bid_board_stage_entered_at,
       d.on_hold,
@@ -3048,6 +3110,17 @@ export async function setDealContractSignedDate(
       .limit(1)
       .for("update");
     if (!existing) return null;
+
+    // A change order's signed/won date is managed only via the change-order endpoint (updateDealChangeOrder,
+    // which also recomputes commission). Editing it here would move won_closed_date/attribution WITHOUT the
+    // commission recompute and could enqueue the contract-signed Procore handoff for a CRM-only child.
+    if (existing.isChangeOrder === true) {
+      throw new AppError(
+        409,
+        "A change order's signed date is managed through the change-order endpoints, not the contract-signed-date path.",
+        "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
 
     const oldValue = existing.contractSignedDate ?? null;
     const newValue = contractSignedDate ?? null;

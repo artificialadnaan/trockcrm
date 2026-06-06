@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -110,7 +110,9 @@ export async function listProjectValidationForOffice(
           updatedAt: deals.updatedAt,
         })
         .from(deals)
-        .where(eq(deals.isActive, true))
+        // CO children are CRM-only and must never link/sync to Procore (Safety Req A) — keep them out of
+        // the project-validation candidate pool so a CRM-only child isn't flagged as an unmatched candidate.
+        .where(and(eq(deals.isActive, true), eq(deals.isChangeOrder, false)))
         .then((rows) =>
           rows.map((row) => ({
             ...row,

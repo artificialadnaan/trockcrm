@@ -33,6 +33,8 @@ export interface SearchResult {
   officeSlug?: string;
   deepLink: string;
   rank: number;
+  // True when this deal result is a change-order child deal, so the UI can badge it. Deal results only.
+  isChangeOrder?: boolean;
 }
 
 export interface SearchResponse {
@@ -352,6 +354,7 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
       propertyCity: deals.propertyCity,
       propertyState: deals.propertyState,
       onHold: deals.onHold,
+      isChangeOrder: deals.isChangeOrder,
       stageSlug: pipelineStageConfig.slug,
       relevance,
     })
@@ -361,6 +364,9 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
       and(
         buildDealSearchCondition(query),
         or(eq(deals.isActive, true), inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])),
+        // A soft-deleted change-order child is a (terminal) Won deal, so the terminal-findable rule above
+        // would keep it searchable + deep-linkable to a deleted CO. Exclude inactive CO children explicitly.
+        sql`NOT (${deals.isChangeOrder} = true AND ${deals.isActive} = false)`,
       ),
     )
     // Status tier FIRST (active < on_hold < terminal) so the per-entity cap can't fill up with
@@ -382,6 +388,7 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
     status: deriveDealStatus(r.stageSlug, r.onHold),
     deepLink: `/deals/${r.id}`,
     rank: Number(r.relevance ?? 0),
+    isChangeOrder: r.isChangeOrder === true,
   }));
 }
 

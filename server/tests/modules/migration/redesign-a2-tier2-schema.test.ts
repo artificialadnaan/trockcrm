@@ -149,8 +149,12 @@ describe("redesign A2 tier 2 schema migration", () => {
   });
 
   it("keeps the Drizzle deals schema aligned with the project_number partial unique index", () => {
+    // The partial unique index now EXEMPTS change-order child deals (migration 0155): a CO child shares
+    // the parent's project_number, so uniqueness applies only to is_change_order = false rows. The
+    // Drizzle .where() predicate must match the migration's recreated index predicate.
+    expect(dealsSchema).toContain('uniqueIndex("deals_project_number_uidx")');
     expect(dealsSchema).toContain(
-      'uniqueIndex("deals_project_number_uidx").on(table.projectNumber).where(sql`${table.projectNumber} IS NOT NULL`)'
+      "${table.projectNumber} IS NOT NULL AND ${table.isChangeOrder} = false"
     );
   });
 });

@@ -111,6 +111,21 @@ describe("getClosedWonSummary folds change orders by signed_date (disjoint, reco
     expect(both.totalWonValue).toBeCloseTo(173000, 2);
     expect(y2025.totalWonValue + y2026.totalWonValue).toBeCloseTo(both.totalWonValue, 2);
   });
+
+  it("a voided CO (on_hold tombstone, is_active=false) drops from Won rollups — value AND count", async () => {
+    // deleteDealChangeOrder tombstones a voided CO with on_hold=true (+ is_active=false). The on_hold-only
+    // Won rollups must then exclude it from BOTH totalWonValue (on_hold → 0) and totalWonDeals (on_hold
+    // filter) — closing the deleted-CO Won-leak with no predicate change. (on_hold here stands in for a
+    // tombstoned CO; the deal-side tombstone set is proven in change-order-child-deal.runtime.test.ts.)
+    await pg.exec(
+      `INSERT INTO deals (id, assigned_rep_id, stage_id, project_type_id, on_hold, won_closed_date, created_at, awarded_amount) VALUES
+        ('${U("5a01")}','${REP_A}','${ST.won}','${PT_R}', false, '2050-06-01','2050-05-01T00:00:00Z', 4000),
+        ('${U("5a02")}','${REP_A}','${ST.won}','${PT_R}', true,  '2050-06-01','2050-05-01T00:00:00Z', 7000)`
+    );
+    const s = await getClosedWonSummary(tdb, { from: "2050-01-01", to: "2050-12-31" });
+    expect(s.totalWonValue).toBeCloseTo(4000, 2); // the voided 7000 is zeroed (on_hold)
+    expect(s.totalWonDeals).toBe(1); // the voided deal is excluded from the count (on_hold predicate)
+  });
 });
 
 describe("getRevenueByProjectType folds change orders by signed_date", () => {

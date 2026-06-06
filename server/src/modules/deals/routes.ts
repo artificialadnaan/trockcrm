@@ -2075,6 +2075,7 @@ router.delete("/:id/change-orders/:changeOrderId", requireRole("admin"), async (
     const removed = await deleteDealChangeOrder(req.tenantDb!, {
       id: changeOrderId,
       dealId,
+      deletedBy: req.user!.id,
     });
     await writeAuditLog(req.tenantDb!, {
       tableName: "deal_change_orders",
@@ -3213,7 +3214,21 @@ router.delete("/:id", async (req, res, next) => {
       allowAdmin: true,
       message: "Only the assigned rep or an admin can delete this deal",
     });
-    const deal = await deleteDeal(req.tenantDb!, dealId, "admin");
+    // A change-order child inherits the parent's rep, so owner access would let a non-admin rep delete it
+    // via this route (voiding the CO + removing its commission), bypassing the admin-only change-order
+    // delete endpoint. CO deletion is admin-only — reject non-admins here. (Admins fall through to
+    // deleteDeal, which soft-deletes + removes the CO's commission + dismisses its tasks.)
+    if (req.user!.role !== "admin") {
+      const [coCheck] = await req.tenantDb!
+        .select({ isChangeOrder: deals.isChangeOrder })
+        .from(deals)
+        .where(eq(deals.id, dealId))
+        .limit(1);
+      if (coCheck?.isChangeOrder === true) {
+        throw new AppError(403, "Only an admin can delete a change order.", "CHANGE_ORDER_ADMIN_ONLY");
+      }
+    }
+    const deal = await deleteDeal(req.tenantDb!, dealId, "admin", req.user!.id);
     if (deal) {
       const auditContext = buildRouteAuditContext(req);
       await logActivity({

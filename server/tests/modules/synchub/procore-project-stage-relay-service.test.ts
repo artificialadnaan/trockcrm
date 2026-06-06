@@ -232,6 +232,21 @@ describe("SyncHub Procore project stage-change relay service", () => {
     expect(sqlText).toContain("INSERT INTO \"office_main\".portfolio_project_stage_entries");
   });
 
+  it("excludes change-order child deals from BOTH deal-match queries (Safety Req A)", async () => {
+    // A CO child shares the parent's project_number; if the project_number match returned parent+child
+    // it would be a multi-match and the parent's stage writeback would be silently skipped (Onyx class).
+    const { client, query } = createRecordingClient({ linkedMatchRows: [], projectNumberMatchRows: [] });
+    await processSyncHubProcoreProjectStageChanged(validPayload(), { client: client as any });
+    const dealMatchSql = query.mock.calls
+      .map((call) => String(call[0]))
+      .filter((s) => s.includes('"office_main".deals'));
+    // Both the procore_project_id and the (deal_number OR project_number) match queries run + are exempted.
+    expect(dealMatchSql.length).toBeGreaterThanOrEqual(2);
+    for (const s of dealMatchSql) {
+      expect(s).toContain("COALESCE(is_change_order, false) = false");
+    }
+  });
+
   it("defaults the known production Procore company id to office_dallas without a Procore-linked deal", async () => {
     delete process.env[PROCORE_COMPANY_OFFICE_MAP_ENV];
     const { client, query } = createRecordingClient({

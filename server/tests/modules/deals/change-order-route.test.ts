@@ -54,18 +54,24 @@ function createUser(role: TestUser["role"]): TestUser {
   };
 }
 
-function createApp(user: TestUser) {
+function createApp(user: TestUser, tenantDb: unknown = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
     (req as any).user = user;
-    (req as any).tenantDb = {};
+    (req as any).tenantDb = tenantDb;
     (req as any).commitTransaction = vi.fn().mockResolvedValue(undefined);
     next();
   });
   app.use("/api/deals", dealRoutes);
   app.use(errorHandler);
   return app;
+}
+
+// Minimal tenantDb whose `select(...).from(...).where(...).limit(...)` resolves to the given rows — enough
+// for the DELETE /:id CO-child guard's is_change_order lookup.
+function tenantDbReturning(rows: unknown[]) {
+  return { select: () => ({ from: () => ({ where: () => ({ limit: () => Promise.resolve(rows) }) }) }) };
 }
 
 describe("deal change-order routes — RBAC + wiring", () => {
@@ -241,7 +247,7 @@ describe("deal change-order routes — RBAC + wiring", () => {
     expect(res.status).toBe(200);
     expect(coServiceMocks.deleteDealChangeOrder).toHaveBeenCalledWith(
       expect.any(Object),
-      { id: "co-1", dealId: "deal-1" },
+      { id: "co-1", dealId: "deal-1", deletedBy: "admin-1" },
     );
     expect(auditMocks.writeAuditLog).toHaveBeenCalledWith(
       expect.any(Object),
@@ -263,5 +269,15 @@ describe("deal change-order routes — RBAC + wiring", () => {
     const res = await request(app).delete("/api/deals/deal-1/change-orders/co-1");
     expect(res.status).toBe(403);
     expect(coServiceMocks.deleteDealChangeOrder).not.toHaveBeenCalled();
+  });
+
+  it("a rep CANNOT delete a CO child via the normal deal delete route (admin-only; P1 auth bypass)", async () => {
+    // A CO child inherits the parent's rep, so owner access passes — but CO deletion is admin-only, so the
+    // normal DELETE /:id route must reject a non-admin even when they "own" the child.
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({ id: "co-child-1", assignedRepId: "rep-1", officeId: "office-1" });
+    const app = createApp(createUser("rep"), tenantDbReturning([{ isChangeOrder: true }]));
+    const res = await request(app).delete("/api/deals/co-child-1");
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).toContain("CHANGE_ORDER_ADMIN_ONLY");
   });
 });

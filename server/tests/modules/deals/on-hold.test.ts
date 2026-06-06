@@ -59,6 +59,7 @@ type FakeDealRow = {
   proposalNotes: string | null;
   estimatingSubstage: string | null;
   isBidBoardOwned: boolean;
+  isChangeOrder: boolean;
   bidBoardStageSlug: string | null;
   readOnlySyncedAt: Date | null;
   officeCode?: string | null;
@@ -96,6 +97,7 @@ function makeDealRow(overrides: Partial<FakeDealRow> = {}): FakeDealRow {
     proposalNotes: null,
     estimatingSubstage: "building_estimate",
     isBidBoardOwned: false,
+    isChangeOrder: false,
     bidBoardStageSlug: null,
     readOnlySyncedAt: null,
     officeCode: "dfw",
@@ -176,6 +178,63 @@ function createTenantDb(initialDeal: FakeDealRow) {
 describe("updateDeal on hold foundation", () => {
   beforeEach(() => {
     vi.useRealTimers();
+  });
+
+  it("rejects changing a change-order child's awarded amount via the normal deal edit (use the CO endpoint)", async () => {
+    // A CO's amount is managed via the change-order endpoint (which also recomputes commission). Editing it
+    // through the normal deal path would change the Won total without resyncing commission — block it.
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, awardedAmount: "1000" }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { awardedAmount: "2000" }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("rejects putting a change-order child on hold via the normal deal edit (its value would zero out)", async () => {
+    // on_hold zeroes a deal's effective Won value, which would silently drop the CO from reports.
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, onHold: false }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { onHold: true }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("rejects reassigning a change-order child's rep via the normal deal edit (commission attribution stays put)", async () => {
+    // Reassigning would move Won credit (assigned_rep_id) but leave the commission under the original rep.
+    // A CO's rep is set at creation (inherited from the parent); it is not reassignable via the normal path.
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, assignedRepId: "rep-1" }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { assignedRepId: "rep-2" }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("rejects changing a change-order child's workflow route via the normal deal edit (bucket integrity)", async () => {
+    // workflowRoute drives the service/normal report buckets + filters; a CO inherits the parent's route.
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, workflowRoute: "normal" }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { workflowRoute: "service" }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("rejects changing a change-order child's project type via the normal deal edit (report bucket integrity)", async () => {
+    // reports group/filter on d.project_type_id; editing it here would move only the CO's revenue to another bucket.
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, projectTypeId: "pt-1" }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { projectTypeId: "pt-2" }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("rejects changing a change-order child's region via the normal deal edit (report bucket integrity)", async () => {
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, regionId: "r-1" }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { regionId: "r-2" }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("does NOT block a safe field edit (name) on a change-order child — only amount/hold/rep/route/type/region are locked", async () => {
+    // Full-deal treatment: non-report-affecting fields stay editable on a CO child.
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { name: "Renamed CO" }, "director", "director-1")
+    ).resolves.toBeDefined();
   });
 
   it("turning hold on sets the flag and started timestamp", async () => {

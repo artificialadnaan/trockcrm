@@ -177,3 +177,60 @@ export async function calculateCommissionForDeal(
     sourceValueKind: sourceValue.kind,
   };
 }
+
+/**
+ * Recompute a deal's commission from its CURRENT values: delete any existing commission row(s) for the
+ * deal (audited), then re-run calculateCommissionForDeal so the snapshot reflects the new source value.
+ *
+ * calculateCommissionForDeal is idempotent (it short-circuits on an existing (deal_id, rep_user_id) row),
+ * so a stale commission can only be corrected by removing the old row first. Used when a change order's
+ * amount/date is edited — a stale commission after a CO amount edit is a real payout error. The delete +
+ * re-insert run in the caller's per-request transaction, so there is never a duplicate row and never a
+ * committed window with no row. Returns the same status discriminator as a fresh calc.
+ */
+/**
+ * Delete every commission row for a deal (each audited), returning the count removed. Used both by the
+ * recompute (delete + re-create) and when a change order is deleted — a voided CO must not leave an earned
+ * commission behind (some earned-commission report queries join deals without an is_active filter, so a
+ * soft-deleted CO's commission would otherwise linger). changedBy may be null for a system/cascade actor.
+ */
+export async function removeCommissionForDeal(
+  tenantDb: TenantDb,
+  dealId: string,
+  triggeredByUserId: string | null
+): Promise<number> {
+  const removed = await tenantDb
+    .delete(dealSignedCommissions)
+    .where(eq(dealSignedCommissions.dealId, dealId))
+    .returning({
+      id: dealSignedCommissions.id,
+      amount: dealSignedCommissions.amount,
+      repUserId: dealSignedCommissions.repUserId,
+    });
+  for (const row of removed) {
+    await writeAuditLog(tenantDb, {
+      tableName: "deal_signed_commissions",
+      recordId: row.id,
+      action: "delete",
+      changedBy: triggeredByUserId,
+      changes: {
+        amount: { from: row.amount, to: null },
+        repUserId: { from: row.repUserId, to: null },
+        dealId: { from: dealId, to: null },
+      },
+    });
+  }
+  return removed.length;
+}
+
+export async function recalculateCommissionForDeal(
+  tenantDb: TenantDb,
+  input: {
+    dealId: string;
+    contractSignedDate: string;
+    triggeredByUserId: string;
+  }
+): Promise<CalculateCommissionResult> {
+  await removeCommissionForDeal(tenantDb, input.dealId, input.triggeredByUserId);
+  return calculateCommissionForDeal(tenantDb, input);
+}
