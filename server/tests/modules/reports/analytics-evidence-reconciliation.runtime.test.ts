@@ -33,7 +33,7 @@ const FILTERS = { from: "2026-02-01", to: "2026-02-28", office: undefined, owner
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
 let pg: PGlite;
-const ev = (metric: string, repId?: string) => getAnalyticsEvidence(tdb, FILTERS, { metric, repId } as never);
+const ev = (metric: string, repId?: string | null) => getAnalyticsEvidence(tdb, FILTERS, { metric, repId } as never);
 
 beforeAll(async () => {
   pg = new PGlite();
@@ -110,5 +110,25 @@ describe("Analytics drill-to-evidence reconciles to the headline KPIs (PR-F Part
     expect(nums).not.toContain("M-3"); // won (terminal) -> excluded from open value
     expect(nums).not.toContain("M-6"); // no company -> excluded
     for (const x of ["X-1", "X-2", "X-3", "X-4"]) expect(nums).not.toContain(x);
+  });
+
+  it("per-rep + Unassigned-bucket drill: rep + unassigned sum to the office (Tier-4 LEFT-join grain)", async () => {
+    // deal_count: Alice owns D1,D2,D3,D6 (4); D7 is unassigned (1); office = 5.
+    const office = await ev("deal_count");
+    const alice = await ev("deal_count", ALICE);
+    const unassigned = await ev("deal_count", null);
+    expect(alice.total.count).toBe(4);
+    expect(unassigned.total.count).toBe(1);
+    expect(alice.total.count + unassigned.total.count).toBe(office.total.count);
+    expect(unassigned.records.map((r) => r.dealNumber)).toEqual(["M-7"]);
+    expect(unassigned.scope).toEqual({ kind: "rep", repId: null, repName: "Unassigned" });
+
+    // open_value: Alice D1+D2 = 150k; unassigned D7 = 20k; office = 170k.
+    const ovOffice = await ev("open_value");
+    const ovAlice = await ev("open_value", ALICE);
+    const ovUnassigned = await ev("open_value", null);
+    expect((ovAlice.total.value ?? 0) + (ovUnassigned.total.value ?? 0)).toBeCloseTo(ovOffice.total.value ?? 0, 2);
+    expect(ovAlice.total.value).toBeCloseTo(150000, 2);
+    expect(ovUnassigned.total.value).toBeCloseTo(20000, 2);
   });
 });

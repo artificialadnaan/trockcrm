@@ -58,7 +58,6 @@ import {
   type ForecastEvidenceMetric,
 } from "./performance-tier2-service.js";
 import {
-  ANALYTICS_EVIDENCE_METRICS,
   getAnalyticsEvidence,
   getCustomerConcentrationReport,
   getExecutiveTrendsReport,
@@ -669,8 +668,10 @@ export function parseAnalyticsEvidenceParams(
   return { metric, repId };
 }
 
-const MARKET_MIX_EVIDENCE_METRICS = ANALYTICS_EVIDENCE_METRICS.filter((m) => m === "deal_count");
-const CUSTOMER_CONCENTRATION_EVIDENCE_METRICS = ANALYTICS_EVIDENCE_METRICS.filter((m) => m === "open_value");
+// Per-report allowed metrics (the `satisfies` validates each is a real AnalyticsEvidenceMetric, so a typo
+// fails typecheck; the literal tuple keeps the narrow type the route advertises).
+const MARKET_MIX_EVIDENCE_METRICS = ["deal_count"] as const satisfies readonly AnalyticsEvidenceMetric[];
+const CUSTOMER_CONCENTRATION_EVIDENCE_METRICS = ["open_value"] as const satisfies readonly AnalyticsEvidenceMetric[];
 
 // GET /api/reports/market-mix/evidence?metric=deal_count&dateFrom=...&dateTo=...&office=...&repId=<uuid|__unassigned__>
 router.get("/market-mix/evidence", requireAnyRole, async (req, res, next) => {
