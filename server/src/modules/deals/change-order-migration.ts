@@ -20,6 +20,13 @@ export interface LegacyChangeOrderMigrationResult {
   /** Execute-only: eligible rows that threw during conversion (transaction rolled back, legacy row kept). */
   failedCount: number;
   failedIds: string[];
+  /**
+   * Of the eligible rows, the value the #650 fold did NOT already count (parent on-hold, or parent
+   * Bid-Board-owned but not in a genuine Won stage; excludes test-data parents whose child is also excluded).
+   * These COs were wrongly dropped by the fold and START counting as Won once migrated → the Won TOTAL is
+   * expected to RISE by exactly this amount (the rest just moves fold→child, net flat). 0 ⇒ net-flat total.
+   */
+  newlyCountedAmount: string;
 }
 
 /** Add two non-negative money strings as integer cents via BigInt — exact at any magnitude. */
@@ -70,6 +77,8 @@ export async function migrateLegacyChangeOrders(
       parentActive: deals.isActive,
       parentIsChangeOrder: deals.isChangeOrder,
       parentBidBoardOwned: deals.isBidBoardOwned,
+      parentOnHold: deals.onHold,
+      parentIsTestData: deals.isTestData,
       parentRoute: deals.workflowRoute,
       parentStageSlug: pipelineStageConfig.slug,
     })
@@ -83,6 +92,14 @@ export async function migrateLegacyChangeOrders(
     r.parentIsChangeOrder === false &&
     (r.parentBidBoardOwned === true ||
       isGenuineWonDealStageSlug(r.parentStageSlug, r.parentRoute ?? null));
+  // The #650 fold counted a CO only if its parent was in a genuine Won STAGE and not on hold (test-data
+  // parents were excluded too, and their child inherits is_test_data so it stays excluded). An eligible CO
+  // the fold did NOT count (on-hold parent, or BBO-but-not-Won-stage parent) starts counting once migrated →
+  // it RAISES the Won total. Quantified so the post-migration net-flat check is exact.
+  const newlyCounted = (r: Row): boolean =>
+    eligible(r) &&
+    r.parentIsTestData !== true &&
+    (r.parentOnHold === true || !isGenuineWonDealStageSlug(r.parentStageSlug, r.parentRoute ?? null));
 
   const result: LegacyChangeOrderMigrationResult = {
     totalRows: rows.length,
@@ -93,11 +110,13 @@ export async function migrateLegacyChangeOrders(
     migrated: 0,
     failedCount: 0,
     failedIds: [],
+    newlyCountedAmount: "0.00",
   };
   for (const r of rows) {
     if (eligible(r)) {
       result.eligibleCount++;
       result.eligibleAmount = addMoney(result.eligibleAmount, r.amount);
+      if (newlyCounted(r)) result.newlyCountedAmount = addMoney(result.newlyCountedAmount, r.amount);
     } else {
       result.skippedCount++;
       result.skippedAmount = addMoney(result.skippedAmount, r.amount);

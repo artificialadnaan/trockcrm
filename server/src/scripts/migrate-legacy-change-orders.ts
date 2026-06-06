@@ -37,7 +37,8 @@ async function run() {
       gMigrated = 0,
       gFailed = 0;
     let gEligibleAmt = "0.00",
-      gSkippedAmt = "0.00";
+      gSkippedAmt = "0.00",
+      gNewlyCountedAmt = "0.00";
     const blockers: string[] = [];
 
     for (const { schema_name } of schemas) {
@@ -61,6 +62,7 @@ async function run() {
         gFailed += r.failedCount;
         gEligibleAmt = addMoney(gEligibleAmt, r.eligibleAmount);
         gSkippedAmt = addMoney(gSkippedAmt, r.skippedAmount);
+        gNewlyCountedAmt = addMoney(gNewlyCountedAmt, r.newlyCountedAmount);
       } finally {
         client.release();
       }
@@ -76,6 +78,15 @@ async function run() {
       for (const b of blockers) console.log(`        ${b}`);
     } else {
       console.log(`  BLOCKED (ineligible parent):     0  ✓ clean fix-forward (zero legacy will remain)`);
+    }
+    // Net-flat predictor: the Won TOTAL should be flat (value moves fold→child) EXCEPT for eligible COs the
+    // #650 fold wasn't counting (on-hold / not-Won-stage parents), which start counting once migrated.
+    if (Number(gNewlyCountedAmt) > 0) {
+      console.log(`  Won-total RISE expected:         +$${gNewlyCountedAmt}  (eligible COs the fold did NOT count`);
+      console.log(`                                   — on-hold / not-Won-stage parents — now counting as children;`);
+      console.log(`                                   NOT a double-count: the rest just moves fold→child, net flat.)`);
+    } else {
+      console.log(`  Won-total RISE expected:         $0.00  ✓ NET-FLAT (value just moves fold→child; only the COUNT rises by ${dryRun ? gEligible : gMigrated})`);
     }
     if (dryRun) {
       console.log(`\nReview the eligible count + $ above. Re-run with --execute to migrate (zero legacy remaining).`);

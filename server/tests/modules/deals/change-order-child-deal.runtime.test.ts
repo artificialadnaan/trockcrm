@@ -502,31 +502,36 @@ describe("migrateLegacyChangeOrders — fix-forward (legacy rows → child deals
     // Isolate from legacy rows left by earlier tests in this shared PGlite instance (the migration scans
     // deal_change_orders globally).
     await pg.exec("DELETE FROM deal_change_orders");
-    const pa = U("f1001"); // active Won parent (eligible)
+    const pa = U("f1001"); // active Won parent (eligible; fold already counted its COs)
     const pInactive = U("f1002"); // soft-deleted parent → CO is a blocker
+    const pHold = U("f1003"); // active Won but ON HOLD → eligible, but the fold did NOT count its CO (newly-counted)
     await seedWonParent(pa, "DFW-9-40001-aa", 100000);
     await pg.exec(
-      `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned, is_active) VALUES ` +
-        `('${pInactive}','DFW-9-40002-aa','Deleted Parent','${ST.won}','${REP}','${CO_NS}','${PROP}', 100000,'2025-07-01','DFW-9-40002-aa','DFW','Roofing','normal', false, false)`
+      `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned, is_active, on_hold) VALUES ` +
+        `('${pInactive}','DFW-9-40002-aa','Deleted Parent','${ST.won}','${REP}','${CO_NS}','${PROP}', 100000,'2025-07-01','DFW-9-40002-aa','DFW','Roofing','normal', false, false, false),` +
+        `('${pHold}','DFW-9-40003-aa','On-Hold Parent','${ST.won}','${REP}','${CO_NS}','${PROP}', 100000,'2025-07-01','DFW-9-40003-aa','DFW','Roofing','normal', false, true, true)`
     );
     await pg.exec(
       `INSERT INTO deal_change_orders (id, deal_id, signed_date, amount) VALUES ` +
-        `('${U("f1a1")}','${pa}','2026-02-01', 1000), ('${U("f1a2")}','${pa}','2026-03-01', 2500), ('${U("f1b1")}','${pInactive}','2026-04-01', 9999)`
+        `('${U("f1a1")}','${pa}','2026-02-01', 1000), ('${U("f1a2")}','${pa}','2026-03-01', 2500), ` +
+        `('${U("f1b1")}','${pInactive}','2026-04-01', 9999), ('${U("f1c1")}','${pHold}','2026-05-01', 4000)`
     );
 
     // DRY-RUN: classify, no writes.
     const dry = await migrateLegacyChangeOrders(tdb, { dryRun: true });
-    expect(dry.totalRows).toBe(3);
-    expect(dry.eligibleCount).toBe(2);
-    expect(Number(dry.eligibleAmount)).toBeCloseTo(3500, 2);
+    expect(dry.totalRows).toBe(4);
+    expect(dry.eligibleCount).toBe(3); // pa's 2 + pHold's 1 (on-hold parent is still active+Won → eligible)
+    expect(Number(dry.eligibleAmount)).toBeCloseTo(7500, 2); // 1000 + 2500 + 4000
     expect(dry.skippedCount).toBe(1); // inactive-parent CO = blocker (surfaced, not migrated)
     expect(Number(dry.skippedAmount)).toBeCloseTo(9999, 2);
+    // The on-hold parent's CO ($4000) is "newly counted": the fold excluded it, the child counts → Won total rises by 4000.
+    expect(Number(dry.newlyCountedAmount)).toBeCloseTo(4000, 2);
     expect(dry.migrated).toBe(0);
-    expect(await countN(sql`SELECT count(*)::int AS n FROM deal_change_orders`)).toBe(3); // nothing written
+    expect(await countN(sql`SELECT count(*)::int AS n FROM deal_change_orders`)).toBe(4); // nothing written
 
     // EXECUTE: convert eligible → children + delete their legacy rows; the blocker remains (for resolution).
     const ex = await migrateLegacyChangeOrders(tdb, { dryRun: false });
-    expect(ex.migrated).toBe(2);
+    expect(ex.migrated).toBe(3);
     expect(ex.failedCount).toBe(0);
     expect(await countN(sql`SELECT count(*)::int AS n FROM deal_change_orders WHERE deal_id = ${pa}`)).toBe(0); // zero legacy under the active parent
     expect(await countN(sql`SELECT count(*)::int AS n FROM deals WHERE parent_deal_id = ${pa} AND is_change_order = true`)).toBe(2); // 2 child deals
