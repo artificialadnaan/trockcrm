@@ -273,72 +273,11 @@ function wonDimensionMap(rows: ExecuteRows<any>): Map<string, WonDimensionEntry>
   return map;
 }
 
-// --- Change Orders Part 2: additive signed-date attribution ---------------------------------------
-// A CRM change order (deal_change_orders) is additional signed work on a Won deal. For reporting, its
-// value attributes to the period of its OWN signed_date — NOT the parent deal's won_closed_date. So the
-// Won-value figures here are a DISJOINT sum: base awarded by won_closed_date ⊕ CO amount by signed_date,
-// each dollar counted exactly once (the base awarded_amount never contains CO value). Parent-deal scope
-// reuses buildScopeWhere (test-data + reportable + owner/office) and the WON stage gate — the same Won
-// cohort, minus the won_closed_date window (COs window on their own signed_date instead). on_hold is
-// already excluded by buildScopeWhere's reportable filter; the brief calls it out, so it is also stated
-// explicitly below (idempotent, and defensive against future buildScopeWhere changes). Cast SUM to
-// numeric(38,2) (wide) so a many-CO sum can't overflow the per-row NUMERIC(14,2) ceiling.
-function buildChangeOrderScopeWhere(filters: ReturnType<typeof normalizeFilters>): SQL {
-  return sql`
-    ${buildScopeWhere(filters)}
-    AND psc.slug IN (${sqlStringList(WON_STAGE_SLUGS)})
-    AND COALESCE(d.on_hold, false) = false
-    AND co.signed_date >= ${filters.from}::date
-    AND co.signed_date <= ${filters.to}::date
-  `;
-}
-
-// CO value attributed by signed_date, grouped by an arbitrary key expression (a single dimension, or a
-// period+dimension for the quarterly panel). `selectExpr` must project the grouping key(s); the SUM is
-// always aliased co_value. The parent-deal joins match buildWonByDimensionSql so dimension expressions
-// (c.industry / p.property_type / rc.name / d.project_type / …) resolve identically to the Won cohort.
-function buildChangeOrderValueSql(
-  filters: ReturnType<typeof normalizeFilters>,
-  selectExpr: SQL,
-  groupExpr: SQL
-): SQL {
-  return sql`
-    SELECT ${selectExpr},
-      COALESCE(SUM(co.amount), 0)::numeric(38,2) AS co_value
-    FROM deal_change_orders co
-    JOIN deals d ON d.id = co.deal_id
-    LEFT JOIN companies c ON c.id = d.company_id
-    LEFT JOIN properties p ON p.id = d.property_id
-    LEFT JOIN region_config rc ON rc.id = d.region_id
-    LEFT JOIN users u ON u.id = d.assigned_rep_id
-    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-    WHERE ${buildChangeOrderScopeWhere(filters)}
-    GROUP BY ${groupExpr}
-  `;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function changeOrderValueMap(rows: ExecuteRows<any>): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const row of rowsFromExecute<any>(rows)) {
-    map.set(String(row.name ?? "Uncategorized"), numberFrom(row.co_value));
-  }
-  return map;
-}
-
-// Fold CO value into a WON dimension map: add to wonValue (the period total), but leave avgWon/wonCount
-// (per-deal metrics) untouched — a change order is not itself a deal — and create a CO-only entry for a
-// dimension with COs signed in the period but no base win closed in it.
-function mergeChangeOrderValueIntoWonMap(
-  wonMap: Map<string, WonDimensionEntry>,
-  coMap: Map<string, number>
-) {
-  for (const [key, coValue] of coMap) {
-    const entry = wonMap.get(key);
-    if (entry) entry.wonValue += coValue;
-    else wonMap.set(key, { wonValue: coValue, avgWon: 0, wonCount: 0 });
-  }
-}
+// (#650's change-order fold helpers — buildChangeOrderScopeWhere / buildChangeOrderValueSql /
+// changeOrderValueMap / mergeChangeOrderValueIntoWonMap — were removed. Change orders are now real Won
+// child deals counted via the canonical won_closed_date cohort below, inheriting company/property/region/
+// project_type from the parent, so their value lands in the same dimension buckets WITHOUT a separate
+// deal_change_orders fold. The legacy migration converts all remaining deal_change_orders rows to children.)
 
 // A Market Mix slice = the active-cohort dimension rows UNIONed with the WON cohort, so a dimension with
 // Won value in the period but no active deals CREATED in it (a "won-only" dimension — created earlier,
@@ -468,33 +407,18 @@ export async function getMarketMixReport(
     // CC1 — every Won VALUE figure (KPI total, per-vertical/property/region, breakdown won/avg) comes from
     // the WON cohort (canonical won_closed_date window + usable-won-date guard, archived wins included),
     // NOT the created_at-windowed active cohort. By construction this reconciles to quarterlyWonByVertical.
-    const [
-      wonVerticalRows,
-      wonPropertyRows,
-      wonRegionRows,
-      coVerticalRows,
-      coPropertyRows,
-      coRegionRows,
-    ] = await Promise.all([
+    const [wonVerticalRows, wonPropertyRows, wonRegionRows] = await Promise.all([
       tenantDb.execute(buildWonByDimensionSql(filters, verticalExpr)),
       tenantDb.execute(buildWonByDimensionSql(filters, propertyTypeExpr)),
       tenantDb.execute(buildWonByDimensionSql(filters, regionExpr)),
-      tenantDb.execute(buildChangeOrderValueSql(filters, sql`${verticalExpr} AS name`, verticalExpr)),
-      tenantDb.execute(buildChangeOrderValueSql(filters, sql`${propertyTypeExpr} AS name`, propertyTypeExpr)),
-      tenantDb.execute(buildChangeOrderValueSql(filters, sql`${regionExpr} AS name`, regionExpr)),
     ]);
     const wonVerticalMap = wonDimensionMap(wonVerticalRows);
     const wonPropertyMap = wonDimensionMap(wonPropertyRows);
     const wonRegionMap = wonDimensionMap(wonRegionRows);
-    // Part 2: fold each change order's value into its parent deal's dimension, attributed to the CO's
-    // signed-date period (disjoint from the base won_closed_date attribution). After this merge every
-    // downstream Won-value figure (verticalMix/propertyTypeMix/regionMix, breakdown.wonLastYear, the KPI
-    // totalWonValue) reflects base + period-COs by construction.
-    mergeChangeOrderValueIntoWonMap(wonVerticalMap, changeOrderValueMap(coVerticalRows));
-    mergeChangeOrderValueIntoWonMap(wonPropertyMap, changeOrderValueMap(coPropertyRows));
-    mergeChangeOrderValueIntoWonMap(wonRegionMap, changeOrderValueMap(coRegionRows));
-    // Total Won value === sum over ALL verticals (base + folded COs) === the sum of the quarterly panel
-    // (which folds COs by signed-date quarter below). Summed from the un-limited won-by-vertical map.
+    // Change orders are now real Won child deals counted by the WON cohort above (their value lands in the
+    // parent-inherited vertical/property/region dimension by their own won_closed_date), so there is no
+    // separate deal_change_orders fold. (#650 fold removed.)
+    // Total Won value === sum over ALL verticals === the sum of the quarterly panel below, by construction.
     let totalWonValue = 0;
     for (const entry of wonVerticalMap.values()) totalWonValue += entry.wonValue;
 
@@ -575,15 +499,8 @@ export async function getMarketMixReport(
         GROUP BY quarter, ${verticalExpr}
         ORDER BY quarter ASC, won_value DESC
       `);
-    // Part 2: COs bucketed by their signed-date quarter + parent vertical, folded into the quarterly
-    // panel below so totalWonValue (Σ folded won-by-vertical) === Σ quarterly still holds with COs in.
-    const coQuarterlyRows = await tenantDb.execute(
-      buildChangeOrderValueSql(
-        filters,
-        sql`CONCAT(EXTRACT(YEAR FROM co.signed_date)::int, ' Q', EXTRACT(QUARTER FROM co.signed_date)::int) AS quarter, ${verticalExpr} AS vertical`,
-        sql`quarter, ${verticalExpr}`
-      )
-    );
+    // (CO children are counted in the quarterly Won query above by their own won_closed_date quarter +
+    // inherited vertical, so no separate deal_change_orders quarterly fold. #650 fold removed.)
     // Breakdown: active_deals is the active cohort (is_active); the created-cohort win-rate counts
     // (wins/losses) are terminal-outcome counts that KEEP archived (is_active=false) deals — so the outer
     // scope is whereNoActive and is_active is applied only to active_deals (Codex P2). The Won VALUE
@@ -644,21 +561,13 @@ export async function getMarketMixReport(
         avgDealSize: entry.won?.avgWon ?? 0,
       }));
 
-    // Part 2: merge the base Won-by-quarter rows with the CO-by-signed-quarter rows on (quarter|vertical),
-    // keyed on the RAW vertical so it matches before formatLabel, then re-sort (quarter ASC, value DESC).
+    // CO children are counted in quarterlyRows above (Won-by-quarter, by their own won_closed_date), so no
+    // separate CO-by-signed-quarter fold. (#650 fold removed.)
     const quarterlyByKey = new Map<string, { quarter: string; vertical: string; wonValue: number }>();
     for (const row of rowsFromExecute<any>(quarterlyRows)) {
       const quarter = String(row.quarter ?? "");
       const vertical = String(row.vertical ?? "Uncategorized");
       quarterlyByKey.set(`${quarter}|${vertical}`, { quarter, vertical, wonValue: numberFrom(row.won_value) });
-    }
-    for (const row of rowsFromExecute<any>(coQuarterlyRows)) {
-      const quarter = String(row.quarter ?? "");
-      const vertical = String(row.vertical ?? "Uncategorized");
-      const key = `${quarter}|${vertical}`;
-      const existing = quarterlyByKey.get(key);
-      if (existing) existing.wonValue += numberFrom(row.co_value);
-      else quarterlyByKey.set(key, { quarter, vertical, wonValue: numberFrom(row.co_value) });
     }
     const quarterlyWonByVertical = [...quarterlyByKey.values()]
       .sort((a, b) => a.quarter.localeCompare(b.quarter) || b.wonValue - a.wonValue || a.vertical.localeCompare(b.vertical))
@@ -715,15 +624,8 @@ export async function getCustomerConcentrationReport(
     for (const row of rowsFromExecute<any>(wonByCompanyRows)) {
       wonByCompany.set(String(row.company_id), numberFrom(row.won_value));
     }
-    // Part 2: fold each company's change-order value (attributed by signed_date) into its won lifetime,
-    // disjoint from the base won_closed_date attribution. COs on company-less deals land in a null key
-    // that the company-keyed topCustomers never reads — consistent with this report's company-only scope.
-    const coByCompanyRows = await tenantDb.execute(
-      buildChangeOrderValueSql(filters, sql`d.company_id::text AS name`, sql`d.company_id`)
-    );
-    for (const [companyId, coValue] of changeOrderValueMap(coByCompanyRows)) {
-      wonByCompany.set(companyId, (wonByCompany.get(companyId) ?? 0) + coValue);
-    }
+    // CO children are counted in wonByCompanyRows above (Won by company, by their own won_closed_date, with
+    // company_id inherited from the parent), so no separate deal_change_orders fold. (#650 fold removed.)
 
     const kpiRows = await tenantDb.execute(sql`
         WITH open_customers AS (
@@ -948,27 +850,8 @@ export async function getExecutiveTrendsReport(
           AND psc.slug IN (${sqlStringList([...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS])})
         GROUP BY p.metric
       `);
-    // Part 2: change-order revenue per period (current + previous), attributed by signed_date — folded
-    // into the "Won Revenue" KPI below (disjoint from won_revenue, which is by won_closed_date). Scope
-    // mirrors the outcome KPI's Won cohort (requireActive:false, WON stage), on-hold excluded. A separate
-    // query (not a join) so the one-to-many COs don't multiply the per-deal won_count / won_revenue above.
-    const coRevenueRows = await tenantDb.execute(sql`
-        WITH periods AS (
-          SELECT 'current' AS metric, ${filters.from}::date AS from_date, ${filters.to}::date AS to_date
-          UNION ALL
-          SELECT 'previous' AS metric, ${previousPeriod.previousFrom}::date AS from_date, (${previousPeriod.previousToExclusive}::date - 1) AS to_date
-        )
-        SELECT p.metric, COALESCE(SUM(co.amount), 0)::numeric(38,2) AS co_revenue
-        FROM periods p
-        JOIN deal_change_orders co ON co.signed_date >= p.from_date AND co.signed_date <= p.to_date
-        JOIN deals d ON d.id = co.deal_id
-        JOIN pipeline_stage_config psc ON psc.id = d.stage_id
-        LEFT JOIN users u ON u.id = d.assigned_rep_id
-        WHERE ${buildScopeWhere(filters, { requireActive: false })}
-          AND psc.slug IN (${wonSlugs})
-          AND COALESCE(d.on_hold, false) = false
-        GROUP BY p.metric
-      `);
+    // (CO children are counted in the outcome Won-revenue KPI below by their own won_closed_date period, so
+    // no separate deal_change_orders revenue fold. #650 fold removed.)
     // Monthly trend: new deals (created month), won (by won_closed_date month, current WON stage,
     // COUNT DISTINCT + won_value), lost (by lost-date month, current LOST stage, COUNT DISTINCT) — all
     // within [from,to] so they sum to the outcome KPI. No deal_stage_history (CC1 + CC2). Active pipeline
@@ -1057,9 +940,6 @@ export async function getExecutiveTrendsReport(
     const outcomePeriods = rowsFromExecute<any>(outcomeKpiRows);
     const currentOutcome = outcomePeriods.find((row) => row.metric === "current") ?? {};
     const previousOutcome = outcomePeriods.find((row) => row.metric === "previous") ?? {};
-    const coRevenuePeriods = rowsFromExecute<any>(coRevenueRows);
-    const currentCoRevenue = numberFrom(coRevenuePeriods.find((row) => row.metric === "current")?.co_revenue);
-    const previousCoRevenue = numberFrom(coRevenuePeriods.find((row) => row.metric === "previous")?.co_revenue);
     const metrics = [
       {
         label: "Total Pipeline",
@@ -1068,10 +948,11 @@ export async function getExecutiveTrendsReport(
         format: "currency" as const,
       },
       {
-        // Part 2: base won revenue (by won_closed_date) + change-order revenue (by signed_date), disjoint.
+        // Won revenue (by won_closed_date) — CO children are real Won deals counted here by their own
+        // won_closed_date, so no separate change-order fold. (#650 fold removed.)
         label: "Won Revenue",
-        value: numberFrom(currentOutcome.won_revenue) + currentCoRevenue,
-        previous: numberFrom(previousOutcome.won_revenue) + previousCoRevenue,
+        value: numberFrom(currentOutcome.won_revenue),
+        previous: numberFrom(previousOutcome.won_revenue),
         format: "currency" as const,
       },
       {
