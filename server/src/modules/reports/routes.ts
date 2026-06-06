@@ -58,9 +58,12 @@ import {
   type ForecastEvidenceMetric,
 } from "./performance-tier2-service.js";
 import {
+  getAnalyticsEvidence,
   getCustomerConcentrationReport,
   getExecutiveTrendsReport,
   getMarketMixReport,
+  type AnalyticsEvidenceMetric,
+  type AnalyticsEvidenceOptions,
   type AnalyticsTier4Filters,
 } from "./analytics-tier4-service.js";
 import {
@@ -635,6 +638,63 @@ router.get("/customer-concentration", requireAnyRole, async (req, res, next) => 
     const data = await getCustomerConcentrationReport(
       req.tenantDb!,
       parseTier4Filters(req.query as Record<string, unknown>, req.user!)
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Drill-to-evidence for the Analytics Tier-4 deal-grained headlines: the supporting deal rows behind ONE
+// number, with a total that EQUALS it (same cohort predicate + $ basis as the report). repId absent ->
+// office-wide; the sentinel -> the Unassigned bucket (Tier-4 includes unassigned deals); otherwise a rep UUID.
+export function parseAnalyticsEvidenceParams(
+  query: Record<string, unknown>,
+  allowed: readonly AnalyticsEvidenceMetric[]
+): AnalyticsEvidenceOptions {
+  const metricRaw = pickQueryValue(query.metric);
+  if (!metricRaw || !allowed.includes(metricRaw as AnalyticsEvidenceMetric)) {
+    throw new AppError(400, `metric must be one of: ${allowed.join(", ")}`);
+  }
+  const metric = metricRaw as AnalyticsEvidenceMetric;
+
+  const repIdRaw = pickQueryValue(query.repId);
+  let repId: string | null | undefined;
+  if (repIdRaw === undefined) repId = undefined;
+  else if (repIdRaw === UNASSIGNED_SENTINEL) repId = null;
+  else repId = requireUuid(repIdRaw, "repId");
+
+  return { metric, repId };
+}
+
+// Per-report allowed metrics (the `satisfies` validates each is a real AnalyticsEvidenceMetric, so a typo
+// fails typecheck; the literal tuple keeps the narrow type the route advertises).
+const MARKET_MIX_EVIDENCE_METRICS = ["deal_count"] as const satisfies readonly AnalyticsEvidenceMetric[];
+const CUSTOMER_CONCENTRATION_EVIDENCE_METRICS = ["open_value"] as const satisfies readonly AnalyticsEvidenceMetric[];
+
+// GET /api/reports/market-mix/evidence?metric=deal_count&dateFrom=...&dateTo=...&office=...&repId=<uuid|__unassigned__>
+router.get("/market-mix/evidence", requireAnyRole, async (req, res, next) => {
+  try {
+    const data = await getAnalyticsEvidence(
+      req.tenantDb!,
+      parseTier4Filters(req.query as Record<string, unknown>, req.user!),
+      parseAnalyticsEvidenceParams(req.query as Record<string, unknown>, MARKET_MIX_EVIDENCE_METRICS)
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/customer-concentration/evidence?metric=open_value&dateFrom=...&dateTo=...&office=...&repId=<uuid|__unassigned__>
+router.get("/customer-concentration/evidence", requireAnyRole, async (req, res, next) => {
+  try {
+    const data = await getAnalyticsEvidence(
+      req.tenantDb!,
+      parseTier4Filters(req.query as Record<string, unknown>, req.user!),
+      parseAnalyticsEvidenceParams(req.query as Record<string, unknown>, CUSTOMER_CONCENTRATION_EVIDENCE_METRICS)
     );
     await req.commitTransaction!();
     res.json({ data });

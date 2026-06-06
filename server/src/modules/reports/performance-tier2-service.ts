@@ -12,6 +12,18 @@ import {
 } from "../shared/deal-value-sql.js";
 import { aliasedHasUsableWonDateSql } from "../deals/service.js";
 import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import {
+  evidenceSelectColumnsSql,
+  EVIDENCE_DEAL_DIMENSION_JOINS,
+  reportEvidenceRepScopeSql,
+  mapEvidenceRow,
+  buildEvidenceTotal,
+  resolveEvidenceScope,
+  type EvidenceScope,
+  type ReportEvidenceRecord,
+  type ReportEvidenceTotal,
+  type ReportEvidenceRow,
+} from "./evidence-shared.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows = { rows: unknown[] } | unknown[];
@@ -979,31 +991,6 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
 export const DIRECTOR_EVIDENCE_METRICS = ["won", "lost", "pipeline", "commit", "best_case"] as const;
 export type DirectorEvidenceMetric = (typeof DIRECTOR_EVIDENCE_METRICS)[number];
 
-/** A single supporting deal row behind a Tier-2 report number (Director Scorecard or Forecast Accuracy). */
-export interface ReportEvidenceRecord {
-  id: string;
-  dealNumber: string | null;
-  name: string;
-  repId: string | null;
-  repName: string;
-  stageLabel: string;
-  /** this row's contribution in the metric's $ basis (won = awarded-first, else best-estimate). */
-  value: number | null;
-  /** the canonical date this row sits on for THIS metric (won close / lost date / expected close). */
-  cohortDate: string | null;
-  companyName: string | null;
-  region: string | null;
-  dealType: string | null;
-  daysInStage: number | null;
-}
-
-export interface ReportEvidenceTotal {
-  count: number;
-  /** SUM of the rows' value in the metric's basis. For won/lost the win rate reconciles on COUNT. */
-  value: number | null;
-  basisLabel: string | null;
-}
-
 export interface DirectorScorecardEvidence {
   metric: DirectorEvidenceMetric;
   metricLabel: string;
@@ -1020,21 +1007,6 @@ export interface DirectorScorecardEvidenceOptions {
   // There is NO Unassigned bucket: getDirectorScorecard INNER-joins users on assigned_rep_id, so unassigned
   // deals contribute to NO headline number and there is nothing to drill into.
   repId?: string;
-}
-
-interface ReportEvidenceRow {
-  id: string;
-  deal_number: string | null;
-  name: string;
-  rep_id: string | null;
-  rep_name: string;
-  stage_label: string;
-  value: string | number | null;
-  cohort_date: unknown;
-  company_name: string | null;
-  region: string | null;
-  deal_type: string | null;
-  days_in_stage: unknown;
 }
 
 const DIRECTOR_EVIDENCE_METRIC_LABEL: Record<DirectorEvidenceMetric, string> = {
@@ -1059,74 +1031,20 @@ const DIRECTOR_EVIDENCE_BASIS_LABEL: Record<DirectorEvidenceMetric, string> = {
   best_case: "Best-estimate open value",
 };
 
-/** Optional per-rep narrowing: undefined = office-wide; a string = that rep UUID. */
-function reportEvidenceRepScopeSql(repId?: string): SQL {
-  if (repId === undefined) return sql``;
-  return sql` AND d.assigned_rep_id = ${repId}::uuid`;
-}
-
 /**
- * Shared deal-row projection + joins for Director evidence: identity + owner/stage/value/cohort-date PLUS
- * the director's drill columns (company, region, deal type, days-in-stage). users/offices are INNER-joined
- * exactly as getDirectorScorecard joins them; companies/region_config/project_type_config are additive
- * LEFT JOINs (FK->PK 1:1) that never change the cohort row set, so COUNT(rows)/SUM(value) stay the
- * aggregate's.
+ * Tier-2 deal-row projection: the SHARED evidence column list (identity + owner/stage/value/cohort-date +
+ * company/region/deal-type/days-in-stage drill columns) over the Tier-2-specific FROM. users/offices are
+ * INNER-joined exactly as getDirectorScorecard / getForecastAccuracyReport join them, so the evidence cohort
+ * is row-identical to its INNER-joined aggregate (unassigned / office-less deals drop on both sides). The
+ * additive companies/region_config/project_type_config LEFT JOINs (FK->PK 1:1) never change the cohort.
  */
 function reportEvidenceRowSelectSql(valueSql: SQL, cohortDateSql: SQL): SQL {
-  return sql`
-    SELECT
-      d.id AS id,
-      d.deal_number AS deal_number,
-      d.name AS name,
-      d.assigned_rep_id AS rep_id,
-      COALESCE(u.display_name, '') AS rep_name,
-      COALESCE(psc.name, '') AS stage_label,
-      COALESCE(${valueSql}, 0)::numeric AS value,
-      (${cohortDateSql})::date AS cohort_date,
-      COALESCE(c.name, '') AS company_name,
-      COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), '') AS region,
-      COALESCE(NULLIF(ptc.name, ''), NULLIF(d.project_type, ''), '') AS deal_type,
-      ((now() AT TIME ZONE 'America/Chicago')::date - (d.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
+  return sql`SELECT ${evidenceSelectColumnsSql(valueSql, cohortDateSql)}
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     JOIN users u ON u.id = d.assigned_rep_id
     JOIN offices o ON o.id = u.office_id
-    LEFT JOIN companies c ON c.id = d.company_id
-    LEFT JOIN region_config rc ON rc.id = d.region_id
-    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
-  `;
-}
-
-/** Drill scope header: office-wide (reconciles to the office figure) or a single rep. */
-export type EvidenceScope = { kind: "office" } | { kind: "rep"; repId: string; repName: string };
-
-/** Map a raw evidence SQL row to the typed record (shared by every Tier-2 report's evidence). */
-function mapEvidenceRow(r: ReportEvidenceRow): ReportEvidenceRecord {
-  return {
-    id: String(r.id),
-    dealNumber: r.deal_number == null ? null : String(r.deal_number),
-    name: r.name,
-    repId: r.rep_id == null ? null : String(r.rep_id),
-    repName: r.rep_name || (r.rep_id ? "Unknown rep" : "Unassigned"),
-    stageLabel: r.stage_label,
-    value: numberValue(r.value),
-    cohortDate: r.cohort_date == null ? null : String(r.cohort_date).slice(0, 10),
-    companyName: r.company_name ? String(r.company_name) : null,
-    region: r.region ? String(r.region) : null,
-    dealType: r.deal_type ? String(r.deal_type) : null,
-    daysInStage: r.days_in_stage == null ? null : Number(r.days_in_stage),
-  };
-}
-
-/** Resolve the drill scope: office-wide when no rep; else the rep (name taken from the rows, or looked up if empty). */
-async function resolveEvidenceScope(
-  db: TenantDb,
-  repId: string | undefined,
-  records: ReportEvidenceRecord[]
-): Promise<EvidenceScope> {
-  if (repId === undefined) return { kind: "office" };
-  const repName = records.find((rec) => rec.repId === repId)?.repName ?? (await resolveEvidenceRepName(db, repId));
-  return { kind: "rep", repId, repName };
+    ${EVIDENCE_DEAL_DIMENSION_JOINS}`;
 }
 
 /**
@@ -1184,11 +1102,7 @@ export async function getDirectorScorecardEvidence(
   const { metric } = options;
   const rows = rowsFromExecute<ReportEvidenceRow>(await db.execute(buildDirectorEvidenceQuery(filters, options)));
   const records = rows.map(mapEvidenceRow);
-  const total: ReportEvidenceTotal = {
-    count: records.length,
-    value: records.reduce((sum, rec) => sum + (rec.value ?? 0), 0),
-    basisLabel: DIRECTOR_EVIDENCE_BASIS_LABEL[metric],
-  };
+  const total: ReportEvidenceTotal = buildEvidenceTotal(records, DIRECTOR_EVIDENCE_BASIS_LABEL[metric]);
   const scope = await resolveEvidenceScope(db, options.repId, records);
 
   return {
@@ -1199,14 +1113,6 @@ export async function getDirectorScorecardEvidence(
     total,
     records,
   };
-}
-
-/** Resolve a rep's display name for the scope header when the drill returned no rows. */
-async function resolveEvidenceRepName(db: TenantDb, repId: string): Promise<string> {
-  const rows = rowsFromExecute<{ name: string }>(
-    await db.execute(sql`SELECT display_name AS name FROM users WHERE id = ${repId}::uuid`)
-  );
-  return rows[0]?.name ?? "Unknown rep";
 }
 
 // ===================== DRILL-TO-EVIDENCE (Forecast Accuracy, PR-F Part 2b) =====================
@@ -1298,11 +1204,7 @@ export async function getForecastAccuracyEvidence(
   const { metric } = options;
   const rows = rowsFromExecute<ReportEvidenceRow>(await db.execute(buildForecastEvidenceQuery(filters, options)));
   const records = rows.map(mapEvidenceRow);
-  const total: ReportEvidenceTotal = {
-    count: records.length,
-    value: records.reduce((sum, rec) => sum + (rec.value ?? 0), 0),
-    basisLabel: FORECAST_EVIDENCE_BASIS_LABEL[metric],
-  };
+  const total: ReportEvidenceTotal = buildEvidenceTotal(records, FORECAST_EVIDENCE_BASIS_LABEL[metric]);
   const scope = await resolveEvidenceScope(db, options.repId, records);
   return {
     metric,

@@ -14,6 +14,18 @@ import { aliasedHasUsableWonDateSql } from "../deals/service.js";
 import { LOST_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 // Estimator-aware rep filter (PR 2): owner IN-list matches assigned_rep OR estimator_user_id.
 import { buildAliasedInvolvedRepInListSql } from "../deals/deal-filter-predicates.js";
+import {
+  EVIDENCE_DEAL_DIMENSION_JOINS,
+  buildEvidenceTotal,
+  evidenceSelectColumnsSql,
+  mapEvidenceRow,
+  reportEvidenceRepScopeSql,
+  resolveEvidenceScope,
+  type EvidenceScope,
+  type ReportEvidenceRecord,
+  type ReportEvidenceRow,
+  type ReportEvidenceTotal,
+} from "./evidence-shared.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExecuteRows<T> = { rows: T[] } | T[];
@@ -1155,4 +1167,90 @@ export async function getExecutiveTrendsReport(
       }),
     };
   });
+}
+
+// ===================== DRILL-TO-EVIDENCE (Analytics Tier-4, PR-F Part 2c) =====================
+// Drill the DEAL-grained headline numbers of Market Mix + Customer Concentration to the supporting deal rows,
+// reusing each report's EXACT cohort predicate + $ basis so COUNT/SUM(evidence) === the number by
+// construction. Unlike Tier-2 (Director/Forecast), Tier-4 LEFT-joins users and scopes office via an EXISTS —
+// so it INCLUDES unassigned deals; the evidence LEFT-joins users too (it HAS an Unassigned bucket). The shared
+// row projection / mapper / scope live in evidence-shared.ts; only the report-specific FROM/JOINs + WHERE are
+// built here. Locked by analytics-evidence-reconciliation.runtime.test.ts.
+//
+// won_value (Market Mix totalWonValue) is intentionally NOT drilled here: it folds in change-order value
+// (disjoint base+CO), so a flat deal-row drill would under-count; a CO-aware drill is deferred until the
+// CO-as-child-deal model settles.
+
+export const ANALYTICS_EVIDENCE_METRICS = ["deal_count", "open_value"] as const;
+export type AnalyticsEvidenceMetric = (typeof ANALYTICS_EVIDENCE_METRICS)[number];
+
+const ANALYTICS_EVIDENCE_LABELS: Record<AnalyticsEvidenceMetric, { metric: string; dateAxis: string; basis: string }> = {
+  deal_count: { metric: "Active deals", dateAxis: "Created date", basis: "Best-estimate open value" },
+  open_value: { metric: "Open pipeline value", dateAxis: "Created date", basis: "Forecast-first open value" },
+};
+
+export interface AnalyticsEvidence {
+  metric: AnalyticsEvidenceMetric;
+  metricLabel: string;
+  dateAxisLabel: string;
+  scope: EvidenceScope;
+  total: ReportEvidenceTotal;
+  records: ReportEvidenceRecord[];
+}
+
+export interface AnalyticsEvidenceOptions {
+  metric: AnalyticsEvidenceMetric;
+  /** undefined = office-wide; null = the Unassigned bucket (Tier-4 includes unassigned deals); a string = that rep UUID. */
+  repId?: string | null;
+}
+
+function buildAnalyticsEvidenceQuery(
+  filters: ReturnType<typeof normalizeFilters>,
+  options: AnalyticsEvidenceOptions
+): SQL {
+  const { metric, repId } = options;
+  const repScope = reportEvidenceRepScopeSql(repId);
+  const order = sql` ORDER BY value DESC, d.name`;
+  // Tier-4 FROM: psc INNER (every deal has a stage), users LEFT (unassigned deals stay in), dimension LEFT joins.
+  const from = sql`
+    FROM deals d
+    JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN users u ON u.id = d.assigned_rep_id
+    ${EVIDENCE_DEAL_DIMENSION_JOINS}
+  `;
+
+  if (metric === "open_value") {
+    // Customer Concentration totalOpenValue cohort: created-in-window active deals, non-terminal, reportable,
+    // company-linked; valued on the open-pipeline forecast-first basis (the open_customers CTE).
+    const openValue = aliasedEffectiveDealValueSql("d", aliasedOpenPipelineForecastFirstDealValueSql("d"));
+    const cols = evidenceSelectColumnsSql(openValue, sql`d.created_at`);
+    return sql`SELECT ${cols} ${from}
+      WHERE ${buildWhere(filters, sql`d.created_at`, { requireActive: true })}
+        AND psc.is_terminal = false
+        AND ${aliasedActiveDealCountFilterSql("d")}
+        AND d.company_id IS NOT NULL${repScope}${order}`;
+  }
+  // deal_count: Market Mix totalDealCount cohort = active, created-in-window (COUNT(DISTINCT d.id)). The value
+  // column is informational (this metric reconciles on COUNT); it carries the best-estimate open value.
+  const cols = evidenceSelectColumnsSql(aliasedEffectiveDealValueSql("d"), sql`d.created_at`);
+  return sql`SELECT ${cols} ${from}
+    WHERE ${buildWhere(filters, sql`d.created_at`, { requireActive: true })}${repScope}${order}`;
+}
+
+/** Build the drill-to-evidence for one Analytics number: the supporting deal rows + a total that EQUALS it. */
+export async function getAnalyticsEvidence(
+  tenantDb: TenantDb,
+  input: AnalyticsTier4Filters,
+  options: AnalyticsEvidenceOptions
+): Promise<AnalyticsEvidence> {
+  const filters = normalizeFilters(input);
+  const { metric } = options;
+  const rows = rowsFromExecute<ReportEvidenceRow>(
+    (await tenantDb.execute(buildAnalyticsEvidenceQuery(filters, options))) as unknown as ExecuteRows<ReportEvidenceRow>
+  );
+  const records = rows.map(mapEvidenceRow);
+  const labels = ANALYTICS_EVIDENCE_LABELS[metric];
+  const total: ReportEvidenceTotal = buildEvidenceTotal(records, labels.basis);
+  const scope = await resolveEvidenceScope(tenantDb, options.repId, records);
+  return { metric, metricLabel: labels.metric, dateAxisLabel: labels.dateAxis, scope, total, records };
 }
