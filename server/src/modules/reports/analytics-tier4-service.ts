@@ -1204,6 +1204,11 @@ export interface AnalyticsEvidenceOptions {
   repId?: string | null;
 }
 
+/**
+ * Build the row-select query for one Analytics evidence metric, reusing the matching report's EXACT cohort
+ * predicate + $ basis (Market Mix deal_count / Customer Concentration open_value), with Tier-4's LEFT-join-users
+ * FROM so unassigned deals stay in. Returns rows that reconcile to the headline by construction.
+ */
 function buildAnalyticsEvidenceQuery(
   filters: ReturnType<typeof normalizeFilters>,
   options: AnalyticsEvidenceOptions

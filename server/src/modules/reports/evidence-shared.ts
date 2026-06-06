@@ -83,7 +83,9 @@ export function evidenceSelectColumnsSql(valueSql: SQL, cohortDateSql: SQL): SQL
     d.deal_number AS deal_number,
     d.name AS name,
     d.assigned_rep_id AS rep_id,
-    COALESCE(u.display_name, '') AS rep_name,
+    -- NULLIF(BTRIM(...)) so a blank/whitespace-only display_name yields '' here -> mapEvidenceRow turns it into
+    -- "Unknown rep", matching resolveEvidenceRepName's empty-drill fallback (consistent name with OR without rows).
+    COALESCE(NULLIF(BTRIM(u.display_name), ''), '') AS rep_name,
     COALESCE(psc.name, '') AS stage_label,
     COALESCE(${valueSql}, 0)::numeric AS value,
     (${cohortDateSql})::date AS cohort_date,
@@ -150,11 +152,15 @@ export async function resolveEvidenceScope(
   return { kind: "rep", repId: repId ?? null, repName };
 }
 
-/** Resolve a rep's display name for the scope header when the drill returned no rows. */
+/**
+ * Resolve a rep's display name for the scope header when the drill returned no rows. A NULL / blank /
+ * whitespace-only display_name normalizes to "Unknown rep" — matching mapEvidenceRow's populated-row fallback,
+ * so the scope header is consistent whether or not the drill returned rows.
+ */
 export async function resolveEvidenceRepName(db: TenantDb, repId: string | null): Promise<string> {
   if (repId == null) return "Unassigned";
-  const rows = rowsFromExecute<{ name: string }>(
-    await db.execute(sql`SELECT display_name AS name FROM users WHERE id = ${repId}::uuid`)
+  const rows = rowsFromExecute<{ name: string | null }>(
+    await db.execute(sql`SELECT NULLIF(BTRIM(display_name), '') AS name FROM users WHERE id = ${repId}::uuid`)
   );
   return rows[0]?.name ?? "Unknown rep";
 }

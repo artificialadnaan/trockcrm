@@ -70,7 +70,10 @@ beforeAll(async () => {
       ('${U("d01")}','M-1','Opp Acme','${ST.opp}','${ALICE}','${CO.a}','2026-02-10T12:00:00Z', 50000,'2026-02-10T12:00:00Z'),
       ('${U("d02")}','M-2','Contract Beta','${ST.contract}','${ALICE}','${CO.b}','2026-02-15T12:00:00Z', 100000,'2026-02-15T12:00:00Z'),
       ('${U("d07")}','M-7','Opp Gamma (unassigned)','${ST.opp}', NULL,'${CO.c}','2026-02-13T12:00:00Z', 20000,'2026-02-13T12:00:00Z'),
-      ('${U("d06")}','M-6','Opp no-company','${ST.opp}','${ALICE}', NULL,'2026-02-12T12:00:00Z', 30000,'2026-02-12T12:00:00Z');
+      ('${U("d06")}','M-6','Opp no-company','${ST.opp}','${ALICE}', NULL,'2026-02-12T12:00:00Z', 30000,'2026-02-12T12:00:00Z'),
+      -- M-8 is in a DIFFERENT office (atl) and unassigned -> in the office-wide deal_count, but EXCLUDED by an
+      -- office='dallas' drill, so the office-scoped test actually proves the filter is applied (not a no-op).
+      ('${U("d08")}','M-8','Opp ATL unassigned','${ST.opp}', NULL, NULL,'2026-02-14T12:00:00Z', 10000,'2026-02-14T12:00:00Z');
     -- D3 = won (terminal) but still active -> in deal_count, OUT of open_value.
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, created_at, won_closed_date, forecast_revenue, stage_entered_at) VALUES
       ('${U("d03")}','M-3','Won Acme','${ST.won}','${ALICE}','${CO.a}','2026-02-20T12:00:00Z','2026-02-21', 0,'2026-02-20T12:00:00Z');
@@ -81,6 +84,11 @@ beforeAll(async () => {
       ('${U("d12")}','X-2','Test','${ST.opp}','${ALICE}','${CO.a}','2026-02-11T12:00:00Z', true, false, true, 99000,'2026-02-11T12:00:00Z'),
       ('${U("d13")}','X-3','OutOfWindow','${ST.opp}','${ALICE}','${CO.a}','2026-01-15T12:00:00Z', true, false, false, 99000,'2026-01-15T12:00:00Z'),
       ('${U("d14")}','X-4','Inactive','${ST.opp}','${ALICE}','${CO.a}','2026-02-11T12:00:00Z', false, false, false, 99000,'2026-02-11T12:00:00Z');
+    -- M-7 (unassigned) carries a dallas office_code (kept via the matcher's deal-code arm under office='dallas');
+    -- M-8 carries an atl office_code (excluded under office='dallas') — together they prove the office filter
+    -- both keeps in-office unassigned deals AND drops out-of-office ones.
+    UPDATE deals SET office_code = CASE deal_number WHEN 'M-7' THEN 'dallas' WHEN 'M-8' THEN 'atl' END
+      WHERE deal_number IN ('M-7', 'M-8');
   `);
   tdb = drizzle(pg);
 });
@@ -92,7 +100,7 @@ describe("Analytics drill-to-evidence reconciles to the headline KPIs (PR-F Part
   it("deal_count evidence count === Market Mix totalDealCount; includes unassigned; excludes on-hold/test/out/inactive", async () => {
     const report = await getMarketMixReport(tdb, FILTERS);
     const dc = await ev("deal_count");
-    expect(dc.total.count).toBe(5); // D1,D2,D3(won,active),D6(no-company),D7(unassigned) — absolute anchor
+    expect(dc.total.count).toBe(6); // M-1,M-2,M-3(won,active),M-6(no-company),M-7(unassigned),M-8(atl) — absolute anchor
     expect(dc.total.count).toBe(report.kpis.totalDealCount);
     const nums = dc.records.map((r) => r.dealNumber);
     expect(nums).toContain("M-7"); // unassigned -> Tier-4 LEFT-joins users, so it STAYS in (unlike Tier-2)
@@ -113,14 +121,14 @@ describe("Analytics drill-to-evidence reconciles to the headline KPIs (PR-F Part
   });
 
   it("per-rep + Unassigned-bucket drill: rep + unassigned sum to the office (Tier-4 LEFT-join grain)", async () => {
-    // deal_count: Alice owns D1,D2,D3,D6 (4); D7 is unassigned (1); office = 5.
+    // deal_count: Alice owns M-1,M-2,M-3,M-6 (4); M-7 + M-8 are unassigned (2); office = 6.
     const office = await ev("deal_count");
     const alice = await ev("deal_count", ALICE);
     const unassigned = await ev("deal_count", null);
     expect(alice.total.count).toBe(4);
-    expect(unassigned.total.count).toBe(1);
+    expect(unassigned.total.count).toBe(2);
     expect(alice.total.count + unassigned.total.count).toBe(office.total.count);
-    expect(unassigned.records.map((r) => r.dealNumber)).toEqual(["M-7"]);
+    expect(new Set(unassigned.records.map((r) => r.dealNumber))).toEqual(new Set(["M-7", "M-8"]));
     expect(unassigned.scope).toEqual({ kind: "rep", repId: null, repName: "Unassigned" });
 
     // open_value: Alice D1+D2 = 150k; unassigned D7 = 20k; office = 170k.
@@ -130,5 +138,17 @@ describe("Analytics drill-to-evidence reconciles to the headline KPIs (PR-F Part
     expect((ovAlice.total.value ?? 0) + (ovUnassigned.total.value ?? 0)).toBeCloseTo(ovOffice.total.value ?? 0, 2);
     expect(ovAlice.total.value).toBeCloseTo(150000, 2);
     expect(ovUnassigned.total.value).toBeCloseTo(20000, 2);
+  });
+
+  it("office-filtered drill reuses the report office scope: reconciles and keeps the in-office unassigned deal", async () => {
+    const officeFilters = { ...FILTERS, office: "dallas" };
+    const report = await getMarketMixReport(tdb, officeFilters);
+    const dc = await getAnalyticsEvidence(tdb, officeFilters, { metric: "deal_count" } as never);
+    // Evidence reuses the report's buildWhere (incl. buildOfficeExistsMatcher), so it reconciles for ANY office.
+    expect(dc.total.count).toBe(5); // office-wide is 6; M-8 (atl) is dropped by the dallas filter -> 5 (absolute anchor)
+    expect(dc.total.count).toBe(report.kpis.totalDealCount);
+    const nums = dc.records.map((r) => r.dealNumber);
+    expect(nums).toContain("M-7"); // unassigned but dallas office_code -> kept (matcher's deal-code arm)
+    expect(nums).not.toContain("M-8"); // unassigned + atl office_code -> dropped, proving the filter is applied
   });
 });
