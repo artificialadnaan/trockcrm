@@ -83,7 +83,9 @@ export function evidenceSelectColumnsSql(valueSql: SQL, cohortDateSql: SQL): SQL
     d.deal_number AS deal_number,
     d.name AS name,
     d.assigned_rep_id AS rep_id,
-    COALESCE(u.display_name, '') AS rep_name,
+    -- NULLIF(BTRIM(...)) so a blank/whitespace-only display_name yields '' here -> mapEvidenceRow turns it into
+    -- "Unknown rep", matching resolveEvidenceRepName's empty-drill fallback (consistent name with OR without rows).
+    COALESCE(NULLIF(BTRIM(u.display_name), ''), '') AS rep_name,
     COALESCE(psc.name, '') AS stage_label,
     COALESCE(${valueSql}, 0)::numeric AS value,
     (${cohortDateSql})::date AS cohort_date,
