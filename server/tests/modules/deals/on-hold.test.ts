@@ -214,7 +214,22 @@ describe("updateDeal on hold foundation", () => {
     ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
   });
 
-  it("does NOT block a safe field edit (name) on a change-order child — only amount/hold/rep/route are locked", async () => {
+  it("rejects changing a change-order child's project type via the normal deal edit (report bucket integrity)", async () => {
+    // reports group/filter on d.project_type_id; editing it here would move only the CO's revenue to another bucket.
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, projectTypeId: "pt-1" }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { projectTypeId: "pt-2" }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("rejects changing a change-order child's region via the normal deal edit (report bucket integrity)", async () => {
+    const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true, regionId: "r-1" }));
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { regionId: "r-2" }, "director", "director-1")
+    ).rejects.toMatchObject({ statusCode: 409, code: "CHANGE_ORDER_FIELD_LOCKED" });
+  });
+
+  it("does NOT block a safe field edit (name) on a change-order child — only amount/hold/rep/route/type/region are locked", async () => {
     // Full-deal treatment: non-report-affecting fields stay editable on a CO child.
     const tenantDb = createTenantDb(makeDealRow({ isChangeOrder: true }));
     await expect(

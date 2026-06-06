@@ -206,6 +206,35 @@ describe("createChangeOrderChildDeal — a change order is its own Won child dea
     expect(row.estimator_user_id).toBe(est);
     expect(row.workflow_route).toBe("service"); // sanity: route inherited too
   });
+
+  it("resolves the fallback Won stage within the parent's workflow family (service parent → service Won stage)", async () => {
+    // Two Won stages with the SAME display_order — one standard (ST.won), one service. A service BBO parent
+    // not in a Won stage must land its CO child on the SERVICE Won stage, not nondeterministically the standard one.
+    const svcWon = U("57003");
+    const svcParent = U("d0003");
+    await pg.exec(
+      `INSERT INTO pipeline_stage_config (id, name, slug, display_order, workflow_family, is_terminal) VALUES ('${svcWon}','Service Won','service_sent_to_production', 90, 'service_deal', true)`
+    );
+    await pg.exec(
+      `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned) VALUES ` +
+        `('${svcParent}','DFW-9-30009-aa','Service BBO Parent','${ST.open}','${REP}','${CO_NS}','${PROP}', 200000, NULL, 'DFW-9-30009-aa','DFW','Roofing','service', true)`
+    );
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: svcParent, signedDate: "2026-06-01", amount: "5000", createdBy: REP });
+    expect((await fetchDeal(child.id)).stage_id).toBe(svcWon); // service-family Won stage, NOT the standard ST.won
+  });
+
+  it("truncates the generated CO child name to fit deals.name varchar(500) — long parent names still get COs", async () => {
+    const lp = U("e1020");
+    const longName = "X".repeat(498); // near the 500 limit; + suffix would overflow without truncation
+    await pg.exec(
+      `INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned) VALUES ` +
+        `('${lp}','DFW-9-30010-aa','${longName}','${ST.won}','${REP}','${CO_NS}','${PROP}', 100000, '2025-07-01','DFW-9-30010-aa','DFW','Roofing','normal', false)`
+    );
+    const child = await createChangeOrderChildDeal(tdb, { parentDealId: lp, signedDate: "2026-04-01", amount: "1000", createdBy: REP });
+    const row = await fetchDeal(child.id);
+    expect(row.name.length).toBeLessThanOrEqual(500);
+    expect(String(row.name)).toContain("Change Order");
+  });
 });
 
 async function seedWonParent(id: string, projectNumber: string, awarded: number) {

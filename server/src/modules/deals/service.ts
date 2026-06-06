@@ -2032,10 +2032,18 @@ export async function updateDeal(
     // type) without going through the change-order endpoint.
     const touchesRoute =
       input.workflowRoute !== undefined && input.workflowRoute !== existing.workflowRoute;
-    if (touchesAmount || touchesHold || touchesRep || touchesRoute) {
+    // Lock the inherited reporting dimensions too (project type + region): reports group/filter directly on
+    // d.project_type_id / d.region_id, so editing them here would move ONLY the CO's revenue into a different
+    // bucket, breaking the parent-inherited classification without going through the change-order workflow.
+    const touchesProjectType =
+      (input.projectType !== undefined && input.projectType !== existing.projectType) ||
+      (input.projectTypeId !== undefined && input.projectTypeId !== existing.projectTypeId);
+    const touchesRegion =
+      input.regionId !== undefined && input.regionId !== existing.regionId;
+    if (touchesAmount || touchesHold || touchesRep || touchesRoute || touchesProjectType || touchesRegion) {
       throw new AppError(
         409,
-        "A change order's amount, hold state, rep, and workflow route are managed through the change-order endpoints, not the normal deal edit.",
+        "A change order's amount, hold state, rep, workflow route, project type, and region are managed through the change-order endpoints, not the normal deal edit.",
         "CHANGE_ORDER_FIELD_LOCKED"
       );
     }

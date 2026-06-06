@@ -191,12 +191,22 @@ async function resolveChildWonStage(
   if (parent.stageSlug && isGenuineWonDealStageSlug(parent.stageSlug, parent.workflowRoute)) {
     return { id: parent.stageId, slug: parent.stageSlug };
   }
+  // Constrain the fallback to the PARENT'S workflow family so a normal parent can't nondeterministically
+  // get a service Won stage (or vice versa) — both families' Won stages can be active with the same display
+  // order, and the child must land on the board/family its inherited workflow_route belongs to.
+  const family: "service_deal" | "standard_deal" =
+    (parent.workflowRoute ?? "normal") === "service" ? "service_deal" : "standard_deal";
   const [won] = await tenantDb
     .select({ id: pipelineStageConfig.id, slug: pipelineStageConfig.slug })
     .from(pipelineStageConfig)
-    .where(inArray(pipelineStageConfig.slug, [...WON_STAGE_SLUGS]))
+    .where(
+      and(
+        eq(pipelineStageConfig.workflowFamily, family),
+        inArray(pipelineStageConfig.slug, [...WON_STAGE_SLUGS])
+      )
+    )
     // Prefer an ACTIVE-pipeline Won stage (don't resolve a child into a deprecated stage); fall back to
-    // any Won stage if none is active.
+    // any Won stage in the family if none is active.
     .orderBy(desc(pipelineStageConfig.isActivePipeline), asc(pipelineStageConfig.displayOrder))
     .limit(1);
   if (!won) {
@@ -277,7 +287,12 @@ export async function createChangeOrderChildDeal(
   // Explicit column list (not drizzle .values, which emits every schema column): a CO child sets only
   // these; everything else takes its DB default. CRM-only — no source lead, no geocode, no assignment
   // task. The child shares the parent's project_number (the unique index exempts is_change_order rows).
-  const childName = `${parent.name} — Change Order ${ordinal}`;
+  // Bound the generated name to deals.name's varchar(500): a near-limit parent name + the suffix would
+  // otherwise overflow the column and fail the insert with a DB error, blocking COs on long-named deals.
+  const childNameSuffix = ` — Change Order ${ordinal}`;
+  const childName = `${parent.name}${childNameSuffix}`.length > 500
+    ? `${parent.name.slice(0, 500 - childNameSuffix.length)}${childNameSuffix}`
+    : `${parent.name}${childNameSuffix}`;
   // Suppress the project-number-first-set email (migration 0138 trigger) for this insert: a CO child
   // shares the parent's project_number, so it is NOT a first project-number assignment. Transaction-local
   // (the per-request connection runs in one transaction — middleware/tenant.ts), reset right after the
