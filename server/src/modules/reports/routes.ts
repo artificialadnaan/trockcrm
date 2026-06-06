@@ -649,6 +649,8 @@ router.get("/customer-concentration", requireAnyRole, async (req, res, next) => 
 // Drill-to-evidence for the Analytics Tier-4 deal-grained headlines: the supporting deal rows behind ONE
 // number, with a total that EQUALS it (same cohort predicate + $ basis as the report). repId absent ->
 // office-wide; the sentinel -> the Unassigned bucket (Tier-4 includes unassigned deals); otherwise a rep UUID.
+/** Parse + validate an Analytics evidence query: a metric within the report's `allowed` set + an optional rep
+ * (absent = office-wide, __unassigned__ = the Unassigned bucket, uuid = that rep). */
 export function parseAnalyticsEvidenceParams(
   query: Record<string, unknown>,
   allowed: readonly AnalyticsEvidenceMetric[]
