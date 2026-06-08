@@ -747,7 +747,12 @@ export async function deleteDeal(dealId: string) {
 }
 
 export async function getDealScopingIntake(dealId: string) {
-  return api<{ intake: DealScopingIntake; readiness: DealScopingReadiness; resolved: DealResolvedFields }>(
+  return api<{
+    intake: DealScopingIntake;
+    readiness: DealScopingReadiness;
+    attachments: FileRecord[];
+    resolved: DealResolvedFields;
+  }>(
     `/deals/${dealId}/scoping-intake`
   );
 }
@@ -762,7 +767,12 @@ export async function patchDealScopingIntake(
   }> &
     Record<string, unknown>
 ) {
-  return api<{ intake: DealScopingIntake; readiness: DealScopingReadiness; resolved: DealResolvedFields }>(
+  return api<{
+    intake: DealScopingIntake;
+    readiness: DealScopingReadiness;
+    attachments: FileRecord[];
+    resolved: DealResolvedFields;
+  }>(
     `/deals/${dealId}/scoping-intake`,
     { method: "PATCH", json: input }
   );

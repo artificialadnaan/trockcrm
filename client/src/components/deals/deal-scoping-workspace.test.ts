@@ -21,6 +21,7 @@ import type {
   DealScopingIntake,
   DealScopingReadiness,
 } from "@/hooks/use-deals";
+import type { FileRecord } from "@/hooks/use-files";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 vi.setConfig({ testTimeout: 20_000 });
@@ -204,11 +205,51 @@ function makeScopingResponse(overrides: {
   intake?: Partial<DealScopingIntake>;
   resolved?: Partial<DealResolvedFields>;
   readiness?: Partial<DealScopingReadiness>;
+  attachments?: FileRecord[];
 } = {}) {
   return {
     intake: makeIntake(overrides.intake),
     resolved: makeResolved(overrides.resolved),
     readiness: { ...makeReadiness(), ...overrides.readiness },
+    attachments: overrides.attachments ?? [],
+  };
+}
+
+function makeFileRecord(overrides: Partial<FileRecord> = {}): FileRecord {
+  return {
+    id: "file-1",
+    category: "other",
+    subcategory: null,
+    folderPath: null,
+    tags: [],
+    displayName: "Scope Packet",
+    systemFilename: "scope-packet.pdf",
+    originalFilename: "scope-packet.pdf",
+    mimeType: "application/pdf",
+    fileSizeBytes: 1024,
+    fileExtension: ".pdf",
+    r2Key: "deals/deal-1/scope-packet.pdf",
+    r2Bucket: "crm-files",
+    dealId: "deal-1",
+    leadId: null,
+    intakeSection: "attachments",
+    intakeRequirementKey: "scope_docs",
+    intakeSource: "scoping_intake",
+    contactId: null,
+    procoreProjectId: null,
+    changeOrderId: null,
+    description: null,
+    notes: null,
+    version: 1,
+    parentFileId: null,
+    takenAt: null,
+    geoLat: null,
+    geoLng: null,
+    uploadedBy: "user-1",
+    isActive: true,
+    createdAt: "2026-04-08T09:00:00.000Z",
+    updatedAt: "2026-04-08T09:00:00.000Z",
+    ...overrides,
   };
 }
 
@@ -1246,15 +1287,24 @@ describe("DealScopingWorkspace scoping UX", () => {
     mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
       intake: { projectTypeId: "project-type-1" },
       resolved: { projectTypeId: "project-type-1" },
+      attachments: [
+        makeFileRecord({
+          id: "file-scope-doc",
+          displayName: "Roof Plan",
+          originalFilename: "roof-plan.pdf",
+          intakeRequirementKey: "scope_docs",
+        }),
+      ],
       readiness: {
         status: "ready",
         requiredAttachmentKeys: [],
         attachmentRequirements: [
-          { key: "scope_docs", category: "other", label: "Scope docs", satisfied: false },
+          { key: "scope_docs", category: "other", label: "Scope docs", satisfied: true },
           { key: "site_photos", category: "photo", label: "Site photos", satisfied: false },
         ],
       },
     }));
+    mocks.useFiles.mockReturnValue({ files: [], refetch: vi.fn() });
 
     const { container, cleanup } = await renderWorkspace(
       makeDeal({ sourceLeadId: null, projectTypeId: "project-type-1" })
@@ -1264,9 +1314,132 @@ describe("DealScopingWorkspace scoping UX", () => {
       await vi.waitFor(() => expect(container.textContent).toContain("Attachments"));
       expect(container.textContent).toContain("Scope docs");
       expect(container.textContent).toContain("Site photos");
+      expect(container.textContent).toContain("Roof Plan");
+      expect(container.textContent).toContain("Complete");
       expect(container.textContent).toContain("Optional");
       expect(container.textContent).not.toContain("Required");
       expect(container.textContent).not.toContain("Blocking Items");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("excludes scoped attachment ids from the reuse list when metadata is inherited virtually", async () => {
+    mocks.getDealScopingIntake.mockResolvedValueOnce(makeScopingResponse({
+      intake: { projectTypeId: "project-type-1" },
+      resolved: { projectTypeId: "project-type-1" },
+      attachments: [
+        makeFileRecord({
+          id: "file-version-child",
+          displayName: "Latest Version Scope",
+          originalFilename: "latest-version-scope.pdf",
+          intakeRequirementKey: "scope_docs",
+          intakeSource: "scoping_intake",
+        }),
+      ],
+      readiness: {
+        status: "ready",
+        requiredAttachmentKeys: [],
+        attachmentRequirements: [
+          { key: "scope_docs", category: "other", label: "Scope docs", satisfied: true },
+          { key: "site_photos", category: "photo", label: "Site photos", satisfied: false },
+        ],
+      },
+    }));
+    mocks.useFiles.mockReturnValue({
+      files: [
+        makeFileRecord({
+          id: "file-version-child",
+          displayName: "Latest Version Scope",
+          intakeSection: null,
+          intakeRequirementKey: null,
+          intakeSource: null,
+        }),
+        makeFileRecord({
+          id: "file-reusable",
+          displayName: "Reusable Deal File",
+          intakeSection: null,
+          intakeRequirementKey: null,
+          intakeSource: null,
+        }),
+      ],
+      refetch: vi.fn(),
+    });
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({ sourceLeadId: null, projectTypeId: "project-type-1" })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.textContent).toContain("Attachments"));
+      expect(container.textContent).toContain("Latest Version Scope");
+      expect(container.textContent).toContain("Reusable Deal File");
+      expect(container.textContent?.match(/Latest Version Scope/g)).toHaveLength(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("uploads a new Scope doc and links it to the deal scoping requirement", async () => {
+    const refetchFiles = vi.fn();
+    mocks.getDealScopingIntake.mockResolvedValue(makeScopingResponse({
+      intake: { projectTypeId: "project-type-1" },
+      resolved: { projectTypeId: "project-type-1" },
+      readiness: {
+        status: "ready",
+        requiredAttachmentKeys: [],
+        attachmentRequirements: [
+          { key: "scope_docs", category: "other", label: "Scope docs", satisfied: false },
+          { key: "site_photos", category: "photo", label: "Site photos", satisfied: false },
+        ],
+      },
+    }));
+    mocks.useFiles.mockReturnValue({ files: [], refetch: refetchFiles });
+    mocks.uploadFile.mockResolvedValue(makeFileRecord({
+      id: "uploaded-scope-doc",
+      displayName: "Uploaded Scope",
+      intakeSection: null,
+      intakeRequirementKey: null,
+      intakeSource: null,
+    }));
+    mocks.linkExistingScopingAttachment.mockResolvedValue(makeFileRecord({
+      id: "uploaded-scope-doc",
+      displayName: "Uploaded Scope",
+      intakeRequirementKey: "scope_docs",
+    }));
+
+    const { container, cleanup } = await renderWorkspace(
+      makeDeal({ sourceLeadId: null, projectTypeId: "project-type-1" })
+    );
+
+    try {
+      await vi.waitFor(() => expect(container.textContent).toContain("Attachments"));
+      const [scopeUploadInput] = Array.from(container.querySelectorAll("input[type='file']")) as HTMLInputElement[];
+      expect(scopeUploadInput).toBeDefined();
+      const upload = new File(["scope"], "uploaded-scope.pdf", { type: "application/pdf" });
+      Object.defineProperty(scopeUploadInput, "files", {
+        configurable: true,
+        value: [upload],
+      });
+
+      await act(async () => {
+        scopeUploadInput.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+
+      await vi.waitFor(() => {
+        expect(mocks.uploadFile).toHaveBeenCalledWith(expect.objectContaining({
+          file: upload,
+          category: "other",
+          dealId: "deal-1",
+        }));
+      });
+      expect(mocks.linkExistingScopingAttachment).toHaveBeenCalledWith("deal-1", {
+        fileId: "uploaded-scope-doc",
+        intakeSection: "attachments",
+        intakeRequirementKey: "scope_docs",
+      });
+      expect(refetchFiles).toHaveBeenCalled();
+      expect(mocks.getDealScopingIntake).toHaveBeenCalledTimes(2);
     } finally {
       cleanup();
     }
