@@ -42,8 +42,14 @@ vi.mock("../../../src/modules/reports/report-builder-service.js", () => ({
   runReportBuilder: vi.fn(),
 }));
 
+vi.mock("../../../src/modules/reports/monday-showcase-service.js", () => ({
+  getMondayShowcaseData: vi.fn(),
+  getMondayShowcaseEvidence: vi.fn(),
+}));
+
 import { errorHandler } from "../../../src/middleware/error-handler.js";
 import * as reportService from "../../../src/modules/reports/service.js";
+import * as mondayShowcaseService from "../../../src/modules/reports/monday-showcase-service.js";
 import { runReportBuilder } from "../../../src/modules/reports/report-builder-service.js";
 import * as savedReportsService from "../../../src/modules/reports/saved-reports-service.js";
 import { reportRoutes } from "../../../src/modules/reports/routes.js";
@@ -95,6 +101,25 @@ describe("report route role guards", () => {
     expect(response.status).not.toBe(403);
     expect(response.status).toBe(200);
     expect(runReportBuilder).toHaveBeenCalledOnce();
+  });
+
+  it("allows reps to load the Monday showcase and drill evidence", async () => {
+    vi.mocked(mondayShowcaseService.getMondayShowcaseData).mockResolvedValueOnce({ period: { mode: "completed" } } as any);
+    vi.mocked(mondayShowcaseService.getMondayShowcaseEvidence).mockResolvedValueOnce({ metric: "won", records: [] } as any);
+
+    const showcaseResponse = await request(buildApp("rep")).get("/api/reports/monday-showcase?mode=completed");
+    const evidenceResponse = await request(buildApp("rep")).get("/api/reports/monday-showcase/evidence?metric=won");
+
+    expect(showcaseResponse.status).toBe(200);
+    expect(showcaseResponse.body).toEqual({ data: { period: { mode: "completed" } } });
+    expect(mondayShowcaseService.getMondayShowcaseData).toHaveBeenCalledWith({}, { mode: "completed" });
+
+    expect(evidenceResponse.status).toBe(200);
+    expect(evidenceResponse.body).toEqual({ data: { metric: "won", records: [] } });
+    expect(mondayShowcaseService.getMondayShowcaseEvidence).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ metric: "won", mode: "to_date" }),
+    );
   });
 
   it("blocks non-CRM roles from report-builder runs", async () => {

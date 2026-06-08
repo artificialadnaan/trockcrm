@@ -46,6 +46,7 @@ describe("App route guards", () => {
   });
 
   it("preserves report route guards while export remains page-local", () => {
+    expect(source).toContain('path="/reports/monday-showcase" element={( <RequireRole allowedRoles={["admin", "director", "rep"]}> <MondayShowcasePage />');
     expect(source).toContain('path="/reports/performance/director-scorecard" element={( <RequireRole allowedRoles={["admin", "director"]}> <DirectorScorecardPage />');
     expect(source).toContain('path="/reports/performance/rep-activity" element={( <RequireRole allowedRoles={["admin", "director", "rep"]}> <RepActivityPage />');
     expect(source).toContain('path="/reports/performance/forecast-accuracy" element={( <RequireRole allowedRoles={["admin", "director"]}> <ForecastAccuracyPage />');

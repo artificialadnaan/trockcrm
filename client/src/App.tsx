@@ -245,7 +245,7 @@ export function App() {
               <Route
                 path="/reports/monday-showcase"
                 element={(
-                  <RequireRole allowedRoles={["admin", "director"]}>
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <MondayShowcasePage />
                   </RequireRole>
                 )}
