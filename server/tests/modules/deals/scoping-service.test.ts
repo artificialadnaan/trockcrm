@@ -1,10 +1,10 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getTableColumns } from "drizzle-orm";
+import { and, eq, getTableColumns, or } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { DEAL_SCOPING_INTAKE_STATUSES, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
-import { dealHistory, dealScopingIntake, deals, files, users } from "@trock-crm/shared/schema";
+import { dealHistory, dealScopingIntake, deals, files, leads, users } from "@trock-crm/shared/schema";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertDealScopingWriteAllowed,
@@ -94,6 +94,7 @@ interface FakeDealRow {
   description: string | null;
   projectTypeId: string | null;
   assignedRepId: string;
+  sourceLeadId?: string | null;
   rfpApprovalRequestedAt?: Date | null;
   rfpApprovalStatus?: string | null;
   bidBoardLinkedAt?: Date | null;
@@ -115,12 +116,20 @@ interface FakeUserRow {
 interface FakeFileRow {
   id: string;
   dealId: string | null;
+  leadId?: string | null;
   category?: string | null;
+  originalFilename?: string | null;
+  mimeType?: string | null;
+  tags?: string[];
   r2Key?: string | null;
   r2Bucket?: string | null;
+  parentFileId?: string | null;
+  version?: number | null;
+  intakeSection?: string | null;
   intakeRequirementKey: string | null;
   intakeSource?: string | null;
   isActive: boolean;
+  updatedAt?: Date;
 }
 
 interface FakeDealScopingIntakeRow {
@@ -144,6 +153,7 @@ interface FakeDealScopingIntakeRow {
 
 interface FakeTenantState {
   deals: FakeDealRow[];
+  leads: Array<Record<string, unknown>>;
   users: FakeUserRow[];
   files: FakeFileRow[];
   dealScopingIntake: FakeDealScopingIntakeRow[];
@@ -169,6 +179,7 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
       },
     ],
     users: [{ id: "user-1", officeId: "office-1" }],
+    leads: [],
     files: [],
     dealScopingIntake: [],
     dealHistory: [],
@@ -179,11 +190,117 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
     const tableName = (table as { _: { name?: string } })?._?.name;
 
     if (table === deals || tableName === "deals") return state.deals;
+    if (table === leads || tableName === "leads") return state.leads;
     if (table === users || tableName === "users") return state.users;
     if (table === files || tableName === "files") return state.files;
     if (table === dealScopingIntake || tableName === "deal_scoping_intake") return state.dealScopingIntake;
     if (table === dealHistory || tableName === "deal_history") return state.dealHistory;
     throw new Error("Unexpected table in fake tenant db");
+  }
+
+  function toPropertyName(columnName: string) {
+    return columnName.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
+  }
+
+  function getQueryChunks(condition: unknown) {
+    const chunks = (condition as { queryChunks?: unknown[] } | null)?.queryChunks;
+    if (!Array.isArray(chunks)) {
+      throw new Error("Unsupported fake tenant db where condition");
+    }
+
+    return chunks;
+  }
+
+  function hasQueryChunks(chunk: unknown): chunk is { queryChunks: unknown[] } {
+    return Array.isArray((chunk as { queryChunks?: unknown[] } | null)?.queryChunks);
+  }
+
+  function getStringChunkText(chunk: unknown) {
+    if ((chunk as { constructor?: { name?: string } } | null)?.constructor?.name !== "StringChunk") {
+      return null;
+    }
+
+    const value = (chunk as { value?: unknown }).value;
+    if (Array.isArray(value) && value.every((part) => typeof part === "string")) {
+      return value.join("");
+    }
+    return typeof value === "string" ? value : null;
+  }
+
+  function getEvaluableChunks(condition: unknown) {
+    let chunks = getQueryChunks(condition);
+
+    for (;;) {
+      const meaningfulChunks = chunks.filter((chunk) => {
+        const text = getStringChunkText(chunk);
+        return text == null || (text.trim() !== "" && text.trim() !== "(" && text.trim() !== ")");
+      });
+      const childConditions = meaningfulChunks.filter(hasQueryChunks);
+
+      if (meaningfulChunks.length === 1 && childConditions.length === 1) {
+        chunks = childConditions[0].queryChunks;
+        continue;
+      }
+
+      return chunks;
+    }
+  }
+
+  function isColumnChunk(chunk: unknown): chunk is { name: string } {
+    return !hasQueryChunks(chunk) && typeof (chunk as { name?: unknown } | null)?.name === "string";
+  }
+
+  function isParamChunk(chunk: unknown): chunk is { value: unknown; constructor: { name: string } } {
+    return (chunk as { constructor?: { name?: string } } | null)?.constructor?.name === "Param";
+  }
+
+  function getBooleanOperator(chunk: unknown) {
+    const text = getStringChunkText(chunk)?.trim().toLowerCase();
+    return text === "and" || text === "or" ? text : null;
+  }
+
+  function evaluateWhereCondition<T extends Record<string, unknown>>(row: T, condition: unknown): boolean {
+    const chunks = getEvaluableChunks(condition);
+    const operators = chunks.map(getBooleanOperator).filter((operator): operator is "and" | "or" => operator != null);
+    const childConditions = chunks.filter(hasQueryChunks);
+
+    if (operators.length > 0 || childConditions.length > 0) {
+      const uniqueOperators = new Set(operators);
+      if (childConditions.length === 1 && uniqueOperators.size === 0) {
+        return evaluateWhereCondition(row, childConditions[0]);
+      }
+      if (childConditions.length < 2 || uniqueOperators.size !== 1) {
+        throw new Error("Unsupported composite fake tenant db where condition");
+      }
+
+      const [operator] = uniqueOperators;
+      return operator === "and"
+        ? childConditions.every((childCondition) => evaluateWhereCondition(row, childCondition))
+        : childConditions.some((childCondition) => evaluateWhereCondition(row, childCondition));
+    }
+
+    const columnChunks = chunks.filter(isColumnChunk);
+    const paramChunks = chunks.filter(isParamChunk);
+    const hasEqualsOperator = chunks.some((chunk) => getStringChunkText(chunk)?.includes("="));
+    const hasIsNullOperator = chunks.some((chunk) => getStringChunkText(chunk)?.toLowerCase().includes("is null"));
+
+    if (columnChunks.length === 1 && paramChunks.length === 0 && hasIsNullOperator) {
+      return row[toPropertyName(columnChunks[0].name)] == null;
+    }
+
+    if (columnChunks.length !== 1 || paramChunks.length !== 1 || !hasEqualsOperator) {
+      throw new Error("Unsupported equality fake tenant db where condition");
+    }
+
+    return row[toPropertyName(columnChunks[0].name)] === paramChunks[0].value;
+  }
+
+  function applySimpleWhere<T extends Record<string, unknown>>(rows: T[], condition: unknown) {
+    if (condition == null) {
+      return rows;
+    }
+
+    return rows.filter((row) => evaluateWhereCondition(row, condition));
   }
 
   return {
@@ -193,13 +310,14 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
         from(table: unknown) {
           const rows = getRows(table);
           return {
-            where() {
+            where(condition?: unknown) {
+              const filteredRows = applySimpleWhere(rows as Array<Record<string, unknown>>, condition);
               return {
                 limit(limit: number) {
-                  return Promise.resolve(rows.slice(0, limit));
+                  return Promise.resolve(filteredRows.slice(0, limit));
                 },
                 then(onfulfilled: (value: unknown[]) => unknown) {
-                  return Promise.resolve(rows).then(onfulfilled);
+                  return Promise.resolve(filteredRows).then(onfulfilled);
                 },
               };
             },
@@ -234,12 +352,13 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
       return {
         set(values: Record<string, unknown>) {
           return {
-            where() {
+            where(condition: unknown) {
               const rows = getRows(table) as Array<Record<string, unknown>>;
-              rows.forEach((row) => Object.assign(row, values));
+              const matchedRows = applySimpleWhere(rows, condition);
+              matchedRows.forEach((row) => Object.assign(row, values));
               return {
                 returning() {
-                  return Promise.resolve(rows);
+                  return Promise.resolve(matchedRows);
                 },
               };
             },
@@ -373,6 +492,98 @@ describe("Scoping Service", () => {
     pipelineMocks.getActiveProjectTypes.mockResolvedValue([
       { id: "project-type-1", name: "Roofing", slug: "roofing", code: "3" },
     ]);
+  });
+
+  it("filters fake tenant db rows through composite and/or where predicates", async () => {
+    const tenantDb = createFakeTenantDb({
+      files: [
+        {
+          id: "deal-active-file",
+          dealId: "deal-1",
+          leadId: null,
+          category: "other",
+          originalFilename: "deal.pdf",
+          mimeType: "application/pdf",
+          intakeRequirementKey: null,
+          isActive: true,
+        },
+        {
+          id: "lead-active-file",
+          dealId: null,
+          leadId: "lead-1",
+          category: "photo",
+          originalFilename: "lead.jpg",
+          mimeType: "image/jpeg",
+          intakeRequirementKey: null,
+          isActive: true,
+        },
+        {
+          id: "deal-inactive-file",
+          dealId: "deal-1",
+          leadId: null,
+          category: "other",
+          originalFilename: "inactive.pdf",
+          mimeType: "application/pdf",
+          intakeRequirementKey: null,
+          isActive: false,
+        },
+        {
+          id: "other-active-file",
+          dealId: "deal-2",
+          leadId: null,
+          category: "other",
+          originalFilename: "other.pdf",
+          mimeType: "application/pdf",
+          intakeRequirementKey: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const selectedRows = (await tenantDb
+      .select()
+      .from(files)
+      .where(and(eq(files.isActive, true), or(eq(files.dealId, "deal-1"), eq(files.leadId, "lead-1"))))
+      .then((rows) => rows)) as FakeFileRow[];
+
+    expect(selectedRows.map((row) => row.id)).toEqual(["deal-active-file", "lead-active-file"]);
+  });
+
+  it("returns rows matched before fake tenant db update mutations", async () => {
+    const tenantDb = createFakeTenantDb({
+      files: [
+        {
+          id: "file-1",
+          dealId: "deal-1",
+          leadId: null,
+          category: "other",
+          originalFilename: "scope.pdf",
+          mimeType: "application/pdf",
+          intakeRequirementKey: null,
+          isActive: true,
+        },
+        {
+          id: "file-2",
+          dealId: "deal-2",
+          leadId: null,
+          category: "other",
+          originalFilename: "other.pdf",
+          mimeType: "application/pdf",
+          intakeRequirementKey: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const returnedRows = (await tenantDb
+      .update(files)
+      .set({ dealId: "deal-3" })
+      .where(eq(files.dealId, "deal-1"))
+      .returning()) as FakeFileRow[];
+
+    expect(returnedRows).toHaveLength(1);
+    expect(returnedRows[0]).toMatchObject({ id: "file-1", dealId: "deal-3" });
+    expect(tenantDb.state.files.find((file) => file.id === "file-2")).toMatchObject({ dealId: "deal-2" });
   });
 
   it("allows cleanup mode to bypass only the post-RFP scope lock", async () => {
@@ -1302,6 +1513,678 @@ describe("Scoping Service", () => {
     expect(savedIntake.firstReadyAt).toBeInstanceOf(Date);
   });
 
+  it("auto-populates existing deal documents into the Scope docs attachment bucket before readiness", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      files: [
+        {
+          id: "file-scope-doc",
+          dealId: "deal-1",
+          category: "rfp",
+          originalFilename: "roof-plan.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-1/roof-plan.pdf",
+          r2Bucket: "crm-files",
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+        {
+          id: "file-other-deal",
+          dealId: "deal-2",
+          category: "other",
+          originalFilename: "other-deal.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-2/other-deal.pdf",
+          r2Bucket: "crm-files",
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+
+    expect(readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "scope_docs", category: "other", satisfied: true })
+    );
+    expect(tenantDb.state.files[0]).toMatchObject({
+      id: "file-scope-doc",
+      dealId: "deal-1",
+      category: "rfp",
+      intakeSection: "attachments",
+      intakeRequirementKey: "scope_docs",
+      intakeSource: "scoping_intake",
+    });
+    expect(tenantDb.state.files.find((file) => file.id === "file-other-deal")).toMatchObject({
+      dealId: "deal-2",
+      intakeRequirementKey: null,
+      intakeSource: null,
+    });
+    expect(tenantDb.state.files).toHaveLength(2);
+  });
+
+  it("auto-populates source-lead image files into the Site photos attachment bucket and attaches them to the deal", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Converted Lead Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+          sourceLeadId: "lead-1",
+        },
+      ],
+      files: [
+        {
+          id: "file-site-photo",
+          dealId: null,
+          leadId: "lead-1",
+          category: "other",
+          originalFilename: "site-photo.heic",
+          mimeType: "application/octet-stream",
+          r2Key: "leads/lead-1/site-photo.heic",
+          r2Bucket: "crm-files",
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+        {
+          id: "file-other-lead",
+          dealId: null,
+          leadId: "lead-2",
+          category: "other",
+          originalFilename: "other-lead-photo.jpg",
+          mimeType: "image/jpeg",
+          r2Key: "leads/lead-2/other-lead-photo.jpg",
+          r2Bucket: "crm-files",
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+
+    expect(readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "site_photos", category: "photo", satisfied: true })
+    );
+    expect(tenantDb.state.files[0]).toMatchObject({
+      id: "file-site-photo",
+      dealId: "deal-1",
+      leadId: "lead-1",
+      category: "other",
+      intakeSection: "attachments",
+      intakeRequirementKey: "site_photos",
+      intakeSource: "scoping_intake",
+    });
+    expect(tenantDb.state.files.find((file) => file.id === "file-other-lead")).toMatchObject({
+      dealId: null,
+      leadId: "lead-2",
+      intakeRequirementKey: null,
+      intakeSource: null,
+    });
+    expect(tenantDb.state.files).toHaveLength(2);
+  });
+
+  it("excludes foreign lead-linked files before version-chain attachment resolution", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Converted Lead Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+          sourceLeadId: "lead-1",
+        },
+      ],
+      files: [
+        {
+          id: "lead-scope-root",
+          dealId: null,
+          leadId: "lead-1",
+          category: "other",
+          originalFilename: "lead-scope.pdf",
+          mimeType: "application/pdf",
+          r2Key: "leads/lead-1/lead-scope.pdf",
+          r2Bucket: "crm-files",
+          version: 1,
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+        {
+          id: "foreign-deal-newer-version",
+          dealId: "deal-2",
+          leadId: "lead-1",
+          category: "photo",
+          originalFilename: "foreign-version.jpg",
+          mimeType: "image/jpeg",
+          r2Key: "deals/deal-2/foreign-version.jpg",
+          r2Bucket: "crm-files",
+          parentFileId: "lead-scope-root",
+          version: 2,
+          intakeSection: "attachments",
+          intakeRequirementKey: "site_photos",
+          intakeSource: "scoping_intake",
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+
+    expect(readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "scope_docs", category: "other", satisfied: true })
+    );
+    expect(tenantDb.state.files.find((file) => file.id === "lead-scope-root")).toMatchObject({
+      dealId: "deal-1",
+      intakeSection: "attachments",
+      intakeRequirementKey: "scope_docs",
+      intakeSource: "scoping_intake",
+    });
+    expect(tenantDb.state.files.find((file) => file.id === "foreign-deal-newer-version")).toMatchObject({
+      dealId: "deal-2",
+      intakeRequirementKey: "site_photos",
+      intakeSource: "scoping_intake",
+    });
+  });
+
+  it("maps lead-scoping document keys before MIME fallback during converted deal scoping", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Converted Lead Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+          sourceLeadId: "lead-1",
+        },
+      ],
+      files: [
+        {
+          id: "file-lead-scope-doc",
+          dealId: null,
+          leadId: "lead-1",
+          category: "other",
+          originalFilename: "lead-scoping-plan.jpg",
+          mimeType: "image/jpeg",
+          r2Key: "leads/lead-1/lead-scoping-plan.jpg",
+          r2Bucket: "crm-files",
+          intakeSection: "attachments",
+          intakeRequirementKey: "plansDrawings",
+          intakeSource: "lead_scoping_intake",
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+
+    expect(readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "scope_docs", category: "other", satisfied: false })
+    );
+    expect(tenantDb.state.files[0]).toMatchObject({
+      id: "file-lead-scope-doc",
+      dealId: "deal-1",
+      leadId: "lead-1",
+      category: "other",
+      intakeSection: "attachments",
+      intakeRequirementKey: "scope_docs",
+      intakeSource: "scoping_intake",
+    });
+  });
+
+  it("does not satisfy readiness when linked files are in the wrong scoping bucket", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      files: [
+        {
+          id: "photo-linked-as-scope-doc",
+          dealId: "deal-1",
+          category: "photo",
+          originalFilename: "site-photo.jpg",
+          mimeType: "image/jpeg",
+          r2Key: "deals/deal-1/site-photo.jpg",
+          r2Bucket: "crm-files",
+          intakeSection: "attachments",
+          intakeRequirementKey: "scope_docs",
+          intakeSource: "scoping_intake",
+          isActive: true,
+        },
+        {
+          id: "pdf-linked-as-site-photo",
+          dealId: "deal-1",
+          category: "other",
+          originalFilename: "scope.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-1/scope.pdf",
+          r2Bucket: "crm-files",
+          intakeSection: "attachments",
+          intakeRequirementKey: "site_photos",
+          intakeSource: "scoping_intake",
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+
+    expect(readiness.attachmentRequirements).toEqual([
+      expect.objectContaining({ key: "scope_docs", category: "other", satisfied: false }),
+      expect.objectContaining({ key: "site_photos", category: "photo", satisfied: false }),
+    ]);
+  });
+
+  it("does not auto-populate attachments once the scope is locked by an RFP submission", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Submitted RFP Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+          rfpApprovalRequestedAt: new Date("2026-04-08T09:00:00.000Z"),
+          rfpApprovalStatus: "pending",
+        },
+      ],
+      files: [
+        {
+          id: "file-after-submit",
+          dealId: "deal-1",
+          category: "other",
+          originalFilename: "late-scope.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-1/late-scope.pdf",
+          r2Bucket: "crm-files",
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+
+    expect(readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "scope_docs", category: "other", satisfied: false })
+    );
+    expect(tenantDb.state.files[0].id).toBe("file-after-submit");
+    expect(tenantDb.state.files[0].dealId).toBe("deal-1");
+    expect(tenantDb.state.files[0].intakeSection).toBeUndefined();
+    expect(tenantDb.state.files[0].intakeRequirementKey).toBeNull();
+    expect(tenantDb.state.files[0].intakeSource).toBeNull();
+  });
+
+  it("auto-populates only the latest active file version into scoping attachments", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      files: [
+        {
+          id: "file-old-version",
+          dealId: "deal-1",
+          category: "other",
+          originalFilename: "scope-old.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-1/scope-old.pdf",
+          r2Bucket: "crm-files",
+          version: 1,
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+        {
+          id: "file-version-2",
+          dealId: "deal-1",
+          category: "other",
+          originalFilename: "scope-v2.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-1/scope-v2.pdf",
+          r2Bucket: "crm-files",
+          parentFileId: "file-old-version",
+          version: 2,
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+        {
+          id: "file-version-3",
+          dealId: "deal-1",
+          category: "rfp",
+          originalFilename: "scope-v3.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-1/scope-v3.pdf",
+          r2Bucket: "crm-files",
+          parentFileId: "file-old-version",
+          version: 3,
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+
+    expect(readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "scope_docs", category: "other", satisfied: true })
+    );
+    expect(tenantDb.state.files.find((file) => file.id === "file-old-version")).toMatchObject({
+      intakeRequirementKey: null,
+      intakeSource: null,
+    });
+    expect(tenantDb.state.files.find((file) => file.id === "file-version-2")).toMatchObject({
+      intakeRequirementKey: null,
+      intakeSource: null,
+    });
+    expect(tenantDb.state.files.find((file) => file.id === "file-version-3")).toMatchObject({
+      category: "rfp",
+      intakeSection: "attachments",
+      intakeRequirementKey: "scope_docs",
+      intakeSource: "scoping_intake",
+    });
+  });
+
+  it("keeps versioned locked scoping attachments visible from the latest active file", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Submitted RFP Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+          rfpApprovalRequestedAt: new Date("2026-04-08T09:00:00.000Z"),
+          rfpApprovalStatus: "pending",
+        },
+      ],
+      dealScopingIntake: [
+        {
+          id: "intake-1",
+          dealId: "deal-1",
+          officeId: "office-1",
+          workflowRouteSnapshot: "normal",
+          status: "activated",
+          projectTypeId: null,
+          sectionData: {},
+          completionState: {},
+          readinessErrors: {},
+          firstReadyAt: new Date("2026-04-08T09:00:00.000Z"),
+          activatedAt: new Date("2026-04-08T09:00:00.000Z"),
+          lastAutosavedAt: new Date("2026-04-08T09:00:00.000Z"),
+          createdBy: "user-1",
+          lastEditedBy: "user-1",
+          createdAt: new Date("2026-04-08T08:00:00.000Z"),
+          updatedAt: new Date("2026-04-08T09:00:00.000Z"),
+        },
+      ],
+      files: [
+        {
+          id: "file-linked-parent",
+          dealId: "deal-1",
+          category: "other",
+          originalFilename: "scope-parent.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-1/scope-parent.pdf",
+          r2Bucket: "crm-files",
+          intakeSection: "attachments",
+          intakeRequirementKey: "scope_docs",
+          intakeSource: "scoping_intake",
+          isActive: true,
+        },
+        {
+          id: "file-version-child",
+          dealId: "deal-1",
+          category: "other",
+          originalFilename: "scope-child.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-1/scope-child.pdf",
+          r2Bucket: "crm-files",
+          parentFileId: "file-linked-parent",
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const result = await getOrCreateDealScopingIntake(tenantDb as never, "deal-1", "user-1");
+
+    expect(result.attachments).toHaveLength(1);
+    expect(result.attachments[0]).toMatchObject({
+      id: "file-version-child",
+      category: "other",
+      intakeSection: "attachments",
+      intakeRequirementKey: "scope_docs",
+      intakeSource: "scoping_intake",
+    });
+    expect(result.readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "scope_docs", category: "other", satisfied: true })
+    );
+    expect(tenantDb.state.files.find((file) => file.id === "file-version-child")).toMatchObject({
+      intakeRequirementKey: null,
+      intakeSource: null,
+    });
+  });
+
+  it("does not auto-populate new files after service handoff activation", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "service_deal",
+      displayOrder: 1,
+    });
+    pipelineMocks.getStageBySlug.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "service_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Activated Service Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "service",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+        },
+      ],
+      dealScopingIntake: [
+        {
+          id: "intake-1",
+          dealId: "deal-1",
+          officeId: "office-1",
+          workflowRouteSnapshot: "service",
+          status: "activated",
+          projectTypeId: null,
+          sectionData: {},
+          completionState: {},
+          readinessErrors: {},
+          firstReadyAt: new Date("2026-04-08T09:00:00.000Z"),
+          activatedAt: new Date("2026-04-08T09:00:00.000Z"),
+          lastAutosavedAt: new Date("2026-04-08T09:00:00.000Z"),
+          createdBy: "user-1",
+          lastEditedBy: "user-1",
+          createdAt: new Date("2026-04-08T08:00:00.000Z"),
+          updatedAt: new Date("2026-04-08T09:00:00.000Z"),
+        },
+      ],
+      files: [
+        {
+          id: "file-after-service-handoff",
+          dealId: "deal-1",
+          category: "photo",
+          originalFilename: "late-service-photo.jpg",
+          mimeType: "image/jpeg",
+          r2Key: "deals/deal-1/late-service-photo.jpg",
+          r2Bucket: "crm-files",
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+
+    expect(readiness.status).toBe("activated");
+    expect(readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "site_photos", category: "photo", satisfied: false })
+    );
+    expect(tenantDb.state.files[0]).toMatchObject({
+      id: "file-after-service-handoff",
+      dealId: "deal-1",
+      intakeRequirementKey: null,
+      intakeSource: null,
+    });
+  });
+
+  it("leaves already-linked scoping attachments unchanged when readiness runs repeatedly", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const existingUpdatedAt = new Date("2026-04-01T12:00:00.000Z");
+    const tenantDb = createFakeTenantDb({
+      files: [
+        {
+          id: "file-linked-photo",
+          dealId: "deal-1",
+          category: "photo",
+          originalFilename: "linked-photo.jpg",
+          mimeType: "image/jpeg",
+          r2Key: "deals/deal-1/linked-photo.jpg",
+          r2Bucket: "crm-files",
+          intakeSection: "attachments",
+          intakeRequirementKey: "site_photos",
+          intakeSource: "scoping_intake",
+          isActive: true,
+          updatedAt: existingUpdatedAt,
+        },
+      ],
+    });
+
+    await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+    await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { persist: false });
+
+    expect(tenantDb.state.files).toHaveLength(1);
+    expect(tenantDb.state.files[0]).toMatchObject({
+      id: "file-linked-photo",
+      dealId: "deal-1",
+      category: "photo",
+      intakeSection: "attachments",
+      intakeRequirementKey: "site_photos",
+      intakeSource: "scoping_intake",
+      updatedAt: existingUpdatedAt,
+    });
+  });
+
   it("links an existing deal file into a scoping requirement without duplicating the file row", async () => {
     pipelineMocks.getStageById.mockResolvedValue({
       id: "stage-opportunity",
@@ -1314,6 +2197,9 @@ describe("Scoping Service", () => {
         {
           id: "file-1",
           dealId: "deal-1",
+          category: "other",
+          originalFilename: "uploaded-scope.pdf",
+          mimeType: "application/pdf",
           intakeRequirementKey: null,
           isActive: true,
         },
@@ -1326,14 +2212,15 @@ describe("Scoping Service", () => {
       {
         fileId: "file-1",
         intakeSection: "attachments",
-        intakeRequirementKey: "site_photos",
+        intakeRequirementKey: "scope_docs",
       },
       "user-1"
     );
 
     expect(file.id).toBe("file-1");
+    expect(file.dealId).toBe("deal-1");
     expect(file.intakeSection).toBe("attachments");
-    expect(file.intakeRequirementKey).toBe("site_photos");
+    expect(file.intakeRequirementKey).toBe("scope_docs");
     expect(file.intakeSource).toBe("scoping_intake");
     expect(tenantDb.state.files).toHaveLength(1);
   });

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -22,6 +22,8 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 type DealRow = typeof deals.$inferSelect;
 type DealScopingIntakeRow = typeof dealScopingIntake.$inferSelect;
+type FileRow = typeof files.$inferSelect;
+type ScopingAttachmentFileRow = FileRow;
 
 export type DealScopingPatch = {
   projectTypeId?: string | null;
@@ -32,6 +34,7 @@ export type DealScopingPatch = {
 export interface DealScopingServiceResult {
   intake: DealScopingIntakeRow;
   readiness: DealScopingReadinessResult;
+  attachments: ScopingAttachmentFileRow[];
   previousStatus: DealScopingIntakeStatus | null;
   resolved: ResolvedDealView["resolved"];
 }
@@ -71,11 +74,253 @@ interface EvaluateDealScopingReadinessOptions {
 
 type LinkedScopingAttachmentRow = {
   category: unknown;
+  originalFilename?: unknown;
+  mimeType?: unknown;
   intakeRequirementKey: unknown;
   intakeSource: unknown;
   r2Key: unknown;
   r2Bucket: unknown;
 };
+
+type ExistingScopingAttachmentCandidate = Pick<
+  FileRow,
+  | "id"
+  | "dealId"
+  | "leadId"
+  | "category"
+  | "originalFilename"
+  | "mimeType"
+  | "isActive"
+  | "parentFileId"
+  | "version"
+  | "intakeSection"
+  | "intakeRequirementKey"
+  | "intakeSource"
+>;
+
+type ScopingAttachmentRequirementKey = "scope_docs" | "site_photos";
+
+const IMAGE_FILE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"]);
+const DEAL_SCOPING_INTAKE_SOURCE = "scoping_intake";
+const LEAD_SCOPING_INTAKE_SOURCE = "lead_scoping_intake";
+const LEAD_SCOPING_ATTACHMENT_KEY_MAP: Record<string, ScopingAttachmentRequirementKey> = {
+  companyCamPhotos: "site_photos",
+  typicalUnitPhotos: "site_photos",
+  exteriorBuildingPhotos: "site_photos",
+  amenityPhotos: "site_photos",
+  plansDrawings: "scope_docs",
+  finishSchedules: "scope_docs",
+  scopeDocuments: "scope_docs",
+};
+
+function getLowercaseExtension(filename: string | null | undefined) {
+  if (!filename) {
+    return "";
+  }
+
+  const lastDotIndex = filename.lastIndexOf(".");
+  return lastDotIndex >= 0 ? filename.substring(lastDotIndex).toLowerCase() : "";
+}
+
+function normalizeScopingAttachmentRequirementKey(value: unknown): ScopingAttachmentRequirementKey | null {
+  return value === "scope_docs" || value === "site_photos" ? value : null;
+}
+
+function normalizeLeadScopingAttachmentRequirementKey(value: unknown): ScopingAttachmentRequirementKey | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  return LEAD_SCOPING_ATTACHMENT_KEY_MAP[value] ?? normalizeScopingAttachmentRequirementKey(value);
+}
+
+function isImageScopingAttachment(file: { category: unknown; originalFilename?: unknown; mimeType?: unknown }) {
+  if (file.category === "photo") {
+    return true;
+  }
+
+  const mimeType = typeof file.mimeType === "string" ? file.mimeType.toLowerCase() : "";
+  const extension = getLowercaseExtension(typeof file.originalFilename === "string" ? file.originalFilename : "");
+  return mimeType.startsWith("image/") || IMAGE_FILE_EXTENSIONS.has(extension);
+}
+
+function resolveExistingScopingAttachmentMetadata(file: ExistingScopingAttachmentCandidate): {
+  intakeRequirementKey: ScopingAttachmentRequirementKey;
+} {
+  return {
+    intakeRequirementKey: isImageScopingAttachment(file) ? "site_photos" : "scope_docs",
+  };
+}
+
+function isUnlinkedScopingCandidate(file: ExistingScopingAttachmentCandidate) {
+  return !file.intakeSection && !file.intakeRequirementKey && !file.intakeSource;
+}
+
+function getDirectScopingAttachmentMetadata(file: ExistingScopingAttachmentCandidate): {
+  intakeRequirementKey: ScopingAttachmentRequirementKey;
+} | null {
+  if (
+    file.intakeSection !== "attachments" ||
+    (file.intakeSource !== DEAL_SCOPING_INTAKE_SOURCE && file.intakeSource !== LEAD_SCOPING_INTAKE_SOURCE)
+  ) {
+    return null;
+  }
+
+  const intakeRequirementKey = file.intakeSource === LEAD_SCOPING_INTAKE_SOURCE
+    ? normalizeLeadScopingAttachmentRequirementKey(file.intakeRequirementKey)
+    : normalizeScopingAttachmentRequirementKey(file.intakeRequirementKey);
+  if (!intakeRequirementKey) {
+    return null;
+  }
+
+  return {
+    intakeRequirementKey,
+  };
+}
+
+function getFileVersionRootId<T extends { id: string; parentFileId: string | null }>(file: T) {
+  return file.parentFileId ?? file.id;
+}
+
+function getFileVersionNumber<T extends { parentFileId: string | null; version?: number | null }>(file: T) {
+  return typeof file.version === "number" ? file.version : file.parentFileId ? 2 : 1;
+}
+
+function isLatestActiveFileInSet<T extends { id: string; parentFileId: string | null; isActive: boolean; version?: number | null }>(
+  file: T,
+  filesInScope: T[]
+) {
+  const rootId = getFileVersionRootId(file);
+  const version = getFileVersionNumber(file);
+
+  return (
+    file.isActive &&
+    !filesInScope.some((candidate) => {
+      return (
+        candidate.isActive &&
+        getFileVersionRootId(candidate) === rootId &&
+        getFileVersionNumber(candidate) > version
+      );
+    })
+  );
+}
+
+function isSameVersionChain<T extends { id: string; parentFileId: string | null }>(left: T, right: T) {
+  return getFileVersionRootId(left) === getFileVersionRootId(right);
+}
+
+function findLinkedScopingAttachmentVersionMetadata(
+  file: ExistingScopingAttachmentCandidate,
+  filesInScope: ExistingScopingAttachmentCandidate[]
+) {
+  const directMetadata = getDirectScopingAttachmentMetadata(file);
+  if (directMetadata) {
+    return directMetadata;
+  }
+
+  for (const candidate of filesInScope) {
+    if (!candidate.isActive || !isSameVersionChain(file, candidate)) {
+      continue;
+    }
+
+    const inheritedMetadata = getDirectScopingAttachmentMetadata(candidate);
+    if (inheritedMetadata) {
+      return inheritedMetadata;
+    }
+  }
+
+  return null;
+}
+
+function resolveScopingAttachmentMetadataForCandidate(
+  file: ExistingScopingAttachmentCandidate,
+  filesInScope: ExistingScopingAttachmentCandidate[]
+) {
+  if (file.intakeSection === "attachments" && file.intakeSource === LEAD_SCOPING_INTAKE_SOURCE) {
+    return getDirectScopingAttachmentMetadata(file) ?? resolveExistingScopingAttachmentMetadata(file);
+  }
+
+  return (
+    findLinkedScopingAttachmentVersionMetadata(file, filesInScope) ??
+    (isUnlinkedScopingCandidate(file) ? resolveExistingScopingAttachmentMetadata(file) : null)
+  );
+}
+
+function fileBelongsToDealScope(file: ExistingScopingAttachmentCandidate, deal: Pick<DealRow, "id" | "sourceLeadId">) {
+  if (file.dealId === deal.id) {
+    return true;
+  }
+
+  return Boolean(
+    deal.sourceLeadId &&
+    file.leadId === deal.sourceLeadId &&
+    file.dealId == null
+  );
+}
+
+async function populateDealScopingAttachmentsForDeal(
+  tenantDb: TenantDb,
+  deal: Pick<DealRow, "id" | "sourceLeadId">
+) {
+  const scopeCondition = deal.sourceLeadId
+    ? or(eq(files.dealId, deal.id), and(eq(files.leadId, deal.sourceLeadId), isNull(files.dealId)))
+    : eq(files.dealId, deal.id);
+
+  const candidateFiles = await tenantDb
+    .select({
+      id: files.id,
+      dealId: files.dealId,
+      leadId: files.leadId,
+      category: files.category,
+      originalFilename: files.originalFilename,
+      mimeType: files.mimeType,
+      isActive: files.isActive,
+      parentFileId: files.parentFileId,
+      version: files.version,
+      intakeSection: files.intakeSection,
+      intakeRequirementKey: files.intakeRequirementKey,
+      intakeSource: files.intakeSource,
+    })
+    .from(files)
+    .where(and(eq(files.isActive, true), scopeCondition));
+
+  const scopedCandidateFiles = candidateFiles.filter((file) => fileBelongsToDealScope(file, deal));
+
+  for (const file of scopedCandidateFiles) {
+    if (
+      !isLatestActiveFileInSet(file, scopedCandidateFiles)
+    ) {
+      continue;
+    }
+
+    const metadata = resolveScopingAttachmentMetadataForCandidate(file, scopedCandidateFiles);
+    if (!metadata) {
+      continue;
+    }
+
+    const nextValues = {
+      dealId: deal.id,
+      intakeSection: "attachments",
+      intakeRequirementKey: metadata.intakeRequirementKey,
+      intakeSource: DEAL_SCOPING_INTAKE_SOURCE,
+    };
+    if (
+      file.dealId === nextValues.dealId &&
+      file.intakeSection === nextValues.intakeSection &&
+      file.intakeRequirementKey === nextValues.intakeRequirementKey &&
+      file.intakeSource === nextValues.intakeSource
+    ) {
+      continue;
+    }
+
+    await tenantDb
+      .update(files)
+      .set({
+        ...nextValues,
+        updatedAt: new Date(),
+      })
+      .where(eq(files.id, file.id));
+  }
+}
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -488,13 +733,24 @@ async function getExistingIntake(tenantDb: TenantDb, dealId: string) {
   return intake ?? null;
 }
 
+function isScopingIntakeActivated(intake: DealScopingIntakeRow | null) {
+  return intake?.status === "activated" || intake?.activatedAt != null;
+}
+
+function shouldAutoPopulateDealScopingAttachments(input: {
+  lockState: Awaited<ReturnType<typeof resolveDealScopeLockState>>;
+  intake: DealScopingIntakeRow | null;
+}) {
+  return !input.lockState.locked && !isScopingIntakeActivated(input.intake);
+}
+
 async function buildReadOnlyScopingIntakeSnapshot(input: {
   tenantDb: TenantDb;
   resolvedDeal: ResolvedDealView;
   userId: string;
 }): Promise<DealScopingServiceResult> {
   const user = await getUserOrThrow(input.tenantDb, input.userId);
-  const attachments = await listLinkedScopingAttachments(input.tenantDb, input.resolvedDeal.deal.id);
+  const attachments = await listScopingAttachmentFiles(input.tenantDb, input.resolvedDeal.deal.id);
   const sectionData = buildSeedSectionDataFromResolvedDeal(input.resolvedDeal);
   const projectTypeId = input.resolvedDeal.resolved.projectTypeId ?? null;
   const workflowRoute = resolveScopingWorkflowRoute(input.resolvedDeal.resolved.workflowRoute);
@@ -532,6 +788,7 @@ async function buildReadOnlyScopingIntakeSnapshot(input: {
       updatedAt: timestamp,
     } as DealScopingIntakeRow,
     readiness,
+    attachments,
     previousStatus: null,
     resolved: input.resolvedDeal.resolved,
   };
@@ -547,11 +804,13 @@ export async function getOrCreateDealScopingIntake(
   if (existingIntake) {
     const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
     const readiness = await evaluateDealScopingReadiness(tenantDb, dealId);
+    const attachments = await listScopingAttachmentFiles(tenantDb, dealId);
     const refreshedIntake = (await getExistingIntake(tenantDb, dealId)) ?? existingIntake;
 
     return {
       intake: refreshedIntake,
       readiness,
+      attachments,
       previousStatus: existingIntake.status as DealScopingIntakeStatus,
       resolved: resolvedDeal.resolved,
     };
@@ -579,22 +838,34 @@ export async function getOrCreateDealScopingIntake(
   );
 }
 
-async function listLinkedScopingAttachments(
+async function listScopingAttachmentFiles(
   tenantDb: TenantDb,
   dealId: string
-): Promise<LinkedScopingAttachmentRow[]> {
+): Promise<ScopingAttachmentFileRow[]> {
   const rows = await tenantDb
-    .select({
-      category: files.category,
-      intakeRequirementKey: files.intakeRequirementKey,
-      intakeSource: files.intakeSource,
-      r2Key: files.r2Key,
-      r2Bucket: files.r2Bucket,
-    })
+    .select()
     .from(files)
     .where(and(eq(files.dealId, dealId), eq(files.isActive, true)));
 
-  return rows;
+  return rows.flatMap((file) => {
+    if (!isLatestActiveFileInSet(file, rows)) {
+      return [];
+    }
+
+    const metadata = findLinkedScopingAttachmentVersionMetadata(file, rows);
+    if (!metadata) {
+      return [];
+    }
+
+    return [
+      {
+        ...file,
+        intakeSection: "attachments",
+        intakeRequirementKey: metadata.intakeRequirementKey,
+        intakeSource: DEAL_SCOPING_INTAKE_SOURCE,
+      },
+    ];
+  });
 }
 
 function hasNonEmptyText(value: unknown): value is string {
@@ -647,6 +918,25 @@ function isVerifiedLinkedScopingAttachment(file: LinkedScopingAttachmentRow) {
   );
 }
 
+function doesLinkedAttachmentSatisfyRequirement(
+  attachment: LinkedScopingAttachmentRow,
+  requirement: DealScopingAttachmentRequirement
+) {
+  if (attachment.intakeRequirementKey !== requirement.key) {
+    return false;
+  }
+
+  const isImage = isImageScopingAttachment(attachment);
+  if (requirement.key === "site_photos") {
+    return isImage;
+  }
+  if (requirement.key === "scope_docs") {
+    return !isImage;
+  }
+
+  return attachment.category === requirement.category;
+}
+
 function buildScopingReadiness(input: {
   currentStatus: DealScopingIntakeStatus;
   workflowRoute: WorkflowRoute;
@@ -665,10 +955,8 @@ function buildScopingReadiness(input: {
   const verifiedLinkedAttachments = input.attachments.filter(isVerifiedLinkedScopingAttachment);
   const attachmentRequirements = requiredAttachments.map((requirement) => ({
     ...requirement,
-    satisfied: verifiedLinkedAttachments.some(
-      (attachment) =>
-        attachment.intakeRequirementKey === requirement.key &&
-        attachment.category === requirement.category
+    satisfied: verifiedLinkedAttachments.some((attachment) =>
+      doesLinkedAttachmentSatisfyRequirement(attachment, requirement)
     ),
   }));
   const requiredAttachmentKeySet = new Set(baseReadiness.requiredAttachmentKeys);
@@ -833,8 +1121,12 @@ export async function evaluateDealScopingReadiness(
 ): Promise<DealScopingReadinessResult> {
   const resolvedDeal = await getResolvedDeal(tenantDb, dealId);
   const deal = resolvedDeal.deal;
+  const lockState = await resolveDealScopeLockState(deal);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
-  const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
+  if (shouldAutoPopulateDealScopingAttachments({ lockState, intake: existingIntake })) {
+    await populateDealScopingAttachmentsForDeal(tenantDb, deal);
+  }
+  const attachments = await listScopingAttachmentFiles(tenantDb, dealId);
   const sectionData = buildBaseSectionData(existingIntake, resolvedDeal);
   const projectTypeId = existingIntake?.projectTypeId ?? resolvedDeal.resolved.projectTypeId ?? null;
   const workflowRoute = resolveScopingWorkflowRoute(resolvedDeal.resolved.workflowRoute);
@@ -846,8 +1138,7 @@ export async function evaluateDealScopingReadiness(
     attachments,
   });
 
-  const lockState = await resolveDealScopeLockState(deal);
-  const shouldPersist = options.persist !== false && !lockState.locked;
+  const shouldPersist = options.persist !== false && !lockState.locked && !isScopingIntakeActivated(existingIntake);
   if (existingIntake && shouldPersist) {
     const user = await getUserOrThrow(tenantDb, existingIntake.lastEditedBy);
     await persistReadinessIfNeeded(
@@ -907,6 +1198,7 @@ export async function activateDealScopingIntake(
   return {
     intake: savedIntake,
     readiness: { ...readiness, status: "activated" },
+    attachments: await listScopingAttachmentFiles(tenantDb, dealId),
     previousStatus: existingIntake.status as DealScopingIntakeStatus,
     resolved: (await getResolvedDeal(tenantDb, dealId)).resolved,
   };
@@ -984,7 +1276,10 @@ export async function upsertDealScopingIntake(
       : sanitizedPatch.projectTypeId === undefined
       ? currentProjectTypeId
       : sanitizedPatch.projectTypeId;
-  const attachments = await listLinkedScopingAttachments(tenantDb, dealId);
+  if (shouldAutoPopulateDealScopingAttachments({ lockState: writePolicy.lockState, intake: existingIntake })) {
+    await populateDealScopingAttachmentsForDeal(tenantDb, deal);
+  }
+  const attachments = await listScopingAttachmentFiles(tenantDb, dealId);
   const readiness = buildScopingReadiness({
     currentStatus: (existingIntake?.status ?? "draft") as DealScopingIntakeStatus,
     workflowRoute: nextRoute,
@@ -1050,6 +1345,7 @@ export async function upsertDealScopingIntake(
   return {
     intake: savedIntake,
     readiness,
+    attachments,
     previousStatus: existingIntake?.status as DealScopingIntakeStatus | null ?? null,
     resolved: (await getResolvedDeal(tenantDb, dealId)).resolved,
   };

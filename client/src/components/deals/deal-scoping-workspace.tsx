@@ -401,14 +401,18 @@ export function DealScopingWorkspace({
   const { user } = useAuth();
   const { projectTypes } = useProjectTypes();
   const { stages } = usePipelineStages();
+  const [filesHydratedDealId, setFilesHydratedDealId] = useState<string | null>(null);
   const { files, refetch: refetchFiles } = useFiles({
     dealId: deal.id,
     limit: 50,
+  }, {
+    enabled: filesHydratedDealId === deal.id,
   });
 
   const [intake, setIntake] = useState<DealScopingIntake | null>(null);
   const [readiness, setReadiness] = useState<DealScopingReadiness | null>(null);
   const [resolvedFields, setResolvedFields] = useState<DealResolvedFields | null>(null);
+  const [scopingAttachments, setScopingAttachments] = useState<FileRecord[]>([]);
   const [sectionData, setSectionData] = useState<Record<string, unknown>>({});
   const [projectTypeId, setProjectTypeId] = useState<string | null>(deal.projectTypeId);
   const [intendedProjectNumber, setIntendedProjectNumber] = useState<string | null>(
@@ -540,6 +544,7 @@ export function DealScopingWorkspace({
       const nextSectionData = buildWorkspaceSectionData(deal, result.intake, result.resolved);
       setIntake(result.intake);
       applyReadiness(result.readiness, Boolean(options.notifyReadinessChange));
+      setScopingAttachments(result.attachments ?? []);
       setResolvedFields(result.resolved);
       setSectionData(nextSectionData);
       const nextProjectTypeId = hasSourceLead
@@ -548,6 +553,7 @@ export function DealScopingWorkspace({
       setProjectTypeId(nextProjectTypeId);
       lastSavedFingerprintRef.current = createWorkspaceFingerprint(nextProjectTypeId, nextSectionData);
       hydrationCompleteRef.current = true;
+      setFilesHydratedDealId(deal.id);
       setInitialLoadFailed(false);
       setSaveState("idle");
     } catch (err) {
@@ -572,6 +578,8 @@ export function DealScopingWorkspace({
   useEffect(() => {
     hydrationCompleteRef.current = false;
     setForceEditingReadOnlyScope(false);
+    setScopingAttachments([]);
+    setFilesHydratedDealId(null);
     void loadIntake();
   }, [deal.id, mode]);
 
@@ -626,15 +634,15 @@ export function DealScopingWorkspace({
             ...(adminOverrideEditing ? { forceEditAfterRfp: true } : {}),
           }
         );
-        const responseFingerprint = createWorkspaceFingerprint(projectTypeId, sectionData);
         if (latestWorkspaceFingerprintRef.current !== requestFingerprint) {
           return;
         }
 
         setIntake(result.intake);
         applyReadiness(result.readiness, true);
+        setScopingAttachments(result.attachments ?? []);
         setResolvedFields(result.resolved);
-        lastSavedFingerprintRef.current = responseFingerprint;
+        lastSavedFingerprintRef.current = requestFingerprint;
         setSaveState("saved");
         window.setTimeout(() => setSaveState("idle"), 1200);
       } catch (err) {
@@ -678,16 +686,20 @@ export function DealScopingWorkspace({
     for (const requirement of ATTACHMENT_REQUIREMENTS) {
       map.set(requirement.key, []);
     }
-    for (const file of files) {
+    for (const file of scopingAttachments) {
       const key = file.intakeRequirementKey ?? "";
       if (!map.has(key)) continue;
       map.get(key)!.push(file);
     }
     return map;
-  }, [files]);
+  }, [scopingAttachments]);
+  const scopedAttachmentIds = useMemo(
+    () => new Set(scopingAttachments.map((file) => file.id)),
+    [scopingAttachments]
+  );
   const unlinkedFiles = useMemo(
-    () => files.filter((file) => !file.intakeRequirementKey),
-    [files]
+    () => files.filter((file) => !file.intakeRequirementKey && !scopedAttachmentIds.has(file.id)),
+    [files, scopedAttachmentIds]
   );
   const selectedScopeProjectTypeIds = useMemo(
     () => getSelectedScopeProjectTypeIds(sectionData, projectTypeId),
