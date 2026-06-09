@@ -383,7 +383,10 @@ export type PublicPhotoAsset =
  */
 export async function getPublicPhotoAsset(rawToken: string, photoId: string): Promise<PublicPhotoAsset> {
   const token = await resolvePublicPhotoToken(rawToken);
-  return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
+  // Resolve the photo row inside the tenant transaction, then release the connection BEFORE the R2
+  // fetch — holding a pooled connection open across external network I/O would exhaust the pool
+  // under gallery fan-out (many concurrent image requests per page view).
+  const photo = await withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const photoResult = await tenantDb.execute(sql`
       SELECT id, r2_key, mime_type, display_name, file_extension, external_url
       FROM files
@@ -393,20 +396,20 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
         AND deleted_at IS NULL
       LIMIT 1
     `);
-    const photo = ((photoResult as any).rows ?? photoResult)[0];
-    if (!photo) throw new AppError(404, "Photo not found");
-
-    if (photo.r2_key) {
-      const object = await getObjectBuffer(photo.r2_key);
-      const contentType = photo.mime_type || object.contentType || "application/octet-stream";
-      return {
-        kind: "buffer",
-        buffer: stripImageMetadata(object.buffer, contentType),
-        contentType,
-        filename: `${photo.display_name ?? "photo"}${photo.file_extension ?? ""}`,
-      };
-    }
-    if (photo.external_url) return { kind: "external", url: photo.external_url };
-    throw new AppError(404, "Photo not found");
+    return ((photoResult as any).rows ?? photoResult)[0];
   });
+
+  if (!photo) throw new AppError(404, "Photo not found");
+  if (photo.r2_key) {
+    const object = await getObjectBuffer(photo.r2_key);
+    const contentType = photo.mime_type || object.contentType || "application/octet-stream";
+    return {
+      kind: "buffer",
+      buffer: stripImageMetadata(object.buffer, contentType),
+      contentType,
+      filename: `${photo.display_name ?? "photo"}${photo.file_extension ?? ""}`,
+    };
+  }
+  if (photo.external_url) return { kind: "external", url: photo.external_url };
+  throw new AppError(404, "Photo not found");
 }
