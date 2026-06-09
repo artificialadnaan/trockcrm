@@ -16,6 +16,9 @@ describe("procore photo worker", () => {
   let fetchMock: any;
 
   beforeEach(() => {
+    // Fresh module per test so the module-level Procore token cache (workerCachedToken) doesn't leak
+    // a still-valid token across tests and shift the sequential fetch mocks.
+    vi.resetModules();
     poolQueryMock.mockReset();
     clientQueryMock.mockReset();
     releaseMock.mockReset();
@@ -185,6 +188,49 @@ describe("procore photo worker", () => {
       expect.arrayContaining([expect.stringContaining("procore_photo_link_status = $1"), expect.arrayContaining(["permission_denied", "deal-1"])]),
     ]));
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/links/bulk_update"), expect.objectContaining({ method: "PATCH" }));
+  });
+
+  it("captures the Procore link id from the {data:[...]} bulk_update response (not null)", async () => {
+    process.env.PROCORE_LINK_CREATION_ENABLED = "true";
+    process.env.PROCORE_CLIENT_ID = "client-id";
+    process.env.PROCORE_CLIENT_SECRET = "client-secret";
+    process.env.PROCORE_COMPANY_ID = "company-1";
+    process.env.FRONTEND_URL = "https://crm.test";
+    const { ensurePublicPhotoLinkForDeal } = await import("./procore-photos.js");
+    clientQueryMock
+      .mockResolvedValueOnce({ rows: [{ id: "deal-1", procore_project_id: 12345, procore_photo_link_id: null, procore_photo_link_status: null }] }) // deal select
+      .mockResolvedValueOnce({ rows: [] }) // token insert
+      .mockResolvedValueOnce({ rows: [] }); // deal update
+    poolQueryMock.mockResolvedValue({ rows: [{ id: "admin-1" }] });
+    fetchMock
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ access_token: "token", expires_in: 3600 }) } as Response)
+      // Procore returns the created/updated links wrapped in { data: [...] } — NOT a bare array.
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ data: [{ id: "link-99", title: "T Rock Photos" }] }) } as Response);
+
+    await expect(ensurePublicPhotoLinkForDeal({ officeId: "office-1", schemaName: "office_main", dealId: "deal-1" })).resolves.toBe(true);
+
+    // The link id must be persisted (so re-runs can update-by-id and the early-return fires), NOT null.
+    const updateCall = clientQueryMock.mock.calls.find((c) => String(c[0]).includes("procore_photo_link_id = $1"));
+    expect(updateCall).toBeDefined();
+    expect(updateCall![1]).toEqual(["link-99", "deal-1"]);
+  });
+
+  it("is idempotent: a re-run with an existing link id + 'created' status mints no new token and calls no Procore API", async () => {
+    process.env.PROCORE_LINK_CREATION_ENABLED = "true";
+    process.env.PROCORE_CLIENT_ID = "client-id";
+    process.env.PROCORE_CLIENT_SECRET = "client-secret";
+    process.env.PROCORE_COMPANY_ID = "company-1";
+    process.env.FRONTEND_URL = "https://crm.test";
+    const { ensurePublicPhotoLinkForDeal } = await import("./procore-photos.js");
+    // Deal already has a captured link id + 'created' status (the steady state after the first run).
+    clientQueryMock.mockResolvedValueOnce({ rows: [{ id: "deal-1", procore_project_id: 12345, procore_photo_link_id: "link-99", procore_photo_link_status: "created" }] });
+
+    await expect(ensurePublicPhotoLinkForDeal({ officeId: "office-1", schemaName: "office_main", dealId: "deal-1" })).resolves.toBe(true);
+
+    const sqlText = clientQueryMock.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(sqlText).not.toContain("INSERT INTO public.public_photo_tokens"); // no duplicate token
+    expect(fetchMock).not.toHaveBeenCalled(); // no duplicate "T Rock Photos" link appended
+    expect(clientQueryMock).toHaveBeenCalledTimes(1); // only the deal SELECT, then early-return
   });
 
   it("enqueues batch and single Procore photo sync jobs", async () => {
