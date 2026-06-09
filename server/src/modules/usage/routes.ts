@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { startSession } from "./collection-service.js";
+import { startSession, recordHeartbeat } from "./collection-service.js";
 
 const router = Router();
 
@@ -16,6 +16,20 @@ router.post("/session/start", async (req, res, next) => {
     });
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post("/heartbeat", async (req, res, next) => {
+  try {
+    const sessionId = (req.body as { sessionId?: unknown }).sessionId;
+    if (typeof sessionId !== "string") {
+      return res.status(400).json({ error: "sessionId required" });
+    }
+    await recordHeartbeat(req.tenantDb!, { userId: req.user!.id, sessionId });
+    await req.commitTransaction!();
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { startSession } from "./collection-service.js";
+import { startSession, recordHeartbeat } from "./collection-service.js";
 
 function tenantDbCapturingInsert() {
   const inserted: unknown[] = [];
@@ -35,5 +35,25 @@ describe("startSession", () => {
     const { db, inserted } = tenantDbCapturingInsert();
     await startSession(db, { userId: "rep-1", userAgent: "UA", impersonatorId: null });
     expect(inserted[0]).toMatchObject({ impersonatorId: null });
+  });
+});
+
+describe("recordHeartbeat", () => {
+  it("inserts a heartbeat row and updates the session last_heartbeat_at", async () => {
+    const heartbeatInserts: unknown[] = [];
+    const sessionUpdates: unknown[] = [];
+    const db = {
+      insert: vi.fn().mockReturnValue({
+        values: vi.fn().mockImplementation((v: unknown) => { heartbeatInserts.push(v); return Promise.resolve(); }),
+      }),
+      update: vi.fn().mockReturnValue({
+        set: vi.fn().mockImplementation((v: unknown) => { sessionUpdates.push(v); return { where: vi.fn().mockResolvedValue(undefined) }; }),
+      }),
+    } as any;
+
+    await recordHeartbeat(db, { userId: "rep-1", sessionId: "s1" });
+
+    expect(heartbeatInserts[0]).toMatchObject({ userId: "rep-1", sessionId: "s1" });
+    expect((sessionUpdates[0] as { lastHeartbeatAt: Date }).lastHeartbeatAt).toBeInstanceOf(Date);
   });
 });
