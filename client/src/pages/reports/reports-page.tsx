@@ -78,6 +78,7 @@ const reportCategories: Array<{ category: string; description: string; reports: 
       { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge, path: "/reports/performance/director-scorecard" },
       { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity, path: "/reports/performance/rep-activity" },
       { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, path: "/reports/performance/forecast-accuracy" },
+      { name: "Platform Usage", description: "Active time, actions, and views per rep — daily and weekly.", icon: Activity, path: "/reports/performance/platform-usage" },
     ],
   },
   {
