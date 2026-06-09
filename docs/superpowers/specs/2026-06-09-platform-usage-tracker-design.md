@@ -64,6 +64,21 @@ One row per browser session.
 | `user_agent` | device label |
 | `impersonator_id` | **nullable; stamped at session-start if the session is impersonated** (see §8) |
 
+**`session_count` semantics — "sessions started" (not "real sessions").** A session row exists
+the moment `session/start` is called, regardless of whether any heartbeat follows. So a tab opened
+and immediately abandoned (laptop slammed shut) still counts as 1 session. This is intentional and
+keeps `session_count` cheap and unambiguous; we do **not** apply a min-heartbeat/min-duration floor
+in v1. Note that such an abandoned session contributes **0** to `active_seconds` because the
+interval-merge only accrues time from actual heartbeats capped at `HEARTBEAT_INTERVAL_S +
+HEARTBEAT_GRACE_S`, so abandoned sessions inflate `session_count` only — never time.
+
+**`ended_at` (stale-session inference) — scoped out of v1.** `ended_at` is set best-effort when the
+client fires `sendBeacon` on `pagehide`. We do **not** define a server-side stale-session sweep in
+v1: `ended_at` may remain null indefinitely for abandoned sessions, and nothing downstream depends
+on it (time comes from heartbeats, not from `ended_at − started_at`; `session_count` counts started
+sessions). A future enhancement could backfill `ended_at = last_heartbeat_at` during rollup, but it
+is not required and is explicitly out of scope here.
+
 ### `usage_heartbeat` — append-only, **14-day retention**
 | column | notes |
 |---|---|
@@ -175,6 +190,14 @@ self-review explicitly confirms the test uses a closed-day fixture.
 - **Nightly rollup** (new Railway cron service running a script, like `hubspot-refresh-nightly`;
   jobs are Railway cron services, not in-app node-cron): for each completed day not yet rolled
   up, fetch raw rows → `computeUsageDaily` → upsert `usage_daily` + stamp `rolled_up_at`.
+- **Per-office fan-out (required).** Usage tables are per-office-schema, so the rollup script
+  **must iterate every office schema** — `office_dallas`, `office_atlanta`, `office_pwauditoffice`,
+  and any future office — the same way the existing nightly HubSpot job enumerates tenant schemas
+  (discover via `information_schema.schemata` / the shared tenant-schema list, set `search_path`
+  per office, roll up, prune). A rollup that only hits the default schema would silently never roll
+  up Atlanta (and the gated prune would correctly never delete Atlanta's raw rows, so they'd grow
+  unbounded). The prune (below) runs **inside the same per-office loop**, after that office's
+  rollup succeeds.
 - **Backfill:** action counts for **past** dates can be backfilled from existing `auditLog`;
   time/views cannot (no historical raw rows). Pre-launch days show "—" for time/views.
 
@@ -223,8 +246,17 @@ Without the session-level stamp, the exclusion would silently fail for exactly t
 - **Headline:** team summary strip (active time · actions · N/M reps active today) → ranked
   leaderboard (sortable: active time, actions, days). **Daily / Weekly toggle** + date nav,
   reusing the existing FilterBar period plumbing.
+- **"Active today" is defined as ≥1 heartbeat** (i.e. `active_seconds > 0`), and this single
+  definition drives the "N/M reps active" count consistently. **Views carry no active-time
+  requirement** — they flush every ~10s and on `pagehide`, independent of the 5-min idle gate — so
+  it is possible (and intended) for a rep to have `view_count > 0` while `active_seconds = 0`
+  (e.g. a quick glance under the heartbeat cadence). Such a rep is **not** counted in "N/M reps
+  active" (no heartbeat) but still appears in the leaderboard with their view count. This is
+  deliberate: the active-rep count measures sustained presence; `view_count` measures looking.
 - **Leaderboard time sort:** pre-launch "—" (no time data) is treated as **absent, sorted last** —
-  never as zero — so backfilled-only reps don't outrank reps with real active time.
+  never as zero — so backfilled-only reps don't outrank reps with real active time. A rep with
+  views but zero heartbeats this period also sorts under "—" on the time axis (absent time), while
+  still ranking normally on the actions/views axes.
 - **Rep detail** (click a row): per-day timeline, action/view breakdown, and the recent-views
   drilldown list (last 14 days).
 
@@ -238,6 +270,9 @@ Without the session-level stamp, the exclusion would silently fail for exactly t
   path; assert identical `UsageDailyShape`. (Self-review confirms closed-day, not live snapshot.)
 - **Prune-gated-on-rollup test:** raw rows for an un-rolled day are not deleted; rows for a
   rolled-up day older than 14d are.
+- **Per-office fan-out test:** the rollup script enumerates and rolls up every office schema
+  (Dallas, Atlanta, audit office), not just the default — a second non-default schema with raw
+  rows produces a `usage_daily` row.
 - **Scoping tests (both endpoints):** rep role forced to self on `GET /platform-usage` **and**
   `GET /platform-usage/drilldown` (no-DB capture-WHERE pattern).
 - **Impersonation exclusion test:** impersonated session's time/views excluded from the rep.
