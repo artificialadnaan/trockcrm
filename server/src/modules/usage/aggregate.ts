@@ -14,6 +14,7 @@ export function computeUsageDaily(input: UsageRawInput): UsageDailyShape {
     input.sessions.filter((s) => s.impersonatorId === null).map((s) => s.id),
   );
 
+  // Heartbeats/views referencing a sessionId not in input.sessions are dropped; callers must include all of the day's sessions.
   const realHeartbeats = input.heartbeats.filter((h) => realSessionIds.has(h.sessionId));
   const activeSeconds = mergeActiveSeconds(realHeartbeats.map((h) => h.at));
 
@@ -48,11 +49,17 @@ export function computeUsageDaily(input: UsageRawInput): UsageDailyShape {
   // stage_moves / uploads / activities — no impersonator column (documented caveat)
   breakdown.stage_moves = input.stageMoves.length;
   breakdown.uploads = input.uploads.length;
+  const activityCounts: Record<string, number> = {};
   for (const a of input.activities) {
-    breakdown.activities[a.type] = (breakdown.activities[a.type] ?? 0) + 1;
+    activityCounts[a.type] = (activityCounts[a.type] ?? 0) + 1;
   }
+  // Canonical (sorted) key order so the persisted JSON is byte-identical regardless of input order.
+  breakdown.activities = Object.fromEntries(
+    Object.keys(activityCounts).sort().map((k) => [k, activityCounts[k]]),
+  );
 
   const activitiesTotal = Object.values(breakdown.activities).reduce((s, n) => s + n, 0);
+  // Keep in sync with all breakdown action fields if a new action source is added.
   const actionCount =
     breakdown.creates + breakdown.edits + breakdown.stage_moves + breakdown.uploads + activitiesTotal;
 

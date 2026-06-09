@@ -106,4 +106,29 @@ describe("computeUsageDaily", () => {
     expect(out.breakdown.creates).toBe(1);
     expect(out.breakdown.stage_moves).toBe(1);
   });
+
+  it("produces canonical (sorted) activities key order regardless of input order", () => {
+    const a = computeUsageDaily(baseInput({
+      activities: [{ type: "note", at: t(10) }, { type: "call", at: t(11) }, { type: "email", at: t(12) }],
+    }));
+    const b = computeUsageDaily(baseInput({
+      activities: [{ type: "email", at: t(10) }, { type: "note", at: t(11) }, { type: "call", at: t(12) }],
+    }));
+    // Same logical counts; identical serialization (keys sorted) regardless of input order.
+    expect(Object.keys(a.breakdown.activities)).toEqual(["call", "email", "note"]);
+    expect(JSON.stringify(a.breakdown.activities)).toBe(JSON.stringify(b.breakdown.activities));
+  });
+
+  it("ignores delete and soft_delete audit rows (only insert=creates, update=edits count)", () => {
+    const out = computeUsageDaily(baseInput({
+      auditRows: [
+        { action: "insert", tableName: "deals", createdAt: t(10), impersonatorId: null },
+        { action: "delete", tableName: "deals", createdAt: t(11), impersonatorId: null },
+        { action: "soft_delete", tableName: "leads", createdAt: t(12), impersonatorId: null },
+      ],
+    }));
+    expect(out.breakdown.creates).toBe(1);
+    expect(out.breakdown.edits).toBe(0);
+    expect(out.actionCount).toBe(1);
+  });
 });
