@@ -114,7 +114,7 @@ One row per `(user_id, date)`.
 | `session_count` | |
 | `view_count` | |
 | `action_count` | |
-| `breakdown` | JSONB: `deal_views, lead_views, report_views, creates, edits, stage_moves, uploads, notes, …` |
+| `breakdown` | JSONB. Views: `deal_views, lead_views, report_views, page_views`. Actions (multi-source, see §5): `creates, edits` (auditLog), `stage_moves` (deal_stage_history), `uploads` (files/photo_tags), `activities` (an object sub-keyed by `activities.type`: note/call/meeting/email/site_visit/follow_up/…) |
 | `first_active_at`, `last_active_at` | |
 | `rolled_up_at` | **stamp proving the day was folded; gates retention prune** |
 
@@ -158,12 +158,31 @@ out and never counted). Then **merge overlapping windows across all of the user'
 the day** and sum merged length → `active_seconds`. Because the merge is inside the shared
 function, multi-tab dedup applies identically to the live "today" path and the nightly rollup.
 
-### Action counts via the registry (single source of truth)
-A single `AUDIT_ACTION_TO_USAGE_KEY` map drives action counting:
-`deal.create → creates`, `deal.update → edits`, `deal.stage_transition → stage_moves`,
-`file.upload → uploads`, `note.create → notes`, … The function counts **only mapped actions**;
-unmapped actions are ignored. A **contract test** asserts the registry keys match what
-`auditLog` actually emits (registry drift fails the build) — no inferred filtering.
+### Action counts via a multi-source registry (single source of truth)
+
+**Correction (verified against the real schema):** `auditLog.action` is a *generic* enum
+(`insert | update | delete | soft_delete | legacy_cleanup_scope_change`) keyed by `table_name` +
+`changed_by` + `created_at` + `impersonator_id` — there are **no** dotted action strings like
+`deal.stage_transition`. `auditLog` reliably yields **creates** (`insert`) and **edits**
+(`update`), but the other breakdown buckets live in **purpose-built tables, not `auditLog`**.
+The action count is therefore **multi-source**:
+
+| Breakdown key | Source table | Selector | Has `impersonator_id`? |
+|---|---|---|---|
+| `creates` | `auditLog` | `action = 'insert'` | ✅ |
+| `edits` | `auditLog` | `action = 'update'` | ✅ |
+| `stage_moves` | `deal_stage_history` | rows by `changed_by`, `created_at` | ❌ |
+| `activities` (sub-keyed by `type`: note/call/meeting/email/site_visit/follow_up/…) | `activities` | rows by author, `occurred_at`/`created_at` | ❌ |
+| `uploads` | `files` (+ `photo_tags`) | rows by `uploaded_by` / `created_by_user_id`, `created_at` | ❌ |
+
+A single `USAGE_ACTION_SOURCES` registry (the one source of truth) declares, per breakdown key,
+**which table + which selector** feeds it. `computeUsageDaily` counts only what the registry
+declares; nothing is inferred. A **per-source contract test** asserts each registry entry's
+table/column actually exists in the schema and that the enum/selector values are real (registry
+drift fails the build).
+
+`action_count` = sum of all breakdown keys. The `activities` source intentionally reuses the same
+table the existing Rep Activity report reads, so the two reports reconcile.
 
 ### Both callers are thin
 - **Live "today":** the `GET` handler fetches today's raw rows for the requested rep(s),
@@ -239,6 +258,16 @@ does not know it is impersonated. Therefore:
 Without the session-level stamp, the exclusion would silently fail for exactly the two metrics
 (time, views) this feature is about — hence it is a hard requirement.
 
+### Documented caveat — impersonation on the three non-audit write sources
+Impersonation exclusion is **complete** for the three primary metrics: **time** and **views**
+(via `usage_session.impersonator_id`) and the **audited `creates`/`edits`** (via
+`auditLog.impersonator_id`). It is **incomplete** for `stage_moves`, `activities`, and `uploads`:
+`deal_stage_history`, `activities`, and `files` carry **no impersonator column**, so a write made
+while impersonating attributes to the impersonated rep in those three buckets. This is an accepted
+v1 limitation — impersonation is admin-rare and the inflation is bounded to those three write
+buckets (never time, never views, never audited creates/edits). v1 does **not** add impersonator
+columns to those tables. The Platform Usage page footnotes this limitation.
+
 ## 9. UI — `/reports/performance/platform-usage`
 
 - Route gated `RequireRole [admin, director, rep]`; **server** scopes reps to self. Nav entries on
@@ -264,8 +293,9 @@ Without the session-level stamp, the exclusion would silently fail for exactly t
 
 - `computeUsageDaily` unit tests: idle-gap capping (uses `HEARTBEAT_INTERVAL_S`/`_GRACE_S`),
   multi-tab interval merge across sessions, registry mapping, empty day.
-- **Registry contract test:** `AUDIT_ACTION_TO_USAGE_KEY` keys match what `auditLog` actually
-  emits (drift fails build).
+- **Registry contract test (per-source):** every `USAGE_ACTION_SOURCES` entry names a table +
+  selector that exists in the schema, and enum/selector values are real (`auditLog` insert/update,
+  `deal_stage_history`, `activities.type` values, `files`/`photo_tags`); drift fails the build.
 - **Byte-identical test:** feed a **closed-day fixture** to both the live path and the rollup
   path; assert identical `UsageDailyShape`. (Self-review confirms closed-day, not live snapshot.)
 - **Prune-gated-on-rollup test:** raw rows for an un-rolled day are not deleted; rows for a
