@@ -185,6 +185,10 @@ export { aiPolicyRecommendationApplyEvents } from "./tenant/ai-policy-recommenda
 export { interventionSnoozePolicies } from "./tenant/intervention-snooze-policies.js";
 export { interventionEscalationPolicies } from "./tenant/intervention-escalation-policies.js";
 export { interventionAssigneeBalancingPolicies } from "./tenant/intervention-assignee-balancing-policies.js";
+export { usageSession } from "./tenant/usage-session.js";
+export { usageHeartbeat } from "./tenant/usage-heartbeat.js";
+export { usageViewEvent } from "./tenant/usage-view-event.js";
+export { usageDaily } from "./tenant/usage-daily.js";
 
 // Migration schema tables (staging area for HubSpot data migration)
 export { stagedDeals } from "./migration/staged-deals.js";
