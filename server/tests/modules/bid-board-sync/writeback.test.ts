@@ -16,6 +16,13 @@ function successfulRunBase(sql: string) {
   if (normalizedSql === "begin" || normalizedSql === "commit" || normalizedSql === "rollback") {
     return { rows: [], rowCount: 0 };
   }
+  if (
+    normalizedSql.startsWith("savepoint ") ||
+    normalizedSql.startsWith("release savepoint ") ||
+    normalizedSql.startsWith("rollback to savepoint ")
+  ) {
+    return { rows: [], rowCount: 0 };
+  }
   if (normalizedSql.includes("insert into office_dallas.bid_board_sync_runs")) {
     return { rows: [{ id: "run-123" }], rowCount: 1 };
   }
@@ -164,6 +171,124 @@ describe("Bid Board sync stage writeback", () => {
       "Palm Villas",
       "DFW-4-11826-ab",
     ]));
+  });
+
+  it("skips a row whose mirrored Bid Board project number collides and continues the export", async () => {
+    const duplicateProjectNumberError = Object.assign(
+      new Error('duplicate key value violates unique constraint "deals_bid_board_project_number_canonical_uidx"'),
+      {
+        code: "23505",
+        constraint: "deals_bid_board_project_number_canonical_uidx",
+      }
+    );
+
+    query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const base = successfulRunBase(sql);
+      if (base) return base;
+
+      const normalizedSql = sql.toLowerCase();
+      if (normalizedSql.includes("from office_dallas.deals") && normalizedSql.includes("translate(normalize(d.project_number")) {
+        if (params[0] === "dfw-4-collide-aa") {
+          return {
+            rows: [
+              matchedDeal({
+                id: "deal-collide",
+                name: "Colliding Project",
+                deal_number: "DFW-4-COLLIDE-aa",
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        if (params[0] === "dfw-4-safe-aa") {
+          return {
+            rows: [
+              matchedDeal({
+                id: "deal-safe",
+                name: "Safe Project",
+                deal_number: "DFW-4-SAFE-aa",
+              }),
+            ],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("bid_board_project_number")) {
+        if (params[0] === "deal-collide") {
+          throw duplicateProjectNumberError;
+        }
+        if (params[0] === "deal-safe") {
+          return {
+            rows: [{ id: "deal-safe", name: "Safe Project", deal_number: "DFW-4-SAFE-aa", project_number: null }],
+            rowCount: 1,
+          };
+        }
+        throw new Error(`Unexpected mirrored update params: ${JSON.stringify(params)}`);
+      }
+      if (normalizedSql.includes("from public.pipeline_stage_config") && normalizedSql.includes("slug = $1")) {
+        expect(params).toEqual(["estimate_sent_to_client"]);
+        return {
+          rows: [
+            {
+              id: "stage-sent",
+              slug: "estimate_sent_to_client",
+              display_order: 5,
+              is_terminal: false,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (normalizedSql.includes("update office_dallas.deals") && normalizedSql.includes("stage_id = $1")) {
+        expect(params[0]).toBe("stage-sent");
+        expect(params[8]).toBeNull();
+        expect(params[9]).toBe("deal-safe");
+        return { rows: [{ id: "deal-safe" }], rowCount: 1 };
+      }
+      if (normalizedSql.includes("insert into office_dallas.deal_stage_history")) {
+        expect(params[0]).toBe("deal-safe");
+        return { rows: [], rowCount: 1 };
+      }
+      if (String(sql).toLowerCase().includes("app.skip_stage_history_trigger")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const result = await ingestBidBoardRows({
+      office_slug: "dallas",
+      rows: [
+        {
+          Name: "Colliding Project",
+          Status: "Estimate Sent to Client",
+          "Project #": "DFW-4-COLLIDE-aa",
+        },
+        {
+          Name: "Safe Project",
+          Status: "Estimate Sent to Client",
+          "Project #": "DFW-4-SAFE-aa",
+        },
+      ],
+    });
+
+    expect(result.metrics.matched).toBe(2);
+    expect(result.metrics.updated).toBe(1);
+    expect(result.metrics.stageUpdated).toBe(1);
+    expect(result.metrics.warnings).toBe(1);
+    expect(result.warnings.join("\n")).toContain("duplicate canonical Bid Board project number");
+    expect(result.warnings.join("\n")).toContain("DFW-4-COLLIDE-aa");
+    expect(
+      query.mock.calls.some(
+        ([sql, params]) =>
+          String(sql).toLowerCase().includes("update office_dallas.deals") &&
+          String(sql).toLowerCase().includes("stage_id = $1") &&
+          Array.isArray(params) &&
+          params.includes("deal-collide")
+      )
+    ).toBe(false);
+    expect(query.mock.calls.some(([sql]) => String(sql).toLowerCase() === "commit")).toBe(true);
+    expect(query.mock.calls.some(([sql]) => String(sql).toLowerCase() === "rollback")).toBe(false);
   });
 
   it("routes service estimating statuses to the service_estimating stage for service deals", async () => {

@@ -154,6 +154,8 @@ interface StageConfig {
 const MAX_UNMATCHED_PROJECT_NUMBERS = 100;
 const BID_BOARD_ESTIMATE_SYNC_SOURCE = "bid_board_sync";
 const BID_BOARD_ESTIMATE_SYNC_REASON = "Bid Board export sync - Total Sales -> Bid Estimate";
+const BID_BOARD_MIRROR_UPDATE_SAVEPOINT = "bid_board_mirror_update";
+const BID_BOARD_PROJECT_NUMBER_UNIQUE_CONSTRAINT = "deals_bid_board_project_number_canonical_uidx";
 
 function textValue(value: unknown): string | null {
   if (value == null) return null;
@@ -365,6 +367,17 @@ export function updateParams(
     bidBoardLastUpdatedAt,
     estimatorUserId,
   ];
+}
+
+function isCanonicalBidBoardProjectNumberUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const pgError = err as { code?: unknown; constraint?: unknown; message?: unknown };
+  const message = typeof pgError.message === "string" ? pgError.message : "";
+  return (
+    pgError.code === "23505" &&
+    (pgError.constraint === BID_BOARD_PROJECT_NUMBER_UNIQUE_CONSTRAINT ||
+      message.includes(BID_BOARD_PROJECT_NUMBER_UNIQUE_CONSTRAINT))
+  );
 }
 
 function dealMatchSelectSql(schemaName: string): string {
@@ -1055,10 +1068,26 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           );
         }
       }
-      const updateResult = await client.query(
-        updateSql,
-        updateParams(matches[0].id, normalized, bidBoardLastUpdatedAt, estimatorUserId)
-      );
+      let updateResult;
+      await client.query(`SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
+      try {
+        updateResult = await client.query(
+          updateSql,
+          updateParams(matches[0].id, normalized, bidBoardLastUpdatedAt, estimatorUserId)
+        );
+        await client.query(`RELEASE SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
+      } catch (err) {
+        await client.query(`ROLLBACK TO SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
+        await client.query(`RELEASE SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
+
+        if (isCanonicalBidBoardProjectNumberUniqueViolation(err)) {
+          warnings.push(
+            `Skipped Bid Board row ${normalized.bidBoardProjectNumber}: duplicate canonical Bid Board project number would collide while updating deal ${matches[0].id}; remaining export rows will continue`
+          );
+          continue;
+        }
+        throw err;
+      }
       if ((updateResult.rowCount ?? 0) > 0) {
         metrics.updated++;
         const updateDeal = updateResult.rows?.[0] ?? matches[0];
