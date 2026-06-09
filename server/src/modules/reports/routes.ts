@@ -1082,6 +1082,10 @@ router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
     const grain = req.query.grain === "week" ? "week" : "day";
     const today = new Date().toISOString().slice(0, 10);
     const anchor = typeof req.query.date === "string" ? req.query.date : today;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(anchor)) {
+      res.status(400).json({ error: "date must be YYYY-MM-DD" });
+      return;
+    }
     const dates = grain === "week" ? weekDates(anchor) : [anchor];
 
     const scope = resolveRepScope(
@@ -1093,6 +1097,8 @@ router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
 
     const reps = await resolveReps(client, scope);
 
+    // Sequential by design: all queries share the one tenant PoolClient (a single connection),
+    // which cannot run concurrent queries. Do NOT wrap this in Promise.all. Batch per-rep if needed.
     const leaderboard = [];
     for (const rep of reps) {
       const days = [];

@@ -82,7 +82,7 @@ export async function resolveReps(client: QueryClient, scope: string[] | null): 
     if (scope.length === 0) return [];
     const placeholders = scope.map((_, i) => `$${i + 1}`).join(",");
     const { rows } = await client.query<{ id: string; display_name: string }>(
-      `SELECT id, display_name FROM public.users WHERE id IN (${placeholders})`, scope,
+      `SELECT id, display_name FROM public.users WHERE id IN (${placeholders}) AND role = 'rep' AND is_active = true`, scope,
     );
     return rows.map((r) => ({ id: r.id, displayName: r.display_name }));
   }
@@ -97,7 +97,7 @@ export async function readUsageDaily(client: QueryClient, schema: string, userId
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
   const { rows } = await client.query<{
     active_seconds: number; session_count: number; view_count: number; action_count: number;
-    breakdown: UsageDailyShape["breakdown"]; first_active_at: string | null; last_active_at: string | null;
+    breakdown: UsageDailyShape["breakdown"]; first_active_at: Date | null; last_active_at: Date | null;
   }>(
     `SELECT active_seconds, session_count, view_count, action_count, breakdown, first_active_at, last_active_at
        FROM ${schema}.usage_daily WHERE user_id = $1 AND date = $2`,
@@ -108,7 +108,9 @@ export async function readUsageDaily(client: QueryClient, schema: string, userId
   return {
     userId, date, activeSeconds: Number(r.active_seconds), sessionCount: Number(r.session_count),
     viewCount: Number(r.view_count), actionCount: Number(r.action_count),
-    breakdown: r.breakdown, firstActiveAt: r.first_active_at, lastActiveAt: r.last_active_at,
+    breakdown: r.breakdown,
+    firstActiveAt: r.first_active_at ? new Date(r.first_active_at).toISOString() : null,
+    lastActiveAt: r.last_active_at ? new Date(r.last_active_at).toISOString() : null,
   };
 }
 
