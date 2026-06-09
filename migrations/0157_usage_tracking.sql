@@ -1,5 +1,8 @@
--- migrations/0157_usage_tracking.sql
--- Platform Usage tracker: per-office telemetry + daily rollup tables.
+-- Migration 0157: usage_tracking
+--
+-- Platform Usage tracker — per-office telemetry (sessions, heartbeats, view events)
+-- plus the forever daily rollup. Tables created in every existing office_* schema
+-- (DO loop) and in the office_dallas template block cloned for new tenants.
 
 -- Existing tenants: create the tables in every office_* schema.
 DO $tenant$
@@ -7,7 +10,10 @@ DECLARE
   schema_name text;
 BEGIN
   FOR schema_name IN
-    SELECT nspname FROM pg_namespace WHERE nspname LIKE 'office\_%' ESCAPE '\' ORDER BY nspname
+    SELECT nspname
+    FROM pg_namespace
+    WHERE nspname LIKE 'office\_%' ESCAPE '\'
+    ORDER BY nspname
   LOOP
     EXECUTE format(
       $sql$
@@ -22,7 +28,8 @@ BEGIN
           impersonator_id UUID,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
-        CREATE INDEX IF NOT EXISTS usage_session_user_started_idx ON %1$I.usage_session (user_id, started_at);
+        CREATE INDEX IF NOT EXISTS usage_session_user_started_idx
+          ON %1$I.usage_session (user_id, started_at);
 
         CREATE TABLE IF NOT EXISTS %1$I.usage_heartbeat (
           id BIGSERIAL PRIMARY KEY,
@@ -30,8 +37,10 @@ BEGIN
           user_id UUID NOT NULL,
           at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
-        CREATE INDEX IF NOT EXISTS usage_heartbeat_user_at_idx ON %1$I.usage_heartbeat (user_id, at);
-        CREATE INDEX IF NOT EXISTS usage_heartbeat_session_idx ON %1$I.usage_heartbeat (session_id);
+        CREATE INDEX IF NOT EXISTS usage_heartbeat_user_at_idx
+          ON %1$I.usage_heartbeat (user_id, at);
+        CREATE INDEX IF NOT EXISTS usage_heartbeat_session_idx
+          ON %1$I.usage_heartbeat (session_id);
 
         CREATE TABLE IF NOT EXISTS %1$I.usage_view_event (
           id BIGSERIAL PRIMARY KEY,
@@ -43,7 +52,8 @@ BEGIN
           route TEXT NOT NULL,
           label_snapshot TEXT
         );
-        CREATE INDEX IF NOT EXISTS usage_view_event_user_at_idx ON %1$I.usage_view_event (user_id, at);
+        CREATE INDEX IF NOT EXISTS usage_view_event_user_at_idx
+          ON %1$I.usage_view_event (user_id, at);
 
         CREATE TABLE IF NOT EXISTS %1$I.usage_daily (
           user_id UUID NOT NULL,

@@ -27,10 +27,17 @@ describe("0157_usage_tracking migration", () => {
   });
 
   it("usage_daily has a composite primary key on (user_id, date)", async () => {
-    const { rows } = await db.query<{ count: number }>(
-      `SELECT count(*)::int AS count FROM information_schema.table_constraints
-       WHERE table_schema='office_dallas' AND table_name='usage_daily' AND constraint_type='PRIMARY KEY'`,
+    const { rows } = await db.query<{ column_name: string }>(
+      `SELECT kcu.column_name
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema    = kcu.table_schema
+       WHERE tc.table_schema = 'office_dallas'
+         AND tc.table_name   = 'usage_daily'
+         AND tc.constraint_type = 'PRIMARY KEY'
+       ORDER BY kcu.ordinal_position`,
     );
-    expect(rows[0].count).toBe(1);
+    expect(rows.map((r) => r.column_name)).toEqual(["user_id", "date"]);
   });
 });
