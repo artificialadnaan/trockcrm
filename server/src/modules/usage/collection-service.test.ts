@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { startSession, recordHeartbeat } from "./collection-service.js";
+import { startSession, recordHeartbeat, recordViewEvents } from "./collection-service.js";
 
 function tenantDbCapturingInsert() {
   const inserted: unknown[] = [];
@@ -55,5 +55,22 @@ describe("recordHeartbeat", () => {
 
     expect(heartbeatInserts[0]).toMatchObject({ userId: "rep-1", sessionId: "s1" });
     expect((sessionUpdates[0] as { lastHeartbeatAt: Date }).lastHeartbeatAt).toBeInstanceOf(Date);
+  });
+});
+
+describe("recordViewEvents", () => {
+  it("batch-inserts events with user + session attached", async () => {
+    const inserts: unknown[] = [];
+    const db = { insert: vi.fn().mockReturnValue({ values: vi.fn().mockImplementation((v: unknown) => { inserts.push(v); return Promise.resolve(); }) }) } as any;
+    await recordViewEvents(db, "rep-1", "s1", [
+      { entityType: "deal", entityId: "d-1", route: "/deals/d-1", labelSnapshot: "Tides" },
+    ]);
+    expect((inserts[0] as unknown[])[0]).toMatchObject({ userId: "rep-1", sessionId: "s1", entityType: "deal" });
+  });
+
+  it("no-ops on an empty batch", async () => {
+    const db = { insert: vi.fn() } as any;
+    await recordViewEvents(db, "rep-1", "s1", []);
+    expect(db.insert).not.toHaveBeenCalled();
   });
 });
