@@ -1,12 +1,24 @@
 import { randomUUID } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { and, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, jobQueue } from "@trock-crm/shared/schema";
+import { deals, files, jobQueue } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
-import { buildRfpRequestDeliveryPayload, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
+import {
+  generateDownloadUrl,
+  generateMockDownloadUrl,
+  isR2Configured,
+} from "../../lib/r2-client.js";
+import { activeLatestFileConditions, buildDealFileScopeCondition } from "../files/service.js";
+import { buildRfpAttachmentsFromFiles, buildRfpRequestDeliveryPayload, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+// Presigned download URLs are minted here at enqueue time and persisted inside
+// the job_queue payload. The delivery job retries for ~2.7h and SyncHub may
+// store/display the link to a human reviewer later, so we mint long-lived URLs
+// (7 days — the SigV4 presigned maximum) rather than the default 1h.
+const RFP_ATTACHMENT_URL_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export interface EnqueueOpportunityRfpInput {
   tenantDb: TenantDb;
@@ -61,10 +73,37 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals
   };
 }
 
+/**
+ * Loads the deal's visible files and maps them to RFP attachments. Uses the
+ * canonical deal-file scope (files/service): includes the source lead's
+ * retained files (buildDealFileScopeCondition) and excludes superseded parent
+ * versions (activeLatestFileConditions), so the RFP attachments match the files
+ * a reviewer sees on the deal.
+ */
+export async function loadRfpAttachmentsForDeal(tenantDb: TenantDb, dealId: string) {
+  const scopeCondition = await buildDealFileScopeCondition(tenantDb, dealId);
+  const rows = await tenantDb
+    .select({
+      displayName: files.displayName,
+      fileExtension: files.fileExtension,
+      mimeType: files.mimeType,
+      r2Key: files.r2Key,
+    })
+    .from(files)
+    .where(and(scopeCondition, ...activeLatestFileConditions()));
+
+  return buildRfpAttachmentsFromFiles(rows, async ({ r2Key, filename }) =>
+    isR2Configured()
+      ? await generateDownloadUrl(r2Key, RFP_ATTACHMENT_URL_TTL_SECONDS, filename)
+      : generateMockDownloadUrl(r2Key)
+  );
+}
+
 export async function insertOpportunityRfpRequestJob(
   input: InsertOpportunityRfpJobInput
 ): Promise<{ jobId: number }> {
   const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, input.deal);
+  const attachments = await loadRfpAttachmentsForDeal(input.tenantDb, input.deal.id);
   const jobRows = await input.tenantDb
     .insert(jobQueue)
     .values({
@@ -73,6 +112,7 @@ export async function insertOpportunityRfpRequestJob(
         deal: rfpPayloadDeal,
         sourceEventId: `crm:deal-stage:opportunity:${input.eventId}`,
         syncHubUrl: resolveSyncHubRfpRequestUrl(),
+        attachments,
       }),
       officeId: input.officeId,
       status: "pending",

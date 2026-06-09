@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildNormalizedRfpRequestBody, buildRfpRequestDeliveryPayload } from "../../../src/modules/deals/rfp-payload.js";
+import {
+  buildNormalizedRfpRequestBody,
+  buildRfpAttachmentsFromFiles,
+  buildRfpRequestDeliveryPayload,
+} from "../../../src/modules/deals/rfp-payload.js";
 
 describe("RFP normalized payload builder", () => {
   it("maps CRM deal fields to the SyncHub RFP request contract", () => {
@@ -84,6 +88,76 @@ describe("RFP normalized payload builder", () => {
     expect(payload.deal.estimator).toBe("Mirror Estimator");
     expect(payload.deal.address?.country).toBe("US");
     expect(payload.deal.dueDate).toBe(new Date("2026-08-02").toISOString());
+  });
+
+  it("includes provided attachments in the normalized body", () => {
+    const payload = buildNormalizedRfpRequestBody({
+      sourceEventId: "crm:event-att",
+      deal: { id: "deal-att", name: "Has Files", dealNumber: "dfw-1-00001-aa" },
+      attachments: [
+        { name: "Roof Plan.pdf", url: "https://signed/x", contentType: "application/pdf" },
+      ],
+    });
+
+    expect(payload.attachments).toEqual([
+      { name: "Roof Plan.pdf", url: "https://signed/x", contentType: "application/pdf" },
+    ]);
+  });
+
+  it("defaults attachments to an empty array when none are provided", () => {
+    const payload = buildNormalizedRfpRequestBody({
+      sourceEventId: "crm:event-noatt",
+      deal: { id: "deal-noatt", name: "No Files", dealNumber: "dfw-1-00002-aa" },
+    });
+
+    expect(payload.attachments).toEqual([]);
+  });
+
+  it("maps active deal files to RFP attachments via the injected URL resolver", async () => {
+    const attachments = await buildRfpAttachmentsFromFiles(
+      [
+        {
+          displayName: "Roof Plan",
+          fileExtension: ".pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/d1/roof.pdf",
+        },
+        {
+          displayName: "Site Photo",
+          fileExtension: ".jpg",
+          mimeType: "image/jpeg",
+          r2Key: "deals/d1/site.jpg",
+        },
+      ],
+      async ({ r2Key, filename }) =>
+        `https://signed.example/${r2Key}?name=${encodeURIComponent(filename)}`
+    );
+
+    expect(attachments).toEqual([
+      {
+        name: "Roof Plan.pdf",
+        url: "https://signed.example/deals/d1/roof.pdf?name=Roof%20Plan.pdf",
+        contentType: "application/pdf",
+      },
+      {
+        name: "Site Photo.jpg",
+        url: "https://signed.example/deals/d1/site.jpg?name=Site%20Photo.jpg",
+        contentType: "image/jpeg",
+      },
+    ]);
+  });
+
+  it("passes attachments through the delivery payload wrapper", () => {
+    const payload = buildRfpRequestDeliveryPayload({
+      syncHubUrl: "https://synchub.example.com/api/rfp-requests",
+      sourceEventId: "crm:event-att2",
+      deal: { id: "deal-att2", name: "Wrapped", dealNumber: "dfw-9-12345-aa" },
+      attachments: [{ name: "a.pdf", url: "u", contentType: "application/pdf" }],
+    });
+
+    expect(payload.body.attachments).toEqual([
+      { name: "a.pdf", url: "u", contentType: "application/pdf" },
+    ]);
   });
 
   it("wraps the body with delivery metadata", () => {
