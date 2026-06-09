@@ -1,0 +1,251 @@
+# Platform Usage Tracker — Design Spec
+
+**Date:** 2026-06-09
+**Status:** Approved design (pre-implementation)
+**Owner:** Adnaan
+**Next step:** writing-plans → implementation plan
+
+## 1. Goal
+
+A new **Platform Usage** page under Reports that breaks down, per sales rep, on a
+**daily and weekly** basis:
+
+- **Time spent** — active time in the CRM (not just logged-in time).
+- **How much they did** — actions taken: creating, editing, stage moves, uploads, notes, etc.
+- **How much they used it** — sessions, days active, and views (navigating/looking at records).
+
+Scope is **all CRM usage** — changing stuff, entering stuff, viewing stuff — not only logged
+sales activities.
+
+### Access model
+
+- **Directors / admins:** see all reps.
+- **Reps:** see only their own daily/weekly activity.
+
+Scoping is **server-enforced**, never UI-only.
+
+### "Time spent" definition (approved)
+
+Count time while the CRM tab is open, the user is authenticated, the browser tab is **visible**,
+and there has been **recent interaction**. Stop counting after **5 minutes** with no
+mouse/keyboard/navigation activity (idle). Resume on next interaction.
+
+## 2. Approach (chosen: Hybrid — "A")
+
+Reuse the existing server-side `auditLog` for **write/action counts** (it already records
+`deal.create`, `deal.update`, `deal.stage_transition`, `lead.create`, `lead.convert`, etc. with
+actor, action, entity, IP, user-agent). Add **one lightweight client→server telemetry channel**
+for the two things `auditLog` does not capture: **active time** (heartbeats) and **views**
+(reads/navigation). A single shared aggregation function folds all sources into per-rep daily
+rollups.
+
+Rejected alternatives:
+
+- **Pure client telemetry** — duplicates the reliable server audit trail and makes action counts
+  spoofable/lossy.
+- **Server-only, no heartbeat** — cannot honor the approved active-time definition (overcounts
+  idle tabs left open all day).
+
+## 3. Data model (migration `0157`)
+
+Four tables, **tenant-scoped per-office schema** (via `search_path`, like all CRM tables).
+
+### `usage_session`
+One row per browser session.
+
+| column | notes |
+|---|---|
+| `id` | pk |
+| `user_id` | the rep (the **real** actor; see impersonation) |
+| `started_at` | server-stamped |
+| `last_heartbeat_at` | server-stamped, updated each heartbeat |
+| `ended_at` | nullable; best-effort via `sendBeacon`, else inferred stale |
+| `active_seconds` | accrued for this session (denormalized convenience; truth is the merge) |
+| `user_agent` | device label |
+| `impersonator_id` | **nullable; stamped at session-start if the session is impersonated** (see §8) |
+
+### `usage_heartbeat` — append-only, **14-day retention**
+| column | notes |
+|---|---|
+| `id` | pk |
+| `session_id` | fk → usage_session |
+| `user_id` | denormalized for query |
+| `at` | **server-stamped** receipt time |
+
+Each row = one confirmed active window. Enables time-of-day drilldown. Pruned after 14 days
+**only once the day is folded into `usage_daily`** (see §5).
+
+### `usage_view_event` — append-only, **14-day retention**
+| column | notes |
+|---|---|
+| `id` | pk |
+| `user_id` | denormalized |
+| `session_id` | fk |
+| `at` | **server-stamped** |
+| `entity_type` | `deal` \| `lead` \| `report` \| `page` |
+| `entity_id` | nullable (null for generic pages) |
+| `route` | the client route/path |
+| `label_snapshot` | human label at time of view (e.g. deal name) |
+
+The "viewing stuff" drilldown source. Pruned after 14 days, gated on rollup (see §5).
+
+### `usage_daily` — the **forever** rollup
+One row per `(user_id, date)`.
+
+| column | notes |
+|---|---|
+| `user_id`, `date` | composite key |
+| `active_seconds` | from interval-merged heartbeat windows |
+| `session_count` | |
+| `view_count` | |
+| `action_count` | |
+| `breakdown` | JSONB: `deal_views, lead_views, report_views, creates, edits, stage_moves, uploads, notes, …` |
+| `first_active_at`, `last_active_at` | |
+| `rolled_up_at` | **stamp proving the day was folded; gates retention prune** |
+
+## 4. Collection (client → server)
+
+A single `usePlatformUsageTracker` hook mounted **once** in the authenticated app shell.
+
+- **Session start:** on load → `POST /api/usage/session/start` → returns `sessionId`. If the
+  current request is impersonated, the server stamps `impersonator_id` on the new
+  `usage_session` row (see §8).
+- **Heartbeat (time):** every `HEARTBEAT_INTERVAL_S` (30s), send `POST /api/usage/heartbeat`
+  **only if** `document.visibilityState === "visible"` **and** last interaction
+  < 5 min ago. Interaction = throttled `mousemove/keydown/click/scroll` + route change.
+  Idle ≥ 5 min or tab hidden → stop sending (time stops accruing); resume on next interaction.
+- **Views:** route changes and record-detail opens are batched and flushed
+  (`POST /api/usage/events`) every ~10s and on navigation; `navigator.sendBeacon` flushes the
+  buffer on `pagehide`.
+- **Server stamps all times.** Client timestamps are ignored for accrual; the client only
+  signals active/visible. This neutralizes clock skew.
+
+## 5. The shared aggregation function (the spine)
+
+`computeUsageDaily(input) → UsageDailyShape` — **pure, no I/O**, in
+`server/src/modules/usage/aggregate.ts`. Operates on already-fetched raw rows for **one
+`(user_id, date)`**.
+
+```
+input:  { sessions[], heartbeats[], viewEvents[], auditRows[] }
+output: { active_seconds, session_count, view_count, action_count,
+          breakdown{...}, first_active_at, last_active_at }
+```
+
+### Pinned constants (deterministic, unit-testable)
+- `HEARTBEAT_INTERVAL_S = 30`
+- `HEARTBEAT_GRACE_S = 5`
+
+### Interval-merge lives **inside** this function
+Per session, build active windows from consecutive heartbeats: each heartbeat contributes
+`min(at − prev_at, HEARTBEAT_INTERVAL_S + HEARTBEAT_GRACE_S)` seconds (so idle gaps are capped
+out and never counted). Then **merge overlapping windows across all of the user's sessions for
+the day** and sum merged length → `active_seconds`. Because the merge is inside the shared
+function, multi-tab dedup applies identically to the live "today" path and the nightly rollup.
+
+### Action counts via the registry (single source of truth)
+A single `AUDIT_ACTION_TO_USAGE_KEY` map drives action counting:
+`deal.create → creates`, `deal.update → edits`, `deal.stage_transition → stage_moves`,
+`file.upload → uploads`, `note.create → notes`, … The function counts **only mapped actions**;
+unmapped actions are ignored. A **contract test** asserts the registry keys match what
+`auditLog` actually emits (registry drift fails the build) — no inferred filtering.
+
+### Both callers are thin
+- **Live "today":** the `GET` handler fetches today's raw rows for the requested rep(s),
+  calls `computeUsageDaily`, returns. Never touches `usage_daily`.
+- **Nightly cron:** fetches a **completed** day's raw rows, calls `computeUsageDaily`, **upserts**
+  into `usage_daily` and stamps `rolled_up_at`.
+
+### Invariant (corrected — "today" is a moving target)
+The invariant is **NOT** "live(today) == rollup(today)". `active_seconds` and `last_active_at`
+grow intraday, so a live snapshot of an open day will never equal a rollup computed after the day
+closes. The real invariant is:
+
+> **Given the same raw rows for a completed day, the live path and the rollup path produce
+> byte-identical `UsageDailyShape`.**
+
+The byte-identical test feeds a **closed-day (frozen) fixture** to both code paths and asserts
+equality. It must **not** compare a live "today" snapshot against a later rollup. The spec
+self-review explicitly confirms the test uses a closed-day fixture.
+
+## 6. Rollup & retention
+
+- **Live "today":** the API computes the current day on-read directly from the raw tables via the
+  shared function — accurate intraday, no job lag.
+- **Nightly rollup** (new Railway cron service running a script, like `hubspot-refresh-nightly`;
+  jobs are Railway cron services, not in-app node-cron): for each completed day not yet rolled
+  up, fetch raw rows → `computeUsageDaily` → upsert `usage_daily` + stamp `rolled_up_at`.
+- **Backfill:** action counts for **past** dates can be backfilled from existing `auditLog`;
+  time/views cannot (no historical raw rows). Pre-launch days show "—" for time/views.
+
+### Retention prune (gated on rollup success)
+Prune runs **after** the rollup and deletes raw `usage_heartbeat` / `usage_view_event` rows for a
+date `D` **only if** `usage_daily` has a `rolled_up_at` row for `(user_id, D)` **and**
+`D < today − 14 days`. Never by wall-clock age alone. A failed or skipped rollup leaves raw rows
+intact for the next run to fold — a missed rollup can never delete un-rolled data.
+
+## 7. API
+
+- `GET /api/reports/platform-usage` — params `grain=day|week`, `date` (anchor), optional `rep`.
+  - **Server-enforced scoping:** role `rep` is forced to `rep = self`; `admin`/`director` may
+    request all reps or one specific rep.
+  - Returns: team summary, per-rep leaderboard rows, and (when `rep` set) that rep's per-day
+    breakdown.
+  - Historical days read from `usage_daily`; the current day computed live via the shared
+    function; **a week = mix of rolled-up days + live current day, summed.**
+- `GET /api/reports/platform-usage/drilldown` — params `rep, date, type` → raw
+  `usage_view_event` rows.
+  - **Same server-enforced scoping as the summary**: role `rep` is forced to `rep = self`; a rep
+    cannot read another rep's view history by editing the `rep` param.
+  - Only within the 14-day window; older returns "counts only — drilldown expired".
+- Collection endpoints (§4): `POST /api/usage/session/start`, `/heartbeat`, `/events`.
+
+## 8. Impersonation handling
+
+`auditLog` already carries `impersonatorId`. For **time and views**, the exclusion only works if
+the merge can identify impersonated windows — and heartbeats are written by the client hook, which
+does not know it is impersonated. Therefore:
+
+- **`usage_session.impersonator_id` is stamped at session-start** from the server's request
+  context whenever the session is impersonated.
+- The interval-merge / aggregation **excludes sessions where `impersonator_id IS NOT NULL`** from
+  the impersonated rep's time and view metrics (the activity is attributed to no one for usage
+  purposes), so a director "viewing as rep" never inflates that rep's numbers.
+- Action counts inherit `auditLog`'s existing `impersonatorId` handling.
+
+Without the session-level stamp, the exclusion would silently fail for exactly the two metrics
+(time, views) this feature is about — hence it is a hard requirement.
+
+## 9. UI — `/reports/performance/platform-usage`
+
+- Route gated `RequireRole [admin, director, rep]`; **server** scopes reps to self. Nav entries on
+  the Reports index + `/reports/performance`.
+- **Headline:** team summary strip (active time · actions · N/M reps active today) → ranked
+  leaderboard (sortable: active time, actions, days). **Daily / Weekly toggle** + date nav,
+  reusing the existing FilterBar period plumbing.
+- **Leaderboard time sort:** pre-launch "—" (no time data) is treated as **absent, sorted last** —
+  never as zero — so backfilled-only reps don't outrank reps with real active time.
+- **Rep detail** (click a row): per-day timeline, action/view breakdown, and the recent-views
+  drilldown list (last 14 days).
+
+## 10. Testing
+
+- `computeUsageDaily` unit tests: idle-gap capping (uses `HEARTBEAT_INTERVAL_S`/`_GRACE_S`),
+  multi-tab interval merge across sessions, registry mapping, empty day.
+- **Registry contract test:** `AUDIT_ACTION_TO_USAGE_KEY` keys match what `auditLog` actually
+  emits (drift fails build).
+- **Byte-identical test:** feed a **closed-day fixture** to both the live path and the rollup
+  path; assert identical `UsageDailyShape`. (Self-review confirms closed-day, not live snapshot.)
+- **Prune-gated-on-rollup test:** raw rows for an un-rolled day are not deleted; rows for a
+  rolled-up day older than 14d are.
+- **Scoping tests (both endpoints):** rep role forced to self on `GET /platform-usage` **and**
+  `GET /platform-usage/drilldown` (no-DB capture-WHERE pattern).
+- **Impersonation exclusion test:** impersonated session's time/views excluded from the rep.
+- **Client hook tests:** idle/visibility gating, batching, `sendBeacon` flush (vitest fake timers).
+
+## 11. Out of scope (YAGNI)
+
+- IP-address storage on usage rows (auditLog already keeps it where needed; not required here).
+- Real-time/live-updating dashboard (page is request/refresh, not streaming).
+- Per-record view tracking beyond the 14-day drilldown window (older = counts only, by design).
+- Alerting/flagging low-usage reps (informational page only for v1).
