@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const clientQueryMock = vi.hoisted(() => vi.fn());
 const releaseMock = vi.hoisted(() => vi.fn());
@@ -24,12 +24,29 @@ vi.mock("./procore-photos.js", () => ({
 // change_order_total (corrupting commissions and double-counting CRM-native COs). These tests
 // pin that posture even when real Procore credentials are present.
 describe("procore sync worker — link-only posture", () => {
+  const ENV_KEYS = ["PROCORE_CLIENT_ID", "PROCORE_CLIENT_SECRET", "PROCORE_COMPANY_ID"] as const;
+  const originalEnv: Record<string, string | undefined> = {};
+  for (const k of ENV_KEYS) originalEnv[k] = process.env[k];
+
   beforeEach(() => {
-    vi.clearAllMocks();
+    // Fully reset implementations + the `*Once` queues (clearAllMocks only wipes call history),
+    // then re-establish the connection mock so tests can't leak state into one another.
+    for (const m of [clientQueryMock, releaseMock, ensureAlbumMock, ensureLinkMock, enqueueBatchMock, connectMock]) {
+      m.mockReset();
+    }
+    connectMock.mockImplementation(() => ({ query: clientQueryMock, release: releaseMock }));
     // Real credentials present: gating must be in code, NOT merely "dev mode off".
     process.env.PROCORE_CLIENT_ID = "client-id";
     process.env.PROCORE_CLIENT_SECRET = "client-secret";
     process.env.PROCORE_COMPANY_ID = "company-1";
+  });
+
+  afterAll(() => {
+    // Restore original Procore env so this suite can't leak non-dev mode into later worker specs.
+    for (const k of ENV_KEYS) {
+      if (originalEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = originalEnv[k];
+    }
   });
 
   it("does NOT create a Procore project for a deal with no procore_project_id (even with real creds)", async () => {
@@ -50,6 +67,29 @@ describe("procore sync worker — link-only posture", () => {
     expect(ensureAlbumMock).not.toHaveBeenCalled();
     expect(ensureLinkMock).not.toHaveBeenCalled();
     expect(enqueueBatchMock).not.toHaveBeenCalled();
+    fetchMock.mockRestore();
+  });
+
+  it("cleanly no-ops a create_project job in the pre-provisioning window (no PROCORE_COMPANY_ID, no throw/retry)", async () => {
+    // After this change merges but BEFORE creds are set, the contract-signed handoff still enqueues
+    // create_project jobs. They must no-op, NOT throw on a missing PROCORE_COMPANY_ID (which would
+    // retry forever in job_queue).
+    delete process.env.PROCORE_COMPANY_ID;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected Procore mutation"));
+    const { handleProcoreSyncJob } = await import("./procore-sync.js");
+    clientQueryMock
+      .mockResolvedValueOnce({ rows: [{ slug: "main" }] })
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [] }) // advisory lock
+      .mockResolvedValueOnce({ rows: [{ id: "deal-1", name: "Portfolio Deal", procore_project_id: null }] })
+      .mockResolvedValue({ rows: [] });
+
+    await expect(
+      handleProcoreSyncJob({ action: "create_project", dealId: "deal-1", officeId: "office-1" })
+    ).resolves.toBeUndefined();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(clientQueryMock.mock.calls.map((c) => String(c[0])).join("\n")).not.toContain("procore_project_id = $1");
     fetchMock.mockRestore();
   });
 

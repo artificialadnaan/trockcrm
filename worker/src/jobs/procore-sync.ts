@@ -131,13 +131,15 @@ export async function handleProcoreSyncJob(jobPayload: any): Promise<void> {
       return;
     }
     const schemaName = `office_${officeSlug}`;
-    const companyId = process.env.PROCORE_COMPANY_ID;
-    if (!companyId) throw new Error("PROCORE_COMPANY_ID must be set");
 
+    // PROCORE_COMPANY_ID is resolved INSIDE the branches that actually call Procore, NOT here — so
+    // a disabled/no-op job (e.g. the contract-signed handoff's create_project for a deal with no
+    // project) cleanly no-ops in the pre-provisioning window (creds not yet set) instead of
+    // throwing/retrying before it can reach the link-only gate.
     if (action === "create_project") {
-      await handleCreateProject(client, schemaName, officeId, companyId, dealId);
+      await handleCreateProject(client, schemaName, officeId, dealId);
     } else if (action === "sync_stage") {
-      await handleSyncStage(client, schemaName, officeId, companyId, dealId, crmStageId);
+      await handleSyncStage(client, schemaName, officeId, dealId, crmStageId);
     } else {
       console.warn(`[Procore:worker] Unknown procore_sync action: ${action}`);
     }
@@ -150,7 +152,6 @@ async function handleCreateProject(
   client: any,
   schemaName: string,
   officeId: string,
-  companyId: string,
   dealId: string
 ): Promise<void> {
   let transactionOpen = false;
@@ -202,6 +203,10 @@ async function handleCreateProject(
       transactionOpen = false;
       return;
     }
+
+    // Reached only when project creation is ENABLED (gate above) — now we genuinely need the company.
+    const companyId = process.env.PROCORE_COMPANY_ID;
+    if (!companyId) throw new Error("PROCORE_COMPANY_ID must be set");
 
     let procoreProjectId: number;
 
@@ -274,13 +279,15 @@ async function handleSyncStage(
   client: any,
   schemaName: string,
   officeId: string,
-  companyId: string,
   dealId: string,
   crmStageId: string
 ): Promise<void> {
   // LINK-ONLY: the worker does not push CRM stage changes to Procore — SyncHub owns project stage
   // sync (see WORKER_PROCORE_PROJECT_SYNC_ENABLED). A second writer would race SyncHub's relay.
   if (!WORKER_PROCORE_PROJECT_SYNC_ENABLED) return;
+  // Reached only when ENABLED — now we genuinely need the company for the Procore PATCH below.
+  const companyId = process.env.PROCORE_COMPANY_ID;
+  if (!companyId) throw new Error("PROCORE_COMPANY_ID must be set");
   const dealResult = await client.query(
     `SELECT id, procore_project_id FROM ${schemaName}.deals WHERE id = $1 LIMIT 1`,
     [dealId]
