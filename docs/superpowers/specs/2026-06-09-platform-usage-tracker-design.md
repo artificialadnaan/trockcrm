@@ -64,13 +64,19 @@ One row per browser session.
 | `user_agent` | device label |
 | `impersonator_id` | **nullable; stamped at session-start if the session is impersonated** (see §8) |
 
-**`session_count` semantics — "sessions started" (not "real sessions").** A session row exists
-the moment `session/start` is called, regardless of whether any heartbeat follows. So a tab opened
-and immediately abandoned (laptop slammed shut) still counts as 1 session. This is intentional and
-keeps `session_count` cheap and unambiguous; we do **not** apply a min-heartbeat/min-duration floor
-in v1. Note that such an abandoned session contributes **0** to `active_seconds` because the
-interval-merge only accrues time from actual heartbeats capped at `HEARTBEAT_INTERVAL_S +
-HEARTBEAT_GRACE_S`, so abandoned sessions inflate `session_count` only — never time.
+**`session_count` semantics — "sessions started or active that day" (not "real sessions").** A
+session row exists the moment `session/start` is called, regardless of whether any heartbeat
+follows. So a tab opened and immediately abandoned (laptop slammed shut) still counts as 1 session.
+This is intentional and keeps `session_count` cheap and unambiguous; we do **not** apply a
+min-heartbeat/min-duration floor in v1. Note that such an abandoned session contributes **0** to
+`active_seconds` because the interval-merge only accrues time from actual heartbeats capped at
+`HEARTBEAT_INTERVAL_S + HEARTBEAT_GRACE_S`, so abandoned sessions inflate `session_count` only —
+never time. **Cross-midnight caveat (implementation):** `fetchRawUsageForDay` resolves a day's
+sessions as those *started that day OR active that day* (having a heartbeat/view that day). This is
+required so a session spanning midnight isn't orphaned — its post-midnight heartbeats must attribute
+to the second day. A consequence is that a cross-midnight session counts toward `session_count` on
+both days; in practice nearly all sessions start and end the same day, so the two definitions
+coincide except for the rare straddling session.
 
 **`ended_at` (stale-session inference) — scoped out of v1.** `ended_at` is set best-effort when the
 client fires `sendBeacon` on `pagehide`. We do **not** define a server-side stale-session sweep in
