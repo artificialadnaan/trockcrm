@@ -53,6 +53,36 @@ describe("fetchRawUsageForDay", () => {
     expect(raw.auditRows).toHaveLength(0);
   });
 
+  it("excludes audit_log rows for 'activities' and 'files' tables (double-count guard)", async () => {
+    // Simulates what audit_activities/audit_files DB triggers produce: every insert into
+    // activities/files also writes a row to audit_log. Without the exclusion, one logged
+    // activity would be counted twice (once via the activities bucket, once via auditRows).
+    const REP_DC = U("0020");
+    await db.exec(`
+      -- (a) real activities row
+      INSERT INTO office_dallas.activities (type, responsible_user_id, occurred_at, created_at)
+        VALUES ('call', '${REP_DC}', '2026-06-05T09:00:00Z', '2026-06-05T09:00:00Z');
+      -- (b) real files row
+      INSERT INTO office_dallas.files (uploaded_by, created_at)
+        VALUES ('${REP_DC}', '2026-06-05T09:05:00Z');
+      -- (c) audit_log rows that the triggers would insert (must be excluded)
+      INSERT INTO office_dallas.audit_log (table_name, action, changed_by, impersonator_id, created_at)
+        VALUES ('activities', 'insert', '${REP_DC}', NULL, '2026-06-05T09:00:00Z');
+      INSERT INTO office_dallas.audit_log (table_name, action, changed_by, impersonator_id, created_at)
+        VALUES ('files', 'insert', '${REP_DC}', NULL, '2026-06-05T09:05:00Z');
+      -- (d) genuine audit_log row for a non-bucket table (must be included)
+      INSERT INTO office_dallas.audit_log (table_name, action, changed_by, impersonator_id, created_at)
+        VALUES ('deals', 'insert', '${REP_DC}', NULL, '2026-06-05T09:10:00Z');
+    `);
+    const raw = await fetchRawUsageForDay(client(), "office_dallas", REP_DC, "2026-06-05");
+    // Only the 'deals' audit row survives; the activities/files trigger rows are excluded
+    expect(raw.auditRows).toHaveLength(1);
+    expect(raw.auditRows[0].tableName).toBe("deals");
+    // Dedicated buckets still count them once each
+    expect(raw.activities).toHaveLength(1);
+    expect(raw.uploads).toHaveLength(1);
+  });
+
   it("credits the performer (performed_by_user_id), not the assignee (responsible_user_id)", async () => {
     const REP_ACTOR = U("0010");
     const REP_ASSIGNEE = U("0011");

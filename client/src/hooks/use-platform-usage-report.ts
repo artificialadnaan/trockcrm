@@ -48,7 +48,8 @@ export function usePlatformUsageReport(params: { grain: "day" | "week"; date?: s
 /** Format seconds as "Hh Mm"; returns an em-dash for zero/no time. */
 export function formatActiveTime(seconds: number): string {
   if (seconds <= 0) return "—";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.round((seconds % 3600) / 60);
+  const totalMinutes = Math.round(seconds / 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }

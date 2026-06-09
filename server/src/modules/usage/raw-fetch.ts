@@ -56,7 +56,9 @@ export async function fetchRawUsageForDay(
 
   const auditRows = (await client.query<{ action: string; table_name: string; created_at: string; impersonator_id: string | null }>(
     `SELECT action, table_name, created_at, impersonator_id FROM ${s}.audit_log
-       WHERE changed_by = $1 AND created_at >= $2::timestamptz AND created_at < $2::timestamptz + interval '1 day'`,
+       WHERE changed_by = $1
+         AND table_name NOT IN ('activities', 'files')
+         AND created_at >= $2::timestamptz AND created_at < $2::timestamptz + interval '1 day'`,
     [userId, dayStart],
   )).rows;
 
