@@ -40,4 +40,14 @@ describe("0157_usage_tracking migration", () => {
     );
     expect(rows.map((r) => r.column_name)).toEqual(["user_id", "date"]);
   });
+
+  it("usage_daily.breakdown defaults to '{}' so an insert omitting it succeeds", async () => {
+    await db.query(
+      `INSERT INTO office_dallas.usage_daily (user_id, date) VALUES ('00000000-0000-4000-8000-000000000001', '2026-06-01')`,
+    );
+    const { rows } = await db.query<{ breakdown: unknown }>(
+      `SELECT breakdown FROM office_dallas.usage_daily WHERE date = '2026-06-01'`,
+    );
+    expect(rows[0].breakdown).toEqual({});
+  });
 });

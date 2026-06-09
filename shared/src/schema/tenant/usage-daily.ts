@@ -9,7 +9,7 @@ export const usageDaily = pgTable(
     sessionCount: integer("session_count").default(0).notNull(),
     viewCount: integer("view_count").default(0).notNull(),
     actionCount: integer("action_count").default(0).notNull(),
-    breakdown: jsonb("breakdown").notNull(),
+    breakdown: jsonb("breakdown").notNull().default({}),
     firstActiveAt: timestamp("first_active_at", { withTimezone: true }),
     lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
     rolledUpAt: timestamp("rolled_up_at", { withTimezone: true }).defaultNow().notNull(),
