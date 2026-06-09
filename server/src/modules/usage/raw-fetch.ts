@@ -1,0 +1,94 @@
+// server/src/modules/usage/raw-fetch.ts
+import type { UsageRawInput } from "./types.js";
+
+/** A minimal pg-like client (works for both the request client and the rollup script client). */
+export interface QueryClient {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
+}
+
+/**
+ * Fetch one user+day's raw rows from a single tenant schema. Day bounds are [date, date+1) on the
+ * relevant timestamp column. `schema` is a validated office_* identifier. Used by BOTH the live
+ * read path and the nightly rollup.
+ */
+export async function fetchRawUsageForDay(
+  client: QueryClient,
+  schema: string,
+  userId: string,
+  date: string, // YYYY-MM-DD
+): Promise<UsageRawInput> {
+  if (!/^office_[a-z0-9_]+$/.test(schema)) throw new Error(`invalid schema: ${schema}`);
+  const s = schema;
+  const dayStart = `${date}T00:00:00Z`;
+
+  const sessions = (await client.query<{ id: string; impersonator_id: string | null }>(
+    `SELECT id, impersonator_id FROM ${s}.usage_session
+       WHERE user_id = $1
+         AND (
+           -- session started on this day
+           (started_at >= $2::timestamptz AND started_at < $2::timestamptz + interval '1 day')
+           -- or session has a heartbeat on this day (handles NULL started_at)
+           OR id IN (
+             SELECT session_id FROM ${s}.usage_heartbeat
+             WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'
+           )
+           -- or session has a view_event on this day
+           OR id IN (
+             SELECT session_id FROM ${s}.usage_view_event
+             WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'
+           )
+         )`,
+    [userId, dayStart],
+  )).rows;
+
+  const heartbeats = (await client.query<{ session_id: string; at: string }>(
+    `SELECT session_id, at FROM ${s}.usage_heartbeat
+       WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'
+       ORDER BY at`,
+    [userId, dayStart],
+  )).rows;
+
+  const viewEvents = (await client.query<{ session_id: string; at: string; entity_type: string }>(
+    `SELECT session_id, at, entity_type FROM ${s}.usage_view_event
+       WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'`,
+    [userId, dayStart],
+  )).rows;
+
+  const auditRows = (await client.query<{ action: string; table_name: string; created_at: string; impersonator_id: string | null }>(
+    `SELECT action, table_name, created_at, impersonator_id FROM ${s}.audit_log
+       WHERE changed_by = $1 AND created_at >= $2::timestamptz AND created_at < $2::timestamptz + interval '1 day'`,
+    [userId, dayStart],
+  )).rows;
+
+  const stageMoves = (await client.query<{ created_at: string }>(
+    `SELECT created_at FROM ${s}.deal_stage_history
+       WHERE changed_by = $1 AND created_at >= $2::timestamptz AND created_at < $2::timestamptz + interval '1 day'`,
+    [userId, dayStart],
+  )).rows;
+
+  const activities = (await client.query<{ type: string; at: string }>(
+    `SELECT type, COALESCE(occurred_at, created_at) AS at FROM ${s}.activities
+       WHERE responsible_user_id = $1
+         AND COALESCE(occurred_at, created_at) >= $2::timestamptz
+         AND COALESCE(occurred_at, created_at) < $2::timestamptz + interval '1 day'`,
+    [userId, dayStart],
+  )).rows;
+
+  const uploads = (await client.query<{ at: string }>(
+    `SELECT created_at AS at FROM ${s}.files
+       WHERE uploaded_by = $1 AND created_at >= $2::timestamptz AND created_at < $2::timestamptz + interval '1 day'`,
+    [userId, dayStart],
+  )).rows;
+
+  return {
+    userId,
+    date,
+    sessions: sessions.map((r) => ({ id: r.id, impersonatorId: r.impersonator_id })),
+    heartbeats: heartbeats.map((r) => ({ sessionId: r.session_id, at: new Date(r.at) })),
+    viewEvents: viewEvents.map((r) => ({ sessionId: r.session_id, at: new Date(r.at), entityType: r.entity_type })),
+    auditRows: auditRows.map((r) => ({ action: r.action, tableName: r.table_name, createdAt: new Date(r.created_at), impersonatorId: r.impersonator_id })),
+    stageMoves: stageMoves.map((r) => ({ createdAt: new Date(r.created_at) })),
+    activities: activities.map((r) => ({ type: r.type, at: new Date(r.at) })),
+    uploads: uploads.map((r) => ({ at: new Date(r.at) })),
+  };
+}
