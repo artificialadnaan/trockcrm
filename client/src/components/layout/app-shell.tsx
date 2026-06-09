@@ -1,9 +1,11 @@
 import { Outlet } from "react-router-dom";
+import { usePlatformUsageTracker } from "@/hooks/use-platform-usage-tracker";
 import { Sidebar } from "./sidebar";
 import { Topbar } from "./topbar";
 import { MobileNav } from "./mobile-nav";
 
 export function AppShell() {
+  usePlatformUsageTracker();
   return (
     <div className="flex min-h-screen bg-slate-100">
       <Sidebar />
