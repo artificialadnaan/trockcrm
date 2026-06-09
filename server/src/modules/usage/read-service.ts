@@ -3,7 +3,7 @@ import type { UsageDailyShape } from "./types.js";
 import { computeUsageDaily } from "./aggregate.js";
 import { fetchRawUsageForDay, type QueryClient } from "./raw-fetch.js";
 import { RAW_RETENTION_DAYS } from "./constants.js";
-import { businessWeekDates } from "../../lib/period.js";
+import { businessWeekDates, BUSINESS_TIMEZONE } from "../../lib/period.js";
 
 export interface Requester { role: string; userId: string; }
 
@@ -158,12 +158,14 @@ export async function readViewEvents(
   type?: string,
 ): Promise<ViewEventRow[]> {
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
-  const params: unknown[] = [userId, `${date}T00:00:00Z`];
+  const params: unknown[] = [userId, date];
   let typeClause = "";
   if (type) { params.push(type); typeClause = " AND entity_type = $3"; }
   const { rows } = await client.query<ViewEventRow>(
     `SELECT at, entity_type, entity_id, route, label_snapshot FROM ${schema}.usage_view_event
-       WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'${typeClause}
+       WHERE user_id = $1
+         AND at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+         AND at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')${typeClause}
        ORDER BY at`,
     params,
   );

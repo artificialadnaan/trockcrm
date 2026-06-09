@@ -47,16 +47,15 @@ export async function rollupOfficeDay(client: QueryClient, schema: string, date:
  */
 export async function pruneRolledUpRaw(client: QueryClient, schema: string, asOf: string): Promise<void> {
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
-  const cutoff = `${asOf}T00:00:00Z`;
   for (const table of ["usage_heartbeat", "usage_view_event"]) {
     await client.query(
       `DELETE FROM ${schema}.${table} raw
-        WHERE raw.at < $1::timestamptz - ($2 || ' days')::interval
+        WHERE raw.at < (($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') - ($2 || ' days')::interval)
           AND EXISTS (
             SELECT 1 FROM ${schema}.usage_daily d
-             WHERE d.user_id = raw.user_id AND d.date = (raw.at AT TIME ZONE 'UTC')::date
+             WHERE d.user_id = raw.user_id AND d.date = (raw.at AT TIME ZONE '${BUSINESS_TIMEZONE}')::date
           )`,
-      [cutoff, String(RAW_RETENTION_DAYS)],
+      [asOf, String(RAW_RETENTION_DAYS)],
     );
   }
 }

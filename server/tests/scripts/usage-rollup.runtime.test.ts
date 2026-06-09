@@ -54,6 +54,34 @@ describe("usage rollup fan-out + gated prune", () => {
     expect(rows[0].n).toBe(1); // un-rolled day survived
   });
 
+  it("prune matches business-day usage_daily row for heartbeat whose UTC-date differs from business-date", async () => {
+    // 2026-06-06T02:00:00Z = 2026-06-05 21:00 America/Chicago → business day 2026-06-05 (UTC day 2026-06-06).
+    // Under the old UTC derivation the prune would look for a usage_daily row on 2026-06-06, find none, and
+    // leave the raw row un-pruned (a leak). With BUSINESS_TIMEZONE it correctly matches the 2026-06-05 row.
+    const REP_B = U("00b5");
+    const SID_B = U("00b6");
+    // Session started on business day 2026-06-05 (entirely within Chicago 06-05).
+    await db.exec(`INSERT INTO office_dallas.usage_session (id, user_id, started_at) VALUES ('${SID_B}', '${REP_B}', '2026-06-05T20:00:00Z');`);
+    // Heartbeat at 2026-06-06T02:00:00Z: UTC day 2026-06-06, Chicago day 2026-06-05.
+    await db.exec(`INSERT INTO office_dallas.usage_heartbeat (session_id, user_id, at) VALUES ('${SID_B}', '${REP_B}', '2026-06-06T02:00:00Z');`);
+
+    // Roll up business day 2026-06-05 → writes usage_daily row on date 2026-06-05 for REP_B.
+    await rollupOfficeDay(client(), "office_dallas", "2026-06-05");
+    const { rows: dailyRows } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM office_dallas.usage_daily WHERE user_id='${REP_B}' AND date='2026-06-05'`,
+    );
+    expect(dailyRows[0].n).toBe(1); // confirm the usage_daily row was written
+
+    // Prune with asOf 2026-06-30 (the heartbeat at 06-06T02Z is >14 days older than 06-30 Chicago midnight).
+    await pruneRolledUpRaw(client(), "office_dallas", "2026-06-30");
+
+    // The heartbeat MUST be deleted: the prune found the matching usage_daily row via the business-tz date.
+    const { rows: afterPrune } = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM office_dallas.usage_heartbeat WHERE user_id='${REP_B}' AND at='2026-06-06T02:00:00Z'`,
+    );
+    expect(afterPrune[0].n).toBe(0); // leaked under UTC; deleted under BUSINESS_TIMEZONE
+  });
+
   it("rolls up a user whose only signal that day is a heartbeat (no session started, no writes)", async () => {
     const REP2 = U("0002");
     // Session started the PRIOR day (cross-midnight) — not started on 2026-06-10
