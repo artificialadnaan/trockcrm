@@ -353,12 +353,16 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
     if (!photo) throw new AppError(404, "Photo not found");
 
     const filename = `${photo.display_name}${photo.file_extension ?? ""}`;
-    // R2-backed JPEGs download through the proxy (key hidden, EXIF stripped) rather than via a
-    // presigned URL that would expose the deal-number-bearing object key. Non-JPEG R2 originals are
-    // not served publicly (un-strippable metadata) — fall back to an external URL or 404. External
-    // (CompanyCam) URLs don't carry the deal number and are returned directly.
+    // Mirror the image proxy exactly so the download path can't expose anything the viewer hides:
+    //   - R2 JPEG        -> proxy ?download=1 (key hidden, EXIF stripped)
+    //   - R2 non-JPEG    -> 404 (un-strippable original is never served publicly — do NOT fall back
+    //                      to its external_url, which would leak the unstripped metadata)
+    //   - external only  -> the CompanyCam CDN URL (no R2 copy; no deal number in the key)
     let result: { url: string; filename: string };
-    if (photo.r2_key && isStrippableJpeg(photo.mime_type, photo.file_extension) && context.assetBaseUrl) {
+    if (photo.r2_key) {
+      if (!isStrippableJpeg(photo.mime_type, photo.file_extension) || !context.assetBaseUrl) {
+        throw new AppError(404, "Photo not found");
+      }
       result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename };
     } else if (photo.external_url) {
       result = { url: photo.external_url, filename };

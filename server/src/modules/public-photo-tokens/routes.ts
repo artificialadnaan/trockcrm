@@ -47,7 +47,9 @@ async function pipeStrippedJpeg(source: AsyncIterable<Uint8Array>, res: Response
     headerEmitted = true;
     buf = Buffer.alloc(0);
   }
-  if (!headerEmitted) await write(stripJpegMetadata(buf)); // whole object was header (no SOS seen)
+  // Reaching here without ever finding SOS means the object isn't a parseable JPEG (truncated or
+  // malformed). We can't guarantee its metadata was stripped, so refuse rather than serve raw bytes.
+  if (!headerEmitted) throw new AppError(422, "Unprocessable image");
   res.end();
 }
 
@@ -80,7 +82,10 @@ function apiPublicPhotoBaseUrl(req: Request): string {
 }
 
 function sanitizeFilename(name: string): string {
-  return name.replace(/[\r\n"\\]/g, "_").replace(/[\u0000-\u001f]/g, "").slice(0, 200) || "photo";
+  // Content-Disposition is a latin1 HTTP header — any non-ASCII char (emoji, smart quotes,
+  // accented letters) makes res.setHeader throw ERR_INVALID_CHAR → 500. Collapse everything
+  // outside printable ASCII to "_" so the header is always safe (also drops control chars).
+  return name.replace(/[^\x20-\x7e]/g, "_").replace(/[\r\n"\\]/g, "_").slice(0, 200) || "photo";
 }
 
 publicPhotoViewerRoutes.get("/:token", async (req, res, next) => {
