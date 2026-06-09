@@ -72,12 +72,15 @@ export async function main(): Promise<void> {
       `SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 'office_%' ORDER BY schema_name`,
     );
     const today = businessToday();
-    const yesterday = shiftBusinessDate(today, -1);
     let anyFailed = false;
     for (const { schema_name } of schemas) {
       if (!SCHEMA_RE.test(schema_name)) continue;
+      // Re-roll the entire retained window so any missed/late cron day self-heals.
+      // rollupOfficeDay is an idempotent upsert, so re-rolling is always safe.
       try {
-        await rollupOfficeDay(client, schema_name, yesterday);
+        for (let i = 1; i <= RAW_RETENTION_DAYS; i++) {
+          await rollupOfficeDay(client, schema_name, shiftBusinessDate(today, -i));
+        }
         await pruneRolledUpRaw(client, schema_name, today);
       } catch (err) {
         anyFailed = true;
@@ -90,7 +93,7 @@ export async function main(): Promise<void> {
   }
 }
 
-// Allow direct execution: `tsx src/scripts/usage-rollup.ts`
-if (process.argv[1] && process.argv[1].endsWith("usage-rollup.ts")) {
+// Allow direct execution as compiled JS or TS source.
+if (process.argv[1] && /usage-rollup\.(?:js|ts)$/.test(process.argv[1])) {
   main().catch((err) => { console.error(err); process.exit(1); });
 }

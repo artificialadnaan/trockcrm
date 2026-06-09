@@ -1134,16 +1134,25 @@ router.get("/platform-usage/drilldown", requireAnyRole, async (req, res, next) =
     const type = typeof req.query.type === "string" ? req.query.type : undefined;
     const today = businessToday();
 
-    // Same server-enforced scoping as the summary: a rep is forced to themselves.
     const repParam = typeof req.query.rep === "string" ? req.query.rep : undefined;
     if (repParam !== undefined && !UUID_PATTERN.test(repParam)) {
       throw new AppError(400, "rep must be a valid UUID");
     }
-    const scope = resolveRepScope(
-      { role: req.user!.role, userId: req.user!.id },
-      repParam,
-    );
-    const repId = scope ? scope[0] : (repParam ?? req.user!.id);
+    // Drilldown targets exactly one rep, resolved through the same roster as the summary.
+    let targetScope: string[];
+    if (req.user!.role === "rep") {
+      targetScope = [req.user!.id];
+    } else if (repParam) {
+      targetScope = [repParam];
+    } else {
+      throw new AppError(400, "rep is required");
+    }
+    const schema = `office_${req.officeSlug!}`;
+    const roster = await resolveReps(req.tenantClient!, targetScope);
+    if (roster.length === 0) {
+      throw new AppError(404, "rep not found in usage roster");
+    }
+    const repId = roster[0].id;
 
     if (!isWithinDrilldownWindow(date, today)) {
       await req.commitTransaction!();
@@ -1151,7 +1160,7 @@ router.get("/platform-usage/drilldown", requireAnyRole, async (req, res, next) =
       return;
     }
 
-    const events = await readViewEvents(req.tenantClient!, `office_${req.officeSlug!}`, repId, date, type);
+    const events = await readViewEvents(req.tenantClient!, schema, repId, date, type);
     await req.commitTransaction!();
     res.json({ data: { expired: false, events } });
   } catch (err) {

@@ -16,7 +16,7 @@ beforeAll(async () => {
       CREATE TABLE ${s}.usage_session (id uuid primary key default gen_random_uuid(), user_id uuid, started_at timestamptz default now(), last_heartbeat_at timestamptz, ended_at timestamptz, active_seconds int default 0, user_agent text, impersonator_id uuid, created_at timestamptz default now());
       CREATE TABLE ${s}.usage_heartbeat (id bigserial primary key, session_id uuid, user_id uuid, at timestamptz);
       CREATE TABLE ${s}.usage_view_event (id bigserial primary key, user_id uuid, session_id uuid, at timestamptz, entity_type text, entity_id uuid, route text, label_snapshot text);
-      CREATE TABLE ${s}.audit_log (id bigserial primary key, table_name text, action text, changed_by uuid, impersonator_id uuid, created_at timestamptz);
+      CREATE TABLE ${s}.audit_log (id bigserial primary key, table_name text, action text, changed_by uuid, impersonator_id uuid, changes jsonb, created_at timestamptz);
       CREATE TABLE ${s}.deal_stage_history (id uuid primary key default gen_random_uuid(), deal_id uuid, to_stage_id uuid, changed_by uuid, created_at timestamptz);
       CREATE TABLE ${s}.activities (id uuid primary key default gen_random_uuid(), type text, responsible_user_id uuid, performed_by_user_id uuid, occurred_at timestamptz, created_at timestamptz);
       CREATE TABLE ${s}.files (id uuid primary key default gen_random_uuid(), uploaded_by uuid, created_at timestamptz);

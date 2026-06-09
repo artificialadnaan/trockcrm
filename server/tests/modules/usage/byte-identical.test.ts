@@ -59,6 +59,7 @@ beforeAll(async () => {
       action text,
       changed_by uuid,
       impersonator_id uuid,
+      changes jsonb,
       created_at timestamptz
     );
     CREATE TABLE office_dallas.deal_stage_history (

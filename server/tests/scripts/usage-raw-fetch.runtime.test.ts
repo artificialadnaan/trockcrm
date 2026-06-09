@@ -16,7 +16,7 @@ beforeAll(async () => {
     CREATE TABLE office_dallas.usage_session (id uuid primary key default gen_random_uuid(), user_id uuid, started_at timestamptz, last_heartbeat_at timestamptz, ended_at timestamptz, active_seconds int default 0, user_agent text, impersonator_id uuid, created_at timestamptz default now());
     CREATE TABLE office_dallas.usage_heartbeat (id bigserial primary key, session_id uuid, user_id uuid, at timestamptz);
     CREATE TABLE office_dallas.usage_view_event (id bigserial primary key, user_id uuid, session_id uuid, at timestamptz, entity_type text, entity_id uuid, route text, label_snapshot text);
-    CREATE TABLE office_dallas.audit_log (id bigserial primary key, table_name text, action text, changed_by uuid, impersonator_id uuid, created_at timestamptz);
+    CREATE TABLE office_dallas.audit_log (id bigserial primary key, table_name text, action text, changed_by uuid, impersonator_id uuid, changes jsonb, created_at timestamptz);
     CREATE TABLE office_dallas.deal_stage_history (id uuid primary key default gen_random_uuid(), deal_id uuid, to_stage_id uuid, changed_by uuid, created_at timestamptz);
     CREATE TABLE office_dallas.activities (id uuid primary key default gen_random_uuid(), type text, responsible_user_id uuid, performed_by_user_id uuid, occurred_at timestamptz, created_at timestamptz);
     CREATE TABLE office_dallas.files (id uuid primary key default gen_random_uuid(), uploaded_by uuid, created_at timestamptz);
@@ -81,6 +81,27 @@ describe("fetchRawUsageForDay", () => {
     // Dedicated buckets still count them once each
     expect(raw.activities).toHaveLength(1);
     expect(raw.uploads).toHaveLength(1);
+  });
+
+  it("excludes deal audit UPDATE rows whose changes contain stage_id (counted once via stageMoves, not double-counted as edits)", async () => {
+    const REP_SM = U("0030");
+    await db.exec(`
+      -- (a) deal_stage_history row — counted as a stage move
+      INSERT INTO office_dallas.deal_stage_history (deal_id, to_stage_id, changed_by, created_at)
+        VALUES ('${U("0dd9")}', '${U("0509")}', '${REP_SM}', '2026-06-07T10:00:00Z');
+      -- (b) audit_log UPDATE row for the same stage change (changes includes stage_id) — must be excluded from auditRows
+      INSERT INTO office_dallas.audit_log (table_name, action, changed_by, impersonator_id, changes, created_at)
+        VALUES ('deals', 'update', '${REP_SM}', NULL, '{"stage_id":{"old":"${U("0501")}","new":"${U("0502")}"}}'::jsonb, '2026-06-07T10:00:00Z');
+      -- (c) genuine non-stage deal edit (changes does NOT include stage_id) — must appear in auditRows
+      INSERT INTO office_dallas.audit_log (table_name, action, changed_by, impersonator_id, changes, created_at)
+        VALUES ('deals', 'update', '${REP_SM}', NULL, '{"awarded_amount":{"old":"1","new":"2"}}'::jsonb, '2026-06-07T10:05:00Z');
+    `);
+    const raw = await fetchRawUsageForDay(client(), "office_dallas", REP_SM, "2026-06-07");
+    // Stage-only deal update excluded from auditRows; genuine edit included
+    expect(raw.auditRows).toHaveLength(1);
+    expect(raw.auditRows[0].tableName).toBe("deals");
+    // Stage move is counted exactly once via stageMoves
+    expect(raw.stageMoves).toHaveLength(1);
   });
 
   it("credits the performer (performed_by_user_id), not the assignee (responsible_user_id)", async () => {
