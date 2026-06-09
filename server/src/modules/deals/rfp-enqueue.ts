@@ -80,7 +80,7 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals
  * versions (activeLatestFileConditions), so the RFP attachments match the files
  * a reviewer sees on the deal.
  */
-async function loadRfpAttachmentsForDeal(tenantDb: TenantDb, dealId: string) {
+export async function loadRfpAttachmentsForDeal(tenantDb: TenantDb, dealId: string) {
   const scopeCondition = await buildDealFileScopeCondition(tenantDb, dealId);
   const rows = await tenantDb
     .select({

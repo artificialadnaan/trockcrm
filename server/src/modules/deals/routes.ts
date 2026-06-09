@@ -171,7 +171,7 @@ import {
   setDealMarketOverride,
 } from "../estimating/deal-market-override-service.js";
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
-import { insertOpportunityRfpRequestJob } from "./rfp-enqueue.js";
+import { insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
@@ -1343,9 +1343,14 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       throw new AppError(404, "No failed RFP delivery job found for this deal");
     }
 
+    // A dead job has exhausted all auto-retries, so a manual retry can land
+    // well past the attachments' presigned-URL TTL. Re-mint the URLs here (the
+    // retry is effectively a re-enqueue) so the job doesn't carry dead links.
+    const freshAttachments = await loadRfpAttachmentsForDeal(req.tenantDb!, deal.id);
     const payload: RfpRequestDeliveryPayload = {
       ...deadJob.payload,
       syncHubUrl: resolveSyncHubRfpRequestUrl(),
+      body: { ...deadJob.payload.body, attachments: freshAttachments },
     };
     delete payload.dealHandled;
     await req.tenantDb!.insert(jobQueue).values({

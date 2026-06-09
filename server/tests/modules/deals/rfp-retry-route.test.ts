@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const getDealByIdMock = vi.hoisted(() => vi.fn());
+const loadRfpAttachmentsForDealMock = vi.hoisted(() =>
+  vi.fn(async () => [] as Array<{ name: string; url: string; contentType: string }>)
+);
 const accessMocks = vi.hoisted(() => ({
   assertDealCollaboratorAccess: vi.fn(),
   assertDealOwnerAccess: vi.fn(),
@@ -108,6 +111,11 @@ vi.mock("../../../src/lib/collaboration-access.js", () => ({
   normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
 }));
 
+vi.mock("../../../src/modules/deals/rfp-enqueue.js", () => ({
+  insertOpportunityRfpRequestJob: vi.fn(),
+  loadRfpAttachmentsForDeal: loadRfpAttachmentsForDealMock,
+}));
+
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
 function findRouteHandler(method: "post", path: string) {
@@ -207,6 +215,69 @@ describe("POST /api/deals/:id/rfp-retry", () => {
       expect.objectContaining({ id: "user-1", role: "director" }),
       expect.objectContaining({ allowAdmin: true })
     );
+  });
+
+  it("regenerates attachment URLs on retry instead of reusing the dead payload's stale links", async () => {
+    loadRfpAttachmentsForDealMock.mockResolvedValueOnce([
+      { name: "Plan.pdf", url: "https://fresh.example/plan", contentType: "application/pdf" },
+    ]);
+    const inserted: any[] = [];
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: vi.fn(async () => ({
+          rows: [
+            {
+              id: 10,
+              payload: {
+                dealId: "deal-1",
+                syncHubUrl: "https://old.example.com/api/rfp-requests",
+                body: {
+                  sourceDealId: "deal-1",
+                  attachments: [
+                    { name: "Plan.pdf", url: "https://expired.example/plan", contentType: "application/pdf" },
+                  ],
+                },
+              },
+            },
+          ],
+        })),
+        insert: vi.fn(() => ({
+          values: vi.fn(async (value) => {
+            inserted.push(value);
+            return {};
+          }),
+        })),
+        update: vi.fn(() => ({
+          set: vi.fn(() => ({ where: vi.fn(async () => ({})) })),
+        })),
+      },
+      user: { id: "user-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {
+      statusCode: 200,
+      body: undefined as any,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload: any) {
+        this.body = payload;
+        return this;
+      },
+    } as any;
+    const next = vi.fn((err?: unknown) => {
+      if (err) throw err;
+    });
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(res.statusCode).toBe(202);
+    expect(loadRfpAttachmentsForDealMock).toHaveBeenCalledWith(req.tenantDb, "deal-1");
+    expect(inserted[0].payload.body.attachments).toEqual([
+      { name: "Plan.pdf", url: "https://fresh.example/plan", contentType: "application/pdf" },
+    ]);
   });
 
   it("rejects retries when owner/admin access is denied before loading the deal", async () => {
