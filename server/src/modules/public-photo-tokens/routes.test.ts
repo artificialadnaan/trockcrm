@@ -190,6 +190,39 @@ describe("public photo token routes", () => {
     expect(response.headers.location).toBe("https://img.companycam.com/full.jpg");
   });
 
+  it("returns 422 (not raw bytes) for a JPEG-labeled stream that ends before Start-Of-Scan", async () => {
+    const seg = (m: number, p: Buffer) => { const l = Buffer.alloc(2); l.writeUInt16BE(p.length + 2, 0); return Buffer.concat([Buffer.from([0xff, m]), l, p]); };
+    // SOI + an APP1 EXIF segment, then EOF — no SOS ever arrives (truncated/malformed upload).
+    const headerOnly = Buffer.concat([Buffer.from([0xff, 0xd8]), seg(0xe1, Buffer.from("Exif\0\0GPSLatitude=32.7", "latin1"))]);
+    const stream = (async function* () { yield headerOnly; })();
+    mocks.getPublicPhotoAsset.mockResolvedValueOnce({ kind: "jpeg-stream", stream, contentType: "image/jpeg", filename: "x.jpg" });
+
+    const response = await request(createApp())
+      .get("/api/public/photo-viewer/raw-token/photos/photo-1/image")
+      .buffer()
+      .parse(binaryParser);
+
+    expect(response.status).toBe(422);
+    expect(response.body.toString("latin1")).not.toContain("GPSLatitude");
+  });
+
+  it("does not 500 on a non-ASCII display name — Content-Disposition is header-safe", async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xda, 0x00, 0x02, 0xff, 0xd9]);
+    const stream = (async function* () { yield jpeg; })();
+    mocks.getPublicPhotoAsset.mockResolvedValueOnce({ kind: "jpeg-stream", stream, contentType: "image/jpeg", filename: "roof 📸 “smart”.jpg" });
+
+    const response = await request(createApp())
+      .get("/api/public/photo-viewer/raw-token/photos/photo-1/image")
+      .buffer()
+      .parse(binaryParser);
+
+    expect(response.status).toBe(200);
+    const cd = response.headers["content-disposition"];
+    // eslint-disable-next-line no-control-regex
+    expect(cd).toMatch(/^[\x20-\x7e]*$/); // pure ASCII — no ERR_INVALID_CHAR
+    expect(cd).not.toContain("📸");
+  });
+
   it("returns 404 when the proxied photo is not on the token deal", async () => {
     mocks.getPublicPhotoAsset.mockRejectedValueOnce(new AppError(404, "Photo not found"));
 

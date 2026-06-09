@@ -488,6 +488,20 @@ describe("public photo token service", () => {
     await expect(getPublicPhotoDownload("raw-token", "other-photo", {})).rejects.toMatchObject({ statusCode: 404, message: "Photo not found" });
   });
 
+  it("does NOT fall back to the external original when an R2 photo is a non-JPEG (no metadata leak via download)", async () => {
+    const { getPublicPhotoDownload } = await import("./service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      // HEIC R2 copy that ALSO has an external CompanyCam URL — must not be downloadable (unstripped).
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", deal_id: "deal-1", category: "photo", display_name: "IMG", file_extension: ".heic", external_url: "https://img.companycam.com/full.heic", r2_key: "office_dallas/deals/TR-1/photos/img.heic", mime_type: "image/heic" }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(getPublicPhotoDownload("raw-token", "photo-1", { assetBaseUrl: ASSET_BASE })).rejects.toMatchObject({ statusCode: 404 });
+  });
+
   it("returns a JPEG byte stream (no presigned key) for R2 photos and validates the token read-only", async () => {
     const { getPublicPhotoAsset } = await import("./service.js");
     const fakeStream = (async function* () { yield Buffer.from([0xff, 0xd8, 0xff, 0xd9]); })();
