@@ -30,6 +30,27 @@ async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
 
 const PROCORE_BASE_URL = "https://api.procore.com";
 
+// ── Worker is PHOTO-LINK-ONLY against Procore ────────────────────────────────────────────────
+// SyncHub (trocksynchubv3) is the AUTHORITATIVE Procore project / status / change-order pipeline:
+// it creates the Procore project (Playwright "Add to Portfolio"), relays project.created +
+// ongoing stage changes back to the CRM, and syncs change orders. If this worker ALSO creates
+// projects / polls status / pushes stage / imports COs, we re-introduce the exact problems that
+// pipeline was built to eliminate:
+//   • Duplicate Procore projects — the contract-signed handoff (deals/service.ts setDealContractSignedDate,
+//     default-ON) enqueues a create_project job; an ungated worker POSTs a NEW project for a deal
+//     SyncHub also creates → two Procore projects for one deal.
+//   • Double-written deal stage — runProcoreSync()/webhook reverse-stage-sync races SyncHub's
+//     project.stage_changed relay (two uncoordinated writers of the same field).
+//   • Corrupted commissions — syncChangeOrderToCrm() recomputes deals.change_order_total, which
+//     feeds commission reporting + dashboard value, and double-counts the CRM-native change orders
+//     (deal_change_orders / is_change_order child deals) that are now the source of truth.
+// The ONLY Procore WRITE the worker legitimately owns is the public "T Rock Photos" link, applied
+// onto an ALREADY-created project via the SyncHub-relay skip-branch in handleCreateProject.
+//
+// This is a HARDCODED code-level gate, NOT an env flag: it can only be re-enabled by a code change
+// + review, so a stray/forgotten env var can never silently re-arm prod project duplication.
+const WORKER_PROCORE_PROJECT_SYNC_ENABLED: boolean = false;
+
 // Dev mode: when PROCORE_CLIENT_ID is not set, skip all Procore API calls
 function isDevMode(): boolean {
   return !process.env.PROCORE_CLIENT_ID || !process.env.PROCORE_CLIENT_SECRET;
@@ -110,13 +131,15 @@ export async function handleProcoreSyncJob(jobPayload: any): Promise<void> {
       return;
     }
     const schemaName = `office_${officeSlug}`;
-    const companyId = process.env.PROCORE_COMPANY_ID;
-    if (!companyId) throw new Error("PROCORE_COMPANY_ID must be set");
 
+    // PROCORE_COMPANY_ID is resolved INSIDE the branches that actually call Procore, NOT here — so
+    // a disabled/no-op job (e.g. the contract-signed handoff's create_project for a deal with no
+    // project) cleanly no-ops in the pre-provisioning window (creds not yet set) instead of
+    // throwing/retrying before it can reach the link-only gate.
     if (action === "create_project") {
-      await handleCreateProject(client, schemaName, officeId, companyId, dealId);
+      await handleCreateProject(client, schemaName, officeId, dealId);
     } else if (action === "sync_stage") {
-      await handleSyncStage(client, schemaName, officeId, companyId, dealId, crmStageId);
+      await handleSyncStage(client, schemaName, officeId, dealId, crmStageId);
     } else {
       console.warn(`[Procore:worker] Unknown procore_sync action: ${action}`);
     }
@@ -129,7 +152,6 @@ async function handleCreateProject(
   client: any,
   schemaName: string,
   officeId: string,
-  companyId: string,
   dealId: string
 ): Promise<void> {
   let transactionOpen = false;
@@ -168,6 +190,23 @@ async function handleCreateProject(
       await enqueueProcorePhotoBatch({ officeId, dealId });
       return;
     }
+
+    // LINK-ONLY: the deal has no Procore project yet, and the worker does NOT create one — SyncHub
+    // is the authoritative creator (see WORKER_PROCORE_PROJECT_SYNC_ENABLED). Creating here would
+    // duplicate the project SyncHub makes for the same deal. Commit the (empty) lock-tx and bail;
+    // the photo link is applied later via the relay skip-branch above, once the project exists.
+    if (!WORKER_PROCORE_PROJECT_SYNC_ENABLED) {
+      console.log(
+        `[Procore:worker] Project creation disabled (link-only worker; SyncHub owns project creation) — deal ${dealId} has no Procore project yet, skipping create.`
+      );
+      await client.query("COMMIT");
+      transactionOpen = false;
+      return;
+    }
+
+    // Reached only when project creation is ENABLED (gate above) — now we genuinely need the company.
+    const companyId = process.env.PROCORE_COMPANY_ID;
+    if (!companyId) throw new Error("PROCORE_COMPANY_ID must be set");
 
     let procoreProjectId: number;
 
@@ -240,10 +279,15 @@ async function handleSyncStage(
   client: any,
   schemaName: string,
   officeId: string,
-  companyId: string,
   dealId: string,
   crmStageId: string
 ): Promise<void> {
+  // LINK-ONLY: the worker does not push CRM stage changes to Procore — SyncHub owns project stage
+  // sync (see WORKER_PROCORE_PROJECT_SYNC_ENABLED). A second writer would race SyncHub's relay.
+  if (!WORKER_PROCORE_PROJECT_SYNC_ENABLED) return;
+  // Reached only when ENABLED — now we genuinely need the company for the Procore PATCH below.
+  const companyId = process.env.PROCORE_COMPANY_ID;
+  if (!companyId) throw new Error("PROCORE_COMPANY_ID must be set");
   const dealResult = await client.query(
     `SELECT id, procore_project_id FROM ${schemaName}.deals WHERE id = $1 LIMIT 1`,
     [dealId]
@@ -312,6 +356,17 @@ export async function handleProcoreWebhookJob(jobPayload: any): Promise<void> {
   const { webhookLogId, eventType, payload } = jobPayload;
   const client = await pool.connect();
   try {
+    // LINK-ONLY: Procore webhooks would drive reverse stage sync + change-order import, both owned
+    // by SyncHub (see WORKER_PROCORE_PROJECT_SYNC_ENABLED). Mark the webhook processed (so it does
+    // not retry forever) and do NOT write status/COs back to the CRM.
+    if (!WORKER_PROCORE_PROJECT_SYNC_ENABLED) {
+      console.log(
+        `[Procore:webhook-job] Disabled (link-only worker; SyncHub owns status/CO sync) — marking webhook ${webhookLogId} processed without syncing.`
+      );
+      await markWebhookProcessed(client, webhookLogId, null);
+      return;
+    }
+
     const companyId = process.env.PROCORE_COMPANY_ID;
     if (!companyId) throw new Error("PROCORE_COMPANY_ID must be set");
 
@@ -765,6 +820,14 @@ async function markWebhookProcessed(
  * For each office, polls Procore for project and CO updates on linked deals.
  */
 export async function runProcoreSync(): Promise<void> {
+  // LINK-ONLY: the 15-minute bidirectional poll (reverse stage sync + change-order import) is
+  // disabled — SyncHub owns Procore→CRM status + change-order sync (see
+  // WORKER_PROCORE_PROJECT_SYNC_ENABLED). Gate BEFORE any DB connection so the poll is a true no-op.
+  if (!WORKER_PROCORE_PROJECT_SYNC_ENABLED) {
+    console.log("[Worker:procore-sync] Disabled (link-only worker; SyncHub owns status/CO sync) — skipping poll.");
+    return;
+  }
+
   console.log("[Worker:procore-sync] Starting periodic Procore poll...");
 
   const companyId = process.env.PROCORE_COMPANY_ID;
