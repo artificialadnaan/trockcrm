@@ -59,7 +59,7 @@ export async function fetchRawUsageForDay(
     `SELECT action, table_name, created_at, impersonator_id FROM ${s}.audit_log
        WHERE changed_by = $1
          AND table_name NOT IN ('activities', 'files')
-         AND NOT (table_name = 'deals' AND changes IS NOT NULL AND changes ? 'stage_id')
+         AND NOT (table_name = 'deals' AND changes IS NOT NULL AND (changes ? 'stage_id' OR changes ? 'stageId'))
          AND created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND created_at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`,
     [userId, dayStart],
   )).rows;

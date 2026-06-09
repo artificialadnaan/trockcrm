@@ -105,6 +105,8 @@ describe("computeUsageDaily", () => {
     expect(out.viewCount).toBe(1);
     expect(out.breakdown.creates).toBe(1);
     expect(out.breakdown.stage_moves).toBe(1);
+    // sessionCount must also exclude the impersonated session (consistent with time/view exclusion)
+    expect(out.sessionCount).toBe(1);
   });
 
   it("produces canonical (sorted) activities key order regardless of input order", () => {

@@ -83,21 +83,24 @@ describe("fetchRawUsageForDay", () => {
     expect(raw.uploads).toHaveLength(1);
   });
 
-  it("excludes deal audit UPDATE rows whose changes contain stage_id (counted once via stageMoves, not double-counted as edits)", async () => {
+  it("excludes deal audit UPDATE rows whose changes contain stage_id or stageId (counted once via stageMoves, not double-counted as edits)", async () => {
     const REP_SM = U("0030");
     await db.exec(`
       -- (a) deal_stage_history row — counted as a stage move
       INSERT INTO office_dallas.deal_stage_history (deal_id, to_stage_id, changed_by, created_at)
         VALUES ('${U("0dd9")}', '${U("0509")}', '${REP_SM}', '2026-06-07T10:00:00Z');
-      -- (b) audit_log UPDATE row for the same stage change (changes includes stage_id) — must be excluded from auditRows
+      -- (b) trigger-style audit_log row (DB trigger writes snake_case key) — must be excluded
       INSERT INTO office_dallas.audit_log (table_name, action, changed_by, impersonator_id, changes, created_at)
         VALUES ('deals', 'update', '${REP_SM}', NULL, '{"stage_id":{"old":"${U("0501")}","new":"${U("0502")}"}}'::jsonb, '2026-06-07T10:00:00Z');
-      -- (c) genuine non-stage deal edit (changes does NOT include stage_id) — must appear in auditRows
+      -- (c) explicit logActivity-style audit row (changeDealStage writes camelCase key) — must also be excluded
+      INSERT INTO office_dallas.audit_log (table_name, action, changed_by, impersonator_id, changes, created_at)
+        VALUES ('deals', 'update', '${REP_SM}', NULL, '{"stageId":{"from":"A","to":"B"}}'::jsonb, '2026-06-07T10:00:00Z');
+      -- (d) genuine non-stage deal edit (changes does NOT include stage_id or stageId) — must appear in auditRows
       INSERT INTO office_dallas.audit_log (table_name, action, changed_by, impersonator_id, changes, created_at)
         VALUES ('deals', 'update', '${REP_SM}', NULL, '{"awarded_amount":{"old":"1","new":"2"}}'::jsonb, '2026-06-07T10:05:00Z');
     `);
     const raw = await fetchRawUsageForDay(client(), "office_dallas", REP_SM, "2026-06-07");
-    // Stage-only deal update excluded from auditRows; genuine edit included
+    // Both stage audit rows (trigger snake_case + explicit camelCase) excluded; only genuine edit remains
     expect(raw.auditRows).toHaveLength(1);
     expect(raw.auditRows[0].tableName).toBe("deals");
     // Stage move is counted exactly once via stageMoves

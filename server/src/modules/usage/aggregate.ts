@@ -67,7 +67,7 @@ export function computeUsageDaily(input: UsageRawInput): UsageDailyShape {
     userId: input.userId,
     date: input.date,
     activeSeconds,
-    sessionCount: input.sessions.length,
+    sessionCount: realSessionIds.size,
     viewCount,
     actionCount,
     breakdown,

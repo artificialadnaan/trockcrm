@@ -176,7 +176,7 @@ export async function readViewEvents(
   const { rows } = await client.query<ViewEventRow>(
     `SELECT v.at, v.entity_type, v.entity_id, v.route, v.label_snapshot
        FROM ${schema}.usage_view_event v
-       JOIN ${schema}.usage_session s ON s.id = v.session_id
+       JOIN ${schema}.usage_session s ON s.id = v.session_id AND s.user_id = v.user_id
       WHERE v.user_id = $1
         AND s.impersonator_id IS NULL
         AND v.at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
