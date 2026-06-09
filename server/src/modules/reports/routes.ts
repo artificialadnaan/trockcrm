@@ -82,6 +82,7 @@ import {
 import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
+import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary } from "../usage/read-service.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -1069,6 +1070,43 @@ router.get("/rep-pack", requireDirector, async (req, res, next) => {
     const data = await getRepPackData(req.tenantDb!, { repId, mode });
     await req.commitTransaction!();
     res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/platform-usage?grain=day|week&date=YYYY-MM-DD&rep=<uuid>
+// Reps are server-scoped to themselves; admin/director may pass ?rep= or omit for all active reps.
+router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
+  try {
+    const grain = req.query.grain === "week" ? "week" : "day";
+    const today = new Date().toISOString().slice(0, 10);
+    const anchor = typeof req.query.date === "string" ? req.query.date : today;
+    const dates = grain === "week" ? weekDates(anchor) : [anchor];
+
+    const scope = resolveRepScope(
+      { role: req.user!.role, userId: req.user!.id },
+      typeof req.query.rep === "string" ? req.query.rep : undefined,
+    );
+    const schema = `office_${req.officeSlug!}`;
+    const client = req.tenantClient!; // pg PoolClient bound to the request transaction
+
+    const reps = await resolveReps(client, scope);
+
+    const leaderboard = [];
+    for (const rep of reps) {
+      const days = [];
+      for (const d of dates) {
+        days.push(d >= today
+          ? await buildLiveDay(client, schema, rep.id, d)
+          : await readUsageDaily(client, schema, rep.id, d));
+      }
+      const usage = grain === "week" ? sumDays(rep.id, `week-of-${dates[0]}`, days) : days[0];
+      leaderboard.push({ rep, usage });
+    }
+
+    await req.commitTransaction!();
+    res.json({ data: { grain, dates, summary: buildTeamSummary(leaderboard), leaderboard } });
   } catch (err) {
     next(err);
   }
