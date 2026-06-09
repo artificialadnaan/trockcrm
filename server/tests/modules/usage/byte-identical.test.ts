@@ -10,8 +10,8 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { buildLiveDay, readUsageDaily } from "./read-service.js";
-import { rollupOfficeDay } from "../../scripts/usage-rollup.js";
+import { buildLiveDay, readUsageDaily } from "../../../src/modules/usage/read-service.js";
+import { rollupOfficeDay } from "../../../src/scripts/usage-rollup.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const REP = U("0001");

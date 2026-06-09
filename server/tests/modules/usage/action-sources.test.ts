@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { USAGE_ACTION_SOURCES } from "./action-sources.js";
+import { USAGE_ACTION_SOURCES } from "../../../src/modules/usage/action-sources.js";
 import { AUDIT_ACTIONS, ACTIVITY_TYPES } from "@trock-crm/shared/types";
 
 describe("USAGE_ACTION_SOURCES registry contract", () => {

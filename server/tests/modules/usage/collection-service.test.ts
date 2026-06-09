@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { startSession, recordHeartbeat, recordViewEvents } from "./collection-service.js";
+import { startSession, recordHeartbeat, recordViewEvents } from "../../../src/modules/usage/collection-service.js";
 
 function tenantDbCapturingInsert() {
   const inserted: unknown[] = [];

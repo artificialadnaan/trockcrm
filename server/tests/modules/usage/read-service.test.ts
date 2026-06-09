@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { resolveRepScope, weekDates, sumDays, readUsageDaily } from "./read-service.js";
-import type { UsageDailyShape } from "./types.js";
+import { resolveRepScope, weekDates, sumDays, readUsageDaily } from "../../../src/modules/usage/read-service.js";
+import type { UsageDailyShape } from "../../../src/modules/usage/types.js";
 
 describe("resolveRepScope (server-enforced)", () => {
   it("forces a rep to themselves regardless of requested rep", () => {

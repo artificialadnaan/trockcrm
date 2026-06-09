@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HEARTBEAT_INTERVAL_S, HEARTBEAT_GRACE_S } from "./constants.js";
+import { HEARTBEAT_INTERVAL_S, HEARTBEAT_GRACE_S } from "../../../src/modules/usage/constants.js";
 
 describe("usage constants", () => {
   it("pins the heartbeat cadence deterministically", () => {

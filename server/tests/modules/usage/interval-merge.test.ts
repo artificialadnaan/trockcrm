@@ -1,6 +1,6 @@
 // server/src/modules/usage/interval-merge.test.ts
 import { describe, expect, it } from "vitest";
-import { mergeActiveSeconds } from "./interval-merge.js";
+import { mergeActiveSeconds } from "../../../src/modules/usage/interval-merge.js";
 
 const t = (sec: number) => new Date(Date.UTC(2026, 5, 9, 12, 0, sec));
 

@@ -1,7 +1,7 @@
 // server/src/modules/usage/aggregate.test.ts
 import { describe, expect, it } from "vitest";
-import { computeUsageDaily } from "./aggregate.js";
-import type { UsageRawInput } from "./types.js";
+import { computeUsageDaily } from "../../../src/modules/usage/aggregate.js";
+import type { UsageRawInput } from "../../../src/modules/usage/types.js";
 
 const t = (sec: number) => new Date(Date.UTC(2026, 5, 9, 12, 0, sec));
 
