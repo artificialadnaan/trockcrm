@@ -187,12 +187,17 @@ export async function ensurePublicPhotoLinkForDeal(input: {
     );
     const url = `${publicViewerBaseUrl()}/p/${encodeURIComponent(rawToken)}`;
     try {
-      const links = await procoreJson<any[]>(
+      const links = await procoreJson<any>(
         "PATCH",
         `/rest/v2.0/companies/${companyId}/projects/${deal.procore_project_id}/links/bulk_update`,
         [{ id: deal.procore_photo_link_id ?? undefined, title: PHOTO_LINK_TITLE, url }]
       );
-      const linkId = Array.isArray(links) ? links[0]?.id : (links as any)?.id;
+      // Procore's bulk_update returns the links wrapped as { data: [...] }; a bare array is also
+      // tolerated. Read both — otherwise the link id isn't captured, procore_photo_link_id stays
+      // null, the early-return above never fires, and every re-run (real SyncHub relays cause these)
+      // appends a duplicate "T Rock Photos" link + mints a new token instead of updating in place.
+      const linkArray = Array.isArray(links) ? links : links?.data;
+      const linkId = Array.isArray(linkArray) ? linkArray[0]?.id : undefined;
       await client.query(
         `UPDATE ${input.schemaName}.deals
          SET procore_photo_link_id = $1,
