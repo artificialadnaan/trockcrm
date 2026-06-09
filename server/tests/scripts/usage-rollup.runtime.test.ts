@@ -53,4 +53,18 @@ describe("usage rollup fan-out + gated prune", () => {
     const { rows } = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM office_atlanta.usage_heartbeat WHERE at='2026-06-05T10:00:00Z'`);
     expect(rows[0].n).toBe(1); // un-rolled day survived
   });
+
+  it("rolls up a user whose only signal that day is a heartbeat (no session started, no writes)", async () => {
+    const REP2 = U("0002");
+    // Session started the PRIOR day (cross-midnight) — not started on 2026-06-10
+    await db.exec(`INSERT INTO office_dallas.usage_session (id, user_id, started_at) VALUES ('${U("0bb1")}', '${REP2}', '2026-06-09T23:58:00Z');`);
+    // Heartbeat on 2026-06-10 in office_dallas; no session started that day, no audit/activity/etc.
+    await db.exec(`INSERT INTO office_dallas.usage_heartbeat (session_id, user_id, at) VALUES ('${U("0bb1")}', '${REP2}', '2026-06-10T14:00:30Z');`);
+    await rollupOfficeDay(client(), "office_dallas", "2026-06-10");
+    const { rows } = await db.query<{ n: number; active: number }>(
+      `SELECT count(*)::int AS n, COALESCE(max(active_seconds),0)::int AS active FROM office_dallas.usage_daily WHERE user_id='${REP2}' AND date='2026-06-10'`,
+    );
+    expect(rows[0].n).toBe(1);          // user was discovered and rolled up
+    expect(rows[0].active).toBeGreaterThan(0); // heartbeat produced active time
+  });
 });

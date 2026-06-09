@@ -16,6 +16,8 @@ export async function rollupOfficeDay(client: QueryClient, schema: string, date:
         UNION SELECT changed_by FROM ${schema}.deal_stage_history WHERE created_at >= $1::timestamptz AND created_at < $1::timestamptz + interval '1 day'
         UNION SELECT responsible_user_id FROM ${schema}.activities WHERE COALESCE(occurred_at, created_at) >= $1::timestamptz AND COALESCE(occurred_at, created_at) < $1::timestamptz + interval '1 day'
         UNION SELECT uploaded_by FROM ${schema}.files WHERE created_at >= $1::timestamptz AND created_at < $1::timestamptz + interval '1 day'
+        UNION SELECT user_id FROM ${schema}.usage_heartbeat WHERE at >= $1::timestamptz AND at < $1::timestamptz + interval '1 day'
+        UNION SELECT user_id FROM ${schema}.usage_view_event WHERE at >= $1::timestamptz AND at < $1::timestamptz + interval '1 day'
       ) u WHERE user_id IS NOT NULL`,
     [`${date}T00:00:00Z`],
   );
@@ -71,11 +73,18 @@ export async function main(): Promise<void> {
     );
     const today = new Date().toISOString().slice(0, 10);
     const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    let anyFailed = false;
     for (const { schema_name } of schemas) {
       if (!SCHEMA_RE.test(schema_name)) continue;
-      await rollupOfficeDay(client, schema_name, yesterday); // most recent completed day
-      await pruneRolledUpRaw(client, schema_name, today);
+      try {
+        await rollupOfficeDay(client, schema_name, yesterday);
+        await pruneRolledUpRaw(client, schema_name, today);
+      } catch (err) {
+        anyFailed = true;
+        console.error(`[usage-rollup] failed for ${schema_name}:`, err);
+      }
     }
+    if (anyFailed) throw new Error("usage-rollup: one or more offices failed (see logs above)");
   } finally {
     await pgClient.end();
   }
