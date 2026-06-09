@@ -220,6 +220,21 @@ export async function getObjectBuffer(
 }
 
 /**
+ * Streams an R2 object without buffering it into memory. Returns the raw body stream plus metadata.
+ * Use this (over getObjectBuffer) when proxying potentially large objects to an HTTP response.
+ */
+export async function getObjectStream(
+  r2Key: string
+): Promise<{ stream: AsyncIterable<Uint8Array>; contentType?: string; contentLength?: number }> {
+  const client = getClient();
+  const bucket = getBucket();
+  const resp = await client.send(new GetObjectCommand({ Bucket: bucket, Key: r2Key }));
+  const stream = resp.Body as AsyncIterable<Uint8Array> | undefined;
+  if (!stream) throw new Error(`R2 object ${r2Key} has no body`);
+  return { stream, contentType: resp.ContentType, contentLength: resp.ContentLength };
+}
+
+/**
  * Delete an object from R2 (soft-delete in DB, hard-delete in R2).
  * Used for cleanup of orphaned uploads or permanent deletions.
  */

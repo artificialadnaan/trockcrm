@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   generatePublicToken: vi.fn(),
   getPublicPhotoViewer: vi.fn(),
   getPublicPhotoDownload: vi.fn(),
+  getPublicPhotoAsset: vi.fn(),
   listTokensForDeal: vi.fn(),
   revokeToken: vi.fn(),
   getDealById: vi.fn(),
@@ -49,11 +50,19 @@ vi.mock("./service.js", () => ({
   generatePublicToken: mocks.generatePublicToken,
   getPublicPhotoViewer: mocks.getPublicPhotoViewer,
   getPublicPhotoDownload: mocks.getPublicPhotoDownload,
+  getPublicPhotoAsset: mocks.getPublicPhotoAsset,
   listTokensForDeal: mocks.listTokensForDeal,
   revokeToken: mocks.revokeToken,
 }));
 
 import { adminPhotoTokenRoutes, publicPhotoViewerRoutes } from "./routes.js";
+
+// Collect a binary (image) response body into a Buffer for byte-level assertions.
+function binaryParser(res: any, cb: (err: Error | null, body: Buffer) => void) {
+  const chunks: Buffer[] = [];
+  res.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+  res.on("end", () => cb(null, Buffer.concat(chunks)));
+}
 
 function createApp() {
   const app = express();
@@ -98,7 +107,10 @@ describe("public photo token routes", () => {
     expect(response.body.deal).toEqual({ id: "deal-1", name: "Public Deal", dealNumber: "TR-1", propertyAddress: "100 Main St" });
     expect(JSON.stringify(response.body)).not.toContain("contractAmount");
     expect(JSON.stringify(response.body)).not.toContain("leadSource");
-    expect(mocks.getPublicPhotoViewer).toHaveBeenCalledWith("raw-token");
+    expect(mocks.getPublicPhotoViewer).toHaveBeenCalledWith(
+      "raw-token",
+      expect.objectContaining({ assetBaseUrl: expect.stringContaining("/api/public/photo-viewer") }),
+    );
   });
 
   it.each(["invalid", "expired", "revoked"])("returns 404 for %s public token", async () => {
@@ -124,6 +136,64 @@ describe("public photo token routes", () => {
     mocks.getPublicPhotoDownload.mockRejectedValueOnce(new AppError(404, "Photo not found"));
 
     const response = await request(createApp()).get("/api/public/photo-viewer/raw-token/photos/other-photo/download");
+
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: { message: "Photo not found" } });
+  });
+
+  it("streams R2 JPEG bytes inline, EXIF-stripped across chunk boundaries, with the right headers", async () => {
+    const seg = (m: number, p: Buffer) => { const l = Buffer.alloc(2); l.writeUInt16BE(p.length + 2, 0); return Buffer.concat([Buffer.from([0xff, m]), l, p]); };
+    const jpeg = Buffer.concat([
+      Buffer.from([0xff, 0xd8]),
+      seg(0xe1, Buffer.concat([Buffer.from("Exif\0\0", "latin1"), Buffer.from("GPSLatitude=32.7767", "latin1")])),
+      Buffer.from([0xff, 0xda, 0x00, 0x03, 0x01, 0x12, 0x34, 0x56, 0xff, 0xd9]),
+    ]);
+    // Yield in tiny chunks (split mid-segment) to exercise the streaming header buffer.
+    const stream = (async function* () { yield jpeg.subarray(0, 6); yield jpeg.subarray(6, 14); yield jpeg.subarray(14); })();
+    mocks.getPublicPhotoAsset.mockResolvedValueOnce({ kind: "jpeg-stream", stream, contentType: "image/jpeg", filename: "Roof.jpg" });
+
+    const response = await request(createApp())
+      .get("/api/public/photo-viewer/raw-token/photos/photo-1/image")
+      .buffer()
+      .parse(binaryParser);
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toContain("image/jpeg");
+    expect(response.headers["content-disposition"]).toContain("inline");
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(response.body.toString("latin1")).not.toContain("Exif");
+    expect(response.body.toString("latin1")).not.toContain("GPSLatitude");
+    expect(response.body.includes(Buffer.from([0x12, 0x34, 0x56]))).toBe(true); // image data preserved
+    expect(mocks.getPublicPhotoAsset).toHaveBeenCalledWith("raw-token", "photo-1");
+  });
+
+  it("forces an attachment download when ?download=1 is set", async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xda, 0x00, 0x02, 0xff, 0xd9]);
+    const stream = (async function* () { yield jpeg; })();
+    mocks.getPublicPhotoAsset.mockResolvedValueOnce({ kind: "jpeg-stream", stream, contentType: "image/jpeg", filename: "Roof.jpg" });
+
+    const response = await request(createApp())
+      .get("/api/public/photo-viewer/raw-token/photos/photo-1/image?download=1")
+      .buffer()
+      .parse(binaryParser);
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-disposition"]).toContain("attachment");
+  });
+
+  it("redirects external (CompanyCam) photos to their CDN URL", async () => {
+    mocks.getPublicPhotoAsset.mockResolvedValueOnce({ kind: "external", url: "https://img.companycam.com/full.jpg" });
+
+    const response = await request(createApp()).get("/api/public/photo-viewer/raw-token/photos/photo-1/image").redirects(0);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toBe("https://img.companycam.com/full.jpg");
+  });
+
+  it("returns 404 when the proxied photo is not on the token deal", async () => {
+    mocks.getPublicPhotoAsset.mockRejectedValueOnce(new AppError(404, "Photo not found"));
+
+    const response = await request(createApp()).get("/api/public/photo-viewer/raw-token/photos/other/image");
 
     expect(response.status).toBe(404);
     expect(response.body).toEqual({ error: { message: "Photo not found" } });

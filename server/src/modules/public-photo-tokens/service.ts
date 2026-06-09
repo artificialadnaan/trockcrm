@@ -5,9 +5,11 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { db, pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { buildFileDownloadUrlFromRecord, getFileDownloadUrl, getDealPhotoTimeline } from "../files/service.js";
+import { getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
+import { getObjectStream } from "../../lib/r2-client.js";
+import { isStrippableJpeg } from "./image-metadata.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -141,6 +143,27 @@ export async function verifyAndConsumeToken(rawToken: string): Promise<{
   };
 }
 
+// Read-only token validation (no access_count increment) — used for per-photo asset requests, where
+// a gallery loads many images and counting each as an "access" would be noise.
+export async function resolvePublicPhotoToken(rawToken: string): Promise<{
+  tokenId: string;
+  dealId: string;
+  tenantId: string;
+}> {
+  const tokenHash = hashPublicPhotoToken(rawToken);
+  const result = await db.execute(sql`
+    SELECT id, deal_id, tenant_id
+    FROM public.public_photo_tokens
+    WHERE token = ${tokenHash}
+      AND revoked_at IS NULL
+      AND (expires_at IS NULL OR expires_at > now())
+    LIMIT 1
+  `);
+  const row = ((result as any).rows ?? result)[0];
+  if (!row) throw new AppError(404, "Photo link not found");
+  return { tokenId: row.id, dealId: row.deal_id, tenantId: row.tenant_id };
+}
+
 export async function revokeToken(tokenId: string, userId: string, tenantId?: string): Promise<void> {
   const result = await db.execute(sql`
     UPDATE public.public_photo_tokens
@@ -239,30 +262,49 @@ function publicPhotoShape(photo: any, imageUrl: string | null) {
     uploadedBy: photo.uploadedBy,
     uploaderName: photo.uploaderName,
     uploaderAvatarUrl: photo.uploaderAvatarUrl ?? null,
-    latitude: photo.latitude ?? null,
-    longitude: photo.longitude ?? null,
-    address: photo.address ?? null,
-    addressSource: photo.addressSource ?? null,
-    geocodedAt: normalizeDate(photo.geocodedAt),
+    // Per-photo GPS coordinates and geocoded address are deliberately omitted: this surface is
+    // public (anyone with the link) and must expose photos only, not job-site location granularity.
     procoreSyncStatus: photo.procoreSyncStatus ?? null,
     imageUrl,
   };
 }
 
-async function publicPhotoImageUrl(photo: any): Promise<string | null> {
+/**
+ * Builds the token-scoped public asset URL that streams a photo through the API instead of handing
+ * out a presigned R2 URL. Presigned R2 URLs embed the object key (`.../deals/{dealNumber}/...`),
+ * which would leak the deal number this public surface deliberately omits. The proxy hides the key
+ * and strips EXIF on the way out.
+ */
+function publicPhotoAssetUrl(assetBaseUrl: string, rawToken: string, photoId: string, download = false): string {
+  const base = assetBaseUrl.replace(/\/+$/, "");
+  const url = `${base}/${encodeURIComponent(rawToken)}/photos/${encodeURIComponent(photoId)}/image`;
+  return download ? `${url}?download=1` : url;
+}
+
+function publicPhotoImageUrl(photo: any, assetBaseUrl: string | undefined, rawToken: string): string | null {
   if (!isPublicPhotoImagePreviewable(photo)) return null;
-  if (photo.r2Key) return (await buildFileDownloadUrlFromRecord(photo)).url;
+  // R2-backed photos are streamed through the API proxy (key hidden, EXIF stripped) — but ONLY for
+  // JPEG, the one format we can strip. Non-JPEG R2 originals (HEIC/PNG/WebP/GIF) could carry
+  // un-strippable GPS, so they are NOT exposed on the public surface. External (CompanyCam CDN) URLs
+  // don't carry the deal number and are served directly.
+  if (photo.r2Key) {
+    if (!isStrippableJpeg(photo.mimeType, photo.fileExtension)) return null;
+    return assetBaseUrl ? publicPhotoAssetUrl(assetBaseUrl, rawToken, photo.id) : null;
+  }
   return photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
 }
 
-export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoTimelineFilters = {}) {
+export async function getPublicPhotoViewer(
+  rawToken: string,
+  options: { assetBaseUrl?: string; filters?: DealPhotoTimelineFilters } = {}
+) {
+  const filters = options.filters ?? {};
   const token = await verifyAndConsumeToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const dealResult = await tenantDb.execute(sql`
       SELECT
         id,
         name,
-        deal_number,
         NULLIF(CONCAT_WS(', ', NULLIF(property_address, ''), NULLIF(property_city, ''), NULLIF(property_state, ''), NULLIF(property_zip, '')), '') AS property_address
       FROM deals
       WHERE id = ${token.dealId}::uuid
@@ -275,16 +317,15 @@ export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoT
       ...filters,
       includeDeleted: false,
     });
-    const photos = await Promise.all(timeline.photos.map(async (photo) =>
-      publicPhotoShape(photo, await publicPhotoImageUrl(photo))
-    ));
+    const photos = timeline.photos.map((photo) =>
+      publicPhotoShape(photo, publicPhotoImageUrl(photo, options.assetBaseUrl, rawToken))
+    );
 
     return {
       tokenId: token.tokenId,
       deal: {
         id: deal.id,
         name: deal.name,
-        dealNumber: deal.deal_number,
         propertyAddress: deal.property_address ?? null,
       },
       photos,
@@ -295,11 +336,12 @@ export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoT
 export async function getPublicPhotoDownload(rawToken: string, photoId: string, context: {
   ipAddress?: string | null;
   userAgent?: string | null;
+  assetBaseUrl?: string;
 }) {
   const token = await verifyAndConsumeToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const photoResult = await tenantDb.execute(sql`
-      SELECT id, deal_id, category, display_name, file_extension, external_url
+      SELECT id, deal_id, category, display_name, file_extension, external_url, r2_key, mime_type
       FROM files
       WHERE id = ${photoId}::uuid
         AND deal_id = ${token.dealId}::uuid
@@ -310,9 +352,19 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
     const photo = ((photoResult as any).rows ?? photoResult)[0];
     if (!photo) throw new AppError(404, "Photo not found");
 
-    const result = photo.external_url
-      ? { url: photo.external_url, filename: `${photo.display_name}${photo.file_extension ?? ""}` }
-      : await getFileDownloadUrl(tenantDb, photo.id);
+    const filename = `${photo.display_name}${photo.file_extension ?? ""}`;
+    // R2-backed JPEGs download through the proxy (key hidden, EXIF stripped) rather than via a
+    // presigned URL that would expose the deal-number-bearing object key. Non-JPEG R2 originals are
+    // not served publicly (un-strippable metadata) — fall back to an external URL or 404. External
+    // (CompanyCam) URLs don't carry the deal number and are returned directly.
+    let result: { url: string; filename: string };
+    if (photo.r2_key && isStrippableJpeg(photo.mime_type, photo.file_extension) && context.assetBaseUrl) {
+      result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename };
+    } else if (photo.external_url) {
+      result = { url: photo.external_url, filename };
+    } else {
+      throw new AppError(404, "Photo not found");
+    }
 
     await logPhotoEvent(tenantDb, {
       photoId: photo.id,
@@ -328,4 +380,48 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
 
     return result;
   });
+}
+
+export type PublicPhotoAsset =
+  | { kind: "external"; url: string }
+  | { kind: "jpeg-stream"; stream: AsyncIterable<Uint8Array>; contentType: string; filename: string };
+
+/**
+ * Resolves a single photo for the public viewer proxy. R2-backed JPEGs return a raw byte stream the
+ * route strips + streams (key never exposed, EXIF removed); external (CompanyCam) photos return a
+ * redirect target. NON-JPEG R2 originals (HEIC/PNG/WebP/GIF) are 404'd — we can't strip their
+ * metadata, so they are not served on the public surface. Token validated read-only (no access_count
+ * increment); the photo row is read in the tenant transaction, which is released before opening the
+ * R2 stream so a pooled connection is never held across network I/O.
+ */
+export async function getPublicPhotoAsset(rawToken: string, photoId: string): Promise<PublicPhotoAsset> {
+  const token = await resolvePublicPhotoToken(rawToken);
+  const photo = await withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
+    const photoResult = await tenantDb.execute(sql`
+      SELECT id, r2_key, mime_type, display_name, file_extension, external_url
+      FROM files
+      WHERE id = ${photoId}::uuid
+        AND deal_id = ${token.dealId}::uuid
+        AND category = 'photo'
+        AND deleted_at IS NULL
+      LIMIT 1
+    `);
+    return ((photoResult as any).rows ?? photoResult)[0];
+  });
+
+  if (!photo) throw new AppError(404, "Photo not found");
+  if (photo.r2_key) {
+    if (!isStrippableJpeg(photo.mime_type, photo.file_extension)) {
+      throw new AppError(404, "Photo not found"); // non-JPEG R2 original is not served publicly
+    }
+    const object = await getObjectStream(photo.r2_key);
+    return {
+      kind: "jpeg-stream",
+      stream: object.stream,
+      contentType: "image/jpeg",
+      filename: `${photo.display_name ?? "photo"}${photo.file_extension ?? ""}`,
+    };
+  }
+  if (photo.external_url) return { kind: "external", url: photo.external_url };
+  throw new AppError(404, "Photo not found");
 }

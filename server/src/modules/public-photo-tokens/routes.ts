@@ -6,12 +6,50 @@ import { requireCrmUser } from "../../middleware/field-auth.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import {
   generatePublicToken,
+  getPublicPhotoAsset,
   getPublicPhotoDownload,
   getPublicPhotoViewer,
   listTokensForDeal,
   revokeToken,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
+import { findJpegHeaderEnd, stripJpegMetadata } from "./image-metadata.js";
+
+// Cap on how much of a JPEG header we'll buffer while looking for Start-Of-Scan before giving up.
+// Real EXIF (even with a thumbnail) is well under this; anything larger is treated as unprocessable.
+const JPEG_HEADER_CAP_BYTES = 4 * 1024 * 1024;
+
+// Streams a JPEG to the response, stripping leading metadata segments. Only the header region is
+// buffered (bounded by JPEG_HEADER_CAP_BYTES); the entropy-coded body is streamed chunk-by-chunk
+// with backpressure, so large photos never get fully buffered in memory.
+async function pipeStrippedJpeg(source: AsyncIterable<Uint8Array>, res: Response): Promise<void> {
+  const write = (b: Buffer) =>
+    new Promise<void>((resolve, reject) => {
+      res.write(b, (err) => (err ? reject(err) : resolve()));
+    });
+  let buf = Buffer.alloc(0);
+  let headerEmitted = false;
+  for await (const chunk of source) {
+    const c = Buffer.from(chunk);
+    if (headerEmitted) {
+      await write(c);
+      continue;
+    }
+    buf = Buffer.concat([buf, c]);
+    const r = findJpegHeaderEnd(buf);
+    if (r === "incomplete") {
+      if (buf.length > JPEG_HEADER_CAP_BYTES) throw new AppError(422, "Unprocessable image");
+      continue;
+    }
+    if (r === "invalid") throw new AppError(422, "Unprocessable image");
+    await write(stripJpegMetadata(buf.subarray(0, r.sos)));
+    await write(buf.subarray(r.sos));
+    headerEmitted = true;
+    buf = Buffer.alloc(0);
+  }
+  if (!headerEmitted) await write(stripJpegMetadata(buf)); // whole object was header (no SOS seen)
+  res.end();
+}
 
 export const publicPhotoViewerRoutes = Router();
 export const adminPhotoTokenRoutes = Router();
@@ -34,9 +72,20 @@ function publicViewerBaseUrl(req: Request): string {
   return `${proto}://${req.get("host")}`;
 }
 
+// Absolute base URL of THIS API router (where the streaming photo proxy lives), used to build
+// token-scoped asset URLs that never expose the presigned R2 object key.
+function apiPublicPhotoBaseUrl(req: Request): string {
+  const proto = req.get("x-forwarded-proto") ?? req.protocol;
+  return `${proto}://${req.get("host")}/api/public/photo-viewer`;
+}
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[\r\n"\\]/g, "_").replace(/[\u0000-\u001f]/g, "").slice(0, 200) || "photo";
+}
+
 publicPhotoViewerRoutes.get("/:token", async (req, res, next) => {
   try {
-    const result = await getPublicPhotoViewer(req.params.token);
+    const result = await getPublicPhotoViewer(req.params.token, { assetBaseUrl: apiPublicPhotoBaseUrl(req) });
     res.json(result);
   } catch (err) {
     if (err instanceof AppError && err.statusCode === 404) {
@@ -49,11 +98,47 @@ publicPhotoViewerRoutes.get("/:token", async (req, res, next) => {
 
 publicPhotoViewerRoutes.get("/:token/photos/:photoId/download", async (req, res, next) => {
   try {
-    const result = await getPublicPhotoDownload(req.params.token, req.params.photoId, requestContext(req));
+    const result = await getPublicPhotoDownload(req.params.token, req.params.photoId, {
+      ...requestContext(req),
+      assetBaseUrl: apiPublicPhotoBaseUrl(req),
+    });
     res.json(result);
   } catch (err) {
     if (err instanceof AppError && err.statusCode === 404) {
       res.status(404).json({ error: { message: "Photo not found" } });
+      return;
+    }
+    next(err);
+  }
+});
+
+// Streams a single photo through the API: hides the presigned R2 key (which embeds the deal number)
+// and strips EXIF/GPS from JPEGs. ?download=1 forces an attachment download.
+publicPhotoViewerRoutes.get("/:token/photos/:photoId/image", async (req, res, next) => {
+  try {
+    const asset = await getPublicPhotoAsset(req.params.token, req.params.photoId);
+    if (asset.kind === "external") {
+      res.redirect(302, asset.url);
+      return;
+    }
+    const disposition = req.query.download === "1" ? "attachment" : "inline";
+    res.setHeader("Content-Type", asset.contentType);
+    res.setHeader("Content-Disposition", `${disposition}; filename="${sanitizeFilename(asset.filename)}"`);
+    res.setHeader("Cache-Control", "private, max-age=300");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    await pipeStrippedJpeg(asset.stream, res);
+  } catch (err) {
+    // If we've already started streaming bytes, we can't change the status — just abort the response.
+    if (res.headersSent) {
+      res.destroy(err instanceof Error ? err : undefined);
+      return;
+    }
+    if (err instanceof AppError && err.statusCode === 404) {
+      res.status(404).json({ error: { message: "Photo not found" } });
+      return;
+    }
+    if (err instanceof AppError && err.statusCode === 422) {
+      res.status(422).json({ error: { message: "Unprocessable image" } });
       return;
     }
     next(err);

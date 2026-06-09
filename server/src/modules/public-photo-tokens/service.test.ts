@@ -9,6 +9,9 @@ const getDealPhotoTimelineMock = vi.hoisted(() => vi.fn());
 const buildFileDownloadUrlFromRecordMock = vi.hoisted(() => vi.fn());
 const getFileDownloadUrlMock = vi.hoisted(() => vi.fn());
 const logPhotoEventMock = vi.hoisted(() => vi.fn());
+const getObjectStreamMock = vi.hoisted(() => vi.fn());
+
+const ASSET_BASE = "https://api.test/api/public/photo-viewer";
 
 vi.mock("../../db.js", () => ({
   db: { execute: executeMock },
@@ -29,6 +32,10 @@ vi.mock("../files/audit-log-service.js", () => ({
   logPhotoEvent: logPhotoEventMock,
 }));
 
+vi.mock("../../lib/r2-client.js", () => ({
+  getObjectStream: getObjectStreamMock,
+}));
+
 describe("public photo token service", () => {
   beforeEach(() => {
     executeMock.mockReset();
@@ -40,6 +47,7 @@ describe("public photo token service", () => {
     buildFileDownloadUrlFromRecordMock.mockReset();
     getFileDownloadUrlMock.mockReset();
     logPhotoEventMock.mockReset();
+    getObjectStreamMock.mockReset();
   });
 
   it("hashes public tokens before persistence and returns the raw token only once", async () => {
@@ -200,12 +208,25 @@ describe("public photo token service", () => {
     });
     buildFileDownloadUrlFromRecordMock.mockResolvedValue({ url: "https://r2.test/photo.jpg" });
 
-    const result = await getPublicPhotoViewer("raw-token");
+    const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
-    expect(result.deal).toEqual({ id: "deal-1", name: "Public Deal", dealNumber: "TR-1", propertyAddress: "100 Main St, Dallas, TX" });
+    expect(result.deal).toEqual({ id: "deal-1", name: "Public Deal", propertyAddress: "100 Main St, Dallas, TX" });
+    expect(result.deal).not.toHaveProperty("dealNumber");
     expect(result).not.toHaveProperty("contractAmount");
-    expect(result.photos[0]).toMatchObject({ id: "photo-1", imageUrl: "https://r2.test/photo.jpg", procoreSyncStatus: "pending" });
-    expect(buildFileDownloadUrlFromRecordMock).toHaveBeenCalledWith(expect.objectContaining({ id: "photo-1" }));
+    // R2-backed photos are served through the token proxy — never a presigned key URL (which embeds
+    // the deal number). The imageUrl must contain neither the deal number nor an R2 host.
+    expect(result.photos[0]).toMatchObject({
+      id: "photo-1",
+      imageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image`,
+      procoreSyncStatus: "pending",
+    });
+    expect(result.photos[0].imageUrl).not.toContain("TR-1");
+    expect(result.photos[0].imageUrl).not.toContain("r2.test");
+    // Public viewer must not leak per-photo location granularity.
+    for (const leaked of ["latitude", "longitude", "address", "addressSource", "geocodedAt"]) {
+      expect(result.photos[0]).not.toHaveProperty(leaked);
+    }
+    expect(buildFileDownloadUrlFromRecordMock).not.toHaveBeenCalled();
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
     expect(tenantQueryMock).toHaveBeenCalledWith("COMMIT");
     expect(releaseMock).toHaveBeenCalled();
@@ -253,7 +274,7 @@ describe("public photo token service", () => {
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
   });
 
-  it("uses signed R2 URLs for public CompanyCam image records instead of external URLs", async () => {
+  it("serves R2-backed CompanyCam image records through the proxy instead of external URLs", async () => {
     const { getPublicPhotoViewer } = await import("./service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
@@ -288,16 +309,15 @@ describe("public photo token service", () => {
         r2Key: "office_dallas/deals/TR-1/photos/companycam_123.jpg",
       }],
     });
-    buildFileDownloadUrlFromRecordMock.mockResolvedValue({ url: "https://r2.test/companycam_123.jpg" });
+    const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
-    const result = await getPublicPhotoViewer("raw-token");
-
-    expect(result.photos[0]).toMatchObject({ id: "photo-1", imageUrl: "https://r2.test/companycam_123.jpg" });
-    expect(buildFileDownloadUrlFromRecordMock).toHaveBeenCalledWith(expect.objectContaining({ id: "photo-1" }));
+    expect(result.photos[0]).toMatchObject({ id: "photo-1", imageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image` });
+    expect(result.photos[0].imageUrl).not.toContain("r2.test");
+    expect(buildFileDownloadUrlFromRecordMock).not.toHaveBeenCalled();
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
   });
 
-  it("uses storage key extensions before renamed display names for public image URLs", async () => {
+  it("does not serve non-JPEG R2 originals (HEIC) publicly — imageUrl is null", async () => {
     const { getPublicPhotoViewer } = await import("./service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
@@ -308,13 +328,13 @@ describe("public photo token service", () => {
       .mockResolvedValueOnce({ rows: [] });
     getDealPhotoTimelineMock.mockResolvedValue({
       photos: [{
-        id: "photo-renamed",
+        id: "photo-heic",
         photoCategory: null,
         subcategory: null,
-        displayName: "plan.pdf",
-        mimeType: null,
+        displayName: "IMG_0421.heic",
+        mimeType: "image/heic",
         fileSizeBytes: 10,
-        fileExtension: null,
+        fileExtension: ".heic",
         description: null,
         takenAt: null,
         createdAt: "2026-05-01T00:01:00.000Z",
@@ -329,15 +349,14 @@ describe("public photo token service", () => {
         procoreSyncStatus: null,
         externalThumbnailUrl: null,
         externalUrl: null,
-        r2Key: "office_dallas/deals/TR-1/photos/companycam_renamed.jpg",
+        r2Key: "office_dallas/deals/TR-1/photos/companycam_renamed.heic",
       }],
     });
-    buildFileDownloadUrlFromRecordMock.mockResolvedValue({ url: "https://r2.test/companycam_renamed.jpg" });
+    const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
-    const result = await getPublicPhotoViewer("raw-token");
-
-    expect(result.photos[0]).toMatchObject({ id: "photo-renamed", imageUrl: "https://r2.test/companycam_renamed.jpg" });
-    expect(buildFileDownloadUrlFromRecordMock).toHaveBeenCalledWith(expect.objectContaining({ id: "photo-renamed" }));
+    // HEIC can carry un-strippable GPS, so a non-JPEG R2 original is not exposed on the public viewer.
+    expect(result.photos[0]).toMatchObject({ id: "photo-heic", imageUrl: null });
+    expect(buildFileDownloadUrlFromRecordMock).not.toHaveBeenCalled();
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
   });
 
@@ -433,20 +452,21 @@ describe("public photo token service", () => {
     await expect(getPublicPhotoViewer("raw-token")).rejects.toMatchObject({ statusCode: 404, message: "Photo link not found" });
   });
 
-  it("downloads only photos on the token deal and writes public audit metadata", async () => {
+  it("downloads R2 photos through the proxy (no presigned key URL) and writes public audit metadata", async () => {
     const { getPublicPhotoDownload } = await import("./service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ id: "photo-1", deal_id: "deal-1", category: "photo", display_name: "Roof", file_extension: ".jpg", external_url: null }] })
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", deal_id: "deal-1", category: "photo", display_name: "Roof", file_extension: ".jpg", external_url: null, r2_key: "office_dallas/deals/TR-1/photos/roof.jpg" }] })
       .mockResolvedValueOnce({ rows: [] });
-    getFileDownloadUrlMock.mockResolvedValue({ url: "https://r2.test/photo.jpg", filename: "Roof.jpg" });
 
-    const result = await getPublicPhotoDownload("raw-token", "photo-1", { ipAddress: "127.0.0.1", userAgent: "vitest" });
+    const result = await getPublicPhotoDownload("raw-token", "photo-1", { ipAddress: "127.0.0.1", userAgent: "vitest", assetBaseUrl: ASSET_BASE });
 
-    expect(result).toEqual({ url: "https://r2.test/photo.jpg", filename: "Roof.jpg" });
+    expect(result).toEqual({ url: `${ASSET_BASE}/raw-token/photos/photo-1/image?download=1`, filename: "Roof.jpg" });
+    expect(result.url).not.toContain("TR-1");
+    expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
     expect(logPhotoEventMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       photoId: "photo-1",
       eventType: "downloaded",
@@ -466,5 +486,60 @@ describe("public photo token service", () => {
       .mockResolvedValueOnce({ rows: [] });
 
     await expect(getPublicPhotoDownload("raw-token", "other-photo", {})).rejects.toMatchObject({ statusCode: 404, message: "Photo not found" });
+  });
+
+  it("returns a JPEG byte stream (no presigned key) for R2 photos and validates the token read-only", async () => {
+    const { getPublicPhotoAsset } = await import("./service.js");
+    const fakeStream = (async function* () { yield Buffer.from([0xff, 0xd8, 0xff, 0xd9]); })();
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", r2_key: "office_dallas/deals/TR-1/photos/roof.jpg", mime_type: "image/jpeg", display_name: "Roof", file_extension: ".jpg", external_url: null }] })
+      .mockResolvedValueOnce({ rows: [] });
+    getObjectStreamMock.mockResolvedValue({ stream: fakeStream, contentType: "image/jpeg" });
+
+    const asset = await getPublicPhotoAsset("raw-token", "photo-1");
+
+    expect(asset.kind).toBe("jpeg-stream");
+    if (asset.kind === "jpeg-stream") {
+      expect(asset.contentType).toBe("image/jpeg");
+      expect(asset.filename).toBe("Roof.jpg");
+      expect(asset.stream).toBe(fakeStream);
+    }
+    expect(getObjectStreamMock).toHaveBeenCalledWith("office_dallas/deals/TR-1/photos/roof.jpg");
+    // Read-only: the asset path must NOT increment access_count (it validates via SELECT).
+    expect(String(executeMock.mock.calls[0][0])).not.toContain("access_count = access_count + 1");
+  });
+
+  it("404s non-JPEG R2 originals (HEIC) — un-strippable formats are not served publicly", async () => {
+    const { getPublicPhotoAsset } = await import("./service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", r2_key: "office_dallas/deals/TR-1/photos/img.heic", mime_type: "image/heic", display_name: "IMG", file_extension: ".heic", external_url: null }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(getPublicPhotoAsset("raw-token", "photo-1")).rejects.toMatchObject({ statusCode: 404 });
+    expect(getObjectStreamMock).not.toHaveBeenCalled();
+  });
+
+  it("returns an external redirect target for CompanyCam photos without an R2 copy", async () => {
+    const { getPublicPhotoAsset } = await import("./service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", r2_key: null, mime_type: "image/jpeg", display_name: "CC", file_extension: ".jpg", external_url: "https://img.companycam.com/full.jpg" }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const asset = await getPublicPhotoAsset("raw-token", "photo-1");
+
+    expect(asset).toEqual({ kind: "external", url: "https://img.companycam.com/full.jpg" });
+    expect(getObjectStreamMock).not.toHaveBeenCalled();
   });
 });
