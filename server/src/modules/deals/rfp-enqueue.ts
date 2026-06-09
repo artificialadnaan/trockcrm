@@ -81,6 +81,7 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals
  * a reviewer sees on the deal.
  */
 async function loadRfpAttachmentsForDeal(tenantDb: TenantDb, dealId: string) {
+  const scopeCondition = await buildDealFileScopeCondition(tenantDb, dealId);
   const rows = await tenantDb
     .select({
       displayName: files.displayName,
@@ -89,12 +90,7 @@ async function loadRfpAttachmentsForDeal(tenantDb: TenantDb, dealId: string) {
       r2Key: files.r2Key,
     })
     .from(files)
-    .where(
-      and(
-        await buildDealFileScopeCondition(tenantDb, dealId),
-        ...activeLatestFileConditions()
-      )
-    );
+    .where(and(scopeCondition, ...activeLatestFileConditions()));
 
   return buildRfpAttachmentsFromFiles(rows, async ({ r2Key, filename }) =>
     isR2Configured()
