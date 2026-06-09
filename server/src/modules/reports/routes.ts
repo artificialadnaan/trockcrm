@@ -82,7 +82,7 @@ import {
 import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
-import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary } from "../usage/read-service.js";
+import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, readViewEvents } from "../usage/read-service.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -1113,6 +1113,40 @@ router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
 
     await req.commitTransaction!();
     res.json({ data: { grain, dates, summary: buildTeamSummary(leaderboard), leaderboard } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/platform-usage/drilldown?date=YYYY-MM-DD&rep=<uuid>&type=<entity_type>
+// Returns raw view events for a single rep on one day (within the 14-day raw-retention window).
+// Reps are server-scoped to themselves — the ?rep= param is ignored for reps.
+router.get("/platform-usage/drilldown", requireAnyRole, async (req, res, next) => {
+  try {
+    const date = typeof req.query.date === "string" ? req.query.date : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      res.status(400).json({ error: "date must be YYYY-MM-DD" });
+      return;
+    }
+    const type = typeof req.query.type === "string" ? req.query.type : undefined;
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Same server-enforced scoping as the summary: a rep is forced to themselves.
+    const scope = resolveRepScope(
+      { role: req.user!.role, userId: req.user!.id },
+      typeof req.query.rep === "string" ? req.query.rep : undefined,
+    );
+    const repId = scope ? scope[0] : (typeof req.query.rep === "string" ? req.query.rep : req.user!.id);
+
+    if (!isWithinDrilldownWindow(date, today)) {
+      await req.commitTransaction!();
+      res.json({ data: { expired: true, events: [], message: "counts only — drilldown expired" } });
+      return;
+    }
+
+    const events = await readViewEvents(req.tenantClient!, `office_${req.officeSlug!}`, repId, date, type);
+    await req.commitTransaction!();
+    res.json({ data: { expired: false, events } });
   } catch (err) {
     next(err);
   }

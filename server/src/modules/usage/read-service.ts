@@ -2,6 +2,7 @@
 import type { UsageDailyShape } from "./types.js";
 import { computeUsageDaily } from "./aggregate.js";
 import { fetchRawUsageForDay, type QueryClient } from "./raw-fetch.js";
+import { RAW_RETENTION_DAYS } from "./constants.js";
 
 export interface Requester { role: string; userId: string; }
 
@@ -123,4 +124,40 @@ export function buildTeamSummary(rows: { rep: RepRef; usage: UsageDailyShape }[]
     if (usage.activeSeconds > 0) activeReps++;
   }
   return { activeSeconds, actionCount, activeReps, totalReps: rows.length };
+}
+
+/** Returns true when `date` falls within the raw-event retention window (0..RAW_RETENTION_DAYS-1 days old). */
+export function isWithinDrilldownWindow(date: string, today: string): boolean {
+  const ms = new Date(`${today}T00:00:00Z`).getTime() - new Date(`${date}T00:00:00Z`).getTime();
+  const days = Math.floor(ms / 86_400_000);
+  return days >= 0 && days < RAW_RETENTION_DAYS;
+}
+
+export interface ViewEventRow {
+  at: string;
+  entity_type: string;
+  entity_id: string | null;
+  route: string;
+  label_snapshot: string | null;
+}
+
+/** Raw view events for one user+day, optionally filtered by entity_type, ordered chronologically. */
+export async function readViewEvents(
+  client: QueryClient,
+  schema: string,
+  userId: string,
+  date: string,
+  type?: string,
+): Promise<ViewEventRow[]> {
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
+  const params: unknown[] = [userId, `${date}T00:00:00Z`];
+  let typeClause = "";
+  if (type) { params.push(type); typeClause = " AND entity_type = $3"; }
+  const { rows } = await client.query<ViewEventRow>(
+    `SELECT at, entity_type, entity_id, route, label_snapshot FROM ${schema}.usage_view_event
+       WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'${typeClause}
+       ORDER BY at`,
+    params,
+  );
+  return rows;
 }
