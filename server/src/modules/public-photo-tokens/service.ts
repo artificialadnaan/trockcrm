@@ -8,8 +8,8 @@ import { AppError } from "../../middleware/error-handler.js";
 import { getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
-import { getObjectBuffer } from "../../lib/r2-client.js";
-import { stripImageMetadata } from "./image-metadata.js";
+import { getObjectStream } from "../../lib/r2-client.js";
+import { isStrippableJpeg } from "./image-metadata.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -283,9 +283,14 @@ function publicPhotoAssetUrl(assetBaseUrl: string, rawToken: string, photoId: st
 
 function publicPhotoImageUrl(photo: any, assetBaseUrl: string | undefined, rawToken: string): string | null {
   if (!isPublicPhotoImagePreviewable(photo)) return null;
-  // R2-backed photos are streamed through the API proxy (key hidden, EXIF stripped). External
-  // (CompanyCam CDN) URLs don't carry the deal number, so they're served directly.
-  if (photo.r2Key) return assetBaseUrl ? publicPhotoAssetUrl(assetBaseUrl, rawToken, photo.id) : null;
+  // R2-backed photos are streamed through the API proxy (key hidden, EXIF stripped) — but ONLY for
+  // JPEG, the one format we can strip. Non-JPEG R2 originals (HEIC/PNG/WebP/GIF) could carry
+  // un-strippable GPS, so they are NOT exposed on the public surface. External (CompanyCam CDN) URLs
+  // don't carry the deal number and are served directly.
+  if (photo.r2Key) {
+    if (!isStrippableJpeg(photo.mimeType, photo.fileExtension)) return null;
+    return assetBaseUrl ? publicPhotoAssetUrl(assetBaseUrl, rawToken, photo.id) : null;
+  }
   return photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
 }
 
@@ -336,7 +341,7 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
   const token = await verifyAndConsumeToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const photoResult = await tenantDb.execute(sql`
-      SELECT id, deal_id, category, display_name, file_extension, external_url, r2_key
+      SELECT id, deal_id, category, display_name, file_extension, external_url, r2_key, mime_type
       FROM files
       WHERE id = ${photoId}::uuid
         AND deal_id = ${token.dealId}::uuid
@@ -348,12 +353,18 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
     if (!photo) throw new AppError(404, "Photo not found");
 
     const filename = `${photo.display_name}${photo.file_extension ?? ""}`;
-    // R2-backed photos download through the proxy (key hidden, EXIF stripped) rather than via a
-    // presigned URL that would expose the deal-number-bearing object key. External (CompanyCam) URLs
-    // don't carry the deal number, so they're returned directly.
-    const result = photo.r2_key && context.assetBaseUrl
-      ? { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename }
-      : { url: photo.external_url, filename };
+    // R2-backed JPEGs download through the proxy (key hidden, EXIF stripped) rather than via a
+    // presigned URL that would expose the deal-number-bearing object key. Non-JPEG R2 originals are
+    // not served publicly (un-strippable metadata) — fall back to an external URL or 404. External
+    // (CompanyCam) URLs don't carry the deal number and are returned directly.
+    let result: { url: string; filename: string };
+    if (photo.r2_key && isStrippableJpeg(photo.mime_type, photo.file_extension) && context.assetBaseUrl) {
+      result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename };
+    } else if (photo.external_url) {
+      result = { url: photo.external_url, filename };
+    } else {
+      throw new AppError(404, "Photo not found");
+    }
 
     await logPhotoEvent(tenantDb, {
       photoId: photo.id,
@@ -373,19 +384,18 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
 
 export type PublicPhotoAsset =
   | { kind: "external"; url: string }
-  | { kind: "buffer"; buffer: Buffer; contentType: string; filename: string };
+  | { kind: "jpeg-stream"; stream: AsyncIterable<Uint8Array>; contentType: string; filename: string };
 
 /**
- * Streams a single photo for the public viewer. R2-backed photos are fetched server-side and
- * returned as bytes with EXIF stripped (never as a presigned key URL); external photos return a
- * redirect target. Validates the token read-only (no access_count increment) since a gallery loads
- * many images per page view.
+ * Resolves a single photo for the public viewer proxy. R2-backed JPEGs return a raw byte stream the
+ * route strips + streams (key never exposed, EXIF removed); external (CompanyCam) photos return a
+ * redirect target. NON-JPEG R2 originals (HEIC/PNG/WebP/GIF) are 404'd — we can't strip their
+ * metadata, so they are not served on the public surface. Token validated read-only (no access_count
+ * increment); the photo row is read in the tenant transaction, which is released before opening the
+ * R2 stream so a pooled connection is never held across network I/O.
  */
 export async function getPublicPhotoAsset(rawToken: string, photoId: string): Promise<PublicPhotoAsset> {
   const token = await resolvePublicPhotoToken(rawToken);
-  // Resolve the photo row inside the tenant transaction, then release the connection BEFORE the R2
-  // fetch — holding a pooled connection open across external network I/O would exhaust the pool
-  // under gallery fan-out (many concurrent image requests per page view).
   const photo = await withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const photoResult = await tenantDb.execute(sql`
       SELECT id, r2_key, mime_type, display_name, file_extension, external_url
@@ -401,12 +411,14 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
 
   if (!photo) throw new AppError(404, "Photo not found");
   if (photo.r2_key) {
-    const object = await getObjectBuffer(photo.r2_key);
-    const contentType = photo.mime_type || object.contentType || "application/octet-stream";
+    if (!isStrippableJpeg(photo.mime_type, photo.file_extension)) {
+      throw new AppError(404, "Photo not found"); // non-JPEG R2 original is not served publicly
+    }
+    const object = await getObjectStream(photo.r2_key);
     return {
-      kind: "buffer",
-      buffer: stripImageMetadata(object.buffer, contentType),
-      contentType,
+      kind: "jpeg-stream",
+      stream: object.stream,
+      contentType: "image/jpeg",
       filename: `${photo.display_name ?? "photo"}${photo.file_extension ?? ""}`,
     };
   }

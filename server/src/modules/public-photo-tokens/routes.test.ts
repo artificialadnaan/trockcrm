@@ -57,6 +57,13 @@ vi.mock("./service.js", () => ({
 
 import { adminPhotoTokenRoutes, publicPhotoViewerRoutes } from "./routes.js";
 
+// Collect a binary (image) response body into a Buffer for byte-level assertions.
+function binaryParser(res: any, cb: (err: Error | null, body: Buffer) => void) {
+  const chunks: Buffer[] = [];
+  res.on("data", (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+  res.on("end", () => cb(null, Buffer.concat(chunks)));
+}
+
 function createApp() {
   const app = express();
   app.use(express.json());
@@ -134,32 +141,41 @@ describe("public photo token routes", () => {
     expect(response.body).toEqual({ error: { message: "Photo not found" } });
   });
 
-  it("streams R2 photo bytes inline through the proxy with the right content-type", async () => {
-    mocks.getPublicPhotoAsset.mockResolvedValueOnce({
-      kind: "buffer",
-      buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
-      contentType: "image/jpeg",
-      filename: "Roof.jpg",
-    });
+  it("streams R2 JPEG bytes inline, EXIF-stripped across chunk boundaries, with the right headers", async () => {
+    const seg = (m: number, p: Buffer) => { const l = Buffer.alloc(2); l.writeUInt16BE(p.length + 2, 0); return Buffer.concat([Buffer.from([0xff, m]), l, p]); };
+    const jpeg = Buffer.concat([
+      Buffer.from([0xff, 0xd8]),
+      seg(0xe1, Buffer.concat([Buffer.from("Exif\0\0", "latin1"), Buffer.from("GPSLatitude=32.7767", "latin1")])),
+      Buffer.from([0xff, 0xda, 0x00, 0x03, 0x01, 0x12, 0x34, 0x56, 0xff, 0xd9]),
+    ]);
+    // Yield in tiny chunks (split mid-segment) to exercise the streaming header buffer.
+    const stream = (async function* () { yield jpeg.subarray(0, 6); yield jpeg.subarray(6, 14); yield jpeg.subarray(14); })();
+    mocks.getPublicPhotoAsset.mockResolvedValueOnce({ kind: "jpeg-stream", stream, contentType: "image/jpeg", filename: "Roof.jpg" });
 
-    const response = await request(createApp()).get("/api/public/photo-viewer/raw-token/photos/photo-1/image");
+    const response = await request(createApp())
+      .get("/api/public/photo-viewer/raw-token/photos/photo-1/image")
+      .buffer()
+      .parse(binaryParser);
 
     expect(response.status).toBe(200);
     expect(response.headers["content-type"]).toContain("image/jpeg");
     expect(response.headers["content-disposition"]).toContain("inline");
     expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(response.body.toString("latin1")).not.toContain("Exif");
+    expect(response.body.toString("latin1")).not.toContain("GPSLatitude");
+    expect(response.body.includes(Buffer.from([0x12, 0x34, 0x56]))).toBe(true); // image data preserved
     expect(mocks.getPublicPhotoAsset).toHaveBeenCalledWith("raw-token", "photo-1");
   });
 
   it("forces an attachment download when ?download=1 is set", async () => {
-    mocks.getPublicPhotoAsset.mockResolvedValueOnce({
-      kind: "buffer",
-      buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
-      contentType: "image/jpeg",
-      filename: "Roof.jpg",
-    });
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xda, 0x00, 0x02, 0xff, 0xd9]);
+    const stream = (async function* () { yield jpeg; })();
+    mocks.getPublicPhotoAsset.mockResolvedValueOnce({ kind: "jpeg-stream", stream, contentType: "image/jpeg", filename: "Roof.jpg" });
 
-    const response = await request(createApp()).get("/api/public/photo-viewer/raw-token/photos/photo-1/image?download=1");
+    const response = await request(createApp())
+      .get("/api/public/photo-viewer/raw-token/photos/photo-1/image?download=1")
+      .buffer()
+      .parse(binaryParser);
 
     expect(response.status).toBe(200);
     expect(response.headers["content-disposition"]).toContain("attachment");
