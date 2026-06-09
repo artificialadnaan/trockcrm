@@ -3,6 +3,7 @@ import type { UsageDailyShape } from "./types.js";
 import { computeUsageDaily } from "./aggregate.js";
 import { fetchRawUsageForDay, type QueryClient } from "./raw-fetch.js";
 import { RAW_RETENTION_DAYS } from "./constants.js";
+import { businessWeekDates } from "../../lib/period.js";
 
 export interface Requester { role: string; userId: string; }
 
@@ -13,17 +14,9 @@ export function resolveRepScope(req: Requester, requestedRep: string | undefined
   return null; // all reps
 }
 
-/** ISO dates (Mon..Sun) of the week containing `anchor` (YYYY-MM-DD), in UTC. */
+/** The 7 dates (Sun..Sat) of the canonical business week containing `anchor`. Matches period.ts. */
 export function weekDates(anchor: string): string[] {
-  const d = new Date(`${anchor}T00:00:00Z`);
-  const dow = (d.getUTCDay() + 6) % 7; // 0 = Monday
-  const monday = new Date(d);
-  monday.setUTCDate(d.getUTCDate() - dow);
-  return Array.from({ length: 7 }, (_, i) => {
-    const day = new Date(monday);
-    day.setUTCDate(monday.getUTCDate() + i);
-    return day.toISOString().slice(0, 10);
-  });
+  return businessWeekDates(anchor);
 }
 
 /** The live "today" caller: fetch raw rows + fold. */

@@ -15,9 +15,9 @@ describe("resolveRepScope (server-enforced)", () => {
 });
 
 describe("weekDates", () => {
-  it("returns the 7 ISO dates of the week containing the anchor (Mon-Sun)", () => {
+  it("returns the 7 ISO dates of the week containing the anchor (Sun-Sat, canonical business week)", () => {
     expect(weekDates("2026-06-10")).toEqual([
-      "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-13", "2026-06-14",
+      "2026-06-07", "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-13",
     ]);
   });
 });

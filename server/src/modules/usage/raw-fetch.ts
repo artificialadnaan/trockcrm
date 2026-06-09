@@ -1,5 +1,6 @@
 // server/src/modules/usage/raw-fetch.ts
 import type { UsageRawInput } from "./types.js";
+import { BUSINESS_TIMEZONE } from "../../lib/period.js";
 
 /** A minimal pg-like client (works for both the request client and the rollup script client). */
 export interface QueryClient {
@@ -19,23 +20,23 @@ export async function fetchRawUsageForDay(
 ): Promise<UsageRawInput> {
   if (!/^office_[a-z0-9_]+$/.test(schema)) throw new Error(`invalid schema: ${schema}`);
   const s = schema;
-  const dayStart = `${date}T00:00:00Z`;
+  const dayStart = date;
 
   const sessions = (await client.query<{ id: string; impersonator_id: string | null }>(
     `SELECT id, impersonator_id FROM ${s}.usage_session
        WHERE user_id = $1
          AND (
-           -- session started on this day
-           (started_at >= $2::timestamptz AND started_at < $2::timestamptz + interval '1 day')
+           -- session started on this day (business tz)
+           (started_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND started_at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}'))
            -- or session has a heartbeat on this day (handles NULL started_at)
            OR id IN (
              SELECT session_id FROM ${s}.usage_heartbeat
-             WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'
+             WHERE user_id = $1 AND at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
            )
            -- or session has a view_event on this day
            OR id IN (
              SELECT session_id FROM ${s}.usage_view_event
-             WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'
+             WHERE user_id = $1 AND at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
            )
          )`,
     [userId, dayStart],
@@ -43,14 +44,14 @@ export async function fetchRawUsageForDay(
 
   const heartbeats = (await client.query<{ session_id: string; at: string }>(
     `SELECT session_id, at FROM ${s}.usage_heartbeat
-       WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'
+       WHERE user_id = $1 AND at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
        ORDER BY at`,
     [userId, dayStart],
   )).rows;
 
   const viewEvents = (await client.query<{ session_id: string; at: string; entity_type: string }>(
     `SELECT session_id, at, entity_type FROM ${s}.usage_view_event
-       WHERE user_id = $1 AND at >= $2::timestamptz AND at < $2::timestamptz + interval '1 day'`,
+       WHERE user_id = $1 AND at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`,
     [userId, dayStart],
   )).rows;
 
@@ -58,27 +59,27 @@ export async function fetchRawUsageForDay(
     `SELECT action, table_name, created_at, impersonator_id FROM ${s}.audit_log
        WHERE changed_by = $1
          AND table_name NOT IN ('activities', 'files')
-         AND created_at >= $2::timestamptz AND created_at < $2::timestamptz + interval '1 day'`,
+         AND created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND created_at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`,
     [userId, dayStart],
   )).rows;
 
   const stageMoves = (await client.query<{ created_at: string }>(
     `SELECT created_at FROM ${s}.deal_stage_history
-       WHERE changed_by = $1 AND created_at >= $2::timestamptz AND created_at < $2::timestamptz + interval '1 day'`,
+       WHERE changed_by = $1 AND created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND created_at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`,
     [userId, dayStart],
   )).rows;
 
   const activities = (await client.query<{ type: string; at: string }>(
     `SELECT type, COALESCE(occurred_at, created_at) AS at FROM ${s}.activities
        WHERE COALESCE(performed_by_user_id, responsible_user_id) = $1
-         AND COALESCE(occurred_at, created_at) >= $2::timestamptz
-         AND COALESCE(occurred_at, created_at) < $2::timestamptz + interval '1 day'`,
+         AND COALESCE(occurred_at, created_at) >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+         AND COALESCE(occurred_at, created_at) < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`,
     [userId, dayStart],
   )).rows;
 
   const uploads = (await client.query<{ at: string }>(
     `SELECT created_at AS at FROM ${s}.files
-       WHERE uploaded_by = $1 AND created_at >= $2::timestamptz AND created_at < $2::timestamptz + interval '1 day'`,
+       WHERE uploaded_by = $1 AND created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND created_at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`,
     [userId, dayStart],
   )).rows;
 

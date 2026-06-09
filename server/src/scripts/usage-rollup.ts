@@ -3,6 +3,7 @@ import pg from "pg";
 import { fetchRawUsageForDay, type QueryClient } from "../modules/usage/raw-fetch.js";
 import { computeUsageDaily } from "../modules/usage/aggregate.js";
 import { RAW_RETENTION_DAYS } from "../modules/usage/constants.js";
+import { businessToday, shiftBusinessDate, BUSINESS_TIMEZONE } from "../lib/period.js";
 
 const SCHEMA_RE = /^office_[a-z0-9_]+$/;
 
@@ -11,15 +12,15 @@ export async function rollupOfficeDay(client: QueryClient, schema: string, date:
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
   const { rows: users } = await client.query<{ user_id: string }>(
     `SELECT DISTINCT user_id FROM (
-        SELECT user_id FROM ${schema}.usage_session  WHERE started_at >= $1::timestamptz AND started_at < $1::timestamptz + interval '1 day'
-        UNION SELECT changed_by FROM ${schema}.audit_log WHERE created_at >= $1::timestamptz AND created_at < $1::timestamptz + interval '1 day'
-        UNION SELECT changed_by FROM ${schema}.deal_stage_history WHERE created_at >= $1::timestamptz AND created_at < $1::timestamptz + interval '1 day'
-        UNION SELECT COALESCE(performed_by_user_id, responsible_user_id) FROM ${schema}.activities WHERE COALESCE(occurred_at, created_at) >= $1::timestamptz AND COALESCE(occurred_at, created_at) < $1::timestamptz + interval '1 day'
-        UNION SELECT uploaded_by FROM ${schema}.files WHERE created_at >= $1::timestamptz AND created_at < $1::timestamptz + interval '1 day'
-        UNION SELECT user_id FROM ${schema}.usage_heartbeat WHERE at >= $1::timestamptz AND at < $1::timestamptz + interval '1 day'
-        UNION SELECT user_id FROM ${schema}.usage_view_event WHERE at >= $1::timestamptz AND at < $1::timestamptz + interval '1 day'
+        SELECT user_id FROM ${schema}.usage_session  WHERE started_at >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND started_at < (($1::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        UNION SELECT changed_by FROM ${schema}.audit_log WHERE table_name NOT IN ('activities', 'files') AND created_at >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND created_at < (($1::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        UNION SELECT changed_by FROM ${schema}.deal_stage_history WHERE created_at >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND created_at < (($1::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        UNION SELECT COALESCE(performed_by_user_id, responsible_user_id) FROM ${schema}.activities WHERE COALESCE(occurred_at, created_at) >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND COALESCE(occurred_at, created_at) < (($1::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        UNION SELECT uploaded_by FROM ${schema}.files WHERE created_at >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND created_at < (($1::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        UNION SELECT user_id FROM ${schema}.usage_heartbeat WHERE at >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND at < (($1::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        UNION SELECT user_id FROM ${schema}.usage_view_event WHERE at >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}') AND at < (($1::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
       ) u WHERE user_id IS NOT NULL`,
-    [`${date}T00:00:00Z`],
+    [date],
   );
 
   for (const { user_id } of users) {
@@ -71,8 +72,8 @@ export async function main(): Promise<void> {
     const { rows: schemas } = await client.query<{ schema_name: string }>(
       `SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE 'office_%' ORDER BY schema_name`,
     );
-    const today = new Date().toISOString().slice(0, 10);
-    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    const today = businessToday();
+    const yesterday = shiftBusinessDate(today, -1);
     let anyFailed = false;
     for (const { schema_name } of schemas) {
       if (!SCHEMA_RE.test(schema_name)) continue;

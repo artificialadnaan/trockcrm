@@ -60,3 +60,19 @@ export function sundayWeekBucketSql(tsExpr: string): SQL {
     `(date_trunc('week', ((${tsExpr}) AT TIME ZONE '${BUSINESS_TIMEZONE}') + interval '1 day') - interval '1 day')::date`
   );
 }
+
+/** Today's date (YYYY-MM-DD) in the business tz. */
+export function businessToday(now: Date = new Date()): string {
+  return businessDate(now);
+}
+
+/** Calendar arithmetic on a YYYY-MM-DD string (DST-safe, date-only). */
+export function shiftBusinessDate(isoDate: string, days: number): string {
+  return shiftDays(isoDate, days);
+}
+
+/** The 7 dates (Sunday..Saturday) of the canonical business week containing `anchorIso`. */
+export function businessWeekDates(anchorIso: string): string[] {
+  const sunday = shiftDays(anchorIso, -dayOfWeek(anchorIso)); // dayOfWeek: 0 = Sunday
+  return Array.from({ length: 7 }, (_, i) => shiftDays(sunday, i));
+}

@@ -83,6 +83,7 @@ import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, readViewEvents } from "../usage/read-service.js";
+import { businessToday } from "../../lib/period.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -1080,7 +1081,7 @@ router.get("/rep-pack", requireDirector, async (req, res, next) => {
 router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
   try {
     const grain = req.query.grain === "week" ? "week" : "day";
-    const today = new Date().toISOString().slice(0, 10);
+    const today = businessToday();
     const anchor = readOptionalIsoDate(req.query.date, "date") ?? today;
     const dates = grain === "week" ? weekDates(anchor) : [anchor];
 
@@ -1128,7 +1129,7 @@ router.get("/platform-usage/drilldown", requireAnyRole, async (req, res, next) =
       throw new AppError(400, "date is required (YYYY-MM-DD)");
     }
     const type = typeof req.query.type === "string" ? req.query.type : undefined;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = businessToday();
 
     // Same server-enforced scoping as the summary: a rep is forced to themselves.
     const repParam = typeof req.query.rep === "string" ? req.query.rep : undefined;
