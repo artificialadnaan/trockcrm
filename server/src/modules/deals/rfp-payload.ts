@@ -54,7 +54,46 @@ export interface NormalizedRfpRequestBody {
     dueDate: string | null;
     workflowRoute: string | null;
   };
-  attachments: Array<{ name: string; url: string; contentType: string }>;
+  attachments: RfpAttachment[];
+}
+
+export interface RfpAttachment {
+  name: string;
+  url: string;
+  contentType: string;
+}
+
+/**
+ * A CRM `files` row reduced to the fields needed to build an RFP attachment.
+ * The download URL is resolved by an injected resolver so this stays pure and
+ * testable without R2 or a database.
+ */
+export interface RfpAttachmentSourceFile {
+  displayName: string;
+  fileExtension: string | null;
+  mimeType: string;
+  r2Key: string;
+}
+
+/**
+ * Maps active deal files to the SyncHub attachment contract. `resolveUrl`
+ * produces the (presigned) download URL — generation is async and injected so
+ * callers control TTL and so this is unit-testable with a stub resolver.
+ */
+export async function buildRfpAttachmentsFromFiles(
+  files: RfpAttachmentSourceFile[],
+  resolveUrl: (input: { r2Key: string; filename: string }) => Promise<string>
+): Promise<RfpAttachment[]> {
+  return Promise.all(
+    files.map(async (file) => {
+      const filename = file.displayName + (file.fileExtension ?? "");
+      return {
+        name: filename,
+        url: await resolveUrl({ r2Key: file.r2Key, filename }),
+        contentType: file.mimeType,
+      };
+    })
+  );
 }
 
 export interface RfpRequestDeliveryPayload {
@@ -122,6 +161,7 @@ export function resolveSyncHubOverrideApproveUrl(
 export function buildNormalizedRfpRequestBody(input: {
   deal: RfpPayloadSourceDeal;
   sourceEventId: string;
+  attachments?: RfpAttachment[];
 }): NormalizedRfpRequestBody {
   const { deal, sourceEventId } = input;
   return {
@@ -150,7 +190,7 @@ export function buildNormalizedRfpRequestBody(input: {
       dueDate: cleanIso(deal.bidDueDate) ?? cleanIso(deal.bidBoardDueDate),
       workflowRoute: deal.workflowRoute ?? null,
     },
-    attachments: [],
+    attachments: input.attachments ?? [],
   };
 }
 
@@ -158,6 +198,7 @@ export function buildRfpRequestDeliveryPayload(input: {
   deal: RfpPayloadSourceDeal;
   sourceEventId: string;
   syncHubUrl?: string;
+  attachments?: RfpAttachment[];
 }): RfpRequestDeliveryPayload {
   return {
     dealId: input.deal.id,
@@ -165,6 +206,7 @@ export function buildRfpRequestDeliveryPayload(input: {
     body: buildNormalizedRfpRequestBody({
       deal: input.deal,
       sourceEventId: input.sourceEventId,
+      attachments: input.attachments,
     }),
   };
 }
