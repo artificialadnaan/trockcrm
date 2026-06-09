@@ -46,6 +46,7 @@ import { propertyRoutes } from "./modules/properties/routes.js";
 import { adminRoutes } from "./modules/admin/routes.js";
 import { companycamRoutes } from "./modules/companycam/routes.js";
 import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
+import usageRoutes from "./modules/usage/routes.js";
 import { salesReviewRoutes } from "./modules/sales-review/routes.js";
 import { userRoutes } from "./modules/users/routes.js";
 import { fieldRoutes } from "./modules/field/routes.js";
@@ -251,6 +252,7 @@ export function createApp() {
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[18], propertyRoutes],
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[19], companycamRoutes],
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[20], aiCopilotRoutes],
+    ["/usage", usageRoutes],
   ] as const;
 
   for (const [mount, routes] of crmOnlyTenantRoutes) {
