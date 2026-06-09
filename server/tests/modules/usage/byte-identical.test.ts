@@ -72,6 +72,7 @@ beforeAll(async () => {
       id uuid primary key default gen_random_uuid(),
       type text,
       responsible_user_id uuid,
+      performed_by_user_id uuid,
       occurred_at timestamptz,
       created_at timestamptz
     );
@@ -144,6 +145,19 @@ describe("live vs rollup byte-identical invariant (closed-day fixture)", () => {
     // If this fails it is a REAL reconciliation bug, not a test bug.
     // (rolled_up_at is NOT part of UsageDailyShape / readUsageDaily output, so it does not appear here.)
     expect(JSON.stringify(live)).toBe(JSON.stringify(persisted));
+  });
+
+  it("zero-activity reconciliation: live-empty shape is byte-identical to no-row readback", async () => {
+    const REP_EMPTY = U("00ff");           // a user with NO rows in any source
+    const EMPTY_DAY = "2026-06-02";        // a day with no fixture rows
+    const live = await buildLiveDay(client(), "office_dallas", REP_EMPTY, EMPTY_DAY);
+    const persisted = await readUsageDaily(client(), "office_dallas", REP_EMPTY, EMPTY_DAY);
+    expect(JSON.stringify(live)).toBe(JSON.stringify(persisted));
+    // sanity: both are the canonical zeroed shape
+    expect(live.activeSeconds).toBe(0);
+    expect(live.actionCount).toBe(0);
+    expect(live.firstActiveAt).toBeNull();
+    expect(live.breakdown.activities).toEqual({});
   });
 
   it("live shape has the expected field values from the fixture", async () => {

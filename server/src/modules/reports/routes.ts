@@ -1081,16 +1081,16 @@ router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
   try {
     const grain = req.query.grain === "week" ? "week" : "day";
     const today = new Date().toISOString().slice(0, 10);
-    const anchor = typeof req.query.date === "string" ? req.query.date : today;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(anchor)) {
-      res.status(400).json({ error: "date must be YYYY-MM-DD" });
-      return;
-    }
+    const anchor = readOptionalIsoDate(req.query.date, "date") ?? today;
     const dates = grain === "week" ? weekDates(anchor) : [anchor];
 
+    const repParam = typeof req.query.rep === "string" ? req.query.rep : undefined;
+    if (repParam !== undefined && !UUID_PATTERN.test(repParam)) {
+      throw new AppError(400, "rep must be a valid UUID");
+    }
     const scope = resolveRepScope(
       { role: req.user!.role, userId: req.user!.id },
-      typeof req.query.rep === "string" ? req.query.rep : undefined,
+      repParam,
     );
     const schema = `office_${req.officeSlug!}`;
     const client = req.tenantClient!; // pg PoolClient bound to the request transaction
@@ -1123,20 +1123,23 @@ router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
 // Reps are server-scoped to themselves — the ?rep= param is ignored for reps.
 router.get("/platform-usage/drilldown", requireAnyRole, async (req, res, next) => {
   try {
-    const date = typeof req.query.date === "string" ? req.query.date : "";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      res.status(400).json({ error: "date must be YYYY-MM-DD" });
-      return;
+    const date = readOptionalIsoDate(req.query.date, "date");
+    if (!date) {
+      throw new AppError(400, "date is required (YYYY-MM-DD)");
     }
     const type = typeof req.query.type === "string" ? req.query.type : undefined;
     const today = new Date().toISOString().slice(0, 10);
 
     // Same server-enforced scoping as the summary: a rep is forced to themselves.
+    const repParam = typeof req.query.rep === "string" ? req.query.rep : undefined;
+    if (repParam !== undefined && !UUID_PATTERN.test(repParam)) {
+      throw new AppError(400, "rep must be a valid UUID");
+    }
     const scope = resolveRepScope(
       { role: req.user!.role, userId: req.user!.id },
-      typeof req.query.rep === "string" ? req.query.rep : undefined,
+      repParam,
     );
-    const repId = scope ? scope[0] : (typeof req.query.rep === "string" ? req.query.rep : req.user!.id);
+    const repId = scope ? scope[0] : (repParam ?? req.user!.id);
 
     if (!isWithinDrilldownWindow(date, today)) {
       await req.commitTransaction!();

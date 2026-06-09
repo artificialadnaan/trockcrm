@@ -14,7 +14,7 @@ export async function rollupOfficeDay(client: QueryClient, schema: string, date:
         SELECT user_id FROM ${schema}.usage_session  WHERE started_at >= $1::timestamptz AND started_at < $1::timestamptz + interval '1 day'
         UNION SELECT changed_by FROM ${schema}.audit_log WHERE created_at >= $1::timestamptz AND created_at < $1::timestamptz + interval '1 day'
         UNION SELECT changed_by FROM ${schema}.deal_stage_history WHERE created_at >= $1::timestamptz AND created_at < $1::timestamptz + interval '1 day'
-        UNION SELECT responsible_user_id FROM ${schema}.activities WHERE COALESCE(occurred_at, created_at) >= $1::timestamptz AND COALESCE(occurred_at, created_at) < $1::timestamptz + interval '1 day'
+        UNION SELECT COALESCE(performed_by_user_id, responsible_user_id) FROM ${schema}.activities WHERE COALESCE(occurred_at, created_at) >= $1::timestamptz AND COALESCE(occurred_at, created_at) < $1::timestamptz + interval '1 day'
         UNION SELECT uploaded_by FROM ${schema}.files WHERE created_at >= $1::timestamptz AND created_at < $1::timestamptz + interval '1 day'
         UNION SELECT user_id FROM ${schema}.usage_heartbeat WHERE at >= $1::timestamptz AND at < $1::timestamptz + interval '1 day'
         UNION SELECT user_id FROM ${schema}.usage_view_event WHERE at >= $1::timestamptz AND at < $1::timestamptz + interval '1 day'

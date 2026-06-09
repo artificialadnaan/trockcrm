@@ -18,7 +18,7 @@ beforeAll(async () => {
     CREATE TABLE office_dallas.usage_view_event (id bigserial primary key, user_id uuid, session_id uuid, at timestamptz, entity_type text, entity_id uuid, route text, label_snapshot text);
     CREATE TABLE office_dallas.audit_log (id bigserial primary key, table_name text, action text, changed_by uuid, impersonator_id uuid, created_at timestamptz);
     CREATE TABLE office_dallas.deal_stage_history (id uuid primary key default gen_random_uuid(), deal_id uuid, to_stage_id uuid, changed_by uuid, created_at timestamptz);
-    CREATE TABLE office_dallas.activities (id uuid primary key default gen_random_uuid(), type text, responsible_user_id uuid, occurred_at timestamptz, created_at timestamptz);
+    CREATE TABLE office_dallas.activities (id uuid primary key default gen_random_uuid(), type text, responsible_user_id uuid, performed_by_user_id uuid, occurred_at timestamptz, created_at timestamptz);
     CREATE TABLE office_dallas.files (id uuid primary key default gen_random_uuid(), uploaded_by uuid, created_at timestamptz);
   `);
   const s1 = U("00a1");
@@ -51,5 +51,18 @@ describe("fetchRawUsageForDay", () => {
     const raw = await fetchRawUsageForDay(client(), "office_dallas", REP, "2026-06-02");
     expect(raw.heartbeats).toHaveLength(0);
     expect(raw.auditRows).toHaveLength(0);
+  });
+
+  it("credits the performer (performed_by_user_id), not the assignee (responsible_user_id)", async () => {
+    const REP_ACTOR = U("0010");
+    const REP_ASSIGNEE = U("0011");
+    await db.exec(
+      `INSERT INTO office_dallas.activities (type, responsible_user_id, performed_by_user_id, occurred_at, created_at)
+       VALUES ('call', '${REP_ASSIGNEE}', '${REP_ACTOR}', '2026-06-03T10:00:00Z', '2026-06-03T10:00:00Z')`,
+    );
+    const actorResult = await fetchRawUsageForDay(client(), "office_dallas", REP_ACTOR, "2026-06-03");
+    expect(actorResult.activities).toHaveLength(1);
+    const assigneeResult = await fetchRawUsageForDay(client(), "office_dallas", REP_ASSIGNEE, "2026-06-03");
+    expect(assigneeResult.activities).toHaveLength(0);
   });
 });

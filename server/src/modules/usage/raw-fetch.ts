@@ -68,7 +68,7 @@ export async function fetchRawUsageForDay(
 
   const activities = (await client.query<{ type: string; at: string }>(
     `SELECT type, COALESCE(occurred_at, created_at) AS at FROM ${s}.activities
-       WHERE responsible_user_id = $1
+       WHERE COALESCE(performed_by_user_id, responsible_user_id) = $1
          AND COALESCE(occurred_at, created_at) >= $2::timestamptz
          AND COALESCE(occurred_at, created_at) < $2::timestamptz + interval '1 day'`,
     [userId, dayStart],
