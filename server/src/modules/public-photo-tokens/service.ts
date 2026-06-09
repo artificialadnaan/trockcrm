@@ -5,9 +5,11 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
 import { db, pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { buildFileDownloadUrlFromRecord, getFileDownloadUrl, getDealPhotoTimeline } from "../files/service.js";
+import { getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
+import { getObjectBuffer } from "../../lib/r2-client.js";
+import { stripImageMetadata } from "./image-metadata.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -141,6 +143,27 @@ export async function verifyAndConsumeToken(rawToken: string): Promise<{
   };
 }
 
+// Read-only token validation (no access_count increment) — used for per-photo asset requests, where
+// a gallery loads many images and counting each as an "access" would be noise.
+export async function resolvePublicPhotoToken(rawToken: string): Promise<{
+  tokenId: string;
+  dealId: string;
+  tenantId: string;
+}> {
+  const tokenHash = hashPublicPhotoToken(rawToken);
+  const result = await db.execute(sql`
+    SELECT id, deal_id, tenant_id
+    FROM public.public_photo_tokens
+    WHERE token = ${tokenHash}
+      AND revoked_at IS NULL
+      AND (expires_at IS NULL OR expires_at > now())
+    LIMIT 1
+  `);
+  const row = ((result as any).rows ?? result)[0];
+  if (!row) throw new AppError(404, "Photo link not found");
+  return { tokenId: row.id, dealId: row.deal_id, tenantId: row.tenant_id };
+}
+
 export async function revokeToken(tokenId: string, userId: string, tenantId?: string): Promise<void> {
   const result = await db.execute(sql`
     UPDATE public.public_photo_tokens
@@ -239,30 +262,44 @@ function publicPhotoShape(photo: any, imageUrl: string | null) {
     uploadedBy: photo.uploadedBy,
     uploaderName: photo.uploaderName,
     uploaderAvatarUrl: photo.uploaderAvatarUrl ?? null,
-    latitude: photo.latitude ?? null,
-    longitude: photo.longitude ?? null,
-    address: photo.address ?? null,
-    addressSource: photo.addressSource ?? null,
-    geocodedAt: normalizeDate(photo.geocodedAt),
+    // Per-photo GPS coordinates and geocoded address are deliberately omitted: this surface is
+    // public (anyone with the link) and must expose photos only, not job-site location granularity.
     procoreSyncStatus: photo.procoreSyncStatus ?? null,
     imageUrl,
   };
 }
 
-async function publicPhotoImageUrl(photo: any): Promise<string | null> {
+/**
+ * Builds the token-scoped public asset URL that streams a photo through the API instead of handing
+ * out a presigned R2 URL. Presigned R2 URLs embed the object key (`.../deals/{dealNumber}/...`),
+ * which would leak the deal number this public surface deliberately omits. The proxy hides the key
+ * and strips EXIF on the way out.
+ */
+function publicPhotoAssetUrl(assetBaseUrl: string, rawToken: string, photoId: string, download = false): string {
+  const base = assetBaseUrl.replace(/\/+$/, "");
+  const url = `${base}/${encodeURIComponent(rawToken)}/photos/${encodeURIComponent(photoId)}/image`;
+  return download ? `${url}?download=1` : url;
+}
+
+function publicPhotoImageUrl(photo: any, assetBaseUrl: string | undefined, rawToken: string): string | null {
   if (!isPublicPhotoImagePreviewable(photo)) return null;
-  if (photo.r2Key) return (await buildFileDownloadUrlFromRecord(photo)).url;
+  // R2-backed photos are streamed through the API proxy (key hidden, EXIF stripped). External
+  // (CompanyCam CDN) URLs don't carry the deal number, so they're served directly.
+  if (photo.r2Key) return assetBaseUrl ? publicPhotoAssetUrl(assetBaseUrl, rawToken, photo.id) : null;
   return photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
 }
 
-export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoTimelineFilters = {}) {
+export async function getPublicPhotoViewer(
+  rawToken: string,
+  options: { assetBaseUrl?: string; filters?: DealPhotoTimelineFilters } = {}
+) {
+  const filters = options.filters ?? {};
   const token = await verifyAndConsumeToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const dealResult = await tenantDb.execute(sql`
       SELECT
         id,
         name,
-        deal_number,
         NULLIF(CONCAT_WS(', ', NULLIF(property_address, ''), NULLIF(property_city, ''), NULLIF(property_state, ''), NULLIF(property_zip, '')), '') AS property_address
       FROM deals
       WHERE id = ${token.dealId}::uuid
@@ -275,16 +312,15 @@ export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoT
       ...filters,
       includeDeleted: false,
     });
-    const photos = await Promise.all(timeline.photos.map(async (photo) =>
-      publicPhotoShape(photo, await publicPhotoImageUrl(photo))
-    ));
+    const photos = timeline.photos.map((photo) =>
+      publicPhotoShape(photo, publicPhotoImageUrl(photo, options.assetBaseUrl, rawToken))
+    );
 
     return {
       tokenId: token.tokenId,
       deal: {
         id: deal.id,
         name: deal.name,
-        dealNumber: deal.deal_number,
         propertyAddress: deal.property_address ?? null,
       },
       photos,
@@ -295,11 +331,12 @@ export async function getPublicPhotoViewer(rawToken: string, filters: DealPhotoT
 export async function getPublicPhotoDownload(rawToken: string, photoId: string, context: {
   ipAddress?: string | null;
   userAgent?: string | null;
+  assetBaseUrl?: string;
 }) {
   const token = await verifyAndConsumeToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const photoResult = await tenantDb.execute(sql`
-      SELECT id, deal_id, category, display_name, file_extension, external_url
+      SELECT id, deal_id, category, display_name, file_extension, external_url, r2_key
       FROM files
       WHERE id = ${photoId}::uuid
         AND deal_id = ${token.dealId}::uuid
@@ -310,9 +347,13 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
     const photo = ((photoResult as any).rows ?? photoResult)[0];
     if (!photo) throw new AppError(404, "Photo not found");
 
-    const result = photo.external_url
-      ? { url: photo.external_url, filename: `${photo.display_name}${photo.file_extension ?? ""}` }
-      : await getFileDownloadUrl(tenantDb, photo.id);
+    const filename = `${photo.display_name}${photo.file_extension ?? ""}`;
+    // R2-backed photos download through the proxy (key hidden, EXIF stripped) rather than via a
+    // presigned URL that would expose the deal-number-bearing object key. External (CompanyCam) URLs
+    // don't carry the deal number, so they're returned directly.
+    const result = photo.r2_key && context.assetBaseUrl
+      ? { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename }
+      : { url: photo.external_url, filename };
 
     await logPhotoEvent(tenantDb, {
       photoId: photo.id,
@@ -327,5 +368,45 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
     });
 
     return result;
+  });
+}
+
+export type PublicPhotoAsset =
+  | { kind: "external"; url: string }
+  | { kind: "buffer"; buffer: Buffer; contentType: string; filename: string };
+
+/**
+ * Streams a single photo for the public viewer. R2-backed photos are fetched server-side and
+ * returned as bytes with EXIF stripped (never as a presigned key URL); external photos return a
+ * redirect target. Validates the token read-only (no access_count increment) since a gallery loads
+ * many images per page view.
+ */
+export async function getPublicPhotoAsset(rawToken: string, photoId: string): Promise<PublicPhotoAsset> {
+  const token = await resolvePublicPhotoToken(rawToken);
+  return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
+    const photoResult = await tenantDb.execute(sql`
+      SELECT id, r2_key, mime_type, display_name, file_extension, external_url
+      FROM files
+      WHERE id = ${photoId}::uuid
+        AND deal_id = ${token.dealId}::uuid
+        AND category = 'photo'
+        AND deleted_at IS NULL
+      LIMIT 1
+    `);
+    const photo = ((photoResult as any).rows ?? photoResult)[0];
+    if (!photo) throw new AppError(404, "Photo not found");
+
+    if (photo.r2_key) {
+      const object = await getObjectBuffer(photo.r2_key);
+      const contentType = photo.mime_type || object.contentType || "application/octet-stream";
+      return {
+        kind: "buffer",
+        buffer: stripImageMetadata(object.buffer, contentType),
+        contentType,
+        filename: `${photo.display_name ?? "photo"}${photo.file_extension ?? ""}`,
+      };
+    }
+    if (photo.external_url) return { kind: "external", url: photo.external_url };
+    throw new AppError(404, "Photo not found");
   });
 }

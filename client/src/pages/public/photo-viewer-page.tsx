@@ -17,10 +17,6 @@ interface PublicPhoto {
   takenAt: string | null;
   createdAt: string;
   uploaderName: string;
-  latitude: string | null;
-  longitude: string | null;
-  address: string | null;
-  addressSource: string | null;
   imageUrl: string | null;
 }
 
@@ -28,7 +24,6 @@ interface PublicViewerResponse {
   deal: {
     id: string;
     name: string;
-    dealNumber: string | null;
     propertyAddress: string | null;
   };
   photos: PublicPhoto[];
@@ -193,7 +188,6 @@ export function PublicPhotoViewerPage() {
                 <dl className="space-y-2 text-sm">
                   <div><dt className="text-xs uppercase text-slate-500">Uploaded by</dt><dd>{selectedPhoto.uploaderName}</dd></div>
                   <div><dt className="text-xs uppercase text-slate-500">Taken</dt><dd>{selectedPhoto.takenAt ? new Date(selectedPhoto.takenAt).toLocaleString() : "Not recorded"}</dd></div>
-                  <div><dt className="text-xs uppercase text-slate-500">Address</dt><dd>{selectedPhoto.address ?? "No address recorded"}</dd></div>
                 </dl>
                 <Button className="w-full" onClick={() => downloadPhoto(selectedPhoto.id)}>
                   <Download className="mr-2 h-4 w-4" />
