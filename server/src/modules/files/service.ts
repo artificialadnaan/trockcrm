@@ -249,7 +249,7 @@ async function getDealLineageLeadId(tenantDb: TenantDb, dealId: string): Promise
   return deal?.sourceLeadId ?? null;
 }
 
-async function buildDealFileScopeCondition(tenantDb: TenantDb, dealId: string): Promise<SQL> {
+export async function buildDealFileScopeCondition(tenantDb: TenantDb, dealId: string): Promise<SQL> {
   const sourceLeadId = await getDealLineageLeadId(tenantDb, dealId);
   if (!sourceLeadId) {
     return eq(files.dealId, dealId);
@@ -258,7 +258,7 @@ async function buildDealFileScopeCondition(tenantDb: TenantDb, dealId: string): 
   return or(eq(files.dealId, dealId), eq(files.leadId, sourceLeadId))!;
 }
 
-function activeLatestFileConditions(): SQL[] {
+export function activeLatestFileConditions(): SQL[] {
   return [
     eq(files.isActive, true),
     sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`,

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, files, jobQueue } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -9,6 +9,7 @@ import {
   generateMockDownloadUrl,
   isR2Configured,
 } from "../../lib/r2-client.js";
+import { activeLatestFileConditions, buildDealFileScopeCondition } from "../files/service.js";
 import { buildRfpAttachmentsFromFiles, buildRfpRequestDeliveryPayload, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -73,9 +74,11 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals
 }
 
 /**
- * Loads the deal's active files and maps them to RFP attachments. Mirrors the
- * canonical deal-files query (scoping-service listLinkedScopingAttachments):
- * dealId match + isActive only.
+ * Loads the deal's visible files and maps them to RFP attachments. Uses the
+ * canonical deal-file scope (files/service): includes the source lead's
+ * retained files (buildDealFileScopeCondition) and excludes superseded parent
+ * versions (activeLatestFileConditions), so the RFP attachments match the files
+ * a reviewer sees on the deal.
  */
 async function loadRfpAttachmentsForDeal(tenantDb: TenantDb, dealId: string) {
   const rows = await tenantDb
@@ -86,7 +89,12 @@ async function loadRfpAttachmentsForDeal(tenantDb: TenantDb, dealId: string) {
       r2Key: files.r2Key,
     })
     .from(files)
-    .where(and(eq(files.dealId, dealId), eq(files.isActive, true)));
+    .where(
+      and(
+        await buildDealFileScopeCondition(tenantDb, dealId),
+        ...activeLatestFileConditions()
+      )
+    );
 
   return buildRfpAttachmentsFromFiles(rows, async ({ r2Key, filename }) =>
     isR2Configured()
