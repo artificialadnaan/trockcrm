@@ -76,12 +76,12 @@ export async function resolveReps(client: QueryClient, scope: string[] | null): 
     if (scope.length === 0) return [];
     const placeholders = scope.map((_, i) => `$${i + 1}`).join(",");
     const { rows } = await client.query<{ id: string; display_name: string }>(
-      `SELECT id, display_name FROM public.users WHERE id IN (${placeholders}) AND role = 'rep' AND is_active = true`, scope,
+      `SELECT id, display_name FROM public.users WHERE id IN (${placeholders}) AND role = 'rep' AND is_active = true AND COALESCE(is_test_data, false) = false`, scope,
     );
     return rows.map((r) => ({ id: r.id, displayName: r.display_name }));
   }
   const { rows } = await client.query<{ id: string; display_name: string }>(
-    `SELECT id, display_name FROM public.users WHERE role = 'rep' AND is_active = true ORDER BY display_name`,
+    `SELECT id, display_name FROM public.users WHERE role = 'rep' AND is_active = true AND COALESCE(is_test_data, false) = false ORDER BY display_name`,
   );
   return rows.map((r) => ({ id: r.id, displayName: r.display_name }));
 }
@@ -134,6 +134,18 @@ export function buildTeamSummary(rows: { rep: RepRef; usage: UsageDailyShape }[]
   return { activeSeconds, actionCount, activeReps, totalReps: rows.length };
 }
 
+/** Classify a report date relative to today (all YYYY-MM-DD; lexicographic == chronological). */
+export function resolveDayKind(date: string, today: string): "past" | "live" | "future" {
+  if (date < today) return "past";
+  if (date > today) return "future";
+  return "live";
+}
+
+/** A canonical zeroed day shape (no DB query) — used for future dates in the current week. */
+export function emptyUsageDay(userId: string, date: string): UsageDailyShape {
+  return { userId, date, activeSeconds: 0, sessionCount: 0, viewCount: 0, actionCount: 0, breakdown: ZERO_BREAKDOWN(), firstActiveAt: null, lastActiveAt: null };
+}
+
 /** Returns true when `date` falls within the raw-event retention window (0..RAW_RETENTION_DAYS-1 days old). */
 export function isWithinDrilldownWindow(date: string, today: string): boolean {
   const ms = new Date(`${today}T00:00:00Z`).getTime() - new Date(`${date}T00:00:00Z`).getTime();
@@ -160,13 +172,16 @@ export async function readViewEvents(
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
   const params: unknown[] = [userId, date];
   let typeClause = "";
-  if (type) { params.push(type); typeClause = " AND entity_type = $3"; }
+  if (type) { params.push(type); typeClause = ` AND v.entity_type = $3`; }
   const { rows } = await client.query<ViewEventRow>(
-    `SELECT at, entity_type, entity_id, route, label_snapshot FROM ${schema}.usage_view_event
-       WHERE user_id = $1
-         AND at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
-         AND at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')${typeClause}
-       ORDER BY at`,
+    `SELECT v.at, v.entity_type, v.entity_id, v.route, v.label_snapshot
+       FROM ${schema}.usage_view_event v
+       JOIN ${schema}.usage_session s ON s.id = v.session_id
+      WHERE v.user_id = $1
+        AND s.impersonator_id IS NULL
+        AND v.at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        AND v.at < (($2::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')${typeClause}
+      ORDER BY v.at`,
     params,
   );
   return rows;

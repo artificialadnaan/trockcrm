@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRepScope, weekDates, sumDays, readUsageDaily } from "../../../src/modules/usage/read-service.js";
+import { resolveRepScope, weekDates, sumDays, readUsageDaily, resolveDayKind, emptyUsageDay } from "../../../src/modules/usage/read-service.js";
 import type { UsageDailyShape } from "../../../src/modules/usage/types.js";
 
 describe("resolveRepScope (server-enforced)", () => {
@@ -56,6 +56,22 @@ describe("sumDays", () => {
   });
 });
 
+describe("resolveDayKind", () => {
+  it("classifies past/live/future", () => {
+    expect(resolveDayKind("2026-06-08", "2026-06-10")).toBe("past");
+    expect(resolveDayKind("2026-06-10", "2026-06-10")).toBe("live");
+    expect(resolveDayKind("2026-06-12", "2026-06-10")).toBe("future");
+  });
+});
+describe("emptyUsageDay", () => {
+  it("is a fully zeroed shape", () => {
+    const z = emptyUsageDay("rep-1", "2026-06-12");
+    expect(z.activeSeconds).toBe(0);
+    expect(z.actionCount).toBe(0);
+    expect(z.firstActiveAt).toBeNull();
+    expect(z.breakdown.activities).toEqual({});
+  });
+});
 describe("readUsageDaily coercion", () => {
   it("coerces a pg Date timestamp to an ISO string (so sumDays comparisons are valid)", async () => {
     const client = {

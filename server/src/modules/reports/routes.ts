@@ -82,7 +82,7 @@ import {
 import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
-import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, readViewEvents } from "../usage/read-service.js";
+import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, readViewEvents, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
 import { businessToday } from "../../lib/period.js";
 
 const router = Router();
@@ -1104,9 +1104,12 @@ router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
     for (const rep of reps) {
       const days = [];
       for (const d of dates) {
-        days.push(d >= today
-          ? await buildLiveDay(client, schema, rep.id, d)
-          : await readUsageDaily(client, schema, rep.id, d));
+        const kind = resolveDayKind(d, today);
+        days.push(
+          kind === "live" ? await buildLiveDay(client, schema, rep.id, d)
+          : kind === "past" ? await readUsageDaily(client, schema, rep.id, d)
+          : emptyUsageDay(rep.id, d),
+        );
       }
       const usage = grain === "week" ? sumDays(rep.id, `week-of-${dates[0]}`, days) : days[0];
       leaderboard.push({ rep, usage });
