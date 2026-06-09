@@ -106,10 +106,25 @@ export async function readUsageDaily(client: QueryClient, schema: string, userId
   );
   const r = rows[0];
   if (!r) return { userId, date, activeSeconds: 0, sessionCount: 0, viewCount: 0, actionCount: 0, breakdown: ZERO_BREAKDOWN(), firstActiveAt: null, lastActiveAt: null };
+  // Normalize breakdown key order to match computeUsageDaily's canonical insertion order.
+  // Postgres JSONB may return keys in alphabetical/storage order; the byte-identical invariant
+  // requires readUsageDaily to reconstruct them in the same sequence computeUsageDaily uses.
+  const bd = r.breakdown;
+  const normalizedBreakdown: UsageDailyShape["breakdown"] = {
+    deal_views: Number(bd.deal_views),
+    lead_views: Number(bd.lead_views),
+    report_views: Number(bd.report_views),
+    page_views: Number(bd.page_views),
+    creates: Number(bd.creates),
+    edits: Number(bd.edits),
+    stage_moves: Number(bd.stage_moves),
+    uploads: Number(bd.uploads),
+    activities: Object.fromEntries(Object.keys(bd.activities ?? {}).sort().map((k) => [k, Number(bd.activities[k])])),
+  };
   return {
     userId, date, activeSeconds: Number(r.active_seconds), sessionCount: Number(r.session_count),
     viewCount: Number(r.view_count), actionCount: Number(r.action_count),
-    breakdown: r.breakdown,
+    breakdown: normalizedBreakdown,
     firstActiveAt: r.first_active_at ? new Date(r.first_active_at).toISOString() : null,
     lastActiveAt: r.last_active_at ? new Date(r.last_active_at).toISOString() : null,
   };
