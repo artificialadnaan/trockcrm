@@ -19,7 +19,18 @@ vi.mock("@/hooks/use-platform-usage-report", () => ({
   formatActiveTime: (s: number) => (s > 0 ? `${Math.floor(s / 3600)}h` : "—"),
 }));
 
-import { PlatformUsagePage, barWidthPct } from "./platform-usage-page";
+import { PlatformUsagePage, barWidthPct, viewsAreEmpty } from "./platform-usage-page";
+
+describe("viewsAreEmpty", () => {
+  it("renders muted — only when the rep has no telemetry (no session)", () => {
+    expect(viewsAreEmpty(0, 0)).toBe(true); // not-yet-populated
+    expect(viewsAreEmpty(undefined, 4)).toBe(true); // field absent
+  });
+  it("renders a real 0 once the rep has a session (telemetry present)", () => {
+    expect(viewsAreEmpty(0, 4)).toBe(false); // genuine 0 views, not "—"
+    expect(viewsAreEmpty(12, 4)).toBe(false);
+  });
+});
 
 describe("barWidthPct", () => {
   it("gives zero-action reps an EMPTY bar (no phantom sliver that contradicts the 0)", () => {

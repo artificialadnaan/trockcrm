@@ -233,7 +233,7 @@ function RepRow({
 
       <MutedValue value={formatActiveTime(u.activeSeconds)} empty={u.activeSeconds === 0} />
       <MutedValue value={u.sessionCount} empty={u.sessionCount === 0} />
-      <MutedValue value={u.viewCount} empty={u.viewCount === undefined || u.viewCount === 0} />
+      <MutedValue value={u.viewCount} empty={viewsAreEmpty(u.viewCount, u.sessionCount)} />
     </div>
   );
 }
@@ -259,6 +259,15 @@ function RepAvatar({ name, top }: { name: string; top: boolean }) {
       {repInitials(name)}
     </span>
   );
+}
+
+/**
+ * Whether the Views cell should render the muted "—" (no data) vs the real count. "—" only when the
+ * rep has NO telemetry yet (no session) — so a genuine 0 views, once the rep has a session, shows as
+ * a real "0" rather than masquerading as not-yet-populated.
+ */
+export function viewsAreEmpty(viewCount: number | undefined, sessionCount: number): boolean {
+  return viewCount === undefined || sessionCount === 0;
 }
 
 /**
