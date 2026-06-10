@@ -62,7 +62,7 @@ export function PlatformUsagePage() {
                   <td>{formatActiveTime(r.usage.activeSeconds)}</td>
                   <td>{r.usage.actionCount}</td>
                   <td>{r.usage.sessionCount}</td>
-                  <td>{r.usage.viewCount ?? 0}</td>
+                  <td>{r.usage.viewCount ?? "—"}</td>
                 </tr>
               ))}
             </tbody>
