@@ -43,6 +43,7 @@ import { LeadConversionPage } from "@/pages/reports/lead-conversion-page";
 import { MarketMixPage } from "@/pages/reports/market-mix-page";
 import { PipelineVelocityPage } from "@/pages/reports/pipeline-velocity-page";
 import { RepActivityPage } from "@/pages/reports/rep-activity-page";
+import { PlatformUsagePage } from "@/pages/reports/platform-usage-page";
 import { PortfolioLoadPage } from "@/pages/reports/portfolio-load-page";
 import { ProjectReadinessPage } from "@/pages/reports/project-readiness-page";
 import { WorkflowBottlenecksPage } from "@/pages/reports/workflow-bottlenecks-page";
@@ -287,6 +288,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <RepActivityPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/performance/platform-usage"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
+                    <PlatformUsagePage />
                   </RequireRole>
                 )}
               />

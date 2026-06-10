@@ -82,6 +82,8 @@ import {
 import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
+import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, readViewEvents, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
+import { businessToday } from "../../lib/period.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -1069,6 +1071,98 @@ router.get("/rep-pack", requireDirector, async (req, res, next) => {
     const data = await getRepPackData(req.tenantDb!, { repId, mode });
     await req.commitTransaction!();
     res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/platform-usage?grain=day|week&date=YYYY-MM-DD&rep=<uuid>
+// Reps are server-scoped to themselves; admin/director may pass ?rep= or omit for all active reps.
+router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
+  try {
+    const grain = req.query.grain === "week" ? "week" : "day";
+    const today = businessToday();
+    const anchor = readOptionalIsoDate(req.query.date, "date") ?? today;
+    const dates = grain === "week" ? weekDates(anchor) : [anchor];
+
+    const repParam = req.user!.role !== "rep" && typeof req.query.rep === "string" ? req.query.rep : undefined;
+    if (repParam !== undefined && !UUID_PATTERN.test(repParam)) {
+      throw new AppError(400, "rep must be a valid UUID");
+    }
+    const scope = resolveRepScope(
+      { role: req.user!.role, userId: req.user!.id },
+      repParam,
+    );
+    const schema = `office_${req.officeSlug!}`;
+    const client = req.tenantClient!; // pg PoolClient bound to the request transaction
+
+    const reps = await resolveReps(client, scope);
+
+    // Sequential by design: all queries share the one tenant PoolClient (a single connection),
+    // which cannot run concurrent queries. Do NOT wrap this in Promise.all. Batch per-rep if needed.
+    const leaderboard = [];
+    for (const rep of reps) {
+      const days = [];
+      for (const d of dates) {
+        const kind = resolveDayKind(d, today);
+        days.push(
+          kind === "live" ? await buildLiveDay(client, schema, rep.id, d)
+          : kind === "past" ? await readUsageDaily(client, schema, rep.id, d)
+          : emptyUsageDay(rep.id, d),
+        );
+      }
+      const usage = grain === "week" ? sumDays(rep.id, `week-of-${dates[0]}`, days) : days[0];
+      leaderboard.push({ rep, usage });
+    }
+
+    await req.commitTransaction!();
+    res.json({ data: { grain, dates, summary: buildTeamSummary(leaderboard), leaderboard } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/platform-usage/drilldown?date=YYYY-MM-DD&rep=<uuid>&type=<entity_type>
+// Returns raw view events for a single rep on one day (within the 14-day raw-retention window).
+// Reps are server-scoped to themselves — the ?rep= param is ignored for reps.
+router.get("/platform-usage/drilldown", requireAnyRole, async (req, res, next) => {
+  try {
+    const date = readOptionalIsoDate(req.query.date, "date");
+    if (!date) {
+      throw new AppError(400, "date is required (YYYY-MM-DD)");
+    }
+    const type = typeof req.query.type === "string" ? req.query.type : undefined;
+    const today = businessToday();
+
+    const repParam = req.user!.role !== "rep" && typeof req.query.rep === "string" ? req.query.rep : undefined;
+    if (repParam !== undefined && !UUID_PATTERN.test(repParam)) {
+      throw new AppError(400, "rep must be a valid UUID");
+    }
+    // Drilldown targets exactly one rep, resolved through the same roster as the summary.
+    let targetScope: string[];
+    if (req.user!.role === "rep") {
+      targetScope = [req.user!.id];
+    } else if (repParam) {
+      targetScope = [repParam];
+    } else {
+      throw new AppError(400, "rep is required");
+    }
+    const schema = `office_${req.officeSlug!}`;
+    const roster = await resolveReps(req.tenantClient!, targetScope);
+    if (roster.length === 0) {
+      throw new AppError(404, "rep not found in usage roster");
+    }
+    const repId = roster[0].id;
+
+    if (!isWithinDrilldownWindow(date, today)) {
+      await req.commitTransaction!();
+      res.json({ data: { expired: true, events: [], message: "counts only — drilldown expired" } });
+      return;
+    }
+
+    const events = await readViewEvents(req.tenantClient!, schema, repId, date, type);
+    await req.commitTransaction!();
+    res.json({ data: { expired: false, events } });
   } catch (err) {
     next(err);
   }
