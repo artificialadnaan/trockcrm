@@ -21,11 +21,35 @@ vi.mock("@/hooks/use-platform-usage-report", () => ({
 
 import { PlatformUsagePage } from "./platform-usage-page";
 
+function render() {
+  return renderToStaticMarkup(<MemoryRouter><PlatformUsagePage /></MemoryRouter>).replace(/\s+/g, " ");
+}
+
 describe("PlatformUsagePage", () => {
   it("renders the team summary and a rep leaderboard", () => {
-    const html = renderToStaticMarkup(<MemoryRouter><PlatformUsagePage /></MemoryRouter>).replace(/\s+/g, " ");
+    const html = render();
     expect(html).toContain("Platform Usage");
     expect(html).toContain("Kaleb");
     expect(html).toContain("Adnaan");
+  });
+
+  it("ranks reps by actions desc with the top performer first", () => {
+    const html = render();
+    // Kaleb (312 actions) outranks Adnaan (188) regardless of the data order.
+    expect(html.indexOf("Kaleb")).toBeLessThan(html.indexOf("Adnaan"));
+    expect(html).toContain("312");
+    expect(html).toContain("188");
+  });
+
+  it("renders the reps-active card with the healthy treatment when a healthy fraction is active", () => {
+    const html = render();
+    expect(html).toContain("8/10"); // activeReps/totalReps
+    expect(html).toContain("Healthy"); // 8/10 >= 0.5 -> success, not the red alarm
+    expect(html).not.toContain("All quiet");
+  });
+
+  it("shows real session counts but a muted em-dash for absent view telemetry", () => {
+    const html = render();
+    expect(html).toContain("—"); // Views are undefined in the fixture -> em-dash, never literal 0
   });
 });
