@@ -76,4 +76,10 @@ describe("PlatformUsagePage", () => {
     const html = render();
     expect(html).toContain("—"); // Views are undefined in the fixture -> em-dash, never literal 0
   });
+
+  it("links each rep row to their detail, carrying the current grain", () => {
+    const html = render();
+    // Default grain is weekly; the row links to the rep detail with the period carried.
+    expect(html).toContain('href="/reports/performance/platform-usage/r1?grain=week"');
+  });
 });

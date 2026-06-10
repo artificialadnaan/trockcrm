@@ -186,3 +186,102 @@ export async function readViewEvents(
   );
   return rows;
 }
+
+/**
+ * Raw view events for a user over the half-open business-tz range [fromDate, toExclusiveDate),
+ * newest first. Reuses the same impersonation + ownership join as the single-day drilldown; used
+ * by the rep-detail page so a week's views come back in one query.
+ */
+export async function readViewEventsRange(
+  client: QueryClient,
+  schema: string,
+  userId: string,
+  fromDate: string,
+  toExclusiveDate: string,
+): Promise<ViewEventRow[]> {
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
+  const { rows } = await client.query<ViewEventRow>(
+    `SELECT v.at, v.entity_type, v.entity_id, v.route, v.label_snapshot
+       FROM ${schema}.usage_view_event v
+       JOIN ${schema}.usage_session s ON s.id = v.session_id AND s.user_id = v.user_id
+      WHERE v.user_id = $1
+        AND s.impersonator_id IS NULL
+        AND v.at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        AND v.at < ($3::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+      ORDER BY v.at DESC`,
+    [userId, fromDate, toExclusiveDate],
+  );
+  return rows;
+}
+
+export type ActionDetailType = "create" | "edit" | "stage_move" | "upload" | "note";
+
+export interface ActionDetailItem {
+  type: ActionDetailType;
+  label: string;
+  entityType: string | null;
+  at: string;
+}
+
+export interface ActionDetail {
+  breakdown: Record<ActionDetailType, number>;
+  items: ActionDetailItem[];
+  truncated: boolean;
+}
+
+const ACTION_DETAIL_LIMIT = 500;
+
+/** Classify an audit_log row into one of the five detail buckets. Pure — exported for testing. */
+export function classifyAction(tableName: string, action: string, isStage: boolean): ActionDetailType {
+  if (tableName === "activities") return "note";
+  if (tableName === "files") return "upload";
+  if (isStage) return "stage_move";
+  return action === "insert" ? "create" : "edit";
+}
+
+/**
+ * Itemized actions from audit_log for a user over [fromDate, toExclusiveDate) (business-tz), newest
+ * first, plus a by-type breakdown. Audit rows are NOT pruned, so this is always available regardless
+ * of period age (unlike views). Single-source (audit_log) with deal/lead name fallbacks for labels.
+ */
+export async function readActionDetail(
+  client: QueryClient,
+  schema: string,
+  userId: string,
+  fromDate: string,
+  toExclusiveDate: string,
+): Promise<ActionDetail> {
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
+  const { rows } = await client.query<{
+    action: string;
+    table_name: string;
+    entity_type: string | null;
+    created_at: string;
+    label: string | null;
+    is_stage: boolean;
+  }>(
+    `SELECT al.action, al.table_name, al.entity_type, al.created_at,
+            COALESCE(al.entity_name_snapshot, d.name, l.name, al.entity_type, al.table_name) AS label,
+            (al.table_name = 'deals' AND al.changes IS NOT NULL AND (al.changes ? 'stage_id' OR al.changes ? 'stageId')) AS is_stage
+       FROM ${schema}.audit_log al
+       LEFT JOIN ${schema}.deals d ON al.table_name = 'deals' AND al.record_id = d.id
+       LEFT JOIN ${schema}.leads l ON al.table_name = 'leads' AND al.record_id = l.id
+      WHERE al.changed_by = $1
+        AND al.action IN ('insert', 'update')
+        AND al.created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        AND al.created_at < ($3::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+      ORDER BY al.created_at DESC
+      LIMIT ${ACTION_DETAIL_LIMIT + 1}`,
+    [userId, fromDate, toExclusiveDate],
+  );
+  const truncated = rows.length > ACTION_DETAIL_LIMIT;
+  const items: ActionDetailItem[] = rows.slice(0, ACTION_DETAIL_LIMIT).map((r) => ({
+    type: classifyAction(r.table_name, r.action, r.is_stage === true),
+    label: r.label ?? r.table_name,
+    entityType: r.entity_type,
+    at: r.created_at,
+  }));
+  const breakdown: Record<ActionDetailType, number> = { create: 0, edit: 0, stage_move: 0, upload: 0, note: 0 };
+  for (const it of items) breakdown[it.type] += 1;
+  return { breakdown, items, truncated };
+}
