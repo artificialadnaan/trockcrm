@@ -42,9 +42,16 @@ describe("usage rollup fan-out + gated prune", () => {
   });
 
   it("prune deletes raw rows ONLY for rolled-up days older than 14 days", async () => {
+    // Insert a view_event for the same rolled-up day to verify it is also pruned.
+    const sid = U("00d1");
+    await db.exec(`INSERT INTO office_dallas.usage_view_event (user_id, session_id, at, entity_type, route, label_snapshot) VALUES ('${REP}', '${sid}', '2026-06-01T14:01:00Z', 'page', '/pipeline', null);`);
+
     await pruneRolledUpRaw(client(), "office_dallas", "2026-06-30");
-    const { rows } = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM office_dallas.usage_heartbeat`);
-    expect(rows[0].n).toBe(0);
+
+    const { rows: hb } = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM office_dallas.usage_heartbeat WHERE at='2026-06-01T14:00:30Z'`);
+    expect(hb[0].n).toBe(0);
+    const { rows: ve } = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM office_dallas.usage_view_event WHERE at='2026-06-01T14:01:00Z'`);
+    expect(ve[0].n).toBe(0);
   });
 
   it("prune does NOT delete raw rows for a day with no usage_daily row", async () => {

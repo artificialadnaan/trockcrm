@@ -66,12 +66,12 @@ export function usePlatformUsageTracker(): void {
     return () => window.clearInterval(id);
   }, [user]);
 
-  // 4) Record a view on each route change (buffered).
+  // 4) Record a view on each route change (buffered), including query-string-only navigations.
   useEffect(() => {
     if (!user) return;
-    viewBufferRef.current.push(classifyRoute(location.pathname));
+    viewBufferRef.current.push(classifyRoute(location.pathname + location.search));
     lastInteractionRef.current = Date.now();
-  }, [user, location.pathname]);
+  }, [user, location.pathname, location.search]);
 
   // 5) Flush buffer on interval, on navigation unmount, and on pagehide (keepalive).
   useEffect(() => {

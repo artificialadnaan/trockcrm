@@ -11,6 +11,9 @@ describe("shouldSendHeartbeat", () => {
   it("does not send after the idle threshold", () => {
     expect(shouldSendHeartbeat({ visibility: "visible", msSinceInteraction: 400_000, idleMs: 300_000 })).toBe(false);
   });
+  it("does not send when msSinceInteraction equals the idle threshold (boundary — gate is strict <)", () => {
+    expect(shouldSendHeartbeat({ visibility: "visible", msSinceInteraction: 300_000, idleMs: 300_000 })).toBe(false);
+  });
 });
 
 describe("classifyRoute", () => {

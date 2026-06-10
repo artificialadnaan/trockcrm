@@ -1085,7 +1085,7 @@ router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
     const anchor = readOptionalIsoDate(req.query.date, "date") ?? today;
     const dates = grain === "week" ? weekDates(anchor) : [anchor];
 
-    const repParam = typeof req.query.rep === "string" ? req.query.rep : undefined;
+    const repParam = req.user!.role !== "rep" && typeof req.query.rep === "string" ? req.query.rep : undefined;
     if (repParam !== undefined && !UUID_PATTERN.test(repParam)) {
       throw new AppError(400, "rep must be a valid UUID");
     }
@@ -1134,7 +1134,7 @@ router.get("/platform-usage/drilldown", requireAnyRole, async (req, res, next) =
     const type = typeof req.query.type === "string" ? req.query.type : undefined;
     const today = businessToday();
 
-    const repParam = typeof req.query.rep === "string" ? req.query.rep : undefined;
+    const repParam = req.user!.role !== "rep" && typeof req.query.rep === "string" ? req.query.rep : undefined;
     if (repParam !== undefined && !UUID_PATTERN.test(repParam)) {
       throw new AppError(400, "rep must be a valid UUID");
     }

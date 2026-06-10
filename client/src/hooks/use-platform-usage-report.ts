@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 
 export interface PlatformUsageRow {
@@ -23,8 +23,10 @@ export function usePlatformUsageReport(params: { grain: "day" | "week"; date?: s
   const [data, setData] = useState<PlatformUsageReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const latestRequestId = useRef(0);
 
   const fetchReport = useCallback(async () => {
+    const requestId = ++latestRequestId.current;
     setLoading(true);
     setError(null);
     try {
@@ -32,12 +34,14 @@ export function usePlatformUsageReport(params: { grain: "day" | "week"; date?: s
       if (params.date) qs.set("date", params.date);
       if (params.rep) qs.set("rep", params.rep);
       const result = await api<{ data: PlatformUsageReport }>(`/reports/platform-usage?${qs.toString()}`);
+      if (requestId !== latestRequestId.current) return;
       setData(result.data);
     } catch (err: unknown) {
+      if (requestId !== latestRequestId.current) return;
       setError(err instanceof Error ? err.message : "Failed to load platform usage");
       setData(null);
     } finally {
-      setLoading(false);
+      if (requestId === latestRequestId.current) setLoading(false);
     }
   }, [params.grain, params.date, params.rep]);
 

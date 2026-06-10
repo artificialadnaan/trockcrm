@@ -4,7 +4,8 @@ import { usePlatformUsageReport, formatActiveTime, type PlatformUsageRow } from 
 
 export function PlatformUsagePage() {
   const [grain, setGrain] = useState<"day" | "week">("week");
-  const { data, loading, error } = usePlatformUsageReport({ grain });
+  const [anchorDate, setAnchorDate] = useState<string>("");
+  const { data, loading, error } = usePlatformUsageReport({ grain, date: anchorDate || undefined });
 
   const rows = useMemo<PlatformUsageRow[]>(() => {
     if (!data) return [];
@@ -26,9 +27,17 @@ export function PlatformUsagePage() {
         description="Active time, actions, and views per rep — daily and weekly."
       />
 
-      <div className="flex gap-2">
-        <button type="button" onClick={() => setGrain("day")} className={grain === "day" ? "font-bold" : ""}>Daily</button>
-        <button type="button" onClick={() => setGrain("week")} className={grain === "week" ? "font-bold" : ""}>Weekly</button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" onClick={() => setGrain("day")} aria-pressed={grain === "day"} className={grain === "day" ? "font-bold" : ""}>Daily</button>
+        <button type="button" onClick={() => setGrain("week")} aria-pressed={grain === "week"} className={grain === "week" ? "font-bold" : ""}>Weekly</button>
+        <input
+          type="date"
+          value={anchorDate}
+          onChange={(e) => setAnchorDate(e.target.value)}
+          aria-label="Report date"
+          className="rounded border px-2 py-1 text-sm"
+        />
+        <button type="button" onClick={() => setAnchorDate("")} className="text-sm">Today</button>
       </div>
 
       {loading ? <p>Loading…</p> : null}
@@ -44,7 +53,7 @@ export function PlatformUsagePage() {
 
           <table className="w-full text-left text-sm">
             <thead>
-              <tr><th>Rep</th><th>Active time</th><th>Actions</th><th>Sessions</th></tr>
+              <tr><th>Rep</th><th>Active time</th><th>Actions</th><th>Sessions</th><th>Views</th></tr>
             </thead>
             <tbody>
               {rows.map((r) => (
@@ -53,6 +62,7 @@ export function PlatformUsagePage() {
                   <td>{formatActiveTime(r.usage.activeSeconds)}</td>
                   <td>{r.usage.actionCount}</td>
                   <td>{r.usage.sessionCount}</td>
+                  <td>{r.usage.viewCount ?? 0}</td>
                 </tr>
               ))}
             </tbody>

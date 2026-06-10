@@ -42,12 +42,21 @@ describe("recordHeartbeat", () => {
   it("inserts a heartbeat row and updates the session last_heartbeat_at", async () => {
     const heartbeatInserts: unknown[] = [];
     const sessionUpdates: unknown[] = [];
+    const whereConditions: unknown[] = [];
     const db = {
       insert: vi.fn().mockReturnValue({
         values: vi.fn().mockImplementation((v: unknown) => { heartbeatInserts.push(v); return Promise.resolve(); }),
       }),
       update: vi.fn().mockReturnValue({
-        set: vi.fn().mockImplementation((v: unknown) => { sessionUpdates.push(v); return { where: vi.fn().mockResolvedValue(undefined) }; }),
+        set: vi.fn().mockImplementation((v: unknown) => {
+          sessionUpdates.push(v);
+          return {
+            where: vi.fn().mockImplementation((cond: unknown) => {
+              whereConditions.push(cond);
+              return Promise.resolve(undefined);
+            }),
+          };
+        }),
       }),
     } as any;
 
@@ -55,6 +64,26 @@ describe("recordHeartbeat", () => {
 
     expect(heartbeatInserts[0]).toMatchObject({ userId: "rep-1", sessionId: "s1" });
     expect((sessionUpdates[0] as { lastHeartbeatAt: Date }).lastHeartbeatAt).toBeInstanceOf(Date);
+    // WHERE clause must be called once with a truthy drizzle condition
+    // (the condition is a circular drizzle AST — inspect via toString/toSQL instead of JSON.stringify).
+    expect(whereConditions).toHaveLength(1);
+    expect(whereConditions[0]).toBeTruthy();
+    // The condition wraps eq(usageSession.id, sessionId) AND eq(usageSession.userId, userId).
+    // Drizzle's SQL builder exposes the bound values; flatten them from the nested structure.
+    function collectValues(node: unknown): unknown[] {
+      if (node === null || node === undefined) return [];
+      if (typeof node !== "object") return [node];
+      const obj = node as Record<string, unknown>;
+      const vals: unknown[] = [];
+      for (const key of Object.keys(obj)) {
+        if (key === "table" || key === "encoder") continue; // skip circular refs
+        vals.push(...collectValues(obj[key]));
+      }
+      return vals;
+    }
+    const values = collectValues(whereConditions[0]);
+    expect(values).toContain("s1");
+    expect(values).toContain("rep-1");
   });
 });
 

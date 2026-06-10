@@ -158,11 +158,13 @@ output: { active_seconds, session_count, view_count, action_count,
 - `HEARTBEAT_GRACE_S = 5`
 
 ### Interval-merge lives **inside** this function
-Per session, build active windows from consecutive heartbeats: each heartbeat contributes
-`min(at − prev_at, HEARTBEAT_INTERVAL_S + HEARTBEAT_GRACE_S)` seconds (so idle gaps are capped
-out and never counted). Then **merge overlapping windows across all of the user's sessions for
-the day** and sum merged length → `active_seconds`. Because the merge is inside the shared
-function, multi-tab dedup applies identically to the live "today" path and the nightly rollup.
+Each heartbeat defines a fixed active window `[at − HEARTBEAT_INTERVAL_S, at]`. Windows from
+consecutive heartbeats within `HEARTBEAT_GRACE_S` of each other are merged into one contiguous
+span (so idle gaps beyond `INTERVAL + GRACE` are excluded and never counted). After collecting
+all per-session windows, **merge overlapping windows across all of the user's sessions for the
+day** and sum merged length → `active_seconds`. Multi-tab sessions naturally dedup because
+overlapping windows collapse to a single span. Because the merge is inside the shared function,
+this behaviour applies identically to the live "today" path and the nightly rollup.
 
 ### Action counts via a multi-source registry (single source of truth)
 
