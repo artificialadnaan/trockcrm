@@ -203,7 +203,7 @@ function RepRow({
 }) {
   const u = row.usage;
   const low = u.actionCount <= LOW_ACTIVITY_THRESHOLD;
-  const pct = maxActions > 0 ? Math.max(2, Math.round((u.actionCount / maxActions) * 100)) : 0;
+  const pct = barWidthPct(u.actionCount, maxActions);
   return (
     <div className={cn(GRID, "px-4 py-3 transition-colors hover:bg-slate-50/70")}>
       <div className={cn("text-sm font-bold tabular-nums", isTop ? "text-brand-red" : "text-slate-300")}>{rank}</div>
@@ -259,6 +259,16 @@ function RepAvatar({ name, top }: { name: string; top: boolean }) {
       {repInitials(name)}
     </span>
   );
+}
+
+/**
+ * Proportion-bar width (%). Zero-action reps get an EMPTY bar (0%) so the bar never contradicts the
+ * displayed 0 / "gone dark" flag; positive counts get at least a 2% sliver so a small-but-real
+ * contribution stays visible.
+ */
+export function barWidthPct(actionCount: number, maxActions: number): number {
+  if (maxActions <= 0 || actionCount <= 0) return 0;
+  return Math.max(2, Math.round((actionCount / maxActions) * 100));
 }
 
 function repInitials(name: string): string {

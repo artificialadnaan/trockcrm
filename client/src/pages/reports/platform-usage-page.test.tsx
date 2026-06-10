@@ -19,7 +19,20 @@ vi.mock("@/hooks/use-platform-usage-report", () => ({
   formatActiveTime: (s: number) => (s > 0 ? `${Math.floor(s / 3600)}h` : "—"),
 }));
 
-import { PlatformUsagePage } from "./platform-usage-page";
+import { PlatformUsagePage, barWidthPct } from "./platform-usage-page";
+
+describe("barWidthPct", () => {
+  it("gives zero-action reps an EMPTY bar (no phantom sliver that contradicts the 0)", () => {
+    expect(barWidthPct(0, 312)).toBe(0);
+  });
+  it("floors positive counts to a visible minimum and tops out at 100", () => {
+    expect(barWidthPct(1, 312)).toBe(2);
+    expect(barWidthPct(312, 312)).toBe(100);
+  });
+  it("is 0 when there is no max", () => {
+    expect(barWidthPct(5, 0)).toBe(0);
+  });
+});
 
 function render() {
   return renderToStaticMarkup(<MemoryRouter><PlatformUsagePage /></MemoryRouter>).replace(/\s+/g, " ");
