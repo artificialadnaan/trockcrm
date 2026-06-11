@@ -105,6 +105,12 @@ function repDealVisibilityClause(access: FieldAccessContext) {
   return access.userRole === "rep" ? sql`AND d.assigned_rep_id = ${access.userId}::uuid` : sql``;
 }
 
+// Upper bound on a single per-office fetch. The cross-office /projects list merges in memory and can't
+// push offset into per-office SQL, so it fetches `offset + perPage` rows per office (clamped here) to
+// cover the requested page before slicing. The field list is recency-ordered and search-first, so 500
+// is ample depth (deeper navigation is expected to narrow via search). This is a FIELD-ONLY service.
+export const FIELD_PROJECTS_MAX_FETCH = 500;
+
 export async function listFieldProjects(
   tenantDb: TenantDb,
   access: FieldAccessContext,
@@ -114,7 +120,7 @@ export async function listFieldProjects(
     throw new AppError(400, "Only active field projects are supported");
   }
   const page = Math.max(1, input.page ?? 1);
-  const perPage = Math.min(100, Math.max(1, input.perPage ?? 50));
+  const perPage = Math.min(FIELD_PROJECTS_MAX_FETCH, Math.max(1, input.perPage ?? 50));
   const offset = (page - 1) * perPage;
   const where = activeProjectWhere(input.search);
 

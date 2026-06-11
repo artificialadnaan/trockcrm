@@ -27,6 +27,7 @@ import {
 } from "./photo-reports-service.js";
 import {
   assertAccessibleFieldCaptureTarget,
+  FIELD_PROJECTS_MAX_FETCH,
   listFieldProjects,
   listFieldProjectPhotos,
   listStarredFieldProjects,
@@ -91,9 +92,13 @@ fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
     }
     const page = req.query.page ? Math.max(1, parseInt(req.query.page as string, 10)) : 1;
     const perPage = req.query.perPage ? Math.min(100, Math.max(1, parseInt(req.query.perPage as string, 10))) : 50;
-    // Fetch enough from each office to cover the requested window before merging (cross-office offset
-    // can't be pushed into per-office SQL); capped at 100 by the underlying service.
-    const fetchPerPage = Math.min(100, page * perPage);
+    const offset = (page - 1) * perPage;
+    // Fetch enough from EACH office to cover the requested window before merging (cross-office offset
+    // can't be pushed into per-office SQL). Bounded by FIELD_PROJECTS_MAX_FETCH so a single dominant
+    // office (e.g. Dallas with 1,275 active projects) can still be paged through up to that depth — the
+    // earlier 100-row cap silently returned empty/wrong pages beyond page 2. Beyond the bound, narrow
+    // via search.
+    const fetchPerPage = Math.min(FIELD_PROJECTS_MAX_FETCH, offset + perPage);
     const { results, failures } = await fanOutActiveOffices((officeDb) =>
       listFieldProjects(officeDb, access, {
         search: req.query.search as string | undefined,
@@ -107,7 +112,6 @@ fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
     );
     merged.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
     const total = results.reduce((sum, { value }) => sum + value.total, 0);
-    const offset = (page - 1) * perPage;
     res.json({
       projects: merged.slice(offset, offset + perPage),
       total,
