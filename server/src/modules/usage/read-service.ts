@@ -153,6 +153,17 @@ export function isWithinDrilldownWindow(date: string, today: string): boolean {
   return days >= 0 && days < RAW_RETENTION_DAYS;
 }
 
+/**
+ * The latest period date that is not in the future, for the views retention check. A current week's
+ * range includes a future Saturday; `isWithinDrilldownWindow` treats future dates as out-of-window,
+ * which would wrongly mark the current week's views "expired". Clamp to the newest non-future day
+ * (today, for the current week) so only genuinely-old periods read as expired.
+ */
+export function latestNonFutureDate(dates: string[], today: string): string {
+  const past = dates.filter((d) => d <= today);
+  return past.length > 0 ? past[past.length - 1] : dates[0];
+}
+
 export interface ViewEventRow {
   at: string;
   entity_type: string;
@@ -239,6 +250,24 @@ export function classifyAction(tableName: string, action: string, isStage: boole
   return action === "insert" ? "create" : "edit";
 }
 
+// Detail actions mirror the AGGREGATE's action semantics from audit_log, so the breakdown reconciles
+// with the leaderboard's action count:
+//  - creates/edits  -> non-activities/files inserts+updates (stage updates split out below)
+//  - stage_move     -> deal stage-change updates (changes.stage_id / stageId)
+//  - upload / note  -> activities/files INSERTS only (the aggregate counts those source tables once;
+//                      their audit UPDATES are metadata edits, NOT new upload/note actions)
+//  - impersonated writes are excluded (impersonator_id IS NULL), matching the aggregate and the views.
+const IS_STAGE_SQL =
+  `(al.table_name = 'deals' AND al.changes IS NOT NULL AND (al.changes ? 'stage_id' OR al.changes ? 'stageId'))`;
+const ACTION_DETAIL_WHERE = `al.changed_by = $1
+        AND al.impersonator_id IS NULL
+        AND (
+          (al.table_name IN ('activities', 'files') AND al.action = 'insert')
+          OR (al.table_name NOT IN ('activities', 'files') AND al.action IN ('insert', 'update'))
+        )
+        AND al.created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        AND al.created_at < ($3::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`;
+
 /**
  * Itemized actions from audit_log for a user over [fromDate, toExclusiveDate) (business-tz), newest
  * first, plus a by-type breakdown. Audit rows are NOT pruned, so this is always available regardless
@@ -252,6 +281,32 @@ export async function readActionDetail(
   toExclusiveDate: string,
 ): Promise<ActionDetail> {
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
+  const params = [userId, fromDate, toExclusiveDate];
+
+  // Breakdown over the FULL period (never truncated) so the chips reconcile with the leaderboard even
+  // for reps with more than ACTION_DETAIL_LIMIT actions.
+  const counts = (
+    await client.query<{ c_create: number; c_edit: number; c_stage: number; c_upload: number; c_note: number }>(
+      `SELECT
+          count(*) FILTER (WHERE al.action = 'insert' AND al.table_name NOT IN ('activities', 'files'))::int AS c_create,
+          count(*) FILTER (WHERE al.action = 'update' AND al.table_name NOT IN ('activities', 'files') AND NOT ${IS_STAGE_SQL})::int AS c_edit,
+          count(*) FILTER (WHERE ${IS_STAGE_SQL})::int AS c_stage,
+          count(*) FILTER (WHERE al.table_name = 'files')::int AS c_upload,
+          count(*) FILTER (WHERE al.table_name = 'activities')::int AS c_note
+         FROM ${schema}.audit_log al
+        WHERE ${ACTION_DETAIL_WHERE}`,
+      params,
+    )
+  ).rows[0];
+  const breakdown: Record<ActionDetailType, number> = {
+    create: Number(counts?.c_create ?? 0),
+    edit: Number(counts?.c_edit ?? 0),
+    stage_move: Number(counts?.c_stage ?? 0),
+    upload: Number(counts?.c_upload ?? 0),
+    note: Number(counts?.c_note ?? 0),
+  };
+
+  // Itemized display list: most recent first, capped (the chips above remain full-period accurate).
   const { rows } = await client.query<{
     action: string;
     table_name: string;
@@ -262,17 +317,14 @@ export async function readActionDetail(
   }>(
     `SELECT al.action, al.table_name, al.entity_type, al.created_at,
             COALESCE(al.entity_name_snapshot, d.name, l.name, al.entity_type, al.table_name) AS label,
-            (al.table_name = 'deals' AND al.changes IS NOT NULL AND (al.changes ? 'stage_id' OR al.changes ? 'stageId')) AS is_stage
+            ${IS_STAGE_SQL} AS is_stage
        FROM ${schema}.audit_log al
        LEFT JOIN ${schema}.deals d ON al.table_name = 'deals' AND al.record_id = d.id
        LEFT JOIN ${schema}.leads l ON al.table_name = 'leads' AND al.record_id = l.id
-      WHERE al.changed_by = $1
-        AND al.action IN ('insert', 'update')
-        AND al.created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
-        AND al.created_at < ($3::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+      WHERE ${ACTION_DETAIL_WHERE}
       ORDER BY al.created_at DESC
       LIMIT ${ACTION_DETAIL_LIMIT + 1}`,
-    [userId, fromDate, toExclusiveDate],
+    params,
   );
   const truncated = rows.length > ACTION_DETAIL_LIMIT;
   const items: ActionDetailItem[] = rows.slice(0, ACTION_DETAIL_LIMIT).map((r) => ({
@@ -281,7 +333,5 @@ export async function readActionDetail(
     entityType: r.entity_type,
     at: r.created_at,
   }));
-  const breakdown: Record<ActionDetailType, number> = { create: 0, edit: 0, stage_move: 0, upload: 0, note: 0 };
-  for (const it of items) breakdown[it.type] += 1;
   return { breakdown, items, truncated };
 }

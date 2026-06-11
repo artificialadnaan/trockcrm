@@ -82,7 +82,7 @@ import {
 import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
-import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
+import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, latestNonFutureDate, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
 import { businessToday, shiftBusinessDate } from "../../lib/period.js";
 
 const router = Router();
@@ -1201,9 +1201,10 @@ router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
     // Actions: never pruned -> always populate, regardless of period age.
     const actions = await readActionDetail(req.tenantClient!, schema, rep.id, fromDate, toExclusive);
 
-    // Views: pruned at 14 days. If even the most recent day of the period is outside the window,
-    // the whole period's raw views are gone -> explicit expired state (mirrors /drilldown).
-    const latest = dates[dates.length - 1];
+    // Views: pruned at 14 days. Clamp to the most recent NON-FUTURE day of the period (a current
+    // week's range ends on a future Saturday) — only if even that is outside the window are the raw
+    // views gone -> explicit expired state (mirrors /drilldown).
+    const latest = latestNonFutureDate(dates, today);
     const views = isWithinDrilldownWindow(latest, today)
       ? { expired: false, items: await readViewEventsRange(req.tenantClient!, schema, rep.id, fromDate, toExclusive) }
       : { expired: true, message: "view detail expired for this period — counts only", items: [] as never[] };

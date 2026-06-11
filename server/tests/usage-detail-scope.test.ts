@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRepScope, classifyAction, isWithinDrilldownWindow } from "../src/modules/usage/read-service.js";
+import { resolveRepScope, classifyAction, isWithinDrilldownWindow, latestNonFutureDate } from "../src/modules/usage/read-service.js";
 
 // The /platform-usage/detail route enforces the SAME rep-self scoping as the summary and /drilldown
 // (it calls resolveRepScope, then resolves through the active-office rep roster). A rep can never
@@ -31,5 +31,16 @@ describe("platform-usage/detail — actions-vs-views retention asymmetry", () =>
     expect(isWithinDrilldownWindow("2026-06-09", "2026-06-09")).toBe(true); // today
     expect(isWithinDrilldownWindow("2026-05-27", "2026-06-09")).toBe(true); // 13 days
     expect(isWithinDrilldownWindow("2026-05-20", "2026-06-09")).toBe(false); // 20 days -> views expired
+  });
+
+  it("clamps the retention check to a non-future day so the current week isn't falsely expired", () => {
+    // Current week (Sun 06-07 .. Sat 06-13), today Wed 06-10 -> latest non-future is today, in-window.
+    const week = ["2026-06-07", "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-13"];
+    const latest = latestNonFutureDate(week, "2026-06-10");
+    expect(latest).toBe("2026-06-10");
+    expect(isWithinDrilldownWindow(latest, "2026-06-10")).toBe(true); // NOT expired
+    // An old week (all past, >14d) -> latest is its Saturday, out of window -> expired.
+    const oldWeek = ["2026-05-10", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-16"];
+    expect(isWithinDrilldownWindow(latestNonFutureDate(oldWeek, "2026-06-10"), "2026-06-10")).toBe(false);
   });
 });
