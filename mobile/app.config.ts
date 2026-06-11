@@ -18,7 +18,8 @@ const FIELD_APP_HOST = process.env.EXPO_PUBLIC_FIELD_APP_HOST?.trim();
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: "T-Rock Cam",
-  slug: "trock-cam",
+  // Must match the EAS project's slug (project d829c598-…).
+  slug: "trockcam",
   scheme: "trockcam",
   version: "1.0.0",
   orientation: "portrait",
