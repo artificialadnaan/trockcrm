@@ -33,7 +33,13 @@ import {
   searchFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
+  type FieldProject,
 } from "./projects-service.js";
+import {
+  fanOutActiveOffices,
+  officeTag,
+  withResolvedOffice,
+} from "./cross-office.js";
 
 export const fieldRoutes = Router();
 
@@ -72,32 +78,58 @@ fieldRoutes.get("/me", requireFieldContractor, (req, res) => {
 
 const fieldProjectMiddleware = [requireFieldContractor, tenantMiddleware] as const;
 
-fieldRoutes.get("/projects", ...fieldProjectMiddleware, async (req, res, next) => {
+// Cross-office (field is office-agnostic): fan out the active-project list over ALL active offices,
+// stamp each project with its owning office (dealNumber/name are unique per-schema only, so cross-office
+// rows can be visually identical), merge by recency, and paginate over the merged set. One office
+// failing degrades gracefully — its slug is surfaced in `degradedOffices`, the rest still return.
+fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await listFieldProjects(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      search: req.query.search as string | undefined,
-      status: req.query.status as string | undefined,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      perPage: req.query.perPage ? parseInt(req.query.perPage as string, 10) : undefined,
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const status = req.query.status as string | undefined;
+    if (status && status !== "active") {
+      throw new AppError(400, "Only active field projects are supported");
+    }
+    const page = req.query.page ? Math.max(1, parseInt(req.query.page as string, 10)) : 1;
+    const perPage = req.query.perPage ? Math.min(100, Math.max(1, parseInt(req.query.perPage as string, 10))) : 50;
+    // Fetch enough from each office to cover the requested window before merging (cross-office offset
+    // can't be pushed into per-office SQL); capped at 100 by the underlying service.
+    const fetchPerPage = Math.min(100, page * perPage);
+    const { results, failures } = await fanOutActiveOffices((officeDb) =>
+      listFieldProjects(officeDb, access, {
+        search: req.query.search as string | undefined,
+        status,
+        page: 1,
+        perPage: fetchPerPage,
+      }),
+    );
+    const merged = results.flatMap(({ office, value }) =>
+      value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })),
+    );
+    merged.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+    const total = results.reduce((sum, { value }) => sum + value.total, 0);
+    const offset = (page - 1) * perPage;
+    res.json({
+      projects: merged.slice(offset, offset + perPage),
+      total,
+      page,
+      perPage,
+      degradedOffices: failures.map((failure) => failure.office.slug),
     });
-    await req.commitTransaction();
-    res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.get("/projects/starred", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.get("/projects/starred", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await listStarredFieldProjects(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    });
-    await req.commitTransaction();
-    res.json(result);
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const { results, failures } = await fanOutActiveOffices((officeDb) =>
+      listStarredFieldProjects(officeDb, access),
+    );
+    const projects = results
+      .flatMap(({ office, value }) => value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })))
+      .sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+    res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
   } catch (err) {
     next(err);
   }
@@ -276,44 +308,54 @@ fieldRoutes.delete("/photos/:photoId/tags/:tag", ...fieldProjectMiddleware, asyn
   }
 });
 
-fieldRoutes.get("/projects/:dealId/tags", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.get("/projects/:dealId/tags", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await searchFieldProjectTags(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      projectId: String(req.params.dealId),
-      query: typeof req.query.q === "string" ? req.query.q : undefined,
-      limit: req.query.limit ? parseOptionalPositiveInt(req.query.limit) : undefined,
-    });
-    await req.commitTransaction();
-    res.json(result);
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const projectId = String(req.params.dealId);
+    const { value, office } = await withResolvedOffice(
+      "deal",
+      projectId,
+      (officeDb) =>
+        searchFieldProjectTags(officeDb, access, {
+          projectId,
+          query: typeof req.query.q === "string" ? req.query.q : undefined,
+          limit: req.query.limit ? parseOptionalPositiveInt(req.query.limit) : undefined,
+        }),
+      "Project not found",
+    );
+    res.json({ ...value, ...officeTag(office) });
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.get("/projects/:dealId/reports", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.get("/projects/:dealId/reports", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await listFieldProjectReports(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, String(req.params.dealId));
-    await req.commitTransaction();
-    res.json(result);
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const dealId = String(req.params.dealId);
+    const { value, office } = await withResolvedOffice(
+      "deal",
+      dealId,
+      (officeDb) => listFieldProjectReports(officeDb, access, dealId),
+      "Project not found",
+    );
+    res.json({ ...value, ...officeTag(office) });
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.get("/reports/:reportId/download", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.get("/reports/:reportId/download", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await getFieldProjectReportDownload(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, String(req.params.reportId));
-    await req.commitTransaction();
-    res.json(result);
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const reportId = String(req.params.reportId);
+    const { value, office } = await withResolvedOffice(
+      "file",
+      reportId,
+      (officeDb) => getFieldProjectReportDownload(officeDb, access, reportId),
+      "Report not found",
+    );
+    res.json({ ...value, ...officeTag(office) });
   } catch (err) {
     next(err);
   }
@@ -372,58 +414,76 @@ fieldRoutes.post("/reports/generate", ...fieldProjectMiddleware, async (req, res
   }
 });
 
-fieldRoutes.get("/photo-targets/search", ...fieldProjectMiddleware, async (req, res, next) => {
+// Cross-office capture-target picker (the G1-deferred search): fan out the company-wide picker over
+// ALL active offices and stamp each target with its office, so a field user can attach to ANY active
+// deal/lead in ANY office. Visually-identical targets across offices are disambiguated by officeSlug.
+fieldRoutes.get("/photo-targets/search", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await searchFieldCaptureTargets(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      search: req.query.search as string | undefined,
-      limit: parseOptionalPositiveInt(req.query.limit),
-    });
-    await req.commitTransaction();
-    res.json(result);
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    // Validate inputs BEFORE the fan-out — a 400 thrown inside the per-office callback would be
+    // swallowed by the graceful-degrade (Promise.allSettled) instead of surfacing to the caller.
+    const search = req.query.search as string | undefined;
+    const limit = parseOptionalPositiveInt(req.query.limit);
+    const { results, failures } = await fanOutActiveOffices((officeDb) =>
+      searchFieldCaptureTargets(officeDb, access, { search, limit }),
+    );
+    const targets = results.flatMap(({ office, value }) =>
+      value.targets.map((target) => ({ ...target, ...officeTag(office) })),
+    );
+    res.json({ targets, degradedOffices: failures.map((failure) => failure.office.slug) });
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.get("/photo-targets/validate", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.get("/photo-targets/validate", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await assertAccessibleFieldCaptureTarget(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-      dealId: typeof req.query.dealId === "string" ? req.query.dealId : undefined,
-      leadId: typeof req.query.leadId === "string" ? req.query.leadId : undefined,
-      opportunityId: typeof req.query.opportunityId === "string" ? req.query.opportunityId : undefined,
-    });
-    await req.commitTransaction();
-    res.json({ target: result });
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const dealId = typeof req.query.dealId === "string" ? req.query.dealId : undefined;
+    const leadId = typeof req.query.leadId === "string" ? req.query.leadId : undefined;
+    const opportunityId = typeof req.query.opportunityId === "string" ? req.query.opportunityId : undefined;
+    if ((dealId ? 1 : 0) + (leadId ? 1 : 0) + (opportunityId ? 1 : 0) !== 1) {
+      throw new AppError(400, "Exactly one capture target must be provided.");
+    }
+    // Opportunities live in the deals table; only a plain lead resolves via the leads table.
+    const kind = leadId ? "lead" : "deal";
+    const id = (dealId ?? leadId ?? opportunityId)!;
+    const { value, office } = await withResolvedOffice(
+      kind,
+      id,
+      (officeDb) => assertAccessibleFieldCaptureTarget(officeDb, { dealId, leadId, opportunityId, ...access }),
+      "Capture target not found",
+    );
+    res.json({ target: value, ...officeTag(office) });
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.get("/projects/:dealId/photos", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, res, next) => {
   try {
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const dealId = String(req.params.dealId);
     const categories = typeof req.query.category === "string" && req.query.category.length > 0
       ? req.query.category.split(",")
       : undefined;
     const uploaderIds = typeof req.query.uploader === "string" && req.query.uploader.length > 0
       ? req.query.uploader.split(",")
       : undefined;
-    const result = await listFieldProjectPhotos(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, String(req.params.dealId), {
-      categories,
-      uploaderIds,
-      from: req.query.from as string | undefined,
-      to: req.query.to as string | undefined,
-      includeDeleted: false,
-    });
-    await req.commitTransaction();
-    res.json(result);
+    const { value, office } = await withResolvedOffice(
+      "deal",
+      dealId,
+      (officeDb) =>
+        listFieldProjectPhotos(officeDb, access, dealId, {
+          categories,
+          uploaderIds,
+          from: req.query.from as string | undefined,
+          to: req.query.to as string | undefined,
+          includeDeleted: false,
+        }),
+      "Project not found",
+    );
+    res.json({ ...value, ...officeTag(office) });
   } catch (err) {
     next(err);
   }
