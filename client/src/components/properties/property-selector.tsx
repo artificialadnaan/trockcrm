@@ -161,6 +161,10 @@ export function PropertySelector({
   onPropertySelectedRef.current = onPropertySelected;
   const sortedProperties = sortPropertiesForSelection(properties);
   const shouldRepairIncompleteAddress = Boolean(requireLeadCreateFields || repairIncompleteAddressOnSelect);
+  // Whether to OPEN repair is driven by shouldRepairIncompleteAddress (address-only deal flows included),
+  // but year/units are required ONLY for the lead-create flow — address-only deal flows must never be
+  // forced to fill lead-create metadata. So the requireLeadCreate option is driven strictly by this flag.
+  const requireLeadFields = Boolean(requireLeadCreateFields);
 
   useEffect(() => {
     if (!value) {
@@ -194,8 +198,9 @@ export function PropertySelector({
     if (repairDismissedValue === value) return; // user cancelled for THIS value -> stay closed
     const prop = resolvedValueProperty && resolvedValueProperty.id === value ? resolvedValueProperty : null;
     if (!prop) return; // not resolved yet
-    if (getMissingPropertyFields(prop, { requireLeadCreate: true }).length === 0) return; // complete
+    if (getMissingPropertyFields(prop, { requireLeadCreate: requireLeadFields }).length === 0) return; // complete
     setRepairTarget(prop);
+    setOpen(true); // the repair editor renders inside the open dropdown — surface it for the auto-selected path
     setRepairDraft({
       address: prop.address ?? "",
       city: prop.city ?? "",
@@ -205,7 +210,7 @@ export function PropertySelector({
       unitCount: prop.unitCount != null ? String(prop.unitCount) : "",
     });
     setRepairError(null);
-  }, [shouldRepairIncompleteAddress, value, repairTarget, repairDismissedValue, resolvedValueProperty]);
+  }, [shouldRepairIncompleteAddress, requireLeadFields, value, repairTarget, repairDismissedValue, resolvedValueProperty]);
 
   return (
     <div className="space-y-2">
@@ -233,7 +238,7 @@ export function PropertySelector({
           />
           {repairTarget ? (() => {
             const repairMissing = getMissingPropertyFields(repairTarget, {
-              requireLeadCreate: shouldRepairIncompleteAddress,
+              requireLeadCreate: requireLeadFields,
             });
             return (
             <div className="space-y-3 rounded-md border border-amber-200 bg-amber-50 p-3">
@@ -317,7 +322,7 @@ export function PropertySelector({
                       unitCount: repairDraft.unitCount.trim() ? Number(repairDraft.unitCount) : repairTarget.unitCount ?? null,
                     };
                     const missing = getMissingPropertyFields(patch, {
-                      requireLeadCreate: shouldRepairIncompleteAddress,
+                      requireLeadCreate: requireLeadFields,
                     });
                     if (missing.length > 0) {
                       setRepairError(`Complete missing fields: ${missing.join(", ")}`);
@@ -372,7 +377,7 @@ export function PropertySelector({
             ) : (
               sortedProperties.map((property) => {
                 const incomplete = getMissingPropertyFields(property, {
-                  requireLeadCreate: shouldRepairIncompleteAddress,
+                  requireLeadCreate: requireLeadFields,
                 }).length > 0;
                 const label = getPropertySelectorLabel(property);
                 return (
