@@ -20,79 +20,45 @@ export interface AddressAutocompleteProps {
   required?: boolean;
 }
 
-// Note: /api/address/suggest is office-agnostic (a stateless Mapbox proxy, no tenant data), so this
-// component takes no officeId. The server's MAPBOX_REQUEST_TIMEOUT_MS bounds latency; the reqId guard
-// below drops superseded responses so a slow reply can't clobber a newer keystroke.
-//
-// Why a native input listener instead of React's onChange:
-//   React 19 installs an instance-level value setter (_valueTracker) on controlled inputs.
-//   When a test helper does `inputEl.value = v` followed by `dispatchEvent(new Event("input",...))`,
-//   the tracker already records `v` as the last-known value, so `updateValueIfChanged` returns false
-//   and React suppresses onChange.  A direct `addEventListener("input", ...)` on the wrapper div
-//   bypasses that filtering and fires reliably regardless of how the value was assigned.
+// Controlled input — the parent owns `value` (typing -> onChange -> parent state -> value prop -> this
+// effect). /api/address/suggest is office-agnostic (a stateless Mapbox proxy, no tenant data), so this
+// takes no officeId. The server's MAPBOX_REQUEST_TIMEOUT_MS bounds latency; the reqId guard drops a
+// superseded response so a slow reply can't clobber a newer keystroke. Degrade-WITHOUT-latch: a failed
+// or empty fetch clears suggestions for THAT attempt only — the next `value` change re-runs this effect
+// and retries (no session-wide disable flag).
 export function AddressAutocomplete({ value, onChange, onSelect, id, placeholder, required, ...rest }: AddressAutocompleteProps) {
-  const [query, setQuery] = useState(value);
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [open, setOpen] = useState(false);
   const reqId = useRef(0);
-  const wrapperRef = useRef<HTMLDivElement | null>(null);
 
-  // Stable ref to onChange — avoids re-attaching the native listener on every render while
-  // still calling the latest callback identity.
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
-
-  // Sync external value → internal query (programmatic resets / controlled parent).
-  // setQuery with the same string is a React bail-out: no re-render, no debounce re-fire.
   useEffect(() => {
-    setQuery(value);
-  }, [value]);
-
-  // Native input listener: fires on every "input" event regardless of React's _valueTracker,
-  // making the test's `inputEl.value = v; dispatchEvent(new Event("input"))` pattern work.
-  useEffect(() => {
-    const wrapper = wrapperRef.current;
-    const el = wrapper?.querySelector("input");
-    if (!el) return;
-    const handleInput = () => {
-      const val = el.value;
-      setQuery(val);
-      onChangeRef.current(val);
-    };
-    el.addEventListener("input", handleInput);
-    return () => el.removeEventListener("input", handleInput);
-  }, []); // attach once on mount; uses ref for latest onChange identity
-
-  // Debounced API suggestion fetch
-  useEffect(() => {
-    const q = query.trim();
+    const q = value.trim();
     if (q.length < MIN_QUERY_LENGTH) { setSuggestions([]); setOpen(false); return; }
     const myReq = ++reqId.current;
     const handle = setTimeout(async () => {
       try {
         const res = await api<{ suggestions: AddressSuggestion[] }>(`/address/suggest?q=${encodeURIComponent(q)}`);
-        if (myReq !== reqId.current) return;
+        if (myReq !== reqId.current) return; // superseded by a newer keystroke
         setSuggestions(res.suggestions ?? []);
         setOpen((res.suggestions ?? []).length > 0);
       } catch {
-        // Degrade THIS attempt only — do NOT latch. The next keystroke re-runs this effect and retries.
         if (myReq !== reqId.current) return;
-        setSuggestions([]);
+        setSuggestions([]); // degrade this attempt only; next value change retries
         setOpen(false);
       }
     }, INPUT_DEBOUNCE_MS);
     return () => clearTimeout(handle);
-  }, [query]);
+  }, [value]);
 
   return (
-    <div ref={wrapperRef} className="relative">
+    <div className="relative">
       <Input
         id={id}
         aria-label={rest["aria-label"]}
         placeholder={placeholder}
         required={required}
-        value={query}
-        onChange={() => {}}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
         autoComplete="off"
       />
       {open && suggestions.length > 0 ? (
