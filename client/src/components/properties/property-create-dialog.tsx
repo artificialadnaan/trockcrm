@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { createProperty } from "@/hooks/use-properties";
 import { CompanySelector } from "@/components/companies/company-selector";
+import { AddressAutocomplete } from "./address-autocomplete";
 import { useCompanyDetail } from "@/hooks/use-companies";
 import type { PropertySurface } from "@/hooks/use-properties";
 import {
@@ -170,11 +171,16 @@ export function PropertyCreateDialog({
           </div>
           <div className="space-y-2">
             <Label htmlFor="property-address">Address *</Label>
-            <Input
+            <AddressAutocomplete
               id="property-address"
-              value={formData.address}
-              onChange={(event) => setFormData((prev) => ({ ...prev, address: event.target.value }))}
+              aria-label="Property street address"
               placeholder="123 Main St"
+              required
+              value={formData.address}
+              onChange={(address) => setFormData((prev) => ({ ...prev, address }))}
+              onSelect={({ address, city, state, zip }) =>
+                setFormData((prev) => ({ ...prev, address, city, state, zip }))
+              }
             />
           </div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">

@@ -12,6 +12,7 @@ import {
   maxPropertyBuildYear,
 } from "@/lib/property-completeness";
 import { PropertyCreateDialog } from "./property-create-dialog";
+import { AddressAutocomplete } from "./address-autocomplete";
 
 type PropertySelectorRecord = Pick<
   PropertySurface,
@@ -267,11 +268,22 @@ export function PropertySelector({
               </div>
               <div className="grid gap-2 sm:grid-cols-2">
                 {repairMissing.includes("address") ? (
-                  <Input
+                  <AddressAutocomplete
                     aria-label="Property street address"
                     placeholder="Street address"
                     value={repairDraft.address}
-                    onChange={(event) => setRepairDraft((current) => ({ ...current, address: event.target.value }))}
+                    onChange={(address) => setRepairDraft((current) => ({ ...current, address }))}
+                    onSelect={(parts) =>
+                      setRepairDraft((current) => ({
+                        ...current,
+                        // Set-only-missing: only fill fields that were missing at editor-open (frozen via repairMissing,
+                        // which derives from the stable repairTarget). NEVER overwrite a present city/state/zip.
+                        ...(repairMissing.includes("address") ? { address: parts.address } : {}),
+                        ...(repairMissing.includes("city") ? { city: parts.city } : {}),
+                        ...(repairMissing.includes("state") ? { state: parts.state } : {}),
+                        ...(repairMissing.includes("zip") ? { zip: parts.zip } : {}),
+                      }))
+                    }
                   />
                 ) : null}
                 {repairMissing.includes("city") ? (

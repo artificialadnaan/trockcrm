@@ -47,6 +47,7 @@ import { adminRoutes } from "./modules/admin/routes.js";
 import { companycamRoutes } from "./modules/companycam/routes.js";
 import { aiCopilotRoutes } from "./modules/ai-copilot/routes.js";
 import usageRoutes from "./modules/usage/routes.js";
+import addressRoutes from "./modules/address/routes.js";
 import { salesReviewRoutes } from "./modules/sales-review/routes.js";
 import { userRoutes } from "./modules/users/routes.js";
 import { fieldRoutes } from "./modules/field/routes.js";
@@ -211,6 +212,7 @@ export function createApp() {
 
   // Admin routes (auth required, no tenant context)
   app.use("/api/offices", authMiddleware, requireCrmUser, officeRoutes);
+  app.use("/api/address", authMiddleware, requireCrmUser, apiLimiter, addressRoutes);
 
   // SSE notification endpoint (auth required, no tenant context needed for keepalive)
   app.use("/api/notifications", authMiddleware, requireCrmUser, notificationRoutes);
