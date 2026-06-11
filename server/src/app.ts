@@ -212,7 +212,7 @@ export function createApp() {
 
   // Admin routes (auth required, no tenant context)
   app.use("/api/offices", authMiddleware, requireCrmUser, officeRoutes);
-  app.use("/api/address", authMiddleware, requireCrmUser, addressRoutes);
+  app.use("/api/address", authMiddleware, requireCrmUser, apiLimiter, addressRoutes);
 
   // SSE notification endpoint (auth required, no tenant context needed for keepalive)
   app.use("/api/notifications", authMiddleware, requireCrmUser, notificationRoutes);

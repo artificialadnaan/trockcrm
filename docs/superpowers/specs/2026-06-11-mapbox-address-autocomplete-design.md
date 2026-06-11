@@ -21,7 +21,8 @@ Property addresses are typed free-hand, producing dirty/inconsistent data (e.g. 
 
 ## Decisions (confirmed)
 
-- **Provider:** Mapbox. **Token:** a fresh, URL-restricted `pk.*` stored **server-side** as `MAPBOX_TOKEN` env (Railway); the token shared earlier in chat is rotated/**dead** and must not be referenced.
+- **Provider:** Mapbox. **Token:** a fresh `pk.*` stored **server-side** as `MAPBOX_TOKEN` env (Railway); the token shared earlier in chat is rotated/**dead** and must not be referenced. Because the token is used **server-side**, it must be **NON-URL-restricted**: a server `fetch` sends no `Referer`/`Origin`, so a URL-restricted token would be `403`'d and the feature would silently degrade. Its protection is server-side secrecy + the proxy's auth + the rate-limit, and it should be **scoped to the Geocoding API**.
+- **Permanent geocoding:** the Mapbox query uses **`permanent=true`** because selected addresses are persisted to the property record (Mapbox ToS storage requirement). *Cost optimization (follow-up): suggest lookups could use temporary geocoding and only the persisted lookup permanent, to bound permanent-tier billing to saves — deferred; whole-flow permanent for now given low property-creation volume.*
 - **Architecture:** **server proxy** — the browser never sees the token; enables debounce/rate-limit/cache and provider swap.
 - **Country restriction:** **US-only, via a named config constant** `ADDRESS_AUTOCOMPLETE_COUNTRY = "us"` (not an inline literal). Documented assumption: *"US-only by config; revisit if non-US properties are onboarded."*
 - **Mapbox API:** **Geocoding API v6 forward** — **stateless, per-request. No session tokens, no suggest/retrieve two-step, no session lifecycle.** (See the alternative note below; session-token language applies ONLY to that alternative, never to the v6 path we are building.)

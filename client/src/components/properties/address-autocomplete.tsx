@@ -30,15 +30,21 @@ export function AddressAutocomplete({ value, onChange, onSelect, id, placeholder
   const [suggestions, setSuggestions] = useState<AddressSuggestion[]>([]);
   const [open, setOpen] = useState(false);
   const reqId = useRef(0);
+  const justSelectedRef = useRef<string | null>(null);
 
   useEffect(() => {
     const q = value.trim();
+    const myReq = ++reqId.current; // bump first: invalidates any in-flight response even on early return
+    if (justSelectedRef.current !== null && value === justSelectedRef.current) {
+      justSelectedRef.current = null;
+      setSuggestions([]); setOpen(false);
+      return; // just selected this value — don't reopen the dropdown
+    }
     if (q.length < MIN_QUERY_LENGTH) { setSuggestions([]); setOpen(false); return; }
-    const myReq = ++reqId.current;
     const handle = setTimeout(async () => {
       try {
         const res = await api<{ suggestions: AddressSuggestion[] }>(`/address/suggest?q=${encodeURIComponent(q)}`);
-        if (myReq !== reqId.current) return; // superseded by a newer keystroke
+        if (myReq !== reqId.current) return; // superseded
         setSuggestions(res.suggestions ?? []);
         setOpen((res.suggestions ?? []).length > 0);
       } catch {
@@ -69,7 +75,7 @@ export function AddressAutocomplete({ value, onChange, onSelect, id, placeholder
               type="button"
               data-testid="address-suggestion"
               className="block w-full truncate px-2 py-1.5 text-left text-sm hover:bg-muted"
-              onClick={() => { onSelect({ address: s.address, city: s.city, state: s.state, zip: s.zip }); setOpen(false); }}
+              onClick={() => { justSelectedRef.current = s.address; onSelect({ address: s.address, city: s.city, state: s.state, zip: s.zip }); setOpen(false); }}
             >
               {s.label}
             </button>

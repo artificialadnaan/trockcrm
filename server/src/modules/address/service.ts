@@ -41,7 +41,7 @@ export function parseMapboxFeatures(data: unknown): AddressSuggestion[] {
       state: (p.context?.region?.region_code ?? "").trim().toUpperCase(),
       zip: (p.context?.postcode?.name ?? "").trim(),
     };
-  });
+  }).filter((s) => s.address.length > 0);
 }
 
 export async function suggestAddresses(query: string): Promise<AddressSuggestion[]> {
@@ -55,6 +55,8 @@ export async function suggestAddresses(query: string): Promise<AddressSuggestion
     types: "address",
     country: ADDRESS_AUTOCOMPLETE_COUNTRY,
     limit: String(SUGGEST_LIMIT),
+    // permanent=true: results are persisted to the property record (Mapbox ToS requires it for storage).
+    permanent: "true",
     access_token: token,
   });
   try {

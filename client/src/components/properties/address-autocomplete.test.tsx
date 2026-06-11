@@ -84,4 +84,30 @@ describe("AddressAutocomplete", () => {
     expect(apiMock).toHaveBeenCalledTimes(2);
     expect(suggestion()).not.toBeNull();
   });
+
+  it("ignores an in-flight response after the query drops below min (no stale reopen)", async () => {
+    vi.useFakeTimers();
+    let resolveFetch!: (v: { suggestions: unknown[] }) => void;
+    apiMock.mockReturnValue(new Promise((res) => { resolveFetch = res as typeof resolveFetch; }));
+    render("2711 Haskell");
+    await tick(250); // debounce -> request in flight
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    rerender("12"); // drops below MIN — effect bumps reqId + short-circuits
+    await act(async () => { resolveFetch({ suggestions: [{ id: "1", label: "L", address: "2711 N Haskell Ave", city: "Dallas", state: "TX", zip: "75204" }] }); });
+    expect(suggestion()).toBeNull(); // stale in-flight response was ignored
+  });
+
+  it("does not reopen the dropdown after selecting (durable close)", async () => {
+    vi.useFakeTimers();
+    apiMock.mockResolvedValue({ suggestions: [{ id: "1", label: "2711 N Haskell Ave", address: "2711 N Haskell Ave", city: "Dallas", state: "TX", zip: "75204" }] });
+    render("2711 Haskell");
+    await tick(250);
+    expect(suggestion()).not.toBeNull();
+    apiMock.mockClear();
+    await act(async () => suggestion()!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    rerender("2711 N Haskell Ave"); // parent set value to the selected street
+    await tick(250);
+    expect(apiMock).not.toHaveBeenCalled(); // suppressed — no re-fetch for the just-selected value
+    expect(suggestion()).toBeNull();        // stays closed
+  });
 });

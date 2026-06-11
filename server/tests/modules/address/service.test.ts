@@ -37,6 +37,16 @@ describe("parseMapboxFeatures", () => {
     expect(parseMapboxFeatures({})).toEqual([]);
     expect(parseMapboxFeatures({ features: null } as never)).toEqual([]);
   });
+
+  it("drops suggestions with an empty street address", () => {
+    const data = { features: [
+      { id: "ok", properties: { name: "1 Main St", context: { place: { name: "Austin" } } } },
+      { id: "empty", properties: { name: "", context: { place: { name: "Austin" } } } },
+    ]};
+    const out = parseMapboxFeatures(data);
+    expect(out).toHaveLength(1);
+    expect(out[0].address).toBe("1 Main St");
+  });
 });
 
 describe("suggestAddresses (degrade)", () => {
@@ -71,5 +81,20 @@ describe("suggestAddresses (degrade)", () => {
     const out = await suggestAddresses("2711 Haskell");
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ address: "2711 North Haskell Ave", city: "Dallas", state: "TX", zip: "75204" });
+  });
+
+  it("requests permanent geocoding (results are persisted)", async () => {
+    vi.stubEnv("MAPBOX_TOKEN", "pk.test");
+    const fetchSpy = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ features: [] }) }));
+    globalThis.fetch = fetchSpy as never;
+    await suggestAddresses("2711 Haskell");
+    const url = String(fetchSpy.mock.calls[0][0]);
+    expect(url).toContain("permanent=true");
+  });
+
+  it("returns [] when fetch rejects (timeout/network) — degrade", async () => {
+    vi.stubEnv("MAPBOX_TOKEN", "pk.test");
+    globalThis.fetch = vi.fn(async () => { throw new Error("aborted"); }) as never;
+    expect(await suggestAddresses("2711 Haskell")).toEqual([]);
   });
 });
