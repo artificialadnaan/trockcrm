@@ -490,4 +490,58 @@ describe("PropertySelector Complete-property catch-net (interactive)", () => {
     expect(editorOpen()).toBe(true);
     expect(yearBuiltInput()).toBeTruthy();
   });
+
+  // #5 — Mapbox autocomplete fills the street but the property stays gated on the still-missing year/units.
+  it("selecting an address suggestion fills the street but leaves the property gated on year/units", async () => {
+    // incomplete on ALL fields so the address autocomplete + year/units inputs render
+    const incomplete = incompleteLeadCreateProperty({ id: "pAC", name: "AC", address: null, city: null, state: null, zip: null });
+    propertyHook.list = [incomplete];
+    apiMock.mockResolvedValue({ suggestions: [{ id: "s1", label: "9 Oak St, Dallas, TX 75201", address: "9 Oak St", city: "Dallas", state: "TX", zip: "75201" }] });
+
+    renderSelector("pAC");
+    await flush();
+    expect(editorOpen()).toBe(true);
+
+    const street = container.querySelector<HTMLInputElement>('input[aria-label="Property street address"]')!;
+    await setInputValue(street, "9 Oak");
+    await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
+    const option = container.querySelector<HTMLButtonElement>('[data-testid="address-suggestion"]')!;
+    await clickButton(option);
+    await flush();
+
+    // street filled, but year/units inputs still present (still gated), editor still open
+    expect(container.querySelector<HTMLInputElement>('input[aria-label="Property street address"]')!.value).toBe("9 Oak St");
+    expect(yearBuiltInput()).toBeTruthy();
+    expect(unitCountInput()).toBeTruthy();
+    expect(editorOpen()).toBe(true);
+  });
+
+  // #6 — set-only-missing guard: a present city must survive (the suggestion's different city is NOT written).
+  it("selecting a suggestion does NOT overwrite a present field (set-only-missing guard)", async () => {
+    // Only the STREET is missing; city/state/zip + year/units are present and authoritative.
+    const onlyStreetMissing = buildProperty({ id: "pSOM", name: "SOM", address: null, city: "Plano", state: "TX", zip: "75024" });
+    propertyHook.list = [onlyStreetMissing];
+    propertyHook.updateProperty.mockResolvedValue({ property: { ...onlyStreetMissing, address: "9 Oak St" } });
+    // suggestion carries a DIFFERENT city ("Dallas") — must NOT be written, since city wasn't missing at open
+    apiMock.mockResolvedValue({ suggestions: [{ id: "s1", label: "9 Oak St, Dallas, TX 75201", address: "9 Oak St", city: "Dallas", state: "TX", zip: "75201" }] });
+
+    renderSelector("pSOM");
+    await flush();
+    expect(editorOpen()).toBe(true);
+
+    const street = container.querySelector<HTMLInputElement>('input[aria-label="Property street address"]')!;
+    await setInputValue(street, "9 Oak");
+    await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-testid="address-suggestion"]')!);
+    await flush();
+
+    await clickButton(findButtonByText("Complete property")!);
+    await flush();
+
+    // saved patch keeps the ORIGINAL city "Plano"; the suggestion's "Dallas" was NOT written
+    expect(propertyHook.updateProperty).toHaveBeenCalledTimes(1);
+    const [, patch] = propertyHook.updateProperty.mock.calls[0];
+    expect(patch.address).toBe("9 Oak St");
+    expect(patch.city).toBe("Plano");
+  });
 });
