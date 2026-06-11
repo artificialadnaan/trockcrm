@@ -118,9 +118,16 @@ function ProjectRow({
   onPress: () => void;
   onToggleStar: () => void;
 }) {
+  // The star is a SIBLING of the row's tappable area (not nested inside it), so
+  // tapping the star toggles only — it can never bubble into opening the project.
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}>
-      <View style={{ flex: 1, gap: 4 }}>
+    <View style={styles.row}>
+      <Pressable
+        onPress={onPress}
+        style={({ pressed }) => [{ flex: 1, gap: 4 }, pressed && { opacity: 0.6 }]}
+        accessibilityRole="button"
+        accessibilityLabel={`Open ${project.name}`}
+      >
         <View style={styles.rowTop}>
           <Text style={styles.rowName} numberOfLines={1}>
             {project.name}
@@ -136,13 +143,18 @@ function ProjectRow({
           #{project.dealNumber} · {project.photoCount} photo{project.photoCount === 1 ? "" : "s"} ·{" "}
           {relativeDate(project.lastActivityAt)}
         </Text>
-      </View>
-      <Pressable onPress={onToggleStar} hitSlop={12} accessibilityLabel={project.starred ? "Unstar" : "Star"}>
+      </Pressable>
+      <Pressable
+        onPress={onToggleStar}
+        hitSlop={12}
+        style={styles.starButton}
+        accessibilityLabel={project.starred ? "Unstar" : "Star"}
+      >
         <Text style={[styles.star, project.starred && { color: theme.color.warning }]}>
           {project.starred ? "★" : "☆"}
         </Text>
       </Pressable>
-    </Pressable>
+    </View>
   );
 }
 
@@ -171,5 +183,6 @@ const styles = StyleSheet.create({
   rowName: { flex: 1, fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   rowAddress: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   rowMeta: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
+  starButton: { paddingLeft: theme.space.sm, paddingVertical: theme.space.xs },
   star: { fontSize: 24, color: theme.color.textMuted },
 });

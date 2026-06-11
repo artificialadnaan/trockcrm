@@ -47,11 +47,21 @@ function asNumber(x: unknown): number {
 
 function toDecimalDegrees(value: unknown): number | undefined {
   if (typeof value === "number") return Number.isFinite(value) ? Math.abs(value) : undefined;
-  if (Array.isArray(value) && value.length >= 1) {
-    // DMS: [degrees, minutes, seconds] (each a number or [num, den] rational).
-    const [d = 0, m = 0, s = 0] = value.map(asNumber);
-    if (![d, m, s].every(Number.isFinite)) return undefined;
-    return Math.abs(d) + Math.abs(m) / 60 + Math.abs(s) / 3600;
+  if (Array.isArray(value)) {
+    // A bare 2-element array is an EXIF rational [numerator, denominator]
+    // (e.g. [327, 10] = 32.7°), NOT a degrees/minutes tuple — standard GPS DMS
+    // always has three components (deg, min, sec).
+    if (value.length === 2) {
+      const n = asNumber(value);
+      return Number.isFinite(n) ? Math.abs(n) : undefined;
+    }
+    if (value.length >= 1) {
+      // DMS: [degrees, minutes, seconds] (each a number or [num, den] rational).
+      const [d = 0, m = 0, s = 0] = value.map(asNumber);
+      if (![d, m, s].every(Number.isFinite)) return undefined;
+      return Math.abs(d) + Math.abs(m) / 60 + Math.abs(s) / 3600;
+    }
+    return undefined;
   }
   const n = Number(value);
   return Number.isFinite(n) ? Math.abs(n) : undefined;

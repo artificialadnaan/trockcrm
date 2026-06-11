@@ -160,6 +160,14 @@ export default function CaptureScreen() {
     setPhotos((prev) => prev.filter((p) => p.key !== key));
   }
 
+  function clearTarget() {
+    setTarget(null);
+    // Also clear the route params: otherwise re-entering Capture from the SAME
+    // project later leaves dealId unchanged, the sync effect never re-fires, and
+    // the photos would silently upload to Pending instead of that project.
+    router.setParams({ dealId: "", targetName: "", dealNumber: "", stage: "", propertyAddress: "" });
+  }
+
   async function upload() {
     if (photos.length === 0 || status === "uploading") return;
     setStatus("uploading");
@@ -243,7 +251,7 @@ export default function CaptureScreen() {
           </View>
           <View style={styles.targetActions}>
             {target ? (
-              <Pressable onPress={() => setTarget(null)} disabled={uploading} hitSlop={8} accessibilityLabel="Clear project">
+              <Pressable onPress={clearTarget} disabled={uploading} hitSlop={8} accessibilityLabel="Clear project">
                 <Text style={[styles.link, uploading && styles.linkDisabled]}>Clear</Text>
               </Pressable>
             ) : null}

@@ -36,6 +36,18 @@ describe("extractExifMetadata", () => {
     expect(m.longitude).toBeCloseTo(96, 4);
   });
 
+  it("parses a bare 2-element rational pair as a decimal coordinate (not a DMS tuple)", () => {
+    const m = extractExifMetadata({
+      GPSLatitude: [327, 10], // 32.7°
+      GPSLatitudeRef: "N",
+      GPSLongitude: [968, 10], // 96.8°
+      GPSLongitudeRef: "W",
+    });
+    expect(m.latitude).toBeCloseTo(32.7, 5);
+    expect(m.longitude).toBeCloseTo(-96.8, 5);
+    expect(m.addressSource).toBe("exif");
+  });
+
   it("returns no coords + no source when GPS is missing, but parses takenAt", () => {
     const m = extractExifMetadata({ DateTimeOriginal: "2026:03:10 14:05:09" });
     expect(m.latitude).toBeUndefined();
