@@ -418,47 +418,37 @@ fieldRoutes.post("/reports/generate", ...fieldProjectMiddleware, async (req, res
   }
 });
 
-// Cross-office capture-target picker (the G1-deferred search): fan out the company-wide picker over
-// ALL active offices and stamp each target with its office, so a field user can attach to ANY active
-// deal/lead in ANY office. Visually-identical targets across offices are disambiguated by officeSlug.
-fieldRoutes.get("/photo-targets/search", requireFieldContractor, async (req, res, next) => {
+// NOTE: the capture-target picker (/photo-targets/search + /validate) stays SINGLE-office in Phase 2a.
+// It feeds the photo-ATTACH (write) flow, which is still single-office — surfacing cross-office targets
+// the upload can't yet write to would be a broken UX. These move to cross-office in the Phase 2b writes
+// PR, together with the deal→office resolver that re-binds the write to the target's office.
+fieldRoutes.get("/photo-targets/search", ...fieldProjectMiddleware, async (req, res, next) => {
   try {
-    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
-    // Validate inputs BEFORE the fan-out — a 400 thrown inside the per-office callback would be
-    // swallowed by the graceful-degrade (Promise.allSettled) instead of surfacing to the caller.
-    const search = req.query.search as string | undefined;
-    const limit = parseOptionalPositiveInt(req.query.limit);
-    const { results, failures } = await fanOutActiveOffices((officeDb) =>
-      searchFieldCaptureTargets(officeDb, access, { search, limit }),
-    );
-    const targets = results.flatMap(({ office, value }) =>
-      value.targets.map((target) => ({ ...target, ...officeTag(office) })),
-    );
-    res.json({ targets, degradedOffices: failures.map((failure) => failure.office.slug) });
+    const result = await searchFieldCaptureTargets(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+    }, {
+      search: req.query.search as string | undefined,
+      limit: parseOptionalPositiveInt(req.query.limit),
+    });
+    await req.commitTransaction();
+    res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.get("/photo-targets/validate", requireFieldContractor, async (req, res, next) => {
+fieldRoutes.get("/photo-targets/validate", ...fieldProjectMiddleware, async (req, res, next) => {
   try {
-    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
-    const dealId = typeof req.query.dealId === "string" ? req.query.dealId : undefined;
-    const leadId = typeof req.query.leadId === "string" ? req.query.leadId : undefined;
-    const opportunityId = typeof req.query.opportunityId === "string" ? req.query.opportunityId : undefined;
-    if ((dealId ? 1 : 0) + (leadId ? 1 : 0) + (opportunityId ? 1 : 0) !== 1) {
-      throw new AppError(400, "Exactly one capture target must be provided.");
-    }
-    // Opportunities live in the deals table; only a plain lead resolves via the leads table.
-    const kind = leadId ? "lead" : "deal";
-    const id = (dealId ?? leadId ?? opportunityId)!;
-    const { value, office } = await withResolvedOffice(
-      kind,
-      id,
-      (officeDb) => assertAccessibleFieldCaptureTarget(officeDb, { dealId, leadId, opportunityId, ...access }),
-      "Capture target not found",
-    );
-    res.json({ target: value, ...officeTag(office) });
+    const result = await assertAccessibleFieldCaptureTarget(req.tenantDb!, {
+      userId: req.fieldUser!.id,
+      userRole: req.fieldUser!.role,
+      dealId: typeof req.query.dealId === "string" ? req.query.dealId : undefined,
+      leadId: typeof req.query.leadId === "string" ? req.query.leadId : undefined,
+      opportunityId: typeof req.query.opportunityId === "string" ? req.query.opportunityId : undefined,
+    });
+    await req.commitTransaction();
+    res.json({ target: result });
   } catch (err) {
     next(err);
   }
