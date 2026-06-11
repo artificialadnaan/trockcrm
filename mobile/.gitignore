@@ -1,0 +1,21 @@
+# Expo / RN
+node_modules/
+.expo/
+dist/
+web-build/
+*.tsbuildinfo
+
+# Native build output (we use managed EAS builds; no committed ios/android)
+/ios/
+/android/
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Misc
+coverage/
+.DS_Store
+*.log
+expo-env.d.ts
