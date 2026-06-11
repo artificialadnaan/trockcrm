@@ -71,6 +71,12 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         locationWhenInUsePermission: "Tag jobsite photos with their capture location.",
       },
     ],
+    [
+      "expo-camera",
+      {
+        cameraPermission: "Capture jobsite photos to attach to a project.",
+      },
+    ],
     "expo-audio",
   ],
   experiments: {
