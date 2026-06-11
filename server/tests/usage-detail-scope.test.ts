@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRepScope, classifyAction, isWithinDrilldownWindow, latestNonFutureDate, oldestInWindowDate, classifyViewsState } from "../src/modules/usage/read-service.js";
+import { resolveRepScope, classifyAction, isWithinDrilldownWindow, latestNonFutureDate, oldestInWindowDate, classifyViewsState, composeStageLabel } from "../src/modules/usage/read-service.js";
 
 // The /platform-usage/detail route enforces the SAME rep-self scoping as the summary and /drilldown
 // (it calls resolveRepScope, then resolves through the active-office rep roster). A rep can never
@@ -13,6 +13,21 @@ describe("platform-usage/detail — scoping", () => {
   });
   it("lets an admin omit the rep (null), which the route rejects as 'rep required'", () => {
     expect(resolveRepScope({ role: "admin", userId: "adm-1" }, undefined)).toBeNull();
+  });
+});
+
+describe("platform-usage/detail — stage label composition", () => {
+  it("combines deal name with the from → to transition", () => {
+    expect(composeStageLabel("Tides on Duneville", "Estimate", "Won")).toBe("Tides on Duneville: Estimate → Won");
+  });
+  it("shows just the entered stage on an initial entry (no from)", () => {
+    expect(composeStageLabel("Tides on Duneville", null, "Opportunity")).toBe("Tides on Duneville: Opportunity");
+  });
+  it("degrades gracefully when the deal or stages are missing (deleted)", () => {
+    expect(composeStageLabel(null, "Estimate", "Won")).toBe("Estimate → Won"); // deal deleted
+    expect(composeStageLabel("Deal X", "Opportunity", null)).toBe("Deal X: Opportunity"); // to-stage unresolved
+    expect(composeStageLabel("Deal X", null, null)).toBe("Deal X"); // stages unresolved
+    expect(composeStageLabel(null, null, null)).toBe("Stage move"); // nothing resolves
   });
 });
 
