@@ -5,6 +5,12 @@ import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api";
 import { getOfficeRequestOptions } from "@/lib/office-selection";
 import { formatPropertyLabel, updateProperty, useProperties, type PropertySurface } from "@/hooks/use-properties";
+import {
+  getMissingPropertyFields,
+  isPositiveInteger,
+  isValidBuildYear,
+  maxPropertyBuildYear,
+} from "@/lib/property-completeness";
 import { PropertyCreateDialog } from "./property-create-dialog";
 
 type PropertySelectorRecord = Pick<
@@ -123,14 +129,25 @@ export function PropertySelector({
   const [query, setQuery] = useState("");
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [repairTarget, setRepairTarget] = useState<PropertySurface | null>(null);
-  const [repairDraft, setRepairDraft] = useState<Record<PropertyAddressField, string>>({
+  const [repairDraft, setRepairDraft] = useState<{
+    address: string;
+    city: string;
+    state: string;
+    zip: string;
+    buildYear: string;
+    unitCount: string;
+  }>({
     address: "",
     city: "",
     state: "",
     zip: "",
+    buildYear: "",
+    unitCount: "",
   });
   const [repairError, setRepairError] = useState<string | null>(null);
   const [repairSaving, setRepairSaving] = useState(false);
+  const [repairDismissedValue, setRepairDismissedValue] = useState<string | null>(null);
+  const [resolvedValueProperty, setResolvedValueProperty] = useState<PropertySurface | null>(null);
   const deferredQuery = useDeferredValue(query.trim());
   const { properties, loading, refetch } = useProperties(
     {
@@ -148,6 +165,7 @@ export function PropertySelector({
   useEffect(() => {
     if (!value) {
       setSelectedLabel(null);
+      setResolvedValueProperty(null);
       return;
     }
     let cancelled = false;
@@ -156,6 +174,7 @@ export function PropertySelector({
       .then((selection) => {
         if (!cancelled) {
           setSelectedLabel(selection.label);
+          setResolvedValueProperty(selection.property as PropertySurface);
           onPropertySelectedRef.current?.(selection.property as PropertySurface);
         }
       })
@@ -165,6 +184,28 @@ export function PropertySelector({
       cancelled = true;
     };
   }, [officeId, properties, value]);
+
+  // Catch-net: an incomplete property selected OUTSIDE the dropdown (auto-select / initialValues) still
+  // needs to be repaired. Idempotent + non-trapping: never reopens mid-edit, and stays closed after an
+  // explicit Cancel for the same value.
+  useEffect(() => {
+    if (!shouldRepairIncompleteAddress) return;
+    if (!value || repairTarget) return; // don't reopen while already repairing
+    if (repairDismissedValue === value) return; // user cancelled for THIS value -> stay closed
+    const prop = resolvedValueProperty && resolvedValueProperty.id === value ? resolvedValueProperty : null;
+    if (!prop) return; // not resolved yet
+    if (getMissingPropertyFields(prop, { requireLeadCreate: true }).length === 0) return; // complete
+    setRepairTarget(prop);
+    setRepairDraft({
+      address: prop.address ?? "",
+      city: prop.city ?? "",
+      state: prop.state ?? "",
+      zip: prop.zip ?? "",
+      buildYear: prop.buildYear != null ? String(prop.buildYear) : "",
+      unitCount: prop.unitCount != null ? String(prop.unitCount) : "",
+    });
+    setRepairError(null);
+  }, [shouldRepairIncompleteAddress, value, repairTarget, repairDismissedValue, resolvedValueProperty]);
 
   return (
     <div className="space-y-2">
@@ -190,19 +231,23 @@ export function PropertySelector({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
-          {repairTarget ? (
+          {repairTarget ? (() => {
+            const repairMissing = getMissingPropertyFields(repairTarget, {
+              requireLeadCreate: shouldRepairIncompleteAddress,
+            });
+            return (
             <div className="space-y-3 rounded-md border border-amber-200 bg-amber-50 p-3">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-700" />
                 <div>
-                  <p className="text-sm font-medium text-amber-900">Complete this property address</p>
+                  <p className="text-sm font-medium text-amber-900">Complete this property</p>
                   <p className="text-xs text-amber-800">
-                    Add the missing address fields before selecting this property.
+                    Add the missing details before selecting this property.
                   </p>
                 </div>
               </div>
               <div className="grid gap-2 sm:grid-cols-2">
-                {getMissingPropertyAddressFields(repairTarget).includes("address") ? (
+                {repairMissing.includes("address") ? (
                   <Input
                     aria-label="Property street address"
                     placeholder="Street address"
@@ -210,7 +255,7 @@ export function PropertySelector({
                     onChange={(event) => setRepairDraft((current) => ({ ...current, address: event.target.value }))}
                   />
                 ) : null}
-                {getMissingPropertyAddressFields(repairTarget).includes("city") ? (
+                {repairMissing.includes("city") ? (
                   <Input
                     aria-label="Property city"
                     placeholder="City"
@@ -218,7 +263,7 @@ export function PropertySelector({
                     onChange={(event) => setRepairDraft((current) => ({ ...current, city: event.target.value }))}
                   />
                 ) : null}
-                {getMissingPropertyAddressFields(repairTarget).includes("state") ? (
+                {repairMissing.includes("state") ? (
                   <Input
                     aria-label="Property state"
                     placeholder="State"
@@ -227,12 +272,33 @@ export function PropertySelector({
                     onChange={(event) => setRepairDraft((current) => ({ ...current, state: event.target.value.toUpperCase() }))}
                   />
                 ) : null}
-                {getMissingPropertyAddressFields(repairTarget).includes("zip") ? (
+                {repairMissing.includes("zip") ? (
                   <Input
                     aria-label="Property ZIP"
                     placeholder="ZIP"
                     value={repairDraft.zip}
                     onChange={(event) => setRepairDraft((current) => ({ ...current, zip: event.target.value }))}
+                  />
+                ) : null}
+                {repairMissing.includes("buildYear") ? (
+                  <Input
+                    type="number"
+                    min={1800}
+                    max={maxPropertyBuildYear()}
+                    aria-label="Property year built"
+                    placeholder="Year built"
+                    value={repairDraft.buildYear}
+                    onChange={(event) => setRepairDraft((current) => ({ ...current, buildYear: event.target.value }))}
+                  />
+                ) : null}
+                {repairMissing.includes("unitCount") ? (
+                  <Input
+                    type="number"
+                    min={1}
+                    aria-label="Property number of units"
+                    placeholder="Number of units"
+                    value={repairDraft.unitCount}
+                    onChange={(event) => setRepairDraft((current) => ({ ...current, unitCount: event.target.value }))}
                   />
                 ) : null}
               </div>
@@ -247,8 +313,12 @@ export function PropertySelector({
                       city: repairDraft.city.trim() || repairTarget.city || null,
                       state: (repairDraft.state.trim() || repairTarget.state || "").toUpperCase() || null,
                       zip: repairDraft.zip.trim() || repairTarget.zip || null,
+                      buildYear: repairDraft.buildYear.trim() ? Number(repairDraft.buildYear) : repairTarget.buildYear ?? null,
+                      unitCount: repairDraft.unitCount.trim() ? Number(repairDraft.unitCount) : repairTarget.unitCount ?? null,
                     };
-                    const missing = getMissingPropertyAddressFields(patch);
+                    const missing = getMissingPropertyFields(patch, {
+                      requireLeadCreate: shouldRepairIncompleteAddress,
+                    });
                     if (missing.length > 0) {
                       setRepairError(`Complete missing fields: ${missing.join(", ")}`);
                       return;
@@ -272,13 +342,14 @@ export function PropertySelector({
                   }}
                   disabled={repairSaving}
                 >
-                  {repairSaving ? "Saving..." : "Save address"}
+                  {repairSaving ? "Saving..." : "Complete property"}
                 </Button>
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
                   onClick={() => {
+                    setRepairDismissedValue(repairTarget?.id ?? value ?? null);
                     setRepairTarget(null);
                     setRepairError(null);
                   }}
@@ -288,7 +359,8 @@ export function PropertySelector({
                 </Button>
               </div>
             </div>
-          ) : null}
+            );
+          })() : null}
           <div className="max-h-56 space-y-1 overflow-y-auto">
             {loading ? (
               <div className="flex items-center gap-2 px-2 py-2 text-sm text-muted-foreground">
@@ -299,7 +371,9 @@ export function PropertySelector({
               <p className="px-2 py-2 text-sm text-muted-foreground">No properties found.</p>
             ) : (
               sortedProperties.map((property) => {
-                const incomplete = hasIncompletePropertyAddress(property);
+                const incomplete = getMissingPropertyFields(property, {
+                  requireLeadCreate: shouldRepairIncompleteAddress,
+                }).length > 0;
                 const label = getPropertySelectorLabel(property);
                 return (
                 <button
@@ -314,8 +388,11 @@ export function PropertySelector({
                         city: property.city ?? "",
                         state: property.state ?? "",
                         zip: property.zip ?? "",
+                        buildYear: property.buildYear != null ? String(property.buildYear) : "",
+                        unitCount: property.unitCount != null ? String(property.unitCount) : "",
                       });
                       setRepairError(null);
+                      setRepairDismissedValue(null);
                       return;
                     }
                     setSelectedLabel(label);
