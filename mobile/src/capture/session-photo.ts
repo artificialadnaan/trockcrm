@@ -12,6 +12,10 @@ export type SessionPhoto = {
   height?: number;
   metadata: PhotoMetadata;
   caption: string;
+  // Camera-session token the shot was captured in (undefined for library imports).
+  // GPS reconciliation is scoped to this so a later session's fix can't geotag an
+  // earlier session's shot with the wrong location.
+  cameraSession?: number;
 };
 
 /**
@@ -40,4 +44,23 @@ export function applyGpsToPending(photos: SessionPhoto[], keys: Set<string>, gps
       ? { ...p, metadata: { ...p.metadata, latitude: gps.latitude, longitude: gps.longitude, addressSource: gps.addressSource } }
       : p,
   );
+}
+
+/**
+ * The metadata a photo should upload with, reconciling a resolved session GPS into
+ * a still-ungeotagged shot AT UPLOAD time. Scoped to the camera session: the fix is
+ * only applied to a shot captured in `gpsSession`, so an earlier session's shot is
+ * never geotagged with a later session's coordinates (it stays as-is). Already-
+ * geotagged shots, imports (no cameraSession), and a coordinate-less fix are no-ops.
+ */
+export function reconcileUploadGps(
+  photo: SessionPhoto,
+  sessionGps: PhotoMetadata | null,
+  gpsSession: number | null,
+): PhotoMetadata {
+  const m = photo.metadata;
+  if (m.latitude !== undefined && m.longitude !== undefined) return m;
+  if (!sessionGps || sessionGps.latitude === undefined || sessionGps.longitude === undefined) return m;
+  if (photo.cameraSession === undefined || photo.cameraSession !== gpsSession) return m;
+  return { ...m, latitude: sessionGps.latitude, longitude: sessionGps.longitude, addressSource: sessionGps.addressSource };
 }

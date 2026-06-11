@@ -12,7 +12,7 @@ import { assignPhotoTarget, getTranscriptionConfig } from "../../src/api/endpoin
 import type { FieldCaptureTarget } from "../../src/api/types";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
 import { runConcurrentUploads, uploadCapture, type CaptureTargetRef } from "../../src/capture/upload";
-import { applyGpsToPending, effectiveCaption, type SessionPhoto } from "../../src/capture/session-photo";
+import { applyGpsToPending, effectiveCaption, reconcileUploadGps, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
 import { Badge, Button, EmptyState, TextInput } from "../../src/components/ui";
 import { Banner } from "../../src/components/Banner";
@@ -94,6 +94,9 @@ export default function CaptureScreen() {
   // The in-flight getLiveGps() promise for the current session — upload() awaits it
   // so a quick burst+upload doesn't snapshot ungeotagged metadata before it lands.
   const cameraGpsPromiseRef = useRef<Promise<PhotoMetadata> | null>(null);
+  // The camera session cameraGpsRef belongs to — scopes upload-time reconciliation
+  // so a later session's fix can't geotag an earlier session's shot.
+  const cameraGpsSessionRef = useRef<number | null>(null);
 
   const pendingQuery = usePendingPhotos();
   const transcribeConfig = useQuery({
@@ -155,6 +158,7 @@ export default function CaptureScreen() {
       // so it can't overwrite cameraGpsRef or back-patch the new session's shots.
       if (cameraSessionRef.current !== session) return;
       cameraGpsRef.current = m;
+      cameraGpsSessionRef.current = session;
       // Geotag any shots captured before the fix arrived, then stop tracking them.
       const keys = pendingGpsKeysRef.current;
       if (keys.size > 0 && hasCoords(m)) {
@@ -182,7 +186,10 @@ export default function CaptureScreen() {
       metadata = { takenAt };
       pendingGpsKeysRef.current.add(key);
     }
-    setPhotos((prev) => [...prev, { key, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption: "" }]);
+    setPhotos((prev) => [
+      ...prev,
+      { key, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption: "", cameraSession: cameraSessionRef.current },
+    ]);
   }
 
   async function importPhotos() {
@@ -238,15 +245,10 @@ export default function CaptureScreen() {
       }
     }
     const sessionGps = cameraGpsRef.current;
+    const gpsSession = cameraGpsSessionRef.current;
     const ref = targetRef(target);
-    const results = await runConcurrentUploads(photos, 3, (sp) => {
-      // Reconcile a resolved session GPS into shots captured before it landed, so a
-      // back-patch that hasn't reached this snapshot can't ship them ungeotagged.
-      const metadata =
-        !hasCoords(sp.metadata) && sessionGps && hasCoords(sessionGps)
-          ? { ...sp.metadata, latitude: sessionGps.latitude, longitude: sessionGps.longitude, addressSource: sessionGps.addressSource }
-          : sp.metadata;
-      return uploadCapture(fetcher, {
+    const results = await runConcurrentUploads(photos, 3, (sp) =>
+      uploadCapture(fetcher, {
         uri: sp.uri,
         width: sp.width,
         height: sp.height,
@@ -255,9 +257,11 @@ export default function CaptureScreen() {
         // Per-photo caption wins; batch caption is the fallback for un-captioned photos.
         caption: effectiveCaption(sp.caption, batchCaption),
         tags,
-        metadata,
-      });
-    });
+        // Reconcile a resolved session GPS into still-ungeotagged shots FROM THAT
+        // session only — an earlier session's shot is never geotagged with it.
+        metadata: reconcileUploadGps(sp, sessionGps, gpsSession),
+      }),
+    );
 
     const failedKeys = photos.filter((_, i) => results[i]?.status === "rejected").map((p) => p.key);
     const succeeded = results.filter((r) => r.status === "fulfilled").length;

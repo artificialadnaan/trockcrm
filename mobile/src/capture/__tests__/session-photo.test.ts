@@ -1,4 +1,4 @@
-import { applyGpsToPending, effectiveCaption, type SessionPhoto } from "../session-photo";
+import { applyGpsToPending, effectiveCaption, reconcileUploadGps, type SessionPhoto } from "../session-photo";
 
 describe("effectiveCaption (individual overrides batch)", () => {
   it("uses the per-photo caption when set", () => {
@@ -47,5 +47,43 @@ describe("applyGpsToPending (geotag early burst shots when GPS arrives late)", (
   it("is a no-op when the fix has no coordinates", () => {
     const photos = [photo("a", "t-a")];
     expect(applyGpsToPending(photos, new Set(["a"]), { takenAt: "later" })).toBe(photos);
+  });
+});
+
+describe("reconcileUploadGps (scope the upload fix to the shot's camera session)", () => {
+  const fix = { latitude: 32.7, longitude: -96.8, addressSource: "live_gps" as const, takenAt: "x" };
+  const shot = (cameraSession: number | undefined, geotagged = false): SessionPhoto => ({
+    key: "k",
+    uri: "u",
+    caption: "",
+    cameraSession,
+    metadata: geotagged ? { latitude: 1, longitude: 2, takenAt: "t" } : { takenAt: "t" },
+  });
+
+  it("geotags a session-1 shot with session-1's fix (keeps its takenAt)", () => {
+    expect(reconcileUploadGps(shot(1), fix, 1)).toMatchObject({
+      latitude: 32.7,
+      longitude: -96.8,
+      addressSource: "live_gps",
+      takenAt: "t",
+    });
+  });
+
+  it("does NOT geotag an earlier-session shot with a later session's fix", () => {
+    const p = shot(1);
+    expect(reconcileUploadGps(p, fix, 2)).toBe(p.metadata); // unchanged
+  });
+
+  it("leaves already-geotagged shots and library imports (no cameraSession) untouched", () => {
+    const geotagged = shot(1, true);
+    expect(reconcileUploadGps(geotagged, fix, 1)).toBe(geotagged.metadata);
+    const imported = shot(undefined);
+    expect(reconcileUploadGps(imported, fix, 1)).toBe(imported.metadata);
+  });
+
+  it("is a no-op when the fix has no coordinates", () => {
+    const p = shot(1);
+    expect(reconcileUploadGps(p, { takenAt: "x" }, 1)).toBe(p.metadata);
+    expect(reconcileUploadGps(p, null, 1)).toBe(p.metadata);
   });
 });
