@@ -8,32 +8,60 @@ export type PhotoMetadata = {
   takenAt?: string;
 };
 
+const GPS_TIMEOUT_MS = 8000;
+
 /**
  * High-accuracy current position for camera captures (and gallery fallback),
- * matching the web getLiveGps (enableHighAccuracy, ~8s). Permission denial or
- * any failure degrades gracefully to a timestamp-only result.
+ * matching the web getLiveGps (~8s budget). A fresh fix is RACED against an 8s
+ * timeout so weak indoor GPS can't block capture; on timeout we fall back to the
+ * last known position, then to a timestamp-only result. Permission denial / any
+ * failure also degrades to timestamp-only.
  */
 export async function getLiveGps(): Promise<PhotoMetadata> {
+  const takenAt = new Date().toISOString();
   try {
     const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== "granted") return { takenAt: new Date().toISOString() };
-    const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-    return {
-      latitude: pos.coords.latitude,
-      longitude: pos.coords.longitude,
-      addressSource: "live_gps",
-      takenAt: new Date().toISOString(),
-    };
+    if (status !== "granted") return { takenAt };
+    const fresh = await Promise.race([
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), GPS_TIMEOUT_MS)),
+    ]);
+    const coords = fresh?.coords ?? (await Location.getLastKnownPositionAsync())?.coords ?? null;
+    if (!coords) return { takenAt };
+    return { latitude: coords.latitude, longitude: coords.longitude, addressSource: "live_gps", takenAt };
   } catch {
-    return { takenAt: new Date().toISOString() };
+    return { takenAt };
   }
 }
 
+// An EXIF value can be a plain number (iOS decimal degrees), a [num, den]
+// rational, or a degrees/minutes/seconds array of numbers/rationals.
+function asNumber(x: unknown): number {
+  if (Array.isArray(x) && x.length === 2 && typeof x[0] !== "object" && typeof x[1] !== "object") {
+    const n = Number(x[0]);
+    const d = Number(x[1]);
+    return d !== 0 ? n / d : NaN;
+  }
+  return Number(x);
+}
+
+function toDecimalDegrees(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? Math.abs(value) : undefined;
+  if (Array.isArray(value) && value.length >= 1) {
+    // DMS: [degrees, minutes, seconds] (each a number or [num, den] rational).
+    const [d = 0, m = 0, s = 0] = value.map(asNumber);
+    if (![d, m, s].every(Number.isFinite)) return undefined;
+    return Math.abs(d) + Math.abs(m) / 60 + Math.abs(s) / 3600;
+  }
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.abs(n) : undefined;
+}
+
 function toSignedCoordinate(value: unknown, ref: unknown, negativeRef: string): number | undefined {
-  const num = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(num)) return undefined;
+  const magnitude = toDecimalDegrees(value);
+  if (magnitude === undefined) return undefined;
   const refStr = typeof ref === "string" ? ref.toUpperCase() : "";
-  return refStr === negativeRef ? -Math.abs(num) : Math.abs(num);
+  return refStr === negativeRef ? -magnitude : magnitude;
 }
 
 function parseExifDate(value: unknown): string | undefined {

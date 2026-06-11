@@ -132,7 +132,13 @@ export default function ProjectDetailScreen() {
             onPress={() =>
               router.push({
                 pathname: "/(app)/capture",
-                params: { dealId, targetName: toStr(params.name) },
+                params: {
+                  dealId,
+                  targetName: toStr(params.name),
+                  dealNumber: toStr(params.dealNumber),
+                  stage: toStr(params.stage),
+                  propertyAddress: toStr(params.propertyAddress),
+                },
               })
             }
             style={{ flex: 1 }}

@@ -35,7 +35,13 @@ function hasCoords(m: PhotoMetadata): boolean {
 }
 
 export default function CaptureScreen() {
-  const params = useLocalSearchParams<{ dealId?: string; targetName?: string }>();
+  const params = useLocalSearchParams<{
+    dealId?: string;
+    targetName?: string;
+    dealNumber?: string;
+    stage?: string;
+    propertyAddress?: string;
+  }>();
   const router = useRouter();
   const { fetcher, user } = useAuth();
   const qc = useQueryClient();
@@ -81,6 +87,25 @@ export default function CaptureScreen() {
     return `sp-${keyCounter.current}`;
   }
 
+  // Bust a deal's cached gallery (staleTime is 30s) so newly confirmed photos
+  // appear immediately on the detail screen instead of after a manual refresh.
+  function invalidateDealPhotos(dealId: string) {
+    if (user) void qc.invalidateQueries({ queryKey: qk.projectPhotos(user.id, dealId) });
+  }
+
+  // We only have the deal's number/stage/address when we arrived from that deal's
+  // "Add photos" (passed as params) — pass them through on the return navigation
+  // so the detail screen renders full metadata instead of just name + photo count.
+  function detailParamsFor(t: SelectedTarget): Record<string, string> {
+    const out: Record<string, string> = { id: t.id, name: t.name };
+    if (typeof params.dealId === "string" && params.dealId === t.id) {
+      if (typeof params.dealNumber === "string") out.dealNumber = params.dealNumber;
+      if (typeof params.stage === "string") out.stage = params.stage;
+      if (typeof params.propertyAddress === "string") out.propertyAddress = params.propertyAddress;
+    }
+    return out;
+  }
+
   async function addAssets(assets: ImagePicker.ImagePickerAsset[], source: "camera" | "library") {
     let live: PhotoMetadata | null = null;
     const needsLive = source === "camera" || assets.some((a) => !hasCoords(extractExifMetadata(a.exif as Record<string, unknown>)));
@@ -97,6 +122,7 @@ export default function CaptureScreen() {
   }
 
   async function takePhoto() {
+    if (status === "uploading") return;
     setNotice(null);
     const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) {
@@ -113,6 +139,7 @@ export default function CaptureScreen() {
   }
 
   async function importPhotos() {
+    if (status === "uploading") return;
     setNotice(null);
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
@@ -129,6 +156,7 @@ export default function CaptureScreen() {
   }
 
   function removePhoto(key: string) {
+    if (status === "uploading") return;
     setPhotos((prev) => prev.filter((p) => p.key !== key));
   }
 
@@ -162,13 +190,8 @@ export default function CaptureScreen() {
       setNotice({ tone: "success", text: `${succeeded} photo${succeeded === 1 ? "" : "s"} uploaded.` });
       void pendingQuery.refetch();
       if (target?.type === "deal") {
-        // Bust the project's cached gallery so the detail screen shows the new
-        // photos immediately (staleTime is 30s) rather than after a manual refresh.
-        if (user) void qc.invalidateQueries({ queryKey: qk.projectPhotos(user.id, target.id) });
-        router.replace({
-          pathname: "/(app)/projects/[id]",
-          params: { id: target.id, name: target.name },
-        });
+        invalidateDealPhotos(target.id);
+        router.replace({ pathname: "/(app)/projects/[id]", params: detailParamsFor(target) });
       }
     } else {
       setPhotos((prev) => prev.filter((p) => failedKeys.includes(p.key)));
@@ -178,6 +201,9 @@ export default function CaptureScreen() {
         text: `${succeeded} uploaded, ${failedKeys.length} failed. Tap upload to retry the rest.`,
       });
       void pendingQuery.refetch();
+      // The fulfilled uploads are already confirmed server-side — refresh the
+      // gallery cache here too, not only on the all-success path.
+      if (target?.type === "deal" && succeeded > 0) invalidateDealPhotos(target.id);
     }
   }
 
@@ -192,6 +218,7 @@ export default function CaptureScreen() {
         t.type === "deal" ? { dealId: t.id } : t.type === "lead" ? { leadId: t.id } : { opportunityId: t.id },
       );
       void pendingQuery.refetch();
+      if (t.type === "deal") invalidateDealPhotos(t.id);
       setNotice({ tone: "success", text: `Photo assigned to ${t.name}.` });
     } catch {
       setNotice({ tone: "error", text: "Couldn't assign that photo." });
@@ -207,22 +234,31 @@ export default function CaptureScreen() {
         <Text style={styles.title}>Capture</Text>
 
         {/* Target */}
-        <Pressable onPress={() => setPickerOpen(true)} style={styles.targetCard}>
+        <View style={styles.targetCard}>
           <View style={{ flex: 1 }}>
             <Text style={styles.targetLabel}>Project</Text>
             <Text style={styles.targetName} numberOfLines={1}>
               {target ? target.name : "No project — uploads to Pending"}
             </Text>
           </View>
-          <Text style={styles.link}>{target ? "Change" : "Choose"}</Text>
-        </Pressable>
+          <View style={styles.targetActions}>
+            {target ? (
+              <Pressable onPress={() => setTarget(null)} disabled={uploading} hitSlop={8} accessibilityLabel="Clear project">
+                <Text style={[styles.link, uploading && styles.linkDisabled]}>Clear</Text>
+              </Pressable>
+            ) : null}
+            <Pressable onPress={() => setPickerOpen(true)} disabled={uploading} hitSlop={8}>
+              <Text style={[styles.link, uploading && styles.linkDisabled]}>{target ? "Change" : "Choose"}</Text>
+            </Pressable>
+          </View>
+        </View>
 
         {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
 
         {/* Capture buttons */}
         <View style={styles.actions}>
-          <Button title="📷 Take photo" onPress={takePhoto} style={{ flex: 1 }} />
-          <Button title="🖼 Import" variant="ghost" onPress={importPhotos} style={{ flex: 1 }} />
+          <Button title="📷 Take photo" onPress={takePhoto} disabled={uploading} style={{ flex: 1 }} />
+          <Button title="🖼 Import" variant="ghost" onPress={importPhotos} disabled={uploading} style={{ flex: 1 }} />
         </View>
 
         {/* Session thumbnails */}
@@ -231,7 +267,13 @@ export default function CaptureScreen() {
             {photos.map((p) => (
               <View key={p.key} style={styles.thumbWrap}>
                 <Image source={{ uri: p.uri }} style={styles.thumb} />
-                <Pressable onPress={() => removePhoto(p.key)} style={styles.remove} hitSlop={8} accessibilityLabel="Remove photo">
+                <Pressable
+                  onPress={() => removePhoto(p.key)}
+                  disabled={uploading}
+                  style={[styles.remove, uploading && { opacity: 0.4 }]}
+                  hitSlop={8}
+                  accessibilityLabel="Remove photo"
+                >
                   <Text style={styles.removeText}>✕</Text>
                 </Pressable>
               </View>
@@ -335,6 +377,8 @@ const styles = StyleSheet.create({
   targetLabel: { fontFamily: theme.font.medium, fontSize: 12, color: theme.color.textMuted },
   targetName: { fontFamily: theme.font.semibold, fontSize: 16, color: theme.color.textPrimary },
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  linkDisabled: { opacity: 0.4 },
+  targetActions: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
   actions: { flexDirection: "row", gap: theme.space.md },
   thumbWrap: { position: "relative" },
   thumb: { width: 84, height: 84, borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
