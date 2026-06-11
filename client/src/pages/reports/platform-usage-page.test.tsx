@@ -91,4 +91,15 @@ describe("PlatformUsagePage", () => {
     ).replace(/\s+/g, " ");
     expect(html).toContain("officeId=atlanta");
   });
+
+  it("initializes the period from the URL so the rep-detail back link round-trips the same view", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/reports/performance/platform-usage?grain=day&date=2026-06-09"]}>
+        <PlatformUsagePage />
+      </MemoryRouter>,
+    ).replace(/\s+/g, " ");
+    // The page read grain=day + date from the URL, so the detail link re-emits them (& is HTML-escaped).
+    expect(html).toContain("/reports/performance/platform-usage/r1?grain=day");
+    expect(html).toContain("date=2026-06-09");
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRepScope, classifyAction, isWithinDrilldownWindow, latestNonFutureDate } from "../src/modules/usage/read-service.js";
+import { resolveRepScope, classifyAction, isWithinDrilldownWindow, latestNonFutureDate, oldestInWindowDate } from "../src/modules/usage/read-service.js";
 
 // The /platform-usage/detail route enforces the SAME rep-self scoping as the summary and /drilldown
 // (it calls resolveRepScope, then resolves through the active-office rep roster). A rep can never
@@ -42,5 +42,13 @@ describe("platform-usage/detail — actions-vs-views retention asymmetry", () =>
     // An old week (all past, >14d) -> latest is its Saturday, out of window -> expired.
     const oldWeek = ["2026-05-10", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-16"];
     expect(isWithinDrilldownWindow(latestNonFutureDate(oldWeek, "2026-06-10"), "2026-06-10")).toBe(false);
+  });
+
+  it("clamps a partial week's view query lower bound to the oldest in-window date", () => {
+    // Week Sun 05-24 .. Sat 05-30, today 06-11: 05-24..05-28 are >=14d (pruned), 05-29/05-30 in-window.
+    const week = ["2026-05-24", "2026-05-25", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29", "2026-05-30"];
+    expect(oldestInWindowDate(week, "2026-06-11")).toBe("2026-05-29");
+    // A fully in-window period clamps to its own first date (no change).
+    expect(oldestInWindowDate(["2026-06-08", "2026-06-09"], "2026-06-10")).toBe("2026-06-08");
   });
 });

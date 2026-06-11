@@ -164,6 +164,15 @@ export function latestNonFutureDate(dates: string[], today: string): string {
   return past.length > 0 ? past[past.length - 1] : dates[0];
 }
 
+/**
+ * The oldest date of the period that is still within the retention window — the lower bound for view
+ * queries on a partially-pruned period, so lingering rows older than the window (if pruning lags) are
+ * never surfaced past the retention gate. Falls back to the first date when none are in-window.
+ */
+export function oldestInWindowDate(dates: string[], today: string): string {
+  return dates.find((d) => isWithinDrilldownWindow(d, today)) ?? dates[0];
+}
+
 export interface ViewEventRow {
   at: string;
   entity_type: string;

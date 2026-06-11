@@ -82,7 +82,7 @@ import {
 import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
-import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, latestNonFutureDate, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
+import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, latestNonFutureDate, oldestInWindowDate, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
 import { businessToday, shiftBusinessDate } from "../../lib/period.js";
 
 const router = Router();
@@ -1212,8 +1212,12 @@ router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
     if (!isWithinDrilldownWindow(latest, today)) {
       views = { expired: true, partial: false, message: "view detail expired for this period — counts only", items: [] };
     } else {
-      const items = await readViewEventsRange(req.tenantClient!, schema, rep.id, fromDate, toExclusive);
       const partial = !isWithinDrilldownWindow(fromDate, today);
+      // For a partial period only the in-window days have un-pruned views; clamp the query's lower
+      // bound to the oldest in-window date so lingering rows (if pruning lags) aren't surfaced past
+      // the retention gate.
+      const queryFrom = partial ? oldestInWindowDate(dates, today) : fromDate;
+      const items = await readViewEventsRange(req.tenantClient!, schema, rep.id, queryFrom, toExclusive);
       views = partial
         ? { expired: false, partial: true, message: "view detail is partial — older days in this period are beyond the 14-day window", items }
         : { expired: false, partial: false, items };

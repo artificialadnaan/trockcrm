@@ -14,8 +14,12 @@ const HEALTHY_ACTIVE_RATIO = 0.5;
 const GRID = "grid grid-cols-[2rem_minmax(0,1fr)_5.5rem_5rem_4.5rem] items-center gap-3";
 
 export function PlatformUsagePage() {
-  const [grain, setGrain] = useState<"day" | "week">("week");
-  const [anchorDate, setAnchorDate] = useState<string>("");
+  // Initialize the period (and office) from the URL so the rep-detail back link round-trips to the
+  // same view the user was on. Subsequent toggles update local state; the detail link re-emits them.
+  const [searchParams] = useSearchParams();
+  const officeId = searchParams.get("officeId");
+  const [grain, setGrain] = useState<"day" | "week">(() => (searchParams.get("grain") === "day" ? "day" : "week"));
+  const [anchorDate, setAnchorDate] = useState<string>(() => searchParams.get("date") ?? "");
   const { data, loading, error } = usePlatformUsageReport({ grain, date: anchorDate || undefined });
 
   // Headline ranking is by Actions desc — the proportion bars make 46-vs-0 read at a glance.
@@ -28,8 +32,6 @@ export function PlatformUsagePage() {
   // Clicking a rep row opens their detail, carrying the current period (grain/date) AND the active
   // office (?officeId) so the detail is scoped to the same office the leaderboard is showing — the
   // api client reads ?officeId into the x-office-id header.
-  const [searchParams] = useSearchParams();
-  const officeId = searchParams.get("officeId");
   const detailHref = (repId: string) => {
     const qs = new URLSearchParams({ grain });
     if (anchorDate) qs.set("date", anchorDate);
