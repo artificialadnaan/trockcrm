@@ -1,14 +1,19 @@
 import type { ExpoConfig, ConfigContext } from "expo/config";
 
 /**
- * T-Rock Cam — iOS-only Expo config (dynamic so the EAS project id + API base URL
- * can come from the environment without editing tracked source).
+ * T-Rock Cam — iOS-only Expo config (dynamic).
  *
- * The only account-bound value is `extra.eas.projectId`. Run `eas init` once to
- * create/bind the project (it prints the id), then either let `eas` manage it or
- * export `EAS_PROJECT_ID` before build/submit. See README.md "First-time EAS setup".
+ * EAS project id is bound to the created project (overridable via EAS_PROJECT_ID).
+ *
+ * Universal links: set EXPO_PUBLIC_FIELD_APP_HOST to the field web host (e.g.
+ * field.<domain>) so emailed HTTPS invites (FIELD_APP_URL + /accept-invite?token=)
+ * open the native accept-invite route. This also requires the backend to serve an
+ * apple-app-site-association file at that host (server-side; not in this lane).
+ * Without it, the custom `trockcam://` scheme still works and the HTTPS invite
+ * falls back to the web accept-invite page.
  */
-const EAS_PROJECT_ID = process.env.EAS_PROJECT_ID ?? "";
+const EAS_PROJECT_ID = process.env.EAS_PROJECT_ID ?? "d829c598-4767-40cf-ba32-2441bd406221";
+const FIELD_APP_HOST = process.env.EXPO_PUBLIC_FIELD_APP_HOST?.trim();
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
@@ -30,6 +35,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     bundleIdentifier: "com.trockgc.trockcam",
     icon: "./assets/icon.png",
     supportsTablet: false,
+    // Enables HTTPS universal-link invite onboarding when the field host is set
+    // (and the backend serves apple-app-site-association). No-op otherwise.
+    associatedDomains: FIELD_APP_HOST ? [`applinks:${FIELD_APP_HOST}`] : undefined,
     infoPlist: {
       // Field photos can be large batches; allow background-friendly networking.
       ITSAppUsesNonExemptEncryption: false,
@@ -69,6 +77,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   },
   owner: "adnaan.iqbal",
   extra: {
-    eas: EAS_PROJECT_ID ? { projectId: EAS_PROJECT_ID } : {},
+    eas: { projectId: EAS_PROJECT_ID },
   },
 });

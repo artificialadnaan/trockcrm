@@ -21,6 +21,14 @@ export function VoiceRecorder({ onTranscript }: { onTranscript: (text: string) =
   const [seconds, setSeconds] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Synchronous mirror of `status` so the auto-stop interval (whose `stop`
+  // closure was captured before `setStatus("recording")` flushed) reads the
+  // CURRENT state instead of a stale one — otherwise the 60s cap never fires.
+  const statusRef = useRef<Status>("idle");
+  function applyStatus(next: Status) {
+    statusRef.current = next;
+    setStatus(next);
+  }
 
   function clearTick() {
     if (tickRef.current) {
@@ -43,7 +51,7 @@ export function VoiceRecorder({ onTranscript }: { onTranscript: (text: string) =
       await recorder.prepareToRecordAsync();
       recorder.record();
       setSeconds(0);
-      setStatus("recording");
+      applyStatus("recording");
       tickRef.current = setInterval(() => {
         setSeconds((prev) => {
           const next = prev + 1;
@@ -53,14 +61,14 @@ export function VoiceRecorder({ onTranscript }: { onTranscript: (text: string) =
       }, 1000);
     } catch {
       setError("Could not start recording.");
-      setStatus("idle");
+      applyStatus("idle");
     }
   }
 
   async function stop() {
     clearTick();
-    if (status !== "recording") return;
-    setStatus("transcribing");
+    if (statusRef.current !== "recording") return;
+    applyStatus("transcribing");
     try {
       await recorder.stop();
       const uri = recorder.uri;
@@ -78,7 +86,7 @@ export function VoiceRecorder({ onTranscript }: { onTranscript: (text: string) =
     } catch (e) {
       setError(e instanceof Error ? e.message : "Transcription failed.");
     } finally {
-      setStatus("idle");
+      applyStatus("idle");
       setSeconds(0);
     }
   }

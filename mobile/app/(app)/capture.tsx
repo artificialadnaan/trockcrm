@@ -1,12 +1,13 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
 import { theme } from "../../src/theme/theme";
 import { useAuth } from "../../src/auth/AuthContext";
 import { usePendingPhotos } from "../../src/query/hooks";
+import { qk } from "../../src/query/keys";
 import { assignPhotoTarget, getTranscriptionConfig } from "../../src/api/endpoints";
 import type { FieldCaptureTarget } from "../../src/api/types";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
@@ -36,7 +37,8 @@ function hasCoords(m: PhotoMetadata): boolean {
 export default function CaptureScreen() {
   const params = useLocalSearchParams<{ dealId?: string; targetName?: string }>();
   const router = useRouter();
-  const { fetcher } = useAuth();
+  const { fetcher, user } = useAuth();
+  const qc = useQueryClient();
 
   const initialTarget: SelectedTarget | null =
     typeof params.dealId === "string" && params.dealId
@@ -44,6 +46,19 @@ export default function CaptureScreen() {
       : null;
 
   const [target, setTarget] = useState<SelectedTarget | null>(initialTarget);
+
+  // Capture is a tab and stays mounted; when the user taps "Add photos" from a
+  // (different) project the route params change but useState(initialTarget) only
+  // applied on first mount — re-sync so the upload attaches to the chosen project.
+  useEffect(() => {
+    if (typeof params.dealId === "string" && params.dealId) {
+      setTarget({
+        id: params.dealId,
+        type: "deal",
+        name: typeof params.targetName === "string" ? params.targetName : "Project",
+      });
+    }
+  }, [params.dealId, params.targetName]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [assigningPhotoId, setAssigningPhotoId] = useState<string | null>(null);
   const [photos, setPhotos] = useState<SessionPhoto[]>([]);
@@ -147,6 +162,9 @@ export default function CaptureScreen() {
       setNotice({ tone: "success", text: `${succeeded} photo${succeeded === 1 ? "" : "s"} uploaded.` });
       void pendingQuery.refetch();
       if (target?.type === "deal") {
+        // Bust the project's cached gallery so the detail screen shows the new
+        // photos immediately (staleTime is 30s) rather than after a manual refresh.
+        if (user) void qc.invalidateQueries({ queryKey: qk.projectPhotos(user.id, target.id) });
         router.replace({
           pathname: "/(app)/projects/[id]",
           params: { id: target.id, name: target.name },

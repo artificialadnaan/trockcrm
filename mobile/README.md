@@ -41,17 +41,14 @@ npm install
 ```
 
 ## First-time EAS setup (one-time, account-bound)
-These steps need *your* Expo + Apple accounts and cannot be pre-baked:
+The EAS project id is already bound in `app.config.ts` (`eas init --id
+d829c598-4767-40cf-ba32-2441bd406221`). You only need to authenticate and set the API host:
 ```bash
-npm i -g eas-cli          # if not already installed
-eas login                 # Expo account (owner: adnaan.iqbal)
-eas init                  # creates the EAS project + prints its projectId
+npm i -g eas-cli                                          # if not already installed
+eas login                                                 # Expo account (owner: adnaan.iqbal)
+export EXPO_PUBLIC_API_BASE_URL=https://<prod-api-host>   # required (or .env / EAS env)
 ```
-Then make the project id available to `app.config.ts` (either is fine):
-```bash
-export EAS_PROJECT_ID=<the id eas init printed>
-# or add EAS_PROJECT_ID to .env
-```
+Override the project binding with `EAS_PROJECT_ID` only if you rebind to a different project.
 
 ## Run on the iOS Simulator (fastest)
 ```bash
@@ -87,8 +84,13 @@ npm run doctor        # npx expo-doctor
 
 ## Notes / scope
 - **iOS-only** by design: there is no `android` config block and no Android EAS profile.
-- This app is a **non-workspace** package nested in the trockcrm monorepo; `metro.config.js`
-  disables hierarchical module lookup so the bundler never resolves the repo's hoisted React.
+- This app is a **non-workspace** package nested in the trockcrm monorepo with its own
+  complete `node_modules`, so the default Metro config resolves React/deps locally
+  (expo-doctor clean) and EAS builds it standalone.
+- **Invite deep links:** the custom `trockcam://accept-invite?token=` scheme works out of the
+  box. For emailed HTTPS invites to open the native route, set `EXPO_PUBLIC_FIELD_APP_HOST` and
+  have the backend serve `apple-app-site-association` at that host; otherwise HTTPS invites fall
+  back to the web accept-invite page.
 - **No public photo viewer** in v1 (the field web app has none either; the public share stays
   web-only). The backend public-viewer exposure-policy gap is tracked separately as a
   server-side ticket — see `.audit/trockcam-mobile-discovery.md`.

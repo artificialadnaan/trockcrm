@@ -62,8 +62,9 @@ export const TextInput = React.forwardRef<RNTextInput, TextInputProps>(function 
     <RNTextInput
       ref={ref}
       placeholderTextColor={theme.color.textMuted}
-      style={[styles.input, props.style]}
       {...props}
+      // After the spread so a caller's `style` MERGES with (not replaces) the base.
+      style={[styles.input, props.style]}
     />
   );
 });

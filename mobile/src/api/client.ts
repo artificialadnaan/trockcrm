@@ -1,4 +1,4 @@
-import { API_BASE_URL } from "../config";
+import { API_BASE_URL, API_BASE_URL_MISSING_MESSAGE } from "../config";
 
 export class ApiError extends Error {
   status: number;
@@ -60,6 +60,10 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
     timeoutMs = DEFAULT_TIMEOUT_MS,
     signal,
   } = opts;
+
+  // Fail fast and clearly when the host wasn't configured (see config.ts) — at
+  // call time rather than import time so the UI can render and surface it.
+  if (!API_BASE_URL) throw new ApiError(API_BASE_URL_MISSING_MESSAGE, 0);
 
   const headers: Record<string, string> = { Accept: "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;

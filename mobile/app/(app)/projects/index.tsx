@@ -20,8 +20,12 @@ export default function ProjectsScreen() {
   const starredQuery = useStarredProjects(!searching);
   const toggleStar = useToggleStar();
 
-  const projects = projectsQuery.data?.projects ?? [];
+  const allProjects = projectsQuery.data?.projects ?? [];
   const starred = !searching ? starredQuery.data?.projects ?? [] : [];
+  // Don't list a starred project twice — drop them from the main list when the
+  // Starred section is shown (mirrors the field web app).
+  const starredIds = new Set(starred.map((p) => p.id));
+  const projects = starred.length > 0 ? allProjects.filter((p) => !starredIds.has(p.id)) : allProjects;
 
   function openProject(project: FieldProject) {
     router.push({
@@ -93,7 +97,7 @@ export default function ProjectsScreen() {
         ListEmptyComponent={
           projectsQuery.isLoading ? (
             <LoadingState label="Loading projects…" />
-          ) : (
+          ) : starred.length > 0 ? null : (
             <EmptyState
               title={searching ? "No matches" : "No projects yet"}
               subtitle={searching ? `Nothing found for "${debounced}".` : "Active projects will appear here."}

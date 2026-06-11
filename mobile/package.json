@@ -8,7 +8,7 @@
     "ios": "expo run:ios",
     "build:export": "expo export --platform ios --output-dir dist",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "jest",
+    "test": "EXPO_PUBLIC_API_BASE_URL=https://api.test.local jest",
     "doctor": "npx expo-doctor"
   },
   "dependencies": {
