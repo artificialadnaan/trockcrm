@@ -1201,13 +1201,23 @@ router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
     // Actions: never pruned -> always populate, regardless of period age.
     const actions = await readActionDetail(req.tenantClient!, schema, rep.id, fromDate, toExclusive);
 
-    // Views: pruned at 14 days. Clamp to the most recent NON-FUTURE day of the period (a current
-    // week's range ends on a future Saturday) — only if even that is outside the window are the raw
-    // views gone -> explicit expired state (mirrors /drilldown).
+    // Views: pruned at 14 days. Clamp to the most recent NON-FUTURE day (a current week's range ends
+    // on a future Saturday). Three states: fully expired (even the latest non-future day is past the
+    // window), partial (the latest is in-window but the period's earliest day is already pruned), or
+    // available. Mirrors the /drilldown expired messaging and is honest about the asymmetry.
     const latest = latestNonFutureDate(dates, today);
-    const views = isWithinDrilldownWindow(latest, today)
-      ? { expired: false, items: await readViewEventsRange(req.tenantClient!, schema, rep.id, fromDate, toExclusive) }
-      : { expired: true, message: "view detail expired for this period — counts only", items: [] as never[] };
+    let views:
+      | { expired: true; partial: false; message: string; items: never[] }
+      | { expired: false; partial: boolean; message?: string; items: Awaited<ReturnType<typeof readViewEventsRange>> };
+    if (!isWithinDrilldownWindow(latest, today)) {
+      views = { expired: true, partial: false, message: "view detail expired for this period — counts only", items: [] };
+    } else {
+      const items = await readViewEventsRange(req.tenantClient!, schema, rep.id, fromDate, toExclusive);
+      const partial = !isWithinDrilldownWindow(fromDate, today);
+      views = partial
+        ? { expired: false, partial: true, message: "view detail is partial — older days in this period are beyond the 14-day window", items }
+        : { expired: false, partial: false, items };
+    }
 
     await req.commitTransaction!();
     res.json({ data: { rep: { id: rep.id, displayName: rep.displayName }, grain, dates, actions, views } });

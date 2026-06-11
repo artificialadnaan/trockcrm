@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { cn } from "@/lib/utils";
@@ -25,10 +25,17 @@ export function PlatformUsagePage() {
   }, [data]);
   const maxActions = useMemo(() => rows.reduce((m, r) => Math.max(m, r.usage.actionCount), 0), [rows]);
 
-  // Clicking a rep row opens their detail, carrying the current period so the detail matches the
-  // leaderboard's grain/date.
-  const detailHref = (repId: string) =>
-    `/reports/performance/platform-usage/${repId}?grain=${grain}${anchorDate ? `&date=${anchorDate}` : ""}`;
+  // Clicking a rep row opens their detail, carrying the current period (grain/date) AND the active
+  // office (?officeId) so the detail is scoped to the same office the leaderboard is showing — the
+  // api client reads ?officeId into the x-office-id header.
+  const [searchParams] = useSearchParams();
+  const officeId = searchParams.get("officeId");
+  const detailHref = (repId: string) => {
+    const qs = new URLSearchParams({ grain });
+    if (anchorDate) qs.set("date", anchorDate);
+    if (officeId) qs.set("officeId", officeId);
+    return `/reports/performance/platform-usage/${repId}?${qs.toString()}`;
+  };
 
   return (
     <div className="space-y-6">

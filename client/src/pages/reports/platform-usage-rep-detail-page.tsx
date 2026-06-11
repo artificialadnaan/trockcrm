@@ -19,6 +19,7 @@ export function PlatformUsageRepDetailPage() {
   const [params] = useSearchParams();
   const grain = params.get("grain") === "day" ? "day" : "week";
   const date = params.get("date") || undefined;
+  const officeId = params.get("officeId") || undefined;
   const { data, loading, error } = usePlatformUsageDetail({ repId, grain, date });
 
   const periodLabel = useMemo(() => {
@@ -27,8 +28,13 @@ export function PlatformUsageRepDetailPage() {
     return `${data.dates[0]} – ${data.dates[data.dates.length - 1]}`;
   }, [data]);
 
-  // Carry the period back to the leaderboard so the round-trip stays on the same view.
-  const backHref = `${BACK_TO}?grain=${grain}${date ? `&date=${date}` : ""}`;
+  // Carry the period + office back to the leaderboard so the round-trip stays on the same view/office.
+  const backHref = (() => {
+    const qs = new URLSearchParams({ grain });
+    if (date) qs.set("date", date);
+    if (officeId) qs.set("officeId", officeId);
+    return `${BACK_TO}?${qs.toString()}`;
+  })();
 
   return (
     <div className="space-y-6">
@@ -83,15 +89,22 @@ export function PlatformUsageRepDetailPage() {
                 {data.views.message ?? "View detail expired for this period — counts only."}
               </div>
             ) : (
-              <DetailList
-                emptyLabel="No record views in this period."
-                rows={data.views.items.map((v, i) => ({
-                  key: `v${i}`,
-                  badge: v.entity_type,
-                  label: v.label_snapshot ?? v.route,
-                  at: v.at,
-                }))}
-              />
+              <>
+                {data.views.partial ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    {data.views.message ?? "View detail is partial — older days in this period are beyond the 14-day window."}
+                  </div>
+                ) : null}
+                <DetailList
+                  emptyLabel="No record views in this period."
+                  rows={data.views.items.map((v, i) => ({
+                    key: `v${i}`,
+                    badge: v.entity_type,
+                    label: v.label_snapshot ?? v.route,
+                    at: v.at,
+                  }))}
+                />
+              </>
             )}
           </section>
         </div>

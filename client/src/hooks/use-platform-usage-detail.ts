@@ -23,7 +23,7 @@ export interface PlatformUsageDetail {
   grain: "day" | "week";
   dates: string[];
   actions: { breakdown: Record<ActionDetailType, number>; items: ActionDetailItem[]; truncated: boolean };
-  views: { expired: boolean; message?: string; items: ViewDetailItem[] };
+  views: { expired: boolean; partial?: boolean; message?: string; items: ViewDetailItem[] };
 }
 
 export function usePlatformUsageDetail(params: { repId: string; grain: "day" | "week"; date?: string }) {

@@ -82,4 +82,13 @@ describe("PlatformUsagePage", () => {
     // Default grain is weekly; the row links to the rep detail with the period carried.
     expect(html).toContain('href="/reports/performance/platform-usage/r1?grain=week"');
   });
+
+  it("carries the active office (?officeId) into the detail link for cross-office views", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/reports/performance/platform-usage?officeId=atlanta"]}>
+        <PlatformUsagePage />
+      </MemoryRouter>,
+    ).replace(/\s+/g, " ");
+    expect(html).toContain("officeId=atlanta");
+  });
 });

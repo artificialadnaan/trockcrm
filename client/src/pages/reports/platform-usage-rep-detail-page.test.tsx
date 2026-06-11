@@ -63,4 +63,22 @@ describe("PlatformUsageRepDetailPage", () => {
     expect(html).toContain("Stage move"); // actions are never pruned, so they still show
     expect(html).not.toContain("/deals/d1"); // no view rows
   });
+
+  it("renders the partial-views note when only the older days of the period are pruned", () => {
+    mockData = {
+      ...base,
+      views: {
+        expired: false,
+        partial: true,
+        message: "view detail is partial — older days in this period are beyond the 14-day window",
+        items: [
+          { at: "2026-06-09T18:31:00Z", entity_type: "deal", entity_id: "d1", route: "/deals/d1", label_snapshot: "Opened Acme Tower" },
+        ],
+      },
+    };
+    const html = render();
+    expect(html).toContain("view detail is partial"); // the partial note
+    expect(html).toContain("Opened Acme Tower"); // the available (recent) views still render
+    expect(html).not.toContain("No record views in this period"); // not the empty state
+  });
 });

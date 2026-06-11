@@ -17,6 +17,10 @@ beforeAll(async () => {
     CREATE SCHEMA office_dallas;
     CREATE TABLE office_dallas.deals (id uuid primary key, name text);
     CREATE TABLE office_dallas.leads (id uuid primary key, name text);
+    CREATE TABLE office_dallas.deal_stage_history (
+      id uuid primary key default gen_random_uuid(),
+      deal_id uuid, to_stage_id uuid, changed_by uuid, created_at timestamptz
+    );
     CREATE TABLE office_dallas.audit_log (
       id bigserial primary key,
       table_name text, record_id uuid, action text,
@@ -31,6 +35,13 @@ beforeAll(async () => {
   `);
   // All at 2026-06-01 14:00Z (= 09:00 America/Chicago on 06-01).
   const t = "2026-06-01T14:00:00Z";
+  // Stage moves are sourced from deal_stage_history (one row per change). The two audit stage rows
+  // below (stage_id + stageId for the SAME change) must NOT also count — that was the double-count.
+  await db.exec(`
+    INSERT INTO office_dallas.deal_stage_history (deal_id, to_stage_id, changed_by, created_at) VALUES
+      ('${DEAL1}', '${U("0501")}', '${REP}', '${t}'),
+      ('${DEAL1}', '${U("0502")}', '${REP}', '${t}');
+  `);
   await db.exec(`
     INSERT INTO office_dallas.audit_log (table_name, record_id, action, changed_by, impersonator_id, changes, entity_name_snapshot, created_at) VALUES
       -- creates (deal + lead inserts, labels via join / snapshot)
@@ -60,7 +71,7 @@ describe("readActionDetail", () => {
     expect(detail.breakdown).toEqual({
       create: 2, // deal insert + lead insert (impersonated deal insert excluded)
       edit: 1, // deal update (non-stage)
-      stage_move: 2, // stage_id + stageId
+      stage_move: 2, // from deal_stage_history (NOT the 2 audit stage rows — no double-count)
       upload: 1, // file INSERT only (file update excluded)
       note: 1, // activity INSERT only (activity update excluded)
     });
