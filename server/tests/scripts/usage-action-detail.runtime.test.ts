@@ -29,9 +29,11 @@ beforeAll(async () => {
       changes jsonb, created_at timestamptz
     );
     -- Notes/uploads are sourced from these tables (NOT audit_log), with the aggregate's crediting +
-    -- dating, so the detail reconciles with the leaderboard breakdown.
+    -- dating, so the detail reconciles with the leaderboard breakdown. activities.type is a real ENUM
+    -- here (as in prod) — a text column would hide the "COALESCE types ... cannot be matched" bug.
+    CREATE TYPE office_dallas.activity_type AS ENUM ('call', 'note', 'email', 'meeting');
     CREATE TABLE office_dallas.activities (
-      id uuid primary key, type text,
+      id uuid primary key, type office_dallas.activity_type,
       responsible_user_id uuid, performed_by_user_id uuid,
       deal_id uuid, lead_id uuid, subject text,
       occurred_at timestamptz, created_at timestamptz
@@ -76,8 +78,9 @@ beforeAll(async () => {
     INSERT INTO office_dallas.activities (id, type, responsible_user_id, performed_by_user_id, deal_id, lead_id, subject, occurred_at, created_at) VALUES
       -- A: performed_by REP (credited even though the audit row for this activity has no REP-only signal) -> counts
       ('${U("0ac1")}', 'call', '${ADMIN}', '${REP}', '${DEAL1}', NULL, 'Logged call', '${t}', '${t}'),
-      -- B: performed_by NULL, responsible REP (COALESCE crediting) -> counts
-      ('${U("0ac2")}', 'note', '${REP}', NULL, NULL, '${LEAD1}', 'Left a note', '${t}', '${t}'),
+      -- B: performed_by NULL, responsible REP (COALESCE crediting) -> counts. NULL subject + no
+      -- deal/lead, so the label falls through to a.type::text — exercises the enum cast in COALESCE.
+      ('${U("0ac2")}', 'note', '${REP}', NULL, NULL, NULL, NULL, '${t}', '${t}'),
       -- C: performed_by ADMIN -> wrong user, excluded
       ('${U("0ac3")}', 'call', '${ADMIN}', '${ADMIN}', '${DEAL1}', NULL, 'Admin call', '${t}', '${t}'),
       -- D: occurred_at out of range (dated by occurred_at, NOT created_at) -> excluded
@@ -111,9 +114,11 @@ describe("readActionDetail", () => {
 
   it("sources notes/uploads from activities/files (aggregate crediting + dating), NOT audit rows", async () => {
     const detail = await readActionDetail(client(), "office_dallas", REP, "2026-06-01", "2026-06-02");
-    // The note credited by performed_by_user_id and the COALESCE-credited note both appear...
+    // The note credited by performed_by_user_id (label from subject) appears...
     expect(detail.items.some((i) => i.type === "note" && i.label === "Logged call")).toBe(true);
-    expect(detail.items.some((i) => i.type === "note" && i.label === "Left a note")).toBe(true);
+    // ...and the COALESCE-credited note with no subject/deal/lead falls through to the enum type,
+    // cast to text — i.e. the query plans against a real enum (the regression that 500'd prod).
+    expect(detail.items.some((i) => i.type === "note" && i.label === "note")).toBe(true);
     // ...the upload comes from files.display_name (not the audit 'audit-file' snapshot)...
     expect(detail.items.some((i) => i.type === "upload" && i.label === "photo.jpg")).toBe(true);
     // ...and the audit metadata snapshots never leak into the detail.

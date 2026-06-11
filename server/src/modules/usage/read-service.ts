@@ -386,7 +386,10 @@ export async function readActionDetail(
   const noteRows = (
     await client.query<{ at: string; label: string | null; entity_type: string | null }>(
       `SELECT ${NOTE_AT_SQL} AS at,
-              COALESCE(a.subject, d.name, l.name, a.type) AS label,
+              -- a.type is the activity_type ENUM; cast to text so COALESCE matches the varchar
+              -- columns (subject/deal/lead names) — an un-cast enum throws "COALESCE types ...
+              -- cannot be matched" against the real schema (PGlite text columns hid this).
+              COALESCE(a.subject, d.name, l.name, a.type::text) AS label,
               CASE WHEN a.deal_id IS NOT NULL THEN 'deal' WHEN a.lead_id IS NOT NULL THEN 'lead' ELSE NULL END AS entity_type
          FROM ${schema}.activities a
          LEFT JOIN ${schema}.deals d ON a.deal_id = d.id
