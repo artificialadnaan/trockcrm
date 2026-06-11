@@ -9,7 +9,7 @@ import { ProjectDetailPage } from "./ProjectDetailPage";
 
 const apiMock = vi.hoisted(() => vi.fn());
 
-vi.mock("../lib/api", () => ({ api: apiMock }));
+vi.mock("../lib/api", () => ({ api: apiMock, getActiveOfficeId: () => "office-1" }));
 vi.mock("../lib/auth", () => ({
   useAuth: () => ({
     user: {
@@ -80,7 +80,7 @@ describe("ProjectDetailPage", () => {
   it("renders project photos, filters by category, opens drawer, and shows read-only viewer metadata", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false },
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ photos: [photo("photo-1", "damage"), photo("photo-2", "safety", "uploader-2")] })
       .mockResolvedValueOnce({ reports: [] });
@@ -116,7 +116,7 @@ describe("ProjectDetailPage", () => {
   it("filters photos by tag pills", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false },
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ photos: [photo("photo-1", "damage"), photo("photo-2", "safety", "uploader-2")] })
       .mockResolvedValueOnce({ reports: [] });
@@ -133,7 +133,7 @@ describe("ProjectDetailPage", () => {
   it("cycles grouping with the grouping pill", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false },
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ photos: [photo("photo-1", "damage")] })
       .mockResolvedValueOnce({ reports: [] });
@@ -148,7 +148,7 @@ describe("ProjectDetailPage", () => {
   it("routes to capture with the current project from the Add photos action", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 0, starred: false },
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ photos: [] })
       .mockResolvedValueOnce({ reports: [] });
@@ -164,7 +164,7 @@ describe("ProjectDetailPage", () => {
   it("keeps the photo gallery available when reports fail to load", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 1, starred: false },
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 1, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ photos: [photo("photo-1", "damage")] })
       .mockRejectedValueOnce(new Error("reports unavailable"));
@@ -179,7 +179,7 @@ describe("ProjectDetailPage", () => {
   it("toggles star optimistically and rolls back when the API fails", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 1, starred: false },
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 1, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ photos: [photo("photo-1", "damage")] })
       .mockResolvedValueOnce({ reports: [] })
@@ -197,7 +197,7 @@ describe("ProjectDetailPage", () => {
   it("applies advanced uploader filters and clears them from the drawer", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false },
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ photos: [photo("photo-1", "damage"), photo("photo-2", "safety", "uploader-2")] })
       .mockResolvedValueOnce({ reports: [] });
