@@ -25,6 +25,7 @@ describe("platform-usage/detail — stage label composition", () => {
   });
   it("degrades gracefully when the deal or stages are missing (deleted)", () => {
     expect(composeStageLabel(null, "Estimate", "Won")).toBe("Estimate → Won"); // deal deleted
+    expect(composeStageLabel("Deal X", "Opportunity", null)).toBe("Deal X: Opportunity"); // to-stage unresolved
     expect(composeStageLabel("Deal X", null, null)).toBe("Deal X"); // stages unresolved
     expect(composeStageLabel(null, null, null)).toBe("Stage move"); // nothing resolves
   });
