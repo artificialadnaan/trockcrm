@@ -37,6 +37,7 @@ import {
   type FieldProject,
 } from "./projects-service.js";
 import {
+  assertFanOutNotFullyDegraded,
   fanOutActiveOffices,
   officeTag,
   withResolvedOffice,
@@ -99,13 +100,15 @@ fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
     // earlier 100-row cap silently returned empty/wrong pages beyond page 2. Beyond the bound, narrow
     // via search.
     const fetchPerPage = Math.min(FIELD_PROJECTS_MAX_FETCH, offset + perPage);
-    const { results, failures } = await fanOutActiveOffices((officeDb) =>
-      listFieldProjects(officeDb, access, {
-        search: req.query.search as string | undefined,
-        status,
-        page: 1,
-        perPage: fetchPerPage,
-      }),
+    const { results, failures } = assertFanOutNotFullyDegraded(
+      await fanOutActiveOffices((officeDb) =>
+        listFieldProjects(officeDb, access, {
+          search: req.query.search as string | undefined,
+          status,
+          page: 1,
+          perPage: fetchPerPage,
+        }),
+      ),
     );
     const merged = results.flatMap(({ office, value }) =>
       value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })),
@@ -127,8 +130,8 @@ fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
 fieldRoutes.get("/projects/starred", requireFieldContractor, async (req, res, next) => {
   try {
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
-    const { results, failures } = await fanOutActiveOffices((officeDb) =>
-      listStarredFieldProjects(officeDb, access),
+    const { results, failures } = assertFanOutNotFullyDegraded(
+      await fanOutActiveOffices((officeDb) => listStarredFieldProjects(officeDb, access)),
     );
     const projects = results
       .flatMap(({ office, value }) => value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })))

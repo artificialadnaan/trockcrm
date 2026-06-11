@@ -58,15 +58,30 @@ export async function fanOutOffices<T>(
 }
 
 /**
- * Pure orchestration: return the FIRST office whose `hits` predicate resolves true (UUID ids are
- * globally unique, so at most one office owns a given id). An office whose check throws is ignored.
+ * Pure: pick the office that reported ownership from a fan-out of ownership checks. Returns null when
+ * NO office owns the id AND every office answered cleanly. Throws 503 when no office claimed it but one
+ * or more checks FAILED — we cannot conclude the record is absent, so we must NOT collapse a degraded
+ * owning-office into a misleading 404 (the record may exist in the office that happened to fail).
  */
-export async function resolveOffice(
-  offices: readonly FieldOffice[],
-  hits: (office: FieldOffice) => Promise<boolean>,
-): Promise<FieldOffice | null> {
-  const { results } = await fanOutOffices(offices, hits);
-  return results.find((entry) => entry.value)?.office ?? null;
+export function pickResolvedOffice(outcome: FanOutOutcome<boolean>): FieldOffice | null {
+  const owner = outcome.results.find((entry) => entry.value)?.office;
+  if (owner) return owner;
+  if (outcome.failures.length > 0) {
+    throw new AppError(503, "Could not determine the record's office — a schema is temporarily unavailable.");
+  }
+  return null;
+}
+
+/**
+ * Pure guard for fan-out LIST reads: if there were active offices but EVERY one failed, throw 503
+ * instead of returning an empty 200 that's indistinguishable from "no results". An all-office outage
+ * must not look like an empty project list.
+ */
+export function assertFanOutNotFullyDegraded<T>(outcome: FanOutOutcome<T>): FanOutOutcome<T> {
+  if (outcome.results.length === 0 && outcome.failures.length > 0) {
+    throw new AppError(503, "Projects are temporarily unavailable — every office failed to respond.");
+  }
+  return outcome;
 }
 
 /** All ACTIVE offices. Field is office-agnostic, so this is the full active set — NOT the user's accessible subset. */
@@ -114,13 +129,15 @@ export async function resolveOfficeForId(kind: "deal" | "lead" | "file", id: str
   // `table` is a fixed internal literal (never user input); `id` is parameterized.
   const table = sql.identifier(kind === "deal" ? "deals" : kind === "lead" ? "leads" : "files");
   const offices = await listActiveFieldOffices();
-  return resolveOffice(offices, (office) =>
+  const outcome = await fanOutOffices(offices, (office) =>
     runInOffice(office, async (officeDb) => {
       const result = await officeDb.execute(sql`SELECT 1 AS hit FROM ${table} WHERE id = ${id}::uuid LIMIT 1`);
       const rows = (result as { rows?: unknown[] }).rows ?? [];
       return rows.length > 0;
     }),
   );
+  // Throws 503 if the owning office may have failed; returns null only when every office cleanly reported "not mine".
+  return pickResolvedOffice(outcome);
 }
 
 /**

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { fanOutOffices, resolveOffice, type FieldOffice } from "../../../src/modules/field/cross-office.js";
+import {
+  assertFanOutNotFullyDegraded,
+  fanOutOffices,
+  pickResolvedOffice,
+  type FieldOffice,
+} from "../../../src/modules/field/cross-office.js";
 
 const offices: FieldOffice[] = [
   { id: "id-dallas", slug: "dallas" },
@@ -35,22 +40,50 @@ describe("fanOutOffices", () => {
   });
 });
 
-describe("resolveOffice", () => {
-  it("returns the single office whose schema reports the id (UUIDs are globally unique)", async () => {
-    const office = await resolveOffice(offices, async (o) => o.slug === "dallas");
-    expect(office).toEqual({ id: "id-dallas", slug: "dallas" });
+describe("pickResolvedOffice", () => {
+  it("returns the office that reported ownership (UUIDs are globally unique → at most one)", () => {
+    const office = pickResolvedOffice({
+      results: [
+        { office: offices[0]!, value: false },
+        { office: offices[2]!, value: true },
+      ],
+      failures: [],
+    });
+    expect(office).toEqual({ id: "id-pw", slug: "pwauditoffice" });
   });
 
-  it("returns null when no office owns the id", async () => {
-    const office = await resolveOffice(offices, async () => false);
+  it("returns null when every office cleanly reported NOT-mine (genuine not-found → 404)", () => {
+    const office = pickResolvedOffice({
+      results: offices.map((o) => ({ office: o, value: false })),
+      failures: [],
+    });
     expect(office).toBeNull();
   });
 
-  it("ignores an office whose hit-check throws and still finds the owning office", async () => {
-    const office = await resolveOffice(offices, async (o) => {
-      if (o.slug === "atlanta") throw new Error("down");
-      return o.slug === "pwauditoffice";
-    });
-    expect(office).toEqual({ id: "id-pw", slug: "pwauditoffice" });
+  it("THROWS 503 (not null) when no office claimed it but one FAILED — the owner may be the failed office", () => {
+    expect(() =>
+      pickResolvedOffice({
+        results: [{ office: offices[0]!, value: false }],
+        failures: [{ office: offices[1]!, error: "schema down" }],
+      }),
+    ).toThrowError(/temporarily unavailable/i);
+  });
+});
+
+describe("assertFanOutNotFullyDegraded", () => {
+  it("passes the outcome through when at least one office succeeded", () => {
+    const outcome = { results: [{ office: offices[0]!, value: 1 }], failures: [{ office: offices[1]!, error: "x" }] };
+    expect(assertFanOutNotFullyDegraded(outcome)).toBe(outcome);
+  });
+
+  it("THROWS 503 when there were active offices but EVERY one failed (not an empty 200)", () => {
+    expect(() =>
+      assertFanOutNotFullyDegraded({ results: [], failures: offices.map((o) => ({ office: o, error: "down" })) }),
+    ).toThrowError(/temporarily unavailable/i);
+  });
+
+  it("does NOT throw when there were simply no offices/results and no failures", () => {
+    const outcome = { results: [], failures: [] };
+    expect(assertFanOutNotFullyDegraded(outcome)).toBe(outcome);
   });
 });
