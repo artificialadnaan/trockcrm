@@ -31,9 +31,10 @@ export default function CameraCapture({
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView>(null);
   const [busy, setBusy] = useState(false);
+  const [ready, setReady] = useState(false);
 
   async function shoot() {
-    if (busy || !cameraRef.current) return;
+    if (busy || !ready || !cameraRef.current) return;
     setBusy(true);
     try {
       const photo = await cameraRef.current.takePictureAsync({ quality: 1, exif: true });
@@ -62,7 +63,7 @@ export default function CameraCapture({
         </SafeAreaView>
       ) : (
         <View style={styles.fill}>
-          <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" />
+          <CameraView ref={cameraRef} style={StyleSheet.absoluteFill} facing="back" onCameraReady={() => setReady(true)} />
           <SafeAreaView style={styles.overlay} edges={["top", "bottom"]}>
             <View style={styles.topBar}>
               <Text style={styles.counter}>
@@ -83,13 +84,15 @@ export default function CameraCapture({
               ) : null}
               <Pressable
                 onPress={shoot}
-                disabled={busy}
-                style={({ pressed }) => [styles.shutter, (busy || pressed) && { opacity: 0.7 }]}
+                disabled={busy || !ready}
+                style={({ pressed }) => [styles.shutter, (busy || !ready || pressed) && { opacity: 0.5 }]}
                 accessibilityLabel="Capture photo"
               >
                 <View style={styles.shutterInner} />
               </Pressable>
-              <Text style={styles.hint}>Tap to capture — camera stays open for the next shot</Text>
+              <Text style={styles.hint}>
+                {ready ? "Tap to capture — camera stays open for the next shot" : "Preparing camera…"}
+              </Text>
             </View>
           </SafeAreaView>
         </View>

@@ -87,6 +87,13 @@ export default function CaptureScreen() {
   // Keys of shots captured before this session's GPS fix resolved — back-patched
   // with the coordinates once getLiveGps() returns (capture never waits on it).
   const pendingGpsKeysRef = useRef<Set<string>>(new Set());
+  // Monotonic camera-session token: a late getLiveGps() from a PRIOR session (the
+  // user reopened the camera before it resolved) must not overwrite or back-patch
+  // the current session with a stale fix.
+  const cameraSessionRef = useRef(0);
+  // The in-flight getLiveGps() promise for the current session — upload() awaits it
+  // so a quick burst+upload doesn't snapshot ungeotagged metadata before it lands.
+  const cameraGpsPromiseRef = useRef<Promise<PhotoMetadata> | null>(null);
 
   const pendingQuery = usePendingPhotos();
   const transcribeConfig = useQuery({
@@ -140,7 +147,13 @@ export default function CaptureScreen() {
     setNotice(null);
     cameraGpsRef.current = null;
     pendingGpsKeysRef.current = new Set();
-    void getLiveGps().then((m) => {
+    const session = (cameraSessionRef.current += 1);
+    const gpsPromise = getLiveGps();
+    cameraGpsPromiseRef.current = gpsPromise;
+    void gpsPromise.then((m) => {
+      // Drop a fix from a previous camera session (reopened before this resolved)
+      // so it can't overwrite cameraGpsRef or back-patch the new session's shots.
+      if (cameraSessionRef.current !== session) return;
       cameraGpsRef.current = m;
       // Geotag any shots captured before the fix arrived, then stop tracking them.
       const keys = pendingGpsKeysRef.current;
@@ -154,14 +167,18 @@ export default function CaptureScreen() {
 
   function onCameraCapture(shot: CapturedShot) {
     const key = nextKey();
+    // Honor the shot's own EXIF (DateTimeOriginal + any embedded GPS), mirroring the
+    // import path; else the live session GPS; else back-patch when getLiveGps() lands.
+    const exifMeta = extractExifMetadata(shot.exif);
     const gps = cameraGpsRef.current;
-    const takenAt = new Date().toISOString();
+    const takenAt = exifMeta.takenAt ?? new Date().toISOString();
     let metadata: PhotoMetadata;
-    if (gps && hasCoords(gps)) {
+    if (hasCoords(exifMeta)) {
+      metadata = { ...exifMeta, takenAt };
+    } else if (gps && hasCoords(gps)) {
       metadata = { ...gps, takenAt };
     } else {
-      // Session GPS not resolved yet — keep the shot (never block) and back-patch
-      // its coordinates when getLiveGps() returns.
+      // Capture never blocks on GPS — keep the shot and back-patch coordinates later.
       metadata = { takenAt };
       pendingGpsKeysRef.current.add(key);
     }
@@ -211,9 +228,25 @@ export default function CaptureScreen() {
     if (photos.length === 0 || status === "uploading") return;
     setStatus("uploading");
     setNotice(null);
+    // Don't let a quick burst→Upload race the non-blocking GPS fix: if early shots
+    // are still waiting on it, wait for the in-flight fix so the snapshot is geotagged.
+    if (pendingGpsKeysRef.current.size > 0 && cameraGpsRef.current === null && cameraGpsPromiseRef.current) {
+      try {
+        await cameraGpsPromiseRef.current;
+      } catch {
+        /* best-effort — upload still proceeds */
+      }
+    }
+    const sessionGps = cameraGpsRef.current;
     const ref = targetRef(target);
-    const results = await runConcurrentUploads(photos, 3, (sp) =>
-      uploadCapture(fetcher, {
+    const results = await runConcurrentUploads(photos, 3, (sp) => {
+      // Reconcile a resolved session GPS into shots captured before it landed, so a
+      // back-patch that hasn't reached this snapshot can't ship them ungeotagged.
+      const metadata =
+        !hasCoords(sp.metadata) && sessionGps && hasCoords(sessionGps)
+          ? { ...sp.metadata, latitude: sessionGps.latitude, longitude: sessionGps.longitude, addressSource: sessionGps.addressSource }
+          : sp.metadata;
+      return uploadCapture(fetcher, {
         uri: sp.uri,
         width: sp.width,
         height: sp.height,
@@ -222,9 +255,9 @@ export default function CaptureScreen() {
         // Per-photo caption wins; batch caption is the fallback for un-captioned photos.
         caption: effectiveCaption(sp.caption, batchCaption),
         tags,
-        metadata: sp.metadata,
-      }),
-    );
+        metadata,
+      });
+    });
 
     const failedKeys = photos.filter((_, i) => results[i]?.status === "rejected").map((p) => p.key);
     const succeeded = results.filter((r) => r.status === "fulfilled").length;
