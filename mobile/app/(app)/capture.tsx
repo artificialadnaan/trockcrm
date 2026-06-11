@@ -199,7 +199,14 @@ export default function CaptureScreen() {
       void pendingQuery.refetch();
       if (target?.type === "deal") {
         invalidateDealPhotos(target.id);
-        router.replace({ pathname: "/(app)/projects/[id]", params: detailParamsFor(target) });
+        // Only open the rep-scoped detail when the deal came from an accessible
+        // project route ("Add photos"). A picker-searched deal is company-wide and
+        // may be unowned — its detail queries would 403, and onUnauthorized would
+        // sign the rep out. In that case stay put with the success notice.
+        const fromAccessibleProject = typeof params.dealId === "string" && params.dealId === target.id;
+        if (fromAccessibleProject) {
+          router.replace({ pathname: "/(app)/projects/[id]", params: detailParamsFor(target) });
+        }
       }
     } else {
       setPhotos((prev) => prev.filter((p) => failedKeys.includes(p.key)));
@@ -292,10 +299,17 @@ export default function CaptureScreen() {
         {/* Metadata for the session */}
         {photos.length > 0 ? (
           <View style={{ gap: theme.space.md }}>
-            <View style={{ gap: theme.space.xs }}>
-              <Text style={styles.fieldLabel}>Category</Text>
-              <CategoryPicker value={category} onChange={setCategory} />
-            </View>
+            {/* Locked during upload: upload() snapshots these values for every
+                in-flight request and clears them on success, so mid-upload edits
+                would be silently lost. */}
+            <View
+              pointerEvents={uploading ? "none" : "auto"}
+              style={[{ gap: theme.space.md }, uploading && { opacity: 0.5 }]}
+            >
+              <View style={{ gap: theme.space.xs }}>
+                <Text style={styles.fieldLabel}>Category</Text>
+                <CategoryPicker value={category} onChange={setCategory} />
+              </View>
 
             <View style={{ gap: theme.space.xs }}>
               <Text style={styles.fieldLabel}>Description</Text>
@@ -314,6 +328,7 @@ export default function CaptureScreen() {
             <View style={{ gap: theme.space.xs }}>
               <Text style={styles.fieldLabel}>Tags</Text>
               <PhotoTagInput tags={tags} onChange={setTags} dealId={target?.type === "deal" ? target.id : undefined} />
+              </View>
             </View>
 
             <Button

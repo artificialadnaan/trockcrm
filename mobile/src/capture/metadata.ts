@@ -26,7 +26,10 @@ export async function getLiveGps(): Promise<PhotoMetadata> {
       Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
       new Promise<null>((resolve) => setTimeout(() => resolve(null), GPS_TIMEOUT_MS)),
     ]);
-    const coords = fresh?.coords ?? (await Location.getLastKnownPositionAsync())?.coords ?? null;
+    // Bound the cached fallback to 60s (matches the web's maximumAge) so a
+    // days-old fix from another jobsite is never uploaded as a "live_gps" coord.
+    const coords =
+      fresh?.coords ?? (await Location.getLastKnownPositionAsync({ maxAge: 60_000 }))?.coords ?? null;
     if (!coords) return { takenAt };
     return { latitude: coords.latitude, longitude: coords.longitude, addressSource: "live_gps", takenAt };
   } catch {
