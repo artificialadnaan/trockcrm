@@ -12,7 +12,7 @@ import { assignPhotoTarget, getTranscriptionConfig } from "../../src/api/endpoin
 import type { FieldCaptureTarget } from "../../src/api/types";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
 import { runConcurrentUploads, uploadCapture, type CaptureTargetRef } from "../../src/capture/upload";
-import { effectiveCaption, type SessionPhoto } from "../../src/capture/session-photo";
+import { applyGpsToPending, effectiveCaption, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
 import { Badge, Button, EmptyState, TextInput } from "../../src/components/ui";
 import { Banner } from "../../src/components/Banner";
@@ -84,6 +84,9 @@ export default function CaptureScreen() {
   // Live GPS fetched once per camera session so burst shots aren't each blocked
   // on a fresh fix (a burst is at one location); applied to every shot.
   const cameraGpsRef = useRef<PhotoMetadata | null>(null);
+  // Keys of shots captured before this session's GPS fix resolved — back-patched
+  // with the coordinates once getLiveGps() returns (capture never waits on it).
+  const pendingGpsKeysRef = useRef<Set<string>>(new Set());
 
   const pendingQuery = usePendingPhotos();
   const transcribeConfig = useQuery({
@@ -136,20 +139,33 @@ export default function CaptureScreen() {
     if (status === "uploading") return;
     setNotice(null);
     cameraGpsRef.current = null;
+    pendingGpsKeysRef.current = new Set();
     void getLiveGps().then((m) => {
       cameraGpsRef.current = m;
+      // Geotag any shots captured before the fix arrived, then stop tracking them.
+      const keys = pendingGpsKeysRef.current;
+      if (keys.size > 0 && hasCoords(m)) {
+        setPhotos((prev) => applyGpsToPending(prev, keys, m));
+        pendingGpsKeysRef.current = new Set();
+      }
     });
     setCameraOpen(true);
   }
 
   function onCameraCapture(shot: CapturedShot) {
+    const key = nextKey();
     const gps = cameraGpsRef.current;
-    const metadata: PhotoMetadata =
-      gps && hasCoords(gps) ? { ...gps, takenAt: new Date().toISOString() } : { takenAt: new Date().toISOString() };
-    setPhotos((prev) => [
-      ...prev,
-      { key: nextKey(), uri: shot.uri, width: shot.width, height: shot.height, metadata, caption: "" },
-    ]);
+    const takenAt = new Date().toISOString();
+    let metadata: PhotoMetadata;
+    if (gps && hasCoords(gps)) {
+      metadata = { ...gps, takenAt };
+    } else {
+      // Session GPS not resolved yet — keep the shot (never block) and back-patch
+      // its coordinates when getLiveGps() returns.
+      metadata = { takenAt };
+      pendingGpsKeysRef.current.add(key);
+    }
+    setPhotos((prev) => [...prev, { key, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption: "" }]);
   }
 
   async function importPhotos() {
