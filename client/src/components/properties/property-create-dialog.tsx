@@ -9,6 +9,11 @@ import { createProperty } from "@/hooks/use-properties";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { useCompanyDetail } from "@/hooks/use-companies";
 import type { PropertySurface } from "@/hooks/use-properties";
+import {
+  isPositiveInteger,
+  isValidBuildYear,
+  maxPropertyBuildYear,
+} from "@/lib/property-completeness";
 
 interface PropertyCreateDialogProps {
   onCreated?: (property: PropertySurface) => void;
@@ -88,17 +93,13 @@ export function PropertyCreateDialog({
       setError("ZIP must be 5 digits or ZIP+4");
       return;
     }
-    const buildYear = Number(formData.buildYear);
-    const maxYear = new Date().getFullYear() + 2;
-    if (
-      (requireLeadCreateFields || formData.buildYear.trim()) &&
-      (!Number.isInteger(buildYear) || buildYear < 1800 || buildYear > maxYear)
-    ) {
-      setError(`Year built must be between 1800 and ${maxYear}`);
+    const buildYear = formData.buildYear.trim() ? Number(formData.buildYear) : null;
+    if ((requireLeadCreateFields || formData.buildYear.trim()) && !isValidBuildYear(buildYear)) {
+      setError(`Year built must be between 1800 and ${maxPropertyBuildYear()}`);
       return;
     }
-    const unitCount = Number(formData.unitCount);
-    if ((requireLeadCreateFields || formData.unitCount.trim()) && (!Number.isInteger(unitCount) || unitCount <= 0)) {
+    const unitCount = formData.unitCount.trim() ? Number(formData.unitCount) : null;
+    if ((requireLeadCreateFields || formData.unitCount.trim()) && !isPositiveInteger(unitCount)) {
       setError("Number of units must be a positive integer");
       return;
     }

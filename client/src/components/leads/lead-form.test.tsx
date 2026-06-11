@@ -1713,7 +1713,9 @@ describe("LeadForm", () => {
     expect(container.textContent).toContain("Answer required project intake questions: Timeline Target Date");
   });
 
-  it("renders a Year Built repair input when the selected property is missing buildYear", () => {
+  // Property repair is now consolidated into PropertySelector (see property-completeness + property-selector
+  // tests). lead-form only surfaces the create-gate errors when the selected property is still incomplete.
+  it("surfaces a Year Built gate error when the selected property is missing buildYear", () => {
     properties = [{ ...completeProperty, buildYear: null }];
 
     const html = renderToStaticMarkup(
@@ -1736,13 +1738,11 @@ describe("LeadForm", () => {
       </MemoryRouter>
     );
 
-    expect(html).toContain("This property is missing required information");
-    expect(html).toContain("Year Built");
-    expect(html).not.toContain("Number of Units");
     expect(html).toContain("Year built must be between");
+    expect(html).not.toContain("Number of units must be a positive integer.");
   });
 
-  it("renders a Number of Units repair input when the selected property is missing unitCount", () => {
+  it("surfaces a Number of Units gate error when the selected property is missing unitCount", () => {
     properties = [{ ...completeProperty, unitCount: null }];
 
     const html = renderToStaticMarkup(
@@ -1765,13 +1765,11 @@ describe("LeadForm", () => {
       </MemoryRouter>
     );
 
-    expect(html).toContain("This property is missing required information");
-    expect(html).toContain("Number of Units");
-    expect(html).not.toContain("Year Built");
     expect(html).toContain("Number of units must be a positive integer.");
+    expect(html).not.toContain("Year built must be between");
   });
 
-  it("renders both property repair inputs when buildYear and unitCount are missing", () => {
+  it("surfaces both property gate errors when buildYear and unitCount are missing", () => {
     properties = [{ ...completeProperty, buildYear: null, unitCount: null }];
 
     const html = renderToStaticMarkup(
@@ -1794,11 +1792,11 @@ describe("LeadForm", () => {
       </MemoryRouter>
     );
 
-    expect(html).toContain("Year Built");
-    expect(html).toContain("Number of Units");
+    expect(html).toContain("Year built must be between");
+    expect(html).toContain("Number of units must be a positive integer.");
   });
 
-  it("does not render property repair inputs when buildYear and unitCount are populated", () => {
+  it("surfaces no property gate errors when buildYear and unitCount are populated", () => {
     const html = renderToStaticMarkup(
       <MemoryRouter>
         <LeadForm
@@ -1820,91 +1818,8 @@ describe("LeadForm", () => {
     );
 
     expect(html).not.toContain("This property is missing required information");
-    expect(html).not.toContain("property-repair-build-year");
-    expect(html).not.toContain("property-repair-unit-count");
-  });
-
-  it("updates repaired property values before creating the lead", async () => {
-    const calls: string[] = [];
-    properties = [{ ...completeProperty, buildYear: null, unitCount: null }];
-    propertyHookMocks.updateProperty.mockImplementation(async () => {
-      calls.push("updateProperty");
-      return { property: { ...completeProperty } };
-    });
-    leadHookMocks.createLead.mockImplementation(async () => {
-      calls.push("createLead");
-      return { lead: { id: "lead-created" } };
-    });
-
-    renderCreateForm();
-    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-build-year")!, "2010");
-    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-unit-count")!, "42");
-    await submitForm();
-
-    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith(
-      "property-1",
-      {
-        buildYear: 2010,
-        unitCount: 42,
-      },
-      { officeId: "office-dallas" }
-    );
-    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
-    expect(calls).toEqual(["updateProperty", "createLead"]);
-  });
-
-  it("updates repaired property address fields before creating the lead", async () => {
-    const calls: string[] = [];
-    properties = [
-      {
-        ...completeProperty,
-        address: null,
-        city: "Peachtree Corners",
-        state: "GA",
-        zip: null,
-      },
-    ];
-    propertyHookMocks.updateProperty.mockImplementation(async () => {
-      calls.push("updateProperty");
-      return { property: { ...completeProperty, address: "5000 Triangle Pkwy", city: "Peachtree Corners", state: "GA", zip: "30092" } };
-    });
-    leadHookMocks.createLead.mockImplementation(async () => {
-      calls.push("createLead");
-      return { lead: { id: "lead-created" } };
-    });
-
-    renderCreateForm();
-    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-address")!, "5000 Triangle Pkwy");
-    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-zip")!, "30092");
-    await submitForm();
-
-    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith(
-      "property-1",
-      {
-        address: "5000 Triangle Pkwy",
-        zip: "30092",
-      },
-      { officeId: "office-dallas" }
-    );
-    expect(leadHookMocks.createLead).toHaveBeenCalledTimes(1);
-    expect(calls).toEqual(["updateProperty", "createLead"]);
-  });
-
-  it("skips lead creation and shows an error if property repair fails", async () => {
-    properties = [{ ...completeProperty, buildYear: null }];
-    propertyHookMocks.updateProperty.mockRejectedValue(new Error("Property update failed"));
-
-    renderCreateForm();
-    await setInputValue(container.querySelector<HTMLInputElement>("#property-repair-build-year")!, "2010");
-    await submitForm();
-
-    expect(propertyHookMocks.updateProperty).toHaveBeenCalledWith(
-      "property-1",
-      { buildYear: 2010 },
-      { officeId: "office-dallas" }
-    );
-    expect(leadHookMocks.createLead).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Failed to update property: Property update failed");
+    expect(html).not.toContain("Year built must be between");
+    expect(html).not.toContain("Number of units must be a positive integer.");
   });
 
   it("shows inline error when inline contact phone is too short", async () => {
