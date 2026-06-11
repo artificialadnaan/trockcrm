@@ -194,6 +194,15 @@ export function PropertySelector({
     };
   }, [officeId, properties, value]);
 
+  // A dismissal applies only to the value it was made for. Once the controlled selection changes to a
+  // DIFFERENT property (e.g. the parent switches A -> B -> A without passing through null), clear the stale
+  // dismissal so the catch-net re-evaluates the new selection instead of silently suppressing repair.
+  useEffect(() => {
+    if (repairDismissedValue !== null && repairDismissedValue !== value) {
+      setRepairDismissedValue(null);
+    }
+  }, [value, repairDismissedValue]);
+
   // Catch-net: an incomplete property selected OUTSIDE the dropdown (auto-select / initialValues) still
   // needs to be repaired. Idempotent + non-trapping: never reopens mid-edit, and stays closed after an
   // explicit Cancel for the same value.
