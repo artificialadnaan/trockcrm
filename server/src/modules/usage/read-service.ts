@@ -285,6 +285,17 @@ export function classifyAction(action: string, isStage: boolean): ActionDetailTy
   return action === "insert" ? "create" : "edit";
 }
 
+/**
+ * Compose a scannable stage-move label: the deal name plus the stage transition. `from_stage` is NULL
+ * on an initial entry (so just the entered stage), and any of these can be NULL when the entity/stage
+ * was deleted (graceful fallback, never a throw). Pure — exported for testing.
+ */
+export function composeStageLabel(dealName: string | null, fromStage: string | null, toStage: string | null): string {
+  const move = fromStage && toStage ? `${fromStage} → ${toStage}` : (toStage ?? fromStage ?? null);
+  if (dealName && move) return `${dealName}: ${move}`;
+  return dealName ?? move ?? "Stage move";
+}
+
 // Detail actions mirror the AGGREGATE's action sources (raw-fetch.ts / USAGE_ACTION_SOURCES) so the
 // breakdown reconciles with the leaderboard's action count — sourcing each bucket from the SAME table,
 // crediting column, and timestamp the rollup uses:
@@ -359,24 +370,42 @@ export async function readActionDetail(
   // full-period accurate even when the list is truncated.) Each source caps at LIMIT+1 so the merge
   // can detect truncation without an over-large fetch.
   const cap = ACTION_DETAIL_LIMIT + 1;
+  // Per-entity label resolution: most create/edit rows carry NO entity_name_snapshot (tasks/emails/
+  // contacts store null), so join each audited table by record_id and resolve its real name/title/
+  // subject. Every join is a gated LEFT JOIN (table_name + record_id), so a deleted record simply
+  // yields null and falls through to entity_type/table_name as a last resort — never a 500. All
+  // label sources are text/varchar (no enum), so the COALESCE type-matches.
   const auditRows = (
-    await client.query<{ action: string; entity_type: string | null; created_at: string; label: string | null }>(
-      `SELECT al.action, al.entity_type, al.created_at,
-              COALESCE(al.entity_name_snapshot, d.name, l.name, al.entity_type, al.table_name) AS label
+    await client.query<{ action: string; table_name: string; created_at: string; label: string | null }>(
+      `SELECT al.action, al.table_name, al.created_at,
+              COALESCE(
+                al.entity_name_snapshot,
+                d.name, l.name, t.title,
+                NULLIF(TRIM(CONCAT_WS(' ', co.first_name, co.last_name)), ''),
+                em.subject,
+                al.entity_type, al.table_name
+              ) AS label
          FROM ${schema}.audit_log al
-         LEFT JOIN ${schema}.deals d ON al.table_name = 'deals' AND al.record_id = d.id
-         LEFT JOIN ${schema}.leads l ON al.table_name = 'leads' AND al.record_id = l.id
+         LEFT JOIN ${schema}.deals d     ON al.table_name = 'deals'    AND al.record_id = d.id
+         LEFT JOIN ${schema}.leads l     ON al.table_name = 'leads'    AND al.record_id = l.id
+         LEFT JOIN ${schema}.tasks t     ON al.table_name = 'tasks'    AND al.record_id = t.id
+         LEFT JOIN ${schema}.contacts co ON al.table_name = 'contacts' AND al.record_id = co.id
+         LEFT JOIN ${schema}.emails em   ON al.table_name = 'emails'   AND al.record_id = em.id
         WHERE ${AUDIT_DETAIL_WHERE}
         ORDER BY al.created_at DESC
         LIMIT ${cap}`,
       params,
     )
   ).rows;
+  // Stage moves: deal name + from → to stage names. Stage names live in public.pipeline_stage_config
+  // (cross-schema, shared); from_stage_id is NULL on initial entry. LEFT JOINs keep it null-safe.
   const stageRows = (
-    await client.query<{ created_at: string; label: string | null }>(
-      `SELECT sh.created_at, d.name AS label
+    await client.query<{ created_at: string; deal_name: string | null; from_stage: string | null; to_stage: string | null }>(
+      `SELECT sh.created_at, d.name AS deal_name, fs.name AS from_stage, ts.name AS to_stage
          FROM ${schema}.deal_stage_history sh
          LEFT JOIN ${schema}.deals d ON sh.deal_id = d.id
+         LEFT JOIN public.pipeline_stage_config fs ON sh.from_stage_id = fs.id
+         LEFT JOIN public.pipeline_stage_config ts ON sh.to_stage_id = ts.id
         WHERE ${STAGE_DETAIL_WHERE}
         ORDER BY sh.created_at DESC
         LIMIT ${cap}`,
@@ -416,13 +445,13 @@ export async function readActionDetail(
   const merged: ActionDetailItem[] = [
     ...auditRows.map((r) => ({
       type: classifyAction(r.action, false),
-      label: r.label ?? "Record",
-      entityType: r.entity_type,
+      label: r.label ?? r.table_name,
+      entityType: r.table_name,
       at: r.created_at,
     })),
     ...stageRows.map((r) => ({
       type: "stage_move" as ActionDetailType,
-      label: r.label ?? "Stage move",
+      label: composeStageLabel(r.deal_name, r.from_stage, r.to_stage),
       entityType: "deal" as string | null,
       at: r.created_at,
     })),
