@@ -24,13 +24,14 @@
 - **Modify** `client/src/components/properties/property-selector.tsx` — replace repair street `<Input>` with `<AddressAutocomplete>`.
 - **Modify** `client/src/components/properties/property-selector.test.tsx` — add the invariant test (select fills address, year/units still gated).
 
-**Env (ops, not code):** set `MAPBOX_TOKEN` (fresh URL-restricted `pk.*`) on the API service in Railway. Document in the PR description; do not commit the token.
+**Env (ops, not code):** set `MAPBOX_TOKEN` as a **NON-URL-restricted** `pk.*` token scoped to the Geocoding API on the Railway **API** service. (A URL-restricted token would 403 on every server-side `fetch` because the server sends no `Referer`/`Origin`, silently degrading to empty suggestions.) Document the requirement in the PR description; do not commit the token.
 
 ---
 
 ## Task 1: Server — address suggest service (parser + degrade)
 
 **Files:**
+
 - Create: `server/src/modules/address/service.ts`
 - Test: `server/tests/modules/address/service.test.ts`
 
@@ -212,6 +213,7 @@ git commit -m "feat(address): Mapbox v6 suggest service with parser + silent-deg
 ## Task 2: Server — `GET /api/address/suggest` route + mount
 
 **Files:**
+
 - Create: `server/src/modules/address/routes.ts`
 - Modify: `server/src/app.ts` (add import + one `app.use` line near the other authed routes, e.g. just after the `/api/offices` mount ~line 213)
 
@@ -241,10 +243,13 @@ export default router;
 - [ ] **Step 2: Mount in app.ts**
 
 Add the import alongside the other route imports:
+
 ```ts
 import addressRoutes from "./modules/address/routes.js";
 ```
+
 Add the mount next to the other authed-no-tenant routes (mirrors `/api/offices`):
+
 ```ts
 app.use("/api/address", authMiddleware, requireCrmUser, addressRoutes);
 ```
@@ -266,6 +271,7 @@ git commit -m "feat(address): mount GET /api/address/suggest (authed)"
 ## Task 3: Client — `<AddressAutocomplete>` component
 
 **Files:**
+
 - Create: `client/src/components/properties/address-autocomplete.tsx`
 - Test: `client/src/components/properties/address-autocomplete.test.tsx`
 
@@ -460,6 +466,7 @@ git commit -m "feat(address): shared AddressAutocomplete (debounce, min-chars, d
 ## Task 4: Wire into PropertyCreateDialog
 
 **Files:**
+
 - Modify: `client/src/components/properties/property-create-dialog.tsx` (the `Address` field block, currently `<Input id="property-address" value={formData.address} onChange=... placeholder="123 Main St" />`)
 
 - [ ] **Step 1: Add the import**
@@ -471,6 +478,7 @@ import { AddressAutocomplete } from "./address-autocomplete";
 - [ ] **Step 2: Replace the Address Input with AddressAutocomplete**
 
 Replace the existing Address `<Input>` (keep the surrounding `<Label htmlFor="property-address">Address *</Label>` and layout) with:
+
 ```tsx
 <AddressAutocomplete
   id="property-address"
@@ -502,6 +510,7 @@ git commit -m "feat(address): autocomplete in Create Property dialog (fills city
 ## Task 5: Wire into PropertySelector repair editor + invariant test
 
 **Files:**
+
 - Modify: `client/src/components/properties/property-selector.tsx` (the repair editor's street `<Input>`, gated by `repairMissing.includes("address")`)
 - Modify: `client/src/components/properties/property-selector.test.tsx` (add the invariant test)
 
@@ -518,6 +527,7 @@ import { AddressAutocomplete } from "./address-autocomplete";
 - [ ] **Step 2: Replace the repair street Input**
 
 Replace the `repairMissing.includes("address")` `<Input ... aria-label="Property street address" ...>` block with:
+
 ```tsx
 {repairMissing.includes("address") ? (
   <AddressAutocomplete
@@ -556,7 +566,7 @@ it("selecting an address suggestion fills the street but leaves the property gat
   // type into the address autocomplete, wait debounce, click the suggestion
   const street = container.querySelector<HTMLInputElement>('input[aria-label="Property street address"]')!;
   await act(async () => { street.value = "9 Oak"; street.dispatchEvent(new Event("input", { bubbles: true })); });
-  await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 300)); }); // 250ms debounce + margin (switch to fake timers if flaky)
   const option = container.querySelector<HTMLButtonElement>('[data-testid="address-suggestion"]')!;
   await clickButton(option);
   await flush();
@@ -582,7 +592,7 @@ it("selecting a suggestion does NOT overwrite a present field (set-only-missing 
 
   const street = container.querySelector<HTMLInputElement>('input[aria-label="Property street address"]')!;
   await act(async () => { street.value = "9 Oak"; street.dispatchEvent(new Event("input", { bubbles: true })); });
-  await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 300)); }); // 250ms debounce + margin (switch to fake timers if flaky)
   await clickButton(container.querySelector<HTMLButtonElement>('[data-testid="address-suggestion"]')!);
   await flush();
 
@@ -630,5 +640,5 @@ Re-confirm disjoint surfaces — `main` has moved since the last check. Verify n
 gh pr list --state open --json number,headRefName,files --jq \
  '.[]|select(.files[].path|test("property-selector|property-create-dialog|modules/address"))|{number,headRefName}'
 ```
+
 Expected: empty. If not empty, coordinate before branching.
-```
