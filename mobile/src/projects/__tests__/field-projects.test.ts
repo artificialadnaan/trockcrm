@@ -2,11 +2,25 @@ import {
   categoryLabel,
   filterPhotos,
   groupPhotos,
+  isProjectOffOffice,
   relativeDate,
   tagsOf,
   uploadersOf,
   type FieldPhoto,
 } from "../field-projects";
+
+describe("isProjectOffOffice", () => {
+  it("is false (writable) when the project's office matches the writable office", () => {
+    expect(isProjectOffOffice({ officeId: "office-1" }, "office-1")).toBe(false);
+  });
+  it("is true (view-only) when the project belongs to a different office", () => {
+    expect(isProjectOffOffice({ officeId: "office-2" }, "office-1")).toBe(true);
+  });
+  it("is true (view-only, fail-safe) when the writable office can't be resolved", () => {
+    expect(isProjectOffOffice({ officeId: "office-1" }, null)).toBe(true);
+    expect(isProjectOffOffice({ officeId: "office-1" }, undefined)).toBe(true);
+  });
+});
 
 function photo(overrides: Partial<FieldPhoto>): FieldPhoto {
   return {
