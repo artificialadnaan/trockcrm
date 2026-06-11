@@ -6,7 +6,6 @@ import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildFileDownloadUrlFromRecord, getDealPhotoTimeline, searchPhotoUploadTargets } from "../files/service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
-import { getDealById } from "../deals/service.js";
 import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -101,9 +100,11 @@ function activeProjectWhere(search?: string) {
   `;
 }
 
-function repDealVisibilityClause(access: FieldAccessContext) {
-  return access.userRole === "rep" ? sql`AND d.assigned_rep_id = ${access.userId}::uuid` : sql``;
-}
+// NOTE: the field surface is intentionally UNSCOPED by rep — EVERY field user (incl. role "rep") sees
+// EVERY active project across all offices, matching field_contractor/construction (which were never
+// rep-scoped). The product requirement is "every field user finds every project", so the old
+// rep-only `assigned_rep_id = <user>` filter has been removed from the field read path. (Within-office
+// "my work" lives in the CRM, which keeps its own scoping — untouched.)
 
 // Upper bound on a single per-office fetch. The cross-office /projects list merges in memory and can't
 // push offset into per-office SQL, so it fetches `offset + perPage` rows per office (clamped here) to
@@ -129,7 +130,6 @@ export async function listFieldProjects(
     FROM deals d
     LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE ${where}
-    ${repDealVisibilityClause(access)}
   `);
   const rowsResult = await tenantDb.execute(sql`
     SELECT
@@ -154,7 +154,6 @@ export async function listFieldProjects(
         AND f.deleted_at IS NULL
     ) photo_stats ON true
     WHERE ${where}
-    ${repDealVisibilityClause(access)}
     ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
     LIMIT ${perPage}
     OFFSET ${offset}
@@ -190,7 +189,6 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, access: Field
     ) photo_stats ON true
     WHERE fsp.user_id = ${access.userId}::uuid
       AND ${activeProjectWhere()}
-      ${repDealVisibilityClause(access)}
     ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
   `);
 
@@ -215,12 +213,11 @@ export async function unstarFieldProject(tenantDb: TenantDb, access: FieldAccess
   return { starred: false };
 }
 
-export async function assertActiveFieldProject(tenantDb: TenantDb, access: FieldAccessContext, dealId: string): Promise<FieldProject> {
-  const deal = await getDealById(tenantDb, dealId, access.userRole, access.userId);
-  if (!deal || !deal.isActive) {
-    throw new AppError(404, "Project not found");
-  }
-
+// `access` is retained for signature stability but the field surface is UNSCOPED by rep (see note
+// above) — the direct active-project query below is the sole gate (existence + is_active + non-terminal),
+// so a rep can open ANY active project, not just assigned ones. We deliberately do NOT route through the
+// rep-scoped getDealById (which 403s a non-owned deal for role "rep").
+export async function assertActiveFieldProject(tenantDb: TenantDb, _access: FieldAccessContext, dealId: string): Promise<FieldProject> {
   const result = await tenantDb.execute(sql`
     SELECT
       d.id,
