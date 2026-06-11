@@ -55,7 +55,6 @@ Property addresses are typed free-hand, producing dirty/inconsistent data (e.g. 
     value: string;                                   // street-address text (controlled)
     onChange: (address: string) => void;             // free typing always allowed
     onSelect: (parts: { address: string; city: string; state: string; zip: string }) => void;
-    officeId?: string | null;
     id?: string; "aria-label"?: string; placeholder?: string; required?: boolean;
   }
   ```
