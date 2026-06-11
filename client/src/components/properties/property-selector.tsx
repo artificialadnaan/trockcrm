@@ -170,6 +170,11 @@ export function PropertySelector({
     if (!value) {
       setSelectedLabel(null);
       setResolvedValueProperty(null);
+      // Fully reset repair state on an externally-cleared selection so stale repair UI doesn't linger and
+      // a previous dismissal doesn't suppress repair for the next selection of the same property.
+      setRepairTarget(null);
+      setRepairDismissedValue(null);
+      setRepairError(null);
       return;
     }
     let cancelled = false;
@@ -336,6 +341,9 @@ export function PropertySelector({
                       setSelectedLabel(getPropertySelectorLabel(result.property));
                       onChange(result.property.id);
                       void refetch();
+                      // Replace the resolved record with the saved (now-complete) one BEFORE clearing the
+                      // target, so the catch-net effect doesn't see the stale pre-save object and reopen.
+                      setResolvedValueProperty(result.property);
                       setRepairTarget(null);
                       setOpen(false);
                       setQuery("");
