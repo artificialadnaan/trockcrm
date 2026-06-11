@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRepScope, classifyAction, isWithinDrilldownWindow, latestNonFutureDate, oldestInWindowDate } from "../src/modules/usage/read-service.js";
+import { resolveRepScope, classifyAction, isWithinDrilldownWindow, latestNonFutureDate, oldestInWindowDate, classifyViewsState } from "../src/modules/usage/read-service.js";
 
 // The /platform-usage/detail route enforces the SAME rep-self scoping as the summary and /drilldown
 // (it calls resolveRepScope, then resolves through the active-office rep roster). A rep can never
@@ -17,12 +17,35 @@ describe("platform-usage/detail — scoping", () => {
 });
 
 describe("platform-usage/detail — action classification", () => {
-  it("classifies audit rows into the five detail buckets", () => {
-    expect(classifyAction("deals", "insert", false)).toBe("create");
-    expect(classifyAction("deals", "update", false)).toBe("edit");
-    expect(classifyAction("deals", "update", true)).toBe("stage_move"); // changes.stage_id/stageId
-    expect(classifyAction("files", "insert", false)).toBe("upload");
-    expect(classifyAction("activities", "insert", false)).toBe("note");
+  // classifyAction covers only the audit-sourced buckets (create/edit/stage). Notes and uploads are
+  // sourced from the activities/files tables (their own crediting/dating), not from audit rows.
+  it("classifies audit create/edit/stage rows", () => {
+    expect(classifyAction("insert", false)).toBe("create");
+    expect(classifyAction("update", false)).toBe("edit");
+    expect(classifyAction("update", true)).toBe("stage_move"); // changes.stage_id/stageId
+  });
+});
+
+describe("platform-usage/detail — views retention state", () => {
+  it("treats a future date-picker selection as future (NOT expired)", () => {
+    // Selecting tomorrow / next week: no data yet, but it is NOT expired (the opposite of the truth).
+    expect(classifyViewsState(["2026-06-20"], "2026-06-10")).toEqual({ kind: "future" });
+    const futureWeek = ["2026-06-21", "2026-06-22", "2026-06-23", "2026-06-24", "2026-06-25", "2026-06-26", "2026-06-27"];
+    expect(classifyViewsState(futureWeek, "2026-06-10")).toEqual({ kind: "future" });
+  });
+  it("marks a fully-old period expired", () => {
+    const oldWeek = ["2026-05-10", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14", "2026-05-15", "2026-05-16"];
+    expect(classifyViewsState(oldWeek, "2026-06-10")).toEqual({ kind: "expired" });
+  });
+  it("clamps a partial (straddling) period's query lower bound to the oldest in-window day", () => {
+    // Week 05-24..05-30, today 06-11: 05-24..05-28 pruned, 05-29/05-30 in-window.
+    const week = ["2026-05-24", "2026-05-25", "2026-05-26", "2026-05-27", "2026-05-28", "2026-05-29", "2026-05-30"];
+    expect(classifyViewsState(week, "2026-06-11")).toEqual({ kind: "partial", queryFrom: "2026-05-29" });
+  });
+  it("returns available with the period start for a fully in-window period (incl. current week's future Saturday)", () => {
+    expect(classifyViewsState(["2026-06-08", "2026-06-09"], "2026-06-10")).toEqual({ kind: "available", queryFrom: "2026-06-08" });
+    const currentWeek = ["2026-06-07", "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-13"];
+    expect(classifyViewsState(currentWeek, "2026-06-10")).toEqual({ kind: "available", queryFrom: "2026-06-07" });
   });
 });
 

@@ -28,6 +28,18 @@ beforeAll(async () => {
       entity_type text, entity_name_snapshot text,
       changes jsonb, created_at timestamptz
     );
+    -- Notes/uploads are sourced from these tables (NOT audit_log), with the aggregate's crediting +
+    -- dating, so the detail reconciles with the leaderboard breakdown.
+    CREATE TABLE office_dallas.activities (
+      id uuid primary key, type text,
+      responsible_user_id uuid, performed_by_user_id uuid,
+      deal_id uuid, lead_id uuid, subject text,
+      occurred_at timestamptz, created_at timestamptz
+    );
+    CREATE TABLE office_dallas.files (
+      id uuid primary key, display_name text, original_filename text,
+      deal_id uuid, lead_id uuid, uploaded_by uuid, created_at timestamptz
+    );
   `);
   await db.exec(`
     INSERT INTO office_dallas.deals (id, name) VALUES ('${DEAL1}', 'Tides on Duneville');
@@ -49,45 +61,72 @@ beforeAll(async () => {
       ('leads', '${LEAD1}', 'insert', '${REP}', NULL, NULL, NULL, '${t}'),
       -- edit (deal update, non-stage)
       ('deals', '${DEAL1}', 'update', '${REP}', NULL, '{"awarded_amount":{"old":"1","new":"2"}}'::jsonb, NULL, '${t}'),
-      -- stage moves (snake + camel)
+      -- stage moves (snake + camel) — audit rows that must NOT count (sourced from stage history)
       ('deals', '${DEAL1}', 'update', '${REP}', NULL, '{"stage_id":{"old":"a","new":"b"}}'::jsonb, NULL, '${t}'),
       ('deals', '${DEAL1}', 'update', '${REP}', NULL, '{"stageId":{"from":"A","to":"B"}}'::jsonb, NULL, '${t}'),
-      -- note (activity insert) + EXCLUDED activity update
-      ('activities', '${U("0ac1")}', 'insert', '${REP}', NULL, NULL, 'Logged call', '${t}'),
-      ('activities', '${U("0ac1")}', 'update', '${REP}', NULL, '{"notes":{"old":"x","new":"y"}}'::jsonb, 'Logged call', '${t}'),
-      -- upload (file insert) + EXCLUDED file update
-      ('files', '${U("0f11")}', 'insert', '${REP}', NULL, NULL, 'photo.jpg', '${t}'),
-      ('files', '${U("0f11")}', 'update', '${REP}', NULL, '{"display_name":{"old":"a","new":"b"}}'::jsonb, 'photo.jpg', '${t}'),
+      -- audit rows touching the activity/file — these must NOT feed notes/uploads anymore
+      ('activities', '${U("0ac1")}', 'insert', '${REP}', NULL, NULL, 'audit-note', '${t}'),
+      ('files', '${U("0f11")}', 'update', '${REP}', NULL, '{"display_name":{"old":"a","new":"b"}}'::jsonb, 'audit-file', '${t}'),
       -- EXCLUDED: impersonated deal insert (admin acting as rep)
       ('deals', '${U("0de2")}', 'insert', '${REP}', '${ADMIN}', NULL, NULL, '${t}')
+  `);
+  // Notes from the activities table — aggregate crediting (COALESCE performed_by/responsible) + dating
+  // (COALESCE occurred_at/created_at). Two count for REP; the wrong-user and out-of-range ones do not.
+  await db.exec(`
+    INSERT INTO office_dallas.activities (id, type, responsible_user_id, performed_by_user_id, deal_id, lead_id, subject, occurred_at, created_at) VALUES
+      -- A: performed_by REP (credited even though the audit row for this activity has no REP-only signal) -> counts
+      ('${U("0ac1")}', 'call', '${ADMIN}', '${REP}', '${DEAL1}', NULL, 'Logged call', '${t}', '${t}'),
+      -- B: performed_by NULL, responsible REP (COALESCE crediting) -> counts
+      ('${U("0ac2")}', 'note', '${REP}', NULL, NULL, '${LEAD1}', 'Left a note', '${t}', '${t}'),
+      -- C: performed_by ADMIN -> wrong user, excluded
+      ('${U("0ac3")}', 'call', '${ADMIN}', '${ADMIN}', '${DEAL1}', NULL, 'Admin call', '${t}', '${t}'),
+      -- D: occurred_at out of range (dated by occurred_at, NOT created_at) -> excluded
+      ('${U("0ac4")}', 'note', '${REP}', '${REP}', NULL, NULL, 'Backdated', '2026-06-03T14:00:00Z', '${t}')
+  `);
+  // Uploads from the files table — credited by uploaded_by, dated by created_at.
+  await db.exec(`
+    INSERT INTO office_dallas.files (id, display_name, original_filename, deal_id, lead_id, uploaded_by, created_at) VALUES
+      ('${U("0f11")}', 'photo.jpg', 'IMG_0001.jpg', '${DEAL1}', NULL, '${REP}', '${t}'),
+      -- wrong user -> excluded
+      ('${U("0f12")}', 'admin.jpg', 'IMG_0002.jpg', '${DEAL1}', NULL, '${ADMIN}', '${t}')
   `);
 });
 
 afterAll(async () => { await db?.close(); });
 
 describe("readActionDetail", () => {
-  it("breakdown matches the aggregate semantics: impersonated + activity/file updates excluded", async () => {
+  it("breakdown reconciles with the aggregate: each bucket from the aggregate's source table", async () => {
     const detail = await readActionDetail(client(), "office_dallas", REP, "2026-06-01", "2026-06-02");
     expect(detail.breakdown).toEqual({
       create: 2, // deal insert + lead insert (impersonated deal insert excluded)
       edit: 1, // deal update (non-stage)
       stage_move: 2, // from deal_stage_history (NOT the 2 audit stage rows — no double-count)
-      upload: 1, // file INSERT only (file update excluded)
-      note: 1, // activity INSERT only (activity update excluded)
+      upload: 1, // files table, uploaded_by REP (ADMIN's file excluded)
+      note: 2, // activities table, COALESCE(performed_by, responsible)=REP (A + B; ADMIN's + backdated excluded)
     });
-    // 7 real actions; impersonated + the two metadata updates are gone.
-    expect(detail.items).toHaveLength(7);
+    // 2 creates + 1 edit + 2 stage + 1 upload + 2 notes = 8.
+    expect(detail.items).toHaveLength(8);
     expect(detail.truncated).toBe(false);
+  });
+
+  it("sources notes/uploads from activities/files (aggregate crediting + dating), NOT audit rows", async () => {
+    const detail = await readActionDetail(client(), "office_dallas", REP, "2026-06-01", "2026-06-02");
+    // The note credited by performed_by_user_id and the COALESCE-credited note both appear...
+    expect(detail.items.some((i) => i.type === "note" && i.label === "Logged call")).toBe(true);
+    expect(detail.items.some((i) => i.type === "note" && i.label === "Left a note")).toBe(true);
+    // ...the upload comes from files.display_name (not the audit 'audit-file' snapshot)...
+    expect(detail.items.some((i) => i.type === "upload" && i.label === "photo.jpg")).toBe(true);
+    // ...and the audit metadata snapshots never leak into the detail.
+    expect(detail.items.some((i) => i.label === "audit-note" || i.label === "audit-file")).toBe(false);
   });
 
   it("labels deals via the join fallback (trigger rows have no snapshot)", async () => {
     const detail = await readActionDetail(client(), "office_dallas", REP, "2026-06-01", "2026-06-02");
     expect(detail.items.some((i) => i.label === "Tides on Duneville")).toBe(true);
-    expect(detail.items.some((i) => i.label === "Logged call")).toBe(true);
   });
 
-  it("returns nothing for a period with no audit rows", async () => {
-    const detail = await readActionDetail(client(), "office_dallas", REP, "2026-06-05", "2026-06-06");
+  it("returns nothing for a period with no actions", async () => {
+    const detail = await readActionDetail(client(), "office_dallas", REP, "2026-06-08", "2026-06-09");
     expect(detail.items).toHaveLength(0);
     expect(detail.breakdown).toEqual({ create: 0, edit: 0, stage_move: 0, upload: 0, note: 0 });
   });

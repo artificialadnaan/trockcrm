@@ -82,7 +82,7 @@ import {
 import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
-import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, latestNonFutureDate, oldestInWindowDate, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
+import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, classifyViewsState, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
 import { businessToday, shiftBusinessDate } from "../../lib/period.js";
 
 const router = Router();
@@ -1201,24 +1201,24 @@ router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
     // Actions: never pruned -> always populate, regardless of period age.
     const actions = await readActionDetail(req.tenantClient!, schema, rep.id, fromDate, toExclusive);
 
-    // Views: pruned at 14 days. Clamp to the most recent NON-FUTURE day (a current week's range ends
-    // on a future Saturday). Three states: fully expired (even the latest non-future day is past the
-    // window), partial (the latest is in-window but the period's earliest day is already pruned), or
-    // available. Mirrors the /drilldown expired messaging and is honest about the asymmetry.
-    const latest = latestNonFutureDate(dates, today);
+    // Views: pruned at 14 days, so the detail's availability is period-age dependent (unlike actions).
+    // classifyViewsState decides the state purely from the dates: future (no data yet — NOT "expired"),
+    // expired (even the latest non-future day is past the window), partial (latest in-window but the
+    // earliest day is pruned), or available. Mirrors the /drilldown expired messaging.
+    const vState = classifyViewsState(dates, today);
     let views:
       | { expired: true; partial: false; message: string; items: never[] }
       | { expired: false; partial: boolean; message?: string; items: Awaited<ReturnType<typeof readViewEventsRange>> };
-    if (!isWithinDrilldownWindow(latest, today)) {
+    if (vState.kind === "future") {
+      // A future date-picker selection — there is no data yet, and it is not "expired".
+      views = { expired: false, partial: false, items: [] };
+    } else if (vState.kind === "expired") {
       views = { expired: true, partial: false, message: "view detail expired for this period — counts only", items: [] };
     } else {
-      const partial = !isWithinDrilldownWindow(fromDate, today);
-      // For a partial period only the in-window days have un-pruned views; clamp the query's lower
-      // bound to the oldest in-window date so lingering rows (if pruning lags) aren't surfaced past
-      // the retention gate.
-      const queryFrom = partial ? oldestInWindowDate(dates, today) : fromDate;
-      const items = await readViewEventsRange(req.tenantClient!, schema, rep.id, queryFrom, toExclusive);
-      views = partial
+      // partial | available — queryFrom is clamped to the oldest in-window day for a partial period so
+      // lingering rows (if pruning lags) aren't surfaced past the retention gate.
+      const items = await readViewEventsRange(req.tenantClient!, schema, rep.id, vState.queryFrom, toExclusive);
+      views = vState.kind === "partial"
         ? { expired: false, partial: true, message: "view detail is partial — older days in this period are beyond the 14-day window", items }
         : { expired: false, partial: false, items };
     }
