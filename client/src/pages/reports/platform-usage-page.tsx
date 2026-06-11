@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { cn } from "@/lib/utils";
@@ -13,8 +14,12 @@ const HEALTHY_ACTIVE_RATIO = 0.5;
 const GRID = "grid grid-cols-[2rem_minmax(0,1fr)_5.5rem_5rem_4.5rem] items-center gap-3";
 
 export function PlatformUsagePage() {
-  const [grain, setGrain] = useState<"day" | "week">("week");
-  const [anchorDate, setAnchorDate] = useState<string>("");
+  // Initialize the period (and office) from the URL so the rep-detail back link round-trips to the
+  // same view the user was on. Subsequent toggles update local state; the detail link re-emits them.
+  const [searchParams] = useSearchParams();
+  const officeId = searchParams.get("officeId");
+  const [grain, setGrain] = useState<"day" | "week">(() => (searchParams.get("grain") === "day" ? "day" : "week"));
+  const [anchorDate, setAnchorDate] = useState<string>(() => searchParams.get("date") ?? "");
   const { data, loading, error } = usePlatformUsageReport({ grain, date: anchorDate || undefined });
 
   // Headline ranking is by Actions desc — the proportion bars make 46-vs-0 read at a glance.
@@ -23,6 +28,16 @@ export function PlatformUsagePage() {
     return [...data.leaderboard].sort((a, b) => b.usage.actionCount - a.usage.actionCount);
   }, [data]);
   const maxActions = useMemo(() => rows.reduce((m, r) => Math.max(m, r.usage.actionCount), 0), [rows]);
+
+  // Clicking a rep row opens their detail, carrying the current period (grain/date) AND the active
+  // office (?officeId) so the detail is scoped to the same office the leaderboard is showing — the
+  // api client reads ?officeId into the x-office-id header.
+  const detailHref = (repId: string) => {
+    const qs = new URLSearchParams({ grain });
+    if (anchorDate) qs.set("date", anchorDate);
+    if (officeId) qs.set("officeId", officeId);
+    return `/reports/performance/platform-usage/${repId}?${qs.toString()}`;
+  };
 
   return (
     <div className="space-y-6">
@@ -95,7 +110,7 @@ export function PlatformUsagePage() {
             <RepsActiveCard active={data.summary.activeReps} total={data.summary.totalReps} />
           </div>
 
-          <Leaderboard rows={rows} maxActions={maxActions} />
+          <Leaderboard rows={rows} maxActions={maxActions} detailHref={detailHref} />
 
           <p className="text-xs leading-relaxed text-slate-400">
             Sessions and Views show <span className="font-medium text-slate-500">—</span> until telemetry is
@@ -159,7 +174,15 @@ function RepsActiveCard({ active, total }: { active: number; total: number }) {
   );
 }
 
-function Leaderboard({ rows, maxActions }: { rows: PlatformUsageRow[]; maxActions: number }) {
+function Leaderboard({
+  rows,
+  maxActions,
+  detailHref,
+}: {
+  rows: PlatformUsageRow[];
+  maxActions: number;
+  detailHref: (repId: string) => string;
+}) {
   if (rows.length === 0) {
     return (
       <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-500">
@@ -183,7 +206,14 @@ function Leaderboard({ rows, maxActions }: { rows: PlatformUsageRow[]; maxAction
       </div>
       <div className="divide-y divide-slate-50">
         {rows.map((r, i) => (
-          <RepRow key={r.rep.id} row={r} rank={i + 1} maxActions={maxActions} isTop={i === 0 && r.usage.actionCount > 0} />
+          <RepRow
+            key={r.rep.id}
+            row={r}
+            rank={i + 1}
+            maxActions={maxActions}
+            isTop={i === 0 && r.usage.actionCount > 0}
+            href={detailHref(r.rep.id)}
+          />
         ))}
       </div>
     </div>
@@ -195,17 +225,19 @@ function RepRow({
   rank,
   maxActions,
   isTop,
+  href,
 }: {
   row: PlatformUsageRow;
   rank: number;
   maxActions: number;
   isTop: boolean;
+  href: string;
 }) {
   const u = row.usage;
   const low = u.actionCount <= LOW_ACTIVITY_THRESHOLD;
   const pct = barWidthPct(u.actionCount, maxActions);
   return (
-    <div className={cn(GRID, "px-4 py-3 transition-colors hover:bg-slate-50/70")}>
+    <Link to={href} className={cn(GRID, "px-4 py-3 transition-colors hover:bg-slate-50/70")}>
       <div className={cn("text-sm font-bold tabular-nums", isTop ? "text-brand-red" : "text-slate-300")}>{rank}</div>
 
       <div className="flex min-w-0 items-center gap-3">
@@ -234,7 +266,7 @@ function RepRow({
       <MutedValue value={formatActiveTime(u.activeSeconds)} empty={u.activeSeconds === 0} />
       <MutedValue value={u.sessionCount} empty={u.sessionCount === 0} />
       <MutedValue value={u.viewCount} empty={viewsAreEmpty(u.viewCount, u.sessionCount)} />
-    </div>
+    </Link>
   );
 }
 

@@ -82,8 +82,8 @@ import {
 import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
-import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, readViewEvents, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
-import { businessToday } from "../../lib/period.js";
+import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, classifyViewsState, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
+import { businessToday, shiftBusinessDate } from "../../lib/period.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -1163,6 +1163,68 @@ router.get("/platform-usage/drilldown", requireAnyRole, async (req, res, next) =
     const events = await readViewEvents(req.tenantClient!, schema, repId, date, type);
     await req.commitTransaction!();
     res.json({ data: { expired: false, events } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Rep detail: itemized Actions (audit_log, always available) + Views (usage_view_event, pruned at
+// 14d) for one rep over the selected day/week. SAME server-enforced rep-self scoping as the summary
+// and drilldown — a rep can only ever load their own detail.
+router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
+  try {
+    const grain = req.query.grain === "week" ? "week" : "day";
+    const today = businessToday();
+    const anchor = readOptionalIsoDate(req.query.date, "date") ?? today;
+
+    const repParam = req.user!.role !== "rep" && typeof req.query.rep === "string" ? req.query.rep : undefined;
+    if (repParam !== undefined && !UUID_PATTERN.test(repParam)) {
+      throw new AppError(400, "rep must be a valid UUID");
+    }
+    // Identical scoping to /drilldown: rep -> self; admin/director -> the requested rep, resolved
+    // through the active-office rep roster (404 if not a rep). Never UI-gated.
+    const scope = resolveRepScope({ role: req.user!.role, userId: req.user!.id }, repParam);
+    if (!scope) {
+      throw new AppError(400, "rep is required");
+    }
+    const schema = `office_${req.officeSlug!}`;
+    const roster = await resolveReps(req.tenantClient!, scope);
+    if (roster.length === 0) {
+      throw new AppError(404, "rep not found in usage roster");
+    }
+    const rep = roster[0];
+
+    const dates = grain === "week" ? weekDates(anchor) : [anchor];
+    const fromDate = dates[0];
+    const toExclusive = shiftBusinessDate(dates[dates.length - 1], 1);
+
+    // Actions: never pruned -> always populate, regardless of period age.
+    const actions = await readActionDetail(req.tenantClient!, schema, rep.id, fromDate, toExclusive);
+
+    // Views: pruned at 14 days, so the detail's availability is period-age dependent (unlike actions).
+    // classifyViewsState decides the state purely from the dates: future (no data yet — NOT "expired"),
+    // expired (even the latest non-future day is past the window), partial (latest in-window but the
+    // earliest day is pruned), or available. Mirrors the /drilldown expired messaging.
+    const vState = classifyViewsState(dates, today);
+    let views:
+      | { expired: true; partial: false; message: string; items: never[] }
+      | { expired: false; partial: boolean; message?: string; items: Awaited<ReturnType<typeof readViewEventsRange>> };
+    if (vState.kind === "future") {
+      // A future date-picker selection — there is no data yet, and it is not "expired".
+      views = { expired: false, partial: false, items: [] };
+    } else if (vState.kind === "expired") {
+      views = { expired: true, partial: false, message: "view detail expired for this period — counts only", items: [] };
+    } else {
+      // partial | available — queryFrom is clamped to the oldest in-window day for a partial period so
+      // lingering rows (if pruning lags) aren't surfaced past the retention gate.
+      const items = await readViewEventsRange(req.tenantClient!, schema, rep.id, vState.queryFrom, toExclusive);
+      views = vState.kind === "partial"
+        ? { expired: false, partial: true, message: "view detail is partial — older days in this period are beyond the 14-day window", items }
+        : { expired: false, partial: false, items };
+    }
+
+    await req.commitTransaction!();
+    res.json({ data: { rep: { id: rep.id, displayName: rep.displayName }, grain, dates, actions, views } });
   } catch (err) {
     next(err);
   }

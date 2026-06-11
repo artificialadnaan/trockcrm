@@ -76,4 +76,30 @@ describe("PlatformUsagePage", () => {
     const html = render();
     expect(html).toContain("—"); // Views are undefined in the fixture -> em-dash, never literal 0
   });
+
+  it("links each rep row to their detail, carrying the current grain", () => {
+    const html = render();
+    // Default grain is weekly; the row links to the rep detail with the period carried.
+    expect(html).toContain('href="/reports/performance/platform-usage/r1?grain=week"');
+  });
+
+  it("carries the active office (?officeId) into the detail link for cross-office views", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/reports/performance/platform-usage?officeId=atlanta"]}>
+        <PlatformUsagePage />
+      </MemoryRouter>,
+    ).replace(/\s+/g, " ");
+    expect(html).toContain("officeId=atlanta");
+  });
+
+  it("initializes the period from the URL so the rep-detail back link round-trips the same view", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/reports/performance/platform-usage?grain=day&date=2026-06-09"]}>
+        <PlatformUsagePage />
+      </MemoryRouter>,
+    ).replace(/\s+/g, " ");
+    // The page read grain=day + date from the URL, so the detail link re-emits them (& is HTML-escaped).
+    expect(html).toContain("/reports/performance/platform-usage/r1?grain=day");
+    expect(html).toContain("date=2026-06-09");
+  });
 });

@@ -153,6 +153,53 @@ export function isWithinDrilldownWindow(date: string, today: string): boolean {
   return days >= 0 && days < RAW_RETENTION_DAYS;
 }
 
+/**
+ * The latest period date that is not in the future, for the views retention check. A current week's
+ * range includes a future Saturday; `isWithinDrilldownWindow` treats future dates as out-of-window,
+ * which would wrongly mark the current week's views "expired". Clamp to the newest non-future day
+ * (today, for the current week) so only genuinely-old periods read as expired.
+ */
+export function latestNonFutureDate(dates: string[], today: string): string {
+  const past = dates.filter((d) => d <= today);
+  return past.length > 0 ? past[past.length - 1] : dates[0];
+}
+
+/**
+ * The oldest date of the period that is still within the retention window — the lower bound for view
+ * queries on a partially-pruned period, so lingering rows older than the window (if pruning lags) are
+ * never surfaced past the retention gate. Falls back to the first date when none are in-window.
+ */
+export function oldestInWindowDate(dates: string[], today: string): string {
+  return dates.find((d) => isWithinDrilldownWindow(d, today)) ?? dates[0];
+}
+
+/**
+ * The view-detail retention state for a period, decided purely from its dates and `today`. Views are
+ * raw events pruned at the retention window; actions are never pruned. Four states:
+ *  - `future`    — the whole period is ahead of today (a future date-picker selection). No data yet,
+ *                  NOT "expired" (which would be the opposite of the truth).
+ *  - `expired`   — even the latest non-future day is older than the window; only counts survive.
+ *  - `partial`   — the latest day is in-window but the period's earliest day is already pruned.
+ *  - `available` — every day is in-window.
+ * `queryFrom` is the clamped lower bound for the view query (the oldest in-window day for a partial
+ * period, else the period start). Mirrors the /drilldown expired messaging.
+ */
+export type ViewsState =
+  | { kind: "future" }
+  | { kind: "expired" }
+  | { kind: "partial"; queryFrom: string }
+  | { kind: "available"; queryFrom: string };
+
+export function classifyViewsState(dates: string[], today: string): ViewsState {
+  const fromDate = dates[0];
+  if (fromDate > today) return { kind: "future" };
+  const latest = latestNonFutureDate(dates, today);
+  if (!isWithinDrilldownWindow(latest, today)) return { kind: "expired" };
+  const partial = !isWithinDrilldownWindow(fromDate, today);
+  const queryFrom = partial ? oldestInWindowDate(dates, today) : fromDate;
+  return partial ? { kind: "partial", queryFrom } : { kind: "available", queryFrom };
+}
+
 export interface ViewEventRow {
   at: string;
   entity_type: string;
@@ -185,4 +232,211 @@ export async function readViewEvents(
     params,
   );
   return rows;
+}
+
+/**
+ * Raw view events for a user over the half-open business-tz range [fromDate, toExclusiveDate),
+ * newest first. Reuses the same impersonation + ownership join as the single-day drilldown; used
+ * by the rep-detail page so a week's views come back in one query.
+ */
+export async function readViewEventsRange(
+  client: QueryClient,
+  schema: string,
+  userId: string,
+  fromDate: string,
+  toExclusiveDate: string,
+): Promise<ViewEventRow[]> {
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
+  const { rows } = await client.query<ViewEventRow>(
+    `SELECT v.at, v.entity_type, v.entity_id, v.route, v.label_snapshot
+       FROM ${schema}.usage_view_event v
+       JOIN ${schema}.usage_session s ON s.id = v.session_id AND s.user_id = v.user_id
+      WHERE v.user_id = $1
+        AND s.impersonator_id IS NULL
+        AND v.at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        AND v.at < ($3::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+      ORDER BY v.at DESC`,
+    [userId, fromDate, toExclusiveDate],
+  );
+  return rows;
+}
+
+export type ActionDetailType = "create" | "edit" | "stage_move" | "upload" | "note";
+
+export interface ActionDetailItem {
+  type: ActionDetailType;
+  label: string;
+  entityType: string | null;
+  at: string;
+}
+
+export interface ActionDetail {
+  breakdown: Record<ActionDetailType, number>;
+  items: ActionDetailItem[];
+  truncated: boolean;
+}
+
+const ACTION_DETAIL_LIMIT = 500;
+
+/** Classify an audit_log create/edit row (creates/edits only — stage/note/upload have their own
+ *  sources). Pure — exported for testing. */
+export function classifyAction(action: string, isStage: boolean): ActionDetailType {
+  if (isStage) return "stage_move";
+  return action === "insert" ? "create" : "edit";
+}
+
+// Detail actions mirror the AGGREGATE's action sources (raw-fetch.ts / USAGE_ACTION_SOURCES) so the
+// breakdown reconciles with the leaderboard's action count — sourcing each bucket from the SAME table,
+// crediting column, and timestamp the rollup uses:
+//  - creates/edits  -> audit_log, table NOT IN (activities, files), EXCLUDING stage updates; credited
+//                      by changed_by; impersonated writes excluded (impersonator_id IS NULL).
+//  - stage_move     -> deal_stage_history (one row per change; changed_by). Sourcing from audit would
+//                      double-count: a stage change writes BOTH a trigger row (changes.stage_id) and an
+//                      explicit logActivity row (changes.stageId). No impersonator column (caveat).
+//  - note           -> activities, credited by COALESCE(performed_by_user_id, responsible_user_id) and
+//                      dated by COALESCE(occurred_at, created_at) — NOT the audit row. Sourcing from
+//                      audit_log inserts would drop notes credited to a different user and misdate
+//                      backdated activities (occurred_at), diverging from the counted breakdown.
+//  - upload         -> files, credited by uploaded_by, dated by created_at — NOT the audit row.
+const IS_STAGE_SQL =
+  `(al.table_name = 'deals' AND al.changes IS NOT NULL AND (al.changes ? 'stage_id' OR al.changes ? 'stageId'))`;
+const AUDIT_DETAIL_WHERE = `al.changed_by = $1
+        AND al.impersonator_id IS NULL
+        AND al.table_name NOT IN ('activities', 'files')
+        AND NOT ${IS_STAGE_SQL}
+        AND al.action IN ('insert', 'update')
+        AND al.created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        AND al.created_at < ($3::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`;
+const STAGE_DETAIL_WHERE = `sh.changed_by = $1
+        AND sh.created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        AND sh.created_at < ($3::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`;
+// Notes: activities table, aggregate crediting/dating (COALESCE on user and timestamp).
+const NOTE_AT_SQL = `COALESCE(a.occurred_at, a.created_at)`;
+const NOTE_DETAIL_WHERE = `COALESCE(a.performed_by_user_id, a.responsible_user_id) = $1
+        AND ${NOTE_AT_SQL} >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        AND ${NOTE_AT_SQL} < ($3::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`;
+const UPLOAD_DETAIL_WHERE = `f.uploaded_by = $1
+        AND f.created_at >= ($2::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+        AND f.created_at < ($3::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')`;
+
+/**
+ * Itemized actions for a user over [fromDate, toExclusiveDate) (business-tz), newest first, plus a
+ * by-type breakdown. None of these sources are pruned, so this is always available regardless of
+ * period age (unlike views). Each bucket is sourced exactly as the aggregate sources it: creates/edits
+ * from audit_log, stage moves from deal_stage_history, notes from activities, uploads from files.
+ */
+export async function readActionDetail(
+  client: QueryClient,
+  schema: string,
+  userId: string,
+  fromDate: string,
+  toExclusiveDate: string,
+): Promise<ActionDetail> {
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema: ${schema}`);
+  const params = [userId, fromDate, toExclusiveDate];
+  const cnt = async (sql: string) => Number((await client.query<{ n: number }>(sql, params)).rows[0]?.n ?? 0);
+
+  // Breakdown over the FULL period (never truncated) so the chips reconcile with the leaderboard.
+  const auditCounts = (
+    await client.query<{ c_create: number; c_edit: number }>(
+      `SELECT
+          count(*) FILTER (WHERE al.action = 'insert')::int AS c_create,
+          count(*) FILTER (WHERE al.action = 'update')::int AS c_edit
+         FROM ${schema}.audit_log al
+        WHERE ${AUDIT_DETAIL_WHERE}`,
+      params,
+    )
+  ).rows[0];
+  const breakdown: Record<ActionDetailType, number> = {
+    create: Number(auditCounts?.c_create ?? 0),
+    edit: Number(auditCounts?.c_edit ?? 0),
+    stage_move: await cnt(`SELECT count(*)::int AS n FROM ${schema}.deal_stage_history sh WHERE ${STAGE_DETAIL_WHERE}`),
+    upload: await cnt(`SELECT count(*)::int AS n FROM ${schema}.files f WHERE ${UPLOAD_DETAIL_WHERE}`),
+    note: await cnt(`SELECT count(*)::int AS n FROM ${schema}.activities a WHERE ${NOTE_DETAIL_WHERE}`),
+  };
+
+  // Itemized display: one query per source, merged newest-first, capped. (The chips above stay
+  // full-period accurate even when the list is truncated.) Each source caps at LIMIT+1 so the merge
+  // can detect truncation without an over-large fetch.
+  const cap = ACTION_DETAIL_LIMIT + 1;
+  const auditRows = (
+    await client.query<{ action: string; entity_type: string | null; created_at: string; label: string | null }>(
+      `SELECT al.action, al.entity_type, al.created_at,
+              COALESCE(al.entity_name_snapshot, d.name, l.name, al.entity_type, al.table_name) AS label
+         FROM ${schema}.audit_log al
+         LEFT JOIN ${schema}.deals d ON al.table_name = 'deals' AND al.record_id = d.id
+         LEFT JOIN ${schema}.leads l ON al.table_name = 'leads' AND al.record_id = l.id
+        WHERE ${AUDIT_DETAIL_WHERE}
+        ORDER BY al.created_at DESC
+        LIMIT ${cap}`,
+      params,
+    )
+  ).rows;
+  const stageRows = (
+    await client.query<{ created_at: string; label: string | null }>(
+      `SELECT sh.created_at, d.name AS label
+         FROM ${schema}.deal_stage_history sh
+         LEFT JOIN ${schema}.deals d ON sh.deal_id = d.id
+        WHERE ${STAGE_DETAIL_WHERE}
+        ORDER BY sh.created_at DESC
+        LIMIT ${cap}`,
+      params,
+    )
+  ).rows;
+  const noteRows = (
+    await client.query<{ at: string; label: string | null; entity_type: string | null }>(
+      `SELECT ${NOTE_AT_SQL} AS at,
+              COALESCE(a.subject, d.name, l.name, a.type) AS label,
+              CASE WHEN a.deal_id IS NOT NULL THEN 'deal' WHEN a.lead_id IS NOT NULL THEN 'lead' ELSE NULL END AS entity_type
+         FROM ${schema}.activities a
+         LEFT JOIN ${schema}.deals d ON a.deal_id = d.id
+         LEFT JOIN ${schema}.leads l ON a.lead_id = l.id
+        WHERE ${NOTE_DETAIL_WHERE}
+        ORDER BY ${NOTE_AT_SQL} DESC
+        LIMIT ${cap}`,
+      params,
+    )
+  ).rows;
+  const uploadRows = (
+    await client.query<{ at: string; label: string | null; entity_type: string | null }>(
+      `SELECT f.created_at AS at,
+              COALESCE(f.display_name, f.original_filename) AS label,
+              CASE WHEN f.deal_id IS NOT NULL THEN 'deal' WHEN f.lead_id IS NOT NULL THEN 'lead' ELSE NULL END AS entity_type
+         FROM ${schema}.files f
+        WHERE ${UPLOAD_DETAIL_WHERE}
+        ORDER BY f.created_at DESC
+        LIMIT ${cap}`,
+      params,
+    )
+  ).rows;
+
+  const merged: ActionDetailItem[] = [
+    ...auditRows.map((r) => ({
+      type: classifyAction(r.action, false),
+      label: r.label ?? "Record",
+      entityType: r.entity_type,
+      at: r.created_at,
+    })),
+    ...stageRows.map((r) => ({
+      type: "stage_move" as ActionDetailType,
+      label: r.label ?? "Stage move",
+      entityType: "deal" as string | null,
+      at: r.created_at,
+    })),
+    ...noteRows.map((r) => ({
+      type: "note" as ActionDetailType,
+      label: r.label ?? "Activity",
+      entityType: r.entity_type,
+      at: r.at,
+    })),
+    ...uploadRows.map((r) => ({
+      type: "upload" as ActionDetailType,
+      label: r.label ?? "File",
+      entityType: r.entity_type,
+      at: r.at,
+    })),
+  ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const truncated = merged.length > ACTION_DETAIL_LIMIT;
+  const items = merged.slice(0, ACTION_DETAIL_LIMIT);
+  return { breakdown, items, truncated };
 }
