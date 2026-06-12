@@ -5,7 +5,9 @@ import { theme } from "../theme/theme";
 import { useAuth } from "../auth/AuthContext";
 import { transcribeAudio } from "../dictation/transcribe";
 
-type Status = "idle" | "recording" | "transcribing";
+// "starting" = permission prompt + audio-session/recorder setup, before the first
+// frame is recorded — counts as busy so a parent can't tear us down mid-start.
+type Status = "idle" | "starting" | "recording" | "transcribing";
 
 const MAX_SECONDS = 60;
 
@@ -49,16 +51,19 @@ export function VoiceRecorder({
 
   // Surface busy state to the parent; report idle on unmount as a backstop.
   useEffect(() => {
-    onBusyChange?.(status === "recording" || status === "transcribing");
+    onBusyChange?.(status !== "idle");
   }, [status, onBusyChange]);
   useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
 
   async function start() {
     setError(null);
+    // Mark busy up-front so the permission prompt + setup window counts as in-flight.
+    applyStatus("starting");
     try {
       const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
         setError("Microphone permission is required for voice notes.");
+        applyStatus("idle");
         return;
       }
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
@@ -107,27 +112,30 @@ export function VoiceRecorder({
 
   const recording = status === "recording";
   const transcribing = status === "transcribing";
+  const starting = status === "starting";
 
   return (
     <View style={{ gap: 6 }}>
       <Pressable
         onPress={recording ? stop : start}
-        disabled={transcribing}
+        disabled={transcribing || starting}
         accessibilityRole="button"
         accessibilityLabel={recording ? "Stop voice note" : "Record voice note"}
         style={({ pressed }) => [
           styles.button,
           recording && styles.buttonRecording,
-          transcribing && styles.buttonBusy,
+          (transcribing || starting) && styles.buttonBusy,
           pressed && { opacity: 0.85 },
         ]}
       >
         <Text style={styles.buttonText}>
           {transcribing
             ? "Transcribing…"
-            : recording
-              ? `Stop · ${String(seconds).padStart(2, "0")}s`
-              : "🎤 Dictate description"}
+            : starting
+              ? "Starting…"
+              : recording
+                ? `Stop · ${String(seconds).padStart(2, "0")}s`
+                : "🎤 Dictate description"}
         </Text>
       </Pressable>
       {error ? <Text style={styles.error}>{error}</Text> : null}
