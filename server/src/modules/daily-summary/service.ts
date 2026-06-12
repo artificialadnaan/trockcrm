@@ -287,13 +287,22 @@ export async function readAdvancedToday(client: QueryClient, schema: string, dat
   }));
 }
 
-/** Distinct browser-session reps per CT hour today — the page's hourly curve (honest: browser reps only). */
+/**
+ * Distinct browser-session reps per CT hour today — the page's hourly curve. Scoped to the SAME
+ * population as the rest of the summary so the chart reconciles with the headline/leaderboard: only
+ * active, non-test reps (mirroring resolveReps) and only non-impersonated sessions (mirroring the
+ * impersonator exclusion in computeUsageDaily). A director/admin or impersonated heartbeat must not
+ * inflate the "reps active" count.
+ */
 export async function readHourly(client: QueryClient, schema: string, date: string): Promise<HourCount[]> {
   const { rows } = await client.query<{ hour: number | string; reps: number | string }>(
     `SELECT EXTRACT(HOUR FROM (h.at AT TIME ZONE '${BUSINESS_TIMEZONE}'))::int AS hour,
             COUNT(DISTINCT h.user_id)::int AS reps
        FROM ${schema}.usage_heartbeat h
+       JOIN ${schema}.usage_session s ON s.id = h.session_id AND s.impersonator_id IS NULL
+       JOIN public.users u ON u.id = h.user_id
       WHERE (h.at AT TIME ZONE '${BUSINESS_TIMEZONE}')::date = $1::date
+        AND u.role = 'rep' AND u.is_active = true AND COALESCE(u.is_test_data, false) = false
       GROUP BY hour
       ORDER BY hour`,
     [date],

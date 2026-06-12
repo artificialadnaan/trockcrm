@@ -30,6 +30,8 @@ describe("resolveFrontendBaseUrl — always absolute, never a relative CTA", () 
     expect(resolveFrontendBaseUrl("https://trockcrm.com/")).toBe("https://trockcrm.com");
     expect(resolveFrontendBaseUrl("  https://staging.trockcrm.com//  ")).toBe("https://staging.trockcrm.com");
     expect(resolveFrontendBaseUrl("http://localhost:5173")).toBe("http://localhost:5173");
+    // canonicalize away any query/hash so appending the path can't malform the CTA
+    expect(resolveFrontendBaseUrl("https://trockcrm.com/?utm=x#top")).toBe("https://trockcrm.com");
   });
 });
 

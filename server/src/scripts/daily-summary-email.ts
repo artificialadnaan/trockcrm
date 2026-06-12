@@ -49,10 +49,13 @@ export function resolveFrontendBaseUrl(raw: string | undefined): string {
   const normalized = (raw ?? "").trim().replace(/\/+$/, "");
   if (!normalized) return fallback;
   // Must be an ABSOLUTE http(s) URL — a relative value ("/", "/app", "foo") would build a relative CTA
-  // that breaks in email clients, so anything non-absolute falls back to the live default.
+  // that breaks in email clients. Canonicalize to origin+path (dropping any ?query/#hash) so appending
+  // `/daily-summary/...` can't produce a malformed link; anything non-absolute falls back to the default.
   try {
     const parsed = new URL(normalized);
-    if (parsed.protocol === "http:" || parsed.protocol === "https:") return normalized;
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return (parsed.origin + parsed.pathname).replace(/\/+$/, "");
+    }
   } catch {
     /* not a valid absolute URL */
   }

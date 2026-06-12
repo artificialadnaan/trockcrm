@@ -1,7 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
-import { readWonToday, readAdvancedToday } from "../src/modules/daily-summary/service.js";
+import { readWonToday, readAdvancedToday, readHourly } from "../src/modules/daily-summary/service.js";
 
 // Real-types harness (the hand-rolled-schema lesson, bitten 3×): won_closed_date is a real DATE, the value
 // columns are real NUMERIC, the stage-slug filter uses a real text[] ANY(), and stage history is timestamptz
@@ -12,6 +12,9 @@ const client = () => ({ query: (sql: string, params?: unknown[]) => db.query(sql
 const DATE = "2026-06-12";
 const REP_A = "11111111-1111-1111-1111-111111111111";
 const REP_B = "11111111-1111-1111-1111-111111111112";
+const REP_C = "11111111-1111-1111-1111-111111111113"; // director — excluded from hourly
+const REP_D = "11111111-1111-1111-1111-111111111114"; // inactive rep — excluded from hourly
+const IMP = "11111111-1111-1111-1111-1111111111ff"; // impersonator
 const ST_WON = "22222222-2222-2222-2222-222222222221";
 const ST_OPP = "22222222-2222-2222-2222-222222222222";
 const ST_EST = "22222222-2222-2222-2222-222222222223";
@@ -23,8 +26,10 @@ beforeAll(async () => {
   db = new PGlite();
   await db.exec(`
     CREATE SCHEMA office_test;
-    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text);
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, role text, is_active boolean, is_test_data boolean);
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text NOT NULL, name text, is_terminal boolean NOT NULL DEFAULT false);
+    CREATE TABLE office_test.usage_session (id uuid PRIMARY KEY, user_id uuid, impersonator_id uuid);
+    CREATE TABLE office_test.usage_heartbeat (id bigint, session_id uuid, user_id uuid, at timestamptz);
     CREATE TABLE office_test.deals (
       id uuid PRIMARY KEY,
       name text,
@@ -47,9 +52,12 @@ beforeAll(async () => {
       is_backward_move boolean,
       created_at timestamptz NOT NULL
     );
-    INSERT INTO public.users (id, display_name) VALUES
-      ('${REP_A}', 'Kaleb Marshall'),
-      ('${REP_B}', 'Sidney Monroe');
+    INSERT INTO public.users (id, display_name, role, is_active, is_test_data) VALUES
+      ('${REP_A}', 'Kaleb Marshall', 'rep',      true,  false),
+      ('${REP_B}', 'Sidney Monroe',  'rep',      true,  false),
+      ('${REP_C}', 'Dana Director',  'director', true,  false),
+      ('${REP_D}', 'Ivan Inactive',  'rep',      false, false),
+      ('${IMP}',   'Admin Imp',      'admin',    true,  false);
     INSERT INTO public.pipeline_stage_config (id, slug, name, is_terminal) VALUES
       ('${ST_WON}', '${WON_SLUG}', 'Won', true),
       ('${ST_OPP}', 'opportunity', 'Opportunity', false),
@@ -92,6 +100,25 @@ beforeAll(async () => {
       ('${uuid(15)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-12 13:00:00-05'),
       ('${uuid(15)}', '${ST_EST}', '${ST_OPP}', '${REP_A}', true,  '2026-06-12 14:00:00-05'),
       ('${uuid(16)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-12 13:00:00-05');
+  `);
+
+  // ---- Hourly fixtures: only active non-test reps on NON-impersonated sessions should count ----
+  const S_A = "44444444-4444-4444-4444-000000000001"; // REP_A, real session
+  const S_BIMP = "44444444-4444-4444-4444-000000000002"; // REP_B, IMPERSONATED → excluded
+  const S_C = "44444444-4444-4444-4444-000000000003"; // REP_C director → excluded by role
+  const S_D = "44444444-4444-4444-4444-000000000004"; // REP_D inactive → excluded
+  await db.exec(`
+    INSERT INTO office_test.usage_session (id, user_id, impersonator_id) VALUES
+      ('${S_A}',    '${REP_A}', NULL),
+      ('${S_BIMP}', '${REP_B}', '${IMP}'),
+      ('${S_C}',    '${REP_C}', NULL),
+      ('${S_D}',    '${REP_D}', NULL);
+    INSERT INTO office_test.usage_heartbeat (id, session_id, user_id, at) VALUES
+      (1, '${S_A}',    '${REP_A}', '2026-06-12 13:10:00-05'),
+      (2, '${S_A}',    '${REP_A}', '2026-06-12 14:10:00-05'),
+      (3, '${S_BIMP}', '${REP_B}', '2026-06-12 13:20:00-05'),
+      (4, '${S_C}',    '${REP_C}', '2026-06-12 13:30:00-05'),
+      (5, '${S_D}',    '${REP_D}', '2026-06-12 13:40:00-05');
   `);
 });
 afterAll(async () => { await db?.close(); });
@@ -145,5 +172,14 @@ describe("readAdvancedToday — latest move per deal, terminal/backward-aware, m
     expect(names).not.toContain("Closed Deal");     // moved into Won (terminal)
     expect(names).not.toContain("Lost Deal");       // moved into Lost (terminal)
     expect(names).not.toContain("Yesterday Move");  // prior day
+  });
+});
+
+describe("readHourly — scoped to the same population as the headline/leaderboard", () => {
+  it("counts only active non-test reps on non-impersonated sessions (excludes imp/director/inactive)", async () => {
+    const hourly = await readHourly(client(), "office_test", DATE);
+    // REP_A (real session) counts at 13 and 14; REP_B (impersonated), REP_C (director), REP_D (inactive)
+    // are all excluded — so each hour shows exactly 1, never 4.
+    expect(hourly).toEqual([{ hour: 13, reps: 1 }, { hour: 14, reps: 1 }]);
   });
 });

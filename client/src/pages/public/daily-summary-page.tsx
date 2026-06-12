@@ -47,7 +47,10 @@ export function DailySummaryPage() {
     () => (data?.wonToday ?? []).reduce((s, d) => s + (Number.isFinite(d.value) ? d.value : 0), 0),
     [data]
   );
-  const maxHourReps = useMemo(() => (data?.hourly ?? []).reduce((mx, h) => Math.max(mx, h.reps), 0), [data]);
+  const maxHourReps = useMemo(
+    () => (data?.hourly ?? []).reduce((mx, h) => Math.max(mx, Number.isFinite(h?.reps) ? Number(h.reps) : 0), 0),
+    [data]
+  );
 
   if (loading) return <Centered>Loading…</Centered>;
   if (error || !data) return <Centered>{error ?? "Not found."}</Centered>;
