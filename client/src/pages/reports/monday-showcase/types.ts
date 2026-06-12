@@ -102,6 +102,8 @@ export interface EvidenceRecord {
   region: string | null;
   dealType: string | null;
   daysInStage: number | null;
+  /** the deal's stored win probability (0-100), shown as-is. null = unknown (NOT zero); always null for leads. */
+  winProbability: number | null;
 }
 
 export interface EvidenceTotal {

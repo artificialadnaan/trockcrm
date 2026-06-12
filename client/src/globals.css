@@ -87,3 +87,29 @@
     @apply font-sans;
   }
 }
+
+/* ScrollSyncX top rail — force an ALWAYS-VISIBLE thin horizontal scrollbar so wide tables advertise their
+   hidden right-edge columns. `-webkit-appearance: none` + an explicit height defeats macOS overlay
+   scrollbars (which otherwise stay invisible until mid-scroll). Used by the report tables' top scroll rail. */
+@layer utilities {
+  .scrollbar-top-rail {
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: rgb(148 163 184) rgb(241 245 249); /* slate-400 thumb / slate-100 track */
+  }
+  .scrollbar-top-rail::-webkit-scrollbar {
+    height: 10px;
+    -webkit-appearance: none;
+  }
+  .scrollbar-top-rail::-webkit-scrollbar-track {
+    background: rgb(241 245 249); /* slate-100 */
+    border-radius: 9999px;
+  }
+  .scrollbar-top-rail::-webkit-scrollbar-thumb {
+    background-color: rgb(148 163 184); /* slate-400 */
+    border-radius: 9999px;
+    border: 2px solid rgb(241 245 249);
+  }
+  .scrollbar-top-rail::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(100 116 139); /* slate-500 */
+  }
+}

@@ -47,7 +47,8 @@ beforeAll(async () => {
       assigned_rep_id uuid, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, won_closed_date date, expected_close_date date,
       dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric,
-      company_id uuid, region_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz
+      company_id uuid, region_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz,
+      win_probability integer
     );
     CREATE TABLE leads (
       id uuid PRIMARY KEY, name text NOT NULL, stage_id uuid NOT NULL, assigned_rep_id uuid,
@@ -69,9 +70,9 @@ beforeAll(async () => {
     -- won1: Acme, region from the COMPANY ('DFW'); Type from the CANONICAL project_type_config ('Commercial')
     -- even though the legacy project_type text is stale; 12 days in stage.
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, won_closed_date, awarded_amount,
-                       company_id, region_id, project_type, project_type_id, stage_entered_at) VALUES
+                       company_id, region_id, project_type, project_type_id, stage_entered_at, win_probability) VALUES
       ('${D.won1}','W-1','Won Acme','${ST.won}','${REP}','2026-05-26', 100000,
-       '${CO.acme}', NULL, 'Comm (stale)', '${PT.commercial}', now() - interval '12 days');
+       '${CO.acme}', NULL, 'Comm (stale)', '${PT.commercial}', now() - interval '12 days', 65);
     -- won2: Beta (no company region) but region_id -> region_config 'North Texas' (FALLBACK); Type falls back
     -- to the legacy text ('Residential') since project_type_id is null.
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, won_closed_date, awarded_amount,
@@ -108,12 +109,14 @@ describe("enriched drill-down columns populate and stay reconciled", () => {
     expect(acme.dealType).toBe("Commercial"); // canonical project_type_config name, NOT the stale "Comm (stale)" legacy text
     expect(acme.daysInStage).toBeGreaterThanOrEqual(11);
     expect(acme.daysInStage).toBeLessThanOrEqual(13);
+    expect(acme.winProbability).toBe(65); // the deal's real win_probability, surfaced as-is
 
     // region FALLBACK: Beta has no company region, so the deal's region_config name is used.
     const beta = ev.records.find((r) => r.dealNumber === "W-2")!;
     expect(beta.companyName).toBe("Beta Builders");
     expect(beta.region).toBe("North Texas");
     expect(beta.dealType).toBe("Residential"); // legacy fallback: no project_type_id, so the legacy text is used
+    expect(beta.winProbability).toBeNull(); // blank win_probability stays null (unknown, NOT zero)
   });
 
   it("lead evidence carries company/region(via company)/type/age, with no deal value", async () => {
@@ -125,5 +128,6 @@ describe("enriched drill-down columns populate and stay reconciled", () => {
     expect(lead.daysInStage).toBeGreaterThanOrEqual(4);
     expect(lead.daysInStage).toBeLessThanOrEqual(6);
     expect(lead.value).toBeNull();
+    expect(lead.winProbability).toBeNull(); // leads have no win probability
   });
 });

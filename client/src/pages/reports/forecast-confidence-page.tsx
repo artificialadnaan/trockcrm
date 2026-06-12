@@ -4,6 +4,7 @@ import { Link, useLocation } from "react-router-dom";
 import { useMondayShowcase } from "@/hooks/use-reports";
 import { PROJECTION_BAND_LABEL, type EvidenceRequest, type MondayShowcaseData } from "./monday-showcase/types";
 import { DrillProvider, DrillNumber, EvidenceDrawer, usd, int, BAND_BAR, Sparkline, DRILL_UNDERLINE } from "./evidence-kit";
+import { ScrollSyncX } from "./scroll-sync-x";
 import { DEFAULT_WEEK_MODE, type WeekMode } from "./week-mode";
 
 // A·1 Forecast Confidence Board -- the forward projection ladder made TRUSTWORTHY by the N/M honesty
@@ -93,7 +94,7 @@ function Board({ data }: { data: MondayShowcaseData }) {
       </div>
 
       {/* Per-rep contribution to the forecast */}
-      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <ScrollSyncX className="rounded-xl border border-slate-200 bg-white" bodyClassName="overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="border-b border-slate-100 bg-[#f7f8fb] text-[11px] font-black uppercase tracking-wide text-slate-500">
             <tr>
@@ -120,7 +121,7 @@ function Board({ data }: { data: MondayShowcaseData }) {
             ))}
           </tbody>
         </table>
-      </div>
+      </ScrollSyncX>
     </div>
   );
 }

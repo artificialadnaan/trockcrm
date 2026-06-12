@@ -9,3 +9,9 @@ export const int = (n: number | null | undefined): string => (n == null ? "—" 
 
 export const signed = (n: number | null | undefined): string =>
   n == null ? "—" : n > 0 ? `+${n.toLocaleString("en-US")}` : n.toLocaleString("en-US");
+
+// Win probability is sparsely filled (~1% of deals). A MISSING value means "unknown", NOT zero — so
+// null/undefined/NaN must render the em dash, never "NaN%" or a misleading "0%". A real stored 0 is a
+// value and renders "0%". The deal's win_probability is shown as-is (never computed or inferred).
+export const winPct = (n: number | null | undefined): string =>
+  n == null || Number.isNaN(n) ? "—" : `${n}%`;

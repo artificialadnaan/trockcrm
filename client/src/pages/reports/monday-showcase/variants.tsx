@@ -10,6 +10,7 @@ import {
 } from "./types";
 import { DrillNumber, DRILL_UNDERLINE } from "./drill";
 import { usd, int, signed, ACCENT, BAND_BAR, DeltaChip, Sparkline, type AccentKey } from "../evidence-kit";
+import { ScrollSyncX } from "../scroll-sync-x";
 
 // Every variant below renders a slice of the SAME payload -- so Won/Sent/Estimated/Projection figures
 // are identical across all of them by construction (locked server-side by the reconciliation test). Every
@@ -336,7 +337,8 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
     </th>
   );
   return (
-    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+    <div className="rounded-xl border border-slate-200 bg-white">
+      <ScrollSyncX bodyClassName="overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="border-b border-slate-100 bg-[#f7f8fb] text-[11px] font-black uppercase tracking-wide">
           <tr>
@@ -403,6 +405,7 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
           </tr>
         </tfoot>
       </table>
+      </ScrollSyncX>
       <p className="px-3 py-2 text-xs text-slate-400">Footer totals are the canonical office aggregates — the exact numbers each TOTAL drills into — so the rep rows above need not sum to them when there is unassigned activity. Click a column header to re-rank; click any number for its records.</p>
     </div>
   );
