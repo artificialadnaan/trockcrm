@@ -18,6 +18,7 @@ import {
 } from "../../../src/projects/field-projects";
 import { Badge, Button, Chip, EmptyState, LoadingState, SectionLabel } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
+import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { PhotoGrid } from "../../../src/components/PhotoGrid";
 import { PhotoViewerModal } from "../../../src/components/PhotoViewerModal";
 import { ReportBuilder } from "../../../src/components/ReportBuilder";
@@ -106,11 +107,7 @@ export default function ProjectDetailScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
-        <Pressable onPress={() => router.back()} hitSlop={10} accessibilityLabel="Back">
-          <Text style={styles.back}>‹ Back</Text>
-        </Pressable>
-      </View>
+      <ScreenHeader onBack={() => router.back()} title={toStr(params.name) || "Project"} />
 
       <ScrollView
         contentContainerStyle={styles.body}
@@ -125,11 +122,9 @@ export default function ProjectDetailScreen() {
           />
         }
       >
-        <View style={{ gap: 4 }}>
-          <View style={styles.titleRow}>
-            <Text style={styles.title}>{toStr(params.name) || "Project"}</Text>
-            {params.stage ? <Badge label={toStr(params.stage)} /> : null}
-          </View>
+        {/* Name lives in the persistent header band now; the body leads with stage + address + meta. */}
+        <View style={{ gap: theme.space.xs }}>
+          {params.stage ? <Badge label={toStr(params.stage)} /> : null}
           {params.propertyAddress ? <Text style={styles.address}>{toStr(params.propertyAddress)}</Text> : null}
           <Text style={styles.meta}>
             #{toStr(params.dealNumber)} · {allPhotos.length} photo{allPhotos.length === 1 ? "" : "s"}
@@ -294,17 +289,7 @@ export default function ProjectDetailScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  header: {
-    paddingHorizontal: theme.space.lg,
-    paddingVertical: theme.space.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-    backgroundColor: theme.color.surfaceCard,
-  },
-  back: { fontFamily: theme.font.semibold, fontSize: 16, color: theme.color.brandRed },
   body: { padding: theme.space.lg, gap: theme.space.lg, paddingBottom: theme.space.xxl },
-  titleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.sm },
-  title: { flex: 1, fontFamily: theme.font.bold, fontSize: 22, color: theme.color.textPrimary },
   address: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textMuted },
   meta: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   actions: { flexDirection: "row", gap: theme.space.md },

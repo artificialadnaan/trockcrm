@@ -9,7 +9,7 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { isProjectOffOffice, relativeDate, type FieldProject } from "../../../src/projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
-import { BrandLogo } from "../../../src/components/BrandLogo";
+import { ScreenHeader } from "../../../src/components/ScreenHeader";
 
 export default function ProjectsScreen() {
   const router = useRouter();
@@ -60,9 +60,7 @@ export default function ProjectsScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
-        <BrandLogo size={36} />
-      </View>
+      <ScreenHeader />
 
       <FlatList
         data={projects}
@@ -179,13 +177,6 @@ function ProjectRow({
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  header: {
-    paddingHorizontal: theme.space.lg,
-    paddingVertical: theme.space.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-    backgroundColor: theme.color.surfaceCard,
-  },
   list: { padding: theme.space.lg, gap: theme.space.sm },
   sectionTitle: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textMuted, textTransform: "uppercase", letterSpacing: 0.4 },
   row: {

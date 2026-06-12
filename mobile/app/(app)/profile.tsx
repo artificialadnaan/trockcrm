@@ -4,7 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../src/auth/AuthContext";
 import { theme } from "../../src/theme/theme";
 import { Badge, Button } from "../../src/components/ui";
-import { BrandLogo } from "../../src/components/BrandLogo";
+import { ScreenHeader } from "../../src/components/ScreenHeader";
 
 const ROLE_LABEL: Record<string, string> = {
   admin: "Admin",
@@ -20,11 +20,8 @@ export default function ProfileScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
+      <ScreenHeader />
       <ScrollView contentContainerStyle={styles.body}>
-        <View style={styles.logo}>
-          <BrandLogo size={48} />
-        </View>
-
         <View style={styles.card}>
           <Text style={styles.greeting}>Hi{firstName ? `, ${firstName}` : ""} 👋</Text>
           {user?.email ? <Text style={styles.email}>{user.email}</Text> : null}
@@ -45,7 +42,6 @@ export default function ProfileScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
   body: { padding: theme.space.lg, gap: theme.space.lg, flexGrow: 1 },
-  logo: { alignItems: "center", marginTop: theme.space.md },
   card: {
     backgroundColor: theme.color.surfaceCard,
     borderRadius: theme.radius.lg,

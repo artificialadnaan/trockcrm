@@ -17,6 +17,7 @@ import type { CapturedShot } from "../../src/capture/CameraCapture";
 import { Badge, Button, EmptyState, TextInput } from "../../src/components/ui";
 import { Banner } from "../../src/components/Banner";
 import { CategoryPicker } from "../../src/components/CategoryPicker";
+import { ScreenHeader } from "../../src/components/ScreenHeader";
 import { PhotoTagInput } from "../../src/components/PhotoTagInput";
 import { VoiceRecorder } from "../../src/components/VoiceRecorder";
 import { TargetPicker } from "../../src/components/TargetPicker";
@@ -316,9 +317,8 @@ export default function CaptureScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
+      <ScreenHeader />
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-        <Text style={styles.title}>Capture</Text>
-
         {/* Target */}
         <View style={styles.targetCard}>
           <View style={{ flex: 1 }}>
@@ -465,7 +465,6 @@ export default function CaptureScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
-  title: { fontFamily: theme.font.bold, fontSize: 22, color: theme.color.textPrimary },
   targetCard: {
     flexDirection: "row",
     alignItems: "center",
