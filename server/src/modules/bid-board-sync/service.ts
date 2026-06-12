@@ -14,6 +14,7 @@ import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { BID_BOARD_SYNC } from "../audit/system-processes.js";
 import { canonicalizeProjectNumber, canonicalProjectNumberSql } from "./project-number.js";
 import { resolveEstimatorUserId, isEstimatorMapConfigured } from "./estimator-map.js";
+import { awardedAmountSeedOnWin } from "../deals/awarded-amount-seed.js";
 
 type RawBidBoardRow = Record<string, unknown>;
 
@@ -109,6 +110,7 @@ interface DealMatch {
   bid_board_stage_status: string | null;
   bid_board_last_updated_at: string | null;
   bid_estimate: string | null;
+  awarded_amount: string | null;
   // Won-period reporting basis (migration 0141): the bid-board mirror keeps won_closed_date in
   // lockstep with Won status. contract_signed_* are the accounting override fed into the canonical
   // resolveWonClosedDateWriteThrough — same convention as changeDealStage.
@@ -411,6 +413,7 @@ function dealMatchSelectSql(schemaName: string): string {
            d.bid_board_stage_status,
            d.bid_board_last_updated_at,
            d.bid_estimate,
+           d.awarded_amount,
            d.won_closed_date,
            d.contract_signed_date,
            d.contract_signed_at,
@@ -825,6 +828,14 @@ export async function writeStageIfSafe(
       })
     : null;
 
+  // Seed awarded_amount from the bid estimate on a fresh Win, ONLY when awarded is currently blank
+  // (mirrors changeDealStage / the manual path). The helper is the single source of the "blank +
+  // positive bid" rule; the SQL COALESCE below is the only-if-empty guard at the DB layer so a
+  // present (e.g. director-confirmed) value can NEVER be overwritten, even under a race.
+  const awardedSeed = targetIsWon
+    ? awardedAmountSeedOnWin(deal.awarded_amount, deal.bid_estimate)
+    : null;
+
   const stageFamily = stageFamilyForSlug(targetSlug);
   const status = row.bidBoardStatus ?? targetSlug;
   const stageChangedAt = new Date();
@@ -850,6 +861,9 @@ export async function writeStageIfSafe(
             bid_board_stage_entered_at = NOW(),
             read_only_synced_at = NOW(),
             won_closed_date = $9::date,
+            -- Only-if-empty awarded_amount seed: COALESCE can fill a NULL but never overwrite a
+            -- present value. $12 is NULL when not Won / not eligible, making this a safe no-op.
+            awarded_amount = COALESCE(awarded_amount, $12::numeric),
             actual_close_date = CASE WHEN $6::text = 'won' THEN COALESCE(actual_close_date, CURRENT_DATE) ELSE NULL END,
             lost_at = CASE WHEN $6::text = 'lost' THEN COALESCE(lost_at, NOW()) ELSE NULL END,
             bid_board_loss_outcome = CASE WHEN $6::text = 'lost' THEN COALESCE(bid_board_loss_outcome, $8::text) ELSE NULL END,
@@ -874,6 +888,7 @@ export async function writeStageIfSafe(
       nextWonClosedDate,
       deal.id,
       deal.stage_id,
+      awardedSeed,
     ]
   );
 

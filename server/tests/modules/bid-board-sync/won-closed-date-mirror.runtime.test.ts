@@ -60,6 +60,7 @@ beforeAll(async () => {
       actual_close_date date, lost_at timestamptz, bid_board_loss_outcome text,
       lost_reason_id uuid, lost_notes text, lost_competitor text,
       won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
+      awarded_amount numeric, bid_estimate numeric,
       updated_at timestamptz DEFAULT now()
     );
     CREATE TABLE office_test.deal_stage_history (
@@ -103,7 +104,7 @@ function buildDeal(overrides: Partial<DealArg>): DealArg {
     bid_board_profit_margin_pct: null, bid_board_total_sales: null, bid_board_created_at: null,
     bid_board_due_date: null, bid_board_customer_name: null, bid_board_customer_contact_raw: null,
     bid_board_stage_slug: null, bid_board_stage_family: null, bid_board_stage_status: null,
-    bid_board_last_updated_at: null, bid_estimate: null,
+    bid_board_last_updated_at: null, bid_estimate: null, awarded_amount: null,
     won_closed_date: null, contract_signed_date: null, contract_signed_at: null,
     ...overrides,
   } as DealArg;
@@ -113,17 +114,20 @@ async function seedDeal(opts: {
   id: string; stageId: string; stageSlug: string; stageOrder: number; stageTerminal: boolean;
   wonClosedDate?: string | null; contractSignedDate?: string | null; contractSignedAt?: string | null;
   stageEnteredAt?: string; bidBoardStatus: string; actualCloseDate?: string | null;
+  awardedAmount?: string | null; bidEstimate?: string | null;
 }): Promise<DealArg> {
   const stageEnteredAt = opts.stageEnteredAt ?? "2026-05-01T12:00:00Z";
   const pn = `DFW-1-${opts.id.slice(-4)}-aa`;
   await client.query(
     `INSERT INTO office_test.deals
        (id, name, deal_number, project_number, stage_id, stage_entered_at, is_bid_board_owned,
-        bid_board_status, won_closed_date, contract_signed_date, contract_signed_at, actual_close_date)
-     VALUES ($1,$2,$3,$3,$4,$5::timestamptz,true,$6,$7::date,$8::date,$9::timestamptz,$10::date)`,
+        bid_board_status, won_closed_date, contract_signed_date, contract_signed_at, actual_close_date,
+        awarded_amount, bid_estimate)
+     VALUES ($1,$2,$3,$3,$4,$5::timestamptz,true,$6,$7::date,$8::date,$9::timestamptz,$10::date,
+             $11::numeric,$12::numeric)`,
     [opts.id, `Deal ${opts.id.slice(-4)}`, pn, opts.stageId, stageEnteredAt, opts.bidBoardStatus,
       opts.wonClosedDate ?? null, opts.contractSignedDate ?? null, opts.contractSignedAt ?? null,
-      opts.actualCloseDate ?? null]
+      opts.actualCloseDate ?? null, opts.awardedAmount ?? null, opts.bidEstimate ?? null]
   );
   return buildDeal({
     id: opts.id, stage_id: opts.stageId, stage_slug: opts.stageSlug,
@@ -131,6 +135,7 @@ async function seedDeal(opts: {
     stage_entered_at: stageEnteredAt, won_closed_date: opts.wonClosedDate ?? null,
     contract_signed_date: opts.contractSignedDate ?? null, contract_signed_at: opts.contractSignedAt ?? null,
     bid_board_status: opts.bidBoardStatus,
+    awarded_amount: opts.awardedAmount ?? null, bid_estimate: opts.bidEstimate ?? null,
   });
 }
 
@@ -149,7 +154,7 @@ const row = (bidBoardStatus: string): RowArg =>
 async function dealRow(id: string) {
   const { rows } = await client.query(
     `SELECT stage_id, won_closed_date::text AS won_closed_date, actual_close_date::text AS actual_close_date,
-            lost_at FROM office_test.deals WHERE id = $1`,
+            lost_at, awarded_amount::text AS awarded_amount FROM office_test.deals WHERE id = $1`,
     [id]
   );
   return rows[0];
@@ -297,5 +302,78 @@ describe("Bid Board sync — authoritative stage + won_closed_date mirror (runti
     expect(rows[0].lost_reason_id).toBeNull();
     expect(rows[0].lost_notes).toBeNull();
     expect(rows[0].lost_competitor).toBeNull();
+  });
+});
+
+describe("Bid Board sync — awarded_amount seed on Won (runtime, only-if-empty)", () => {
+  it("seeds awarded_amount from bid_estimate when a deal becomes Won with a NULL awarded_amount", async () => {
+    const id = U("a01");
+    const deal = await seedDeal({
+      id, stageId: ST_ESTIMATING, stageSlug: "estimating", stageOrder: 2, stageTerminal: false,
+      bidBoardStatus: "Won", awardedAmount: null, bidEstimate: "12345.67",
+    });
+
+    await writeStageIfSafe(client as any, SCHEMA, deal, stage(ST_WON, "won", 7, true), row("Won"), USER);
+
+    const d = await dealRow(id);
+    expect(d.stage_id).toBe(ST_WON);
+    expect(Number(d.awarded_amount)).toBe(12345.67);
+  });
+
+  it("NEVER overwrites a present awarded_amount on a Won transition (COALESCE no-op, even if bid differs)", async () => {
+    const id = U("a02");
+    const deal = await seedDeal({
+      id, stageId: ST_ESTIMATING, stageSlug: "estimating", stageOrder: 2, stageTerminal: false,
+      bidBoardStatus: "Won", awardedAmount: "99999", bidEstimate: "12345.67",
+    });
+
+    await writeStageIfSafe(client as any, SCHEMA, deal, stage(ST_WON, "won", 7, true), row("Won"), USER);
+
+    const d = await dealRow(id);
+    expect(d.stage_id).toBe(ST_WON);
+    expect(Number(d.awarded_amount)).toBe(99999);
+  });
+
+  it("leaves awarded_amount NULL on a Won transition when bid_estimate is NULL", async () => {
+    const id = U("a03");
+    const deal = await seedDeal({
+      id, stageId: ST_ESTIMATING, stageSlug: "estimating", stageOrder: 2, stageTerminal: false,
+      bidBoardStatus: "Won", awardedAmount: null, bidEstimate: null,
+    });
+
+    await writeStageIfSafe(client as any, SCHEMA, deal, stage(ST_WON, "won", 7, true), row("Won"), USER);
+
+    const d = await dealRow(id);
+    expect(d.stage_id).toBe(ST_WON);
+    expect(d.awarded_amount).toBeNull();
+  });
+
+  it("leaves awarded_amount NULL on a Won transition when bid_estimate is 0 (mirrors the <= 0 skip)", async () => {
+    const id = U("a04");
+    const deal = await seedDeal({
+      id, stageId: ST_ESTIMATING, stageSlug: "estimating", stageOrder: 2, stageTerminal: false,
+      bidBoardStatus: "Won", awardedAmount: null, bidEstimate: "0",
+    });
+
+    await writeStageIfSafe(client as any, SCHEMA, deal, stage(ST_WON, "won", 7, true), row("Won"), USER);
+
+    const d = await dealRow(id);
+    expect(d.stage_id).toBe(ST_WON);
+    expect(d.awarded_amount).toBeNull();
+  });
+
+  it("does NOT seed awarded_amount on a NON-Won stage write even with a positive bid_estimate", async () => {
+    const id = U("a05");
+    const deal = await seedDeal({
+      id, stageId: ST_WON, stageSlug: "won", stageOrder: 7, stageTerminal: true,
+      wonClosedDate: "2026-05-01", actualCloseDate: "2026-05-01",
+      bidBoardStatus: "Contract", awardedAmount: null, bidEstimate: "12345.67",
+    });
+
+    await writeStageIfSafe(client as any, SCHEMA, deal, stage(ST_CONTRACT, "contract", 6, false), row("Contract"), USER);
+
+    const d = await dealRow(id);
+    expect(d.stage_id).toBe(ST_CONTRACT);
+    expect(d.awarded_amount).toBeNull();
   });
 });

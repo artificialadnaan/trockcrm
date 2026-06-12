@@ -41,7 +41,7 @@ beforeAll(async () => {
       bid_board_total_sales numeric, bid_board_created_at timestamptz, bid_board_due_date date,
       bid_board_customer_name text, bid_board_customer_contact_raw text, bid_board_stage_slug text,
       bid_board_stage_family text, bid_board_stage_status text, bid_board_last_updated_at timestamptz,
-      bid_estimate numeric, won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
+      bid_estimate numeric, awarded_amount numeric, won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
       procore_bid_id bigint, is_active boolean NOT NULL DEFAULT true,
       is_change_order boolean NOT NULL DEFAULT false, parent_deal_id uuid
     );
