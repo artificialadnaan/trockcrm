@@ -33,7 +33,9 @@
   },
   "submit": {
     "production": {
-      "ios": {}
+      "ios": {
+        "appleTeamId": "WKX5A3KC28"
+      }
     }
   }
 }
