@@ -355,7 +355,9 @@ export default function CaptureScreen() {
           <Button
             title="Import"
             variant="ghost"
-            icon={<Ionicons name="images-outline" size={18} color={theme.color.textPrimary} />}
+            icon={
+              <Ionicons name="images-outline" size={18} color={uploading ? theme.color.textMuted : theme.color.textPrimary} />
+            }
             onPress={importPhotos}
             disabled={uploading}
             accessibilityLabel="Import photos"

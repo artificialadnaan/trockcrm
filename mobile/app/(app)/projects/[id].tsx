@@ -256,9 +256,11 @@ export default function ProjectDetailScreen() {
             <LoadingState label="Loading reports…" />
           ) : (reportsQuery.data?.reports ?? []).length === 0 ? (
             <Text style={styles.meta}>
-              {allPhotos.length === 0
-                ? "No reports yet. Build one once you've added photos."
-                : "No reports yet. Build one from the photos above."}
+              {offOffice
+                ? "No reports yet."
+                : allPhotos.length === 0
+                  ? "No reports yet. Build one once you've added photos."
+                  : "No reports yet. Build one from the photos above."}
             </Text>
           ) : (
             (reportsQuery.data?.reports ?? []).map((report) => (

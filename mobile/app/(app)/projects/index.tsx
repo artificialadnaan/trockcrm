@@ -179,7 +179,7 @@ function ProjectRow({
           hitSlop={12}
           style={styles.starButton}
           accessibilityRole="button"
-          accessibilityLabel={project.starred ? "Unstar" : "Star"}
+          accessibilityLabel={project.starred ? `Unstar ${project.name}` : `Star ${project.name}`}
         >
           <Text style={[styles.star, project.starred && { color: theme.color.brandRed }]}>
             {project.starred ? "★" : "☆"}
