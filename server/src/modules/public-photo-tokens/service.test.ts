@@ -478,7 +478,9 @@ describe("public photo token service", () => {
 
     const result = await getPublicPhotoDownload("raw-token", "photo-1", { ipAddress: "127.0.0.1", userAgent: "vitest", assetBaseUrl: ASSET_BASE });
 
-    expect(result).toEqual({ url: `${ASSET_BASE}/raw-token/photos/photo-1/image?download=1`, filename: "Roof.jpg" });
+    // Filename is genericized — the internal display_name ("Roof") is never exposed via Content-Disposition.
+    expect(result).toEqual({ url: `${ASSET_BASE}/raw-token/photos/photo-1/image?download=1`, filename: "photo.jpg" });
+    expect(result.filename).not.toContain("Roof");
     expect(result.url).not.toContain("TR-1");
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
     expect(logPhotoEventMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -533,7 +535,9 @@ describe("public photo token service", () => {
     expect(asset.kind).toBe("jpeg-stream");
     if (asset.kind === "jpeg-stream") {
       expect(asset.contentType).toBe("image/jpeg");
-      expect(asset.filename).toBe("Roof.jpg");
+      // Genericized filename — the internal display_name ("Roof") never reaches Content-Disposition.
+      expect(asset.filename).toBe("photo.jpg");
+      expect(asset.filename).not.toContain("Roof");
       expect(asset.stream).toBe(fakeStream);
     }
     expect(getObjectStreamMock).toHaveBeenCalledWith("office_dallas/deals/TR-1/photos/roof.jpg");

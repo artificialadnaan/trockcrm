@@ -326,6 +326,14 @@ export async function getPublicPhotoViewer(
   });
 }
 
+// The photo's internal display_name can carry the deal number or job notes, so the public
+// surface never uses it for the download / Content-Disposition filename. Keep only the
+// (non-sensitive) extension so the browser saves a usable file; default to .jpg because the
+// proxied public image is always a stripped JPEG.
+function publicDownloadFilename(fileExtension: string | null | undefined): string {
+  return `photo${normalizeExplicitExtension(fileExtension) ?? ".jpg"}`;
+}
+
 export async function getPublicPhotoDownload(rawToken: string, photoId: string, context: {
   ipAddress?: string | null;
   userAgent?: string | null;
@@ -334,7 +342,7 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
   const token = await verifyAndConsumeToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const photoResult = await tenantDb.execute(sql`
-      SELECT id, deal_id, category, display_name, file_extension, external_url, r2_key, mime_type
+      SELECT id, deal_id, category, file_extension, external_url, r2_key, mime_type
       FROM files
       WHERE id = ${photoId}::uuid
         AND deal_id = ${token.dealId}::uuid
@@ -345,7 +353,7 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
     const photo = ((photoResult as any).rows ?? photoResult)[0];
     if (!photo) throw new AppError(404, "Photo not found");
 
-    const filename = `${photo.display_name}${photo.file_extension ?? ""}`;
+    const filename = publicDownloadFilename(photo.file_extension);
     // Mirror the image proxy exactly so the download path can't expose anything the viewer hides:
     //   - R2 JPEG        -> proxy ?download=1 (key hidden, EXIF stripped)
     //   - R2 non-JPEG    -> 404 (un-strippable original is never served publicly — do NOT fall back
@@ -395,7 +403,7 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
   const token = await resolvePublicPhotoToken(rawToken);
   const photo = await withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const photoResult = await tenantDb.execute(sql`
-      SELECT id, r2_key, mime_type, display_name, file_extension, external_url
+      SELECT id, r2_key, mime_type, file_extension, external_url
       FROM files
       WHERE id = ${photoId}::uuid
         AND deal_id = ${token.dealId}::uuid
@@ -416,7 +424,7 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
       kind: "jpeg-stream",
       stream: object.stream,
       contentType: "image/jpeg",
-      filename: `${photo.display_name ?? "photo"}${photo.file_extension ?? ""}`,
+      filename: publicDownloadFilename(photo.file_extension),
     };
   }
   if (photo.external_url) return { kind: "external", url: photo.external_url };
