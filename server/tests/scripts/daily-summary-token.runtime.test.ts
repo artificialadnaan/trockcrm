@@ -10,11 +10,13 @@ import {
 let db: PGlite;
 const client = () => ({ query: (sql: string, params?: unknown[]) => db.query(sql, params as unknown[]) }) as never;
 
+const ZERO = { created: 0, edits: 0, stageMoves: 0, uploads: 0, emails: 0, notes: 0, reports: 0 };
 const payload = (date: string): DailySummaryPayload => ({
   date, office: "dallas", asOfLabel: "as of 5:00 PM CT",
-  headline: { activeReps: 1, totalReps: 2, totalActions: 9, biggestMover: { name: "Kaleb", actions: 9 } },
-  leaderboard: [{ rank: 1, name: "Kaleb", actions: 9 }],
-  majorMoves: [], teamHealth: { active: 1, quiet: 1, quietNames: ["Zoe"] },
+  headline: { activeReps: 1, totalReps: 2, totalActions: 9, totalActiveMinutes: 12, totalSessions: 1, biggestMover: { name: "Kaleb", actions: 9 } },
+  wonToday: [], advancedToday: [],
+  leaderboard: [{ rank: 1, name: "Kaleb", actions: 9, activeMinutes: 12, breakdown: { ...ZERO, created: 9 } }],
+  hourly: [], teamHealth: { active: 1, quiet: 1, quietNames: ["Zoe"] },
 });
 const future = new Date(Date.now() + 30 * 864e5);
 const past = new Date(Date.now() - 864e5);
