@@ -1,5 +1,5 @@
 import React, { Suspense, useEffect, useRef, useState } from "react";
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -23,6 +23,7 @@ import { PhotoTagInput } from "../../src/components/PhotoTagInput";
 import { VoiceRecorder } from "../../src/components/VoiceRecorder";
 import { TargetPicker } from "../../src/components/TargetPicker";
 import { ReviewTray } from "../../src/components/ReviewTray";
+import { KeyboardDoneAccessory, KEYBOARD_ACCESSORY_ID } from "../../src/components/KeyboardDoneAccessory";
 
 // Lazy so the Import path never loads expo-camera's native module (live camera is
 // a physical-device-only surface; the iOS Simulator has no camera).
@@ -80,7 +81,9 @@ export default function CaptureScreen() {
   const [category, setCategory] = useState<string | null>(null);
   const [tags, setTags] = useState<string[]>([]);
   const [status, setStatus] = useState<UploadStatus>("idle");
-  const [notice, setNotice] = useState<{ tone: "error" | "success"; text: string } | null>(null);
+  const [notice, setNotice] = useState<
+    { tone: "error" | "success"; text: string; viewTarget?: SelectedTarget } | null
+  >(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   const keyCounter = useRef(0);
   // Live GPS fetched once per camera session so burst shots aren't each blocked
@@ -106,6 +109,14 @@ export default function CaptureScreen() {
     queryFn: () => getTranscriptionConfig(fetcher),
     staleTime: 5 * 60_000,
   });
+
+  // Auto-dismiss a success banner (~4s) so a saved-and-done state doesn't keep
+  // sitting next to the "ready for the next capture" empty state and read as pending.
+  useEffect(() => {
+    if (notice?.tone !== "success") return;
+    const t = setTimeout(() => setNotice(null), 4000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   function nextKey() {
     keyCounter.current += 1;
@@ -274,7 +285,14 @@ export default function CaptureScreen() {
       setTags([]);
       setCategory(null);
       setStatus("idle");
-      setNotice({ tone: "success", text: `${succeeded} photo${succeeded === 1 ? "" : "s"} uploaded.` });
+      // Name the destination so the green banner is unambiguous (vs. the kept target +
+      // empty state); a deal target also gets a "View" action to the project gallery.
+      const destName = target ? target.name : "Pending";
+      setNotice({
+        tone: "success",
+        text: `${succeeded} photo${succeeded === 1 ? "" : "s"} saved to ${destName}.`,
+        viewTarget: target?.type === "deal" ? target : undefined,
+      });
       void pendingQuery.refetch();
       if (target?.type === "deal") {
         invalidateDealPhotos(target.id);
@@ -319,7 +337,12 @@ export default function CaptureScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScreenHeader />
-      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={styles.body}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      >
         {/* Target */}
         <View style={styles.targetCard}>
           <View style={{ flex: 1 }}>
@@ -340,7 +363,21 @@ export default function CaptureScreen() {
           </View>
         </View>
 
-        {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
+        {notice ? (
+          <Banner
+            message={notice.text}
+            tone={notice.tone}
+            action={
+              notice.viewTarget
+                ? {
+                    label: "View",
+                    onPress: () =>
+                      router.push({ pathname: "/(app)/projects/[id]", params: detailParamsFor(notice.viewTarget!) }),
+                  }
+                : undefined
+            }
+          />
+        ) : null}
 
         {/* Capture actions */}
         <View style={styles.actions}>
@@ -369,7 +406,13 @@ export default function CaptureScreen() {
           <View style={{ gap: theme.space.md }}>
             {/* Review tray (per-photo captions) */}
             <Text style={styles.fieldLabel}>Review ({photos.length})</Text>
-            <ReviewTray photos={photos} onSetCaption={setPhotoCaption} onRemove={removePhoto} disabled={uploading} />
+            <ReviewTray
+              photos={photos}
+              onSetCaption={setPhotoCaption}
+              onRemove={removePhoto}
+              disabled={uploading}
+              voiceEnabled={transcribeConfig.data?.configured ?? false}
+            />
 
             {/* Batch metadata — locked during upload (values are snapshotted per request) */}
             <View
@@ -384,6 +427,7 @@ export default function CaptureScreen() {
                   onChangeText={setBatchCaption}
                   placeholder="Caption for the whole batch"
                   multiline
+                  inputAccessoryViewID={KEYBOARD_ACCESSORY_ID}
                   style={{ minHeight: 60, textAlignVertical: "top", paddingTop: 10 }}
                 />
                 <View style={styles.batchRow}>
@@ -418,8 +462,12 @@ export default function CaptureScreen() {
         ) : (
           <View style={styles.emptyWrap}>
             <EmptyState
-              title="No photos yet"
-              subtitle="Open the camera to burst-capture, or import from your library."
+              title={target ? "Ready for the next capture" : "No photos yet"}
+              subtitle={
+                target
+                  ? `New photos will be saved to ${target.name}.`
+                  : "Open the camera to burst-capture, or import from your library."
+              }
             />
           </View>
         )}
@@ -450,6 +498,9 @@ export default function CaptureScreen() {
           </View>
         ) : null}
       </ScrollView>
+
+      {/* Keyboard "Done" toolbar for the (multiline) batch caption field. */}
+      <KeyboardDoneAccessory />
 
       {/* Burst camera (lazy, full-screen) */}
       {cameraOpen ? (
