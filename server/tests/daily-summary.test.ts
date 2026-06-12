@@ -19,15 +19,17 @@ describe("shouldSendNow — 5pm CT, Mon–Sat, DST-safe", () => {
 });
 
 describe("resolveFrontendBaseUrl — always absolute, never a relative CTA", () => {
-  it("uses the live default when unset/empty/whitespace/slash-only", () => {
-    for (const v of [undefined, "", "   ", "/", "//", " / "]) {
+  it("uses the live default when unset/empty/whitespace/slash-only or any non-absolute value", () => {
+    // slash-only + relative + bare strings are NOT absolute → would build a broken relative CTA
+    for (const v of [undefined, "", "   ", "/", "//", " / ", "/app", "foo", "daily-summary", "ftp://x.com"]) {
       expect(resolveFrontendBaseUrl(v)).toBe("https://trockcrm.com");
     }
   });
-  it("honors a set FRONTEND_URL and strips trailing slashes (no '//daily-summary')", () => {
+  it("honors an absolute http(s) FRONTEND_URL and strips trailing slashes (no '//daily-summary')", () => {
     expect(resolveFrontendBaseUrl("https://trockcrm.com")).toBe("https://trockcrm.com");
     expect(resolveFrontendBaseUrl("https://trockcrm.com/")).toBe("https://trockcrm.com");
     expect(resolveFrontendBaseUrl("  https://staging.trockcrm.com//  ")).toBe("https://staging.trockcrm.com");
+    expect(resolveFrontendBaseUrl("http://localhost:5173")).toBe("http://localhost:5173");
   });
 });
 
@@ -129,6 +131,7 @@ describe("renderDailySummaryEmail", () => {
     expect(html).toContain("The Hayward");
     expect(html).toContain("Opportunity");
     expect(html).toContain("Estimating");
+    expect(html).toContain("Adnaan"); // the mover is named on the row
   });
 
   it("leaderboard shows the breakdown (the value), and enforces minutes/'—' (never 0m)", () => {

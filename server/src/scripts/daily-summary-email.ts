@@ -45,8 +45,18 @@ function recipients(): string[] {
  * default) is a dead NXDOMAIN, so the live frontend is the durable fallback.
  */
 export function resolveFrontendBaseUrl(raw: string | undefined): string {
+  const fallback = "https://trockcrm.com";
   const normalized = (raw ?? "").trim().replace(/\/+$/, "");
-  return normalized || "https://trockcrm.com";
+  if (!normalized) return fallback;
+  // Must be an ABSOLUTE http(s) URL — a relative value ("/", "/app", "foo") would build a relative CTA
+  // that breaks in email clients, so anything non-absolute falls back to the live default.
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") return normalized;
+  } catch {
+    /* not a valid absolute URL */
+  }
+  return fallback;
 }
 
 export async function main(now: Date = new Date()): Promise<void> {

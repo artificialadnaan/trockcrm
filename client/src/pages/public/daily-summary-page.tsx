@@ -41,11 +41,13 @@ export function DailySummaryPage() {
   const token = params.get("token") ?? "";
   const { data, loading, error } = useDailySummary(token);
 
+  // useDailySummary already normalizes (legacy snapshots → safe defaults), but guard the direct array
+  // reads here too so this page can never throw on an old/foreign payload, independent of the hook.
   const wonTotal = useMemo(
-    () => (data ? data.wonToday.reduce((s, d) => s + (Number.isFinite(d.value) ? d.value : 0), 0) : 0),
+    () => (data?.wonToday ?? []).reduce((s, d) => s + (Number.isFinite(d.value) ? d.value : 0), 0),
     [data]
   );
-  const maxHourReps = useMemo(() => (data ? data.hourly.reduce((mx, h) => Math.max(mx, h.reps), 0) : 0), [data]);
+  const maxHourReps = useMemo(() => (data?.hourly ?? []).reduce((mx, h) => Math.max(mx, h.reps), 0), [data]);
 
   if (loading) return <Centered>Loading…</Centered>;
   if (error || !data) return <Centered>{error ?? "Not found."}</Centered>;
