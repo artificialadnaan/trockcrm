@@ -1,3 +1,4 @@
+import { breakdownLabel } from "@trock-crm/shared/types";
 import type { DailySummaryPayload, LeaderRow, RepBreakdown, WonDeal } from "./service.js";
 
 // Email-client-safe: tables + inline styles only (no <style>, flexbox, or JS — survives Outlook/Gmail).
@@ -52,31 +53,6 @@ function minutesLabel(activeMinutes: number | null): string {
   return `${num(activeMinutes)}m`;
 }
 
-// Count-aware [singular, plural] labels for every breakdown bucket — structural keys and activity types.
-// "created" is a count-invariant past participle; the rest read correctly at 1 ("1 note", not "1 notes").
-const BREAKDOWN_LABELS: Record<string, readonly [string, string]> = {
-  created: ["created", "created"],
-  moves: ["move", "moves"],
-  edits: ["edit", "edits"],
-  uploads: ["upload", "uploads"],
-  reports: ["report", "reports"],
-  email: ["email", "emails"],
-  note: ["note", "notes"],
-  call: ["call", "calls"],
-  meeting: ["meeting", "meetings"],
-  voicemail: ["voicemail", "voicemails"],
-  text: ["text", "texts"],
-  sms: ["text", "texts"],
-  task_completed: ["task completed", "tasks completed"],
-};
-
-/** Count-correct label for a breakdown bucket. Unknown activity types are humanized (no naive "+s" that
- *  would yield "task completeds") and shown as-is for both counts — readable beats wrong. */
-function breakdownLabel(key: string, n: number): string {
-  const pair = BREAKDOWN_LABELS[key];
-  if (pair) return n === 1 ? pair[0] : pair[1];
-  return key.replace(/_/g, " ");
-}
 
 /** Team time-spent: 0 -> "—" (no sessions); < 1h -> minutes; otherwise hours to one decimal. */
 function hoursLabel(totalMinutes: number | null | undefined): string {
