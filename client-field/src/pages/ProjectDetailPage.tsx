@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Camera, ChevronLeft, ChevronRight, Download, FileText, Filter, Star, X } from "lucide-react";
-import { api } from "../lib/api";
+import { ArrowLeft, Camera, ChevronLeft, ChevronRight, Download, Eye, FileText, Filter, Star, X } from "lucide-react";
+import { api, getActiveOfficeId } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { BrandLogo } from "../components/BrandLogo";
 import { Button, TextInput } from "../components/ui";
@@ -10,6 +10,7 @@ import {
   categoryLabel,
   filterPhotos,
   groupPhotos,
+  isProjectOffOffice,
   PHOTO_CATEGORIES,
   type FieldPhoto,
   type FieldProject,
@@ -97,6 +98,11 @@ export function ProjectDetailPage() {
   const selectedIndex = selectedPhotoId ? filteredPhotos.findIndex((photo) => photo.id === selectedPhotoId) : -1;
   const selectedPhoto = selectedIndex >= 0 ? filteredPhotos[selectedIndex] : null;
 
+  // Cross-office projects are view-only until cross-office writes ship: the single-office star / report /
+  // capture writes would 404 against the active office's schema, so suppress them and explain why.
+  const writableOfficeId = getActiveOfficeId() ?? user?.tenantId;
+  const offOffice = !!project && isProjectOffOffice(project, writableOfficeId);
+
   if (loading) return <div className="space-y-3">{Array.from({ length: 6 }).map((_, index) => <div key={index} className="h-20 animate-pulse rounded-md bg-muted" />)}</div>;
 
   return (
@@ -110,22 +116,37 @@ export function ProjectDetailPage() {
             <h1 className="truncate text-2xl font-black">{project?.name ?? "Project"}</h1>
             <p className="truncate text-sm text-muted-foreground">{project?.propertyAddress ?? "No address on file"}</p>
           </div>
-          <button type="button" aria-label={project?.starred ? "Unstar project" : "Star project"} className="flex min-h-11 min-w-11 items-center justify-center rounded-full text-primary" onClick={() => void toggleStar()}>
-            <Star className={project?.starred ? "h-6 w-6 fill-primary" : "h-6 w-6"} />
-          </button>
+          {offOffice ? (
+            <span className="flex min-h-11 min-w-11 items-center justify-center rounded-full text-muted-foreground" aria-label={`Managed by the ${project?.officeSlug} office — view only`}>
+              <Eye className="h-6 w-6" />
+            </span>
+          ) : (
+            <button type="button" aria-label={project?.starred ? "Unstar project" : "Star project"} className="flex min-h-11 min-w-11 items-center justify-center rounded-full text-primary" onClick={() => void toggleStar()}>
+              <Star className={project?.starred ? "h-6 w-6 fill-primary" : "h-6 w-6"} />
+            </button>
+          )}
         </div>
         {project ? (
           <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
             <p className="font-semibold text-foreground">Deal # {project.dealNumber}</p>
             <span className="rounded-full bg-muted px-2 py-0.5 font-semibold text-muted-foreground">{project.stage}</span>
+            {offOffice ? (
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 font-bold uppercase text-amber-700">{project.officeSlug} · view-only</span>
+            ) : null}
           </div>
         ) : null}
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
-            <FileText className="mr-2 h-4 w-4" />
-            Generate Report
-          </Button>
-        </div>
+        {offOffice ? (
+          <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">
+            This project is managed by the {project?.officeSlug} office. You can view its photos and reports here; starring, report generation, and photo capture are available from that office.
+          </p>
+        ) : (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
+              <FileText className="mr-2 h-4 w-4" />
+              Generate Report
+            </Button>
+          </div>
+        )}
       </header>
 
       {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-semibold text-red-700">{error}</p> : null}
@@ -141,10 +162,12 @@ export function ProjectDetailPage() {
             <p className="text-sm text-muted-foreground">Generated photo PDFs for this project.</p>
             </div>
           </div>
-          <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
-            <FileText className="mr-2 h-4 w-4" />
-            Build
-          </Button>
+          {!offOffice ? (
+            <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
+              <FileText className="mr-2 h-4 w-4" />
+              Build
+            </Button>
+          ) : null}
         </div>
         {reports.length === 0 ? (
           <p className="text-sm font-semibold text-muted-foreground">No reports yet.</p>
@@ -211,10 +234,12 @@ export function ProjectDetailPage() {
       {filteredPhotos.length === 0 ? (
         <div className="rounded-md bg-muted p-5 text-center">
           <p className="font-semibold text-muted-foreground">No photos in this project yet.</p>
-          <Button className="mt-4" onClick={() => navigate(`/capture?dealId=${id}`)}>
-            <Camera className="mr-2 h-5 w-5" aria-hidden="true" />
-            Add photos
-          </Button>
+          {!offOffice ? (
+            <Button className="mt-4" onClick={() => navigate(`/capture?dealId=${id}`)}>
+              <Camera className="mr-2 h-5 w-5" aria-hidden="true" />
+              Add photos
+            </Button>
+          ) : null}
         </div>
       ) : (
         <div className="space-y-5">
@@ -245,14 +270,16 @@ export function ProjectDetailPage() {
         </div>
       )}
 
-      <Button
-        aria-label="Add photos"
-        className="fixed bottom-24 right-4 z-20 h-14 rounded-full px-5 shadow-lg"
-        onClick={() => navigate(`/capture?dealId=${id}`)}
-      >
-        <Camera className="mr-2 h-5 w-5" aria-hidden="true" />
-        Add photos
-      </Button>
+      {!offOffice ? (
+        <Button
+          aria-label="Add photos"
+          className="fixed bottom-24 right-4 z-20 h-14 rounded-full px-5 shadow-lg"
+          onClick={() => navigate(`/capture?dealId=${id}`)}
+        >
+          <Camera className="mr-2 h-5 w-5" aria-hidden="true" />
+          Add photos
+        </Button>
+      ) : null}
 
       {drawerOpen ? (
         <FilterDrawer

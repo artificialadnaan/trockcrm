@@ -60,6 +60,15 @@ function activeOfficeId(): string | undefined {
   return stored || undefined;
 }
 
+/**
+ * The active office id the field app sends as `x-office-id` (URL `?officeId` → sessionStorage). This is
+ * the office the single-office WRITE endpoints target, so the UI uses it (falling back to the user's
+ * home office) to decide which cross-office projects are writable vs view-only.
+ */
+export function getActiveOfficeId(): string | undefined {
+  return activeOfficeId();
+}
+
 function csrfToken(): string | undefined {
   const cookieToken = document.cookie
     .split(";")

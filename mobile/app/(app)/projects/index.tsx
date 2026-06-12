@@ -5,13 +5,17 @@ import { useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
 import { useDebouncedValue } from "../../../src/hooks/useDebouncedValue";
 import { useProjects, useStarredProjects, useToggleStar } from "../../../src/query/hooks";
-import { relativeDate, type FieldProject } from "../../../src/projects/field-projects";
+import { useAuth } from "../../../src/auth/AuthContext";
+import { isProjectOffOffice, relativeDate, type FieldProject } from "../../../src/projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { BrandLogo } from "../../../src/components/BrandLogo";
 
 export default function ProjectsScreen() {
   const router = useRouter();
+  const { user, activeOfficeId } = useAuth();
+  // Which office the single-office write endpoints target (active office, else the user's home office).
+  const writableOfficeId = activeOfficeId ?? user?.tenantId;
   const [search, setSearch] = useState("");
   const debounced = useDebouncedValue(search.trim(), 250);
   const searching = debounced.length > 0;
@@ -37,6 +41,9 @@ export default function ProjectsScreen() {
         propertyAddress: project.propertyAddress ?? "",
         stage: project.stage,
         starred: project.starred ? "1" : "0",
+        // Carry the owning office so the detail screen can gate write actions for off-office projects.
+        officeId: project.officeId,
+        officeSlug: project.officeSlug,
       },
     });
   }
@@ -82,6 +89,7 @@ export default function ProjectsScreen() {
                   <ProjectRow
                     key={`starred-${project.id}`}
                     project={project}
+                    writableOfficeId={writableOfficeId}
                     onPress={() => openProject(project)}
                     onToggleStar={() => onToggleStar(project)}
                   />
@@ -92,7 +100,7 @@ export default function ProjectsScreen() {
           </View>
         }
         renderItem={({ item }) => (
-          <ProjectRow project={item} onPress={() => openProject(item)} onToggleStar={() => onToggleStar(item)} />
+          <ProjectRow project={item} writableOfficeId={writableOfficeId} onPress={() => openProject(item)} onToggleStar={() => onToggleStar(item)} />
         )}
         ListEmptyComponent={
           projectsQuery.isLoading ? (
@@ -111,13 +119,18 @@ export default function ProjectsScreen() {
 
 function ProjectRow({
   project,
+  writableOfficeId,
   onPress,
   onToggleStar,
 }: {
   project: FieldProject;
+  writableOfficeId: string | null | undefined;
   onPress: () => void;
   onToggleStar: () => void;
 }) {
+  // Cross-office projects are view-only until cross-office writes ship — suppress the star (its
+  // single-office write would 404) and show a view-only badge so the row is clearly read-only.
+  const offOffice = isProjectOffOffice(project, writableOfficeId);
   // The star is a SIBLING of the row's tappable area (not nested inside it), so
   // tapping the star toggles only — it can never bubble into opening the project.
   return (
@@ -144,16 +157,22 @@ function ProjectRow({
           {relativeDate(project.lastActivityAt)}
         </Text>
       </Pressable>
-      <Pressable
-        onPress={onToggleStar}
-        hitSlop={12}
-        style={styles.starButton}
-        accessibilityLabel={project.starred ? "Unstar" : "Star"}
-      >
-        <Text style={[styles.star, project.starred && { color: theme.color.warning }]}>
-          {project.starred ? "★" : "☆"}
-        </Text>
-      </Pressable>
+      {offOffice ? (
+        <View style={styles.starButton} accessibilityLabel={`Managed by the ${project.officeSlug} office — view only`}>
+          <Badge label={`${project.officeSlug} · view-only`} />
+        </View>
+      ) : (
+        <Pressable
+          onPress={onToggleStar}
+          hitSlop={12}
+          style={styles.starButton}
+          accessibilityLabel={project.starred ? "Unstar" : "Star"}
+        >
+          <Text style={[styles.star, project.starred && { color: theme.color.warning }]}>
+            {project.starred ? "★" : "☆"}
+          </Text>
+        </Pressable>
+      )}
     </View>
   );
 }

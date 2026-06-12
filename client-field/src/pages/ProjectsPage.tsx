@@ -1,11 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Search, Star, X } from "lucide-react";
-import { api } from "../lib/api";
+import { Eye, Search, Star, X } from "lucide-react";
+import { api, getActiveOfficeId } from "../lib/api";
+import { useAuth } from "../lib/auth";
 import { Button, TextInput } from "../components/ui";
-import { type FieldProject, relativeDate } from "../lib/field-projects";
+import { type FieldProject, isProjectOffOffice, relativeDate } from "../lib/field-projects";
 
-function ProjectCard({ project, onToggleStar }: { project: FieldProject; onToggleStar: (project: FieldProject) => void }) {
+function ProjectCard({
+  project,
+  onToggleStar,
+  writableOfficeId,
+}: {
+  project: FieldProject;
+  onToggleStar: (project: FieldProject) => void;
+  writableOfficeId: string | undefined;
+}) {
+  // Cross-office projects are view-only until cross-office writes ship: their single-office star write
+  // would 404 against the active office's schema, so suppress the star and show why.
+  const offOffice = isProjectOffOffice(project, writableOfficeId);
   return (
     <Link
       to={`/projects/${project.id}`}
@@ -18,30 +30,47 @@ function ProjectCard({ project, onToggleStar }: { project: FieldProject; onToggl
           <div className="mt-1 flex flex-wrap items-start gap-2 text-sm">
             <p className="font-semibold text-foreground break-all">Deal # {project.dealNumber}</p>
             <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-bold text-muted-foreground">{project.stage}</span>
+            {offOffice ? (
+              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold uppercase text-amber-700">
+                {project.officeSlug} · view-only
+              </span>
+            ) : null}
           </div>
           <p className="mt-1 truncate text-sm text-muted-foreground">{project.propertyAddress || "No address on file"}</p>
           <p className="mt-2 text-sm font-medium text-muted-foreground">
             {project.photoCount} photos • {relativeDate(project.lastActivityAt)}
           </p>
         </div>
-        <button
-          type="button"
-          aria-label={project.starred ? "Unstar project" : "Star project"}
-          className="flex min-h-11 min-w-11 items-center justify-center rounded-full text-primary hover:bg-muted"
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onToggleStar(project);
-          }}
-        >
-          <Star className={project.starred ? "h-6 w-6 fill-primary" : "h-6 w-6"} />
-        </button>
+        {offOffice ? (
+          <span
+            className="flex min-h-11 min-w-11 items-center justify-center rounded-full text-muted-foreground"
+            aria-label={`Managed by the ${project.officeSlug} office — view only`}
+          >
+            <Eye className="h-6 w-6" />
+          </span>
+        ) : (
+          <button
+            type="button"
+            aria-label={project.starred ? "Unstar project" : "Star project"}
+            className="flex min-h-11 min-w-11 items-center justify-center rounded-full text-primary hover:bg-muted"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onToggleStar(project);
+            }}
+          >
+            <Star className={project.starred ? "h-6 w-6 fill-primary" : "h-6 w-6"} />
+          </button>
+        )}
       </div>
     </Link>
   );
 }
 
 export function ProjectsPage() {
+  const { user } = useAuth();
+  // Which office the single-office write endpoints target (active office, else the user's home office).
+  const writableOfficeId = getActiveOfficeId() ?? user?.tenantId;
   const [projects, setProjects] = useState<FieldProject[]>([]);
   const [starred, setStarred] = useState<FieldProject[]>([]);
   const [loading, setLoading] = useState(true);
@@ -139,12 +168,13 @@ export function ProjectsPage() {
           projects={projects}
           empty={`No projects match "${search.trim()}".`}
           onToggleStar={toggleStar}
+          writableOfficeId={writableOfficeId}
         />
       ) : (
         <>
-          {starred.length > 0 ? <ProjectSection title="STARRED" projects={starred} onToggleStar={toggleStar} /> : null}
+          {starred.length > 0 ? <ProjectSection title="STARRED" projects={starred} onToggleStar={toggleStar} writableOfficeId={writableOfficeId} /> : null}
           {starred.length > 0 ? <div className="h-px bg-border" /> : null}
-          <ProjectSection title="ALL ACTIVE" projects={activeProjects} empty="No active projects yet." onToggleStar={toggleStar} />
+          <ProjectSection title="ALL ACTIVE" projects={activeProjects} empty="No active projects yet." onToggleStar={toggleStar} writableOfficeId={writableOfficeId} />
         </>
       )}
     </section>
@@ -156,11 +186,13 @@ function ProjectSection({
   projects,
   empty,
   onToggleStar,
+  writableOfficeId,
 }: {
   title: string;
   projects: FieldProject[];
   empty?: string;
   onToggleStar: (project: FieldProject) => void;
+  writableOfficeId: string | undefined;
 }) {
   return (
     <section>
@@ -169,7 +201,9 @@ function ProjectSection({
         <p className="rounded-md bg-muted p-4 text-sm font-medium text-muted-foreground">{empty}</p>
       ) : (
         <div className="border-y border-border">
-          {projects.map((project) => <ProjectCard key={project.id} project={project} onToggleStar={onToggleStar} />)}
+          {projects.map((project) => (
+            <ProjectCard key={project.id} project={project} onToggleStar={onToggleStar} writableOfficeId={writableOfficeId} />
+          ))}
         </div>
       )}
     </section>

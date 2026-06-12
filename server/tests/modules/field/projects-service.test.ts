@@ -26,6 +26,20 @@ function tenantDb(rows: unknown[][]) {
   } as any;
 }
 
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+  return "";
+}
+
 describe("field projects service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -179,7 +193,7 @@ describe("field projects service", () => {
     expect(JSON.stringify(result.photos[0])).not.toContain("r2Bucket");
   });
 
-  it("accepts rep access context for project queries", async () => {
+  it("is UNSCOPED for reps on the field surface — no assigned_rep_id filter (every field user sees every project)", async () => {
     const db = tenantDb([
       [{ total: 0 }],
       [],
@@ -191,6 +205,19 @@ describe("field projects service", () => {
       page: 1,
       perPage: 50,
     });
+
+    // A "rep" must NOT have their list narrowed to assigned deals — the field surface is office- and
+    // rep-agnostic (matches field_contractor/construction). Neither the count nor the rows query may
+    // carry the old assigned_rep_id restriction.
+    const allSql = db.execute.mock.calls.map((c: any[]) => extractSqlText(c[0])).join(" | ");
+    expect(allSql).not.toContain("assigned_rep_id");
+  });
+
+  it("does not rep-scope the starred list either", async () => {
+    const db = tenantDb([[]]);
+    await listStarredFieldProjects(db, { userId: "rep-1", userRole: "rep" });
+    const allSql = db.execute.mock.calls.map((c: any[]) => extractSqlText(c[0])).join(" | ");
+    expect(allSql).not.toContain("assigned_rep_id");
   });
 
   it("preserves deal identifiers for duplicate-name field projects", async () => {

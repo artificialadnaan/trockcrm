@@ -23,7 +23,22 @@ vi.mock("../../../src/middleware/tenant.js", () => ({
   },
 }));
 
+// Cross-office reads run via the field-only fan-out. Mock it as a single-office pass-through (one
+// fake office) so these tests still assert the read endpoints route through the field-safe services;
+// the fan-out/merge/degrade behavior itself is covered by cross-office.test.ts + field-cross-office-routes.test.ts.
+vi.mock("../../../src/modules/field/cross-office.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/modules/field/cross-office.js")>();
+  const office = { id: "office-1", slug: "trock" };
+  const officeDb = { execute: vi.fn() } as any;
+  return {
+    ...actual,
+    fanOutActiveOffices: vi.fn(async (run: any) => ({ results: [{ office, value: await run(officeDb, office) }], failures: [] })),
+    withResolvedOffice: vi.fn(async (_kind: any, _id: any, run: any) => ({ value: await run(officeDb, office), office })),
+  };
+});
+
 const projectMocks = vi.hoisted(() => ({
+  FIELD_PROJECTS_MAX_FETCH: 500,
   listFieldProjects: vi.fn(),
   listFieldProjectPhotos: vi.fn(),
   listStarredFieldProjects: vi.fn(),
@@ -117,14 +132,16 @@ describe("field routes", () => {
 
   it("routes field project list, starred list, star toggles, and photos through field-safe services", async () => {
     await invokeRoute("get", "/projects", { query: { search: "roof", page: "2", perPage: "25" } });
+    // Cross-office: each office is fetched from page 1 with enough rows to cover the requested window
+    // (page*perPage, capped at 100); the page/perPage slice is applied AFTER the cross-office merge.
     expect(projectMocks.listFieldProjects).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       userId: "admin-1",
       userRole: "admin",
     }), {
       search: "roof",
       status: undefined,
-      page: 2,
-      perPage: 25,
+      page: 1,
+      perPage: 50,
     });
 
     await invokeRoute("get", "/projects/starred", {});
@@ -159,6 +176,17 @@ describe("field routes", () => {
       to: "2026-05-05",
       includeDeleted: false,
     });
+  });
+
+  it("fetches enough rows per office to cover deep pages (cross-office pagination beyond the first window)", async () => {
+    // page 3 perPage 50 → offset 100; each office must be fetched with >= offset+perPage so the merged
+    // slice [100,150] isn't empty. The old min(100, …) cap returned empty/wrong pages past page 2.
+    await invokeRoute("get", "/projects", { query: { page: "3", perPage: "50" } });
+    expect(projectMocks.listFieldProjects).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ page: 1, perPage: 150 }),
+    );
   });
 
   it("routes field photo upload URL and confirm requests through field-safe services", async () => {

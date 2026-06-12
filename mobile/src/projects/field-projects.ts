@@ -12,7 +12,24 @@ export type FieldProject = {
   lastActivityAt: string | null;
   photoCount: number;
   starred: boolean;
+  /** Owning office of this (possibly cross-office) project row — server-stamped on every field read. */
+  officeId: string;
+  officeSlug: string;
 };
+
+/**
+ * Off-office projects are VIEW-ONLY until cross-office WRITES ship: the write endpoints (star,
+ * generate-report, add-photo) are single-office and target the user's writable office schema, so a
+ * write to a project owned by a different office 404s server-side. Suppress those actions for off-office
+ * rows. When the writable office can't be resolved we err on the side of view-only.
+ */
+export function isProjectOffOffice(
+  project: Pick<FieldProject, "officeId">,
+  writableOfficeId: string | null | undefined,
+): boolean {
+  if (!writableOfficeId) return true;
+  return project.officeId !== writableOfficeId;
+}
 
 export type FieldCaptureTarget = {
   id: string;

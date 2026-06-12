@@ -10,6 +10,7 @@ import {
   categoryLabel,
   filterPhotos,
   groupPhotos,
+  isProjectOffOffice,
   tagsOf,
   uploadersOf,
   type FieldPhoto,
@@ -39,10 +40,19 @@ export default function ProjectDetailScreen() {
     dealNumber?: string;
     propertyAddress?: string;
     stage?: string;
+    officeId?: string;
+    officeSlug?: string;
   }>();
   const dealId = toStr(params.id);
   const router = useRouter();
-  const { fetcher } = useAuth();
+  const { fetcher, user, activeOfficeId } = useAuth();
+  // Off-office projects are view-only until cross-office writes ship: the single-office report/capture
+  // writes would 404 against the active office's schema. The owning office arrives via nav params; if it
+  // wasn't passed (e.g. a direct deep link), default to writable and let the server stay the authority.
+  const writableOfficeId = activeOfficeId ?? user?.tenantId;
+  const projectOfficeId = toStr(params.officeId);
+  const officeSlug = toStr(params.officeSlug);
+  const offOffice = projectOfficeId ? isProjectOffOffice({ officeId: projectOfficeId }, writableOfficeId) : false;
 
   const photosQuery = useProjectPhotos(dealId);
   const reportsQuery = useProjectReports(dealId);
@@ -126,31 +136,37 @@ export default function ProjectDetailScreen() {
           </Text>
         </View>
 
-        <View style={styles.actions}>
-          <Button
-            title="Add photos"
-            onPress={() =>
-              router.push({
-                pathname: "/(app)/capture",
-                params: {
-                  dealId,
-                  targetName: toStr(params.name),
-                  dealNumber: toStr(params.dealNumber),
-                  stage: toStr(params.stage),
-                  propertyAddress: toStr(params.propertyAddress),
-                },
-              })
-            }
-            style={{ flex: 1 }}
+        {offOffice ? (
+          <Banner
+            message={`Managed by the ${officeSlug} office — view only. Photos and reports are visible here; starring, report generation, and photo capture are available from that office.`}
           />
-          <Button
-            title="Build report"
-            variant="ghost"
-            onPress={() => setReportOpen(true)}
-            disabled={allPhotos.length === 0}
-            style={{ flex: 1 }}
-          />
-        </View>
+        ) : (
+          <View style={styles.actions}>
+            <Button
+              title="Add photos"
+              onPress={() =>
+                router.push({
+                  pathname: "/(app)/capture",
+                  params: {
+                    dealId,
+                    targetName: toStr(params.name),
+                    dealNumber: toStr(params.dealNumber),
+                    stage: toStr(params.stage),
+                    propertyAddress: toStr(params.propertyAddress),
+                  },
+                })
+              }
+              style={{ flex: 1 }}
+            />
+            <Button
+              title="Build report"
+              variant="ghost"
+              onPress={() => setReportOpen(true)}
+              disabled={allPhotos.length === 0}
+              style={{ flex: 1 }}
+            />
+          </View>
+        )}
 
         {notice ? <Banner message={notice} /> : null}
 
