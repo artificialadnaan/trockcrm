@@ -52,13 +52,30 @@ function minutesLabel(activeMinutes: number | null): string {
   return `${num(activeMinutes)}m`;
 }
 
-/** Readable plural for an activity type key (email -> emails, site_visit -> site visits). */
-function pluralizeActivity(type: string): string {
-  const known: Record<string, string> = {
-    email: "emails", note: "notes", call: "calls", meeting: "meetings", voicemail: "voicemails",
-    text: "texts", sms: "texts",
-  };
-  return known[type] ?? `${type.replace(/_/g, " ")}s`;
+// Count-aware [singular, plural] labels for every breakdown bucket — structural keys and activity types.
+// "created" is a count-invariant past participle; the rest read correctly at 1 ("1 note", not "1 notes").
+const BREAKDOWN_LABELS: Record<string, readonly [string, string]> = {
+  created: ["created", "created"],
+  moves: ["move", "moves"],
+  edits: ["edit", "edits"],
+  uploads: ["upload", "uploads"],
+  reports: ["report", "reports"],
+  email: ["email", "emails"],
+  note: ["note", "notes"],
+  call: ["call", "calls"],
+  meeting: ["meeting", "meetings"],
+  voicemail: ["voicemail", "voicemails"],
+  text: ["text", "texts"],
+  sms: ["text", "texts"],
+  task_completed: ["task completed", "tasks completed"],
+};
+
+/** Count-correct label for a breakdown bucket. Unknown activity types are humanized (no naive "+s" that
+ *  would yield "task completeds") and shown as-is for both counts — readable beats wrong. */
+function breakdownLabel(key: string, n: number): string {
+  const pair = BREAKDOWN_LABELS[key];
+  if (pair) return n === 1 ? pair[0] : pair[1];
+  return key.replace(/_/g, " ");
 }
 
 /** Team time-spent: 0 -> "—" (no sessions); < 1h -> minutes; otherwise hours to one decimal. */
@@ -74,7 +91,7 @@ function breakdownLine(b: RepBreakdown): string {
   const acts = Object.entries(b.activities)
     .filter(([, n]) => n > 0)
     .sort((a, c) => c[1] - a[1] || a[0].localeCompare(c[0]))
-    .map(([type, n]) => [n, pluralizeActivity(type)] as [number, string]);
+    .map(([type, n]) => [n, type] as [number, string]);
   const parts: [number, string][] = [
     [b.created, "created"],
     [b.stageMoves, "moves"],
@@ -84,7 +101,7 @@ function breakdownLine(b: RepBreakdown): string {
     [b.reports, "reports"],
   ];
   const nz = parts.filter(([n]) => n > 0).slice(0, 4);
-  return nz.length ? nz.map(([n, label]) => `${num(n)} ${label}`).join(", ") : "—";
+  return nz.length ? nz.map(([n, key]) => `${num(n)} ${breakdownLabel(key, n)}`).join(", ") : "—";
 }
 
 function sectionLabel(text: string, rightNote?: string): string {

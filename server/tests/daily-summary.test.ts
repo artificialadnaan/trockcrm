@@ -144,6 +144,21 @@ describe("renderDailySummaryEmail", () => {
     expect(html).not.toContain("0m"); // Adnaan (188 actions, no session) must be "—", never "0m idle"
   });
 
+  it("labels breakdown buckets count-correctly (1 note, not 1 notes) and humanizes unknown types", () => {
+    const p: DailySummaryPayload = {
+      ...QUIET,
+      leaderboard: [
+        { rank: 1, name: "Solo", actions: 4, activeMinutes: 10,
+          breakdown: { ...ZERO, stageMoves: 1, activities: { note: 1, task_completed: 1, site_visit: 1 } } },
+      ],
+    };
+    const html = renderDailySummaryEmail(p, PAGE_URL);
+    expect(html).toContain("1 move"); expect(html).not.toContain("1 moves");
+    expect(html).toContain("1 note"); expect(html).not.toContain("1 notes");
+    expect(html).toContain("1 task completed"); expect(html).not.toContain("completeds"); // not "task completeds"
+    expect(html).toContain("1 site visit"); // unknown type humanized, no naive "+s"
+  });
+
   it("surfaces team activity in the headline: time spent + actions, not just movement", () => {
     const html = renderDailySummaryEmail(ACTIVE, PAGE_URL);
     expect(html).toContain("2.5h"); // 150 team active minutes -> hours
