@@ -4,8 +4,9 @@ import type * as schema from "@trock-crm/shared/schema";
 import { deals, leads } from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { buildFileDownloadUrlFromRecord, getDealPhotoTimeline, searchPhotoUploadTargets } from "../files/service.js";
+import { buildFileDownloadUrlFromRecord, getDealPhotoTimeline, searchPhotoUploadTargets, type PhotoUploadTarget } from "../files/service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
+import { officeTag, type FieldOffice, type OfficeTag } from "./cross-office.js";
 import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -407,4 +408,36 @@ export async function searchFieldCaptureTargets(
     search: input.search,
     limit: input.limit,
   });
+}
+
+export type FieldCaptureTarget = PhotoUploadTarget & OfficeTag;
+
+const CAPTURE_TARGET_TYPE_RANK: Record<PhotoUploadTarget["type"], number> = { lead: 0, opportunity: 1, deal: 2 };
+
+function captureTargetUpdatedMs(value: Date | string): number {
+  const ms = (value instanceof Date ? value : new Date(value)).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/**
+ * Merge per-office capture-target search results into ONE company-wide list (finding #3): stamp each
+ * target with its owning office, preserve the single-office type grouping (lead → opportunity → deal),
+ * order by recency (cross-office-comparable) within a type with a stable id tiebreak, and apply ONE
+ * GLOBAL limit — NOT limit-per-office, which would return up to limit×officeCount rows.
+ */
+export function mergeFieldCaptureTargets(
+  perOffice: Array<{ office: FieldOffice; targets: PhotoUploadTarget[] }>,
+  limit: number,
+): FieldCaptureTarget[] {
+  const stamped: FieldCaptureTarget[] = perOffice.flatMap(({ office, targets }) =>
+    targets.map((target) => ({ ...target, ...officeTag(office) })),
+  );
+  stamped.sort((left, right) => {
+    const rankDelta = CAPTURE_TARGET_TYPE_RANK[left.type] - CAPTURE_TARGET_TYPE_RANK[right.type];
+    if (rankDelta !== 0) return rankDelta;
+    const recencyDelta = captureTargetUpdatedMs(right.lastUpdatedAt) - captureTargetUpdatedMs(left.lastUpdatedAt);
+    if (recencyDelta !== 0) return recencyDelta;
+    return left.id.localeCompare(right.id);
+  });
+  return stamped.slice(0, Math.max(0, limit));
 }

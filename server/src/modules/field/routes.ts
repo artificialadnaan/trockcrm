@@ -31,17 +31,31 @@ import {
   listFieldProjects,
   listFieldProjectPhotos,
   listStarredFieldProjects,
+  mergeFieldCaptureTargets,
   searchFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
   type FieldProject,
 } from "./projects-service.js";
+import { assertValidCaptureTargetIds, assertValidUuid } from "./photos-service.js";
 import {
   assertFanOutNotFullyDegraded,
   fanOutActiveOffices,
+  getFieldOfficeById,
+  isFieldCrossOfficeWritesEnabled,
   officeTag,
+  resolveFieldWriteOffice,
+  resolveWriteOffice,
+  runInOffice,
+  runInOfficeTransaction,
   withResolvedOffice,
+  type FieldOffice,
+  type FieldTenantDb,
 } from "./cross-office.js";
+
+// Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
+// the GLOBAL cap when the cross-office picker merges per-office results.
+const FIELD_CAPTURE_TARGET_DEFAULT_LIMIT = 30;
 
 export const fieldRoutes = Router();
 
@@ -60,6 +74,39 @@ function requestAuditContext(req: any) {
     ipAddress: req.ip ?? null,
     userAgent: Array.isArray(userAgentHeader) ? userAgentHeader.join(", ") : userAgentHeader ?? null,
   };
+}
+
+// ─── Cross-office write routing (Phase 2b) ───────────────────────────────────────────────────────
+// These replace tenantMiddleware on the write routes. Flag OFF (or no target) → the uploader's active
+// office in a transaction = byte-for-byte today's behavior. Flag ON → the resolved DEAL/FILE office,
+// re-binding search_path (here), the R2 key slug, and job_queue.office_id (in the services).
+
+/** Run a DEAL/LEAD-targeted field write in the resolved (or uploader's) office, transactionally. */
+async function runFieldDealWrite<T>(
+  req: any,
+  target: { dealId?: string; leadId?: string; opportunityId?: string },
+  run: (db: FieldTenantDb, office: FieldOffice) => Promise<T>,
+  notFoundMessage?: string,
+): Promise<T> {
+  // Validate id FORMAT before resolving — an invalid uuid must be a clean 400, not a `::uuid` cast
+  // error swallowed by the resolver fan-out and surfaced as a misleading 503.
+  assertValidCaptureTargetIds(target);
+  const office = await resolveFieldWriteOffice(req.fieldUser!.tenantId, target, notFoundMessage);
+  return runInOfficeTransaction(office, req.fieldUser!.id, run);
+}
+
+/** Run a FILE-targeted field write (tags, transcription) in the photo's resolved (or uploader's) office. */
+async function runFieldFileWrite<T>(
+  req: any,
+  fileId: string,
+  run: (db: FieldTenantDb, office: FieldOffice) => Promise<T>,
+  notFoundMessage = "Photo not found",
+): Promise<T> {
+  assertValidUuid(fileId, "photoId");
+  const office = isFieldCrossOfficeWritesEnabled()
+    ? await resolveWriteOffice("file", fileId, notFoundMessage)
+    : await getFieldOfficeById(req.fieldUser!.tenantId);
+  return runInOfficeTransaction(office, req.fieldUser!.id, run);
 }
 
 function rawAudioBody() {
@@ -142,72 +189,85 @@ fieldRoutes.get("/projects/starred", requireFieldContractor, async (req, res, ne
   }
 });
 
-fieldRoutes.post("/projects/:dealId/star", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.post("/projects/:dealId/star", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await starFieldProject(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, String(req.params.dealId));
-    await req.commitTransaction();
+    const dealId = String(req.params.dealId);
+    const result = await runFieldDealWrite(req, { dealId }, (db) =>
+      starFieldProject(db, { userId: req.fieldUser!.id, userRole: req.fieldUser!.role }, dealId),
+      "Project not found",
+    );
     res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.delete("/projects/:dealId/star", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.delete("/projects/:dealId/star", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await unstarFieldProject(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, String(req.params.dealId));
-    await req.commitTransaction();
+    const dealId = String(req.params.dealId);
+    const result = await runFieldDealWrite(req, { dealId }, (db) =>
+      unstarFieldProject(db, { userId: req.fieldUser!.id, userRole: req.fieldUser!.role }, dealId),
+      "Project not found",
+    );
     res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.post("/photos/upload-url", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.post("/photos/upload-url", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await requestFieldPhotoUploadUrl(req.tenantDb!, {
-      officeSlug: req.officeSlug!,
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
+    const target = {
       dealId: typeof req.body.dealId === "string" ? req.body.dealId : undefined,
       leadId: typeof req.body.leadId === "string" ? req.body.leadId : undefined,
       opportunityId: typeof req.body.opportunityId === "string" ? req.body.opportunityId : undefined,
-      contentType: String(req.body.contentType),
-      sizeBytes: Number(req.body.sizeBytes),
-      photoCategory: req.body.category ?? req.body.photoCategory ?? null,
-      caption: req.body.caption ?? null,
-      tags: Array.isArray(req.body.tags) ? req.body.tags.map(String) : [],
-    });
-    await req.commitTransaction();
+    };
+    // The R2 key (b) is bound to the resolved office via `officeSlug: office.slug`; the deal-number
+    // lookup inside requestUploadUrl runs in that same office's schema (a).
+    const result = await runFieldDealWrite(req, target, (db, office) =>
+      requestFieldPhotoUploadUrl(db, {
+        officeSlug: office.slug,
+        userId: req.fieldUser!.id,
+        userRole: req.fieldUser!.role,
+        ...target,
+        contentType: String(req.body.contentType),
+        sizeBytes: Number(req.body.sizeBytes),
+        photoCategory: req.body.category ?? req.body.photoCategory ?? null,
+        caption: req.body.caption ?? null,
+        tags: Array.isArray(req.body.tags) ? req.body.tags.map(String) : [],
+      }),
+    );
     res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.post("/photos/confirm-upload", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.post("/photos/confirm-upload", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await confirmFieldPhotoUpload(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-      officeId: req.fieldUser!.tenantId,
+    const target = {
       dealId: typeof req.body.dealId === "string" ? req.body.dealId : undefined,
       leadId: typeof req.body.leadId === "string" ? req.body.leadId : undefined,
       opportunityId: typeof req.body.opportunityId === "string" ? req.body.opportunityId : undefined,
-      uploadToken: String(req.body.uploadToken),
-      objectKey: String(req.body.objectKey),
-      latitude: req.body.latitude !== undefined ? Number(req.body.latitude) : undefined,
-      longitude: req.body.longitude !== undefined ? Number(req.body.longitude) : undefined,
-      addressSource: req.body.addressSource,
-      takenAt: req.body.takenAt,
-      auditContext: requestAuditContext(req),
-    });
-    await req.commitTransaction();
+    };
+    // job_queue.office_id (c) is bound to the resolved office via `officeId: office.id`; officeSlug lets
+    // confirmFieldPhotoUpload assert the token's r2Key was minted under this same office.
+    const result = await runFieldDealWrite(req, target, (db, office) =>
+      confirmFieldPhotoUpload(db, {
+        userId: req.fieldUser!.id,
+        userRole: req.fieldUser!.role,
+        officeId: office.id,
+        officeSlug: office.slug,
+        ...target,
+        uploadToken: String(req.body.uploadToken),
+        objectKey: String(req.body.objectKey),
+        latitude: req.body.latitude !== undefined ? Number(req.body.latitude) : undefined,
+        longitude: req.body.longitude !== undefined ? Number(req.body.longitude) : undefined,
+        addressSource: req.body.addressSource,
+        takenAt: req.body.takenAt,
+        auditContext: requestAuditContext(req),
+      }),
+    );
     res.status(201).json(result);
   } catch (err) {
     next(err);
@@ -227,18 +287,42 @@ fieldRoutes.get("/photos/pending", ...fieldProjectMiddleware, async (req, res, n
   }
 });
 
-fieldRoutes.post("/photos/:photoId/assign-target", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.post("/photos/:photoId/assign-target", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await assignPendingFieldPhotoTarget(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      photoId: String(req.params.photoId),
+    const photoId = String(req.params.photoId);
+    assertValidUuid(photoId, "photoId");
+    const target = {
       dealId: typeof req.body.dealId === "string" ? req.body.dealId : undefined,
       leadId: typeof req.body.leadId === "string" ? req.body.leadId : undefined,
       opportunityId: typeof req.body.opportunityId === "string" ? req.body.opportunityId : undefined,
-    });
-    await req.commitTransaction();
+    };
+    assertValidCaptureTargetIds(target);
+
+    const crossOffice = isFieldCrossOfficeWritesEnabled();
+    // The PENDING photo physically lives in the office it was uploaded into (unassigned uploads park in
+    // the uploader's office). The chosen target must live in that SAME office — otherwise binding it is a
+    // cross-schema row move, which we reject (the files.deal_id FK is the structural backstop). Direct
+    // capture (select a cross-office project, then shoot) is unaffected: that row is born in the deal's
+    // office via upload-url + confirm.
+    const photoOffice = crossOffice
+      ? await resolveWriteOffice("file", photoId, "Pending photo not found")
+      : await getFieldOfficeById(req.fieldUser!.tenantId);
+    if (crossOffice) {
+      const targetOffice = await resolveFieldWriteOffice(req.fieldUser!.tenantId, target, "Capture target not found");
+      if (targetOffice.id !== photoOffice.id) {
+        throw new AppError(
+          409,
+          `This photo was captured under ${photoOffice.slug} and can't be reassigned to a project in ${targetOffice.slug}. Re-capture it from that project instead.`,
+        );
+      }
+    }
+
+    const result = await runInOfficeTransaction(photoOffice, req.fieldUser!.id, (db) =>
+      assignPendingFieldPhotoTarget(db, { userId: req.fieldUser!.id, userRole: req.fieldUser!.role }, {
+        photoId,
+        ...target,
+      }),
+    );
     res.json(result);
   } catch (err) {
     next(err);
@@ -263,52 +347,58 @@ fieldRoutes.post("/photos/transcribe-description", requireFieldContractor, rawAu
   }
 });
 
-fieldRoutes.post("/photos/:photoId/transcribe-description", ...fieldProjectMiddleware, rawAudioBody(), async (req, res, next) => {
+fieldRoutes.post("/photos/:photoId/transcribe-description", requireFieldContractor, rawAudioBody(), async (req, res, next) => {
   try {
+    const photoId = String(req.params.photoId);
     const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-    const result = await transcribeAndPersistFieldPhotoDescription(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      photoId: String(req.params.photoId),
-      audio: body,
-      mimeType: String(req.headers["content-type"] ?? ""),
-      fileName: typeof req.headers["x-file-name"] === "string" ? req.headers["x-file-name"] : undefined,
-      auditContext: requestAuditContext(req),
-    });
-    await req.commitTransaction();
+    const result = await runFieldFileWrite(req, photoId, (db) =>
+      transcribeAndPersistFieldPhotoDescription(db, {
+        userId: req.fieldUser!.id,
+        userRole: req.fieldUser!.role,
+      }, {
+        photoId,
+        audio: body,
+        mimeType: String(req.headers["content-type"] ?? ""),
+        fileName: typeof req.headers["x-file-name"] === "string" ? req.headers["x-file-name"] : undefined,
+        auditContext: requestAuditContext(req),
+      }),
+    );
     res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.post("/photos/:photoId/tags", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.post("/photos/:photoId/tags", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await replaceFieldPhotoTags(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      photoId: String(req.params.photoId),
-      tags: Array.isArray(req.body.tags) ? req.body.tags.map(String) : [],
-    });
-    await req.commitTransaction();
+    const photoId = String(req.params.photoId);
+    const result = await runFieldFileWrite(req, photoId, (db) =>
+      replaceFieldPhotoTags(db, {
+        userId: req.fieldUser!.id,
+        userRole: req.fieldUser!.role,
+      }, {
+        photoId,
+        tags: Array.isArray(req.body.tags) ? req.body.tags.map(String) : [],
+      }),
+    );
     res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.delete("/photos/:photoId/tags/:tag", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.delete("/photos/:photoId/tags/:tag", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await deleteFieldPhotoTag(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      photoId: String(req.params.photoId),
-      tag: decodeURIComponent(String(req.params.tag)),
-    });
-    await req.commitTransaction();
+    const photoId = String(req.params.photoId);
+    const result = await runFieldFileWrite(req, photoId, (db) =>
+      deleteFieldPhotoTag(db, {
+        userId: req.fieldUser!.id,
+        userRole: req.fieldUser!.role,
+      }, {
+        photoId,
+        tag: decodeURIComponent(String(req.params.tag)),
+      }),
+    );
     res.json(result);
   } catch (err) {
     next(err);
@@ -368,32 +458,37 @@ fieldRoutes.get("/reports/:reportId/download", requireFieldContractor, async (re
   }
 });
 
-fieldRoutes.post("/reports/preview", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.post("/reports/preview", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await previewFieldPhotoReport(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      projectId: String(req.body.projectId),
-      photoIds: Array.isArray(req.body.photoIds) ? req.body.photoIds.map(String) : [],
-      groupBy: req.body.groupBy === "tag" || req.body.groupBy === "date" ? req.body.groupBy : "none",
-      creatorName: [req.fieldUser!.firstName, req.fieldUser!.lastName].filter(Boolean).join(" ") || req.fieldUser!.email,
-    });
-    await req.commitTransaction();
+    const projectId = String(req.body.projectId);
+    const result = await runFieldDealWrite(req, { dealId: projectId }, (db) =>
+      previewFieldPhotoReport(db, {
+        userId: req.fieldUser!.id,
+        userRole: req.fieldUser!.role,
+      }, {
+        projectId,
+        photoIds: Array.isArray(req.body.photoIds) ? req.body.photoIds.map(String) : [],
+        groupBy: req.body.groupBy === "tag" || req.body.groupBy === "date" ? req.body.groupBy : "none",
+        creatorName: [req.fieldUser!.firstName, req.fieldUser!.lastName].filter(Boolean).join(" ") || req.fieldUser!.email,
+      }),
+      "Project not found",
+    );
     res.json(result);
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.post("/reports/generate", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.post("/reports/generate", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await generateFieldPhotoReport(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      officeSlug: req.officeSlug!,
-      projectId: String(req.body.projectId),
+    const projectId = String(req.body.projectId);
+    const result = await runFieldDealWrite(req, { dealId: projectId }, (db, office) =>
+      generateFieldPhotoReport(db, {
+        userId: req.fieldUser!.id,
+        userRole: req.fieldUser!.role,
+      }, {
+        officeSlug: office.slug,
+        projectId,
       reportTitle: String(req.body.reportTitle ?? ""),
       coverData: {
         creatorName: String(req.body.coverData?.creatorName ?? ""),
@@ -413,45 +508,60 @@ fieldRoutes.post("/reports/generate", ...fieldProjectMiddleware, async (req, res
               : [],
           }))
         : [],
-    });
-    await req.commitTransaction();
+      }),
+      "Project not found",
+    );
     res.status(201).json(result);
   } catch (err) {
     next(err);
   }
 });
 
-// NOTE: the capture-target picker (/photo-targets/search + /validate) stays SINGLE-office in Phase 2a.
-// It feeds the photo-ATTACH (write) flow, which is still single-office — surfacing cross-office targets
-// the upload can't yet write to would be a broken UX. These move to cross-office in the Phase 2b writes
-// PR, together with the deal→office resolver that re-binds the write to the target's office.
-fieldRoutes.get("/photo-targets/search", ...fieldProjectMiddleware, async (req, res, next) => {
+// The capture-target picker feeds the photo-ATTACH (write) flow. It goes cross-office IN LOCKSTEP with
+// the writes (gated on the same flag): flag-on surfaces every active office's targets (so a user can
+// attach to a project in any office the now-cross-office write path can reach); flag-off stays single
+// office (uploader's), so it never surfaces a target the single-office upload can't write to.
+fieldRoutes.get("/photo-targets/search", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await searchFieldCaptureTargets(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
-    }, {
-      search: req.query.search as string | undefined,
-      limit: parseOptionalPositiveInt(req.query.limit),
-    });
-    await req.commitTransaction();
-    res.json(result);
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const search = req.query.search as string | undefined;
+    const limit = parseOptionalPositiveInt(req.query.limit);
+
+    if (!isFieldCrossOfficeWritesEnabled()) {
+      const office = await getFieldOfficeById(req.fieldUser!.tenantId);
+      const result = await runInOffice(office, (db) => searchFieldCaptureTargets(db, access, { search, limit }));
+      res.json(result);
+      return;
+    }
+
+    const globalLimit = limit ?? FIELD_CAPTURE_TARGET_DEFAULT_LIMIT;
+    const { results, failures } = assertFanOutNotFullyDegraded(
+      await fanOutActiveOffices((db) => searchFieldCaptureTargets(db, access, { search, limit: globalLimit })),
+    );
+    const targets = mergeFieldCaptureTargets(
+      results.map(({ office, value }) => ({ office, targets: value.targets })),
+      globalLimit,
+    );
+    res.json({ targets, degradedOffices: failures.map((failure) => failure.office.slug) });
   } catch (err) {
     next(err);
   }
 });
 
-fieldRoutes.get("/photo-targets/validate", ...fieldProjectMiddleware, async (req, res, next) => {
+fieldRoutes.get("/photo-targets/validate", requireFieldContractor, async (req, res, next) => {
   try {
-    const result = await assertAccessibleFieldCaptureTarget(req.tenantDb!, {
-      userId: req.fieldUser!.id,
-      userRole: req.fieldUser!.role,
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const target = {
       dealId: typeof req.query.dealId === "string" ? req.query.dealId : undefined,
       leadId: typeof req.query.leadId === "string" ? req.query.leadId : undefined,
       opportunityId: typeof req.query.opportunityId === "string" ? req.query.opportunityId : undefined,
-    });
-    await req.commitTransaction();
-    res.json({ target: result });
+    };
+    assertValidCaptureTargetIds(target);
+    const office = await resolveFieldWriteOffice(req.fieldUser!.tenantId, target);
+    const result = await runInOffice(office, (db) =>
+      assertAccessibleFieldCaptureTarget(db, { ...access, ...target }),
+    );
+    res.json({ target: result, ...officeTag(office) });
   } catch (err) {
     next(err);
   }

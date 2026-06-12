@@ -34,6 +34,14 @@ vi.mock("../../../src/modules/field/cross-office.js", async (importOriginal) => 
     ...actual,
     fanOutActiveOffices: vi.fn(async (run: any) => ({ results: [{ office, value: await run(officeDb, office) }], failures: [] })),
     withResolvedOffice: vi.fn(async (_kind: any, _id: any, run: any) => ({ value: await run(officeDb, office), office })),
+    // Cross-office WRITE helpers: resolve to the single fake office and pass the fake db through, so the
+    // write endpoints still assert they route through the field-safe services (resolution/transaction
+    // behavior itself is covered by cross-office.test.ts + cross-office-writes.test.ts). Pool-free.
+    getFieldOfficeById: vi.fn(async () => office),
+    resolveWriteOffice: vi.fn(async () => office),
+    resolveFieldWriteOffice: vi.fn(async () => office),
+    runInOffice: vi.fn(async (_office: any, run: any) => run(officeDb, office)),
+    runInOfficeTransaction: vi.fn(async (_office: any, _userId: any, run: any) => run(officeDb, office)),
   };
 });
 
@@ -43,6 +51,7 @@ const projectMocks = vi.hoisted(() => ({
   listFieldProjectPhotos: vi.fn(),
   listStarredFieldProjects: vi.fn(),
   searchFieldCaptureTargets: vi.fn(),
+  mergeFieldCaptureTargets: vi.fn(() => []),
   assertAccessibleFieldCaptureTarget: vi.fn(),
   starFieldProject: vi.fn(),
   unstarFieldProject: vi.fn(),
@@ -53,6 +62,9 @@ const photoMocks = vi.hoisted(() => ({
   confirmFieldPhotoUpload: vi.fn(),
   listPendingFieldPhotos: vi.fn(),
   assignPendingFieldPhotoTarget: vi.fn(),
+  // Format validators the cross-office write routes call before resolving the office (no-op in tests).
+  assertValidCaptureTargetIds: vi.fn(),
+  assertValidUuid: vi.fn(),
 }));
 
 const transcriptionMocks = vi.hoisted(() => ({
