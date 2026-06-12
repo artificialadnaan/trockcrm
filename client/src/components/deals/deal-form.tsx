@@ -51,6 +51,9 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
   const isEdit = !!deal;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned);
+  // Awarded amount is editable only by admins/directors (mirrors the server-side
+  // AWARDED_AMOUNT_RESTRICTED guard); everyone else sees it read-only.
+  const canEditAwarded = user?.role === "admin" || user?.role === "director";
   const showRelationshipSelectors = !isEdit || !deal?.companyId || !deal?.propertyId;
   const activeStages = getNewDealStages(stages);
   const projectTypeOptions = projectTypeHierarchy.flatMap((parent) => [
@@ -642,8 +645,12 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               <FieldLockLabel
                 htmlFor="awardedAmount"
                 label="Awarded Amount ($)"
-                locked={isBidBoardOwned}
-                message="Awarded amount is mirrored from Bid Board after estimating handoff."
+                locked={isBidBoardOwned || !canEditAwarded}
+                message={
+                  isBidBoardOwned
+                    ? "Awarded amount is mirrored from Bid Board after estimating handoff."
+                    : "Only admins and directors can edit the awarded amount."
+                }
               />
               <Input
                 id="awardedAmount"
@@ -652,7 +659,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 min="0"
                 placeholder="0.00"
                 value={formData.awardedAmount}
-                disabled={isBidBoardOwned}
+                disabled={isBidBoardOwned || !canEditAwarded}
                 onChange={(e) => handleChange("awardedAmount", e.target.value)}
               />
               {fieldErrors.awardedAmount && <p className="text-xs text-red-600">{fieldErrors.awardedAmount}</p>}
