@@ -104,9 +104,14 @@ export function DealEstimatesCard({
           <span className="text-sm text-muted-foreground">Bid Estimate</span>
           <span className="text-sm font-medium">{formatCurrency(deal.bidEstimate)}</span>
         </div>
-        <div className="flex justify-between items-center">
-          <span className="text-sm text-muted-foreground">Awarded Amount</span>
-          <span className="text-sm font-semibold">{formatCurrency(deal.awardedAmount)}</span>
+        <div className="space-y-1">
+          <div className="flex justify-between items-center">
+            <span className="text-sm text-muted-foreground">Awarded Amount</span>
+            <span className="text-sm font-semibold">{formatCurrency(deal.awardedAmount)}</span>
+          </div>
+          {deal.awardedAmountOverridden ? (
+            <p className="text-xs text-muted-foreground">Manually set — not synced from Procore.</p>
+          ) : null}
         </div>
         <div className="flex justify-between items-center">
           <span className="text-sm text-muted-foreground">Change Orders</span>
