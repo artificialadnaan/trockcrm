@@ -8,6 +8,7 @@ import {
   DollarSign,
   Gauge,
   LineChart,
+  MapPinned,
   PieChart,
   ShieldAlert,
   TrendingUp,
@@ -68,6 +69,7 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     reports: [
       { name: "Pipeline Velocity", description: "Stage movement, aging, and value trends.", icon: TrendingUp, path: "/reports/sales/pipeline-velocity" },
       { name: "Closed Won Revenue", description: "Booked revenue by rep, office, and period.", icon: DollarSign, path: "/reports/sales/closed-won-revenue" },
+      { name: "Reports by Region", description: "Won / pipeline / win rate / avg + forecast, stage mix and top reps, segmented by deal Region (with the Unassigned bucket).", icon: MapPinned, path: "/reports/region" },
       { name: "Lead Conversion", description: "Lead source performance through contract.", icon: ChartNoAxesCombined, path: "/reports/sales/lead-conversion" },
     ],
   },

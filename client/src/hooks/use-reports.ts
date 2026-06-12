@@ -6,6 +6,7 @@ import type {
   EvidenceRequest,
 } from "@/pages/reports/monday-showcase/types";
 import type { RepPackData, AtRiskWatchlist } from "@/pages/reports/part4-types";
+import type { RegionReportData } from "@/pages/reports/region-report-types";
 
 export interface SavedReport {
   id: string;
@@ -1498,4 +1499,40 @@ export function useAtRiskWatchlist(repId?: string) {
   }, [repId]);
 
   return { data, loading, error };
+}
+
+// Reports by Region. from/to window the Won/Lost metrics; pipeline/forecast are snapshots. The monotonic
+// request guard drops stale responses when the period toggle fires several fetches in quick succession.
+export function useRegionReport(from?: string, to?: string) {
+  const [data, setData] = useState<RegionReportData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const latestRequest = useRef(0);
+
+  const fetchReport = useCallback(async () => {
+    const requestId = ++latestRequest.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (from) params.set("from", from);
+      if (to) params.set("to", to);
+      const qs = params.toString();
+      const result = await api<{ data: RegionReportData }>(`/reports/region${qs ? `?${qs}` : ""}`);
+      if (requestId !== latestRequest.current) return;
+      setData(result.data);
+    } catch (err: unknown) {
+      if (requestId !== latestRequest.current) return;
+      setError(err instanceof Error ? err.message : "Failed to load region report");
+      setData(null);
+    } finally {
+      if (requestId === latestRequest.current) setLoading(false);
+    }
+  }, [from, to]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
 }

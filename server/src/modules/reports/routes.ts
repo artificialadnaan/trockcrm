@@ -82,8 +82,9 @@ import {
 import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
+import { getRegionReport } from "./region-report-service.js";
 import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, classifyViewsState, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
-import { businessToday, shiftBusinessDate } from "../../lib/period.js";
+import { businessToday, shiftBusinessDate, getWtdPeriod } from "../../lib/period.js";
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -246,6 +247,23 @@ router.get("/win-loss", requireDirector, async (req, res, next) => {
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,
     });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/region?from=2026-01-01&to=2026-12-31
+// Reports by Region: per-region won/pipeline/win-rate/avg + forecast + stage matrix + top reps + movers.
+// from/to window the Won/Lost metrics (canonical won_closed_date / lost_at); pipeline/forecast/stage-matrix
+// are current snapshots; movers are week-based. Defaults to the current week-to-date when absent.
+router.get("/region", requireDirector, async (req, res, next) => {
+  try {
+    const fallback = getWtdPeriod("to_date");
+    const from = readOptionalIsoDate(req.query.from, "from") ?? fallback.from;
+    const to = readOptionalIsoDate(req.query.to, "to") ?? fallback.to;
+    const data = await getRegionReport(req.tenantDb!, { from, to });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
