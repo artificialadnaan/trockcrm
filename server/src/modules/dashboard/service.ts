@@ -29,6 +29,7 @@ import {
 } from "@trock-crm/shared/types";
 import { db } from "../../db.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { computeRepEarnedFloorGate } from "../commissions/floor-gate.js";
 import {
   getPipelineSummary,
   getWinRateTrend,
@@ -1146,10 +1147,18 @@ async function getCommissionDealRollups(
 
 function allocateDealCommissions(
   rollups: CommissionDealRollup[],
-  direct: DirectCommissionMetrics
+  directEarnedCommission: number,
+  gateMet: boolean
 ): RepCommissionDealEarning[] {
-  if (direct.directEarnedCommission <= 0) return [];
-  return rollups.filter((rollup) => rollup.earnedCommission > 0);
+  // The breakdown lists every deal that carries intrinsic earned commission.
+  const earningRows = rollups.filter((rollup) => rollup.earnedCommission > 0);
+  if (!gateMet) {
+    // Below floor: keep the SAME rows visible but zero each per-deal earned commission. The breakdown
+    // must never vanish just because the rep is under their floor.
+    return earningRows.map((rollup) => ({ ...rollup, earnedCommission: 0 }));
+  }
+  if (directEarnedCommission <= 0) return [];
+  return earningRows;
 }
 
 /**
@@ -1220,27 +1229,35 @@ async function getOverrideEarnedCommission(
 ): Promise<number> {
   if (managerOverrideRate <= 0) return 0;
 
-  const result = await tenantDb.execute(sql`
-    SELECT COALESCE(SUM(dsc.amount * ${String(managerOverrideRate)}::numeric), 0)::numeric AS override_earned
+  // The override base is each report's EARNED commission, gated by THAT report's own floor through the
+  // single floor check (computeRepEarnedFloorGate). A report below their floor earns $0, so there is
+  // nothing for the manager to override on that report's deals — no earned commission, nothing to
+  // override. (Enumerating reports and reusing the one helper keeps the override gate from drifting
+  // away from the per-rep gate; for org-sized rosters this is a handful of indexed lookups.)
+  const reportsResult = await tenantDb.execute(sql`
+    SELECT u.id::text AS id
     FROM ${users} u
-    JOIN ${dealSignedCommissions} dsc ON dsc.rep_user_id = u.id
-    JOIN ${deals} d ON d.id = dsc.deal_id
-    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE u.is_active = true
       AND u.role = 'rep'
       AND u.reports_to = ${managerId}
-      AND COALESCE(d.is_test_data, false) = false
-      AND ${dashboardEarnedSignedDateSql()} IS NOT NULL
-      AND psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')
-      ${dashboardNotOnHoldDealSql()}
-      AND ${dashboardEarnedSignedDateSql()} >= ${fromDate}
-      AND ${dashboardEarnedSignedDateSql()} <= ${toDate}
+      -- Exclude flagged smoke-test / duplicate accounts from the override base, matching the commission
+      -- roster (getDirectorRepCommissionRows, P2-8 Codex round 2).
+      AND COALESCE(u.is_test_data, false) = false
   `);
-  const rows = (result as any).rows ?? result;
-  return Number(Number(rows[0]?.override_earned ?? 0).toFixed(2));
+  const reportRows = ((reportsResult as any).rows ?? reportsResult) as Array<{ id: string }>;
+
+  let overrideBase = 0;
+  for (const report of reportRows) {
+    const gate = await computeRepEarnedFloorGate(tenantDb, report.id, { from: fromDate, to: toDate });
+    if (gate.met) overrideBase += gate.earnedCommission;
+  }
+
+  return Number((overrideBase * managerOverrideRate).toFixed(2));
 }
 
-async function getRepCommissionSummary(
+// Exported for the floor-gate runtime test (PGlite), which proves Engine B gates earned + override and
+// keeps the breakdown visible, and reconciles with Engine A (getRepCommissionDashboard).
+export async function getRepCommissionSummary(
   tenantDb: TenantDb,
   repId: string,
   fromDate: string,
@@ -1255,31 +1272,47 @@ async function getRepCommissionSummary(
         rollingFloor: 0,
         overrideRate: 0,
       };
+  // Floor gate — the single source of truth, shared with Engine A (getRepCommissionDashboard) and the
+  // manager-override roll-up. Below floor, this rep's earned commission is $0 everywhere; at/above floor
+  // the FULL earned amount is recognized (no below-floor deductible).
+  const floorGate = await computeRepEarnedFloorGate(tenantDb, repId, { from: fromDate, to: toDate });
+
   const direct = await getDirectCommissionMetrics(tenantDb, repId, config, fromDate, toDate);
   const commissionRollups = await getCommissionDealRollups(tenantDb, repId, config, fromDate, toDate);
   const potentialRevenue = await getRepPotentialRevenue(tenantDb, repId);
   const potentialMargin = potentialRevenue;
-  const potentialEligibleRevenue = Math.max(potentialRevenue - direct.floorRemaining, 0);
-  const potentialCommission = Number((potentialEligibleRevenue * config.commissionRate).toFixed(2));
+  // Potential/in-pipeline is OUT OF SCOPE for the floor gate. The legacy (revenue − floor) deductible is
+  // removed (we use a GATE model, not a deductible): projected commission is the full pipeline revenue ×
+  // rate.
+  const potentialCommission = Number((potentialRevenue * config.commissionRate).toFixed(2));
+
+  // Below floor → earned commission is $0: the rep's direct earned AND the manager override they collect
+  // on their reports (getOverrideEarnedCommission gates each report through the same helper, so a report
+  // below their own floor contributes $0 to this manager's override).
+  const directEarnedCommission = floorGate.met ? direct.directEarnedCommission : 0;
   const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate);
-  const totalEarnedCommission = Number((direct.directEarnedCommission + overrideEarnedCommission).toFixed(2));
-  const deals = allocateDealCommissions(commissionRollups, direct);
+  const totalEarnedCommission = Number((directEarnedCommission + overrideEarnedCommission).toFixed(2));
+  // Breakdown stays visible regardless of the gate (rows listed, per-deal earned zeroed when below floor).
+  const deals = allocateDealCommissions(commissionRollups, directEarnedCommission, floorGate.met);
+  // floorRemaining now reports the gate hurdle: how much qualifying revenue is still needed to clear the
+  // floor (0 once met).
+  const floorRemaining = Number(Math.max(floorGate.floor - floorGate.qualifyingRevenue, 0).toFixed(2));
 
   return {
     summary: {
       commissionRate: config.commissionRate,
       overrideRate: config.overrideRate,
-      rollingFloor: config.rollingFloor,
+      rollingFloor: floorGate.floor,
       rollingPaidRevenue: direct.rollingPaidRevenue,
       rollingCommissionableMargin: direct.rollingCommissionableMargin,
-      floorRemaining: direct.floorRemaining,
+      floorRemaining,
       newCustomerRevenue: direct.newCustomerRevenue,
       newCustomerShare: direct.newCustomerShare,
       newCustomerShareFloor: config.newCustomerShareFloor,
       meetsNewCustomerShare: direct.meetsNewCustomerShare,
       estimatedPaymentCount: direct.estimatedPaymentCount,
       excludedLowMarginRevenue: direct.excludedLowMarginRevenue,
-      directEarnedCommission: direct.directEarnedCommission,
+      directEarnedCommission,
       overrideEarnedCommission,
       totalEarnedCommission,
       potentialRevenue,

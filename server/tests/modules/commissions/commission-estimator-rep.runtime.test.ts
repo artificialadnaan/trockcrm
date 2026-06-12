@@ -31,7 +31,7 @@ beforeAll(async () => {
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL);
     CREATE TABLE companies (id uuid PRIMARY KEY, name text);
     CREATE TABLE properties (id uuid PRIMARY KEY, name text, address text);
-    CREATE TABLE user_commission_settings (user_id uuid PRIMARY KEY, commission_rate numeric, is_active boolean NOT NULL DEFAULT true);
+    CREATE TABLE user_commission_settings (user_id uuid PRIMARY KEY, commission_rate numeric, rolling_floor numeric NOT NULL DEFAULT 0, is_active boolean NOT NULL DEFAULT true);
     CREATE TABLE commission_deal_snapshots (
       deal_id uuid, rep_user_id uuid, last_commission_amount numeric, last_computed_at timestamptz,
       PRIMARY KEY (deal_id, rep_user_id)
