@@ -21,6 +21,7 @@ export function Button({
   disabled = false,
   style,
   accessibilityLabel,
+  icon,
 }: {
   title: string;
   onPress?: () => void;
@@ -29,6 +30,7 @@ export function Button({
   disabled?: boolean;
   style?: ViewProps["style"];
   accessibilityLabel?: string;
+  icon?: React.ReactNode;
 }) {
   const isDisabled = disabled || loading;
   const bg =
@@ -51,7 +53,10 @@ export function Button({
       {loading ? (
         <ActivityIndicator color={fg} />
       ) : (
-        <Text style={[styles.buttonText, { color: fg }]}>{title}</Text>
+        <>
+          {icon ? <View style={styles.buttonIcon}>{icon}</View> : null}
+          <Text style={[styles.buttonText, { color: fg }]}>{title}</Text>
+        </>
       )}
     </Pressable>
   );
@@ -151,6 +156,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
   },
   buttonGhost: { borderWidth: 1, borderColor: theme.color.border },
+  buttonIcon: { marginRight: theme.space.sm },
   buttonText: { fontFamily: theme.font.semibold, fontSize: 16 },
   input: {
     minHeight: 48,

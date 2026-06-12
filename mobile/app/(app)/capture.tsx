@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
+import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../../src/theme/theme";
 import { useAuth } from "../../src/auth/AuthContext";
 import { usePendingPhotos } from "../../src/query/hooks";
@@ -343,8 +344,23 @@ export default function CaptureScreen() {
 
         {/* Capture actions */}
         <View style={styles.actions}>
-          <Button title="📸 Open camera" onPress={openCamera} disabled={uploading} style={{ flex: 1 }} />
-          <Button title="🖼 Import" variant="ghost" onPress={importPhotos} disabled={uploading} style={{ flex: 1 }} />
+          <Button
+            title="Open camera"
+            icon={<Ionicons name="camera" size={18} color={theme.color.textInverse} />}
+            onPress={openCamera}
+            disabled={uploading}
+            accessibilityLabel="Open camera"
+            style={{ flex: 1 }}
+          />
+          <Button
+            title="Import"
+            variant="ghost"
+            icon={<Ionicons name="images-outline" size={18} color={theme.color.textPrimary} />}
+            onPress={importPhotos}
+            disabled={uploading}
+            accessibilityLabel="Import photos"
+            style={{ flex: 1 }}
+          />
         </View>
 
         {photos.length > 0 ? (

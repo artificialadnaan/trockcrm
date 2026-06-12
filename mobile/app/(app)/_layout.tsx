@@ -1,11 +1,15 @@
 import React from "react";
 import { Redirect, Tabs } from "expo-router";
-import { ActivityIndicator, Text, View } from "react-native";
+import { ActivityIndicator, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../../src/auth/AuthContext";
 import { theme } from "../../src/theme/theme";
 
-function TabIcon({ emoji, focused }: { emoji: string; focused: boolean }) {
-  return <Text style={{ fontSize: 22, opacity: focused ? 1 : 0.55 }}>{emoji}</Text>;
+// Monochrome vector icons so the active tab icon inherits tabBarActiveTintColor
+// (brand red) in lockstep with its label — the emoji glyphs never picked up the tint.
+type IoniconName = React.ComponentProps<typeof Ionicons>["name"];
+function TabIcon({ name, color }: { name: IoniconName; color: string }) {
+  return <Ionicons name={name} size={23} color={color} />;
 }
 
 /** Authenticated tab shell (Projects / Capture / Profile) — replaces FieldLayout. */
@@ -33,15 +37,15 @@ export default function AppLayout() {
     >
       <Tabs.Screen
         name="projects"
-        options={{ title: "Projects", tabBarIcon: ({ focused }) => <TabIcon emoji="📁" focused={focused} /> }}
+        options={{ title: "Projects", tabBarIcon: ({ color }) => <TabIcon name="folder-outline" color={color} /> }}
       />
       <Tabs.Screen
         name="capture"
-        options={{ title: "Capture", tabBarIcon: ({ focused }) => <TabIcon emoji="📷" focused={focused} /> }}
+        options={{ title: "Capture", tabBarIcon: ({ color }) => <TabIcon name="camera-outline" color={color} /> }}
       />
       <Tabs.Screen
         name="profile"
-        options={{ title: "Profile", tabBarIcon: ({ focused }) => <TabIcon emoji="👤" focused={focused} /> }}
+        options={{ title: "Profile", tabBarIcon: ({ color }) => <TabIcon name="person-outline" color={color} /> }}
       />
     </Tabs>
   );
