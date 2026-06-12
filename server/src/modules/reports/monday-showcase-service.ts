@@ -646,6 +646,8 @@ export interface EvidenceRecord {
   dealType: string | null;
   /** whole days the record has sat in its CURRENT stage (null when no stage-entry date). */
   daysInStage: number | null;
+  /** the deal's stored win probability (0-100), shown as-is. null = unknown (NOT zero); always null for leads. */
+  winProbability: number | null;
 }
 
 export interface EvidenceTotal {
@@ -703,7 +705,8 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
     COALESCE(c.name, '') AS company_name,
     COALESCE(NULLIF(c.region, ''), NULLIF(rc.name, ''), '') AS region,
     COALESCE(NULLIF(ptc.name, ''), NULLIF(d.project_type, ''), '') AS deal_type,
-    ((now() AT TIME ZONE 'America/Chicago')::date - (d.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
+    ((now() AT TIME ZONE 'America/Chicago')::date - (d.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage,
+    d.win_probability AS win_probability
   `;
 }
 
@@ -809,7 +812,8 @@ export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string):
            COALESCE(c.name, '') AS company_name,
            COALESCE(NULLIF(c.region, ''), '') AS region,
            COALESCE(NULLIF(ptc.name, ''), NULLIF(l.project_type, ''), '') AS deal_type,
-           ((now() AT TIME ZONE 'America/Chicago')::date - (l.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage
+           ((now() AT TIME ZONE 'America/Chicago')::date - (l.stage_entered_at AT TIME ZONE 'America/Chicago')::date)::int AS days_in_stage,
+           NULL::int AS win_probability
     FROM ${leads} l
     JOIN ${pipelineStageConfig} psc ON psc.id = l.stage_id
     LEFT JOIN ${users} u ON u.id = l.assigned_rep_id
@@ -865,6 +869,7 @@ interface EvidenceRow {
   region: string | null;
   deal_type: string | null;
   days_in_stage: unknown;
+  win_probability: unknown;
 }
 
 /**
@@ -920,6 +925,7 @@ export async function getMondayShowcaseEvidence(
     region: r.region ? String(r.region) : null,
     dealType: r.deal_type ? String(r.deal_type) : null,
     daysInStage: r.days_in_stage == null ? null : Number(r.days_in_stage),
+    winProbability: r.win_probability == null ? null : Number(r.win_probability),
   }));
 
   const total: EvidenceTotal = {

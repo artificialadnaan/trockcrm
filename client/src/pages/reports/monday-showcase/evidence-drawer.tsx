@@ -10,7 +10,8 @@ import {
 } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useShowcaseEvidence } from "@/hooks/use-reports";
-import { usd, int } from "../format";
+import { usd, int, winPct } from "../format";
+import { ScrollSyncX } from "../scroll-sync-x";
 import type { EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence } from "./types";
 
 // Literal-day formatting (no UTC-midnight off-by-one), matching the app's date-only rendering (#572).
@@ -26,12 +27,12 @@ function formatCohortDate(iso: string | null): string {
 }
 
 // ---- sorting (client-side; the records are the full reconciling set, so sorting never drops a row) ----
-type SortKey = "name" | "company" | "owner" | "value" | "date" | "region" | "type" | "stage" | "age";
+type SortKey = "name" | "company" | "owner" | "value" | "date" | "winprob" | "region" | "type" | "stage" | "age";
 interface SortState {
   key: SortKey;
   dir: "asc" | "desc";
 }
-const NUMERIC_KEYS: ReadonlySet<SortKey> = new Set(["value", "age"]);
+const NUMERIC_KEYS: ReadonlySet<SortKey> = new Set(["value", "winprob", "age"]);
 
 function sortAccessor(r: EvidenceRecord, key: SortKey): string | number {
   switch (key) {
@@ -45,6 +46,9 @@ function sortAccessor(r: EvidenceRecord, key: SortKey): string | number {
       return r.value ?? Number.NEGATIVE_INFINITY;
     case "date":
       return r.cohortDate ?? "";
+    case "winprob":
+      // blanks sort to the bottom on desc (the common case is "unknown") — never coerced to 0
+      return r.winProbability ?? Number.NEGATIVE_INFINITY;
     case "region":
       return r.region?.toLowerCase() ?? "";
     case "type":
@@ -115,6 +119,15 @@ function columnsFor(ev: MondayShowcaseEvidence): ColumnDef[] {
       header: ev.dateAxisLabel,
       show: true,
       render: (r) => <span className="whitespace-nowrap text-slate-600">{formatCohortDate(r.cohortDate)}</span>,
+    },
+    {
+      // The deal's real win_probability, shown as-is. Hidden for leads (no win prob). Blank renders an em
+      // dash via winPct — a missing value is "unknown", never "0%"/"NaN%".
+      key: "winprob",
+      header: "Win %",
+      numeric: true,
+      show: hasValue,
+      render: (r) => <span className="text-slate-600">{winPct(r.winProbability)}</span>,
     },
     {
       key: "region",
@@ -287,9 +300,12 @@ export function EvidenceDrawer({
               </div>
             ) : (
               <>
-                <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-100">
+                <ScrollSyncX
+                  className="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-100"
+                  bodyClassName="min-h-0 flex-1 overflow-auto"
+                >
                   <EvidenceTable ev={data} onOpenRecord={openRecord} />
-                </div>
+                </ScrollSyncX>
                 <p className="px-1 text-xs text-muted-foreground">
                   Shown on the {data.dateAxisLabel.toLowerCase()} axis — the cohort this number is defined on.
                   Click a column to sort; click a row to open the record.

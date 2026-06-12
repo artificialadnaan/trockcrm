@@ -84,7 +84,8 @@ beforeAll(async () => {
       assigned_rep_id uuid, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, won_closed_date date, expected_close_date date,
       dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric,
-      company_id uuid, region_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz
+      company_id uuid, region_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz,
+      win_probability integer
     );
     CREATE TABLE deal_stage_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, to_stage_id uuid NOT NULL,
