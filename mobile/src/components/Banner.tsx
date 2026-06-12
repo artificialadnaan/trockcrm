@@ -19,7 +19,7 @@ export function Banner({
         : { bg: theme.color.surfaceMuted, border: theme.color.border, text: theme.color.textMuted };
   return (
     <View style={[styles.banner, { backgroundColor: palette.bg, borderColor: palette.border }]} accessibilityRole="alert">
-      <Text style={[styles.text, { color: palette.text }, action && styles.textFlex]}>{message}</Text>
+      <Text style={[styles.text, styles.textFlex, { color: palette.text }]}>{message}</Text>
       {action ? (
         <Pressable onPress={action.onPress} hitSlop={8} accessibilityRole="button" accessibilityLabel={action.label}>
           <Text style={[styles.action, { color: palette.text }]}>{action.label}</Text>
