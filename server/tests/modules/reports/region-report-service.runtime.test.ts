@@ -234,9 +234,11 @@ describe("getRegionReport — exclusions & edge cases", () => {
       INSERT INTO deals (id, name, stage_id, region_id, lost_at, bid_estimate) VALUES
         ('${U("elw")}','lost west','${E.lost}','${ER.west}','2026-05-25T12:00:00Z',5000),
         ('${U("etz")}','lost tz-before-window','${E.lost}','${ER.west}','2026-05-24T02:00:00Z',1000);
-      -- LOST with lost_at NULL but actual_close_date in-window → counted via the canonical COALESCE fallback.
+      -- LOST with lost_at NULL, actual_close_date on the FROM-date boundary (05-24): counted via the canonical
+      -- COALESCE fallback. actual_close_date is a DATE — it must be used as-is (NOT round-tripped through
+      -- ::timestamptz, which would shift it to 05-23 under the UTC session and drop it from the window).
       INSERT INTO deals (id, name, stage_id, region_id, lost_at, actual_close_date, bid_estimate) VALUES
-        ('${U("elf")}','lost fallback','${E.lost}','${ER.west}',NULL,'2026-05-26',3000);
+        ('${U("elf")}','lost fallback','${E.lost}','${ER.west}',NULL,'2026-05-24',3000);
       -- OPEN: on_hold (excluded from pipeline) + normal.
       INSERT INTO deals (id, name, stage_id, region_id, expected_close_date, bid_estimate, on_hold) VALUES
         ('${U("eo1")}','open onhold','${E.opp}','${ER.west}','2026-06-10',30000,true),
@@ -253,9 +255,9 @@ describe("getRegionReport — exclusions & edge cases", () => {
     const west = r.regions.find((x) => x.region === "West Coast")!;
     // 100k normal + 40k archived + 10k boundary-from; on_hold/test_data/after-to excluded.
     expect(west.won).toEqual({ value: 150000, count: 3 });
-    // West win rate = won 3 / (won 3 + lost 2) = 60%. Lost = elw (05-25) + elf (lost_at-NULL fallback,
-    // 05-26); etz (business 05-23) is EXCLUDED by the business-tz window — proves lost windowing isn't
-    // session-tz-dependent.
+    // West win rate = won 3 / (won 3 + lost 2) = 60%. Lost = elw (lost_at 05-25) + elf (actual_close_date
+    // DATE-fallback on the 05-24 from-boundary, used as-is); etz (lost_at → business 05-23) is EXCLUDED by the
+    // business-tz window. Proves lost windowing isn't session-tz-dependent AND the DATE arm isn't shifted.
     expect(west.winRate).toBeCloseTo(60, 1);
   });
 

@@ -135,10 +135,13 @@ const REGION_ORDER = sql`COALESCE(rc.display_order, ${UNASSIGNED_ORDER})`;
 const wonVal = aliasedEffectiveWonDealValueSql("d");
 const openVal = dealValueSqlForBasis("d", "open_best_estimate");
 const wonDate = aliasedWonHsClosedWonDateSql("d"); // d.won_closed_date (DATE — already tz-independent)
-const lostDate = sql`COALESCE(d.lost_at, d.actual_close_date::timestamptz, d.stage_entered_at)`;
 // A timestamptz → the office's BUSINESS (Central) calendar date — so windowing matches the period dates
 // regardless of the DB session timezone (same convention as the showcase's days-in-stage / stage-entry).
 const businessDate = (tsExpr: SQL): SQL => sql`((${tsExpr}) AT TIME ZONE ${BUSINESS_TIMEZONE})::date`;
+// Canonical lost business-date, PER ARM: lost_at / stage_entered_at are timestamptz → convert through the
+// business tz; actual_close_date is ALREADY a calendar DATE → use it directly. Round-tripping the DATE arm
+// through ::timestamptz would shift it a day under a non-CT session (Codex P2).
+const lostBusinessDate = sql`COALESCE((d.lost_at AT TIME ZONE ${BUSINESS_TIMEZONE})::date, d.actual_close_date, (d.stage_entered_at AT TIME ZONE ${BUSINESS_TIMEZONE})::date)`;
 const reportable = sql`${aliasedActiveDealCountFilterSql("d")} AND COALESCE(d.is_test_data, false) = false`;
 const COMMON_JOINS = sql`
   FROM deals d
@@ -152,7 +155,7 @@ const TERMINAL_SLUGS = [...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS];
 const wonInWindow = (from: string, to: string): SQL =>
   sql`psc.slug IN (${slugList(WON_STAGE_SLUGS)}) AND ${aliasedHasUsableWonDateSql("d")} AND ${wonDate} >= ${from}::date AND ${wonDate} <= ${to}::date`;
 const lostInWindow = (from: string, to: string): SQL =>
-  sql`psc.slug IN (${slugList(LOST_STAGE_SLUGS)}) AND ${businessDate(lostDate)} >= ${from}::date AND ${businessDate(lostDate)} <= ${to}::date`;
+  sql`psc.slug IN (${slugList(LOST_STAGE_SLUGS)}) AND ${lostBusinessDate} >= ${from}::date AND ${lostBusinessDate} <= ${to}::date`;
 const OPEN_PREDICATE = sql`d.is_active = true AND psc.is_terminal = false`;
 
 const pct = (part: number, whole: number): number | null => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : null);
