@@ -165,14 +165,15 @@ export default function ProjectDetailScreen() {
 
         {notice ? <Banner message={notice} /> : null}
 
-        {/* Grouping + filters */}
-        <View style={{ gap: theme.space.sm }}>
-          <View style={styles.rowBetween}>
-            <SectionLabel>Group by</SectionLabel>
-            <Pressable onPress={() => setShowFilters((s) => !s)} hitSlop={8}>
-              <Text style={styles.linkMuted}>{showFilters ? "Hide filters" : "Filters"}</Text>
-            </Pressable>
-          </View>
+        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
+        {allPhotos.length > 0 ? (
+          <View style={{ gap: theme.space.sm }}>
+            <View style={styles.rowBetween}>
+              <SectionLabel>Group by</SectionLabel>
+              <Pressable onPress={() => setShowFilters((s) => !s)} hitSlop={10}>
+                <Text style={styles.linkMuted}>{showFilters ? "Hide filters" : "Filters"}</Text>
+              </Pressable>
+            </View>
           <View style={styles.chipRow}>
             {GROUPINGS.map((g) => (
               <Chip key={g.value} label={g.label} selected={grouping === g.value} onPress={() => setGrouping(g.value)} />
@@ -222,8 +223,9 @@ export default function ProjectDetailScreen() {
                 </View>
               ) : null}
             </View>
-          ) : null}
-        </View>
+            ) : null}
+          </View>
+        ) : null}
 
         {/* Gallery */}
         {photosQuery.isLoading ? (
@@ -248,9 +250,13 @@ export default function ProjectDetailScreen() {
         <View style={{ gap: theme.space.sm }}>
           <SectionLabel>Reports</SectionLabel>
           {reportsQuery.isLoading ? (
-            <LoadingState />
+            <LoadingState label="Loading reports…" />
           ) : (reportsQuery.data?.reports ?? []).length === 0 ? (
-            <Text style={styles.meta}>No reports yet. Build one from the photos above.</Text>
+            <Text style={styles.meta}>
+              {allPhotos.length === 0
+                ? "No reports yet. Build one once you've added photos."
+                : "No reports yet. Build one from the photos above."}
+            </Text>
           ) : (
             (reportsQuery.data?.reports ?? []).map((report) => (
               <Pressable

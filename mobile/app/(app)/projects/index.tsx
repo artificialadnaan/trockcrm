@@ -103,7 +103,9 @@ export default function ProjectsScreen() {
         ListEmptyComponent={
           projectsQuery.isLoading ? (
             <LoadingState label="Loading projects…" />
-          ) : starred.length > 0 ? null : (
+          ) : // On error the header Banner already explains it + offers pull-to-refresh — don't
+          // also claim "No projects yet" (those two messages contradict each other) (#8).
+          projectsQuery.isError ? null : starred.length > 0 ? null : (
             <EmptyState
               title={searching ? "No matches" : "No projects yet"}
               subtitle={searching ? `Nothing found for "${debounced}".` : "Active projects will appear here."}

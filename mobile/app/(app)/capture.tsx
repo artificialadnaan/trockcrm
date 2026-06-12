@@ -414,10 +414,12 @@ export default function CaptureScreen() {
             />
           </View>
         ) : (
-          <EmptyState
-            title="No photos yet"
-            subtitle="Open the camera to burst-capture, or import from your library."
-          />
+          <View style={styles.emptyWrap}>
+            <EmptyState
+              title="No photos yet"
+              subtitle="Open the camera to burst-capture, or import from your library."
+            />
+          </View>
         )}
 
         {/* Pending captures */}
@@ -480,7 +482,10 @@ export default function CaptureScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
+  // flexGrow lets the "No photos yet" empty state center in the leftover space
+  // instead of hugging the buttons; no effect once the tray makes content scroll.
+  body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl, flexGrow: 1 },
+  emptyWrap: { flexGrow: 1, justifyContent: "center" },
   targetCard: {
     flexDirection: "row",
     alignItems: "center",
