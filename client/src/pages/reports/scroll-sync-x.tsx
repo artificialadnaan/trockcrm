@@ -16,28 +16,22 @@ interface ScrollSyncXProps {
   className?: string;
   /** the scrollable body's classes — the caller controls its height/overflow (e.g. `min-h-0 flex-1 overflow-auto`). */
   bodyClassName?: string;
-  ariaLabel?: string;
 }
 
-export function ScrollSyncX({
-  children,
-  className,
-  bodyClassName = "overflow-auto",
-  ariaLabel = "Scroll table horizontally",
-}: ScrollSyncXProps) {
+export function ScrollSyncX({ children, className, bodyClassName = "overflow-auto" }: ScrollSyncXProps) {
   const topRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   // width of the spacer inside the top rail = the body's scrollable content width, so the top scrollbar's
   // thumb mirrors the body's. 0 until measured (and in jsdom, where there is no layout).
   const [contentWidth, setContentWidth] = useState(0);
 
+  // Attach the bi-directional scroll mirror ONCE — the refs are stable, so this must not re-run per render.
+  // `lock` prevents the programmatic scrollLeft assignment from ping-ponging back via the other element's
+  // scroll event (released on the next frame).
   useEffect(() => {
     const top = topRef.current;
     const body = bodyRef.current;
     if (!top || !body) return;
-
-    // Bi-directional scroll mirror. `lock` prevents the programmatic scrollLeft assignment from
-    // ping-ponging back via the other element's scroll event (released on the next frame).
     let lock = false;
     const mirror = (from: HTMLDivElement, to: HTMLDivElement) => {
       if (lock) return;
@@ -51,21 +45,24 @@ export function ScrollSyncX({
     const onBody = () => mirror(body, top);
     top.addEventListener("scroll", onTop, { passive: true });
     body.addEventListener("scroll", onBody, { passive: true });
-
-    const measure = () => setContentWidth(body.scrollWidth);
-    measure();
-    let ro: ResizeObserver | undefined;
-    if (typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(measure);
-      ro.observe(body);
-      if (body.firstElementChild) ro.observe(body.firstElementChild);
-    }
-
     return () => {
       top.removeEventListener("scroll", onTop);
       body.removeEventListener("scroll", onBody);
-      ro?.disconnect();
     };
+  }, []);
+
+  // Keep the top rail's spacer width equal to the body's scrollable content width — re-measure when the
+  // content (or its size) changes — so the top scrollbar's thumb matches the body's.
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const measure = () => setContentWidth(body.scrollWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(body);
+    if (body.firstElementChild) ro.observe(body.firstElementChild);
+    return () => ro.disconnect();
   }, [children]);
 
   return (
@@ -74,7 +71,6 @@ export function ScrollSyncX({
         ref={topRef}
         data-testid="scrollsync-top"
         aria-hidden="true"
-        aria-label={ariaLabel}
         className="scrollbar-top-rail shrink-0 overflow-x-auto overflow-y-hidden"
       >
         <div style={{ width: contentWidth || undefined, height: 1 }} />
