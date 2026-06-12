@@ -364,7 +364,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
                 on_hold_accumulated_seconds, on_hold_accumulated_seconds_at_stage_entry,
                 workflow_route, is_bid_board_owned,
                 proposal_status, estimating_substage, actual_close_date, won_closed_date, contract_signed_date, contract_signed_at,
-                dd_estimate, bid_estimate, awarded_amount, proposal_notes,
+                dd_estimate, bid_estimate, awarded_amount, awarded_amount_overridden, proposal_notes,
                 bid_board_stage_slug, bid_board_stage_family, bid_board_stage_status,
                 lost_reason_id, lost_notes, lost_competitor, lost_at
            FROM ${schemaName}.deals
@@ -449,6 +449,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           lostAt: currentDeal.lost_at,
           bidEstimate: currentDeal.bid_estimate,
           awardedAmount: currentDeal.awarded_amount,
+          awardedAmountOverridden: currentDeal.awarded_amount_overridden,
         },
         currentStage: currentStage
           ? {
@@ -697,6 +698,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         // payload-resolved bid/awarded values (staged into `updates`).
         bidEstimate: null,
         awardedAmount: null,
+        awardedAmountOverridden: false,
       },
       targetStage: {
         id: targetStage.id,

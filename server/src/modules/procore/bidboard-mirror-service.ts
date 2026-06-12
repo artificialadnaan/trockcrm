@@ -118,6 +118,7 @@ type MirrorableDeal = {
   lostAt: Date | string | null;
   bidEstimate?: string | null;
   awardedAmount?: string | null;
+  awardedAmountOverridden?: boolean | null;
 };
 
 type MirrorableStage = {
@@ -415,7 +416,12 @@ export function buildBidBoardMirrorUpdate(input: {
   if (input.payload.bidEstimate !== undefined) {
     updates.bidEstimate = input.payload.bidEstimate;
   }
-  if (input.payload.awardedAmount !== undefined) {
+  // awarded_amount is permanently human-owned once an admin/director manually overrides it: the
+  // mirror must never write it again, regardless of payload. When locked, skip both the payload
+  // stage here and the won-seed below; the persist COALESCE(updates.awardedAmount, awarded_amount)
+  // then preserves the existing (human-set) value.
+  const awardedLocked = input.deal.awardedAmountOverridden === true;
+  if (!awardedLocked && input.payload.awardedAmount !== undefined) {
     updates.awardedAmount = input.payload.awardedAmount;
   }
   if (input.payload.proposalNotes !== undefined) {
@@ -497,10 +503,14 @@ export function buildBidBoardMirrorUpdate(input: {
       stagedBid != null && String(stagedBid).trim() !== ""
         ? stagedBid
         : input.deal.bidEstimate;
-    const awardedSeed = awardedAmountSeedOnWin(
-      resolvedAwarded as string | null | undefined,
-      resolvedBid as string | null | undefined
-    );
+    // When the deal's awarded_amount is a human override, never seed it (and the payload stage above
+    // was already skipped) — the mirror defers to the manual value permanently.
+    const awardedSeed = awardedLocked
+      ? null
+      : awardedAmountSeedOnWin(
+          resolvedAwarded as string | null | undefined,
+          resolvedBid as string | null | undefined
+        );
     if (awardedSeed !== null) {
       updates.awardedAmount = awardedSeed; // final SQL: COALESCE(updates.awardedAmount, awarded_amount)
     }
