@@ -273,6 +273,11 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       if (!isBidBoardOwned) {
         payload.ddEstimate = formData.ddEstimate || null;
         payload.bidEstimate = formData.bidEstimate || null;
+      }
+      // Awarded amount is editable by admin/director even on bid-board-owned deals (the server enforces
+      // the same RBAC gate and marks the value overridden so the Procore mirror stops syncing it). DD
+      // and bid estimates stay Procore-owned and are only sent for non-bid-board deals (above).
+      if (canEditAwarded) {
         payload.awardedAmount = formData.awardedAmount || null;
       }
 
@@ -645,12 +650,8 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               <FieldLockLabel
                 htmlFor="awardedAmount"
                 label="Awarded Amount ($)"
-                locked={isBidBoardOwned || !canEditAwarded}
-                message={
-                  isBidBoardOwned
-                    ? "Awarded amount is mirrored from Bid Board after estimating handoff."
-                    : "Only admins and directors can edit the awarded amount."
-                }
+                locked={!canEditAwarded}
+                message="Only admins and directors can edit the awarded amount."
               />
               <Input
                 id="awardedAmount"
@@ -659,7 +660,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 min="0"
                 placeholder="0.00"
                 value={formData.awardedAmount}
-                disabled={isBidBoardOwned || !canEditAwarded}
+                disabled={!canEditAwarded}
                 onChange={(e) => handleChange("awardedAmount", e.target.value)}
               />
               {fieldErrors.awardedAmount && <p className="text-xs text-red-600">{fieldErrors.awardedAmount}</p>}
