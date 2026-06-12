@@ -177,7 +177,30 @@ describe("awarded_amount edit authorization (updateDeal)", () => {
       "office-1"
     );
 
-    expect(result.awardedAmount).toBeDefined();
+    // No 403, and the (numerically-equal) value the rep submitted is accepted.
+    expect(tenantDb.update).toHaveBeenCalled();
+    expect(result.awardedAmount).toBe("1000");
+  });
+
+  it("DOES block a rep sending a non-blank, non-numeric awarded amount on a blank-awarded deal", async () => {
+    // A non-numeric value must NOT normalize to null (which would collide with the blank stored value
+    // and skip the role check). It is a change attempt → AWARDED_AMOUNT_RESTRICTED for a rep.
+    const tenantDb = createUpdateDb({ ...baseExisting, awardedAmount: null });
+
+    await expect(
+      updateDeal(
+        tenantDb as never,
+        "deal-1",
+        { awardedAmount: "abc" },
+        "rep",
+        "rep-1",
+        "office-1"
+      )
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: "AWARDED_AMOUNT_RESTRICTED",
+    });
+    expect(tenantDb.update).not.toHaveBeenCalled();
   });
 });
 

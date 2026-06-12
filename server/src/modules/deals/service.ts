@@ -477,16 +477,18 @@ const BID_BOARD_OWNED_UPDATE_FIELD_LABELS: Partial<Record<keyof UpdateDealInput,
   proposalStatus: "Proposal status",
 };
 
-// Normalize a money input for change-detection: blank/whitespace and non-numeric → null,
-// otherwise the numeric value. Lets semantically-equal money strings ("37027" vs "37027.00",
-// or a whitespace-padded value from a non-UI API client) compare equal, so a rep re-submitting an
-// UNCHANGED awarded amount through the partial-save flow is not falsely blocked on a formatting diff.
-function normalizeMoneyForCompare(value: string | number | null | undefined): number | null {
+// Canonical comparison form for change-detecting a money input:
+//  - blank/whitespace        → null
+//  - parseable money         → canonical numeric string (so "37027" and "37027.00" compare equal,
+//                              and a whitespace-padded value from a non-UI API client is normalized)
+//  - non-blank, UNPARSABLE   → the trimmed raw text (NOT null) — so an invalid value like "abc" can
+//                              never collide with a blank value and skip the awarded-amount RBAC check.
+function normalizeMoneyForCompare(value: string | number | null | undefined): string | null {
   if (value == null) return null;
   const text = String(value).trim();
   if (text === "") return null;
   const n = Number(text);
-  return Number.isFinite(n) ? n : null;
+  return Number.isFinite(n) ? String(n) : text;
 }
 
 function startOfUtcDay(value: Date) {
