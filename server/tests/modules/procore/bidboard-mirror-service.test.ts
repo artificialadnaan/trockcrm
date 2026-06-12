@@ -295,6 +295,230 @@ describe("bid board mirror service", () => {
     expect(result.updates.wonClosedDate).toBe("2026-02-15");
   });
 
+  it("seeds awarded_amount from the deal's bid_estimate on Won entry when awarded is blank", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        bidEstimate: "500",
+        awardedAmount: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      payload: { stageSlug: "won", stageStatus: "signed", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+
+    expect(result.updates.awardedAmount).toBe("500");
+  });
+
+  it("does NOT seed awarded_amount on Won entry when awarded is already present", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        bidEstimate: "500",
+        awardedAmount: "900",
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      payload: { stageSlug: "won", stageStatus: "signed", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+
+    // Awarded already present → never overwritten by the bid estimate.
+    expect(result.updates.awardedAmount).not.toBe("500");
+  });
+
+  it("does NOT seed awarded_amount on Won entry when both awarded and bid are blank", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        bidEstimate: null,
+        awardedAmount: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      payload: { stageSlug: "won", stageStatus: "signed", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+
+    expect(result.updates.awardedAmount).toBeUndefined();
+  });
+
+  it("lets a payload awardedAmount win over the bid-estimate seed on Won entry", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        bidEstimate: "500",
+        awardedAmount: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      payload: {
+        stageSlug: "won",
+        stageStatus: "signed",
+        stageEnteredAt: "2026-04-22T11:00:00.000Z",
+        awardedAmount: "777",
+      },
+    });
+
+    // Payload-provided awarded resolves first → seed does not override it.
+    expect(result.updates.awardedAmount).toBe("777");
+  });
+
+  it("seeds awarded_amount from a payload bidEstimate on Won entry when awarded is blank", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        bidEstimate: null,
+        awardedAmount: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      payload: {
+        stageSlug: "won",
+        stageStatus: "signed",
+        stageEnteredAt: "2026-04-22T11:00:00.000Z",
+        bidEstimate: "640",
+      },
+    });
+
+    // Payload bidEstimate resolves into updates.bidEstimate first, then seeds awarded.
+    expect(result.updates.awardedAmount).toBe("640");
+  });
+
+  it("does NOT seed awarded_amount on a non-Won target even when bid is present and awarded blank", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-estimating",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "drafting",
+        estimatingSubstage: "building_estimate",
+        actualCloseDate: null,
+        wonClosedDate: null,
+        bidEstimate: "500",
+        awardedAmount: null,
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-opportunity", slug: "opportunity", displayOrder: 1 },
+      targetStage: {
+        id: "stage-estimating",
+        slug: "estimating",
+        name: "Estimating",
+        displayOrder: 2,
+        isTerminal: false,
+        workflowFamily: "standard_deal",
+      },
+      payload: { stageSlug: "estimating", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+
+    // Seed is Won-gated → no awarded write on a non-Won transition.
+    expect(result.updates.awardedAmount).toBeUndefined();
+  });
+
   it("accepts historical terminal aliases while storing shared canonical mirror slugs", () => {
     const result = buildBidBoardMirrorUpdate({
       now: new Date("2026-04-23T18:00:00.000Z"),

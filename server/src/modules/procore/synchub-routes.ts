@@ -447,6 +447,8 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           lostNotes: currentDeal.lost_notes,
           lostCompetitor: currentDeal.lost_competitor,
           lostAt: currentDeal.lost_at,
+          bidEstimate: currentDeal.bid_estimate,
+          awardedAmount: currentDeal.awarded_amount,
         },
         currentStage: currentStage
           ? {
@@ -691,6 +693,10 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         lostNotes: null,
         lostCompetitor: null,
         lostAt: null,
+        // Brand-new deal: no existing DB row, so the seed falls back to the
+        // payload-resolved bid/awarded values (staged into `updates`).
+        bidEstimate: null,
+        awardedAmount: null,
       },
       targetStage: {
         id: targetStage.id,
