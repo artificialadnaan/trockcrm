@@ -51,6 +51,7 @@ import { WorkflowBottlenecksPage } from "@/pages/reports/workflow-bottlenecks-pa
 import { MondayShowcasePage } from "@/pages/reports/monday-showcase-page";
 import { ForecastConfidencePage } from "@/pages/reports/forecast-confidence-page";
 import { AtRiskPage } from "@/pages/reports/at-risk-page";
+import { RegionReportPage } from "@/pages/reports/region-report-page";
 import { RepPackPage } from "@/pages/reports/rep-pack-page";
 import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
@@ -260,6 +261,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director"]}>
                     <ForecastConfidencePage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/region"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <RegionReportPage />
                   </RequireRole>
                 )}
               />
