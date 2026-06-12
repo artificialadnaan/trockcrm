@@ -64,6 +64,8 @@ export interface DailySummaryPayload {
     activeReps: number;
     totalReps: number;
     totalActions: number;
+    totalActiveMinutes: number; // team time spent today (sum of per-rep minutes); 0 -> render "—"
+    totalSessions: number; // team browser sessions today
     biggestMover: BiggestMover | null; // null -> render "—", never $NaN/undefined
   };
   wonToday: WonDeal[]; // the headline count AND total derive from THIS array — no count/items drift
@@ -161,13 +163,18 @@ export async function computeDailySummary(client: QueryClient, schema: string, d
   const reps = await resolveReps(client, null);
 
   const perRep: RepRollupInput[] = [];
+  let totalActiveMinutes = 0;
+  let totalSessions = 0;
   for (const rep of reps) {
     const usage = await buildLiveDay(client, schema, rep.id, date);
+    // "minutes where present, — where absent, never 0m": no browser session (firstActiveAt null) -> null.
+    const activeMinutes = usage.firstActiveAt === null ? null : Math.max(1, Math.round(usage.activeSeconds / 60));
+    totalActiveMinutes += activeMinutes ?? 0; // team time spent counts only reps with a real session
+    totalSessions += usage.sessionCount;
     perRep.push({
       name: rep.displayName,
       actions: usage.actionCount,
-      // "minutes where present, — where absent, never 0m": no browser session (firstActiveAt null) -> null.
-      activeMinutes: usage.firstActiveAt === null ? null : Math.max(1, Math.round(usage.activeSeconds / 60)),
+      activeMinutes,
       breakdown: toRepBreakdown(usage.breakdown),
     });
   }
@@ -181,7 +188,14 @@ export async function computeDailySummary(client: QueryClient, schema: string, d
     date,
     office: DAILY_SUMMARY_OFFICE,
     asOfLabel: AS_OF_LABEL,
-    headline: { activeReps: s.activeReps, totalReps: reps.length, totalActions: s.totalActions, biggestMover: s.biggestMover },
+    headline: {
+      activeReps: s.activeReps,
+      totalReps: reps.length,
+      totalActions: s.totalActions,
+      totalActiveMinutes,
+      totalSessions,
+      biggestMover: s.biggestMover,
+    },
     wonToday,
     advancedToday,
     leaderboard: s.leaderboard,

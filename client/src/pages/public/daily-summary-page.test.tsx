@@ -10,7 +10,7 @@ import { DailySummaryPage } from "./daily-summary-page";
 const ZERO = { created: 0, edits: 0, stageMoves: 0, uploads: 0, emails: 0, notes: 0, reports: 0 };
 const ACTIVE = {
   date: "2026-06-12", office: "dallas", asOfLabel: "as of 5:00 PM CT",
-  headline: { activeReps: 2, totalReps: 3, totalActions: 500, biggestMover: { name: "Kaleb", actions: 312 } },
+  headline: { activeReps: 2, totalReps: 3, totalActions: 500, totalActiveMinutes: 150, totalSessions: 8, biggestMover: { name: "Kaleb", actions: 312 } },
   wonToday: [{ dealName: "Anthem on Ashley", repName: "Kaleb Marshall", value: 186000 }],
   advancedToday: [{ dealName: "The Hayward", repName: "Adnaan", fromStage: "Opportunity", toStage: "Estimating" }],
   leaderboard: [
@@ -24,7 +24,7 @@ const ACTIVE = {
 };
 const QUIET = {
   date: "2026-06-13", office: "dallas", asOfLabel: "as of 5:00 PM CT",
-  headline: { activeReps: 0, totalReps: 3, totalActions: 0, biggestMover: null },
+  headline: { activeReps: 0, totalReps: 3, totalActions: 0, totalActiveMinutes: 0, totalSessions: 0, biggestMover: null },
   wonToday: [],
   advancedToday: [],
   leaderboard: [{ rank: 1, name: "Kaleb", actions: 0, activeMinutes: null, breakdown: { ...ZERO } }],
@@ -62,6 +62,8 @@ describe("DailySummaryPage", () => {
     expect(html).toContain("Opportunity"); // from-stage of the advance
     expect(html).toContain("50 created"); // breakdown is the value, not a bar
     expect(html).toContain("Activity by hour");
+    expect(html).toContain("2.5h"); // team time spent (150 min) surfaced in the headline
+    expect(html).toContain("Time"); // the Time stat label
   });
 
   it("enforces the time rule: present -> minutes, absent -> '—', NEVER '0m'", () => {

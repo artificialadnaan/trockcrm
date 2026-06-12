@@ -13,7 +13,7 @@ export interface DailySummaryPayload {
   date: string;
   office: string;
   asOfLabel: string;
-  headline: { activeReps: number; totalReps: number; totalActions: number; biggestMover: BiggestMover | null };
+  headline: { activeReps: number; totalReps: number; totalActions: number; totalActiveMinutes: number; totalSessions: number; biggestMover: BiggestMover | null };
   wonToday: WonDeal[];
   advancedToday: AdvancedMove[];
   leaderboard: LeaderRow[];

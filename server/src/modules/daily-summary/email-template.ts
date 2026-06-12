@@ -50,6 +50,13 @@ function minutesLabel(activeMinutes: number | null): string {
   return activeMinutes == null ? "—" : `${num(activeMinutes)}m`;
 }
 
+/** Team time-spent: 0 -> "—" (no sessions); < 1h -> minutes; otherwise hours to one decimal. */
+function hoursLabel(totalMinutes: number | null | undefined): string {
+  if (!Number.isFinite(totalMinutes) || Number(totalMinutes) <= 0) return "—";
+  const m = Number(totalMinutes);
+  return m < 60 ? `${num(m)}m` : `${(m / 60).toFixed(1)}h`;
+}
+
 /** Non-zero buckets only, highest-signal first, top 4 — the breakdown IS the value, not a bar. */
 function breakdownLine(b: RepBreakdown): string {
   const parts: [number, string][] = [
@@ -184,19 +191,23 @@ export function renderDailySummaryEmail(payload: DailySummaryPayload, pageUrl: s
           <span style="color:#ffffff; font-size:18px; font-weight:bold; letter-spacing:0.04em;">T ROCK &middot; DAILY PULSE</span>
           <span style="color:#94a3b8; font-size:13px; float:right; line-height:24px;">${esc(prettyDate(payload.date))} &middot; ${esc(asOfLabel)}</span>
         </td></tr>
-        <!-- Headline numbers -->
+        <!-- Headline numbers: activity (reps / time / actions) + the biggest mover -->
         <tr><td style="padding:20px 24px 8px;">
           <table width="100%" cellpadding="0" cellspacing="0"><tr>
-            <td width="33%" style="text-align:center;">
-              <div style="font:900 26px Arial; color:${DARK};">${num(headline.activeReps)}/${num(headline.totalReps)}</div>
+            <td width="22%" style="text-align:center;">
+              <div style="font:900 24px Arial; color:${DARK};">${num(headline.activeReps)}/${num(headline.totalReps)}</div>
               <div style="font:11px Arial; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em;">Active</div>
             </td>
-            <td width="33%" style="text-align:center;">
-              <div style="font:900 26px Arial; color:${DARK};">${num(headline.totalActions)}</div>
+            <td width="22%" style="text-align:center;">
+              <div style="font:900 24px Arial; color:${DARK};">${esc(hoursLabel(headline.totalActiveMinutes))}</div>
+              <div style="font:11px Arial; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em;">Time</div>
+            </td>
+            <td width="22%" style="text-align:center;">
+              <div style="font:900 24px Arial; color:${DARK};">${num(headline.totalActions)}</div>
               <div style="font:11px Arial; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em;">Actions</div>
             </td>
             <td width="34%" style="text-align:center;">
-              <div style="font:bold 16px Arial; color:${RED};">${moverLine}</div>
+              <div style="font:bold 15px Arial; color:${RED};">${moverLine}</div>
               <div style="font:11px Arial; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em;">Biggest mover</div>
             </td>
           </tr></table>

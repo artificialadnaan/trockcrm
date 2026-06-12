@@ -42,7 +42,7 @@ describe("summarizeReps — deterministic tiebreak + zero-guard + quiet day", ()
 const ZERO = { created: 0, edits: 0, stageMoves: 0, uploads: 0, emails: 0, notes: 0, reports: 0 };
 const ACTIVE: DailySummaryPayload = {
   date: "2026-06-12", office: "dallas", asOfLabel: AS_OF_LABEL,
-  headline: { activeReps: 2, totalReps: 3, totalActions: 500, biggestMover: { name: "Kaleb", actions: 312 } },
+  headline: { activeReps: 2, totalReps: 3, totalActions: 500, totalActiveMinutes: 150, totalSessions: 8, biggestMover: { name: "Kaleb", actions: 312 } },
   wonToday: [
     { dealName: "Anthem on Ashley", repName: "Kaleb Marshall", value: 186000 },
     { dealName: "2711 N Haskell", repName: "Sidney Monroe", value: 126000 },
@@ -61,7 +61,7 @@ const ACTIVE: DailySummaryPayload = {
 };
 const QUIET: DailySummaryPayload = {
   date: "2026-06-13", office: "dallas", asOfLabel: AS_OF_LABEL,
-  headline: { activeReps: 0, totalReps: 3, totalActions: 0, biggestMover: null },
+  headline: { activeReps: 0, totalReps: 3, totalActions: 0, totalActiveMinutes: 0, totalSessions: 0, biggestMover: null },
   wonToday: [],
   advancedToday: [],
   leaderboard: [{ rank: 1, name: "Kaleb", actions: 0, activeMinutes: null, breakdown: { ...ZERO } }],
@@ -123,5 +123,12 @@ describe("renderDailySummaryEmail", () => {
     expect(html).toContain("50 created"); // the breakdown IS the value, not a bar
     expect(html).toContain("56m"); // Kaleb has a real session
     expect(html).not.toContain("0m"); // Adnaan (188 actions, no session) must be "—", never "0m idle"
+  });
+
+  it("surfaces team activity in the headline: time spent + actions, not just movement", () => {
+    const html = renderDailySummaryEmail(ACTIVE, PAGE_URL);
+    expect(html).toContain("2.5h"); // 150 team active minutes -> hours
+    expect(html).toContain(">Time<"); // the Time stat label
+    expect(html).toContain("500"); // total actions
   });
 });

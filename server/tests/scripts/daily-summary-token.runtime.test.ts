@@ -13,7 +13,7 @@ const client = () => ({ query: (sql: string, params?: unknown[]) => db.query(sql
 const ZERO = { created: 0, edits: 0, stageMoves: 0, uploads: 0, emails: 0, notes: 0, reports: 0 };
 const payload = (date: string): DailySummaryPayload => ({
   date, office: "dallas", asOfLabel: "as of 5:00 PM CT",
-  headline: { activeReps: 1, totalReps: 2, totalActions: 9, biggestMover: { name: "Kaleb", actions: 9 } },
+  headline: { activeReps: 1, totalReps: 2, totalActions: 9, totalActiveMinutes: 12, totalSessions: 1, biggestMover: { name: "Kaleb", actions: 9 } },
   wonToday: [], advancedToday: [],
   leaderboard: [{ rank: 1, name: "Kaleb", actions: 9, activeMinutes: 12, breakdown: { ...ZERO, created: 9 } }],
   hourly: [], teamHealth: { active: 1, quiet: 1, quietNames: ["Zoe"] },

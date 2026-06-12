@@ -22,6 +22,12 @@ function usdCompact(n: number | null | undefined): string {
 }
 // "minutes where present, — where absent, never 0m".
 const minutesLabel = (m: number | null) => (m == null ? "—" : `${num(m)}m`);
+// Team time-spent: 0 -> "—"; < 1h -> minutes; otherwise hours to one decimal.
+function hoursLabel(totalMinutes: number | null | undefined): string {
+  if (!Number.isFinite(totalMinutes) || Number(totalMinutes) <= 0) return "—";
+  const m = Number(totalMinutes);
+  return m < 60 ? `${num(m)}m` : `${(m / 60).toFixed(1)}h`;
+}
 function hourLabel(h: number): string {
   const ampm = h < 12 ? "a" : "p";
   const h12 = h % 12 === 0 ? 12 : h % 12;
@@ -58,9 +64,10 @@ export function DailySummaryPage() {
           </div>
         </div>
 
-        {/* Headline strip */}
-        <div className="grid grid-cols-3 gap-4">
+        {/* Headline strip — activity (reps / time / actions) + the biggest mover */}
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Stat label="Active" value={`${num(h.activeReps)}/${num(h.totalReps)}`} />
+          <Stat label="Time" value={hoursLabel(h.totalActiveMinutes)} sub={`${num(h.totalSessions)} sessions`} />
           <Stat label="Actions" value={num(h.totalActions)} />
           <Stat label="Biggest mover" value={h.biggestMover ? h.biggestMover.name : "—"} accent
                 sub={h.biggestMover ? `+${num(h.biggestMover.actions)}` : undefined} />
