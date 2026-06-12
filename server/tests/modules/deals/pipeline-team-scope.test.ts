@@ -230,7 +230,7 @@ describe("getDealsForPipeline team scope", () => {
     expect(text).toContain(" in ("); // bounded to the team (assigned_rep_id IN (...))
   });
 
-  it("preserves inactive terminal history for all-time terminal pipeline columns", async () => {
+  it("excludes soft-deleted (inactive) Won from the all-time terminal pipeline column", async () => {
     dbState.stages = [
       {
         id: "stage-estimating",
@@ -269,7 +269,9 @@ describe("getDealsForPipeline team scope", () => {
       .map((call) => call[0])
       .find((condition) => containsValue(condition, "stage-won"));
     expect(terminalWhere).toBeTruthy();
-    expect(extractSqlText(terminalWhere).toLowerCase()).not.toContain("is_active");
+    // The Won column now also requires is_active=true so a soft-deleted (is_active=false) Won deal is
+    // excluded from the card. (is_active=false is the canonical delete marker; live Won stays counted.)
+    expect(extractSqlText(terminalWhere).toLowerCase()).toContain("is_active");
   });
 
   it("applies the card limit only to non-terminal visible stages", async () => {

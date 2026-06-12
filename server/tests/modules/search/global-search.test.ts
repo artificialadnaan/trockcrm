@@ -196,13 +196,14 @@ describe("globalSearch — change-order child deals are flagged for badging", ()
     expect(result.deals.find((d) => d.id === "deal-plain")?.isChangeOrder).toBe(false);
   });
 
-  it("excludes soft-deleted change-order children from the deal search (no deep-link to a deleted CO)", async () => {
+  it("excludes soft-deleted terminal deals (Won + CO children) from the deal search (no deep-link to a deleted deal)", async () => {
     const wheres: unknown[] = [];
     const db = capturingDb([[], [], [], [], []], wheres);
     await globalSearch(db as any, "acme");
-    // The deal WHERE must carry the is_change_order exclusion (a terminal/Won CO child would otherwise stay
-    // findable via the terminal-findable rule even when soft-deleted).
+    // The deal WHERE excludes ALL inactive terminal rows (broadened from CO-children-only): a soft-deleted
+    // Won — CO child or plain — is terminal-staged, so the terminal-findable rule would otherwise keep it
+    // searchable + deep-linkable. Renders as NOT (slug IN <terminal> AND is_active = false).
     const dealWhere = extractSqlText(wheres[SELECT_ORDER.indexOf("deals")]).toLowerCase();
-    expect(dealWhere).toContain("is_change_order");
+    expect(dealWhere).toContain("is_active = false");
   });
 });
