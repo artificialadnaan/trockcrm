@@ -14,7 +14,15 @@ const MAX_SECONDS = 60;
  * stop, append the transcript to the description. Uses expo-audio for capture
  * and the raw-body transcribe endpoint (with 2-retry/backoff) under the hood.
  */
-export function VoiceRecorder({ onTranscript }: { onTranscript: (text: string) => void }) {
+export function VoiceRecorder({
+  onTranscript,
+  onBusyChange,
+}: {
+  onTranscript: (text: string) => void;
+  // Reports recording/transcribing so a parent can block teardown (e.g. closing a
+  // sheet) that would abandon an in-flight recording and lose the dictated text.
+  onBusyChange?: (busy: boolean) => void;
+}) {
   const { token, activeOfficeId } = useAuth();
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [status, setStatus] = useState<Status>("idle");
@@ -38,6 +46,12 @@ export function VoiceRecorder({ onTranscript }: { onTranscript: (text: string) =
   }
 
   useEffect(() => clearTick, []);
+
+  // Surface busy state to the parent; report idle on unmount as a backstop.
+  useEffect(() => {
+    onBusyChange?.(status === "recording" || status === "transcribing");
+  }, [status, onBusyChange]);
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
 
   async function start() {
     setError(null);

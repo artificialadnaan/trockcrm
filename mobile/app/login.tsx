@@ -9,7 +9,6 @@ import { theme } from "../src/theme/theme";
 import { Button, TextInput } from "../src/components/ui";
 import { Banner } from "../src/components/Banner";
 import { BrandLogo } from "../src/components/BrandLogo";
-import { KeyboardDoneAccessory, KEYBOARD_ACCESSORY_ID } from "../src/components/KeyboardDoneAccessory";
 
 export default function Login() {
   const { signIn } = useAuth();
@@ -75,7 +74,6 @@ export default function Login() {
             returnKeyType="next"
             onSubmitEditing={() => passwordRef.current?.focus()}
             submitBehavior="submit"
-            inputAccessoryViewID={KEYBOARD_ACCESSORY_ID}
           />
 
           <Text style={styles.label}>Password</Text>
@@ -90,7 +88,6 @@ export default function Login() {
               accessibilityLabel="Password"
               onSubmitEditing={onSubmit}
               returnKeyType="go"
-              inputAccessoryViewID={KEYBOARD_ACCESSORY_ID}
               style={styles.passwordInput}
             />
             <Pressable
@@ -111,7 +108,6 @@ export default function Login() {
           Invited to T-Rock Cam? Open the invitation link from your email on this device.
         </Text>
       </ScrollView>
-      <KeyboardDoneAccessory />
     </SafeAreaView>
   );
 }

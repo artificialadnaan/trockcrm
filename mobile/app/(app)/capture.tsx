@@ -23,7 +23,6 @@ import { PhotoTagInput } from "../../src/components/PhotoTagInput";
 import { VoiceRecorder } from "../../src/components/VoiceRecorder";
 import { TargetPicker } from "../../src/components/TargetPicker";
 import { ReviewTray } from "../../src/components/ReviewTray";
-import { KeyboardDoneAccessory, KEYBOARD_ACCESSORY_ID } from "../../src/components/KeyboardDoneAccessory";
 
 // Lazy so the Import path never loads expo-camera's native module (live camera is
 // a physical-device-only surface; the iOS Simulator has no camera).
@@ -78,6 +77,9 @@ export default function CaptureScreen() {
   const [assigningPhotoId, setAssigningPhotoId] = useState<string | null>(null);
   const [photos, setPhotos] = useState<SessionPhoto[]>([]);
   const [batchCaption, setBatchCaption] = useState("");
+  // Held true while the batch dictation is recording/transcribing, so an Upload
+  // (which clears photos and unmounts VoiceRecorder) can't abandon it mid-flight.
+  const [batchVoiceBusy, setBatchVoiceBusy] = useState(false);
   const [category, setCategory] = useState<string | null>(null);
   const [tags, setTags] = useState<string[]>([]);
   const [status, setStatus] = useState<UploadStatus>("idle");
@@ -436,12 +438,14 @@ export default function CaptureScreen() {
                   onChangeText={setBatchCaption}
                   placeholder="Caption for the whole batch"
                   multiline
-                  inputAccessoryViewID={KEYBOARD_ACCESSORY_ID}
                   style={{ minHeight: 60, textAlignVertical: "top", paddingTop: 10 }}
                 />
                 <View style={styles.batchRow}>
                   {transcribeConfig.data?.configured ? (
-                    <VoiceRecorder onTranscript={(text) => setBatchCaption((prev) => (prev ? `${prev} ${text}` : text))} />
+                    <VoiceRecorder
+                      onTranscript={(text) => setBatchCaption((prev) => (prev ? `${prev} ${text}` : text))}
+                      onBusyChange={setBatchVoiceBusy}
+                    />
                   ) : (
                     <View />
                   )}
@@ -466,6 +470,7 @@ export default function CaptureScreen() {
               title={`Upload ${photos.length} photo${photos.length === 1 ? "" : "s"}`}
               onPress={upload}
               loading={uploading}
+              disabled={batchVoiceBusy}
             />
           </View>
         ) : (
@@ -507,9 +512,6 @@ export default function CaptureScreen() {
           </View>
         ) : null}
       </ScrollView>
-
-      {/* Keyboard "Done" toolbar for the (multiline) batch caption field. */}
-      <KeyboardDoneAccessory />
 
       {/* Burst camera (lazy, full-screen) */}
       {cameraOpen ? (

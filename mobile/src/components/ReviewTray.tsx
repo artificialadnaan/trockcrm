@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Alert,
   Image,
@@ -16,7 +16,6 @@ import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme/theme";
 import type { SessionPhoto } from "../capture/session-photo";
 import { Button, TextInput } from "./ui";
-import { KeyboardDoneAccessory, KEYBOARD_ACCESSORY_ID_SHEET } from "./KeyboardDoneAccessory";
 import { VoiceRecorder } from "./VoiceRecorder";
 
 const GAP = 8;
@@ -48,6 +47,14 @@ export function ReviewTray({
   const size = Math.floor((width - H_PADDING * 2 - GAP * (COLUMNS - 1)) / COLUMNS);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const selected = photos.find((p) => p.key === selectedKey) ?? null;
+  // Block closing the caption sheet while dictation is recording/transcribing — closing
+  // would unmount VoiceRecorder mid-flight and drop the dictated caption.
+  const [voiceBusy, setVoiceBusy] = useState(false);
+  useEffect(() => setVoiceBusy(false), [selectedKey]);
+  function closeSheet() {
+    if (voiceBusy) return;
+    setSelectedKey(null);
+  }
 
   function confirmRemove(key: string) {
     Alert.alert("Remove photo", "Remove this photo from the batch?", [
@@ -97,13 +104,15 @@ export function ReviewTray({
         visible={selected !== null}
         animationType="slide"
         transparent
-        onRequestClose={() => setSelectedKey(null)}
+        onRequestClose={closeSheet}
       >
         {/* Own SafeAreaProvider: a Modal is a separate window, so the sheet's bottom
             inset (home indicator) only resolves with a provider inside the Modal. */}
         <SafeAreaProvider>
+          {/* KeyboardAvoidingView lifts the (multiline) caption + Done above the keyboard;
+              InputAccessoryView is NOT used here — RN's accessory doesn't support multiline. */}
           <KeyboardAvoidingView style={styles.modalRoot} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-            <Pressable style={styles.backdrop} onPress={() => setSelectedKey(null)} accessibilityLabel="Close caption editor" />
+            <Pressable style={styles.backdrop} onPress={closeSheet} accessibilityLabel="Close caption editor" />
             {selected ? (
               <SafeAreaView edges={["bottom"]} style={styles.sheet}>
                 <View style={styles.editorHead}>
@@ -114,12 +123,12 @@ export function ReviewTray({
                   </View>
                   <Pressable
                     onPress={() => confirmRemove(selected.key)}
-                    disabled={disabled}
+                    disabled={disabled || voiceBusy}
                     hitSlop={12}
                     accessibilityRole="button"
                     accessibilityLabel="Remove photo"
                   >
-                    <Text style={styles.remove}>Remove</Text>
+                    <Text style={[styles.remove, (disabled || voiceBusy) && styles.removeDisabled]}>Remove</Text>
                   </Pressable>
                 </View>
                 <TextInput
@@ -130,19 +139,18 @@ export function ReviewTray({
                   accessibilityLabel="Photo caption"
                   multiline
                   autoFocus
-                  inputAccessoryViewID={KEYBOARD_ACCESSORY_ID_SHEET}
                   style={styles.captionInput}
                 />
-                {/* Voice dictation — parity with the batch caption (was never wired into this sheet). */}
+                {/* Voice dictation — parity with the batch caption (was never wired into this sheet).
+                    Functional append in the parent avoids overwriting on rapid transcripts; while it's
+                    recording/transcribing the sheet is held open (closeSheet/Done are guarded). */}
                 {voiceEnabled ? (
-                  // Functional append in the parent — avoids overwriting on rapid transcripts.
-                  <VoiceRecorder onTranscript={(text) => onAppendCaption(selected.key, text)} />
+                  <VoiceRecorder onTranscript={(text) => onAppendCaption(selected.key, text)} onBusyChange={setVoiceBusy} />
                 ) : null}
-                <Button title="Done" onPress={() => setSelectedKey(null)} />
+                <Button title="Done" onPress={closeSheet} disabled={voiceBusy} />
               </SafeAreaView>
             ) : null}
           </KeyboardAvoidingView>
-          <KeyboardDoneAccessory nativeID={KEYBOARD_ACCESSORY_ID_SHEET} />
         </SafeAreaProvider>
       </Modal>
     </View>
@@ -182,5 +190,6 @@ const styles = StyleSheet.create({
   editorLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   editorHint: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
   remove: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.danger },
+  removeDisabled: { opacity: 0.4 },
   captionInput: { minHeight: 80, textAlignVertical: "top", paddingTop: 10, paddingBottom: 10 },
 });
