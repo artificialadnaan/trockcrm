@@ -1,17 +1,31 @@
 import React, { useState } from "react";
-import { Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import {
+  Alert,
+  Image,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme/theme";
 import type { SessionPhoto } from "../capture/session-photo";
-import { TextInput } from "./ui";
+import { Button, TextInput } from "./ui";
 
 const GAP = 8;
 const COLUMNS = 3;
 const H_PADDING = theme.space.lg;
 
 /**
- * Review tray: a grid of captured/imported photos. Tap a photo to caption it
- * individually (optional). A caption badge marks photos that already have their
- * own caption; the rest inherit the batch caption at upload.
+ * Review tray: a grid of captured/imported photos. Tapping a photo opens a
+ * bottom-sheet editor (always adjacent, regardless of how far the grid scrolls)
+ * to caption it individually — optional; uncaptioned photos inherit the batch
+ * caption at upload. A captioned photo is marked with a pencil badge.
  */
 export function ReviewTray({
   photos,
@@ -29,63 +43,100 @@ export function ReviewTray({
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const selected = photos.find((p) => p.key === selectedKey) ?? null;
 
+  function confirmRemove(key: string) {
+    Alert.alert("Remove photo", "Remove this photo from the batch?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Remove",
+        style: "destructive",
+        onPress: () => {
+          onRemove(key);
+          setSelectedKey(null);
+        },
+      },
+    ]);
+  }
+
   return (
     <View style={{ gap: theme.space.md }}>
-      <View style={styles.grid}>
+      {/* The grid dims while an upload is in flight so the whole captured set reads as locked. */}
+      <View style={[styles.grid, disabled && styles.gridDisabled]}>
         {photos.map((photo) => {
           const isSelected = photo.key === selectedKey;
           const hasCaption = photo.caption.trim().length > 0;
           return (
             <Pressable
               key={photo.key}
-              onPress={() => setSelectedKey(isSelected ? null : photo.key)}
+              onPress={() => setSelectedKey(photo.key)}
               disabled={disabled}
-              style={{ width: size, height: size }}
+              accessibilityRole="button"
+              accessibilityState={{ selected: isSelected }}
               accessibilityLabel={hasCaption ? "Photo (captioned) — edit caption" : "Photo — add caption"}
+              style={{ width: size, height: size }}
             >
               <Image source={{ uri: photo.uri }} style={styles.thumb} />
               {hasCaption ? (
                 <View style={styles.captionBadge}>
-                  <Text style={styles.captionBadgeText}>✎</Text>
+                  <Ionicons name="pencil" size={12} color={theme.color.brandRed} />
                 </View>
               ) : null}
-              {isSelected ? <View style={styles.selectedRing} /> : null}
             </Pressable>
           );
         })}
       </View>
 
-      {selected ? (
-        <View style={styles.editor}>
-          <View style={styles.editorHead}>
-            <Image source={{ uri: selected.uri }} style={styles.editorThumb} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.editorLabel}>Caption for this photo</Text>
-              <Text style={styles.editorHint}>Optional — leave blank to use the batch caption.</Text>
-            </View>
-            <Pressable onPress={() => onRemove(selected.key)} disabled={disabled} hitSlop={8} accessibilityLabel="Remove photo">
-              <Text style={styles.remove}>Remove</Text>
-            </Pressable>
-          </View>
-          <TextInput
-            value={selected.caption}
-            onChangeText={(text) => onSetCaption(selected.key, text)}
-            editable={!disabled}
-            placeholder="Describe this photo"
-            multiline
-            style={{ minHeight: 64, textAlignVertical: "top", paddingTop: 10 }}
-          />
-        </View>
-      ) : (
-        <Text style={styles.tapHint}>Tap a photo to caption it (optional).</Text>
-      )}
+      <Text style={styles.tapHint}>Tap a photo to caption it (optional).</Text>
+
+      <Modal
+        visible={selected !== null}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setSelectedKey(null)}
+      >
+        <KeyboardAvoidingView style={styles.modalRoot} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <Pressable style={styles.backdrop} onPress={() => setSelectedKey(null)} accessibilityLabel="Close caption editor" />
+          {selected ? (
+            <SafeAreaView edges={["bottom"]} style={styles.sheet}>
+              <View style={styles.editorHead}>
+                <Image source={{ uri: selected.uri }} style={styles.editorThumb} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.editorLabel}>Caption for this photo</Text>
+                  <Text style={styles.editorHint}>Optional — leave blank to use the shared caption below.</Text>
+                </View>
+                <Pressable
+                  onPress={() => confirmRemove(selected.key)}
+                  disabled={disabled}
+                  hitSlop={12}
+                  accessibilityRole="button"
+                  accessibilityLabel="Remove photo"
+                >
+                  <Text style={styles.remove}>Remove</Text>
+                </Pressable>
+              </View>
+              <TextInput
+                value={selected.caption}
+                onChangeText={(text) => onSetCaption(selected.key, text)}
+                editable={!disabled}
+                placeholder="Describe this photo"
+                accessibilityLabel="Photo caption"
+                multiline
+                autoFocus
+                style={styles.captionInput}
+              />
+              <Button title="Done" onPress={() => setSelectedKey(null)} />
+            </SafeAreaView>
+          ) : null}
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   grid: { flexDirection: "row", flexWrap: "wrap", gap: GAP },
+  gridDisabled: { opacity: 0.5 },
   thumb: { width: "100%", height: "100%", borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
+  // White badge w/ a red pencil — distinct from any selection accent (no more red-on-red).
   captionBadge: {
     position: "absolute",
     top: 4,
@@ -93,29 +144,26 @@ const styles = StyleSheet.create({
     width: 22,
     height: 22,
     borderRadius: 11,
-    backgroundColor: theme.color.brandRed,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  captionBadgeText: { color: theme.color.textInverse, fontSize: 12, fontFamily: theme.font.bold },
-  selectedRing: {
-    ...StyleSheet.absoluteFillObject,
-    borderRadius: theme.radius.sm,
-    borderWidth: 3,
-    borderColor: theme.color.brandRed,
-  },
-  editor: {
     backgroundColor: theme.color.surfaceCard,
     borderWidth: 1,
     borderColor: theme.color.border,
-    borderRadius: theme.radius.md,
-    padding: theme.space.md,
-    gap: theme.space.sm,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  tapHint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
+  modalRoot: { flex: 1, justifyContent: "flex-end" },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(15,17,21,0.45)" },
+  sheet: {
+    backgroundColor: theme.color.surfaceCard,
+    borderTopLeftRadius: theme.radius.lg,
+    borderTopRightRadius: theme.radius.lg,
+    padding: theme.space.lg,
+    gap: theme.space.md,
   },
   editorHead: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
   editorThumb: { width: 48, height: 48, borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
   editorLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   editorHint: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
   remove: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.danger },
-  tapHint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
+  captionInput: { minHeight: 80, textAlignVertical: "top", paddingTop: 10, paddingBottom: 10 },
 });

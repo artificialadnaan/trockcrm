@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -16,6 +16,7 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const passwordRef = useRef<React.ElementRef<typeof TextInput>>(null);
 
   const canSubmit = email.trim().length > 0 && password.length > 0;
 
@@ -58,22 +59,28 @@ export default function Login() {
               autoCapitalize="none"
               autoComplete="email"
               keyboardType="email-address"
+              textContentType="username"
+              accessibilityLabel="Email"
               placeholder="you@trockgc.com"
+              returnKeyType="next"
+              onSubmitEditing={() => passwordRef.current?.focus()}
+              submitBehavior="submit"
             />
 
             <Text style={styles.label}>Password</Text>
             <TextInput
+              ref={passwordRef}
               value={password}
               onChangeText={setPassword}
               secureTextEntry
               autoComplete="password"
-              placeholder="••••••••"
+              textContentType="password"
+              accessibilityLabel="Password"
               onSubmitEditing={onSubmit}
               returnKeyType="go"
             />
 
-            <View style={{ height: theme.space.md }} />
-            <Button title="Sign in" onPress={onSubmit} loading={loading} disabled={!canSubmit} />
+            <Button title="Sign in" onPress={onSubmit} loading={loading} disabled={!canSubmit} style={styles.submit} />
           </View>
 
           <Text style={styles.hint}>
@@ -89,6 +96,7 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
   scroll: { flexGrow: 1, justifyContent: "center", padding: theme.space.xl, gap: theme.space.md },
   logo: { alignItems: "center" },
+  submit: { marginTop: theme.space.sm },
   subtitle: { textAlign: "center", fontFamily: theme.font.body, fontSize: 14, color: theme.color.textMuted },
   card: {
     backgroundColor: theme.color.surfaceCard,
