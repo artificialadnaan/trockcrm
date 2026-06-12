@@ -305,6 +305,9 @@ export interface CreateDealInput {
   stageId: string;
   assignedRepId: string;
   actorUserId?: string;
+  // Role of the user performing the create — gates who may set awarded_amount (admin/director only).
+  // Optional with safe-fail: a missing/insufficient role is denied when awarded_amount is set.
+  actorRole?: string;
   officeId?: string; // Active office — used to validate assignee has access
   companyId?: string;
   propertyId?: string;
@@ -1868,6 +1871,19 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     throw new AppError(400, creationPolicy.reason ?? "Deal creation is not allowed");
   }
 
+  // Only admins and directors may set the awarded amount — keep reps from hand-entering a Won value at
+  // creation (the seed-on-win path is system-initiated and never flows through this user input). No prior
+  // value exists on create, so any non-blank awarded amount requires the elevated role.
+  const setsAwarded =
+    input.awardedAmount != null && String(input.awardedAmount).trim() !== "";
+  if (setsAwarded && !(input.actorRole === "admin" || input.actorRole === "director")) {
+    throw new AppError(
+      403,
+      "Only admins and directors can set the awarded amount",
+      "AWARDED_AMOUNT_RESTRICTED"
+    );
+  }
+
   const lineage = await resolveSourceLeadLineage(tenantDb, input);
   assertDealCreateLineageRequirements(input, lineage);
 
@@ -2119,6 +2135,22 @@ export async function updateDeal(
   if (input.primaryContactId !== undefined) updates.primaryContactId = input.primaryContactId;
   if (input.ddEstimate !== undefined) updates.ddEstimate = input.ddEstimate;
   if (input.bidEstimate !== undefined) updates.bidEstimate = input.bidEstimate;
+  // Only admins and directors may edit the awarded amount. Change-detecting so a rep re-submitting the
+  // deal form with awarded_amount UNCHANGED (the partial-save flow) is not falsely blocked — only an
+  // actual change is gated. The system seed-on-win path does not flow through input.awardedAmount.
+  const touchesAwarded =
+    input.awardedAmount !== undefined &&
+    String(input.awardedAmount ?? "") !== String(existing.awardedAmount ?? "");
+  if (touchesAwarded) {
+    const isDirectorOrAdmin = userRole === "admin" || userRole === "director";
+    if (!isDirectorOrAdmin) {
+      throw new AppError(
+        403,
+        "Only admins and directors can edit the awarded amount",
+        "AWARDED_AMOUNT_RESTRICTED"
+      );
+    }
+  }
   if (input.awardedAmount !== undefined) updates.awardedAmount = input.awardedAmount;
   if (input.description !== undefined) updates.description = input.description;
   if (input.propertyAddress !== undefined) updates.propertyAddress = input.propertyAddress;

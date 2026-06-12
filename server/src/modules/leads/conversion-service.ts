@@ -318,6 +318,7 @@ export function createLeadConversionService(
       workflowRoute,
       assignedRepId: successorAssignedRepId,
       actorUserId: input.userId,
+      actorRole: input.userRole,
       officeId: input.officeId,
       primaryContactId:
         input.primaryContactId === undefined
