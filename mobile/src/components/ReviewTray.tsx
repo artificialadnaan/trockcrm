@@ -11,11 +11,13 @@ import {
   View,
   useWindowDimensions,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme/theme";
 import type { SessionPhoto } from "../capture/session-photo";
 import { Button, TextInput } from "./ui";
+import { KeyboardDoneAccessory, KEYBOARD_ACCESSORY_ID_SHEET } from "./KeyboardDoneAccessory";
+import { VoiceRecorder } from "./VoiceRecorder";
 
 const GAP = 8;
 const COLUMNS = 3;
@@ -32,11 +34,13 @@ export function ReviewTray({
   onSetCaption,
   onRemove,
   disabled = false,
+  voiceEnabled = false,
 }: {
   photos: SessionPhoto[];
   onSetCaption: (key: string, text: string) => void;
   onRemove: (key: string) => void;
   disabled?: boolean;
+  voiceEnabled?: boolean;
 }) {
   const { width } = useWindowDimensions();
   const size = Math.floor((width - H_PADDING * 2 - GAP * (COLUMNS - 1)) / COLUMNS);
@@ -93,40 +97,54 @@ export function ReviewTray({
         transparent
         onRequestClose={() => setSelectedKey(null)}
       >
-        <KeyboardAvoidingView style={styles.modalRoot} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          <Pressable style={styles.backdrop} onPress={() => setSelectedKey(null)} accessibilityLabel="Close caption editor" />
-          {selected ? (
-            <SafeAreaView edges={["bottom"]} style={styles.sheet}>
-              <View style={styles.editorHead}>
-                <Image source={{ uri: selected.uri }} style={styles.editorThumb} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.editorLabel}>Caption for this photo</Text>
-                  <Text style={styles.editorHint}>Optional — leave blank to use the shared caption below.</Text>
+        {/* Own SafeAreaProvider: a Modal is a separate window, so the sheet's bottom
+            inset (home indicator) only resolves with a provider inside the Modal. */}
+        <SafeAreaProvider>
+          <KeyboardAvoidingView style={styles.modalRoot} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+            <Pressable style={styles.backdrop} onPress={() => setSelectedKey(null)} accessibilityLabel="Close caption editor" />
+            {selected ? (
+              <SafeAreaView edges={["bottom"]} style={styles.sheet}>
+                <View style={styles.editorHead}>
+                  <Image source={{ uri: selected.uri }} style={styles.editorThumb} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.editorLabel}>Caption for this photo</Text>
+                    <Text style={styles.editorHint}>Optional — leave blank to use the shared caption below.</Text>
+                  </View>
+                  <Pressable
+                    onPress={() => confirmRemove(selected.key)}
+                    disabled={disabled}
+                    hitSlop={12}
+                    accessibilityRole="button"
+                    accessibilityLabel="Remove photo"
+                  >
+                    <Text style={styles.remove}>Remove</Text>
+                  </Pressable>
                 </View>
-                <Pressable
-                  onPress={() => confirmRemove(selected.key)}
-                  disabled={disabled}
-                  hitSlop={12}
-                  accessibilityRole="button"
-                  accessibilityLabel="Remove photo"
-                >
-                  <Text style={styles.remove}>Remove</Text>
-                </Pressable>
-              </View>
-              <TextInput
-                value={selected.caption}
-                onChangeText={(text) => onSetCaption(selected.key, text)}
-                editable={!disabled}
-                placeholder="Describe this photo"
-                accessibilityLabel="Photo caption"
-                multiline
-                autoFocus
-                style={styles.captionInput}
-              />
-              <Button title="Done" onPress={() => setSelectedKey(null)} />
-            </SafeAreaView>
-          ) : null}
-        </KeyboardAvoidingView>
+                <TextInput
+                  value={selected.caption}
+                  onChangeText={(text) => onSetCaption(selected.key, text)}
+                  editable={!disabled}
+                  placeholder="Describe this photo"
+                  accessibilityLabel="Photo caption"
+                  multiline
+                  autoFocus
+                  inputAccessoryViewID={KEYBOARD_ACCESSORY_ID_SHEET}
+                  style={styles.captionInput}
+                />
+                {/* Voice dictation — parity with the batch caption (was never wired into this sheet). */}
+                {voiceEnabled ? (
+                  <VoiceRecorder
+                    onTranscript={(text) =>
+                      onSetCaption(selected.key, selected.caption ? `${selected.caption} ${text}` : text)
+                    }
+                  />
+                ) : null}
+                <Button title="Done" onPress={() => setSelectedKey(null)} />
+              </SafeAreaView>
+            ) : null}
+          </KeyboardAvoidingView>
+          <KeyboardDoneAccessory nativeID={KEYBOARD_ACCESSORY_ID_SHEET} />
+        </SafeAreaProvider>
       </Modal>
     </View>
   );
