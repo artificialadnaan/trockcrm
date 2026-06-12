@@ -38,6 +38,17 @@ function recipients(): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Resolve the absolute base URL for the email CTA. Strip trailing slashes FIRST, then fall back — so a
+ * slash-only or empty/whitespace FRONTEND_URL normalizes to "" and yields the absolute default, never a
+ * relative `/daily-summary/...` link that breaks in email clients. `crm.trockconstruction.com` (the old
+ * default) is a dead NXDOMAIN, so the live frontend is the durable fallback.
+ */
+export function resolveFrontendBaseUrl(raw: string | undefined): string {
+  const normalized = (raw ?? "").trim().replace(/\/+$/, "");
+  return normalized || "https://trockcrm.com";
+}
+
 export async function main(now: Date = new Date()): Promise<void> {
   if (!shouldSendNow(now)) {
     console.log(`[daily-summary] not 5pm CT (Mon–Sat) — skipping (${now.toISOString()})`);
@@ -77,8 +88,7 @@ export async function main(now: Date = new Date()): Promise<void> {
     // Durable backstop: default to the LIVE frontend (crm.trockconstruction.com is a dead NXDOMAIN that
     // would silently produce a broken CTA). If FRONTEND_URL is set it wins; if it's empty/unset we still
     // ship a working "See full summary" link.
-    // Strip any trailing slash so `${baseUrl}/daily-summary/...` never becomes `//daily-summary/...`.
-    const baseUrl = (process.env.FRONTEND_URL?.trim() || "https://trockcrm.com").replace(/\/+$/, "");
+    const baseUrl = resolveFrontendBaseUrl(process.env.FRONTEND_URL);
     const pageUrl = `${baseUrl}/daily-summary/${date}?token=${encodeURIComponent(rawToken)}`;
     const html = renderDailySummaryEmail(payload, pageUrl);
     const ok = await sendSystemEmail(to, dailySummarySubject(payload), html);

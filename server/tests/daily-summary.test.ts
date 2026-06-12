@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldSendNow } from "../src/scripts/daily-summary-email.js";
+import { shouldSendNow, resolveFrontendBaseUrl } from "../src/scripts/daily-summary-email.js";
 import { summarizeReps, AS_OF_LABEL, type DailySummaryPayload } from "../src/modules/daily-summary/service.js";
 import { renderDailySummaryEmail, dailySummarySubject } from "../src/modules/daily-summary/email-template.js";
 
@@ -15,6 +15,19 @@ describe("shouldSendNow — 5pm CT, Mon–Sat, DST-safe", () => {
   it("skips Sunday (gated on CT weekday, not UTC) and any non-17:00 hour", () => {
     expect(shouldSendNow(new Date("2026-06-14T22:00:00Z"))).toBe(false); // 17:00 CDT but Sunday
     expect(shouldSendNow(new Date("2026-06-12T20:00:00Z"))).toBe(false); // 15:00 CDT
+  });
+});
+
+describe("resolveFrontendBaseUrl — always absolute, never a relative CTA", () => {
+  it("uses the live default when unset/empty/whitespace/slash-only", () => {
+    for (const v of [undefined, "", "   ", "/", "//", " / "]) {
+      expect(resolveFrontendBaseUrl(v)).toBe("https://trockcrm.com");
+    }
+  });
+  it("honors a set FRONTEND_URL and strips trailing slashes (no '//daily-summary')", () => {
+    expect(resolveFrontendBaseUrl("https://trockcrm.com")).toBe("https://trockcrm.com");
+    expect(resolveFrontendBaseUrl("https://trockcrm.com/")).toBe("https://trockcrm.com");
+    expect(resolveFrontendBaseUrl("  https://staging.trockcrm.com//  ")).toBe("https://staging.trockcrm.com");
   });
 });
 
