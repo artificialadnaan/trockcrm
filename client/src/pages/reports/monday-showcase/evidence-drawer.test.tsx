@@ -88,3 +88,35 @@ describe("evidence drawer Win % column", () => {
     expect(text).not.toContain("Win %");
   });
 });
+
+describe("evidence drawer column alignment", () => {
+  it("right-aligns numeric columns, left-aligns text, with a uniform px-3 gutter on every column", () => {
+    mount("projection", [record({ id: "a", winProbability: 65 })]);
+    const heads = Array.from(document.querySelectorAll("thead th"));
+    const cells = Array.from(document.querySelectorAll("tbody tr:first-child td"));
+    expect(heads.length).toBeGreaterThan(0);
+
+    // Uniform horizontal gutter on every header AND cell — even spacing, not random.
+    expect(heads.every((h) => h.className.includes("px-3"))).toBe(true);
+    expect(cells.every((c) => c.className.includes("px-3"))).toBe(true);
+
+    const headByText = (label: string) => heads.find((h) => (h.textContent ?? "").includes(label));
+    // Numeric → right-aligned (header matches its data).
+    for (const num of ["Value", "Win %", "Age"]) {
+      expect(headByText(num)?.className).toContain("text-right");
+    }
+    // Text → left-aligned (every text column, including Expected close date — stays left, not flush
+    // against Value).
+    for (const txt of ["Deal", "Company", "Owner", "Expected close date", "Region", "Type", "Stage"]) {
+      expect(headByText(txt)?.className).toContain("text-left");
+    }
+    // Cells mirror their header: numeric right-aligned (+ tabular-nums so percentages and em dashes
+    // line up on the right edge); every other cell explicitly left-aligned.
+    const numericCells = cells.filter((c) => c.className.includes("text-right"));
+    const textCells = cells.filter((c) => !c.className.includes("text-right"));
+    expect(numericCells.length).toBeGreaterThan(0);
+    expect(textCells.length).toBeGreaterThan(0);
+    expect(numericCells.every((c) => c.className.includes("tabular-nums"))).toBe(true);
+    expect(textCells.every((c) => c.className.includes("text-left"))).toBe(true);
+  });
+});
