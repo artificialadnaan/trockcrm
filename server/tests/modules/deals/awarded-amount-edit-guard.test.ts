@@ -222,6 +222,49 @@ describe("awarded_amount edit authorization (updateDeal)", () => {
   });
 });
 
+describe("awarded_amount editability on bid-board-owned deals", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const bidBoardExisting = { ...baseExisting, isBidBoardOwned: true };
+
+  it("allows an admin to change awarded_amount on a bid-board-owned deal (and marks it overridden)", async () => {
+    const tenantDb = createUpdateDb({ ...bidBoardExisting });
+
+    const result = await updateDeal(
+      tenantDb as never,
+      "deal-1",
+      { awardedAmount: "5000.00" },
+      "admin",
+      "admin-1",
+      "office-1"
+    );
+
+    expect(tenantDb.update).toHaveBeenCalled();
+    expect(result.awardedAmount).toBe("5000.00");
+    expect(result.awardedAmountOverridden).toBe(true);
+  });
+
+  it("still blocks a rep from changing awarded_amount on a bid-board-owned deal", async () => {
+    const tenantDb = createUpdateDb({ ...bidBoardExisting });
+
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { awardedAmount: "5000.00" }, "rep", "rep-1", "office-1")
+    ).rejects.toMatchObject({ statusCode: 403, code: "AWARDED_AMOUNT_RESTRICTED" });
+    expect(tenantDb.update).not.toHaveBeenCalled();
+  });
+
+  it("still locks bid_estimate on a bid-board-owned deal, even for an admin (Procore-owned)", async () => {
+    const tenantDb = createUpdateDb({ ...bidBoardExisting });
+
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { bidEstimate: "5000.00" }, "admin", "admin-1", "office-1")
+    ).rejects.toMatchObject({ statusCode: 403, code: "BID_BOARD_OWNED_FIELD_READ_ONLY" });
+    expect(tenantDb.update).not.toHaveBeenCalled();
+  });
+});
+
 // --- createDeal harness -------------------------------------------------------
 // Mirrors the minimal double used by the deal-number tests in service.test.ts.
 function createCreateDb() {

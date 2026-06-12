@@ -469,10 +469,13 @@ export const BID_BOARD_STAGE_READ_ONLY_MESSAGE =
   "Deal stage progression is read-only in CRM after estimating handoff. Bid Board is now the source of truth for downstream stages.";
 export const BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE =
   "Estimating stage configuration is required to enforce the Bid Board ownership boundary.";
+// Fields that are Procore-managed and therefore read-only in CRM on bid-board-owned deals.
+// awarded_amount is intentionally NOT here: admin/director may manually override it (the edit is
+// gated to those roles by the AWARDED_AMOUNT_RESTRICTED check above, and a manual edit marks the deal
+// awarded_amount_overridden so the mirror stops syncing it). bid_estimate / dd_estimate stay locked.
 const BID_BOARD_OWNED_UPDATE_FIELD_LABELS: Partial<Record<keyof UpdateDealInput, string>> = {
   ddEstimate: "DD estimate",
   bidEstimate: "Bid estimate",
-  awardedAmount: "Awarded amount",
   estimatingSubstage: "Estimating progress",
   proposalStatus: "Proposal status",
 };
