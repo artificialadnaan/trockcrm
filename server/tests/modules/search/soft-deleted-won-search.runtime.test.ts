@@ -51,7 +51,8 @@ beforeAll(async () => {
       ('${D.deletedOpp}',  'Zephyr Deleted Opp',  '${ST.opp}', false, false);
   `);
   tdb = drizzle(pg);
-});
+  // Give PGlite setup explicit headroom over Vitest's default 10s hook timeout for parallel batches (Codex P2).
+}, 30000);
 
 afterAll(async () => {
   await pg?.close?.();

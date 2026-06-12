@@ -26,8 +26,10 @@ const D = {
   deletedWon: U("d02"),
   liveOpp: U("d03"),
   toDelete: U("d04"),
+  coParent: U("d05"),
+  deletedCoChild: U("d06"),
 };
-const PRJ = { toDelete: U("c01"), otherLive: U("c02") };
+const PRJ = { toDelete: U("c01"), otherLive: U("c02"), deletedCoChild: U("c03") };
 const ADMIN = U("ad01");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -97,18 +99,23 @@ beforeAll(async () => {
       ('${ST.won}','Won','won',true),
       ('${ST.opp}','Opportunity','opportunity',false);
 
-    INSERT INTO deals (id, name, deal_number, stage_id, is_active, is_change_order, on_hold, is_test_data, won_closed_date, created_at, updated_at) VALUES
-      ('${D.liveWon}',   'Live Won',    'TR-1','${ST.won}', true,  false, false, false, '2026-06-01', now(), now()),
-      ('${D.deletedWon}','Deleted Won', 'TR-2','${ST.won}', false, false, false, false, '2026-06-02', now(), now()),
-      ('${D.liveOpp}',   'Live Opp',    'TR-3','${ST.opp}', true,  false, false, false, NULL,         now(), now()),
-      ('${D.toDelete}',  'To Delete',   'TR-4','${ST.won}', true,  false, false, false, '2026-06-03', now(), now());
+    INSERT INTO deals (id, name, deal_number, stage_id, is_active, is_change_order, parent_deal_id, on_hold, is_test_data, won_closed_date, created_at, updated_at) VALUES
+      ('${D.liveWon}',       'Live Won',    'TR-1','${ST.won}', true,  false, NULL,            false, false, '2026-06-01', now(), now()),
+      ('${D.deletedWon}',    'Deleted Won', 'TR-2','${ST.won}', false, false, NULL,            false, false, '2026-06-02', now(), now()),
+      ('${D.liveOpp}',       'Live Opp',    'TR-3','${ST.opp}', true,  false, NULL,            false, false, NULL,         now(), now()),
+      ('${D.toDelete}',      'To Delete',   'TR-4','${ST.won}', true,  false, NULL,            false, false, '2026-06-03', now(), now()),
+      ('${D.coParent}',      'CO Parent',   'TR-5','${ST.won}', true,  false, NULL,            false, false, '2026-06-04', now(), now()),
+      ('${D.deletedCoChild}','Deleted CO',  'TR-6','${ST.won}', false, true,  '${D.coParent}', true,  false, '2026-06-04', now(), now());
 
     INSERT INTO projects (id, source_deal_id, is_active, updated_at) VALUES
-      ('${PRJ.toDelete}', '${D.toDelete}', true, now()),
-      ('${PRJ.otherLive}','${D.liveOpp}',  true, now());
+      ('${PRJ.toDelete}',      '${D.toDelete}',       true, now()),
+      ('${PRJ.otherLive}',     '${D.liveOpp}',        true, now()),
+      ('${PRJ.deletedCoChild}','${D.deletedCoChild}', true, now());
   `);
   tdb = drizzle(pg);
-});
+  // PGlite init + the full 138-column deals table can exceed Vitest's default 10s hook timeout when
+  // many test files run in parallel; give the setup explicit headroom (Codex P2).
+}, 30000);
 
 afterAll(async () => {
   await pg?.close?.();
@@ -153,5 +160,22 @@ describe("deleteDeal — soft-deletes the deal, hides it, and cascades to its pr
 
     // repeat delete: no false success — already-inactive returns null
     expect(await deleteDeal(tdb, D.toDelete, "admin", ADMIN)).toBeNull();
+  });
+
+  it("cascades to the project mirror of an ALREADY-deleted CO child when its parent is deleted", async () => {
+    // The CO child was soft-deleted in a prior CO-delete, so softDeleteChangeOrderChildren won't return
+    // it during the parent delete; its project mirror was left active and dangling. The cascade must
+    // still deactivate it — it collects ALL CO child ids, not just the ones voided in this call (Codex P2).
+    const before = await pg.query<{ is_active: boolean }>(
+      `SELECT is_active FROM projects WHERE id = '${PRJ.deletedCoChild}'`
+    );
+    expect(before.rows[0]?.is_active).toBe(true);
+
+    await deleteDeal(tdb, D.coParent, "admin", ADMIN);
+
+    const after = await pg.query<{ is_active: boolean }>(
+      `SELECT is_active FROM projects WHERE id = '${PRJ.deletedCoChild}'`
+    );
+    expect(after.rows[0]?.is_active).toBe(false);
   });
 });

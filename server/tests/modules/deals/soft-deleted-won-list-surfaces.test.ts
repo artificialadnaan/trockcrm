@@ -71,11 +71,12 @@ describe("getDeals pipeline / Won-period drill-down — excludes soft-deleted Wo
       "director", "dir-1"
     );
 
-    expect(wheres.length).toBeGreaterThan(0);
-    const text = render(wheres[0]);
-    expect(text).toContain("is_active");
+    // Select the visibility predicate by content (not by call index) so the assertion can't bind to the
+    // wrong .where() if query order changes.
+    const visibilityWhere = wheres.map(render).find((w) => w.includes("is_active"));
+    expect(visibilityWhere).toBeTruthy();
     // The re-admission OR-branch is gone: no stage_id membership in the visibility clause.
-    expect(text).not.toContain("stage_id");
+    expect(visibilityWhere).not.toContain("stage_id");
   });
 });
 

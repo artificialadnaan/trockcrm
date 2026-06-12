@@ -2604,16 +2604,25 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
       )
     );
 
-  // Cascade the soft-delete to this deal's (and its CO children's) Procore project mirror rows.
+  // Cascade the soft-delete to this deal's (and ALL its CO children's) Procore project mirror rows.
   // projects.source_deal_id references deals(id), but the FK's ON DELETE action only fires on a hard
   // row delete — not this is_active=false soft-delete — so an active project row would otherwise
   // dangle pointing at a deleted deal and keep re-surfacing it on project/bid-board-keyed lists.
+  // Collect ALL CO child ids (not just the ones voided in THIS call): a child soft-deleted in a prior
+  // CO-delete still has an active project mirror that softDeleteChangeOrderChildren (active-only)
+  // wouldn't return in childCoIds, so cascade over every child to deactivate those too.
+  const allCoChildIds = (
+    await tenantDb
+      .select({ id: deals.id })
+      .from(deals)
+      .where(and(eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true)))
+  ).map((row) => row.id);
   await tenantDb
     .update(projects)
     .set({ isActive: false, updatedAt: new Date() })
     .where(
       and(
-        inArray(projects.sourceDealId, [dealId, ...childCoIds]),
+        inArray(projects.sourceDealId, [dealId, ...allCoChildIds]),
         eq(projects.isActive, true),
       )
     );
