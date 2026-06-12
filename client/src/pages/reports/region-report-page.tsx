@@ -115,9 +115,10 @@ function MoversStrip({ movers }: { movers: RegionReportData["movers"] }) {
   const m = movers.biggestRegionMover;
   return (
     <section className="space-y-2">
-      <div className="flex items-baseline gap-2">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <h2 className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">What changed this week</h2>
         <span className="text-[11px] text-slate-400">{movers.weekLabel}</span>
+        <span className="text-[10px] italic text-slate-400">always the current week — independent of the period toggle</span>
       </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-xl border border-slate-200 bg-white p-3">
@@ -260,7 +261,10 @@ function StageHeatmap({ data }: { data: RegionReportData }) {
         <span className="text-[11px] text-slate-400">colour = $ value · number = deal count</span>
       </div>
       <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
-        <table className="w-full text-sm">
+        <table
+          className="w-full text-sm"
+          aria-label="Open deals by region (rows) and pipeline stage (columns). The number is the deal count; the cell shade encodes total $ value (darker = more)."
+        >
           <thead className="border-b border-slate-100 bg-[#f7f8fb] text-[11px] font-black uppercase tracking-wide text-slate-500">
             <tr>
               <th className="px-3 py-2.5 text-left">Region</th>
@@ -273,25 +277,27 @@ function StageHeatmap({ data }: { data: RegionReportData }) {
           </thead>
           <tbody>
             {data.regions.map((r) => (
-              <tr key={r.region} className="border-b border-slate-50 last:border-0">
+              <tr key={r.region} className={`border-b border-slate-50 last:border-0 ${r.isUnassigned ? "bg-amber-50" : ""}`}>
                 <td className={`px-3 py-2.5 font-medium ${r.isUnassigned ? "text-amber-700" : "text-slate-700"}`}>{r.region}</td>
                 {data.stageColumns.map((col) => {
                   const cell = cellOf(r.region, col.slug);
                   const count = cell?.count ?? 0;
                   const value = cell?.value ?? 0;
                   const intensity = heatIntensity(value, maxValue);
+                  // Cap the shade so the count (the dual-encoding's other half) keeps a readable contrast
+                  // ratio against dark text at every intensity — no white-on-mid-indigo dead zone.
                   return (
-                    <td key={col.slug} className="px-1.5 py-1.5 text-center">
+                    <td key={`${r.region}-${col.slug}`} className="px-1.5 py-1.5 text-center">
                       <div
                         className="rounded-md px-2 py-1.5 tabular-nums"
                         style={{
-                          backgroundColor: count > 0 ? `rgba(79, 70, 229, ${0.08 + intensity * 0.85})` : "transparent",
-                          color: intensity > 0.55 ? "white" : count > 0 ? "rgb(30 41 59)" : "rgb(203 213 225)",
+                          backgroundColor: count > 0 ? `rgba(79, 70, 229, ${0.06 + intensity * 0.55})` : "transparent",
+                          color: count > 0 ? "rgb(30 41 59)" : "rgb(203 213 225)",
                         }}
-                        title={count > 0 ? `${int(count)} deals · ${usd(value)}` : "—"}
+                        title={count > 0 ? `${int(count)} deals · ${usd(value)}` : "no open deals"}
                       >
                         <span className="text-sm font-semibold">{count > 0 ? int(count) : "·"}</span>
-                        {count > 0 ? <span className="ml-1 text-[10px] opacity-80">{usd(value)}</span> : null}
+                        {count > 0 ? <span className="ml-1 text-[10px] text-slate-500">{usd(value)}</span> : null}
                       </div>
                     </td>
                   );
@@ -301,6 +307,12 @@ function StageHeatmap({ data }: { data: RegionReportData }) {
           </tbody>
         </table>
       </div>
+      <div className="flex items-center gap-2 px-1 text-[10px] text-slate-400">
+        <span>$ value</span>
+        <span className="inline-flex h-2.5 w-24 rounded-full" style={{ background: "linear-gradient(to right, rgba(79,70,229,0.06), rgba(79,70,229,0.61))" }} />
+        <span>low → high</span>
+        <span className="ml-2">· number = deal count</span>
+      </div>
     </section>
   );
 }
@@ -308,7 +320,11 @@ function StageHeatmap({ data }: { data: RegionReportData }) {
 function TopRepsSection({ regions }: { regions: RegionRow[] }) {
   return (
     <section className="space-y-2">
-      <h2 className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">Top reps within region</h2>
+      <div className="flex items-baseline gap-2">
+        <h2 className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">Top reps within region</h2>
+        <ScopeBadge />
+        <span className="text-[11px] text-slate-400">ranked by won value in the period</span>
+      </div>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {regions.map((r) => (
           <div key={r.region} className="rounded-xl border border-slate-200 bg-white p-3.5">

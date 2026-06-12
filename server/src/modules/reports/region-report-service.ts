@@ -117,10 +117,20 @@ function rowsFromExecute<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
   return ((result as { rows?: T[] })?.rows ?? []) as T[];
 }
-const n = (v: unknown): number => (v == null ? 0 : Number(v));
+const n = (v: unknown): number => {
+  const num = v == null ? 0 : Number(v);
+  return Number.isNaN(num) ? 0 : num;
+};
 
-// CANONICAL fragments.
-const REGION_NAME = sql`COALESCE(NULLIF(rc.name, ''), '${sql.raw(UNASSIGNED)}')`;
+// Defense-in-depth: the route validates from/to, but this is an exported service — never interpolate an
+// unvalidated date into the SQL templates below.
+function assertIsoDate(value: string, label: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`region report ${label} must be an ISO date (YYYY-MM-DD)`);
+}
+
+// CANONICAL fragments. The 'Unassigned' default is a parameterized literal (no sql.raw) so nothing in the
+// region expression is ever string-built.
+const REGION_NAME = sql`COALESCE(NULLIF(rc.name, ''), ${UNASSIGNED})`;
 const REGION_ORDER = sql`COALESCE(rc.display_order, ${UNASSIGNED_ORDER})`;
 const wonVal = aliasedEffectiveWonDealValueSql("d");
 const openVal = dealValueSqlForBasis("d", "open_best_estimate");
@@ -132,6 +142,8 @@ const COMMON_JOINS = sql`
   JOIN pipeline_stage_config psc ON psc.id = d.stage_id
   LEFT JOIN region_config rc ON rc.id = d.region_id
   LEFT JOIN users u ON u.id = d.assigned_rep_id`;
+// Only for trusted, hardcoded stage-slug constants (WON_STAGE_SLUGS / LOST_STAGE_SLUGS). Each slug is
+// parameterized, but never call this with user input.
 const slugList = (slugs: readonly string[]) => sql.join(slugs.map((s) => sql`${s}`), sql`, `);
 const TERMINAL_SLUGS = [...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS];
 const wonInWindow = (from: string, to: string): SQL =>
@@ -144,6 +156,8 @@ const pct = (part: number, whole: number): number | null => (whole > 0 ? Math.ro
 
 export async function getRegionReport(tenantDb: TenantDb, options: RegionReportOptions): Promise<RegionReportData> {
   const { from, to } = options;
+  assertIsoDate(from, "from");
+  assertIsoDate(to, "to");
   const now = options.now ?? new Date();
   const topN = options.topN ?? 5;
   const today = businessToday(now);
@@ -291,12 +305,19 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
   const terminalByRegion = new Map(terminalRows.map((r) => [r.region, r]));
   const openByRegion = new Map(openRows.map((r) => [r.region, r]));
 
-  // canonical region order: active regions, then Unassigned, then any stray region from the data.
-  const orderedNames: Array<{ region: string; order: number }> = [
-    ...activeRegions.map((rg) => ({ region: rg.name, order: rg.display_order })),
-    { region: UNASSIGNED, order: UNASSIGNED_ORDER },
-  ];
-  const known = new Set(orderedNames.map((o) => o.region));
+  // canonical region order: active regions, then the synthetic Unassigned bucket, then any stray region from
+  // the data. Skip blank-named or literally-"Unassigned" config rows + dedupe so the synthetic bucket is the
+  // ONLY Unassigned and no name collides (REGION_NAME already folds blank/null rc.name into 'Unassigned').
+  const orderedNames: Array<{ region: string; order: number }> = [];
+  const known = new Set<string>();
+  for (const rg of activeRegions) {
+    const name = (rg.name ?? "").trim();
+    if (!name || name.toLowerCase() === UNASSIGNED.toLowerCase() || known.has(name)) continue;
+    known.add(name);
+    orderedNames.push({ region: name, order: n(rg.display_order) });
+  }
+  orderedNames.push({ region: UNASSIGNED, order: UNASSIGNED_ORDER });
+  known.add(UNASSIGNED);
   for (const r of [...terminalRows, ...openRows]) {
     if (!known.has(r.region)) {
       known.add(r.region);
@@ -351,15 +372,13 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
   const totalOpenCount = regions.reduce((s, r) => s + r.pipeline.count, 0);
   const unassignedOpen = regions.find((r) => r.isUnassigned)?.pipeline.count ?? 0;
 
-  // biggest region mover (largest absolute Δ won, this week vs prior week)
-  let biggestRegionMover: RegionMover | null = null;
-  for (const row of moverRows) {
-    const delta = n(row.this_won) - n(row.prior_won);
-    if (delta === 0) continue;
-    if (!biggestRegionMover || Math.abs(delta) > Math.abs(biggestRegionMover.deltaWon)) {
-      biggestRegionMover = { region: row.region, deltaWon: delta };
-    }
-  }
+  // biggest region mover (largest absolute Δ won, this week vs prior week). Deterministic tie-break by
+  // region name so equal-magnitude movers don't flip between runs.
+  const movers = moverRows
+    .map((row) => ({ region: row.region, deltaWon: n(row.this_won) - n(row.prior_won) }))
+    .filter((m) => m.deltaWon !== 0)
+    .sort((a, b) => Math.abs(b.deltaWon) - Math.abs(a.deltaWon) || a.region.localeCompare(b.region));
+  const biggestRegionMover: RegionMover | null = movers[0] ?? null;
 
   return {
     period: { from, to, label: `${from} → ${to}` },
@@ -382,7 +401,7 @@ async function topMoverDeal(tenantDb: TenantDb, whereSql: SQL, valueSql: SQL): P
       SELECT d.id AS id, d.deal_number AS deal_number, d.name AS name, ${REGION_NAME} AS region, ${valueSql} AS val
       ${COMMON_JOINS}
       WHERE ${whereSql}
-      ORDER BY val DESC NULLS LAST, d.created_at DESC
+      ORDER BY val DESC NULLS LAST, d.created_at DESC, d.id DESC
       LIMIT 1`)
   );
   const row = rows[0];

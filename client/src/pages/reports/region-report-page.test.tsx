@@ -10,9 +10,22 @@ const hookState: { data: RegionReportData | null; loading: boolean; error: strin
   loading: false,
   error: null,
 };
+const hookCalls: Array<[string | undefined, string | undefined]> = [];
 vi.mock("@/hooks/use-reports", () => ({
-  useRegionReport: () => hookState,
+  useRegionReport: (from?: string, to?: string) => {
+    hookCalls.push([from, to]);
+    return hookState;
+  },
 }));
+
+const EMPTY: RegionReportData = {
+  period: { from: "2026-05-01", to: "2026-05-31", label: "2026-05-01 → 2026-05-31" },
+  summary: { totalWon: { value: 0, count: 0 }, openPipeline: { value: 0, count: 0 }, winRate: null, unassignedPct: null },
+  movers: { weekLabel: "2026-05-24 → 2026-05-27", biggestRegionMover: null, biggestNewDeal: null, biggestWin: null, biggestLoss: null },
+  regions: [],
+  stageColumns: [],
+  stageMatrix: [],
+};
 
 import { RegionReportPage } from "./region-report-page";
 
@@ -173,6 +186,7 @@ describe("RegionReportPage", () => {
     hookState.data = null;
     hookState.loading = true;
     mount();
+    expect(container.querySelector(".animate-spin")).not.toBeNull(); // loading spinner rendered
     act(() => root.unmount());
     hookState.loading = false;
     hookState.error = "boom";
@@ -181,5 +195,23 @@ describe("RegionReportPage", () => {
     root = createRoot(container);
     mount();
     expect((container.textContent ?? "").toLowerCase()).toContain("boom");
+  });
+
+  it("renders an empty report (no regions) without crashing or showing NaN", () => {
+    hookState.data = EMPTY;
+    mount();
+    const t = container.textContent ?? "";
+    expect(t).toContain("Reports by Region");
+    expect(t).not.toContain("NaN");
+    expect(t).toContain("—"); // null win rate / unassigned % render the safe placeholder
+  });
+
+  it("passes the resolved period as valid YYYY-MM-DD from/to into the data hook", () => {
+    hookCalls.length = 0;
+    mount();
+    const [from, to] = hookCalls[hookCalls.length - 1];
+    expect(from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(to).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(from! <= to!).toBe(true);
   });
 });

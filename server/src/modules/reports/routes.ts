@@ -260,9 +260,16 @@ router.get("/win-loss", requireDirector, async (req, res, next) => {
 // are current snapshots; movers are week-based. Defaults to the current week-to-date when absent.
 router.get("/region", requireDirector, async (req, res, next) => {
   try {
+    const rawFrom = readOptionalIsoDate(req.query.from, "from");
+    const rawTo = readOptionalIsoDate(req.query.to, "to");
+    // Both-or-neither: a single bound mixes a client date with a server default and can invert the window.
+    if ((rawFrom == null) !== (rawTo == null)) {
+      throw new AppError(400, "Provide both 'from' and 'to', or neither.");
+    }
     const fallback = getWtdPeriod("to_date");
-    const from = readOptionalIsoDate(req.query.from, "from") ?? fallback.from;
-    const to = readOptionalIsoDate(req.query.to, "to") ?? fallback.to;
+    const from = rawFrom ?? fallback.from;
+    const to = rawTo ?? fallback.to;
+    if (from > to) throw new AppError(400, "'from' must be on or before 'to'.");
     const data = await getRegionReport(req.tenantDb!, { from, to });
     await req.commitTransaction!();
     res.json({ data });

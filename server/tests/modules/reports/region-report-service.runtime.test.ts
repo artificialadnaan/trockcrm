@@ -182,4 +182,89 @@ describe("getRegionReport — 6-section aggregation", () => {
     const central = r.regions.find((x) => x.region === "Central")!;
     expect(central.sparkline).toEqual([0, 0, 0, 0, 0, 0, 20000, 100000]); // wk-1=wp2, wk0=w2+w3
   });
+
+  it("reconciles: office summary equals the SUM of the region cards (incl. Unassigned)", async () => {
+    const r = await getRegionReport(tdb, { from: "2026-05-24", to: "2026-05-27", now: NOW });
+    expect(r.summary.totalWon.value).toBe(r.regions.reduce((s, x) => s + x.won.value, 0));
+    expect(r.summary.totalWon.count).toBe(r.regions.reduce((s, x) => s + x.won.count, 0));
+    expect(r.summary.openPipeline.value).toBe(r.regions.reduce((s, x) => s + x.pipeline.value, 0));
+    expect(r.summary.openPipeline.count).toBe(r.regions.reduce((s, x) => s + x.pipeline.count, 0));
+  });
+});
+
+describe("getRegionReport — exclusions & edge cases", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let edb: any;
+  let epg: PGlite;
+  const E = { won: U("eb09"), lost: U("eb0a"), opp: U("eb01") };
+  const ER = { west: U("ec01") };
+  beforeAll(async () => {
+    epg = new PGlite();
+    await epg.exec(`SET TimeZone='UTC';`);
+    await epg.exec(`
+      CREATE TABLE users (id uuid PRIMARY KEY, display_name text NOT NULL);
+      CREATE TABLE region_config (id uuid PRIMARY KEY, name text NOT NULL, display_order int NOT NULL, is_active boolean NOT NULL DEFAULT true);
+      CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text NOT NULL, slug text UNIQUE NOT NULL, display_order int NOT NULL DEFAULT 0, workflow_family text NOT NULL DEFAULT 'standard_deal', is_terminal boolean NOT NULL DEFAULT false);
+      CREATE TABLE deals (
+        id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
+        assigned_rep_id uuid, region_id uuid, on_hold boolean NOT NULL DEFAULT false,
+        is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
+        won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
+        expected_close_date date, created_at timestamptz NOT NULL DEFAULT now(),
+        awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, bid_board_total_sales numeric
+      );
+      INSERT INTO region_config (id, name, display_order, is_active) VALUES ('${ER.west}','West Coast',1,true);
+      INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES
+        ('${E.opp}','Opportunity','opportunity',2,false),('${E.won}','Won','won',7,true),('${E.lost}','Lost','lost',8,true);
+
+      -- West WON, in-window — normal + archived (is_active=false, must COUNT) + boundary on the from-date.
+      INSERT INTO deals (id, name, stage_id, region_id, won_closed_date, awarded_amount, is_active, on_hold, is_test_data) VALUES
+        ('${U("en1")}','normal','${E.won}','${ER.west}','2026-05-25',100000,true,false,false),
+        ('${U("ear")}','archived','${E.won}','${ER.west}','2026-05-26',40000,false,false,false),
+        ('${U("ebf")}','boundary-from','${E.won}','${ER.west}','2026-05-24',10000,true,false,false),
+        ('${U("eoh")}','onhold','${E.won}','${ER.west}','2026-05-25',50000,true,true,false),
+        ('${U("etd")}','testdata','${E.won}','${ER.west}','2026-05-25',70000,true,false,true),
+        ('${U("eat")}','after-to','${E.won}','${ER.west}','2026-05-28',999000,true,false,false);
+      -- Unassigned WON (region_id NULL) in-window.
+      INSERT INTO deals (id, name, stage_id, region_id, won_closed_date, awarded_amount) VALUES
+        ('${U("eun")}','unassigned won','${E.won}',NULL,'2026-05-26',25000);
+      -- West LOST in-window (for win rate).
+      INSERT INTO deals (id, name, stage_id, region_id, lost_at, bid_estimate) VALUES
+        ('${U("elw")}','lost west','${E.lost}','${ER.west}','2026-05-25T12:00:00Z',5000);
+      -- LOST with lost_at NULL but actual_close_date in-window → counted via the canonical COALESCE fallback.
+      INSERT INTO deals (id, name, stage_id, region_id, lost_at, actual_close_date, bid_estimate) VALUES
+        ('${U("elf")}','lost fallback','${E.lost}','${ER.west}',NULL,'2026-05-26',3000);
+      -- OPEN: on_hold (excluded from pipeline) + normal.
+      INSERT INTO deals (id, name, stage_id, region_id, expected_close_date, bid_estimate, on_hold) VALUES
+        ('${U("eo1")}','open onhold','${E.opp}','${ER.west}','2026-06-10',30000,true),
+        ('${U("eo2")}','open normal','${E.opp}','${ER.west}','2026-06-10',60000,false);
+    `);
+    edb = drizzle(epg);
+  });
+  afterAll(async () => {
+    await epg?.close?.();
+  });
+
+  it("counts archived (is_active=false) wins, excludes on_hold/test_data, respects window boundaries", async () => {
+    const r = await getRegionReport(edb, { from: "2026-05-24", to: "2026-05-27", now: NOW });
+    const west = r.regions.find((x) => x.region === "West Coast")!;
+    // 100k normal + 40k archived + 10k boundary-from; on_hold/test_data/after-to excluded.
+    expect(west.won).toEqual({ value: 150000, count: 3 });
+    // West win rate = won 3 / (won 3 + lost 2) = 60% (lost = elw + the lost_at-NULL fallback elf).
+    expect(west.winRate).toBeCloseTo(60, 1);
+  });
+
+  it("maps NULL-region wins to the Unassigned segment and reconciles to office", async () => {
+    const r = await getRegionReport(edb, { from: "2026-05-24", to: "2026-05-27", now: NOW });
+    const un = r.regions.find((x) => x.region === "Unassigned")!;
+    expect(un.won).toEqual({ value: 25000, count: 1 });
+    expect(r.summary.totalWon.value).toBe(175000); // 150k West + 25k Unassigned
+    expect(r.summary.totalWon.value).toBe(r.regions.reduce((s, x) => s + x.won.value, 0));
+  });
+
+  it("excludes on_hold open deals from pipeline", async () => {
+    const r = await getRegionReport(edb, { from: "2026-05-24", to: "2026-05-27", now: NOW });
+    const west = r.regions.find((x) => x.region === "West Coast")!;
+    expect(west.pipeline).toEqual({ value: 60000, count: 1 }); // open onhold (30k) excluded
+  });
 });

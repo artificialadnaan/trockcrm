@@ -29,6 +29,7 @@ export interface RegionRow {
   sparkline: number[];
   /** CURRENT snapshot projection + honest N/M coverage. */
   forecast: { bands: RegionForecastBands; coverage: { n: number; m: number } };
+  /** WINDOWED — top reps by won value in the period. */
   topReps: RegionTopRep[];
 }
 export interface RegionStageColumn {
