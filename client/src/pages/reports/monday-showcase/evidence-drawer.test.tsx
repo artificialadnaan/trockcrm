@@ -105,13 +105,18 @@ describe("evidence drawer column alignment", () => {
     for (const num of ["Value", "Win %", "Age"]) {
       expect(headByText(num)?.className).toContain("text-right");
     }
-    // Text → left-aligned, including Expected close date (stays left, not flush against Value).
-    for (const txt of ["Deal", "Company", "Owner", "Expected close date", "Region"]) {
+    // Text → left-aligned (every text column, including Expected close date — stays left, not flush
+    // against Value).
+    for (const txt of ["Deal", "Company", "Owner", "Expected close date", "Region", "Type", "Stage"]) {
       expect(headByText(txt)?.className).toContain("text-left");
     }
-    // Numeric cells carry tabular-nums so percentages and em dashes line up on the right edge.
+    // Cells mirror their header: numeric right-aligned (+ tabular-nums so percentages and em dashes
+    // line up on the right edge); every other cell explicitly left-aligned.
     const numericCells = cells.filter((c) => c.className.includes("text-right"));
+    const textCells = cells.filter((c) => !c.className.includes("text-right"));
     expect(numericCells.length).toBeGreaterThan(0);
+    expect(textCells.length).toBeGreaterThan(0);
     expect(numericCells.every((c) => c.className.includes("tabular-nums"))).toBe(true);
+    expect(textCells.every((c) => c.className.includes("text-left"))).toBe(true);
   });
 });
