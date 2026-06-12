@@ -98,5 +98,3 @@ picker never surfaces a cross-office target the (flag-off) upload can't write to
   `office_B/deals/<dealNumber>/…`, `job_queue.office_id = office_B`; negatives (unknown id → 404, transient
   → 503, forced wrong-schema INSERT rejected by the FK). photos-only-on-terminal + rep-ownership preserved
   per resolved office.
-</content>
-</invoke>

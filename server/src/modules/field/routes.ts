@@ -561,7 +561,9 @@ fieldRoutes.get("/photo-targets/validate", requireFieldContractor, async (req, r
     const result = await runInOffice(office, (db) =>
       assertAccessibleFieldCaptureTarget(db, { ...access, ...target }),
     );
-    res.json({ target: result, ...officeTag(office) });
+    // Stamp the owning office only when cross-office writes are on — keeps the flag-off payload contract
+    // byte-for-byte identical to today's single-office response (`{ target }`).
+    res.json(isFieldCrossOfficeWritesEnabled() ? { target: result, ...officeTag(office) } : { target: result });
   } catch (err) {
     next(err);
   }

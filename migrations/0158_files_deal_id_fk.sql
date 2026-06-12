@@ -52,11 +52,16 @@ END $tenant$;
 -- TENANT_SCHEMA_START
 DO $files_deal_fk$
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint c
-    JOIN pg_namespace n ON n.oid = c.connamespace
-    WHERE n.nspname = 'office_dallas' AND c.conname = 'files_deal_id_fkey'
-  ) THEN
+  -- Guard the tables exist before altering (matches the repo's TENANT_SCHEMA convention) so this block
+  -- is safe both as office_dallas's own migration and as the clone template for a freshly-provisioned
+  -- schema where files/deals may not be present yet.
+  IF to_regclass('office_dallas.files') IS NOT NULL
+     AND to_regclass('office_dallas.deals') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint c
+       JOIN pg_namespace n ON n.oid = c.connamespace
+       WHERE n.nspname = 'office_dallas' AND c.conname = 'files_deal_id_fkey'
+     ) THEN
     ALTER TABLE office_dallas.files
       ADD CONSTRAINT files_deal_id_fkey FOREIGN KEY (deal_id) REFERENCES office_dallas.deals(id) ON DELETE SET NULL NOT VALID;
   END IF;

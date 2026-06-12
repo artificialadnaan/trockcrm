@@ -22,27 +22,40 @@ const photoMocks = vi.hoisted(() => ({
 }));
 vi.mock("../../../src/modules/field/photos-service.js", () => photoMocks);
 
+// File-targeted write services (tags / transcription) — mocked so we can assert the route resolves the
+// PHOTO's office (via runFieldFileWrite → resolveWriteOffice("file", …)) and runs the edit there.
+const tagMocks = vi.hoisted(() => ({
+  replaceFieldPhotoTags: vi.fn(async () => ({ tags: ["roof"] })),
+  deleteFieldPhotoTag: vi.fn(async () => ({ tags: [] })),
+  searchFieldProjectTags: vi.fn(),
+}));
+vi.mock("../../../src/modules/field/photo-tags-service.js", () => tagMocks);
+
 // Resolver + transaction helpers mocked so we can drive which office each id resolves to, pool-free.
 // office A = dallas (the uploader's active office), office B = atlanta (the cross-office deal's home).
 const xoMocks = vi.hoisted(() => ({
   enabled: false,
   // deal id "deal-b" / photo "photo-b" live in office B; everything else in office A.
   officeForId: (id: string) => (id.endsWith("-b") ? { id: "id-atlanta", slug: "atlanta" } : { id: "id-dallas", slug: "dallas" }),
+  resolveWriteOffice: vi.fn(),
+  runInOfficeTransaction: vi.fn(),
 }));
 vi.mock("../../../src/modules/field/cross-office.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../src/modules/field/cross-office.js")>();
   const officeDb = { execute: vi.fn() } as any;
+  xoMocks.resolveWriteOffice.mockImplementation(async (_kind: string, id: string) => xoMocks.officeForId(id));
+  xoMocks.runInOfficeTransaction.mockImplementation(async (_office: any, _userId: any, run: any) => run(officeDb, _office));
   return {
     ...actual,
     isFieldCrossOfficeWritesEnabled: vi.fn(() => xoMocks.enabled),
     getFieldOfficeById: vi.fn(async (id: string) => xoMocks.officeForId(id)),
-    resolveWriteOffice: vi.fn(async (_kind: string, id: string) => xoMocks.officeForId(id)),
+    resolveWriteOffice: xoMocks.resolveWriteOffice,
     resolveFieldWriteOffice: vi.fn(async (uploaderId: string, target: any) =>
       xoMocks.enabled
         ? xoMocks.officeForId(target.dealId ?? target.opportunityId ?? target.leadId ?? uploaderId)
         : xoMocks.officeForId(uploaderId),
     ),
-    runInOfficeTransaction: vi.fn(async (_office: any, _userId: any, run: any) => run(officeDb, _office)),
+    runInOfficeTransaction: xoMocks.runInOfficeTransaction,
     runInOffice: vi.fn(async (_office: any, run: any) => run(officeDb, _office)),
   };
 });
@@ -114,6 +127,26 @@ describe("cross-office write re-binding (flag ON)", () => {
 
     expect(res.status).toBe(200);
     expect(photoMocks.assignPendingFieldPhotoTarget).toHaveBeenCalledTimes(1);
+  });
+
+  it("tag write resolves the PHOTO's office (file-targeted) and runs the edit there", async () => {
+    xoMocks.enabled = true;
+    const res = await request(buildApp())
+      .post("/api/field/photos/photo-b/tags") // photo-b → office B
+      .send({ tags: ["roof"] });
+
+    expect(res.status).toBe(200);
+    expect(xoMocks.resolveWriteOffice).toHaveBeenCalledWith("file", "photo-b", expect.any(String));
+    expect(tagMocks.replaceFieldPhotoTags).toHaveBeenCalledTimes(1);
+  });
+
+  it("tag delete resolves the PHOTO's office (file-targeted)", async () => {
+    xoMocks.enabled = true;
+    const res = await request(buildApp()).delete("/api/field/photos/photo-b/tags/roof");
+
+    expect(res.status).toBe(200);
+    expect(xoMocks.resolveWriteOffice).toHaveBeenCalledWith("file", "photo-b", expect.any(String));
+    expect(tagMocks.deleteFieldPhotoTag).toHaveBeenCalledTimes(1);
   });
 });
 

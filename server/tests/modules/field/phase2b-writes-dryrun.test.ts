@@ -84,12 +84,16 @@ const CASES: Case[] = [
     expect: { rejected: true },
   },
   {
-    name: "FLAG OFF · cross-office deal stays single-office (today's behavior, uploader's office)",
+    // Flag-off, the picker is single-office, so the only reachable flag-off target is in the uploader's
+    // OWN office — modeled here. (A foreign dealId never reaches key-building with the flag off:
+    // requestFieldPhotoUploadUrl validates the target in the uploader's schema and 404s first. So we do
+    // NOT model a flag-off cross-office "unknown" key — that path is unreachable.)
+    name: "FLAG OFF · same-office deal stays single-office (today's behavior, uploader's office)",
     flag: false,
     endpoint: "upload-url",
     uploaderOffice: DALLAS,
-    target: { dealId: "deal-atl-100" },
-    expect: { schema: "office_dallas", r2Prefix: "office_dallas/deals/unknown/photo/", jobOfficeId: "id-dallas" },
+    target: { dealId: "deal-dal-200" },
+    expect: { schema: "office_dallas", r2Prefix: "office_dallas/deals/DAL-200/photo/", jobOfficeId: "id-dallas" },
   },
 ];
 
