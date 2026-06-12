@@ -92,17 +92,39 @@ function tokenStatus(row: { revoked_at?: Date | string | null; expires_at?: Date
   return "active";
 }
 
+// Build a parameterized `uuid[]` SQL value (each element cast explicitly) so subset photo-id
+// lists never depend on driver array serialization. NULL/empty -> SQL NULL = a whole-deal token.
+function photoIdsArrayParam(photoIds: string[] | null | undefined) {
+  if (!photoIds || photoIds.length === 0) return sql`NULL::uuid[]`;
+  return sql`ARRAY[${sql.join(photoIds.map((id) => sql`${id}::uuid`), sql`, `)}]`;
+}
+
+// PG returns a uuid[] column as a string[] (or null). Normalize empty arrays to null so callers
+// only ever see "null = whole deal" vs "non-empty subset".
+function normalizePhotoIds(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  return value.map((id) => String(id));
+}
+
+// Limits a per-photo lookup (`files.id`) to a subset token's photo_ids — so a requested photo id
+// outside the token's scope 404s even if guessed. No-op for whole-deal tokens (null photo_ids).
+function tokenPhotoScopeSql(photoIds: string[] | null) {
+  return photoIds === null ? sql`` : sql` AND id = ANY(${photoIdsArrayParam(photoIds)})`;
+}
+
 export async function generatePublicToken(input: {
   dealId: string;
   createdByUserId: string;
   tenantId: string;
   expiresAt?: Date | null;
+  // Scope the token to a specific set of photo ids. Omit / null / empty = whole-deal token.
+  photoIds?: string[] | null;
 }): Promise<{ rawToken: string; token: { id: string; dealId: string; tenantId: string; expiresAt: string | null } }> {
   const rawToken = generateRawPublicToken();
   const tokenHash = hashPublicPhotoToken(rawToken);
   const result = await db.execute(sql`
-    INSERT INTO public.public_photo_tokens (token, deal_id, tenant_id, created_by_user_id, expires_at)
-    VALUES (${tokenHash}, ${input.dealId}::uuid, ${input.tenantId}::uuid, ${input.createdByUserId}::uuid, ${input.expiresAt ?? null})
+    INSERT INTO public.public_photo_tokens (token, deal_id, tenant_id, created_by_user_id, expires_at, photo_ids)
+    VALUES (${tokenHash}, ${input.dealId}::uuid, ${input.tenantId}::uuid, ${input.createdByUserId}::uuid, ${input.expiresAt ?? null}, ${photoIdsArrayParam(input.photoIds)})
     RETURNING id, deal_id, tenant_id, expires_at
   `);
   const row = ((result as any).rows ?? result)[0];
@@ -117,11 +139,37 @@ export async function generatePublicToken(input: {
   };
 }
 
+// Validates (in the deal's tenant db) that every photo id is an ACTIVE photo on the given deal.
+// Throws 400 listing nothing sensitive if any id is missing — so a subset share token can never be
+// minted referencing another deal's photos (or a non-photo / deleted file). No-op for an empty list.
+export async function assertPhotosBelongToDeal(
+  tenantDb: TenantDb,
+  dealId: string,
+  photoIds: string[]
+): Promise<void> {
+  if (photoIds.length === 0) return;
+  const result = await tenantDb.execute(sql`
+    SELECT id
+    FROM files
+    WHERE id = ANY(${photoIdsArrayParam(photoIds)})
+      AND deal_id = ${dealId}::uuid
+      AND category = 'photo'
+      AND deleted_at IS NULL
+      AND is_active = true
+  `);
+  const foundIds = new Set((((result as any).rows ?? result) as Array<{ id: string }>).map((row) => row.id));
+  const missing = photoIds.filter((id) => !foundIds.has(id));
+  if (missing.length > 0) {
+    throw new AppError(400, "One or more selected photos are not part of this project.");
+  }
+}
+
 export async function verifyAndConsumeToken(rawToken: string): Promise<{
   tokenId: string;
   dealId: string;
   tenantId: string;
   createdByUserId: string;
+  photoIds: string[] | null;
 }> {
   const tokenHash = hashPublicPhotoToken(rawToken);
   const result = await db.execute(sql`
@@ -131,7 +179,7 @@ export async function verifyAndConsumeToken(rawToken: string): Promise<{
     WHERE token = ${tokenHash}
       AND revoked_at IS NULL
       AND (expires_at IS NULL OR expires_at > now())
-    RETURNING id, deal_id, tenant_id, created_by_user_id
+    RETURNING id, deal_id, tenant_id, created_by_user_id, photo_ids
   `);
   const row = ((result as any).rows ?? result)[0];
   if (!row) throw new AppError(404, "Photo link not found");
@@ -140,6 +188,7 @@ export async function verifyAndConsumeToken(rawToken: string): Promise<{
     dealId: row.deal_id,
     tenantId: row.tenant_id,
     createdByUserId: row.created_by_user_id,
+    photoIds: normalizePhotoIds(row.photo_ids),
   };
 }
 
@@ -149,10 +198,11 @@ export async function resolvePublicPhotoToken(rawToken: string): Promise<{
   tokenId: string;
   dealId: string;
   tenantId: string;
+  photoIds: string[] | null;
 }> {
   const tokenHash = hashPublicPhotoToken(rawToken);
   const result = await db.execute(sql`
-    SELECT id, deal_id, tenant_id
+    SELECT id, deal_id, tenant_id, photo_ids
     FROM public.public_photo_tokens
     WHERE token = ${tokenHash}
       AND revoked_at IS NULL
@@ -161,7 +211,7 @@ export async function resolvePublicPhotoToken(rawToken: string): Promise<{
   `);
   const row = ((result as any).rows ?? result)[0];
   if (!row) throw new AppError(404, "Photo link not found");
-  return { tokenId: row.id, dealId: row.deal_id, tenantId: row.tenant_id };
+  return { tokenId: row.id, dealId: row.deal_id, tenantId: row.tenant_id, photoIds: normalizePhotoIds(row.photo_ids) };
 }
 
 export async function revokeToken(tokenId: string, userId: string, tenantId?: string): Promise<void> {
@@ -309,6 +359,8 @@ export async function getPublicPhotoViewer(
     const timeline = await getDealPhotoTimeline(tenantDb, token.dealId, 1, 500, {
       ...filters,
       includeDeleted: false,
+      // Subset token (non-null photo_ids) -> the viewer lists ONLY those photos; whole-deal token -> all.
+      photoIds: token.photoIds ?? undefined,
     });
     const photos = timeline.photos.map((photo) =>
       publicPhotoShape(photo, publicPhotoImageUrl(photo, options.assetBaseUrl, rawToken))
@@ -347,7 +399,7 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
       WHERE id = ${photoId}::uuid
         AND deal_id = ${token.dealId}::uuid
         AND category = 'photo'
-        AND deleted_at IS NULL
+        AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}
       LIMIT 1
     `);
     const photo = ((photoResult as any).rows ?? photoResult)[0];
@@ -408,7 +460,7 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
       WHERE id = ${photoId}::uuid
         AND deal_id = ${token.dealId}::uuid
         AND category = 'photo'
-        AND deleted_at IS NULL
+        AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}
       LIMIT 1
     `);
     return ((photoResult as any).rows ?? photoResult)[0];

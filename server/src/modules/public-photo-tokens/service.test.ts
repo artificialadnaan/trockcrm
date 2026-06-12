@@ -74,6 +74,7 @@ describe("public photo token service", () => {
       dealId: "deal-1",
       tenantId: "tenant-1",
       createdByUserId: "user-1",
+      photoIds: null,
     });
     const queryText = JSON.stringify(executeMock.mock.calls[0][0]);
     expect(queryText).toContain("access_count = access_count + 1");
@@ -573,5 +574,110 @@ describe("public photo token service", () => {
 
     expect(asset).toEqual({ kind: "external", url: "https://img.companycam.com/full.jpg" });
     expect(getObjectStreamMock).not.toHaveBeenCalled();
+  });
+
+  // ─── Token subset support ──────────────────────────────────────────────────────────────────────
+  const PHOTO_A = "11111111-1111-1111-1111-111111111111";
+  const PHOTO_B = "22222222-2222-2222-2222-222222222222";
+  const PHOTO_C = "33333333-3333-3333-3333-333333333333";
+
+  it("persists photo_ids for a SUBSET token (whole-deal token stores NULL::uuid[])", async () => {
+    const { generatePublicToken } = await import("./service.js");
+    executeMock.mockResolvedValue({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", expires_at: null }] });
+
+    await generatePublicToken({ dealId: "deal-1", tenantId: "tenant-1", createdByUserId: "user-1", photoIds: [PHOTO_A, PHOTO_B] });
+    const subsetInsert = JSON.stringify(executeMock.mock.calls[0][0]);
+    expect(subsetInsert).toContain("photo_ids");
+    expect(subsetInsert).toContain(PHOTO_A);
+    expect(subsetInsert).toContain(PHOTO_B);
+
+    executeMock.mockClear();
+    await generatePublicToken({ dealId: "deal-1", tenantId: "tenant-1", createdByUserId: "user-1" });
+    expect(JSON.stringify(executeMock.mock.calls[0][0])).toContain("NULL::uuid[]");
+  });
+
+  it("returns the token's photo subset from verifyAndConsumeToken / resolvePublicPhotoToken", async () => {
+    const { verifyAndConsumeToken, resolvePublicPhotoToken } = await import("./service.js");
+
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1", photo_ids: [PHOTO_A, PHOTO_B] }] });
+    const consumed = await verifyAndConsumeToken("raw");
+    expect(consumed.photoIds).toEqual([PHOTO_A, PHOTO_B]);
+    expect(JSON.stringify(executeMock.mock.calls[0][0])).toContain("photo_ids");
+
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", photo_ids: null }] });
+    expect((await resolvePublicPhotoToken("raw")).photoIds).toBeNull();
+  });
+
+  it("scopes the public viewer timeline to the token's photo subset", async () => {
+    const { getPublicPhotoViewer } = await import("./service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1", photo_ids: [PHOTO_A] }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "deal-1", name: "Public Deal", property_address: "100 Main St" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    getDealPhotoTimelineMock.mockResolvedValue({ photos: [] });
+
+    await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
+
+    expect(getDealPhotoTimelineMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      1,
+      500,
+      expect.objectContaining({ photoIds: [PHOTO_A], includeDeleted: false }),
+    );
+  });
+
+  it("enforces the subset in the per-photo asset query so an out-of-scope photo is unreachable", async () => {
+    const { getPublicPhotoAsset } = await import("./service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", photo_ids: [PHOTO_A] }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] }) // the subset WHERE clause filters the out-of-scope id out
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(getPublicPhotoAsset("raw-token", PHOTO_C)).rejects.toMatchObject({ statusCode: 404 });
+    const filesSql = tenantQueryMock.mock.calls.map((call) => JSON.stringify(call[0])).join(" ");
+    expect(filesSql).toContain("ANY");
+    expect(filesSql).toContain(PHOTO_A); // the subset is bound into the query
+  });
+
+  it("does NOT add a subset filter to the asset query for a whole-deal token", async () => {
+    const { getPublicPhotoAsset } = await import("./service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", photo_ids: null }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", r2_key: null, mime_type: "image/jpeg", file_extension: ".jpg", external_url: "https://img.companycam.com/full.jpg" }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await getPublicPhotoAsset("raw-token", "photo-1");
+    const filesSql = tenantQueryMock.mock.calls.map((call) => JSON.stringify(call[0])).join(" ");
+    expect(filesSql).not.toContain("ANY");
+  });
+
+  it("assertPhotosBelongToDeal passes only when every id is an active photo on the deal", async () => {
+    const { assertPhotosBelongToDeal } = await import("./service.js");
+
+    const okExec = vi.fn().mockResolvedValue({ rows: [{ id: PHOTO_A }, { id: PHOTO_B }] });
+    await expect(assertPhotosBelongToDeal({ execute: okExec } as any, "deal-1", [PHOTO_A, PHOTO_B])).resolves.toBeUndefined();
+    const validationSql = JSON.stringify(okExec.mock.calls[0][0]);
+    expect(validationSql).toContain("is_active");
+    expect(validationSql).toContain("category");
+
+    const missingExec = vi.fn().mockResolvedValue({ rows: [{ id: PHOTO_A }] });
+    await expect(assertPhotosBelongToDeal({ execute: missingExec } as any, "deal-1", [PHOTO_A, PHOTO_B])).rejects.toMatchObject({
+      statusCode: 400,
+    });
+
+    // No id list -> no query at all.
+    const emptyExec = vi.fn();
+    await expect(assertPhotosBelongToDeal({ execute: emptyExec } as any, "deal-1", [])).resolves.toBeUndefined();
+    expect(emptyExec).not.toHaveBeenCalled();
   });
 });
