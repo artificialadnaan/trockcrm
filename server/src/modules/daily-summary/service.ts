@@ -19,15 +19,16 @@ export interface BiggestMover {
   name: string;
   actions: number;
 }
-/** Per-rep action breakdown — the leaderboard's value is the named detail, not a bar length. */
+/** Per-rep action breakdown — the leaderboard's value is the named detail, not a bar length.
+ *  `activities` carries the FULL per-type map (email/note/call/meeting/…) so no action type counted in
+ *  actionCount is dropped from the breakdown (a calls-heavy rep must not show actions with an empty line). */
 export interface RepBreakdown {
   created: number;
   edits: number;
   stageMoves: number;
   uploads: number;
-  emails: number;
-  notes: number;
   reports: number;
+  activities: Record<string, number>;
 }
 export interface LeaderRow {
   rank: number;
@@ -76,19 +77,19 @@ export interface DailySummaryPayload {
 }
 
 const ZERO_REP_BREAKDOWN = (): RepBreakdown => ({
-  created: 0, edits: 0, stageMoves: 0, uploads: 0, emails: 0, notes: 0, reports: 0,
+  created: 0, edits: 0, stageMoves: 0, uploads: 0, reports: 0, activities: {},
 });
 
-/** Map the canonical usage breakdown JSONB into the leaderboard's named buckets. */
+/** Map the canonical usage breakdown JSONB into the leaderboard's named buckets — activities carried
+ *  whole (every type), so the breakdown line can never under-count a rep's real actions. */
 function toRepBreakdown(b: UsageBreakdown): RepBreakdown {
   return {
     created: b.creates,
     edits: b.edits,
     stageMoves: b.stage_moves,
     uploads: b.uploads,
-    emails: b.activities.email ?? 0,
-    notes: b.activities.note ?? 0,
     reports: b.report_views,
+    activities: { ...b.activities },
   };
 }
 
@@ -240,37 +241,50 @@ export async function readWonToday(client: QueryClient, schema: string, date: st
 }
 
 /**
- * Deals that ADVANCED today: stage transitions whose to-stage is non-terminal (so this excludes moves
- * into Won AND into Lost — both terminal). DISTINCT ON keeps only each deal's latest transition that day,
- * so a deal that moved twice is listed once. Resolved to from/to stage names via pipeline_stage_config.
+ * Deals that ADVANCED today. Correctness details (all review-driven):
+ * - Pick each deal's LATEST transition of the day FIRST (DISTINCT ON in the subquery, no stage filter),
+ *   THEN exclude it if that latest move was terminal — otherwise a deal that went non-terminal→Won later
+ *   the same day would still surface here (and double-count against Won today).
+ * - Exclude backward moves (a regression isn't "advancing") via the real `is_backward_move` column.
+ * - Attribute the row to the actual mover `sh.changed_by` (the same column that credits stage_moves in
+ *   the usage breakdown), so the named Advanced rows agree with the "Who moved it" leaderboard — not the
+ *   deal's current assignee.
+ * - Reportable + non-test only, matching readWonToday, so test/on-hold noise can't reach leadership.
  */
 export async function readAdvancedToday(client: QueryClient, schema: string, date: string): Promise<AdvancedMove[]> {
   const { rows } = await client.query<{
-    deal_name: string | null; rep_name: string | null; from_stage: string | null; to_stage: string | null; created_at: string;
+    deal_name: string | null; rep_name: string | null; from_stage: string | null; to_stage: string | null;
   }>(
-    `SELECT DISTINCT ON (sh.deal_id)
-            d.name AS deal_name, u.display_name AS rep_name,
-            fs.name AS from_stage, ts.name AS to_stage, sh.created_at
-       FROM ${schema}.deal_stage_history sh
-       LEFT JOIN ${schema}.deals d ON sh.deal_id = d.id
-       LEFT JOIN public.users u ON u.id = d.assigned_rep_id
-       LEFT JOIN public.pipeline_stage_config fs ON sh.from_stage_id = fs.id
-       LEFT JOIN public.pipeline_stage_config ts ON sh.to_stage_id = ts.id
-      WHERE sh.created_at >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
-        AND sh.created_at < (($1::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
-        AND COALESCE(ts.is_terminal, false) = false
-      ORDER BY sh.deal_id, sh.created_at DESC`,
+    `SELECT latest.deal_name, latest.rep_name, latest.from_stage, latest.to_stage
+       FROM (
+         SELECT DISTINCT ON (sh.deal_id)
+                d.name AS deal_name, u.display_name AS rep_name,
+                fs.name AS from_stage, ts.name AS to_stage,
+                COALESCE(ts.is_terminal, false) AS to_terminal,
+                COALESCE(sh.is_backward_move, false) AS is_backward,
+                sh.created_at
+           FROM ${schema}.deal_stage_history sh
+           JOIN ${schema}.deals d ON sh.deal_id = d.id
+           LEFT JOIN public.users u ON u.id = sh.changed_by
+           LEFT JOIN public.pipeline_stage_config fs ON sh.from_stage_id = fs.id
+           LEFT JOIN public.pipeline_stage_config ts ON sh.to_stage_id = ts.id
+          WHERE sh.created_at >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+            AND sh.created_at < (($1::date + 1)::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')
+            AND ${reportableDealSqlPredicate("d")}
+            AND COALESCE(d.is_test_data, false) = false
+          ORDER BY sh.deal_id, sh.created_at DESC
+       ) latest
+      WHERE latest.to_terminal = false
+        AND latest.is_backward = false
+      ORDER BY latest.created_at DESC`,
     [date],
   );
-  // DISTINCT ON forces deal_id ordering; present newest-move-first for the reader.
-  return [...rows]
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
-    .map((r) => ({
-      dealName: r.deal_name ?? "(unnamed deal)",
-      repName: r.rep_name ?? "Unassigned",
-      fromStage: r.from_stage,
-      toStage: r.to_stage,
-    }));
+  return rows.map((r) => ({
+    dealName: r.deal_name ?? "(unnamed deal)",
+    repName: r.rep_name ?? "Unassigned",
+    fromStage: r.from_stage,
+    toStage: r.to_stage,
+  }));
 }
 
 /** Distinct browser-session reps per CT hour today — the page's hourly curve (honest: browser reps only). */

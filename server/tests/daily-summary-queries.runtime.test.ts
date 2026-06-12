@@ -11,6 +11,7 @@ const client = () => ({ query: (sql: string, params?: unknown[]) => db.query(sql
 
 const DATE = "2026-06-12";
 const REP_A = "11111111-1111-1111-1111-111111111111";
+const REP_B = "11111111-1111-1111-1111-111111111112";
 const ST_WON = "22222222-2222-2222-2222-222222222221";
 const ST_OPP = "22222222-2222-2222-2222-222222222222";
 const ST_EST = "22222222-2222-2222-2222-222222222223";
@@ -42,9 +43,13 @@ beforeAll(async () => {
       deal_id uuid,
       from_stage_id uuid,
       to_stage_id uuid,
+      changed_by uuid,
+      is_backward_move boolean,
       created_at timestamptz NOT NULL
     );
-    INSERT INTO public.users (id, display_name) VALUES ('${REP_A}', 'Kaleb Marshall');
+    INSERT INTO public.users (id, display_name) VALUES
+      ('${REP_A}', 'Kaleb Marshall'),
+      ('${REP_B}', 'Sidney Monroe');
     INSERT INTO public.pipeline_stage_config (id, slug, name, is_terminal) VALUES
       ('${ST_WON}', '${WON_SLUG}', 'Won', true),
       ('${ST_OPP}', 'opportunity', 'Opportunity', false),
@@ -65,19 +70,28 @@ beforeAll(async () => {
   `);
 
   // ---- Advanced-today fixtures (stage history) ----
-  // DA "The Hayward": two moves today; DISTINCT ON keeps the latest (Estimating -> Negotiation).
+  // DA "The Hayward": two non-terminal moves today; latest (Est->Neg) was made by REP_B (Sidney), while
+  // the deal is ASSIGNED to REP_A — so the row must attribute to the mover, not the assignee.
   await db.exec(`
-    INSERT INTO office_test.deals (id, name, assigned_rep_id, stage_id) VALUES
-      ('${uuid(10)}', 'The Hayward',   '${REP_A}', '${ST_NEG}'),
-      ('${uuid(11)}', 'Closed Deal',   '${REP_A}', '${ST_WON}'),
-      ('${uuid(12)}', 'Lost Deal',     '${REP_A}', '${ST_LOST}'),
-      ('${uuid(13)}', 'Yesterday Move','${REP_A}', '${ST_EST}');
-    INSERT INTO office_test.deal_stage_history (deal_id, from_stage_id, to_stage_id, created_at) VALUES
-      ('${uuid(10)}', '${ST_OPP}', '${ST_EST}', '2026-06-12 13:00:00-05'),
-      ('${uuid(10)}', '${ST_EST}', '${ST_NEG}', '2026-06-12 14:00:00-05'),
-      ('${uuid(11)}', '${ST_NEG}', '${ST_WON}', '2026-06-12 15:00:00-05'),
-      ('${uuid(12)}', '${ST_NEG}', '${ST_LOST}','2026-06-12 15:30:00-05'),
-      ('${uuid(13)}', '${ST_OPP}', '${ST_EST}', '2026-06-11 13:00:00-05');
+    INSERT INTO office_test.deals (id, name, assigned_rep_id, stage_id, is_test_data) VALUES
+      ('${uuid(10)}', 'The Hayward',      '${REP_A}', '${ST_NEG}',  false),
+      ('${uuid(11)}', 'Closed Deal',      '${REP_A}', '${ST_WON}',  false),
+      ('${uuid(12)}', 'Lost Deal',        '${REP_A}', '${ST_LOST}', false),
+      ('${uuid(13)}', 'Yesterday Move',   '${REP_A}', '${ST_EST}',  false),
+      ('${uuid(14)}', 'Promoted then Won','${REP_A}', '${ST_WON}',  false),
+      ('${uuid(15)}', 'Bounced Back',     '${REP_A}', '${ST_OPP}',  false),
+      ('${uuid(16)}', 'Test Advanced',    '${REP_A}', '${ST_EST}',  true);
+    INSERT INTO office_test.deal_stage_history (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move, created_at) VALUES
+      ('${uuid(10)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-12 13:00:00-05'),
+      ('${uuid(10)}', '${ST_EST}', '${ST_NEG}', '${REP_B}', false, '2026-06-12 14:00:00-05'),
+      ('${uuid(11)}', '${ST_NEG}', '${ST_WON}', '${REP_A}', false, '2026-06-12 15:00:00-05'),
+      ('${uuid(12)}', '${ST_NEG}', '${ST_LOST}','${REP_A}', false, '2026-06-12 15:30:00-05'),
+      ('${uuid(13)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-11 13:00:00-05'),
+      ('${uuid(14)}', '${ST_EST}', '${ST_NEG}', '${REP_A}', false, '2026-06-12 13:00:00-05'),
+      ('${uuid(14)}', '${ST_NEG}', '${ST_WON}', '${REP_A}', false, '2026-06-12 15:00:00-05'),
+      ('${uuid(15)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-12 13:00:00-05'),
+      ('${uuid(15)}', '${ST_EST}', '${ST_OPP}', '${REP_A}', true,  '2026-06-12 14:00:00-05'),
+      ('${uuid(16)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-12 13:00:00-05');
   `);
 });
 afterAll(async () => { await db?.close(); });
@@ -108,10 +122,28 @@ describe("readWonToday — canonical won_closed_date cohort + effective-won valu
   });
 });
 
-describe("readAdvancedToday — non-terminal moves, latest-per-deal", () => {
-  it("lists a deal once at its latest transition; excludes moves into Won/Lost and prior days", async () => {
+describe("readAdvancedToday — latest move per deal, terminal/backward-aware, mover-attributed", () => {
+  it("lists a deal once at its latest transition, attributed to the mover (changed_by, not the assignee)", async () => {
     const adv = await readAdvancedToday(client(), "office_test", DATE);
     expect(adv.length).toBe(1);
-    expect(adv[0]).toMatchObject({ dealName: "The Hayward", fromStage: "Estimating", toStage: "Negotiation" });
+    expect(adv[0]).toMatchObject({
+      dealName: "The Hayward",
+      fromStage: "Estimating",
+      toStage: "Negotiation",
+      repName: "Sidney Monroe", // the mover (changed_by REP_B), NOT the assignee (REP_A)
+    });
+  });
+  it("excludes a deal whose LATEST move was terminal (advanced→Won same day is not 'advanced')", async () => {
+    const adv = await readAdvancedToday(client(), "office_test", DATE);
+    expect(adv.map((a) => a.dealName)).not.toContain("Promoted then Won");
+  });
+  it("excludes a deal whose latest move was a backward move, and test/terminal/prior-day deals", async () => {
+    const adv = await readAdvancedToday(client(), "office_test", DATE);
+    const names = adv.map((a) => a.dealName);
+    expect(names).not.toContain("Bounced Back");   // latest move is_backward_move = true
+    expect(names).not.toContain("Test Advanced");  // is_test_data = true
+    expect(names).not.toContain("Closed Deal");     // moved into Won (terminal)
+    expect(names).not.toContain("Lost Deal");       // moved into Lost (terminal)
+    expect(names).not.toContain("Yesterday Move");  // prior day
   });
 });

@@ -45,9 +45,20 @@ function wonTotal(won: WonDeal[]): number {
   return won.reduce((s, d) => s + (Number.isFinite(d.value) ? d.value : 0), 0);
 }
 
-/** "minutes where present, — where absent, never 0m": null -> "—"; otherwise the floored minutes. */
+/** "minutes where present, — where absent, never 0m": null/0/negative -> "—" (guarded at render time so
+ *  the invariant holds even if upstream flooring ever regresses); otherwise the minutes. */
 function minutesLabel(activeMinutes: number | null): string {
-  return activeMinutes == null ? "—" : `${num(activeMinutes)}m`;
+  if (activeMinutes == null || !Number.isFinite(activeMinutes) || activeMinutes <= 0) return "—";
+  return `${num(activeMinutes)}m`;
+}
+
+/** Readable plural for an activity type key (email -> emails, site_visit -> site visits). */
+function pluralizeActivity(type: string): string {
+  const known: Record<string, string> = {
+    email: "emails", note: "notes", call: "calls", meeting: "meetings", voicemail: "voicemails",
+    text: "texts", sms: "texts",
+  };
+  return known[type] ?? `${type.replace(/_/g, " ")}s`;
 }
 
 /** Team time-spent: 0 -> "—" (no sessions); < 1h -> minutes; otherwise hours to one decimal. */
@@ -57,16 +68,20 @@ function hoursLabel(totalMinutes: number | null | undefined): string {
   return m < 60 ? `${num(m)}m` : `${(m / 60).toFixed(1)}h`;
 }
 
-/** Non-zero buckets only, highest-signal first, top 4 — the breakdown IS the value, not a bar. */
+/** Non-zero buckets only, highest-signal first, top 4 — the breakdown IS the value, not a bar. Activity
+ *  types (email/call/meeting/…) are all included so a calls-heavy rep never shows an empty breakdown. */
 function breakdownLine(b: RepBreakdown): string {
+  const acts = Object.entries(b.activities)
+    .filter(([, n]) => n > 0)
+    .sort((a, c) => c[1] - a[1] || a[0].localeCompare(c[0]))
+    .map(([type, n]) => [n, pluralizeActivity(type)] as [number, string]);
   const parts: [number, string][] = [
     [b.created, "created"],
     [b.stageMoves, "moves"],
-    [b.emails, "emails"],
+    ...acts,
     [b.edits, "edits"],
     [b.uploads, "uploads"],
     [b.reports, "reports"],
-    [b.notes, "notes"],
   ];
   const nz = parts.filter(([n]) => n > 0).slice(0, 4);
   return nz.length ? nz.map(([n, label]) => `${num(n)} ${label}`).join(", ") : "—";
@@ -157,7 +172,7 @@ export function renderDailySummaryEmail(payload: DailySummaryPayload, pageUrl: s
     wonCount > 0
       ? `
         <tr><td style="padding:14px 24px 4px;">
-          ${sectionLabel("Won today", `${wonCount} · ${usdCompact(wonTotal(wonToday))}`)}
+          ${sectionLabel("Won today", `${wonCount} · ${usdFull(wonTotal(wonToday))}`)}
         </td></tr>
         <tr><td style="padding:2px 24px 8px;">${wonRows(wonToday)}</td></tr>`
       : "";

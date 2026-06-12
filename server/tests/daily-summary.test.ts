@@ -39,7 +39,7 @@ describe("summarizeReps — deterministic tiebreak + zero-guard + quiet day", ()
   });
 });
 
-const ZERO = { created: 0, edits: 0, stageMoves: 0, uploads: 0, emails: 0, notes: 0, reports: 0 };
+const ZERO = { created: 0, edits: 0, stageMoves: 0, uploads: 0, reports: 0, activities: {} as Record<string, number> };
 const ACTIVE: DailySummaryPayload = {
   date: "2026-06-12", office: "dallas", asOfLabel: AS_OF_LABEL,
   headline: { activeReps: 2, totalReps: 3, totalActions: 500, totalActiveMinutes: 150, totalSessions: 8, biggestMover: { name: "Kaleb", actions: 312 } },
@@ -51,7 +51,7 @@ const ACTIVE: DailySummaryPayload = {
     { dealName: "The Hayward", repName: "Adnaan", fromStage: "Opportunity", toStage: "Estimating" },
   ],
   leaderboard: [
-    { rank: 1, name: "Kaleb", actions: 312, activeMinutes: 56, breakdown: { ...ZERO, created: 50, edits: 15, stageMoves: 2, emails: 22 } },
+    { rank: 1, name: "Kaleb", actions: 312, activeMinutes: 56, breakdown: { ...ZERO, created: 50, edits: 15, stageMoves: 2, activities: { email: 22, call: 3 } } },
     // A worker with actions but NO browser session — must render "—", never "0m".
     { rank: 2, name: "Adnaan", actions: 188, activeMinutes: null, breakdown: { ...ZERO, created: 21, reports: 26 } },
     { rank: 3, name: "Zoe", actions: 0, activeMinutes: null, breakdown: { ...ZERO } },
@@ -105,9 +105,9 @@ describe("renderDailySummaryEmail", () => {
     expect(html).toContain("2711 N Haskell");
     expect(html).toContain("$186,000");
     expect(html).toContain("$126,000");
-    // header = count · compact-total, both derived from the SAME wonToday array (186000 + 126000 = 312000)
-    expect(html).toContain("2 · $312K");
-    // subject mirrors the same reconciled total
+    // header = count · EXACT total (not compacted), both from the SAME wonToday array (186000 + 126000)
+    expect(html).toContain("2 · $312,000");
+    // subject keeps the compact teaser form of the same reconciled total
     expect(dailySummarySubject(ACTIVE)).toContain("2 won, $312K");
   });
 
@@ -121,6 +121,7 @@ describe("renderDailySummaryEmail", () => {
   it("leaderboard shows the breakdown (the value), and enforces minutes/'—' (never 0m)", () => {
     const html = renderDailySummaryEmail(ACTIVE, PAGE_URL);
     expect(html).toContain("50 created"); // the breakdown IS the value, not a bar
+    expect(html).toContain("3 calls"); // ALL activity types surface (not just email/note)
     expect(html).toContain("56m"); // Kaleb has a real session
     expect(html).not.toContain("0m"); // Adnaan (188 actions, no session) must be "—", never "0m idle"
   });

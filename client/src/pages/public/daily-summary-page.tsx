@@ -13,15 +13,16 @@ function prettyDate(iso: string): string {
 }
 const num = (n: number | null | undefined) => (Number.isFinite(n) ? Number(n).toLocaleString("en-US") : "—");
 const usdFull = (n: number | null | undefined) => (Number.isFinite(n) ? `$${Math.round(Number(n)).toLocaleString("en-US")}` : "$0");
-function usdCompact(n: number | null | undefined): string {
-  if (!Number.isFinite(n)) return "$0";
-  const v = Math.round(Number(n));
-  if (Math.abs(v) >= 1_000_000) return `$${(v / 1_000_000).toFixed(Math.abs(v) >= 10_000_000 ? 0 : 1)}M`;
-  if (Math.abs(v) >= 1_000) return `$${Math.round(v / 1_000)}K`;
-  return `$${v}`;
+// "minutes where present, — where absent, never 0m" — guarded so 0/negative also render "—".
+const minutesLabel = (m: number | null) =>
+  m == null || !Number.isFinite(m) || m <= 0 ? "—" : `${num(m)}m`;
+function pluralizeActivity(type: string): string {
+  const known: Record<string, string> = {
+    email: "emails", note: "notes", call: "calls", meeting: "meetings", voicemail: "voicemails",
+    text: "texts", sms: "texts",
+  };
+  return known[type] ?? `${type.replace(/_/g, " ")}s`;
 }
-// "minutes where present, — where absent, never 0m".
-const minutesLabel = (m: number | null) => (m == null ? "—" : `${num(m)}m`);
 // Team time-spent: 0 -> "—"; < 1h -> minutes; otherwise hours to one decimal.
 function hoursLabel(totalMinutes: number | null | undefined): string {
   if (!Number.isFinite(totalMinutes) || Number(totalMinutes) <= 0) return "—";
@@ -74,7 +75,7 @@ export function DailySummaryPage() {
         </div>
 
         {/* Won today — full, uncapped */}
-        <Card title="Won today" right={data.wonToday.length ? `${data.wonToday.length} · ${usdCompact(wonTotal)}` : undefined}>
+        <Card title="Won today" right={data.wonToday.length ? `${data.wonToday.length} · ${usdFull(wonTotal)}` : undefined}>
           {data.wonToday.length ? (
             <table className="w-full text-sm">
               <tbody>
@@ -181,17 +182,20 @@ export function DailySummaryPage() {
   );
 }
 
-/** Non-zero buckets only, highest-signal first — the breakdown IS the value. */
+/** Non-zero buckets only, highest-signal first — the breakdown IS the value. All activity types included. */
 function breakdownLine(r: LeaderRow): string {
   const b: RepBreakdown = r.breakdown;
+  const acts = Object.entries(b.activities ?? {})
+    .filter(([, n]) => n > 0)
+    .sort((a, c) => c[1] - a[1] || a[0].localeCompare(c[0]))
+    .map(([type, n]) => [n, pluralizeActivity(type)] as [number, string]);
   const parts: [number, string][] = [
     [b.created, "created"],
     [b.stageMoves, "moves"],
-    [b.emails, "emails"],
+    ...acts,
     [b.edits, "edits"],
     [b.uploads, "uploads"],
     [b.reports, "reports"],
-    [b.notes, "notes"],
   ];
   const nz = parts.filter(([n]) => n > 0);
   return nz.length ? nz.map(([n, label]) => `${num(n)} ${label}`).join(", ") : "—";

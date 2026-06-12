@@ -7,14 +7,14 @@ vi.mock("@/hooks/use-daily-summary", () => ({ useDailySummary: () => hook.ret })
 
 import { DailySummaryPage } from "./daily-summary-page";
 
-const ZERO = { created: 0, edits: 0, stageMoves: 0, uploads: 0, emails: 0, notes: 0, reports: 0 };
+const ZERO = { created: 0, edits: 0, stageMoves: 0, uploads: 0, reports: 0, activities: {} as Record<string, number> };
 const ACTIVE = {
   date: "2026-06-12", office: "dallas", asOfLabel: "as of 5:00 PM CT",
   headline: { activeReps: 2, totalReps: 3, totalActions: 500, totalActiveMinutes: 150, totalSessions: 8, biggestMover: { name: "Kaleb", actions: 312 } },
   wonToday: [{ dealName: "Anthem on Ashley", repName: "Kaleb Marshall", value: 186000 }],
   advancedToday: [{ dealName: "The Hayward", repName: "Adnaan", fromStage: "Opportunity", toStage: "Estimating" }],
   leaderboard: [
-    { rank: 1, name: "Kaleb", actions: 312, activeMinutes: 56, breakdown: { ...ZERO, created: 50, edits: 15, stageMoves: 2, emails: 22 } },
+    { rank: 1, name: "Kaleb", actions: 312, activeMinutes: 56, breakdown: { ...ZERO, created: 50, edits: 15, stageMoves: 2, activities: { email: 22 } } },
     // A worker with actions but NO browser session — must show "—", NEVER "0m".
     { rank: 2, name: "Adnaan", actions: 188, activeMinutes: null, breakdown: { ...ZERO, created: 21, reports: 26 } },
     { rank: 3, name: "Zoe", actions: 0, activeMinutes: null, breakdown: { ...ZERO } },
