@@ -334,12 +334,14 @@ function appendQuery(url: string, params: Record<string, string>): string {
   return `${url}${url.includes("?") ? "&" : "?"}${qs}`;
 }
 
-async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+// Exported for the soft-deleted-Won search runtime test; used internally by globalSearch / naturalLanguageSearch.
+export async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
   // Unified substring field set (name/number/project/address/owner/company/contact via the
   // shared builder). The REAL stage slug comes from pipeline_stage_config via stageId -- the
   // denormalized bid-board slug is only set at the estimating boundary, so it would miss
-  // CRM-owned Won/Lost. Findable set = active OR a terminal (won/lost) stage: terminal deals are
-  // FINDABLE + MARKED, while soft-deleted (inactive, non-terminal) deals stay hidden.
+  // CRM-owned Won/Lost. Findable set = active OR a LIVE terminal (won/lost) stage: live terminal
+  // deals are FINDABLE + MARKED, while soft-deleted (is_active=false) deals — including inactive
+  // terminal Won/Lost — stay hidden (the inactive-terminal exclusion in the WHERE below).
   // ONE relevance score, reused for BOTH the SQL ORDER BY (which rows survive the per-entity LIMIT)
   // and the SearchResult.rank the cross-office merge re-ranks on -- so the merge can never demote or
   // drop a row on a field the SQL ranked it on. (The old JS scoreMatch covered fewer fields than the
@@ -364,9 +366,10 @@ async function searchDeals(tenantDb: TenantDb, query: string, limit: number): Pr
       and(
         buildDealSearchCondition(query),
         or(eq(deals.isActive, true), inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])),
-        // A soft-deleted change-order child is a (terminal) Won deal, so the terminal-findable rule above
-        // would keep it searchable + deep-linkable to a deleted CO. Exclude inactive CO children explicitly.
-        sql`NOT (${deals.isChangeOrder} = true AND ${deals.isActive} = false)`,
+        // The terminal-findable arm above (active OR terminal stage) would otherwise keep a SOFT-DELETED
+        // (is_active=false) terminal deal searchable + deep-linkable — a plain deleted Won, or a deleted
+        // CO child. Exclude ALL inactive terminal rows, so only LIVE terminal (and active) deals are found.
+        sql`NOT (${inArray(pipelineStageConfig.slug, [...TERMINAL_STAGE_SLUGS])} AND ${deals.isActive} = false)`,
       ),
     )
     // Status tier FIRST (active < on_hold < terminal) so the per-entity cap can't fill up with

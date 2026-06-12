@@ -18,6 +18,7 @@ import {
   jobQueue,
   projectTypeConfig,
   offices,
+  projects,
 } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
@@ -1519,34 +1520,13 @@ export async function getDeals(
   // status. Only the explicit active/on_hold/inactive values take over is_active.
   if (!filters.status || filters.status === "any") {
     if (filters.isActive === "pipeline" || (hasWonClosedFilter && filters.isActive !== "all")) {
-      let terminalInactiveStageIds: string[] = [];
-      if (filters.inactiveStageIds?.length || hasWonClosedFilter) {
-        const allStages = await listDealStages();
-        const terminalStageIds = new Set(
-          allStages.filter((stage) => isTerminalWorkspaceStage(stage)).map((stage) => stage.id)
-        );
-        terminalInactiveStageIds =
-          filters.isActive === "pipeline"
-            ? (filters.inactiveStageIds ?? []).filter((id) => terminalStageIds.has(id))
-            : [];
-        if (hasWonClosedFilter) {
-          // Won-period drill-down must share the same row set as the Won card:
-          // active Won rows plus inactive historical Won aliases. Keep this
-          // aligned here so the generic pipeline visibility guard cannot drop an
-          // inactive Won-family row before the won_closed_date filter runs.
-          for (const wonStageId of await resolveWonClosedStageIds(allStages)) {
-            if (terminalStageIds.has(wonStageId) && !terminalInactiveStageIds.includes(wonStageId)) {
-              terminalInactiveStageIds.push(wonStageId);
-            }
-          }
-        }
-      }
-      conditions.push(
-        or(
-          eq(deals.isActive, true),
-          terminalInactiveStageIds.length ? inArray(deals.stageId, terminalInactiveStageIds) : sql`false`
-        )
-      );
+      // Pipeline board + Won-period drill-down: LIVE rows only. This branch previously re-admitted
+      // inactive terminal rows via or(is_active=true, stage_id IN terminalInactive) to "keep inactive
+      // historical Won aliases" aligned with the Won card. But is_active=false is the canonical
+      // soft-delete marker and there is no legitimately-inactive Won population, so that arm only ever
+      // re-admitted SOFT-DELETED rows. Collapsing to is_active=true hides them and stays byte-aligned
+      // with the Won card (which now also requires is_active=true, §6.7). Live Won stays visible.
+      conditions.push(eq(deals.isActive, true));
     } else if (filters.isActive !== "all") {
       conditions.push(eq(deals.isActive, filters.isActive ?? true));
     }
@@ -1768,7 +1748,13 @@ export async function getDealById(
   dealId: string,
   userRole: string,
   userId: string,
-  atRiskViewerRole: string = userRole
+  atRiskViewerRole: string = userRole,
+  // Soft-deleted deals (is_active=false is the canonical delete marker) are hidden by default.
+  // getDealById is the de-facto access gate for the detail page, the edit (PATCH) baseline, and the
+  // per-deal action routes — so a deleted deal must 404 there (otherwise a soft-deleted Won deal
+  // stays openable AND editable, the data-integrity hole this guards). Opt in only for a future
+  // restore/admin view; no production caller passes true today.
+  includeInactive: boolean = false
 ) {
   const result = await tenantDb
     .select({
@@ -1777,7 +1763,7 @@ export async function getDealById(
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
-    .where(eq(deals.id, dealId))
+    .where(includeInactive ? eq(deals.id, dealId) : and(eq(deals.id, dealId), eq(deals.isActive, true)))
     .limit(1);
 
   const deal = result[0] ?? null;
@@ -2618,6 +2604,20 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
       )
     );
 
+  // Cascade the soft-delete to this deal's (and its CO children's) Procore project mirror rows.
+  // projects.source_deal_id references deals(id), but the FK's ON DELETE action only fires on a hard
+  // row delete — not this is_active=false soft-delete — so an active project row would otherwise
+  // dangle pointing at a deleted deal and keep re-surfacing it on project/bid-board-keyed lists.
+  await tenantDb
+    .update(projects)
+    .set({ isActive: false, updatedAt: new Date() })
+    .where(
+      and(
+        inArray(projects.sourceDealId, [dealId, ...childCoIds]),
+        eq(projects.isActive, true),
+      )
+    );
+
   // If the deleted deal is ITSELF a change-order child (deletable via this route now that COs are real,
   // deep-linkable deals), remove its own commission — the cascade above only covers descendants, and
   // earned-commission report queries don't all filter is_active, so a voided CO's commission would linger.
@@ -2768,10 +2768,16 @@ export async function getDealsForPipeline(
       // §6.3: exclude on-hold deals entirely from the Won column — count, value,
       // AND the returned cards. (The summary value/activeCount already filter
       // on-hold via FILTER; adding it to the WHERE also drops on-hold from
-      // totalCount and the card list, so on-hold is excluded everywhere.) Note
-      // is_active is intentionally NOT required here: terminal Won deals are
-      // legitimately inactive and stay counted (§6.7).
+      // totalCount and the card list, so on-hold is excluded everywhere.)
       stageConditions.push(aliasedActiveDealCountFilterSql("deals"));
+      // Also require is_active=true so a soft-deleted (is_active=false) Won deal is NOT shown on the
+      // Won card. The on_hold reportable filter above does not catch a plain (non-CO) soft-deleted Won
+      // deal — deleteDeal sets only is_active=false on it, never on_hold — so this explicit guard is
+      // needed. LIVE Won deals (is_active=true) stay counted/visible (the field #695 Won-browse set).
+      // (The §6.7 "terminal Won deals are legitimately inactive and stay counted" note predated the
+      // soft-delete-hides-Won requirement; the only is_active=false Won deals are soft-deleted ones,
+      // so this changes no legitimate Won count.)
+      stageConditions.push(eq(deals.isActive, true));
       // §6.1: when a period window is requested, require a usable won_closed_date
       // (this is what aliasedDealWonWindowEligibilitySql now returns — a
       // deals.won_closed_date IS NOT NULL guard). All-time (no window) omits the

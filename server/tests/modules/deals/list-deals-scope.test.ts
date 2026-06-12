@@ -485,7 +485,7 @@ describe("getDeals scope filtering", () => {
     });
   });
 
-  it("getDeals pipeline visibility keeps inactive rows limited to explicit terminal stages", async () => {
+  it("getDeals pipeline visibility shows only live rows — no inactive-terminal re-admission (soft-deleted Won hidden)", async () => {
     const capturedWheres: unknown[] = [];
     const dataChain: any = {
       from: vi.fn().mockReturnThis(),
@@ -516,11 +516,14 @@ describe("getDeals scope filtering", () => {
       "director-1"
     );
 
-    expect(capturedWheres.some((condition) => containsValue(condition, "stage-won"))).toBe(true);
+    // is_active=false is the canonical soft-delete marker (no legitimately-inactive Won population),
+    // so the pipeline/Won-period visibility no longer re-admits inactive terminal rows: a
+    // client-supplied terminal stage id does NOT re-surface soft-deleted rows. Visibility = live only.
+    expect(capturedWheres.some((condition) => containsValue(condition, "stage-won"))).toBe(false);
     expect(capturedWheres.some((condition) => containsValue(condition, "stage-estimating"))).toBe(false);
   });
 
-  it("getDeals pipeline visibility drops client-supplied non-terminal inactiveStageIds", async () => {
+  it("getDeals pipeline visibility ignores client-supplied inactiveStageIds entirely (cannot re-admit soft-deleted rows)", async () => {
     const capturedWheres: unknown[] = [];
     const dataChain: any = {
       from: vi.fn().mockReturnThis(),
@@ -551,7 +554,8 @@ describe("getDeals scope filtering", () => {
       "director-1"
     );
 
-    expect(capturedWheres.some((condition) => containsValue(condition, "stage-won"))).toBe(true);
+    // Neither the terminal nor the non-terminal client-supplied inactiveStageId re-admits anything now.
+    expect(capturedWheres.some((condition) => containsValue(condition, "stage-won"))).toBe(false);
     expect(capturedWheres.some((condition) => containsValue(condition, "stage-estimating"))).toBe(false);
   });
 
