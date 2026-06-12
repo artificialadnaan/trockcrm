@@ -112,6 +112,7 @@ export function Chip({
   return (
     <Pressable
       onPress={onPress}
+      hitSlop={6}
       accessibilityRole="button"
       accessibilityState={{ selected }}
       style={({ pressed }) => [

@@ -330,11 +330,11 @@ export default function CaptureScreen() {
           </View>
           <View style={styles.targetActions}>
             {target ? (
-              <Pressable onPress={clearTarget} disabled={uploading} hitSlop={8} accessibilityLabel="Clear project">
+              <Pressable onPress={clearTarget} disabled={uploading} hitSlop={12} accessibilityLabel="Clear project">
                 <Text style={[styles.link, uploading && styles.linkDisabled]}>Clear</Text>
               </Pressable>
             ) : null}
-            <Pressable onPress={() => setPickerOpen(true)} disabled={uploading} hitSlop={8}>
+            <Pressable onPress={() => setPickerOpen(true)} disabled={uploading} hitSlop={12}>
               <Text style={[styles.link, uploading && styles.linkDisabled]}>{target ? "Change" : "Choose"}</Text>
             </Pressable>
           </View>
@@ -390,7 +390,7 @@ export default function CaptureScreen() {
                   ) : (
                     <View />
                   )}
-                  <Pressable onPress={applyBatchToEmpty} hitSlop={8} accessibilityLabel="Apply batch caption to all uncaptioned photos">
+                  <Pressable onPress={applyBatchToEmpty} hitSlop={12} accessibilityLabel="Apply batch caption to all uncaptioned photos">
                     <Text style={styles.link}>Apply to all</Text>
                   </Pressable>
                 </View>
@@ -440,7 +440,7 @@ export default function CaptureScreen() {
                   </Text>
                   <Badge label={photo.photoCategory ?? "Uncategorized"} />
                 </View>
-                <Pressable onPress={() => setAssigningPhotoId(photo.id)} hitSlop={8}>
+                <Pressable onPress={() => setAssigningPhotoId(photo.id)} hitSlop={12}>
                   <Text style={styles.link}>Assign</Text>
                 </Pressable>
               </View>

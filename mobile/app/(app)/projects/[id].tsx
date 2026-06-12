@@ -156,8 +156,11 @@ export default function ProjectDetailScreen() {
             <Button
               title="Build report"
               variant="ghost"
+              // Gate on the FILTERED set the builder actually receives — otherwise
+              // active filters that exclude every photo still enable Build and open
+              // an empty builder (#15).
               onPress={() => setReportOpen(true)}
-              disabled={allPhotos.length === 0}
+              disabled={filtered.length === 0}
               style={{ flex: 1 }}
             />
           </View>

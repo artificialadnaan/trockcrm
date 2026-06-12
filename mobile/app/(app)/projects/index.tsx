@@ -62,6 +62,21 @@ export default function ProjectsScreen() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScreenHeader />
 
+      {/* Search is pinned above the list (not inside its scrolling header) so it
+          stays reachable as the rep pages down (#4). clearButtonMode adds a one-tap
+          X to clear the query (#5). */}
+      <View style={styles.searchBar}>
+        <TextInput
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search by name, deal #, or address"
+          autoCapitalize="none"
+          autoCorrect={false}
+          clearButtonMode="while-editing"
+          returnKeyType="search"
+        />
+      </View>
+
       <FlatList
         data={projects}
         keyExtractor={(p) => p.id}
@@ -69,33 +84,28 @@ export default function ProjectsScreen() {
         keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.color.brandRed} />}
         ListHeaderComponent={
-          <View style={{ gap: theme.space.md }}>
-            <TextInput
-              value={search}
-              onChangeText={setSearch}
-              placeholder="Search by name, deal #, or address"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            {projectsQuery.isError ? (
-              <Banner message="Couldn't load projects. Pull to refresh." />
-            ) : null}
-            {starred.length > 0 ? (
-              <View style={{ gap: theme.space.sm }}>
-                <Text style={styles.sectionTitle}>Starred</Text>
-                {starred.map((project) => (
-                  <ProjectRow
-                    key={`starred-${project.id}`}
-                    project={project}
-                    writableOfficeId={writableOfficeId}
-                    onPress={() => openProject(project)}
-                    onToggleStar={() => onToggleStar(project)}
-                  />
-                ))}
-                <Text style={[styles.sectionTitle, { marginTop: theme.space.sm }]}>All projects</Text>
-              </View>
-            ) : null}
-          </View>
+          projectsQuery.isError || starred.length > 0 ? (
+            <View style={{ gap: theme.space.md }}>
+              {projectsQuery.isError ? (
+                <Banner message="Couldn't load projects. Pull to refresh." />
+              ) : null}
+              {starred.length > 0 ? (
+                <View style={{ gap: theme.space.sm }}>
+                  <Text style={styles.sectionTitle}>Starred</Text>
+                  {starred.map((project) => (
+                    <ProjectRow
+                      key={`starred-${project.id}`}
+                      project={project}
+                      writableOfficeId={writableOfficeId}
+                      onPress={() => openProject(project)}
+                      onToggleStar={() => onToggleStar(project)}
+                    />
+                  ))}
+                  <Text style={[styles.sectionTitle, { marginTop: theme.space.sm }]}>All projects</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null
         }
         renderItem={({ item }) => (
           <ProjectRow project={item} writableOfficeId={writableOfficeId} onPress={() => openProject(item)} onToggleStar={() => onToggleStar(item)} />
@@ -182,7 +192,8 @@ function ProjectRow({
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  list: { padding: theme.space.lg, gap: theme.space.sm },
+  searchBar: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.md, paddingBottom: theme.space.sm },
+  list: { paddingHorizontal: theme.space.lg, paddingBottom: theme.space.lg, paddingTop: theme.space.xs, gap: theme.space.sm },
   sectionTitle: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textMuted, textTransform: "uppercase", letterSpacing: 0.4 },
   row: {
     flexDirection: "row",
