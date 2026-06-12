@@ -470,7 +470,7 @@ export default function CaptureScreen() {
               title={`Upload ${photos.length} photo${photos.length === 1 ? "" : "s"}`}
               onPress={upload}
               loading={uploading}
-              disabled={batchVoiceBusy}
+              disabled={uploading || batchVoiceBusy}
             />
           </View>
         ) : (
