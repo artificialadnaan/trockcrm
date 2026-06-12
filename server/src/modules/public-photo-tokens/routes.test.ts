@@ -91,10 +91,10 @@ describe("public photo token routes", () => {
     });
     mocks.listTokensForDeal.mockResolvedValue([{ id: "token-1", status: "active", accessCount: 0 }]);
     mocks.revokeToken.mockResolvedValue(undefined);
+    // Locked public shape: deal = name + address only; photo = id + imageUrl only.
     mocks.getPublicPhotoViewer.mockResolvedValue({
-      tokenId: "token-1",
-      deal: { id: "deal-1", name: "Public Deal", dealNumber: "TR-1", propertyAddress: "100 Main St" },
-      photos: [{ id: "photo-1", displayName: "Roof", imageUrl: "https://example.test/photo.jpg" }],
+      deal: { name: "Public Deal", propertyAddress: "100 Main St" },
+      photos: [{ id: "photo-1", imageUrl: "https://example.test/photo.jpg" }],
     });
     mocks.getPublicPhotoDownload.mockResolvedValue({ url: "https://example.test/photo.jpg", filename: "Roof.jpg" });
     delete process.env.FRONTEND_URL;
@@ -104,9 +104,12 @@ describe("public photo token routes", () => {
     const response = await request(createApp()).get("/api/public/photo-viewer/raw-token");
 
     expect(response.status).toBe(200);
-    expect(response.body.deal).toEqual({ id: "deal-1", name: "Public Deal", dealNumber: "TR-1", propertyAddress: "100 Main St" });
-    expect(JSON.stringify(response.body)).not.toContain("contractAmount");
-    expect(JSON.stringify(response.body)).not.toContain("leadSource");
+    expect(response.body.deal).toEqual({ name: "Public Deal", propertyAddress: "100 Main St" });
+    expect(response.body).not.toHaveProperty("tokenId");
+    expect(response.body.deal).not.toHaveProperty("id");
+    for (const internal of ["contractAmount", "leadSource", "dealNumber", "uploaderName", "procoreSyncStatus"]) {
+      expect(JSON.stringify(response.body)).not.toContain(internal);
+    }
     expect(mocks.getPublicPhotoViewer).toHaveBeenCalledWith(
       "raw-token",
       expect.objectContaining({ assetBaseUrl: expect.stringContaining("/api/public/photo-viewer") }),

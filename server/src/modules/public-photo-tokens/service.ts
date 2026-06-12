@@ -246,25 +246,18 @@ export async function withPublicPhotoTenant<T>(
   }
 }
 
+// PUBLIC EXPOSURE LOCK (the customer-facing share page). Policy: expose the photos
+// and the property name/address ONLY. Everything else is dropped here:
+//   - uploader identity (uploadedBy / uploaderName / uploaderAvatarUrl)
+//   - category / subcategory and the Procore sync status (internal classification)
+//   - file/technical metadata (mimeType, fileSizeBytes, fileExtension)
+//   - timestamps (takenAt / createdAt) and the caption (description)
+// Per-photo GPS + geocoded address were already omitted; the deal number is hidden by
+// the image proxy. `id` is the random photo UUID needed to address the proxied image
+// (it's already embedded in imageUrl) — not a business identifier.
 function publicPhotoShape(photo: any, imageUrl: string | null) {
   return {
     id: photo.id,
-    category: "photo",
-    photoCategory: photo.photoCategory ?? null,
-    subcategory: photo.subcategory ?? null,
-    displayName: photo.displayName,
-    mimeType: photo.mimeType,
-    fileSizeBytes: photo.fileSizeBytes ?? null,
-    fileExtension: photo.fileExtension ?? null,
-    description: photo.description ?? null,
-    takenAt: normalizeDate(photo.takenAt),
-    createdAt: normalizeDate(photo.createdAt)!,
-    uploadedBy: photo.uploadedBy,
-    uploaderName: photo.uploaderName,
-    uploaderAvatarUrl: photo.uploaderAvatarUrl ?? null,
-    // Per-photo GPS coordinates and geocoded address are deliberately omitted: this surface is
-    // public (anyone with the link) and must expose photos only, not job-site location granularity.
-    procoreSyncStatus: photo.procoreSyncStatus ?? null,
     imageUrl,
   };
 }
@@ -322,9 +315,9 @@ export async function getPublicPhotoViewer(
     );
 
     return {
-      tokenId: token.tokenId,
+      // Public exposure lock: property name + address only — no deal id, no token id,
+      // no deal number (the deal number is also hidden by the image proxy).
       deal: {
-        id: deal.id,
         name: deal.name,
         propertyAddress: deal.property_address ?? null,
       },
