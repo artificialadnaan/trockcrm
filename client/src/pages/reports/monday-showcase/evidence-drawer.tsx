@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 import { useShowcaseEvidence } from "@/hooks/use-reports";
 import { usd, int, winPct } from "../format";
 import { ScrollSyncX } from "../scroll-sync-x";
@@ -211,8 +212,11 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
     <Table>
       <TableHeader className="sticky top-0 z-10 bg-popover">
         <TableRow className="hover:bg-transparent">
+          {/* Disciplined alignment: numeric columns right / text left, with a uniform px-3 gutter on
+              every header + cell so spacing reads as a grid, not random. The header alignment mirrors
+              its column's data (flex-row-reverse keeps the sort caret on the edge the numbers align to). */}
           {columns.map((col) => (
-            <TableHead key={col.key} className={col.numeric ? "text-right" : undefined}>
+            <TableHead key={col.key} className={cn("px-3", col.numeric ? "text-right" : "text-left")}>
               <button
                 type="button"
                 onClick={() => toggleSort(col.key)}
@@ -237,7 +241,7 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
             title={`Open the ${ev.metric === "leads" ? "lead" : "deal"} record`}
           >
             {columns.map((col) => (
-              <TableCell key={col.key} className={col.numeric ? "text-right tabular-nums" : undefined}>
+              <TableCell key={col.key} className={cn("px-3", col.numeric ? "text-right tabular-nums" : "text-left")}>
                 {col.render(r)}
               </TableCell>
             ))}
