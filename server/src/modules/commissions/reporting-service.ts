@@ -16,6 +16,7 @@ import { aliasedActiveDealCountFilterSql, aliasedDealBestEstimateSql } from "../
 // Estimator-aware rep filter (PR 2): the DEAL filter matches assigned_rep OR estimator_user_id. This is
 // a view-filter change ONLY — commission attribution (dsc.rep_user_id) and rate (cs.user_id) are untouched.
 import { buildAliasedInvolvedRepSql } from "../deals/deal-filter-predicates.js";
+import { computeRepEarnedFloorGate } from "./floor-gate.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -444,6 +445,21 @@ export async function getRepCommissionDashboard(
     .filter((row: RepCommissionDashboardDeal | null): row is RepCommissionDashboardDeal => row != null);
   await refreshCommissionSnapshots(tenantDb, rows, repId);
 
+  // Floor gate (single source of truth — the same helper Engine B and the manager-override roll-up use).
+  // While the rep's qualifying revenue is below their floor, earned commission is $0 — both per-deal and
+  // the page total. We gate AFTER the snapshot write so the snapshot keeps each deal's intrinsic (ungated)
+  // commission for "since last update" deltas; only the displayed earned figures zero out. The breakdown
+  // rows stay listed (just $0). Pipeline (unsigned) rows are a separate metric and are never gated.
+  const floorGate = await computeRepEarnedFloorGate(tenantDb, repId, dateRange);
+  if (!floorGate.met) {
+    for (const deal of rows) {
+      if (deal.isEarned) {
+        deal.commission = 0;
+        deal.deltaCommission = null;
+      }
+    }
+  }
+
   const earned = Number(rows.filter((deal) => deal.isEarned).reduce((sum, deal) => sum + deal.commission, 0).toFixed(2));
   const inPipeline = Number(rows.filter((deal) => !deal.isEarned).reduce((sum, deal) => sum + deal.commission, 0).toFixed(2));
   const totalPotential = Number((earned + inPipeline).toFixed(2));
@@ -587,27 +603,45 @@ export async function getCommissionEarned(
 
   const monthRows = (monthResult as any).rows ?? monthResult;
   const dealRows = (dealsResult as any).rows ?? dealsResult;
-  return {
-    months: monthRows.map((row: any) => ({
-      month: textFrom(row.month),
-      earnedCommission: numberFrom(row.earned_commission),
-      dealCount: numberFrom(row.deal_count),
-    })),
-    deals: dealRows.map((row: any) => ({
-      dealId: textFrom(row.deal_id),
-      dealNumber: row.deal_number ? textFrom(row.deal_number) : null,
-      dealName: textFrom(row.deal_name),
-      repId: textFrom(row.rep_id),
-      repName: textFrom(row.rep_name),
-      stageName: textFrom(row.stage_name),
-      stageSlug: textFrom(row.stage_slug),
-      sourceValueAmount: numberFrom(row.source_value_amount),
-      appliedRate: numberFrom(row.applied_rate),
-      earnedCommission: numberFrom(row.earned_commission),
-      contractSignedDate: dateFrom(row.contract_signed_date),
-      paidYtd: numberFrom(row.paid_ytd),
-    })),
-  };
+  const earnedMonths: CommissionEarnedMonth[] = monthRows.map((row: any) => ({
+    month: textFrom(row.month),
+    earnedCommission: numberFrom(row.earned_commission),
+    dealCount: numberFrom(row.deal_count),
+  }));
+  const earnedDeals: CommissionDealRow[] = dealRows.map((row: any) => ({
+    dealId: textFrom(row.deal_id),
+    dealNumber: row.deal_number ? textFrom(row.deal_number) : null,
+    dealName: textFrom(row.deal_name),
+    repId: textFrom(row.rep_id),
+    repName: textFrom(row.rep_name),
+    stageName: textFrom(row.stage_name),
+    stageSlug: textFrom(row.stage_slug),
+    sourceValueAmount: numberFrom(row.source_value_amount),
+    appliedRate: numberFrom(row.applied_rate),
+    earnedCommission: numberFrom(row.earned_commission),
+    contractSignedDate: dateFrom(row.contract_signed_date),
+    paidYtd: numberFrom(row.paid_ytd),
+  }));
+
+  // Floor gate (same helper as the engines). Applied to the SINGLE-REP scope only — when the request
+  // resolves to one rep (always for a rep viewing their own; a director drilling into a repId). If that
+  // rep is below floor for the window, earned commission zeroes out (rows stay listed for the breakdown;
+  // paidYtd is actual payments, not gated). The director ALL-reps aggregate (no repId) stays gross —
+  // per-rep gating of an aggregate is a separate concern and there is no consumer of it today.
+  const earnedRepId = effectiveCommissionRepId(filters);
+  if (earnedRepId) {
+    const gate = await computeRepEarnedFloorGate(tenantDb, earnedRepId, {
+      from: filters.from ?? null,
+      to: filters.to ?? null,
+    });
+    if (!gate.met) {
+      return {
+        months: earnedMonths.map((m) => ({ ...m, earnedCommission: 0 })),
+        deals: earnedDeals.map((d) => ({ ...d, earnedCommission: 0 })),
+      };
+    }
+  }
+  return { months: earnedMonths, deals: earnedDeals };
 }
 
 export async function getCommissionSummary(
@@ -675,9 +709,35 @@ export async function getCommissionSummary(
 
   const rows = (result as any).rows ?? result;
   const row = rows[0] ?? {};
+  let earnedMtd = numberFrom(row.earned_mtd);
+  let earnedYtd = numberFrom(row.earned_ytd);
+
+  // Floor gate (single-rep scope, same helper as the engines): MTD and YTD earned each gate on the rep's
+  // floor over the SAME effective window the earned CTE uses. The CTE bounds earned by max(period-start,
+  // filters.from)..filters.to (the FILTER's period-start AND the outer dateSql), so the gate must use the
+  // later of the period start and filters.from — otherwise revenue before filters.from could release a
+  // filtered window whose own qualifying revenue is below floor. Aggregate (no repId) stays gross.
+  const summaryRepId = effectiveCommissionRepId(filters);
+  if (summaryRepId) {
+    const laterDate = (periodStart: string, from: string | undefined) =>
+      from && from > periodStart ? from : periodStart;
+    const [mtdGate, ytdGate] = await Promise.all([
+      computeRepEarnedFloorGate(tenantDb, summaryRepId, {
+        from: laterDate(utcBounds.monthStart, filters.from),
+        to: filters.to ?? null,
+      }),
+      computeRepEarnedFloorGate(tenantDb, summaryRepId, {
+        from: laterDate(utcBounds.yearStart, filters.from),
+        to: filters.to ?? null,
+      }),
+    ]);
+    if (!mtdGate.met) earnedMtd = 0;
+    if (!ytdGate.met) earnedYtd = 0;
+  }
+
   return {
-    earnedMtd: numberFrom(row.earned_mtd),
-    earnedYtd: numberFrom(row.earned_ytd),
+    earnedMtd,
+    earnedYtd,
     potentialPipeline: numberFrom(row.potential_pipeline),
     paidYtd: numberFrom(row.paid_ytd),
   };

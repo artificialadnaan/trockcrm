@@ -719,7 +719,11 @@ describe("Dashboard Service", () => {
       expect(dealOwnerQueries.every((text: string) => text.includes("from users u"))).toBe(true);
     });
 
-    it("manager override applies to commission amount, not full contract value", async () => {
+    it("manager override is commission-based and routes each report through the floor gate", async () => {
+      // The override base is each report's EARNED commission (SUM(dsc.amount)), gated by that report's
+      // own rolling_floor via the single floor-gate query — not full contract value, and not a monolithic
+      // override query. (End-to-end numeric behaviour, incl. below-floor reports contributing $0, is proven
+      // in tests/modules/commissions/floor-gate.runtime.test.ts.)
       const { getDirectorDashboard } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = {
         execute: vi.fn().mockImplementation((query: unknown) => {
@@ -746,8 +750,14 @@ describe("Dashboard Service", () => {
             });
           }
 
-          if (text.includes("as override_earned")) {
-            return Promise.resolve({ rows: [{ override_earned: "500" }] });
+          // Manager-override report enumeration -> one report rolls up to this manager.
+          if (text.includes("reports_to") && text.includes("role = 'rep'")) {
+            return Promise.resolve({ rows: [{ id: "report-1" }] });
+          }
+
+          // Floor-gate query (per rep AND per report): qualifying revenue + earned commission + floor.
+          if (text.includes("as qualifying_revenue") && text.includes("as earned_commission")) {
+            return Promise.resolve({ rows: [{ qualifying_revenue: "100000", earned_commission: "5000", floor: "0" }] });
           }
 
           if (text.includes("sum(dsc.source_value_amount)") && text.includes("earned_commission")) {
@@ -770,13 +780,21 @@ describe("Dashboard Service", () => {
 
       await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
 
-      const overrideQuery = tenantDb.execute.mock.calls
-        .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
-        .find((text: string) => text.includes("as override_earned"));
+      const queries = tenantDb.execute.mock.calls.map(([query]: [unknown]) => extractSqlText(query).toLowerCase());
 
-      expect(overrideQuery).toContain("sum(dsc.amount *");
-      expect(overrideQuery).toContain("coalesce(d.on_hold, false) = false");
-      expect(overrideQuery).not.toContain("sum(dsc.source_value_amount *");
+      // The legacy monolithic "sum(dsc.amount * rate) as override_earned" query is gone.
+      expect(queries.some((text) => text.includes("as override_earned"))).toBe(false);
+
+      // The override base comes from the floor-gate query: commission amount (SUM(dsc.amount)), gated by
+      // the report's rolling_floor, and on-hold deals excluded.
+      const gateQuery = queries.find(
+        (text) => text.includes("as qualifying_revenue") && text.includes("as earned_commission")
+      );
+      expect(gateQuery).toBeDefined();
+      expect(gateQuery).toContain("sum(dsc.amount)");
+      expect(gateQuery).toContain("rolling_floor");
+      expect(gateQuery).toContain("coalesce(d.on_hold, false) = false");
+      expect(gateQuery).not.toContain("sum(dsc.source_value_amount *");
     });
 
     it("uses unsigned commission pipeline stages and deal value times rate for director commission potential", async () => {

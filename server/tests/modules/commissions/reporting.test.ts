@@ -106,6 +106,8 @@ describe("commission reporting service", () => {
           paid_ytd: "0.00",
         },
       ],
+      // getCommissionEarned floor-gate (single-rep): floor 0 -> met -> earned NOT zeroed.
+      [{ qualifying_revenue: "300000.00", earned_commission: "22500.00", floor: "0" }],
       [
         {
           earned_mtd: "7500.00",
@@ -114,6 +116,9 @@ describe("commission reporting service", () => {
           paid_ytd: "7500.00",
         },
       ],
+      // getCommissionSummary MTD + YTD floor-gates (met).
+      [{ qualifying_revenue: "300000.00", earned_commission: "22500.00", floor: "0" }],
+      [{ qualifying_revenue: "300000.00", earned_commission: "22500.00", floor: "0" }],
     ]);
 
     const filters = {
@@ -336,6 +341,63 @@ describe("commission reporting service", () => {
     expect(sqlText).not.toContain("slug in ('won', 'sent_to_production', 'service_sent_to_production', 'closed_won')");
   });
 
+  it("floor-gates a single rep's earned months/deals to $0 below floor (breakdown stays visible)", async () => {
+    const { getCommissionEarned } = await import("../../../src/modules/commissions/reporting-service.js");
+    const tenantDb = createMockTenantDb([
+      [{ month: "2026-04", earned_commission: "7500.00", deal_count: "1" }], // month query
+      [
+        {
+          deal_id: "deal-1",
+          deal_number: "D-1",
+          deal_name: "North Tower",
+          rep_id: "rep-1",
+          rep_name: "Rep One",
+          stage_name: "Contract",
+          stage_slug: "contract",
+          source_value_amount: "100000.00",
+          applied_rate: "0.075000",
+          earned_commission: "7500.00",
+          contract_signed_date: "2026-04-10",
+          paid_ytd: "0.00",
+        },
+      ], // deals query
+      // floor-gate: owned book 100000 < floor 1000000 -> NOT met -> earned zeroes (rows stay).
+      [{ qualifying_revenue: "100000.00", earned_commission: "7500.00", floor: "1000000.00" }],
+    ]);
+
+    const earned = await getCommissionEarned(tenantDb, {
+      role: "rep" as const,
+      userId: "rep-1",
+      from: "2026-01-01",
+      to: "2026-12-31",
+      stages: [],
+    });
+
+    expect(earned.months[0].earnedCommission).toBe(0); // gated
+    expect(earned.deals).toHaveLength(1); // breakdown still visible
+    expect(earned.deals[0].earnedCommission).toBe(0); // per-deal earned gated
+  });
+
+  it("floor-gates a single rep's earned summary (MTD/YTD) to $0 below floor, leaving potential untouched", async () => {
+    const { getCommissionSummary } = await import("../../../src/modules/commissions/reporting-service.js");
+    const tenantDb = createMockTenantDb([
+      [{ earned_mtd: "5000.00", earned_ytd: "20000.00", potential_pipeline: "30000.00", paid_ytd: "1234.00" }], // summary CTE
+      [{ qualifying_revenue: "100000.00", earned_commission: "5000.00", floor: "1000000.00" }], // MTD gate: not met
+      [{ qualifying_revenue: "100000.00", earned_commission: "20000.00", floor: "1000000.00" }], // YTD gate: not met
+    ]);
+
+    const summary = await getCommissionSummary(tenantDb, {
+      role: "rep" as const,
+      userId: "rep-1",
+      stages: [],
+    });
+
+    expect(summary.earnedMtd).toBe(0); // gated
+    expect(summary.earnedYtd).toBe(0); // gated
+    expect(summary.potentialPipeline).toBe(30000); // NOT gated (out of scope)
+    expect(summary.paidYtd).toBe(1234); // payments untouched
+  });
+
   it("builds the sales-rep dashboard with earned, pipeline, stage totals, and deltas", async () => {
     const { getRepCommissionDashboard } = await import("../../../src/modules/commissions/reporting-service.js");
     const tenantDb = createMockTenantDb([
@@ -378,6 +440,8 @@ describe("commission reporting service", () => {
         },
       ],
       [],
+      // Floor-gate query (qualifyingRevenue >= floor -> met, so earned is NOT gated here).
+      [{ qualifying_revenue: "100000.00", earned_commission: "1500.00", floor: "0" }],
     ]);
 
     const data = await getRepCommissionDashboard(tenantDb, {
@@ -405,7 +469,8 @@ describe("commission reporting service", () => {
       "estimating",
       "opportunity",
     ]);
-    expect(tenantDb.execute).toHaveBeenCalledTimes(2);
+    // main commission_rows query + snapshot upsert + floor-gate query
+    expect(tenantDb.execute).toHaveBeenCalledTimes(3);
   });
 
   it("scopes snapshot reads and writes by both deal and rep", async () => {
