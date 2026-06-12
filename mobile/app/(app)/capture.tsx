@@ -1,5 +1,5 @@
 import React, { Suspense, useEffect, useRef, useState } from "react";
-import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -77,10 +77,15 @@ export default function CaptureScreen() {
   const [assigningPhotoId, setAssigningPhotoId] = useState<string | null>(null);
   const [photos, setPhotos] = useState<SessionPhoto[]>([]);
   const [batchCaption, setBatchCaption] = useState("");
+  // Held true while the batch dictation is recording/transcribing, so an Upload
+  // (which clears photos and unmounts VoiceRecorder) can't abandon it mid-flight.
+  const [batchVoiceBusy, setBatchVoiceBusy] = useState(false);
   const [category, setCategory] = useState<string | null>(null);
   const [tags, setTags] = useState<string[]>([]);
   const [status, setStatus] = useState<UploadStatus>("idle");
-  const [notice, setNotice] = useState<{ tone: "error" | "success"; text: string } | null>(null);
+  const [notice, setNotice] = useState<
+    { tone: "error" | "success"; text: string; viewTarget?: SelectedTarget } | null
+  >(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   const keyCounter = useRef(0);
   // Live GPS fetched once per camera session so burst shots aren't each blocked
@@ -106,6 +111,14 @@ export default function CaptureScreen() {
     queryFn: () => getTranscriptionConfig(fetcher),
     staleTime: 5 * 60_000,
   });
+
+  // Auto-dismiss a success banner (~4s) so a saved-and-done state doesn't keep
+  // sitting next to the "ready for the next capture" empty state and read as pending.
+  useEffect(() => {
+    if (notice?.tone !== "success") return;
+    const t = setTimeout(() => setNotice(null), 4000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   function nextKey() {
     keyCounter.current += 1;
@@ -220,6 +233,14 @@ export default function CaptureScreen() {
     setPhotos((prev) => prev.map((p) => (p.key === key ? { ...p, caption: text } : p)));
   }
 
+  // Functional append (reads the live caption) so back-to-back voice transcripts
+  // can't overwrite each other via a stale captured value.
+  function appendPhotoCaption(key: string, text: string) {
+    setPhotos((prev) =>
+      prev.map((p) => (p.key === key ? { ...p, caption: p.caption ? `${p.caption} ${text}` : text } : p)),
+    );
+  }
+
   // Materialize the batch caption onto photos WITHOUT their own caption — keeps
   // "individual overrides batch" (never clobbers a per-photo caption).
   function applyBatchToEmpty() {
@@ -274,7 +295,14 @@ export default function CaptureScreen() {
       setTags([]);
       setCategory(null);
       setStatus("idle");
-      setNotice({ tone: "success", text: `${succeeded} photo${succeeded === 1 ? "" : "s"} uploaded.` });
+      // Name the destination so the green banner is unambiguous (vs. the kept target +
+      // empty state); a deal target also gets a "View" action to the project gallery.
+      const destName = target ? target.name : "Pending";
+      setNotice({
+        tone: "success",
+        text: `${succeeded} photo${succeeded === 1 ? "" : "s"} saved to ${destName}.`,
+        viewTarget: target?.type === "deal" ? target : undefined,
+      });
       void pendingQuery.refetch();
       if (target?.type === "deal") {
         invalidateDealPhotos(target.id);
@@ -319,7 +347,12 @@ export default function CaptureScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScreenHeader />
-      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        contentContainerStyle={styles.body}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      >
         {/* Target */}
         <View style={styles.targetCard}>
           <View style={{ flex: 1 }}>
@@ -340,7 +373,21 @@ export default function CaptureScreen() {
           </View>
         </View>
 
-        {notice ? <Banner message={notice.text} tone={notice.tone} /> : null}
+        {notice ? (
+          <Banner
+            message={notice.text}
+            tone={notice.tone}
+            action={
+              notice.viewTarget
+                ? {
+                    label: "View",
+                    onPress: () =>
+                      router.push({ pathname: "/(app)/projects/[id]", params: detailParamsFor(notice.viewTarget!) }),
+                  }
+                : undefined
+            }
+          />
+        ) : null}
 
         {/* Capture actions */}
         <View style={styles.actions}>
@@ -369,7 +416,14 @@ export default function CaptureScreen() {
           <View style={{ gap: theme.space.md }}>
             {/* Review tray (per-photo captions) */}
             <Text style={styles.fieldLabel}>Review ({photos.length})</Text>
-            <ReviewTray photos={photos} onSetCaption={setPhotoCaption} onRemove={removePhoto} disabled={uploading} />
+            <ReviewTray
+              photos={photos}
+              onSetCaption={setPhotoCaption}
+              onAppendCaption={appendPhotoCaption}
+              onRemove={removePhoto}
+              disabled={uploading}
+              voiceEnabled={transcribeConfig.data?.configured ?? false}
+            />
 
             {/* Batch metadata — locked during upload (values are snapshotted per request) */}
             <View
@@ -388,7 +442,10 @@ export default function CaptureScreen() {
                 />
                 <View style={styles.batchRow}>
                   {transcribeConfig.data?.configured ? (
-                    <VoiceRecorder onTranscript={(text) => setBatchCaption((prev) => (prev ? `${prev} ${text}` : text))} />
+                    <VoiceRecorder
+                      onTranscript={(text) => setBatchCaption((prev) => (prev ? `${prev} ${text}` : text))}
+                      onBusyChange={setBatchVoiceBusy}
+                    />
                   ) : (
                     <View />
                   )}
@@ -413,13 +470,18 @@ export default function CaptureScreen() {
               title={`Upload ${photos.length} photo${photos.length === 1 ? "" : "s"}`}
               onPress={upload}
               loading={uploading}
+              disabled={uploading || batchVoiceBusy}
             />
           </View>
         ) : (
           <View style={styles.emptyWrap}>
             <EmptyState
-              title="No photos yet"
-              subtitle="Open the camera to burst-capture, or import from your library."
+              title={target ? "Ready for the next capture" : "No photos yet"}
+              subtitle={
+                target
+                  ? `New photos will be saved to ${target.name}.`
+                  : "Open the camera to burst-capture, or import from your library."
+              }
             />
           </View>
         )}

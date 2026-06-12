@@ -1,6 +1,6 @@
 import React, { useRef, useState } from "react";
 import { ActivityIndicator, Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { theme } from "../theme/theme";
 import { Button } from "../components/ui";
@@ -50,11 +50,15 @@ export default function CameraCapture({
 
   return (
     <Modal visible animationType="slide" presentationStyle="fullScreen" onRequestClose={onClose}>
-      {!permission ? (
-        <View style={styles.center}>
-          <ActivityIndicator color={theme.color.brandRed} />
-        </View>
-      ) : !permission.granted ? (
+      {/* A Modal renders in its own native window outside the app's SafeAreaProvider,
+          so the overlay's SafeAreaView needs its own provider to resolve real insets —
+          otherwise the counter/Done land under the status bar / Dynamic Island. */}
+      <SafeAreaProvider>
+        {!permission ? (
+          <View style={styles.center}>
+            <ActivityIndicator color={theme.color.brandRed} />
+          </View>
+        ) : !permission.granted ? (
         <SafeAreaView style={styles.permWrap}>
           <Text style={styles.permTitle}>Camera access</Text>
           <Text style={styles.permText}>T-Rock Cam needs the camera to capture jobsite photos.</Text>
@@ -96,7 +100,8 @@ export default function CameraCapture({
             </View>
           </SafeAreaView>
         </View>
-      )}
+        )}
+      </SafeAreaProvider>
     </Modal>
   );
 }

@@ -5,7 +5,9 @@ import { theme } from "../theme/theme";
 import { useAuth } from "../auth/AuthContext";
 import { transcribeAudio } from "../dictation/transcribe";
 
-type Status = "idle" | "recording" | "transcribing";
+// "starting" = permission prompt + audio-session/recorder setup, before the first
+// frame is recorded — counts as busy so a parent can't tear us down mid-start.
+type Status = "idle" | "starting" | "recording" | "transcribing";
 
 const MAX_SECONDS = 60;
 
@@ -14,7 +16,15 @@ const MAX_SECONDS = 60;
  * stop, append the transcript to the description. Uses expo-audio for capture
  * and the raw-body transcribe endpoint (with 2-retry/backoff) under the hood.
  */
-export function VoiceRecorder({ onTranscript }: { onTranscript: (text: string) => void }) {
+export function VoiceRecorder({
+  onTranscript,
+  onBusyChange,
+}: {
+  onTranscript: (text: string) => void;
+  // Reports recording/transcribing so a parent can block teardown (e.g. closing a
+  // sheet) that would abandon an in-flight recording and lose the dictated text.
+  onBusyChange?: (busy: boolean) => void;
+}) {
   const { token, activeOfficeId } = useAuth();
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [status, setStatus] = useState<Status>("idle");
@@ -39,12 +49,21 @@ export function VoiceRecorder({ onTranscript }: { onTranscript: (text: string) =
 
   useEffect(() => clearTick, []);
 
+  // Surface busy state to the parent; report idle on unmount as a backstop.
+  useEffect(() => {
+    onBusyChange?.(status !== "idle");
+  }, [status, onBusyChange]);
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
+
   async function start() {
     setError(null);
+    // Mark busy up-front so the permission prompt + setup window counts as in-flight.
+    applyStatus("starting");
     try {
       const permission = await AudioModule.requestRecordingPermissionsAsync();
       if (!permission.granted) {
         setError("Microphone permission is required for voice notes.");
+        applyStatus("idle");
         return;
       }
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
@@ -93,27 +112,30 @@ export function VoiceRecorder({ onTranscript }: { onTranscript: (text: string) =
 
   const recording = status === "recording";
   const transcribing = status === "transcribing";
+  const starting = status === "starting";
 
   return (
     <View style={{ gap: 6 }}>
       <Pressable
         onPress={recording ? stop : start}
-        disabled={transcribing}
+        disabled={transcribing || starting}
         accessibilityRole="button"
         accessibilityLabel={recording ? "Stop voice note" : "Record voice note"}
         style={({ pressed }) => [
           styles.button,
           recording && styles.buttonRecording,
-          transcribing && styles.buttonBusy,
+          (transcribing || starting) && styles.buttonBusy,
           pressed && { opacity: 0.85 },
         ]}
       >
         <Text style={styles.buttonText}>
           {transcribing
             ? "Transcribing…"
-            : recording
-              ? `Stop · ${String(seconds).padStart(2, "0")}s`
-              : "🎤 Dictate description"}
+            : starting
+              ? "Starting…"
+              : recording
+                ? `Stop · ${String(seconds).padStart(2, "0")}s`
+                : "🎤 Dictate description"}
         </Text>
       </Pressable>
       {error ? <Text style={styles.error}>{error}</Text> : null}
