@@ -43,6 +43,14 @@ export async function main(now: Date = new Date()): Promise<void> {
     console.log(`[daily-summary] not 5pm CT (Mon–Sat) — skipping (${now.toISOString()})`);
     return;
   }
+  // No recipients configured -> full no-op: no DB work, no snapshot, no token, no email. Checked
+  // BEFORE compute/store so an unset DAILY_SUMMARY_RECIPIENTS never leaves an orphan snapshot or
+  // consumes the day's idempotency slot.
+  const to = recipients();
+  if (to.length === 0) {
+    console.warn("[daily-summary] DAILY_SUMMARY_RECIPIENTS is empty — no-op (no snapshot, no email)");
+    return;
+  }
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is required");
 
@@ -66,11 +74,6 @@ export async function main(now: Date = new Date()): Promise<void> {
       return;
     }
 
-    const to = recipients();
-    if (to.length === 0) {
-      console.warn("[daily-summary] DAILY_SUMMARY_RECIPIENTS is empty — snapshot stored, no email sent");
-      return;
-    }
     const baseUrl = process.env.FRONTEND_URL ?? "https://crm.trockconstruction.com";
     const pageUrl = `${baseUrl}/daily-summary/${date}?token=${encodeURIComponent(rawToken)}`;
     const html = renderDailySummaryEmail(payload, pageUrl);
