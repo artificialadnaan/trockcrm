@@ -16,7 +16,7 @@ import {
 import { dealValueSqlForBasis, projectionBandSql, futureDatedCloseDatePredicateSql } from "./foundations.js";
 import { aliasedHasUsableWonDateSql } from "../deals/service.js";
 import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
-import { getWtdPeriod, businessToday, shiftBusinessDate } from "../../lib/period.js";
+import { getWtdPeriod, businessToday, shiftBusinessDate, BUSINESS_TIMEZONE } from "../../lib/period.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -134,8 +134,11 @@ const REGION_NAME = sql`COALESCE(NULLIF(rc.name, ''), ${UNASSIGNED})`;
 const REGION_ORDER = sql`COALESCE(rc.display_order, ${UNASSIGNED_ORDER})`;
 const wonVal = aliasedEffectiveWonDealValueSql("d");
 const openVal = dealValueSqlForBasis("d", "open_best_estimate");
-const wonDate = aliasedWonHsClosedWonDateSql("d"); // d.won_closed_date (DATE)
+const wonDate = aliasedWonHsClosedWonDateSql("d"); // d.won_closed_date (DATE — already tz-independent)
 const lostDate = sql`COALESCE(d.lost_at, d.actual_close_date::timestamptz, d.stage_entered_at)`;
+// A timestamptz → the office's BUSINESS (Central) calendar date — so windowing matches the period dates
+// regardless of the DB session timezone (same convention as the showcase's days-in-stage / stage-entry).
+const businessDate = (tsExpr: SQL): SQL => sql`((${tsExpr}) AT TIME ZONE ${BUSINESS_TIMEZONE})::date`;
 const reportable = sql`${aliasedActiveDealCountFilterSql("d")} AND COALESCE(d.is_test_data, false) = false`;
 const COMMON_JOINS = sql`
   FROM deals d
@@ -149,7 +152,7 @@ const TERMINAL_SLUGS = [...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS];
 const wonInWindow = (from: string, to: string): SQL =>
   sql`psc.slug IN (${slugList(WON_STAGE_SLUGS)}) AND ${aliasedHasUsableWonDateSql("d")} AND ${wonDate} >= ${from}::date AND ${wonDate} <= ${to}::date`;
 const lostInWindow = (from: string, to: string): SQL =>
-  sql`psc.slug IN (${slugList(LOST_STAGE_SLUGS)}) AND (${lostDate})::date >= ${from}::date AND (${lostDate})::date <= ${to}::date`;
+  sql`psc.slug IN (${slugList(LOST_STAGE_SLUGS)}) AND ${businessDate(lostDate)} >= ${from}::date AND ${businessDate(lostDate)} <= ${to}::date`;
 const OPEN_PREDICATE = sql`d.is_active = true AND psc.is_terminal = false`;
 
 const pct = (part: number, whole: number): number | null => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : null);
@@ -282,11 +285,13 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
   );
   const biggestNewDeal = await topMoverDeal(
     tenantDb,
-    sql`${reportable} AND ${OPEN_PREDICATE} AND d.created_at >= ${week.from}::date AND d.created_at < (${week.to}::date + 1)`,
+    sql`${reportable} AND ${OPEN_PREDICATE} AND ${businessDate(sql`d.created_at`)} >= ${week.from}::date AND ${businessDate(sql`d.created_at`)} <= ${week.to}::date`,
     openVal
   );
   const biggestWin = await topMoverDeal(tenantDb, sql`${reportable} AND ${wonInWindow(week.from, week.to)}`, wonVal);
-  const biggestLoss = await topMoverDeal(tenantDb, sql`${reportable} AND ${lostInWindow(week.from, week.to)}`, wonVal);
+  // Lost deals are valued on the best-estimate basis (a stale awarded_amount must not rank a loss by the
+  // awarded-first Won chain), consistent with how open/non-won evidence is valued.
+  const biggestLoss = await topMoverDeal(tenantDb, sql`${reportable} AND ${lostInWindow(week.from, week.to)}`, openVal);
 
   // ---------- assemble ----------
   const repsByRegion = new Map<string, RegionTopRep[]>();

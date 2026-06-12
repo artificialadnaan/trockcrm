@@ -228,9 +228,12 @@ describe("getRegionReport — exclusions & edge cases", () => {
       -- Unassigned WON (region_id NULL) in-window.
       INSERT INTO deals (id, name, stage_id, region_id, won_closed_date, awarded_amount) VALUES
         ('${U("eun")}','unassigned won','${E.won}',NULL,'2026-05-26',25000);
-      -- West LOST in-window (for win rate).
+      -- West LOST in-window (for win rate) + a tz-boundary loss: 2026-05-24T02:00Z = 2026-05-23 21:00
+      -- Central → business date 05-23, BEFORE the [05-24,05-27] window, so it must be EXCLUDED even though
+      -- its UTC ::date (05-24) is in-window (this catches session-tz windowing under PGlite's UTC session).
       INSERT INTO deals (id, name, stage_id, region_id, lost_at, bid_estimate) VALUES
-        ('${U("elw")}','lost west','${E.lost}','${ER.west}','2026-05-25T12:00:00Z',5000);
+        ('${U("elw")}','lost west','${E.lost}','${ER.west}','2026-05-25T12:00:00Z',5000),
+        ('${U("etz")}','lost tz-before-window','${E.lost}','${ER.west}','2026-05-24T02:00:00Z',1000);
       -- LOST with lost_at NULL but actual_close_date in-window → counted via the canonical COALESCE fallback.
       INSERT INTO deals (id, name, stage_id, region_id, lost_at, actual_close_date, bid_estimate) VALUES
         ('${U("elf")}','lost fallback','${E.lost}','${ER.west}',NULL,'2026-05-26',3000);
@@ -250,7 +253,9 @@ describe("getRegionReport — exclusions & edge cases", () => {
     const west = r.regions.find((x) => x.region === "West Coast")!;
     // 100k normal + 40k archived + 10k boundary-from; on_hold/test_data/after-to excluded.
     expect(west.won).toEqual({ value: 150000, count: 3 });
-    // West win rate = won 3 / (won 3 + lost 2) = 60% (lost = elw + the lost_at-NULL fallback elf).
+    // West win rate = won 3 / (won 3 + lost 2) = 60%. Lost = elw (05-25) + elf (lost_at-NULL fallback,
+    // 05-26); etz (business 05-23) is EXCLUDED by the business-tz window — proves lost windowing isn't
+    // session-tz-dependent.
     expect(west.winRate).toBeCloseTo(60, 1);
   });
 
