@@ -55,6 +55,7 @@ import {
   adminPhotoTokenRoutes,
   publicPhotoViewerRoutes,
 } from "./modules/public-photo-tokens/routes.js";
+import { dailySummaryPublicRoutes } from "./modules/daily-summary/routes.js";
 import { CRM_ONLY_TENANT_ROUTE_MOUNTS } from "./route-access-policy.js";
 import {
   createCsrfToken,
@@ -122,6 +123,7 @@ export function createApp() {
     leadDueDiligencePublicRoutes
   );
   app.use("/api/public/photo-viewer", publicPhotoViewerRoutes);
+  app.use("/api/public/daily-summary", dailySummaryPublicRoutes);
 
   app.use((req, res, next) => {
     const csrfCookieOptions = getCsrfCookieOptionsForRequest(process.env, {

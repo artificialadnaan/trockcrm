@@ -82,6 +82,7 @@ import { PhotoFeedPage } from "@/pages/photos/photo-feed-page";
 import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
 import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
 import { PublicPhotoViewerPage } from "@/pages/public/photo-viewer-page";
+import { DailySummaryPage } from "@/pages/public/daily-summary-page";
 import { Toaster } from "@/components/ui/sonner";
 
 const HomeDashboardPage = lazy(() =>
@@ -133,6 +134,7 @@ function AuthGate({ children }: { children: ReactNode }) {
   const location = useLocation();
 
   if (location.pathname.startsWith("/p/")) return <>{children}</>;
+  if (location.pathname.startsWith("/daily-summary/")) return <>{children}</>; // token-guarded public page
 
   if (loading) {
     return (
@@ -203,6 +205,7 @@ export function App() {
           <>
             <Routes>
             <Route path="/p/:token" element={<PublicPhotoViewerPage />} />
+            <Route path="/daily-summary/:date" element={<DailySummaryPage />} />
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route path="/onboarding-required" element={<OnboardingRequiredPage />} />
             <Route element={<AppShell />}>
