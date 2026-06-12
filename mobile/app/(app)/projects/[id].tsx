@@ -170,7 +170,7 @@ export default function ProjectDetailScreen() {
           <View style={styles.rowBetween}>
             <SectionLabel>Group by</SectionLabel>
             <Pressable onPress={() => setShowFilters((s) => !s)} hitSlop={8}>
-              <Text style={styles.link}>{showFilters ? "Hide filters" : "Filters"}</Text>
+              <Text style={styles.linkMuted}>{showFilters ? "Hide filters" : "Filters"}</Text>
             </Pressable>
           </View>
           <View style={styles.chipRow}>
@@ -295,6 +295,8 @@ const styles = StyleSheet.create({
   actions: { flexDirection: "row", gap: theme.space.md },
   rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  // Muted so the "Filters" toggle doesn't compete with the red primary "Add photos".
+  linkMuted: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textMuted },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
   groupLabel: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   reportRow: {

@@ -493,7 +493,8 @@ const styles = StyleSheet.create({
   },
   targetLabel: { fontFamily: theme.font.medium, fontSize: 12, color: theme.color.textMuted },
   targetName: { fontFamily: theme.font.semibold, fontSize: 16, color: theme.color.textPrimary },
-  link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  // Charcoal (not red) so the only red call-to-action in view is the primary button.
+  link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   linkDisabled: { opacity: 0.4 },
   targetActions: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
   actions: { flexDirection: "row", gap: theme.space.md },

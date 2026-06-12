@@ -166,7 +166,7 @@ function ProjectRow({
           style={styles.starButton}
           accessibilityLabel={project.starred ? "Unstar" : "Star"}
         >
-          <Text style={[styles.star, project.starred && { color: theme.color.warning }]}>
+          <Text style={[styles.star, project.starred && { color: theme.color.brandRed }]}>
             {project.starred ? "★" : "☆"}
           </Text>
         </Pressable>
@@ -193,6 +193,6 @@ const styles = StyleSheet.create({
   rowName: { flex: 1, fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   rowAddress: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   rowMeta: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
-  starButton: { paddingLeft: theme.space.sm, paddingVertical: theme.space.xs },
-  star: { fontSize: 24, color: theme.color.textMuted },
+  starButton: { paddingHorizontal: theme.space.sm, paddingVertical: theme.space.sm },
+  star: { fontSize: 26, color: theme.color.textMuted },
 });
