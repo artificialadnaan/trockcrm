@@ -210,20 +210,31 @@ describe("public photo token service", () => {
 
     const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
-    expect(result.deal).toEqual({ id: "deal-1", name: "Public Deal", propertyAddress: "100 Main St, Dallas, TX" });
+    // Public exposure lock: the deal payload is property name + address ONLY — no id,
+    // no deal number, no token id, no other deal field.
+    expect(result.deal).toEqual({ name: "Public Deal", propertyAddress: "100 Main St, Dallas, TX" });
+    expect(result.deal).not.toHaveProperty("id");
     expect(result.deal).not.toHaveProperty("dealNumber");
+    expect(result).not.toHaveProperty("tokenId");
     expect(result).not.toHaveProperty("contractAmount");
-    // R2-backed photos are served through the token proxy — never a presigned key URL (which embeds
-    // the deal number). The imageUrl must contain neither the deal number nor an R2 host.
-    expect(result.photos[0]).toMatchObject({
+    // Per-photo payload is locked to the image only: { id, imageUrl }. R2-backed photos are
+    // served through the token proxy — never a presigned key URL (which embeds the deal
+    // number) — so the imageUrl must contain neither the deal number nor an R2 host.
+    expect(result.photos[0]).toEqual({
       id: "photo-1",
       imageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image`,
-      procoreSyncStatus: "pending",
     });
     expect(result.photos[0].imageUrl).not.toContain("TR-1");
     expect(result.photos[0].imageUrl).not.toContain("r2.test");
-    // Public viewer must not leak per-photo location granularity.
-    for (const leaked of ["latitude", "longitude", "address", "addressSource", "geocodedAt"]) {
+    // None of the DROP-list fields may appear: uploader identity, category/sync status,
+    // file/EXIF metadata, timestamps, caption, or per-photo location granularity.
+    for (const leaked of [
+      "uploadedBy", "uploaderName", "uploaderAvatarUrl",
+      "photoCategory", "subcategory", "category", "procoreSyncStatus",
+      "mimeType", "fileSizeBytes", "fileExtension", "description",
+      "takenAt", "createdAt", "displayName",
+      "latitude", "longitude", "address", "addressSource", "geocodedAt",
+    ]) {
       expect(result.photos[0]).not.toHaveProperty(leaked);
     }
     expect(buildFileDownloadUrlFromRecordMock).not.toHaveBeenCalled();
@@ -270,7 +281,10 @@ describe("public photo token service", () => {
 
     const result = await getPublicPhotoViewer("raw-token");
 
-    expect(result.photos[0]).toMatchObject({ id: "photo-pdf", imageUrl: null, mimeType: "application/pdf" });
+    // Non-image record: imageUrl is null (un-strippable, not proxied) and the locked shape
+    // still exposes only { id, imageUrl } — the mimeType is not leaked.
+    expect(result.photos[0]).toEqual({ id: "photo-pdf", imageUrl: null });
+    expect(result.photos[0]).not.toHaveProperty("mimeType");
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
   });
 
@@ -311,7 +325,7 @@ describe("public photo token service", () => {
     });
     const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
 
-    expect(result.photos[0]).toMatchObject({ id: "photo-1", imageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image` });
+    expect(result.photos[0]).toEqual({ id: "photo-1", imageUrl: `${ASSET_BASE}/raw-token/photos/photo-1/image` });
     expect(result.photos[0].imageUrl).not.toContain("r2.test");
     expect(buildFileDownloadUrlFromRecordMock).not.toHaveBeenCalled();
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
@@ -464,7 +478,9 @@ describe("public photo token service", () => {
 
     const result = await getPublicPhotoDownload("raw-token", "photo-1", { ipAddress: "127.0.0.1", userAgent: "vitest", assetBaseUrl: ASSET_BASE });
 
-    expect(result).toEqual({ url: `${ASSET_BASE}/raw-token/photos/photo-1/image?download=1`, filename: "Roof.jpg" });
+    // Filename is genericized — the internal display_name ("Roof") is never exposed via Content-Disposition.
+    expect(result).toEqual({ url: `${ASSET_BASE}/raw-token/photos/photo-1/image?download=1`, filename: "photo.jpg" });
+    expect(result.filename).not.toContain("Roof");
     expect(result.url).not.toContain("TR-1");
     expect(getFileDownloadUrlMock).not.toHaveBeenCalled();
     expect(logPhotoEventMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
@@ -519,7 +535,9 @@ describe("public photo token service", () => {
     expect(asset.kind).toBe("jpeg-stream");
     if (asset.kind === "jpeg-stream") {
       expect(asset.contentType).toBe("image/jpeg");
-      expect(asset.filename).toBe("Roof.jpg");
+      // Genericized filename — the internal display_name ("Roof") never reaches Content-Disposition.
+      expect(asset.filename).toBe("photo.jpg");
+      expect(asset.filename).not.toContain("Roof");
       expect(asset.stream).toBe(fakeStream);
     }
     expect(getObjectStreamMock).toHaveBeenCalledWith("office_dallas/deals/TR-1/photos/roof.jpg");
