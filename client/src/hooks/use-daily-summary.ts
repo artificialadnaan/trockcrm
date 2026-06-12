@@ -2,15 +2,22 @@ import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 
 export interface BiggestMover { name: string; actions: number }
-export interface LeaderRow { rank: number; name: string; actions: number }
-export interface MajorMove { kind: "won" | "advanced"; label: string }
+export interface RepBreakdown {
+  created: number; edits: number; stageMoves: number; uploads: number; emails: number; notes: number; reports: number;
+}
+export interface LeaderRow { rank: number; name: string; actions: number; activeMinutes: number | null; breakdown: RepBreakdown }
+export interface WonDeal { dealName: string; repName: string; value: number }
+export interface AdvancedMove { dealName: string; repName: string; fromStage: string | null; toStage: string | null }
+export interface HourCount { hour: number; reps: number }
 export interface DailySummaryPayload {
   date: string;
   office: string;
   asOfLabel: string;
   headline: { activeReps: number; totalReps: number; totalActions: number; biggestMover: BiggestMover | null };
+  wonToday: WonDeal[];
+  advancedToday: AdvancedMove[];
   leaderboard: LeaderRow[];
-  majorMoves: MajorMove[];
+  hourly: HourCount[];
   teamHealth: { active: number; quiet: number; quietNames: string[] };
 }
 

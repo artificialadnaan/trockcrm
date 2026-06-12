@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { useDailySummary } from "@/hooks/use-daily-summary";
+import { useDailySummary, type LeaderRow, type RepBreakdown } from "@/hooks/use-daily-summary";
 
 const RED = "#CC0000";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -12,6 +12,21 @@ function prettyDate(iso: string): string {
   return `${WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]}, ${MONTHS[m - 1]} ${d}`;
 }
 const num = (n: number | null | undefined) => (Number.isFinite(n) ? Number(n).toLocaleString("en-US") : "—");
+const usdFull = (n: number | null | undefined) => (Number.isFinite(n) ? `$${Math.round(Number(n)).toLocaleString("en-US")}` : "$0");
+function usdCompact(n: number | null | undefined): string {
+  if (!Number.isFinite(n)) return "$0";
+  const v = Math.round(Number(n));
+  if (Math.abs(v) >= 1_000_000) return `$${(v / 1_000_000).toFixed(Math.abs(v) >= 10_000_000 ? 0 : 1)}M`;
+  if (Math.abs(v) >= 1_000) return `$${Math.round(v / 1_000)}K`;
+  return `$${v}`;
+}
+// "minutes where present, — where absent, never 0m".
+const minutesLabel = (m: number | null) => (m == null ? "—" : `${num(m)}m`);
+function hourLabel(h: number): string {
+  const ampm = h < 12 ? "a" : "p";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}${ampm}`;
+}
 
 export function DailySummaryPage() {
   useParams(); // :date is display sugar; the token is authoritative for which snapshot loads.
@@ -19,18 +34,21 @@ export function DailySummaryPage() {
   const token = params.get("token") ?? "";
   const { data, loading, error } = useDailySummary(token);
 
-  const maxActions = useMemo(() => (data ? data.leaderboard.reduce((mx, r) => Math.max(mx, r.actions), 0) : 0), [data]);
+  const wonTotal = useMemo(
+    () => (data ? data.wonToday.reduce((s, d) => s + (Number.isFinite(d.value) ? d.value : 0), 0) : 0),
+    [data]
+  );
+  const maxHourReps = useMemo(() => (data ? data.hourly.reduce((mx, h) => Math.max(mx, h.reps), 0) : 0), [data]);
 
   if (loading) return <Centered>Loading…</Centered>;
   if (error || !data) return <Centered>{error ?? "Not found."}</Centered>;
 
   const h = data.headline;
-  const wonCount = data.majorMoves.filter((m) => m.kind === "won").length;
-  const advancedCount = data.majorMoves.filter((m) => m.kind === "advanced").length;
+  const workers = data.leaderboard.filter((r) => r.actions > 0);
 
   return (
     <div className="min-h-screen bg-slate-50 py-8">
-      <div className="mx-auto max-w-2xl space-y-6 px-4">
+      <div className="mx-auto max-w-3xl space-y-6 px-4">
         {/* Header */}
         <div className="overflow-hidden rounded-2xl bg-slate-900 shadow-sm">
           <div className="h-1.5 w-full bg-gradient-to-r from-[#CC0000] to-[#790000]" />
@@ -48,42 +66,94 @@ export function DailySummaryPage() {
                 sub={h.biggestMover ? `+${num(h.biggestMover.actions)}` : undefined} />
         </div>
 
-        {/* Leaderboard */}
-        <Card title="Leaderboard">
-          {data.leaderboard.some((r) => r.actions > 0) ? (
-            <div className="space-y-2">
-              {data.leaderboard.filter((r) => r.actions > 0).map((r) => (
-                <div key={r.rank} className="flex items-center gap-3">
-                  <span className={`w-5 text-sm font-bold tabular-nums ${r.rank === 1 ? "text-[#CC0000]" : "text-slate-300"}`}>{r.rank}</span>
-                  <span className="w-32 shrink-0 truncate text-sm font-medium text-slate-800">{r.name}</span>
-                  <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-100">
-                    <div className="h-full rounded-full" style={{ width: `${maxActions > 0 ? Math.max(4, Math.round((r.actions / maxActions) * 100)) : 0}%`, background: r.rank === 1 ? RED : "#cbd5e1" }} />
-                  </div>
-                  <span className="w-12 text-right text-sm font-bold tabular-nums text-slate-700">{num(r.actions)}</span>
-                </div>
-              ))}
+        {/* Won today — full, uncapped */}
+        <Card title="Won today" right={data.wonToday.length ? `${data.wonToday.length} · ${usdCompact(wonTotal)}` : undefined}>
+          {data.wonToday.length ? (
+            <table className="w-full text-sm">
+              <tbody>
+                {data.wonToday.map((d, i) => (
+                  <tr key={i} className="border-b border-slate-50 last:border-0">
+                    <td className="py-1.5 pr-3 text-slate-800"><span className="text-emerald-600">●</span> {d.dealName}</td>
+                    <td className="py-1.5 px-3 text-slate-500">{d.repName}</td>
+                    <td className="py-1.5 text-right font-bold tabular-nums text-slate-800 whitespace-nowrap">{usdFull(d.value)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <Quiet>No deals won today.</Quiet>
+          )}
+        </Card>
+
+        {/* Advanced today — full, uncapped */}
+        <Card title="Advanced today" right={data.advancedToday.length ? `${data.advancedToday.length} ${data.advancedToday.length === 1 ? "move" : "moves"}` : undefined}>
+          {data.advancedToday.length ? (
+            <table className="w-full text-sm">
+              <tbody>
+                {data.advancedToday.map((m, i) => (
+                  <tr key={i} className="border-b border-slate-50 last:border-0">
+                    <td className="py-1.5 pr-3 text-slate-800 whitespace-nowrap">▸ {m.dealName}</td>
+                    <td className="py-1.5 px-3 text-slate-500">{m.fromStage ?? "—"} → {m.toStage ?? "—"}</td>
+                    <td className="py-1.5 text-right text-slate-500">{m.repName}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <Quiet>No stage advances today.</Quiet>
+          )}
+        </Card>
+
+        {/* Who moved it — per-rep, uncapped, breakdown columns */}
+        <Card title="Who moved it">
+          {workers.length ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-[11px] uppercase tracking-wide text-slate-400">
+                    <th className="py-1 pr-2 text-left font-semibold">#</th>
+                    <th className="py-1 px-2 text-left font-semibold">Rep</th>
+                    <th className="py-1 px-2 text-right font-semibold">Time</th>
+                    <th className="py-1 px-2 text-right font-semibold">Actions</th>
+                    <th className="py-1 pl-2 text-left font-semibold">Breakdown</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {workers.map((r) => (
+                    <tr key={r.rank} className="border-b border-slate-50 last:border-0">
+                      <td className={`py-1.5 pr-2 font-bold tabular-nums ${r.rank === 1 ? "text-[#CC0000]" : "text-slate-300"}`}>{r.rank}</td>
+                      <td className="py-1.5 px-2 font-medium text-slate-800">{r.name}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-slate-600">{minutesLabel(r.activeMinutes)}</td>
+                      <td className="py-1.5 px-2 text-right font-bold tabular-nums text-slate-800">{num(r.actions)}</td>
+                      <td className="py-1.5 pl-2 text-slate-500">{breakdownLine(r)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           ) : (
             <Quiet>Quiet day — no rep activity yet.</Quiet>
           )}
         </Card>
 
-        {/* Major moves */}
-        <Card title="Major moves today">
-          {data.majorMoves.length > 0 ? (
-            <div className="space-y-1.5">
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">{wonCount} won · {advancedCount} advanced</div>
-              {data.majorMoves.map((m, i) => (
-                <div key={i} className="flex items-center gap-2 text-sm text-slate-800">
-                  <span className={m.kind === "won" ? "font-bold text-[#CC0000]" : "text-slate-400"}>{m.kind === "won" ? "★ Won" : "→"}</span>
-                  <span className="truncate">{m.label}</span>
+        {/* Activity by hour — the one honest time visual (browser-session reps only) */}
+        {data.hourly.length ? (
+          <Card title="Activity by hour">
+            <div className="flex items-end gap-1.5" style={{ height: 96 }}>
+              {data.hourly.map((slot) => (
+                <div key={slot.hour} className="flex flex-1 flex-col items-center justify-end">
+                  <div
+                    className="w-full rounded-t"
+                    style={{ height: `${maxHourReps > 0 ? Math.max(6, Math.round((slot.reps / maxHourReps) * 80)) : 0}px`, background: RED, opacity: 0.85 }}
+                    title={`${slot.reps} rep(s) active`}
+                  />
+                  <span className="mt-1 text-[10px] tabular-nums text-slate-400">{hourLabel(slot.hour)}</span>
                 </div>
               ))}
             </div>
-          ) : (
-            <Quiet>Quiet day — no major moves.</Quiet>
-          )}
-        </Card>
+            <p className="mt-2 text-xs text-slate-400">Reps with an open browser session, by Central hour. Activity via API/import isn’t in this curve.</p>
+          </Card>
+        ) : null}
 
         {/* Team health */}
         <Card title="Team health">
@@ -104,6 +174,22 @@ export function DailySummaryPage() {
   );
 }
 
+/** Non-zero buckets only, highest-signal first — the breakdown IS the value. */
+function breakdownLine(r: LeaderRow): string {
+  const b: RepBreakdown = r.breakdown;
+  const parts: [number, string][] = [
+    [b.created, "created"],
+    [b.stageMoves, "moves"],
+    [b.emails, "emails"],
+    [b.edits, "edits"],
+    [b.uploads, "uploads"],
+    [b.reports, "reports"],
+    [b.notes, "notes"],
+  ];
+  const nz = parts.filter(([n]) => n > 0);
+  return nz.length ? nz.map(([n, label]) => `${num(n)} ${label}`).join(", ") : "—";
+}
+
 function Centered({ children }: { children: React.ReactNode }) {
   return <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 text-sm text-slate-500">{children}</div>;
 }
@@ -116,10 +202,13 @@ function Stat({ label, value, sub, accent = false }: { label: string; value: str
     </div>
   );
 }
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function Card({ title, right, children }: { title: string; right?: string; children: React.ReactNode }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4">
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">{title}</div>
+      <div className="mb-2 flex items-baseline justify-between">
+        <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">{title}</div>
+        {right ? <div className="text-sm font-bold tabular-nums text-slate-700">{right}</div> : null}
+      </div>
       {children}
     </div>
   );

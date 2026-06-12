@@ -39,21 +39,36 @@ describe("summarizeReps — deterministic tiebreak + zero-guard + quiet day", ()
   });
 });
 
+const ZERO = { created: 0, edits: 0, stageMoves: 0, uploads: 0, emails: 0, notes: 0, reports: 0 };
 const ACTIVE: DailySummaryPayload = {
   date: "2026-06-12", office: "dallas", asOfLabel: AS_OF_LABEL,
   headline: { activeReps: 2, totalReps: 3, totalActions: 500, biggestMover: { name: "Kaleb", actions: 312 } },
-  leaderboard: [{ rank: 1, name: "Kaleb", actions: 312 }, { rank: 2, name: "Adnaan", actions: 188 }, { rank: 3, name: "Zoe", actions: 0 }],
-  majorMoves: [{ kind: "won", label: "Anthem on Ashley: Estimating → Won" }, { kind: "advanced", label: "The hayward: Opportunity → Estimating" }],
+  wonToday: [
+    { dealName: "Anthem on Ashley", repName: "Kaleb Marshall", value: 186000 },
+    { dealName: "2711 N Haskell", repName: "Sidney Monroe", value: 126000 },
+  ],
+  advancedToday: [
+    { dealName: "The Hayward", repName: "Adnaan", fromStage: "Opportunity", toStage: "Estimating" },
+  ],
+  leaderboard: [
+    { rank: 1, name: "Kaleb", actions: 312, activeMinutes: 56, breakdown: { ...ZERO, created: 50, edits: 15, stageMoves: 2, emails: 22 } },
+    // A worker with actions but NO browser session — must render "—", never "0m".
+    { rank: 2, name: "Adnaan", actions: 188, activeMinutes: null, breakdown: { ...ZERO, created: 21, reports: 26 } },
+    { rank: 3, name: "Zoe", actions: 0, activeMinutes: null, breakdown: { ...ZERO } },
+  ],
+  hourly: [{ hour: 8, reps: 4 }, { hour: 12, reps: 7 }],
   teamHealth: { active: 2, quiet: 1, quietNames: ["Zoe"] },
 };
 const QUIET: DailySummaryPayload = {
   date: "2026-06-13", office: "dallas", asOfLabel: AS_OF_LABEL,
   headline: { activeReps: 0, totalReps: 3, totalActions: 0, biggestMover: null },
-  leaderboard: [{ rank: 1, name: "Kaleb", actions: 0 }],
-  majorMoves: [],
+  wonToday: [],
+  advancedToday: [],
+  leaderboard: [{ rank: 1, name: "Kaleb", actions: 0, activeMinutes: null, breakdown: { ...ZERO } }],
+  hourly: [],
   teamHealth: { active: 0, quiet: 3, quietNames: ["Kaleb", "Adnaan", "Zoe"] },
 };
-const PAGE_URL = "https://crm.trockconstruction.com/daily-summary/2026-06-12?token=TESTTOKEN123";
+const PAGE_URL = "https://trockcrm.com/daily-summary/2026-06-12?token=TESTTOKEN123";
 
 describe("renderDailySummaryEmail", () => {
   it("states 'as of 5:00 PM CT' so it isn't read as a complete daily total", () => {
@@ -82,5 +97,31 @@ describe("renderDailySummaryEmail", () => {
   it("subject carries the date + as-of framing", () => {
     expect(dailySummarySubject(ACTIVE)).toContain("Daily Pulse");
     expect(dailySummarySubject(ACTIVE)).toContain(AS_OF_LABEL);
+  });
+
+  it("names the won deals and the Won header reconciles to their sum (no count/total drift)", () => {
+    const html = renderDailySummaryEmail(ACTIVE, PAGE_URL);
+    expect(html).toContain("Anthem on Ashley");
+    expect(html).toContain("2711 N Haskell");
+    expect(html).toContain("$186,000");
+    expect(html).toContain("$126,000");
+    // header = count · compact-total, both derived from the SAME wonToday array (186000 + 126000 = 312000)
+    expect(html).toContain("2 · $312K");
+    // subject mirrors the same reconciled total
+    expect(dailySummarySubject(ACTIVE)).toContain("2 won, $312K");
+  });
+
+  it("names the advances as From → To with the rep", () => {
+    const html = renderDailySummaryEmail(ACTIVE, PAGE_URL);
+    expect(html).toContain("The Hayward");
+    expect(html).toContain("Opportunity");
+    expect(html).toContain("Estimating");
+  });
+
+  it("leaderboard shows the breakdown (the value), and enforces minutes/'—' (never 0m)", () => {
+    const html = renderDailySummaryEmail(ACTIVE, PAGE_URL);
+    expect(html).toContain("50 created"); // the breakdown IS the value, not a bar
+    expect(html).toContain("56m"); // Kaleb has a real session
+    expect(html).not.toContain("0m"); // Adnaan (188 actions, no session) must be "—", never "0m idle"
   });
 });

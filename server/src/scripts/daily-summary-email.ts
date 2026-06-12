@@ -74,7 +74,10 @@ export async function main(now: Date = new Date()): Promise<void> {
       return;
     }
 
-    const baseUrl = process.env.FRONTEND_URL ?? "https://crm.trockconstruction.com";
+    // Durable backstop: default to the LIVE frontend (crm.trockconstruction.com is a dead NXDOMAIN that
+    // would silently produce a broken CTA). If FRONTEND_URL is set it wins; if it's empty/unset we still
+    // ship a working "See full summary" link.
+    const baseUrl = process.env.FRONTEND_URL?.trim() || "https://trockcrm.com";
     const pageUrl = `${baseUrl}/daily-summary/${date}?token=${encodeURIComponent(rawToken)}`;
     const html = renderDailySummaryEmail(payload, pageUrl);
     const ok = await sendSystemEmail(to, dailySummarySubject(payload), html);

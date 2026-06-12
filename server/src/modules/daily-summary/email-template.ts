@@ -1,10 +1,14 @@
-import type { DailySummaryPayload } from "./service.js";
+import type { DailySummaryPayload, LeaderRow, RepBreakdown, WonDeal } from "./service.js";
 
 // Email-client-safe: tables + inline styles only (no <style>, flexbox, or JS — survives Outlook/Gmail).
 // Brand: T Rock red accents (#CC0000 / #790000) on a neutral body.
 
 const RED = "#CC0000";
 const DARK = "#1e293b";
+const MUTE = "#64748b";
+
+const WON_EMAIL_CAP = 5;
+const ADVANCED_EMAIL_CAP = 4;
 
 function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -12,6 +16,18 @@ function esc(s: string): string {
 /** NaN-safe integer — never renders "NaN"/"undefined" in the headline (same discipline as safe formatCurrency). */
 function num(n: number | null | undefined): string {
   return Number.isFinite(n) ? Number(n).toLocaleString("en-US") : "—";
+}
+/** Full dollars, NaN-safe: $186,000. */
+function usdFull(n: number | null | undefined): string {
+  return Number.isFinite(n) ? `$${Math.round(Number(n)).toLocaleString("en-US")}` : "$0";
+}
+/** Compact dollars for headers, NaN-safe: $312K / $1.2M. */
+function usdCompact(n: number | null | undefined): string {
+  if (!Number.isFinite(n)) return "$0";
+  const v = Math.round(Number(n));
+  if (Math.abs(v) >= 1_000_000) return `$${(v / 1_000_000).toFixed(Math.abs(v) >= 10_000_000 ? 0 : 1)}M`;
+  if (Math.abs(v) >= 1_000) return `$${Math.round(v / 1_000)}K`;
+  return `$${v}`;
 }
 
 /** Pretty date for the header, e.g. "Fri, Jun 12" — from the CT date string (no tz conversion). */
@@ -24,35 +40,137 @@ function prettyDate(iso: string): string {
   return `${WEEKDAYS[wd]}, ${MONTHS[m - 1]} ${d}`;
 }
 
+/** The day's Won total — summed from the SAME array the rows render from (header can't drift from items). */
+function wonTotal(won: WonDeal[]): number {
+  return won.reduce((s, d) => s + (Number.isFinite(d.value) ? d.value : 0), 0);
+}
+
+/** "minutes where present, — where absent, never 0m": null -> "—"; otherwise the floored minutes. */
+function minutesLabel(activeMinutes: number | null): string {
+  return activeMinutes == null ? "—" : `${num(activeMinutes)}m`;
+}
+
+/** Non-zero buckets only, highest-signal first, top 4 — the breakdown IS the value, not a bar. */
+function breakdownLine(b: RepBreakdown): string {
+  const parts: [number, string][] = [
+    [b.created, "created"],
+    [b.stageMoves, "moves"],
+    [b.emails, "emails"],
+    [b.edits, "edits"],
+    [b.uploads, "uploads"],
+    [b.reports, "reports"],
+    [b.notes, "notes"],
+  ];
+  const nz = parts.filter(([n]) => n > 0).slice(0, 4);
+  return nz.length ? nz.map(([n, label]) => `${num(n)} ${label}`).join(", ") : "—";
+}
+
+function sectionLabel(text: string, rightNote?: string): string {
+  return `
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td style="font:bold 11px Arial; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em;">${esc(text)}</td>
+      ${rightNote ? `<td style="text-align:right; font:bold 12px Arial; color:${DARK};">${esc(rightNote)}</td>` : ""}
+    </tr></table>`;
+}
+
+function wonRows(won: WonDeal[]): string {
+  if (won.length === 0) return "";
+  const shown = won.slice(0, WON_EMAIL_CAP);
+  const rows = shown
+    .map(
+      (d) => `
+      <tr>
+        <td style="padding:3px 8px 3px 0; font:13px Arial; color:${DARK};">
+          <span style="color:#16a34a;">&#9679;</span> ${esc(d.dealName)}
+        </td>
+        <td style="padding:3px 8px; font:13px Arial; color:${MUTE};">${esc(d.repName)}</td>
+        <td style="padding:3px 0; font:bold 13px Arial; color:${DARK}; text-align:right; white-space:nowrap;">${esc(usdFull(d.value))}</td>
+      </tr>`,
+    )
+    .join("");
+  const more =
+    won.length > WON_EMAIL_CAP
+      ? `<tr><td colspan="3" style="padding:4px 0 0; font:12px Arial; color:${RED};">+${won.length - WON_EMAIL_CAP} more &rarr; full list on the page</td></tr>`
+      : "";
+  return `<table width="100%" cellpadding="0" cellspacing="0">${rows}${more}</table>`;
+}
+
+function advancedRows(moves: DailySummaryPayload["advancedToday"]): string {
+  if (moves.length === 0) return "";
+  const shown = moves.slice(0, ADVANCED_EMAIL_CAP);
+  const rows = shown
+    .map(
+      (m) => `
+      <tr>
+        <td style="padding:3px 8px 3px 0; font:13px Arial; color:${DARK}; white-space:nowrap;">&#9656; ${esc(m.dealName)}</td>
+        <td style="padding:3px 8px; font:13px Arial; color:${MUTE};">${esc(m.fromStage ?? "—")} &rarr; ${esc(m.toStage ?? "—")}</td>
+        <td style="padding:3px 0; font:13px Arial; color:${MUTE}; text-align:right;">${esc(m.repName)}</td>
+      </tr>`,
+    )
+    .join("");
+  const more =
+    moves.length > ADVANCED_EMAIL_CAP
+      ? `<tr><td colspan="3" style="padding:4px 0 0; font:12px Arial; color:${RED};">+${moves.length - ADVANCED_EMAIL_CAP} more &rarr; full list on the page</td></tr>`
+      : "";
+  return `<table width="100%" cellpadding="0" cellspacing="0">${rows}${more}</table>`;
+}
+
+function leaderRows(leaderboard: LeaderRow[]): string {
+  const top = leaderboard.filter((r) => r.actions > 0).slice(0, 5);
+  if (top.length === 0) {
+    return `<tr><td style="padding:8px 0; font:13px Arial; color:${MUTE};">Quiet day — no rep activity yet.</td></tr>`;
+  }
+  return top
+    .map(
+      (r) => `
+      <tr>
+        <td style="padding:5px 8px 5px 0; font:bold 13px Arial; color:${DARK}; width:16px; vertical-align:top;">${r.rank}</td>
+        <td style="padding:5px 0;">
+          <div style="font:bold 13px Arial; color:${DARK};">${esc(r.name)} <span style="color:#94a3b8; font-weight:normal;">&middot; ${esc(minutesLabel(r.activeMinutes))}</span></div>
+          <div style="font:12px Arial; color:${MUTE};">${esc(breakdownLine(r.breakdown))}</div>
+        </td>
+        <td style="padding:5px 0; font:bold 13px Arial; color:${DARK}; text-align:right; width:48px; vertical-align:top;">${num(r.actions)}</td>
+      </tr>`,
+    )
+    .join("");
+}
+
 export function renderDailySummaryEmail(payload: DailySummaryPayload, pageUrl: string): string {
-  const { headline, leaderboard, majorMoves, asOfLabel } = payload;
+  const { headline, leaderboard, wonToday, advancedToday, asOfLabel } = payload;
   const moverLine = headline.biggestMover
-    ? `▲ ${esc(headline.biggestMover.name)} <span style="color:#64748b;">+${num(headline.biggestMover.actions)}</span>`
+    ? `&#9650; ${esc(headline.biggestMover.name)} <span style="color:#64748b;">+${num(headline.biggestMover.actions)}</span>`
     : "—";
 
-  const wonCount = majorMoves.filter((m) => m.kind === "won").length;
-  const advancedCount = majorMoves.filter((m) => m.kind === "advanced").length;
-  const movesTeaser =
-    majorMoves.length === 0
-      ? "Quiet day — no major moves"
-      : `${wonCount} won · ${advancedCount} advanced today`;
+  const wonCount = wonToday.length;
+  const advancedCount = advancedToday.length;
+  // Quiet-day teaser preserves the exact "Quiet day — no major moves" copy used elsewhere.
+  const quietMoves = wonCount === 0 && advancedCount === 0;
 
-  const top = leaderboard.filter((r) => r.actions > 0).slice(0, 5);
-  const maxActions = top.reduce((mx, r) => Math.max(mx, r.actions), 0);
-  const leaderRows = top.length
-    ? top
-        .map((r) => {
-          const barW = maxActions > 0 ? Math.max(6, Math.round((r.actions / maxActions) * 120)) : 0;
-          return `
-        <tr>
-          <td style="padding:4px 8px 4px 0; font:bold 13px Arial; color:${DARK}; width:18px;">${r.rank}</td>
-          <td style="padding:4px 8px 4px 0; font:13px Arial; color:${DARK};">${esc(r.name)}</td>
-          <td style="padding:4px 0;"><table cellpadding="0" cellspacing="0"><tr><td style="background:${RED}; height:8px; width:${barW}px; border-radius:4px; font-size:0; line-height:0;">&nbsp;</td></tr></table></td>
-          <td style="padding:4px 0 4px 8px; font:bold 13px Arial; color:${DARK}; text-align:right; width:48px;">${num(r.actions)}</td>
-        </tr>`;
-        })
-        .join("")
-    : `<tr><td colspan="4" style="padding:8px 0; font:13px Arial; color:#64748b;">Quiet day — no rep activity yet.</td></tr>`;
+  const wonSection =
+    wonCount > 0
+      ? `
+        <tr><td style="padding:14px 24px 4px;">
+          ${sectionLabel("Won today", `${wonCount} · ${usdCompact(wonTotal(wonToday))}`)}
+        </td></tr>
+        <tr><td style="padding:2px 24px 8px;">${wonRows(wonToday)}</td></tr>`
+      : "";
+
+  const advancedSection =
+    advancedCount > 0
+      ? `
+        <tr><td style="padding:8px 24px 4px; border-top:1px solid #f1f5f9;">
+          ${sectionLabel("Advanced today", `${advancedCount} ${advancedCount === 1 ? "move" : "moves"}`)}
+        </td></tr>
+        <tr><td style="padding:2px 24px 8px;">${advancedRows(advancedToday)}</td></tr>`
+      : "";
+
+  const quietSection = quietMoves
+    ? `
+        <tr><td style="padding:14px 24px 8px;">
+          ${sectionLabel("Today")}
+          <div style="font:14px Arial; color:${DARK}; padding-top:4px;">Quiet day — no major moves</div>
+        </td></tr>`
+    : "";
 
   return `<!DOCTYPE html>
 <html>
@@ -63,8 +181,8 @@ export function renderDailySummaryEmail(payload: DailySummaryPayload, pageUrl: s
       <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff; border-radius:8px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,0.1);">
         <!-- Header -->
         <tr><td style="background-color:${DARK}; padding:18px 24px; border-bottom:3px solid ${RED};">
-          <span style="color:#ffffff; font-size:18px; font-weight:bold; letter-spacing:0.04em;">T ROCK · DAILY PULSE</span>
-          <span style="color:#94a3b8; font-size:13px; float:right; line-height:24px;">${esc(prettyDate(payload.date))} · ${esc(asOfLabel)}</span>
+          <span style="color:#ffffff; font-size:18px; font-weight:bold; letter-spacing:0.04em;">T ROCK &middot; DAILY PULSE</span>
+          <span style="color:#94a3b8; font-size:13px; float:right; line-height:24px;">${esc(prettyDate(payload.date))} &middot; ${esc(asOfLabel)}</span>
         </td></tr>
         <!-- Headline numbers -->
         <tr><td style="padding:20px 24px 8px;">
@@ -83,19 +201,17 @@ export function renderDailySummaryEmail(payload: DailySummaryPayload, pageUrl: s
             </td>
           </tr></table>
         </td></tr>
-        <!-- Leaderboard (top 5) -->
-        <tr><td style="padding:8px 24px;">
-          <div style="font:bold 11px Arial; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em; padding-bottom:4px;">Leaderboard</div>
-          <table width="100%" cellpadding="0" cellspacing="0">${leaderRows}</table>
-        </td></tr>
-        <!-- Major moves teaser -->
-        <tr><td style="padding:8px 24px 4px;">
-          <div style="font:bold 11px Arial; color:#94a3b8; text-transform:uppercase; letter-spacing:0.06em;">Major moves</div>
-          <div style="font:14px Arial; color:${DARK}; padding-top:2px;">${esc(movesTeaser)}</div>
+        ${wonSection}
+        ${advancedSection}
+        ${quietSection}
+        <!-- Leaderboard (top 5) — the breakdown is the value, not a bar -->
+        <tr><td style="padding:10px 24px 4px; border-top:1px solid #f1f5f9;">
+          ${sectionLabel("Who moved it")}
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:4px;">${leaderRows(leaderboard)}</table>
         </td></tr>
         <!-- CTA -->
         <tr><td style="padding:16px 24px 24px;">
-          <a href="${esc(pageUrl)}" style="display:inline-block; background-color:${RED}; color:#ffffff; padding:12px 24px; border-radius:6px; text-decoration:none; font:bold 14px Arial;">See full summary →</a>
+          <a href="${esc(pageUrl)}" style="display:inline-block; background-color:${RED}; color:#ffffff; padding:12px 24px; border-radius:6px; text-decoration:none; font:bold 14px Arial;">See full summary &rarr;</a>
         </td></tr>
         <!-- Footer -->
         <tr><td style="padding:14px 24px; border-top:1px solid #e2e8f0; color:#94a3b8; font-size:12px;">
@@ -109,6 +225,10 @@ export function renderDailySummaryEmail(payload: DailySummaryPayload, pageUrl: s
 }
 
 export function dailySummarySubject(payload: DailySummaryPayload): string {
+  const head = `Daily Pulse — ${prettyDate(payload.date)} (${payload.asOfLabel})`;
+  if (payload.wonToday.length > 0) {
+    return `${head} · ${payload.wonToday.length} won, ${usdCompact(wonTotal(payload.wonToday))}`;
+  }
   const mover = payload.headline.biggestMover ? ` · ${payload.headline.biggestMover.name} leads` : "";
-  return `Daily Pulse — ${prettyDate(payload.date)} (${payload.asOfLabel})${mover}`;
+  return `${head}${mover}`;
 }
