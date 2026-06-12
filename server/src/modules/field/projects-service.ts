@@ -7,7 +7,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { buildFileDownloadUrlFromRecord, getDealPhotoTimeline, searchPhotoUploadTargets, type PhotoUploadTarget } from "../files/service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
 import { officeTag, type FieldOffice, type OfficeTag } from "./cross-office.js";
-import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -16,12 +16,15 @@ export type FieldAccessContext = {
   userRole: UserRole;
 };
 
-// The set of terminal (won/lost) stage slugs whose deals are excluded from the
-// field "active projects" list. Sourced from the shared canonical constant
-// (canonical terminal + the full Won and Lost slug families) rather than a
-// hardcoded literal — a hardcoded subset silently let terminal deals on omitted
-// alias stages (e.g. service_scheduled / service_complete) leak in as "active".
-const TERMINAL_FIELD_STAGE_SLUGS = TERMINAL_STAGE_SLUGS;
+// Field "browsable projects" stage rule. The field surface shows ACTIVE-pipeline deals AND Won-family
+// terminal deals — crews must find and photograph Won / in-production jobs — but NEVER Lost-family (dead
+// jobs). This is the intent-explicit replacement for the old "exclude ALL terminal" rule (which hid Won):
+// it deliberately does NOT widen to every terminal stage, which would flood the list with hundreds of
+// active Lost deals. `is_active = true` is still required, so only LIVE Won deals surface — the exact set
+// the capture-target picker already reaches; archived (is_active=false) Won stay hidden. Both sets come
+// from the SHARED canonical slug families (not a hardcoded literal) so omitted alias stages can't drift.
+const FIELD_WON_BROWSABLE_SLUGS = WON_STAGE_SLUGS;
+const FIELD_LOST_EXCLUDED_SLUGS = LOST_STAGE_SLUGS;
 
 const textArray = (values: readonly string[]) => sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
 
@@ -86,10 +89,14 @@ function mapFieldProject(row: any): FieldProject {
 
 function activeProjectWhere(search?: string) {
   const normalizedSearch = search?.trim();
+  const stageSlug = sql`COALESCE(psc.slug, d.bid_board_stage_slug, '')`;
   return sql`
     d.is_active = true
-    AND COALESCE(psc.is_terminal, false) = false
-    AND COALESCE(psc.slug, d.bid_board_stage_slug, '') <> ALL(${textArray(TERMINAL_FIELD_STAGE_SLUGS)})
+    AND (
+      COALESCE(psc.is_terminal, false) = false
+      OR ${stageSlug} = ANY(${textArray(FIELD_WON_BROWSABLE_SLUGS)})
+    )
+    AND ${stageSlug} <> ALL(${textArray(FIELD_LOST_EXCLUDED_SLUGS)})
     ${normalizedSearch ? sql`
       AND (
         d.name ILIKE ${`%${normalizedSearch}%`}
