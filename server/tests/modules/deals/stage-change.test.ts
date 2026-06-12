@@ -1692,6 +1692,9 @@ describe("changeDealStage", () => {
       expect(result.deal.stageId).toBe("stage-won");
       // only-if-empty seed: the bid becomes the awarded amount.
       expect(result.deal.awardedAmount).toBe("1234.56");
+      // CRITICAL INVARIANT: the automatic seed must NEVER mark the value as a manual override —
+      // otherwise the first auto-seed would freeze Procore sync and break seed-forward.
+      expect(result.deal.awardedAmountOverridden).not.toBe(true);
     });
 
     it("does NOT overwrite a present awarded_amount with the bid when entering Won", async () => {

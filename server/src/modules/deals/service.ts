@@ -1931,6 +1931,9 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       ddEstimate: input.ddEstimate ?? null,
       bidEstimate: input.bidEstimate ?? null,
       awardedAmount: input.awardedAmount ?? null,
+      // A non-blank awarded set at creation by an admin/director (reps are rejected by the guard above)
+      // is a manual override — protects it if this deal is later bid-board-matched and synced.
+      awardedAmountOverridden: setsAwarded,
       // deals.bid_due_date is timestamptz, but the business field is date-only.
       // Persist UTC midnight so every environment resolves the same calendar day.
       bidDueDate: normalizedBidDueDate,
@@ -2166,6 +2169,10 @@ export async function updateDeal(
     }
   }
   if (input.awardedAmount !== undefined) updates.awardedAmount = input.awardedAmount;
+  // A genuine admin/director change to awarded_amount is a permanent manual override: mark it so the
+  // Procore mirror never overwrites it. Gated on touchesAwarded (the change-detected edit) — a no-op
+  // re-save of the same value does NOT freeze sync, and the automatic seed never reaches this path.
+  if (touchesAwarded) updates.awardedAmountOverridden = true;
   if (input.description !== undefined) updates.description = input.description;
   if (input.propertyAddress !== undefined) updates.propertyAddress = input.propertyAddress;
   if (input.propertyCity !== undefined) updates.propertyCity = input.propertyCity;

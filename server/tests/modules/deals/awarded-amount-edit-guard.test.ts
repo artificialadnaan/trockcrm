@@ -130,6 +130,24 @@ describe("awarded_amount edit authorization (updateDeal)", () => {
 
     expect(tenantDb.update).toHaveBeenCalled();
     expect(result.awardedAmount).toBe("5000.00");
+    // A genuine admin change marks the value as a permanent manual override.
+    expect(result.awardedAmountOverridden).toBe(true);
+  });
+
+  it("does NOT mark overridden when an admin re-saves the SAME awarded amount (no-op)", async () => {
+    const tenantDb = createUpdateDb({ ...baseExisting }); // stored "1000.00", not overridden
+
+    const result = await updateDeal(
+      tenantDb as never,
+      "deal-1",
+      { awardedAmount: "1000.00" }, // unchanged
+      "admin",
+      "admin-1",
+      "office-1"
+    );
+
+    // touchesAwarded is false → the override flag is not set (sync stays unfrozen on a no-op save).
+    expect(result.awardedAmountOverridden).not.toBe(true);
   });
 
   it("allows a director to change the awarded amount", async () => {
@@ -282,6 +300,8 @@ describe("awarded_amount set authorization (createDeal)", () => {
     });
 
     expect(deal.awardedAmount).toBe("5000.00");
+    // An admin/director hand-setting awarded at creation is a manual override.
+    expect(deal.awardedAmountOverridden).toBe(true);
   });
 
   it("allows a rep to create a deal with NO awarded amount", async () => {
@@ -293,5 +313,7 @@ describe("awarded_amount set authorization (createDeal)", () => {
     });
 
     expect(deal.id).toBe("deal-1");
+    // No awarded set → not a manual override.
+    expect(deal.awardedAmountOverridden).toBe(false);
   });
 });
