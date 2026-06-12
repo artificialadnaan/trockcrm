@@ -32,12 +32,14 @@ const H_PADDING = theme.space.lg;
 export function ReviewTray({
   photos,
   onSetCaption,
+  onAppendCaption,
   onRemove,
   disabled = false,
   voiceEnabled = false,
 }: {
   photos: SessionPhoto[];
   onSetCaption: (key: string, text: string) => void;
+  onAppendCaption: (key: string, text: string) => void;
   onRemove: (key: string) => void;
   disabled?: boolean;
   voiceEnabled?: boolean;
@@ -133,11 +135,8 @@ export function ReviewTray({
                 />
                 {/* Voice dictation — parity with the batch caption (was never wired into this sheet). */}
                 {voiceEnabled ? (
-                  <VoiceRecorder
-                    onTranscript={(text) =>
-                      onSetCaption(selected.key, selected.caption ? `${selected.caption} ${text}` : text)
-                    }
-                  />
+                  // Functional append in the parent — avoids overwriting on rapid transcripts.
+                  <VoiceRecorder onTranscript={(text) => onAppendCaption(selected.key, text)} />
                 ) : null}
                 <Button title="Done" onPress={() => setSelectedKey(null)} />
               </SafeAreaView>

@@ -231,6 +231,14 @@ export default function CaptureScreen() {
     setPhotos((prev) => prev.map((p) => (p.key === key ? { ...p, caption: text } : p)));
   }
 
+  // Functional append (reads the live caption) so back-to-back voice transcripts
+  // can't overwrite each other via a stale captured value.
+  function appendPhotoCaption(key: string, text: string) {
+    setPhotos((prev) =>
+      prev.map((p) => (p.key === key ? { ...p, caption: p.caption ? `${p.caption} ${text}` : text } : p)),
+    );
+  }
+
   // Materialize the batch caption onto photos WITHOUT their own caption — keeps
   // "individual overrides batch" (never clobbers a per-photo caption).
   function applyBatchToEmpty() {
@@ -409,6 +417,7 @@ export default function CaptureScreen() {
             <ReviewTray
               photos={photos}
               onSetCaption={setPhotoCaption}
+              onAppendCaption={appendPhotoCaption}
               onRemove={removePhoto}
               disabled={uploading}
               voiceEnabled={transcribeConfig.data?.configured ?? false}
