@@ -9,7 +9,7 @@ import type { Deal, DealChangeOrder } from "@/hooks/use-deals";
 // for the component's `deal: Deal` prop.
 type EstimatesDeal = Pick<
   Deal,
-  "id" | "name" | "ddEstimate" | "bidEstimate" | "awardedAmount" | "changeOrderTotal"
+  "id" | "name" | "ddEstimate" | "bidEstimate" | "awardedAmount" | "awardedAmountOverridden" | "changeOrderTotal"
 >;
 
 function makeDeal(overrides: Partial<EstimatesDeal> = {}): Deal {
@@ -60,5 +60,28 @@ describe("DealEstimatesCard — a parent's change-order children", () => {
     const html = renderToStaticMarkup(<DealEstimatesCard deal={makeDeal()} changeOrders={[]} />);
 
     expect(html).not.toContain('data-testid="change-order-row"');
+  });
+});
+
+describe("DealEstimatesCard — manual-override indicator", () => {
+  it("shows the 'manually set — not synced from Procore' indicator when awarded_amount is overridden", () => {
+    const html = renderToStaticMarkup(
+      <DealEstimatesCard deal={makeDeal({ awardedAmountOverridden: true })} changeOrders={[]} />
+    );
+
+    expect(html).toContain("Manually set");
+    expect(html).toContain("not synced from Procore");
+  });
+
+  it("does NOT show the indicator when awarded_amount is not overridden", () => {
+    const htmlFalse = renderToStaticMarkup(
+      <DealEstimatesCard deal={makeDeal({ awardedAmountOverridden: false })} changeOrders={[]} />
+    );
+    const htmlAbsent = renderToStaticMarkup(
+      <DealEstimatesCard deal={makeDeal()} changeOrders={[]} />
+    );
+
+    expect(htmlFalse).not.toContain("Manually set");
+    expect(htmlAbsent).not.toContain("Manually set");
   });
 });

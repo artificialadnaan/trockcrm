@@ -116,6 +116,7 @@ export interface Deal {
   ddEstimate: string | null;
   bidEstimate: string | null;
   awardedAmount: string | null;
+  awardedAmountOverridden?: boolean | null;
   changeOrderTotal: string | null;
   description: string | null;
   estimator?: string | null;

@@ -405,6 +405,57 @@ describe("bid board mirror service", () => {
     expect(result.updates.awardedAmount ?? null).toBeNull();
   });
 
+  function wonDeal(overrides: Record<string, unknown>) {
+    return {
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal" as const,
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        bidEstimate: "500",
+        awardedAmount: "900",
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+        ...overrides,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: { id: "stage-won", slug: "won", name: "Won", displayOrder: 5, isTerminal: true, workflowFamily: "standard_deal" as const },
+      payload: { stageSlug: "won", stageStatus: "signed", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    };
+  }
+
+  it("overridden: never writes awarded_amount even when the Procore payload sends a different value", () => {
+    const result = buildBidBoardMirrorUpdate({
+      ...wonDeal({ awardedAmount: "900", awardedAmountOverridden: true }),
+      payload: { stageSlug: "won", stageStatus: "signed", awardedAmount: "777", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+    // Locked → payload "777" is NOT staged; persist COALESCE(undefined→null, awarded_amount) keeps "900".
+    expect(result.updates.awardedAmount ?? null).toBeNull();
+  });
+
+  it("NOT overridden: a payload awarded value still applies (unchanged behavior)", () => {
+    const result = buildBidBoardMirrorUpdate({
+      ...wonDeal({ awardedAmount: "900", awardedAmountOverridden: false }),
+      payload: { stageSlug: "won", stageStatus: "signed", awardedAmount: "777", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+    expect(result.updates.awardedAmount).toBe("777");
+  });
+
+  it("overridden: does not seed even when awarded is blank and bid is present", () => {
+    const result = buildBidBoardMirrorUpdate(
+      wonDeal({ awardedAmount: null, bidEstimate: "500", awardedAmountOverridden: true })
+    );
+    expect(result.updates.awardedAmount ?? null).toBeNull();
+  });
+
   it("does NOT seed awarded_amount on Won entry when both awarded and bid are blank", () => {
     const result = buildBidBoardMirrorUpdate({
       now: new Date("2026-04-23T18:00:00.000Z"),

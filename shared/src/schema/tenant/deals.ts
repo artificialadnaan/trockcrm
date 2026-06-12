@@ -76,6 +76,10 @@ export const deals = pgTable(
     ddEstimate: numeric("dd_estimate", { precision: 14, scale: 2 }),
     bidEstimate: numeric("bid_estimate", { precision: 14, scale: 2 }),
     awardedAmount: numeric("awarded_amount", { precision: 14, scale: 2 }),
+    // Set only by a genuine admin/director manual edit of awarded_amount (createDeal/updateDeal user
+    // input) — NOT by the #688 won-transition seed. When true the Procore mirror never overwrites
+    // awarded_amount (see buildBidBoardMirrorUpdate). Migration 0159.
+    awardedAmountOverridden: boolean("awarded_amount_overridden").notNull().default(false),
     changeOrderTotal: numeric("change_order_total", { precision: 14, scale: 2 }).default("0"),
     description: text("description"),
     estimator: text("estimator"),

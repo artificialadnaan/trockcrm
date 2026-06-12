@@ -130,6 +130,24 @@ describe("awarded_amount edit authorization (updateDeal)", () => {
 
     expect(tenantDb.update).toHaveBeenCalled();
     expect(result.awardedAmount).toBe("5000.00");
+    // A genuine admin change marks the value as a permanent manual override.
+    expect(result.awardedAmountOverridden).toBe(true);
+  });
+
+  it("does NOT mark overridden when an admin re-saves the SAME awarded amount (no-op)", async () => {
+    const tenantDb = createUpdateDb({ ...baseExisting }); // stored "1000.00", not overridden
+
+    const result = await updateDeal(
+      tenantDb as never,
+      "deal-1",
+      { awardedAmount: "1000.00" }, // unchanged
+      "admin",
+      "admin-1",
+      "office-1"
+    );
+
+    // touchesAwarded is false → the override flag is not set (sync stays unfrozen on a no-op save).
+    expect(result.awardedAmountOverridden).not.toBe(true);
   });
 
   it("allows a director to change the awarded amount", async () => {
@@ -200,6 +218,49 @@ describe("awarded_amount edit authorization (updateDeal)", () => {
       statusCode: 403,
       code: "AWARDED_AMOUNT_RESTRICTED",
     });
+    expect(tenantDb.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("awarded_amount editability on bid-board-owned deals", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const bidBoardExisting = { ...baseExisting, isBidBoardOwned: true };
+
+  it("allows an admin to change awarded_amount on a bid-board-owned deal (and marks it overridden)", async () => {
+    const tenantDb = createUpdateDb({ ...bidBoardExisting });
+
+    const result = await updateDeal(
+      tenantDb as never,
+      "deal-1",
+      { awardedAmount: "5000.00" },
+      "admin",
+      "admin-1",
+      "office-1"
+    );
+
+    expect(tenantDb.update).toHaveBeenCalled();
+    expect(result.awardedAmount).toBe("5000.00");
+    expect(result.awardedAmountOverridden).toBe(true);
+  });
+
+  it("still blocks a rep from changing awarded_amount on a bid-board-owned deal", async () => {
+    const tenantDb = createUpdateDb({ ...bidBoardExisting });
+
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { awardedAmount: "5000.00" }, "rep", "rep-1", "office-1")
+    ).rejects.toMatchObject({ statusCode: 403, code: "AWARDED_AMOUNT_RESTRICTED" });
+    expect(tenantDb.update).not.toHaveBeenCalled();
+  });
+
+  it("still locks bid_estimate on a bid-board-owned deal, even for an admin (Procore-owned)", async () => {
+    const tenantDb = createUpdateDb({ ...bidBoardExisting });
+
+    await expect(
+      updateDeal(tenantDb as never, "deal-1", { bidEstimate: "5000.00" }, "admin", "admin-1", "office-1")
+    ).rejects.toMatchObject({ statusCode: 403, code: "BID_BOARD_OWNED_FIELD_READ_ONLY" });
     expect(tenantDb.update).not.toHaveBeenCalled();
   });
 });
@@ -282,6 +343,8 @@ describe("awarded_amount set authorization (createDeal)", () => {
     });
 
     expect(deal.awardedAmount).toBe("5000.00");
+    // An admin/director hand-setting awarded at creation is a manual override.
+    expect(deal.awardedAmountOverridden).toBe(true);
   });
 
   it("allows a rep to create a deal with NO awarded amount", async () => {
@@ -293,5 +356,7 @@ describe("awarded_amount set authorization (createDeal)", () => {
     });
 
     expect(deal.id).toBe("deal-1");
+    // No awarded set → not a manual override.
+    expect(deal.awardedAmountOverridden).toBe(false);
   });
 });
