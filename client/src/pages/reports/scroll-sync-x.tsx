@@ -21,9 +21,13 @@ interface ScrollSyncXProps {
 export function ScrollSyncX({ children, className, bodyClassName = "overflow-auto" }: ScrollSyncXProps) {
   const topRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
-  // width of the spacer inside the top rail = the body's scrollable content width, so the top scrollbar's
-  // thumb mirrors the body's. 0 until measured (and in jsdom, where there is no layout).
+  // For the top rail to scroll in lockstep with the body, their scroll RANGES (scrollWidth − clientWidth)
+  // must match. The spacer width = body.scrollWidth gives the rail the same scrollWidth; the rail width is
+  // pinned to body.clientWidth so the rail's clientWidth matches too — otherwise, when the body shows a
+  // classic (non-overlay) vertical scrollbar, body.clientWidth is narrower than the full-width rail and the
+  // rail can't reach the rightmost columns. Both are 0 until measured (and in jsdom, where there is no layout).
   const [contentWidth, setContentWidth] = useState(0);
+  const [railWidth, setRailWidth] = useState(0);
 
   // Attach the bi-directional scroll mirror ONCE — the refs are stable, so this must not re-run per render.
   // `lock` prevents the programmatic scrollLeft assignment from ping-ponging back via the other element's
@@ -56,7 +60,10 @@ export function ScrollSyncX({ children, className, bodyClassName = "overflow-aut
   useEffect(() => {
     const body = bodyRef.current;
     if (!body) return;
-    const measure = () => setContentWidth(body.scrollWidth);
+    const measure = () => {
+      setContentWidth(body.scrollWidth);
+      setRailWidth(body.clientWidth);
+    };
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(measure);
@@ -72,6 +79,7 @@ export function ScrollSyncX({ children, className, bodyClassName = "overflow-aut
         data-testid="scrollsync-top"
         aria-hidden="true"
         className="scrollbar-top-rail shrink-0 overflow-x-auto overflow-y-hidden"
+        style={{ width: railWidth || undefined }}
       >
         <div style={{ width: contentWidth || undefined, height: 1 }} />
       </div>
