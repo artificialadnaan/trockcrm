@@ -480,12 +480,23 @@ export function buildBidBoardMirrorUpdate(input: {
     });
 
     // Seed awarded_amount from the bid estimate on Won, only-if-empty (CRM-internal).
-    // Resolve the values as they will be persisted: a payload-provided value (already
-    // staged into `updates` above) wins over the loaded DB value.
+    // Resolve the values as they will be persisted: a payload-provided value (staged into
+    // `updates` above) wins ONLY when it is a real, non-blank value; a missing/null/empty
+    // staged value falls back to the loaded DB value. This matters because the persist SQL is
+    // COALESCE(updates.awardedAmount, awarded_amount): without the non-blank check, an explicit
+    // `awardedAmount: null` in the webhook would make resolvedAwarded null, fire the seed, and
+    // OVERWRITE a present DB awarded value with the bid. Falling back to the DB value keeps the
+    // seed strictly only-if-empty.
+    const stagedAwarded = updates.awardedAmount;
+    const stagedBid = updates.bidEstimate;
     const resolvedAwarded =
-      updates.awardedAmount !== undefined ? updates.awardedAmount : input.deal.awardedAmount;
+      stagedAwarded != null && String(stagedAwarded).trim() !== ""
+        ? stagedAwarded
+        : input.deal.awardedAmount;
     const resolvedBid =
-      updates.bidEstimate !== undefined ? updates.bidEstimate : input.deal.bidEstimate;
+      stagedBid != null && String(stagedBid).trim() !== ""
+        ? stagedBid
+        : input.deal.bidEstimate;
     const awardedSeed = awardedAmountSeedOnWin(
       resolvedAwarded as string | null | undefined,
       resolvedBid as string | null | undefined

@@ -320,6 +320,24 @@ describe("Bid Board sync — awarded_amount seed on Won (runtime, only-if-empty)
     expect(Number(d.awarded_amount)).toBe(12345.67);
   });
 
+  it("seeds from the LIVE bid_estimate when the same sync set the estimate then wins (in-memory deal is stale-NULL)", async () => {
+    const id = U("a06");
+    const deal = await seedDeal({
+      id, stageId: ST_ESTIMATING, stageSlug: "estimating", stageOrder: 2, stageTerminal: false,
+      bidBoardStatus: "Won", awardedAmount: null, bidEstimate: "8200.00",
+    });
+    // Reproduce the real ingest cycle: writeEstimateIfNeeded already wrote bid_estimate to the DB
+    // row this cycle, but matches[0] was loaded BEFORE that write and still carries the stale NULL.
+    // The seed must read the live DB column, not this stale in-memory value.
+    deal.bid_estimate = null;
+
+    await writeStageIfSafe(client as any, SCHEMA, deal, stage(ST_WON, "won", 7, true), row("Won"), USER);
+
+    const d = await dealRow(id);
+    expect(d.stage_id).toBe(ST_WON);
+    expect(Number(d.awarded_amount)).toBe(8200);
+  });
+
   it("NEVER overwrites a present awarded_amount on a Won transition (COALESCE no-op, even if bid differs)", async () => {
     const id = U("a02");
     const deal = await seedDeal({

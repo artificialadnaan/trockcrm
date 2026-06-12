@@ -162,6 +162,23 @@ describe("awarded_amount edit authorization (updateDeal)", () => {
 
     expect(result.awardedAmount).toBe("1000.00");
   });
+
+  it("does NOT block a rep when the awarded amount is numerically equal but differently formatted", async () => {
+    const tenantDb = createUpdateDb({ ...baseExisting }); // stored "1000.00"
+
+    // A non-UI API client (e.g. the mobile field app) sends "1000" — same money value, different
+    // string form. Change-detection normalizes both to a number, so this is a no-op, not a 403.
+    const result = await updateDeal(
+      tenantDb as never,
+      "deal-1",
+      { awardedAmount: "1000" },
+      "rep",
+      "rep-1",
+      "office-1"
+    );
+
+    expect(result.awardedAmount).toBeDefined();
+  });
 });
 
 // --- createDeal harness -------------------------------------------------------

@@ -316,3 +316,12 @@ if (awardedSeed !== null) {
 - **Type consistency:** helper signature `awardedAmountSeedOnWin(currentAwarded, bidEstimate): string | null` used identically in Tasks 2/3/4; `MirrorableDeal` extension named `bidEstimate`/`awardedAmount` consistent with `synchub-routes` locals `bid_estimate`/`awarded_amount`. ✓
 - **No placeholders:** all steps carry concrete code/commands. ✓
 - **No backfill / no data patch** included — forward behavior only. ✓
+
+## Review follow-ups (post-review hardening)
+
+Applied after code review of the PR; supersede the matching snippets above:
+
+- **Path B (bid-board poll) reads the LIVE estimate.** `writeEstimateIfNeeded` updates `bid_estimate` in the DB earlier in the same sync cycle but does NOT mutate the in-memory `matches[0]`, so seeding from the JS `deal.bid_estimate` could miss a deal that gets its estimate set AND wins in one cycle. The seed is now expressed entirely in the UPDATE SQL against the live row: `awarded_amount = CASE WHEN $isWon AND awarded_amount IS NULL AND bid_estimate IS NOT NULL AND bid_estimate > 0 THEN bid_estimate ELSE awarded_amount END` (still only-if-empty, still Won-gated). Regression test: in-memory `deal.bid_estimate` stale-NULL while the DB row has a positive estimate → awarded still seeds.
+- **Path C (mirror) only-if-empty hardened.** `resolvedAwarded`/`resolvedBid` now use the payload-staged value only when it is non-null and non-blank, otherwise fall back to the loaded DB value — so an explicit `awardedAmount: null` in the webhook can no longer make the seed overwrite a present DB awarded value through the persist `COALESCE`. Regression test added.
+- **Edit-guard change-detection normalizes money.** `touchesAwarded` compares `normalizeMoneyForCompare(input.awardedAmount)` vs the existing value (blank/whitespace/non-numeric → null, else the number) so a non-UI client sending a numerically-equal but differently-formatted value (`"1000"` vs stored `"1000.00"`) is a no-op, not a false `AWARDED_AMOUNT_RESTRICTED` 403. The create-path guard keeps its blank-detection (its job is "is any non-blank value being set", not change-detection).
+- **Skipped (verified invalid):** the suggestion to gate `updates.awardedAmount` on `touchesAwarded` to avoid `BID_BOARD_OWNED_FIELD_READ_ONLY` — that guard keys on `input.awardedAmount !== undefined` (not `updates.*`), and the deal form omits `awardedAmount` for bid-board-owned deals, so the change has no effect on the described symptom.

@@ -477,6 +477,18 @@ const BID_BOARD_OWNED_UPDATE_FIELD_LABELS: Partial<Record<keyof UpdateDealInput,
   proposalStatus: "Proposal status",
 };
 
+// Normalize a money input for change-detection: blank/whitespace and non-numeric → null,
+// otherwise the numeric value. Lets semantically-equal money strings ("37027" vs "37027.00",
+// or a whitespace-padded value from a non-UI API client) compare equal, so a rep re-submitting an
+// UNCHANGED awarded amount through the partial-save flow is not falsely blocked on a formatting diff.
+function normalizeMoneyForCompare(value: string | number | null | undefined): number | null {
+  if (value == null) return null;
+  const text = String(value).trim();
+  if (text === "") return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : null;
+}
+
 function startOfUtcDay(value: Date) {
   return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
 }
@@ -2140,7 +2152,7 @@ export async function updateDeal(
   // actual change is gated. The system seed-on-win path does not flow through input.awardedAmount.
   const touchesAwarded =
     input.awardedAmount !== undefined &&
-    String(input.awardedAmount ?? "") !== String(existing.awardedAmount ?? "");
+    normalizeMoneyForCompare(input.awardedAmount) !== normalizeMoneyForCompare(existing.awardedAmount);
   if (touchesAwarded) {
     const isDirectorOrAdmin = userRole === "admin" || userRole === "director";
     if (!isDirectorOrAdmin) {

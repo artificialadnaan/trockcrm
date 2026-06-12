@@ -366,6 +366,45 @@ describe("bid board mirror service", () => {
     expect(result.updates.awardedAmount).not.toBe("500");
   });
 
+  it("does NOT let an explicit null awarded payload overwrite a present DB awarded via the seed", () => {
+    const result = buildBidBoardMirrorUpdate({
+      now: new Date("2026-04-23T18:00:00.000Z"),
+      deal: {
+        id: "deal-1",
+        stageId: "stage-review",
+        stageEnteredAt: new Date("2026-04-22T11:00:00.000Z"),
+        workflowRoute: "normal",
+        isBidBoardOwned: true,
+        proposalStatus: "accepted",
+        estimatingSubstage: null,
+        actualCloseDate: null,
+        wonClosedDate: null,
+        bidEstimate: "500",
+        awardedAmount: "900", // present in the DB
+        lostReasonId: null,
+        lostNotes: null,
+        lostCompetitor: null,
+        lostAt: null,
+      },
+      currentStage: { id: "stage-review", slug: "estimate_under_review", displayOrder: 3 },
+      targetStage: {
+        id: "stage-won",
+        slug: "won",
+        name: "Won",
+        displayOrder: 5,
+        isTerminal: true,
+        workflowFamily: "standard_deal",
+      },
+      // Webhook explicitly carries awardedAmount: null. Persist SQL is COALESCE(updates.awardedAmount,
+      // awarded_amount), so the seed must NOT fire here (it would set updates.awardedAmount = bid and
+      // overwrite the present DB value). resolvedAwarded falls back to the DB "900".
+      payload: { stageSlug: "won", stageStatus: "signed", awardedAmount: null, stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+
+    expect(result.updates.awardedAmount).not.toBe("500");
+    expect(result.updates.awardedAmount ?? null).toBeNull();
+  });
+
   it("does NOT seed awarded_amount on Won entry when both awarded and bid are blank", () => {
     const result = buildBidBoardMirrorUpdate({
       now: new Date("2026-04-23T18:00:00.000Z"),
