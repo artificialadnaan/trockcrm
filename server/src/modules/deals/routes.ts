@@ -1853,6 +1853,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       name,
       assignedRepId: repId,
       actorUserId: req.user!.id,
+      actorRole: req.user!.role,
       officeId: req.user!.activeOfficeId,
       creationContext: "direct",
       // RFP eligibility for direct-created Service opportunities depends on
@@ -1925,6 +1926,7 @@ router.post("/", async (req, res, next) => {
       stageId,
       assignedRepId: repId,
       actorUserId: req.user!.id,
+      actorRole: req.user!.role,
       officeId: req.user!.activeOfficeId,
       creationContext: "direct",
       ...rest,

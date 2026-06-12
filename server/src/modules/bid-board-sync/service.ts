@@ -109,6 +109,7 @@ interface DealMatch {
   bid_board_stage_status: string | null;
   bid_board_last_updated_at: string | null;
   bid_estimate: string | null;
+  awarded_amount: string | null;
   // Won-period reporting basis (migration 0141): the bid-board mirror keeps won_closed_date in
   // lockstep with Won status. contract_signed_* are the accounting override fed into the canonical
   // resolveWonClosedDateWriteThrough — same convention as changeDealStage.
@@ -411,6 +412,7 @@ function dealMatchSelectSql(schemaName: string): string {
            d.bid_board_stage_status,
            d.bid_board_last_updated_at,
            d.bid_estimate,
+           d.awarded_amount,
            d.won_closed_date,
            d.contract_signed_date,
            d.contract_signed_at,
@@ -850,6 +852,17 @@ export async function writeStageIfSafe(
             bid_board_stage_entered_at = NOW(),
             read_only_synced_at = NOW(),
             won_closed_date = $9::date,
+            -- Only-if-empty awarded_amount seed on a Win, mirroring awardedAmountSeedOnWin's
+            -- "blank + positive bid" rule against the LIVE row: reads bid_estimate AS IT STANDS
+            -- after writeEstimateIfNeeded ran earlier this sync cycle (so a deal that gets its
+            -- estimate set AND wins in the same cycle still seeds), and only fills a NULL awarded
+            -- amount so a present (e.g. director-confirmed) value is never overwritten. $12 is the
+            -- targetIsWon flag, making this a no-op on non-Won writes.
+            awarded_amount = CASE
+              WHEN $12::boolean AND awarded_amount IS NULL AND bid_estimate IS NOT NULL AND bid_estimate > 0
+              THEN bid_estimate
+              ELSE awarded_amount
+            END,
             actual_close_date = CASE WHEN $6::text = 'won' THEN COALESCE(actual_close_date, CURRENT_DATE) ELSE NULL END,
             lost_at = CASE WHEN $6::text = 'lost' THEN COALESCE(lost_at, NOW()) ELSE NULL END,
             bid_board_loss_outcome = CASE WHEN $6::text = 'lost' THEN COALESCE(bid_board_loss_outcome, $8::text) ELSE NULL END,
@@ -874,6 +887,7 @@ export async function writeStageIfSafe(
       nextWonClosedDate,
       deal.id,
       deal.stage_id,
+      targetIsWon,
     ]
   );
 

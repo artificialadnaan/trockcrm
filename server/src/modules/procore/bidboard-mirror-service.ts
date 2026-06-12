@@ -5,6 +5,7 @@ import {
 } from "@trock-crm/shared/types";
 
 import { AppError } from "../../middleware/error-handler.js";
+import { awardedAmountSeedOnWin } from "../deals/awarded-amount-seed.js";
 import {
   VALID_ESTIMATING_SUBSTAGES,
   VALID_PROPOSAL_STATUSES,
@@ -115,6 +116,8 @@ type MirrorableDeal = {
   lostNotes: string | null;
   lostCompetitor: string | null;
   lostAt: Date | string | null;
+  bidEstimate?: string | null;
+  awardedAmount?: string | null;
 };
 
 type MirrorableStage = {
@@ -475,6 +478,32 @@ export function buildBidBoardMirrorUpdate(input: {
       ),
       stageDrivenWonDate,
     });
+
+    // Seed awarded_amount from the bid estimate on Won, only-if-empty (CRM-internal).
+    // Resolve the values as they will be persisted: a payload-provided value (staged into
+    // `updates` above) wins ONLY when it is a real, non-blank value; a missing/null/empty
+    // staged value falls back to the loaded DB value. This matters because the persist SQL is
+    // COALESCE(updates.awardedAmount, awarded_amount): without the non-blank check, an explicit
+    // `awardedAmount: null` in the webhook would make resolvedAwarded null, fire the seed, and
+    // OVERWRITE a present DB awarded value with the bid. Falling back to the DB value keeps the
+    // seed strictly only-if-empty.
+    const stagedAwarded = updates.awardedAmount;
+    const stagedBid = updates.bidEstimate;
+    const resolvedAwarded =
+      stagedAwarded != null && String(stagedAwarded).trim() !== ""
+        ? stagedAwarded
+        : input.deal.awardedAmount;
+    const resolvedBid =
+      stagedBid != null && String(stagedBid).trim() !== ""
+        ? stagedBid
+        : input.deal.bidEstimate;
+    const awardedSeed = awardedAmountSeedOnWin(
+      resolvedAwarded as string | null | undefined,
+      resolvedBid as string | null | undefined
+    );
+    if (awardedSeed !== null) {
+      updates.awardedAmount = awardedSeed; // final SQL: COALESCE(updates.awardedAmount, awarded_amount)
+    }
   }
 
   if (canonicalTargetStageSlug === "lost") {
