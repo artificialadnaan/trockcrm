@@ -42,6 +42,23 @@ vi.mock("../src/middleware/tenant.js", () => ({
   },
 }));
 
+// The field write routes resolve the office + open a transaction via cross-office.js. Mock the
+// pool-touching helpers to a single fake office (flag-off path here) so the routes run pool-free —
+// the CSRF/cross-origin behavior under test is independent of office resolution.
+vi.mock("../src/modules/field/cross-office.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/modules/field/cross-office.js")>();
+  const office = { id: "office-1", slug: "trock" };
+  const officeDb = { execute: vi.fn() } as any;
+  return {
+    ...actual,
+    getFieldOfficeById: vi.fn(async () => office),
+    resolveWriteOffice: vi.fn(async () => office),
+    resolveFieldWriteOffice: vi.fn(async () => office),
+    runInOffice: vi.fn(async (_office: any, run: any) => run(officeDb, office)),
+    runInOfficeTransaction: vi.fn(async (_office: any, _userId: any, run: any) => run(officeDb, office)),
+  };
+});
+
 const projectMocks = vi.hoisted(() => ({
   starFieldProject: vi.fn(),
 }));
@@ -67,6 +84,9 @@ vi.mock("../src/modules/field/projects-service.js", async () => {
 vi.mock("../src/modules/field/photos-service.js", () => ({
   requestFieldPhotoUploadUrl: photoMocks.requestFieldPhotoUploadUrl,
   confirmFieldPhotoUpload: vi.fn(),
+  // Format validators the write routes call before resolving the office (no-op for non-uuid test ids).
+  assertValidCaptureTargetIds: vi.fn(),
+  assertValidUuid: vi.fn(),
 }));
 
 vi.mock("../src/modules/files/routes.js", () => {

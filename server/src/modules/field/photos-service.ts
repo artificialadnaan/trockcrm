@@ -84,13 +84,16 @@ function normalizeCaptureTargetIds(input: {
   };
 }
 
-function assertValidUuid(value: string, field: string): void {
+export function assertValidUuid(value: string, field: string): void {
   if (!UUID_PATTERN.test(value)) {
     throw new AppError(400, `Invalid ${field}: must be a UUID.`);
   }
 }
 
-function assertValidCaptureTargetIds(input: {
+// Exported so the cross-office write routes can validate capture-target id FORMAT *before* resolving
+// the deal's office — an invalid uuid must be a clean 400, not a `::uuid` cast error swallowed by the
+// resolver's fan-out and reported as a misleading 503.
+export function assertValidCaptureTargetIds(input: {
   dealId?: string;
   leadId?: string;
   opportunityId?: string;
@@ -299,6 +302,13 @@ export async function confirmFieldPhotoUpload(
     userId: string;
     userRole: UserRole;
     officeId: string;
+    /**
+     * The resolved (deal's) office slug this confirm is running in. The upload token's r2Key embeds the
+     * office it was minted under (`office_<slug>/…`); we assert they match so a token can't be replayed
+     * under a different office to file the row in the wrong schema. Optional for back-compat; when omitted
+     * the assertion is skipped (single-office callers).
+     */
+    officeSlug?: string;
     dealId?: string;
     leadId?: string;
     opportunityId?: string;
@@ -325,6 +335,12 @@ export async function confirmFieldPhotoUpload(
   const pending = getPendingUploadMetadata(input.uploadToken);
   if (!pending) throw new AppError(400, "Invalid or expired upload token");
   if (pending.r2Key !== input.objectKey) throw new AppError(400, "objectKey does not match the issued upload.");
+  // Token-office integrity: the r2Key was built under the office this upload was issued for. If the
+  // confirm resolved to a different office (token replayed under another active office), the prefix
+  // won't match — reject rather than file the row in the wrong schema.
+  if (input.officeSlug && !pending.r2Key.startsWith(`office_${input.officeSlug}/`)) {
+    throw new AppError(409, "Upload token was issued for a different office.");
+  }
   if (
     pending.dealId !== (normalizedTarget.dealId ?? normalizedTarget.opportunityId ?? undefined) ||
     pending.leadId !== (normalizedTarget.leadId ?? undefined) ||

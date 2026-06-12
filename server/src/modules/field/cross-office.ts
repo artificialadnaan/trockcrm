@@ -8,9 +8,9 @@
 // session-level search_path, run in parallel via Promise.allSettled so one office failing degrades
 // gracefully instead of failing the whole read.
 //
-// READ-ONLY by contract. Cross-office WRITES (photo attach/confirm) are a separately-gated phase and
-// must NOT reuse this module without a deal->office resolver re-binding search_path + R2 key + job
-// office — see the Phase 2b plan.
+// Cross-office WRITES (Phase 2b) live at the bottom of this file, gated behind
+// FIELD_CROSS_OFFICE_WRITES_ENABLED and built on the SAME deal->office resolver: they re-bind
+// search_path + R2 key + job office to the DEAL's office. See the Phase 2b build doc.
 
 import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -155,4 +155,107 @@ export async function withResolvedOffice<T>(
   if (!office) throw new AppError(404, notFoundMessage);
   const value = await runInOffice(office, (officeDb) => run(officeDb, office));
   return { value, office };
+}
+
+// ─── Phase 2b: cross-office WRITES (gated) ───────────────────────────────────────────────────────
+// A cross-office WRITE re-binds the deal's office to all three orphan hazards (search_path, R2 key,
+// job_queue.office_id). Everything below is OFF unless FIELD_CROSS_OFFICE_WRITES_ENABLED === "true";
+// with the flag off the write office is always the uploader's active office (today's single-office
+// behavior), so merging this PR changes nothing until the flag is flipped.
+
+/** Cross-office field WRITES master gate. Default OFF — merging the PR does not activate writes. */
+export function isFieldCrossOfficeWritesEnabled(): boolean {
+  return process.env.FIELD_CROSS_OFFICE_WRITES_ENABLED === "true";
+}
+
+export type WriteOfficeSource = { kind: "deal" | "lead"; id: string } | "uploader";
+
+/**
+ * Pure decision: where does a field write land? With the flag OFF (or no capture target), the
+ * UPLOADER's active office (today's behavior). With the flag ON and a target, the TARGET's office —
+ * resolved from the DB, never client-trusted. `opportunityId` resolves as a deal (opportunities are
+ * deal records); an explicit `dealId` wins over `opportunityId` if both are present.
+ */
+export function pickWriteOfficeSource(
+  flagEnabled: boolean,
+  target: { dealId?: string; leadId?: string; opportunityId?: string },
+): WriteOfficeSource {
+  if (!flagEnabled) return "uploader";
+  const dealLike = target.dealId ?? target.opportunityId;
+  if (dealLike) return { kind: "deal", id: dealLike };
+  if (target.leadId) return { kind: "lead", id: target.leadId };
+  return "uploader";
+}
+
+/** Pure: a resolved office is required — null (no active office owns the id) is a hard 404, write nothing. */
+export function requireResolvedOffice(office: FieldOffice | null, notFoundMessage: string): FieldOffice {
+  if (!office) throw new AppError(404, notFoundMessage);
+  return office;
+}
+
+/** Look up one active office by id (the uploader's active office for the flag-off / unassigned path). */
+export async function getFieldOfficeById(officeId: string): Promise<FieldOffice> {
+  const { rows } = await pool.query<{ id: string; slug: string }>(
+    "SELECT id, slug FROM public.offices WHERE id = $1 AND is_active = true",
+    [officeId],
+  );
+  const row = rows[0];
+  if (!row) throw new AppError(404, "Office not found or inactive");
+  return { id: row.id, slug: row.slug };
+}
+
+/** Resolve the office that owns a write target (deal/lead/file); 404 if none, 503 if a schema was unavailable. */
+export async function resolveWriteOffice(
+  kind: "deal" | "lead" | "file",
+  id: string,
+  notFoundMessage: string,
+): Promise<FieldOffice> {
+  // resolveOfficeForId throws 503 (via pickResolvedOffice) when the owning office may have failed,
+  // and returns null only when EVERY office cleanly reported "not mine".
+  return requireResolvedOffice(await resolveOfficeForId(kind, id), notFoundMessage);
+}
+
+/**
+ * Route-facing: the office a field write must run in. Flag-off (or no target) → the uploader's active
+ * office; flag-on + target → the target's resolved office. NEVER trusts a client-supplied office id.
+ */
+export async function resolveFieldWriteOffice(
+  uploaderOfficeId: string,
+  target: { dealId?: string; leadId?: string; opportunityId?: string },
+  notFoundMessage = "Capture target not found",
+): Promise<FieldOffice> {
+  const source = pickWriteOfficeSource(isFieldCrossOfficeWritesEnabled(), target);
+  if (source === "uploader") return getFieldOfficeById(uploaderOfficeId);
+  return resolveWriteOffice(source.kind, source.id, notFoundMessage);
+}
+
+/**
+ * Run `run` inside a TRANSACTION bound to one office's schema, faithfully replicating tenantMiddleware's
+ * envelope (BEGIN, statement_timeout, LOCAL search_path, LOCAL app.current_user_id, COMMIT/ROLLBACK).
+ * This is the WRITE counterpart of runInOffice and the (a) search_path hazard's closure point — every
+ * cross-office write runs through here, bound to the resolved office.
+ */
+export async function runInOfficeTransaction<T>(
+  office: FieldOffice,
+  userId: string,
+  run: (officeDb: FieldTenantDb, office: FieldOffice) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL statement_timeout = '30s'");
+    await client.query("SELECT set_config('search_path', $1, true)", [`office_${office.slug},public`]);
+    await client.query("SELECT set_config('app.current_user_id', $1, true)", [userId]);
+    const officeDb = drizzle(client, { schema });
+    const result = await run(officeDb, office);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {
+      /* best-effort; the client is released regardless */
+    });
+    throw err;
+  } finally {
+    client.release();
+  }
 }
