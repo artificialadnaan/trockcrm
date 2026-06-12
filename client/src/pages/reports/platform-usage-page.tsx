@@ -13,6 +13,33 @@ const HEALTHY_ACTIVE_RATIO = 0.5;
 // Shared column template — header and rows must stay in lockstep.
 const GRID = "grid grid-cols-[2rem_minmax(0,1fr)_5.5rem_5rem_4.5rem] items-center gap-3";
 
+// Window labels. These format a CT-resolved business-date STRING (YYYY-MM-DD, already bounded to
+// America/Chicago by the server) — NOT a timestamp. The weekday is read straight off the calendar
+// parts via Date.UTC(...).getUTCDay() so there is ZERO timezone conversion. Do NOT "improve" this
+// into `new Date(iso)` / Date.parse on a timestamp — that reintroduces a local-tz shift and drifts
+// the label off the America/Chicago day bounds the rest of the feature uses.
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+function dateParts(iso: string) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return { m, d, weekday: new Date(Date.UTC(y, m - 1, d)).getUTCDay() };
+}
+export function dayLabel(iso: string): string {
+  const p = dateParts(iso);
+  return `${WEEKDAYS[p.weekday]}, ${MONTHS[p.m - 1]} ${p.d}`; // "Thu, Jun 12"
+}
+export function weekLabel(startIso: string, endIso: string): string {
+  const s = dateParts(startIso);
+  const e = dateParts(endIso);
+  return s.m === e.m
+    ? `Week of ${MONTHS[s.m - 1]} ${s.d}–${e.d}` // "Week of Jun 7–13"
+    : `Week of ${MONTHS[s.m - 1]} ${s.d} – ${MONTHS[e.m - 1]} ${e.d}`; // "Week of Jun 28 – Jul 4"
+}
+/** The explicit label for the selected window (a single day or a Sun–Sat week). */
+export function windowLabel(grain: "day" | "week", dates: string[]): string {
+  return grain === "week" ? weekLabel(dates[0], dates[dates.length - 1]) : dayLabel(dates[0]);
+}
+
 export function PlatformUsagePage() {
   // Initialize the period (and office) from the URL so the rep-detail back link round-trips to the
   // same view the user was on. Subsequent toggles update local state; the detail link re-emits them.
@@ -39,6 +66,14 @@ export function PlatformUsagePage() {
     return `/reports/performance/platform-usage/${repId}?${qs.toString()}`;
   };
 
+  // Window-aware copy. Relative words ("today" / "this week") are used ONLY for the current period
+  // (default view / Today button → anchorDate is empty); any explicit date pick falls back to the
+  // explicit window label, so a past window is never mislabeled "today" / "this week".
+  const isCurrent = anchorDate === "";
+  const win = data ? windowLabel(data.grain, data.dates) : "";
+  const relWord = (data?.grain ?? grain) === "week" ? "this week" : "today";
+  const metricLabel = (base: string) => (isCurrent ? `${base} ${relWord}` : `${base} · ${win}`);
+
   return (
     <div className="space-y-6">
       <div className="space-y-3">
@@ -49,6 +84,15 @@ export function PlatformUsagePage() {
         />
         {/* Brand title rule (accent only) */}
         <div className="h-1 w-14 rounded-full bg-gradient-to-r from-[#CC0000] to-[#790000]" />
+        {/* Window sub-header — the selected window, read first (not inferred from the toggle). */}
+        {data ? (
+          <div className="flex items-baseline gap-2">
+            <span className="rounded bg-[#CC0000]/10 px-1.5 py-0.5 text-xs font-bold uppercase tracking-wide text-[#CC0000]">
+              {data.grain === "week" ? "Weekly" : "Daily"}
+            </span>
+            <span className="text-xl font-black text-slate-900">{win}</span>
+          </div>
+        ) : null}
       </div>
 
       {/* Controls — grain toggle, date nav, today (behavior unchanged) */}
@@ -91,6 +135,12 @@ export function PlatformUsagePage() {
         >
           Today
         </button>
+        {/* Weekly: make explicit that the picked date expands to a full Sun–Sat week. */}
+        {data && data.grain === "week" ? (
+          <span className="text-sm text-slate-500">
+            → {weekLabel(data.dates[0], data.dates[data.dates.length - 1])}
+          </span>
+        ) : null}
       </div>
 
       {loading ? <div className="text-sm text-slate-500">Loading…</div> : null}
@@ -102,14 +152,18 @@ export function PlatformUsagePage() {
         <>
           <div className="grid gap-4 sm:grid-cols-3">
             <MetricCard
-              label="Active time"
+              label={metricLabel("Active time")}
               value={formatActiveTime(data.summary.activeSeconds)}
               muted={data.summary.activeSeconds === 0}
             />
-            <MetricCard label="Actions" value={String(data.summary.actionCount)} />
-            <RepsActiveCard active={data.summary.activeReps} total={data.summary.totalReps} />
+            <MetricCard label={metricLabel("Actions")} value={String(data.summary.actionCount)} />
+            <RepsActiveCard label={metricLabel("Active")} active={data.summary.activeReps} total={data.summary.totalReps} />
           </div>
 
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-sm font-semibold text-slate-700">Leaderboard</h2>
+            <span className="text-xs text-slate-400">Ranked by actions · {isCurrent ? relWord : win}</span>
+          </div>
           <Leaderboard rows={rows} maxActions={maxActions} detailHref={detailHref} />
 
           <p className="text-xs leading-relaxed text-slate-400">
@@ -138,7 +192,7 @@ function MetricCard({ label, value, muted = false }: { label: string; value: str
  * The most actionable number on the page — and the loudest. Red/danger treatment when the roster is
  * quiet or under-active, green/success when a healthy fraction is active.
  */
-function RepsActiveCard({ active, total }: { active: number; total: number }) {
+function RepsActiveCard({ label, active, total }: { label: string; active: number; total: number }) {
   const ratio = total > 0 ? active / total : 0;
   const healthy = ratio >= HEALTHY_ACTIVE_RATIO;
   const status = healthy ? "Healthy" : active === 0 ? "All quiet" : "Low";
@@ -155,7 +209,7 @@ function RepsActiveCard({ active, total }: { active: number; total: number }) {
           healthy ? "text-emerald-700" : "text-[#791F1F]/70",
         )}
       >
-        Reps active
+        {label}
       </div>
       <div className="mt-1 flex items-baseline gap-2">
         <span className={cn("text-3xl font-black tabular-nums", healthy ? "text-emerald-800" : "text-[#791F1F]")}>
