@@ -29,6 +29,7 @@ import {
   isBidBoardOwnedDownstreamStage,
 } from "./service.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
+import { awardedAmountSeedOnWin } from "./awarded-amount-seed.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 
@@ -390,6 +391,16 @@ export async function changeDealStage(
       ),
       stageDrivenWonDate,
     });
+    // only-if-empty: when a deal enters Won with no awarded amount, seed it from the bid.
+    // The FOR UPDATE lock on currentDeal makes this read-then-write atomic; a present
+    // awarded amount is never overwritten.
+    const awardedSeed = awardedAmountSeedOnWin(
+      currentDeal[0].awardedAmount,
+      currentDeal[0].bidEstimate,
+    );
+    if (awardedSeed !== null) {
+      dealUpdates.awardedAmount = awardedSeed;
+    }
   }
 
   if (isLostOutcomeStage(targetStage.slug, currentDeal[0].workflowRoute)) {

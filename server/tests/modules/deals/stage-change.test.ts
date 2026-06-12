@@ -1662,4 +1662,77 @@ describe("changeDealStage", () => {
     vi.useRealTimers();
   });
 
+  describe("awarded_amount seed on the manual Won transition", () => {
+    function mockWonGate() {
+      vi.mocked(validateStageGate).mockResolvedValue({
+        allowed: true,
+        isBackwardMove: false,
+        requiresOverride: false,
+        targetStage: { id: "stage-won", name: "Won", slug: "won", isTerminal: true, isActivePipeline: true, displayOrder: 9 },
+        currentStage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", isTerminal: false, isActivePipeline: true, displayOrder: 1 },
+      } as never);
+    }
+
+    it("seeds awarded_amount from the bid when the deal enters Won with no awarded amount", async () => {
+      const tenantDb = createTenantDb({
+        stageId: "stage-opportunity",
+        awardedAmount: null,
+        bidEstimate: "1234.56",
+        ddEstimate: null,
+      });
+      mockWonGate();
+
+      const result = await changeDealStage(tenantDb as never, {
+        dealId: "deal-1",
+        targetStageId: "stage-won",
+        userId: "user-1",
+        userRole: "director",
+      });
+
+      expect(result.deal.stageId).toBe("stage-won");
+      // only-if-empty seed: the bid becomes the awarded amount.
+      expect(result.deal.awardedAmount).toBe("1234.56");
+    });
+
+    it("does NOT overwrite a present awarded_amount with the bid when entering Won", async () => {
+      const tenantDb = createTenantDb({
+        stageId: "stage-opportunity",
+        awardedAmount: "999.00",
+        bidEstimate: "1234.56",
+        ddEstimate: null,
+      });
+      mockWonGate();
+
+      const result = await changeDealStage(tenantDb as never, {
+        dealId: "deal-1",
+        targetStageId: "stage-won",
+        userId: "user-1",
+        userRole: "director",
+      });
+
+      // present awarded amount is authoritative — never clobbered by the bid.
+      expect(result.deal.awardedAmount).toBe("999.00");
+    });
+
+    it("leaves awarded_amount blank when entering Won with no bid to seed from", async () => {
+      const tenantDb = createTenantDb({
+        stageId: "stage-opportunity",
+        awardedAmount: null,
+        bidEstimate: null,
+        ddEstimate: null,
+      });
+      mockWonGate();
+
+      const result = await changeDealStage(tenantDb as never, {
+        dealId: "deal-1",
+        targetStageId: "stage-won",
+        userId: "user-1",
+        userRole: "director",
+      });
+
+      // no bid -> nothing to seed; awarded amount stays null.
+      expect(result.deal.awardedAmount).toBeNull();
+    });
+  });
+
 });
