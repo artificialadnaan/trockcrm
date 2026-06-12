@@ -137,22 +137,24 @@ function ProjectRow({
         onPress={onPress}
         style={({ pressed }) => [{ flex: 1, gap: 4 }, pressed && { opacity: 0.6 }]}
         accessibilityRole="button"
-        accessibilityLabel={`Open ${project.name}`}
+        accessibilityLabel={`Open ${project.name}, deal ${project.dealNumber}, ${project.stage}`}
       >
-        <View style={styles.rowTop}>
-          <Text style={styles.rowName} numberOfLines={1}>
-            {project.name}
-          </Text>
+        {/* Full-width name on its own line — the stage badge no longer competes for width (#1). */}
+        <Text style={styles.rowName} numberOfLines={1}>
+          {project.name}
+        </Text>
+        {/* Deal # is promoted to a prominent, non-truncating element so rows that differ
+            only by deal # stay distinguishable; the stage badge wraps beside it (#2). */}
+        <View style={styles.rowBadges}>
+          <Text style={styles.rowDeal}>#{project.dealNumber}</Text>
           <Badge label={project.stage} />
         </View>
-        {project.propertyAddress ? (
-          <Text style={styles.rowAddress} numberOfLines={1}>
-            {project.propertyAddress}
-          </Text>
-        ) : null}
+        {/* Always render the address line (muted fallback) so cards keep a consistent height (#3). */}
+        <Text style={[styles.rowAddress, !project.propertyAddress && styles.rowAddressMissing]} numberOfLines={1}>
+          {project.propertyAddress || "No address on file"}
+        </Text>
         <Text style={styles.rowMeta}>
-          #{project.dealNumber} · {project.photoCount} photo{project.photoCount === 1 ? "" : "s"} ·{" "}
-          {relativeDate(project.lastActivityAt)}
+          {project.photoCount} photo{project.photoCount === 1 ? "" : "s"} · {relativeDate(project.lastActivityAt)}
         </Text>
       </Pressable>
       {offOffice ? (
@@ -164,6 +166,7 @@ function ProjectRow({
           onPress={onToggleStar}
           hitSlop={12}
           style={styles.starButton}
+          accessibilityRole="button"
           accessibilityLabel={project.starred ? "Unstar" : "Star"}
         >
           <Text style={[styles.star, project.starred && { color: theme.color.brandRed }]}>
@@ -189,9 +192,11 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.md,
     padding: theme.space.md,
   },
-  rowTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.sm },
-  rowName: { flex: 1, fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  rowName: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  rowBadges: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: theme.space.sm },
+  rowDeal: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },
   rowAddress: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
+  rowAddressMissing: { fontStyle: "italic", color: theme.color.textMuted, opacity: 0.7 },
   rowMeta: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
   starButton: { paddingHorizontal: theme.space.sm, paddingVertical: theme.space.sm },
   star: { fontSize: 26, color: theme.color.textMuted },
