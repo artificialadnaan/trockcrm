@@ -8,7 +8,7 @@
 // is asserted too.
 import { PGlite } from "@electric-sql/pglite";
 import { readFileSync } from "node:fs";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 let db: PGlite;
 
@@ -80,6 +80,12 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await db?.close();
+});
+
+// The whole suite shares one PGlite session, so a test that SETs search_path and throws before
+// resetting would leak office_atlanta into the next test. Always unwind to public between tests.
+afterEach(async () => {
+  await db.exec(`SET search_path TO public;`);
 });
 
 // Stand-ins for the real helpers, run against the live engine. resolveOfficeForId fans out a
