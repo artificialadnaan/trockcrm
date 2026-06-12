@@ -1,13 +1,15 @@
 import React, { useRef, useState } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../src/auth/AuthContext";
 import { ApiError } from "../src/api/client";
 import { theme } from "../src/theme/theme";
 import { Button, TextInput } from "../src/components/ui";
 import { Banner } from "../src/components/Banner";
 import { BrandLogo } from "../src/components/BrandLogo";
+import { KeyboardDoneAccessory, KEYBOARD_ACCESSORY_ID } from "../src/components/KeyboardDoneAccessory";
 
 export default function Login() {
   const { signIn } = useAuth();
@@ -17,6 +19,7 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const passwordRef = useRef<React.ElementRef<typeof TextInput>>(null);
+  const [showPassword, setShowPassword] = useState(false);
 
   const canSubmit = email.trim().length > 0 && password.length > 0;
 
@@ -42,52 +45,73 @@ export default function Login() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <View style={styles.logo}>
-            <BrandLogo size={72} />
-          </View>
-          <Text style={styles.subtitle}>Field sign in</Text>
+      {/* automaticallyAdjustKeyboardInsets (not a padding KAV) keeps the centered card
+          from jumping/clipping when the keyboard opens (#55); on-drag dismisses it. */}
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+      >
+        <View style={styles.logo}>
+          <BrandLogo size={72} />
+        </View>
+        <Text style={styles.title}>Sign in</Text>
+        <Text style={styles.subtitle}>Field crew access</Text>
 
-          <View style={styles.card}>
-            {error ? <Banner message={error} /> : null}
+        <View style={styles.card}>
+          {error ? <Banner message={error} /> : null}
 
-            <Text style={styles.label}>Email</Text>
-            <TextInput
-              value={email}
-              onChangeText={setEmail}
-              autoCapitalize="none"
-              autoComplete="email"
-              keyboardType="email-address"
-              textContentType="username"
-              accessibilityLabel="Email"
-              placeholder="you@trockgc.com"
-              returnKeyType="next"
-              onSubmitEditing={() => passwordRef.current?.focus()}
-              submitBehavior="submit"
-            />
+          <Text style={styles.label}>Email</Text>
+          <TextInput
+            value={email}
+            onChangeText={setEmail}
+            autoCapitalize="none"
+            autoComplete="email"
+            keyboardType="email-address"
+            textContentType="username"
+            accessibilityLabel="Email"
+            placeholder="you@trockgc.com"
+            returnKeyType="next"
+            onSubmitEditing={() => passwordRef.current?.focus()}
+            submitBehavior="submit"
+            inputAccessoryViewID={KEYBOARD_ACCESSORY_ID}
+          />
 
-            <Text style={styles.label}>Password</Text>
+          <Text style={styles.label}>Password</Text>
+          <View style={styles.passwordWrap}>
             <TextInput
               ref={passwordRef}
               value={password}
               onChangeText={setPassword}
-              secureTextEntry
+              secureTextEntry={!showPassword}
               autoComplete="password"
               textContentType="password"
               accessibilityLabel="Password"
               onSubmitEditing={onSubmit}
               returnKeyType="go"
+              inputAccessoryViewID={KEYBOARD_ACCESSORY_ID}
+              style={styles.passwordInput}
             />
-
-            <Button title="Sign in" onPress={onSubmit} loading={loading} disabled={!canSubmit} style={styles.submit} />
+            <Pressable
+              onPress={() => setShowPassword((s) => !s)}
+              hitSlop={8}
+              style={styles.eye}
+              accessibilityRole="button"
+              accessibilityLabel={`${showPassword ? "Hide" : "Show"} password`}
+            >
+              <Ionicons name={showPassword ? "eye-off-outline" : "eye-outline"} size={22} color={theme.color.textMuted} />
+            </Pressable>
           </View>
 
-          <Text style={styles.hint}>
-            Invited to T-Rock Cam? Open the invitation link from your email on this device.
-          </Text>
-        </ScrollView>
-      </KeyboardAvoidingView>
+          <Button title="Sign in" onPress={onSubmit} loading={loading} disabled={!canSubmit} style={styles.submit} />
+        </View>
+
+        <Text style={styles.hint}>
+          Invited to T-Rock Cam? Open the invitation link from your email on this device.
+        </Text>
+      </ScrollView>
+      <KeyboardDoneAccessory />
     </SafeAreaView>
   );
 }
@@ -97,7 +121,11 @@ const styles = StyleSheet.create({
   scroll: { flexGrow: 1, justifyContent: "center", padding: theme.space.xl, gap: theme.space.md },
   logo: { alignItems: "center" },
   submit: { marginTop: theme.space.sm },
+  title: { textAlign: "center", fontFamily: theme.font.bold, fontSize: 24, color: theme.color.textPrimary },
   subtitle: { textAlign: "center", fontFamily: theme.font.body, fontSize: 14, color: theme.color.textMuted },
+  passwordWrap: { position: "relative", justifyContent: "center" },
+  passwordInput: { paddingRight: 44 },
+  eye: { position: "absolute", right: theme.space.md, padding: 4 },
   card: {
     backgroundColor: theme.color.surfaceCard,
     borderRadius: theme.radius.lg,
