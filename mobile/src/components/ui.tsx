@@ -11,7 +11,7 @@ import {
 } from "react-native";
 import { theme } from "../theme/theme";
 
-type ButtonVariant = "primary" | "ghost" | "danger";
+type ButtonVariant = "primary" | "ghost" | "danger" | "dangerGhost";
 
 export function Button({
   title,
@@ -21,6 +21,7 @@ export function Button({
   disabled = false,
   style,
   accessibilityLabel,
+  icon,
 }: {
   title: string;
   onPress?: () => void;
@@ -29,11 +30,22 @@ export function Button({
   disabled?: boolean;
   style?: ViewProps["style"];
   accessibilityLabel?: string;
+  icon?: React.ReactNode;
 }) {
   const isDisabled = disabled || loading;
+  const isOutline = variant === "ghost" || variant === "dangerGhost";
   const bg =
     variant === "primary" ? theme.color.brandRed : variant === "danger" ? theme.color.danger : "transparent";
-  const fg = variant === "ghost" ? theme.color.textPrimary : theme.color.textInverse;
+  const fg =
+    variant === "ghost"
+      ? theme.color.textPrimary
+      : variant === "dangerGhost"
+        ? theme.color.danger
+        : theme.color.textInverse;
+  // A disabled outline button gets a muted fill + muted text so it reads clearly
+  // inert — a plain opacity dip left a disabled ghost button looking like a normal
+  // secondary action.
+  const disabledOutline = isDisabled && isOutline;
   return (
     <Pressable
       onPress={onPress}
@@ -43,15 +55,23 @@ export function Button({
       accessibilityLabel={accessibilityLabel ?? title}
       style={({ pressed }) => [
         styles.button,
-        { backgroundColor: bg, opacity: isDisabled ? 0.55 : pressed ? 0.85 : 1 },
-        variant === "ghost" && styles.buttonGhost,
+        isOutline && styles.buttonGhost,
+        variant === "dangerGhost" && { borderColor: theme.color.danger },
+        {
+          backgroundColor: disabledOutline ? theme.color.surfaceMuted : bg,
+          opacity: isDisabled ? (isOutline ? 1 : 0.55) : pressed ? 0.85 : 1,
+        },
+        disabledOutline && { borderColor: theme.color.border },
         style,
       ]}
     >
       {loading ? (
         <ActivityIndicator color={fg} />
       ) : (
-        <Text style={[styles.buttonText, { color: fg }]}>{title}</Text>
+        <>
+          {icon ? <View style={styles.buttonIcon}>{icon}</View> : null}
+          <Text style={[styles.buttonText, { color: disabledOutline ? theme.color.textMuted : fg }]}>{title}</Text>
+        </>
       )}
     </Pressable>
   );
@@ -92,6 +112,7 @@ export function Chip({
   return (
     <Pressable
       onPress={onPress}
+      hitSlop={6}
       accessibilityRole="button"
       accessibilityState={{ selected }}
       style={({ pressed }) => [
@@ -151,6 +172,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
   },
   buttonGhost: { borderWidth: 1, borderColor: theme.color.border },
+  buttonIcon: { marginRight: theme.space.sm },
   buttonText: { fontFamily: theme.font.semibold, fontSize: 16 },
   input: {
     minHeight: 48,

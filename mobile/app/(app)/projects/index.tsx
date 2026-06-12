@@ -9,7 +9,7 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { isProjectOffOffice, relativeDate, type FieldProject } from "../../../src/projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
-import { BrandLogo } from "../../../src/components/BrandLogo";
+import { ScreenHeader } from "../../../src/components/ScreenHeader";
 
 export default function ProjectsScreen() {
   const router = useRouter();
@@ -60,8 +60,21 @@ export default function ProjectsScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
-        <BrandLogo size={36} />
+      <ScreenHeader />
+
+      {/* Search is pinned above the list (not inside its scrolling header) so it
+          stays reachable as the rep pages down (#4). clearButtonMode adds a one-tap
+          X to clear the query (#5). */}
+      <View style={styles.searchBar}>
+        <TextInput
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search by name, deal #, or address"
+          autoCapitalize="none"
+          autoCorrect={false}
+          clearButtonMode="while-editing"
+          returnKeyType="search"
+        />
       </View>
 
       <FlatList
@@ -71,33 +84,28 @@ export default function ProjectsScreen() {
         keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.color.brandRed} />}
         ListHeaderComponent={
-          <View style={{ gap: theme.space.md }}>
-            <TextInput
-              value={search}
-              onChangeText={setSearch}
-              placeholder="Search by name, deal #, or address"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            {projectsQuery.isError ? (
-              <Banner message="Couldn't load projects. Pull to refresh." />
-            ) : null}
-            {starred.length > 0 ? (
-              <View style={{ gap: theme.space.sm }}>
-                <Text style={styles.sectionTitle}>Starred</Text>
-                {starred.map((project) => (
-                  <ProjectRow
-                    key={`starred-${project.id}`}
-                    project={project}
-                    writableOfficeId={writableOfficeId}
-                    onPress={() => openProject(project)}
-                    onToggleStar={() => onToggleStar(project)}
-                  />
-                ))}
-                <Text style={[styles.sectionTitle, { marginTop: theme.space.sm }]}>All projects</Text>
-              </View>
-            ) : null}
-          </View>
+          projectsQuery.isError || starred.length > 0 ? (
+            <View style={{ gap: theme.space.md }}>
+              {projectsQuery.isError ? (
+                <Banner message="Couldn't load projects. Pull to refresh." />
+              ) : null}
+              {starred.length > 0 ? (
+                <View style={{ gap: theme.space.sm }}>
+                  <Text style={styles.sectionTitle}>Starred</Text>
+                  {starred.map((project) => (
+                    <ProjectRow
+                      key={`starred-${project.id}`}
+                      project={project}
+                      writableOfficeId={writableOfficeId}
+                      onPress={() => openProject(project)}
+                      onToggleStar={() => onToggleStar(project)}
+                    />
+                  ))}
+                  <Text style={[styles.sectionTitle, { marginTop: theme.space.sm }]}>All projects</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null
         }
         renderItem={({ item }) => (
           <ProjectRow project={item} writableOfficeId={writableOfficeId} onPress={() => openProject(item)} onToggleStar={() => onToggleStar(item)} />
@@ -105,7 +113,9 @@ export default function ProjectsScreen() {
         ListEmptyComponent={
           projectsQuery.isLoading ? (
             <LoadingState label="Loading projects…" />
-          ) : starred.length > 0 ? null : (
+          ) : // On error the header Banner already explains it + offers pull-to-refresh — don't
+          // also claim "No projects yet" (those two messages contradict each other) (#8).
+          projectsQuery.isError ? null : starred.length > 0 ? null : (
             <EmptyState
               title={searching ? "No matches" : "No projects yet"}
               subtitle={searching ? `Nothing found for "${debounced}".` : "Active projects will appear here."}
@@ -139,22 +149,24 @@ function ProjectRow({
         onPress={onPress}
         style={({ pressed }) => [{ flex: 1, gap: 4 }, pressed && { opacity: 0.6 }]}
         accessibilityRole="button"
-        accessibilityLabel={`Open ${project.name}`}
+        accessibilityLabel={`Open ${project.name}, deal ${project.dealNumber}, ${project.stage}`}
       >
-        <View style={styles.rowTop}>
-          <Text style={styles.rowName} numberOfLines={1}>
-            {project.name}
-          </Text>
+        {/* Full-width name on its own line — the stage badge no longer competes for width (#1). */}
+        <Text style={styles.rowName} numberOfLines={1}>
+          {project.name}
+        </Text>
+        {/* Deal # is promoted to a prominent, non-truncating element so rows that differ
+            only by deal # stay distinguishable; the stage badge wraps beside it (#2). */}
+        <View style={styles.rowBadges}>
+          <Text style={styles.rowDeal}>#{project.dealNumber}</Text>
           <Badge label={project.stage} />
         </View>
-        {project.propertyAddress ? (
-          <Text style={styles.rowAddress} numberOfLines={1}>
-            {project.propertyAddress}
-          </Text>
-        ) : null}
+        {/* Always render the address line (muted fallback) so cards keep a consistent height (#3). */}
+        <Text style={[styles.rowAddress, !project.propertyAddress && styles.rowAddressMissing]} numberOfLines={1}>
+          {project.propertyAddress || "No address on file"}
+        </Text>
         <Text style={styles.rowMeta}>
-          #{project.dealNumber} · {project.photoCount} photo{project.photoCount === 1 ? "" : "s"} ·{" "}
-          {relativeDate(project.lastActivityAt)}
+          {project.photoCount} photo{project.photoCount === 1 ? "" : "s"} · {relativeDate(project.lastActivityAt)}
         </Text>
       </Pressable>
       {offOffice ? (
@@ -166,9 +178,10 @@ function ProjectRow({
           onPress={onToggleStar}
           hitSlop={12}
           style={styles.starButton}
-          accessibilityLabel={project.starred ? "Unstar" : "Star"}
+          accessibilityRole="button"
+          accessibilityLabel={project.starred ? `Unstar ${project.name}` : `Star ${project.name}`}
         >
-          <Text style={[styles.star, project.starred && { color: theme.color.warning }]}>
+          <Text style={[styles.star, project.starred && { color: theme.color.brandRed }]}>
             {project.starred ? "★" : "☆"}
           </Text>
         </Pressable>
@@ -179,14 +192,8 @@ function ProjectRow({
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  header: {
-    paddingHorizontal: theme.space.lg,
-    paddingVertical: theme.space.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-    backgroundColor: theme.color.surfaceCard,
-  },
-  list: { padding: theme.space.lg, gap: theme.space.sm },
+  searchBar: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.md, paddingBottom: theme.space.sm },
+  list: { paddingHorizontal: theme.space.lg, paddingBottom: theme.space.lg, paddingTop: theme.space.xs, gap: theme.space.sm },
   sectionTitle: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textMuted, textTransform: "uppercase", letterSpacing: 0.4 },
   row: {
     flexDirection: "row",
@@ -198,10 +205,12 @@ const styles = StyleSheet.create({
     borderRadius: theme.radius.md,
     padding: theme.space.md,
   },
-  rowTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.sm },
-  rowName: { flex: 1, fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  rowName: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  rowBadges: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: theme.space.sm },
+  rowDeal: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },
   rowAddress: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
+  rowAddressMissing: { fontStyle: "italic", color: theme.color.textMuted, opacity: 0.7 },
   rowMeta: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
-  starButton: { paddingLeft: theme.space.sm, paddingVertical: theme.space.xs },
-  star: { fontSize: 24, color: theme.color.textMuted },
+  starButton: { paddingHorizontal: theme.space.sm, paddingVertical: theme.space.sm },
+  star: { fontSize: 26, color: theme.color.textMuted },
 });

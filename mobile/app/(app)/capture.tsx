@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
+import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../../src/theme/theme";
 import { useAuth } from "../../src/auth/AuthContext";
 import { usePendingPhotos } from "../../src/query/hooks";
@@ -17,6 +18,7 @@ import type { CapturedShot } from "../../src/capture/CameraCapture";
 import { Badge, Button, EmptyState, TextInput } from "../../src/components/ui";
 import { Banner } from "../../src/components/Banner";
 import { CategoryPicker } from "../../src/components/CategoryPicker";
+import { ScreenHeader } from "../../src/components/ScreenHeader";
 import { PhotoTagInput } from "../../src/components/PhotoTagInput";
 import { VoiceRecorder } from "../../src/components/VoiceRecorder";
 import { TargetPicker } from "../../src/components/TargetPicker";
@@ -316,9 +318,8 @@ export default function CaptureScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
+      <ScreenHeader />
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-        <Text style={styles.title}>Capture</Text>
-
         {/* Target */}
         <View style={styles.targetCard}>
           <View style={{ flex: 1 }}>
@@ -329,11 +330,11 @@ export default function CaptureScreen() {
           </View>
           <View style={styles.targetActions}>
             {target ? (
-              <Pressable onPress={clearTarget} disabled={uploading} hitSlop={8} accessibilityLabel="Clear project">
+              <Pressable onPress={clearTarget} disabled={uploading} hitSlop={12} accessibilityLabel="Clear project">
                 <Text style={[styles.link, uploading && styles.linkDisabled]}>Clear</Text>
               </Pressable>
             ) : null}
-            <Pressable onPress={() => setPickerOpen(true)} disabled={uploading} hitSlop={8}>
+            <Pressable onPress={() => setPickerOpen(true)} disabled={uploading} hitSlop={12}>
               <Text style={[styles.link, uploading && styles.linkDisabled]}>{target ? "Change" : "Choose"}</Text>
             </Pressable>
           </View>
@@ -343,8 +344,25 @@ export default function CaptureScreen() {
 
         {/* Capture actions */}
         <View style={styles.actions}>
-          <Button title="📸 Open camera" onPress={openCamera} disabled={uploading} style={{ flex: 1 }} />
-          <Button title="🖼 Import" variant="ghost" onPress={importPhotos} disabled={uploading} style={{ flex: 1 }} />
+          <Button
+            title="Open camera"
+            icon={<Ionicons name="camera" size={18} color={theme.color.textInverse} />}
+            onPress={openCamera}
+            disabled={uploading}
+            accessibilityLabel="Open camera"
+            style={{ flex: 1 }}
+          />
+          <Button
+            title="Import"
+            variant="ghost"
+            icon={
+              <Ionicons name="images-outline" size={18} color={uploading ? theme.color.textMuted : theme.color.textPrimary} />
+            }
+            onPress={importPhotos}
+            disabled={uploading}
+            accessibilityLabel="Import photos"
+            style={{ flex: 1 }}
+          />
         </View>
 
         {photos.length > 0 ? (
@@ -374,7 +392,7 @@ export default function CaptureScreen() {
                   ) : (
                     <View />
                   )}
-                  <Pressable onPress={applyBatchToEmpty} hitSlop={8} accessibilityLabel="Apply batch caption to all uncaptioned photos">
+                  <Pressable onPress={applyBatchToEmpty} hitSlop={12} accessibilityLabel="Apply batch caption to all uncaptioned photos">
                     <Text style={styles.link}>Apply to all</Text>
                   </Pressable>
                 </View>
@@ -398,10 +416,12 @@ export default function CaptureScreen() {
             />
           </View>
         ) : (
-          <EmptyState
-            title="No photos yet"
-            subtitle="Open the camera to burst-capture, or import from your library."
-          />
+          <View style={styles.emptyWrap}>
+            <EmptyState
+              title="No photos yet"
+              subtitle="Open the camera to burst-capture, or import from your library."
+            />
+          </View>
         )}
 
         {/* Pending captures */}
@@ -422,7 +442,7 @@ export default function CaptureScreen() {
                   </Text>
                   <Badge label={photo.photoCategory ?? "Uncategorized"} />
                 </View>
-                <Pressable onPress={() => setAssigningPhotoId(photo.id)} hitSlop={8}>
+                <Pressable onPress={() => setAssigningPhotoId(photo.id)} hitSlop={12}>
                   <Text style={styles.link}>Assign</Text>
                 </Pressable>
               </View>
@@ -464,8 +484,10 @@ export default function CaptureScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
-  title: { fontFamily: theme.font.bold, fontSize: 22, color: theme.color.textPrimary },
+  // flexGrow lets the "No photos yet" empty state center in the leftover space
+  // instead of hugging the buttons; no effect once the tray makes content scroll.
+  body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl, flexGrow: 1 },
+  emptyWrap: { flexGrow: 1, justifyContent: "center" },
   targetCard: {
     flexDirection: "row",
     alignItems: "center",
@@ -478,7 +500,8 @@ const styles = StyleSheet.create({
   },
   targetLabel: { fontFamily: theme.font.medium, fontSize: 12, color: theme.color.textMuted },
   targetName: { fontFamily: theme.font.semibold, fontSize: 16, color: theme.color.textPrimary },
-  link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  // Charcoal (not red) so the only red call-to-action in view is the primary button.
+  link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   linkDisabled: { opacity: 0.4 },
   targetActions: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
   actions: { flexDirection: "row", gap: theme.space.md },

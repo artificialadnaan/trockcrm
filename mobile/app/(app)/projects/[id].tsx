@@ -18,6 +18,7 @@ import {
 } from "../../../src/projects/field-projects";
 import { Badge, Button, Chip, EmptyState, LoadingState, SectionLabel } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
+import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { PhotoGrid } from "../../../src/components/PhotoGrid";
 import { PhotoViewerModal } from "../../../src/components/PhotoViewerModal";
 import { ReportBuilder } from "../../../src/components/ReportBuilder";
@@ -106,11 +107,7 @@ export default function ProjectDetailScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <View style={styles.header}>
-        <Pressable onPress={() => router.back()} hitSlop={10} accessibilityLabel="Back">
-          <Text style={styles.back}>‹ Back</Text>
-        </Pressable>
-      </View>
+      <ScreenHeader onBack={() => router.back()} title={toStr(params.name) || "Project"} />
 
       <ScrollView
         contentContainerStyle={styles.body}
@@ -125,11 +122,9 @@ export default function ProjectDetailScreen() {
           />
         }
       >
-        <View style={{ gap: 4 }}>
-          <View style={styles.titleRow}>
-            <Text style={styles.title}>{toStr(params.name) || "Project"}</Text>
-            {params.stage ? <Badge label={toStr(params.stage)} /> : null}
-          </View>
+        {/* Name lives in the persistent header band now; the body leads with stage + address + meta. */}
+        <View style={{ gap: theme.space.xs }}>
+          {params.stage ? <Badge label={toStr(params.stage)} /> : null}
           {params.propertyAddress ? <Text style={styles.address}>{toStr(params.propertyAddress)}</Text> : null}
           <Text style={styles.meta}>
             #{toStr(params.dealNumber)} · {allPhotos.length} photo{allPhotos.length === 1 ? "" : "s"}
@@ -161,8 +156,11 @@ export default function ProjectDetailScreen() {
             <Button
               title="Build report"
               variant="ghost"
+              // Gate on the FILTERED set the builder actually receives — otherwise
+              // active filters that exclude every photo still enable Build and open
+              // an empty builder (#15).
               onPress={() => setReportOpen(true)}
-              disabled={allPhotos.length === 0}
+              disabled={filtered.length === 0}
               style={{ flex: 1 }}
             />
           </View>
@@ -170,14 +168,15 @@ export default function ProjectDetailScreen() {
 
         {notice ? <Banner message={notice} /> : null}
 
-        {/* Grouping + filters */}
-        <View style={{ gap: theme.space.sm }}>
-          <View style={styles.rowBetween}>
-            <SectionLabel>Group by</SectionLabel>
-            <Pressable onPress={() => setShowFilters((s) => !s)} hitSlop={8}>
-              <Text style={styles.link}>{showFilters ? "Hide filters" : "Filters"}</Text>
-            </Pressable>
-          </View>
+        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
+        {allPhotos.length > 0 ? (
+          <View style={{ gap: theme.space.sm }}>
+            <View style={styles.rowBetween}>
+              <SectionLabel>Group by</SectionLabel>
+              <Pressable onPress={() => setShowFilters((s) => !s)} hitSlop={10}>
+                <Text style={styles.linkMuted}>{showFilters ? "Hide filters" : "Filters"}</Text>
+              </Pressable>
+            </View>
           <View style={styles.chipRow}>
             {GROUPINGS.map((g) => (
               <Chip key={g.value} label={g.label} selected={grouping === g.value} onPress={() => setGrouping(g.value)} />
@@ -227,8 +226,9 @@ export default function ProjectDetailScreen() {
                 </View>
               ) : null}
             </View>
-          ) : null}
-        </View>
+            ) : null}
+          </View>
+        ) : null}
 
         {/* Gallery */}
         {photosQuery.isLoading ? (
@@ -253,9 +253,15 @@ export default function ProjectDetailScreen() {
         <View style={{ gap: theme.space.sm }}>
           <SectionLabel>Reports</SectionLabel>
           {reportsQuery.isLoading ? (
-            <LoadingState />
+            <LoadingState label="Loading reports…" />
           ) : (reportsQuery.data?.reports ?? []).length === 0 ? (
-            <Text style={styles.meta}>No reports yet. Build one from the photos above.</Text>
+            <Text style={styles.meta}>
+              {offOffice
+                ? "No reports yet."
+                : allPhotos.length === 0
+                  ? "No reports yet. Build one once you've added photos."
+                  : "No reports yet. Build one from the photos above."}
+            </Text>
           ) : (
             (reportsQuery.data?.reports ?? []).map((report) => (
               <Pressable
@@ -294,22 +300,14 @@ export default function ProjectDetailScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  header: {
-    paddingHorizontal: theme.space.lg,
-    paddingVertical: theme.space.sm,
-    borderBottomWidth: 1,
-    borderBottomColor: theme.color.border,
-    backgroundColor: theme.color.surfaceCard,
-  },
-  back: { fontFamily: theme.font.semibold, fontSize: 16, color: theme.color.brandRed },
   body: { padding: theme.space.lg, gap: theme.space.lg, paddingBottom: theme.space.xxl },
-  titleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.sm },
-  title: { flex: 1, fontFamily: theme.font.bold, fontSize: 22, color: theme.color.textPrimary },
   address: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textMuted },
   meta: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   actions: { flexDirection: "row", gap: theme.space.md },
   rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  // Muted so the "Filters" toggle doesn't compete with the red primary "Add photos".
+  linkMuted: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textMuted },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
   groupLabel: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   reportRow: {

@@ -28,12 +28,13 @@ export function BrandLogo({
     ? require("../../assets/mark.png")
     : require("../../assets/mark-onlight.png");
   return (
-    <View style={styles.row}>
+    // Group the mark + wordmark into a single VoiceOver element so the logo
+    // announces once ("T-Rock Cam"), not three times (mark, "T-ROCK", "CAM").
+    <View style={styles.row} accessible accessibilityRole="image" accessibilityLabel="T-Rock Cam">
       <Image
         source={markSource}
         style={{ width: size, height: size }}
         resizeMode="contain"
-        accessibilityLabel="T Rock"
       />
       {showWordmark ? (
         <View>
