@@ -27,8 +27,12 @@ function numberValue(value: number | string | null | undefined) {
   return Number(value ?? 0);
 }
 
-/** Drill scope header: office-wide (reconciles to the office figure) or a single rep (null = the Unassigned bucket). */
-export type EvidenceScope = { kind: "office" } | { kind: "rep"; repId: string | null; repName: string };
+/** Drill scope header: office-wide (reconciles to the office figure), a single rep, or a single region
+ *  (null repId/regionId = the Unassigned bucket). */
+export type EvidenceScope =
+  | { kind: "office" }
+  | { kind: "rep"; repId: string | null; repName: string }
+  | { kind: "region"; regionId: string | null; regionName: string };
 
 /** A single supporting deal row behind a report number. */
 export interface ReportEvidenceRecord {

@@ -54,6 +54,30 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
     expect(unassigned).toContain("assigned_rep_id IS NULL");
   });
 
+  it("region scope adds a region_id filter (UUID / Unassigned IS NULL); office scope does not — so the drill reconciles to the region rollup", () => {
+    const REGION = "11111111-1111-1111-1111-111111111111";
+    const wonOffice = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30"));
+    const wonRegion = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", undefined, REGION));
+    const wonUnassigned = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", undefined, null));
+    // office-wide drill carries NO region predicate (reconciles to the office number)
+    expect(wonOffice).not.toContain("region_id =");
+    expect(wonOffice).not.toContain("region_id IS NULL");
+    // a named region scopes on region_id = <uuid>; Unassigned scopes on region_id IS NULL
+    expect(wonRegion).toContain("region_id =");
+    expect(wonRegion).toContain(REGION);
+    expect(wonUnassigned).toContain("region_id IS NULL");
+    // the SAME region filter threads through the stage-entry (sent/estimated) and projection builders
+    expect(extractSqlText(buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, "2026-05-24", "2026-05-30", undefined, REGION))).toContain("region_id =");
+    expect(extractSqlText(buildProjectionEvidenceSql(undefined, undefined, REGION))).toContain("region_id =");
+    expect(extractSqlText(buildProjectionEvidenceSql(undefined, undefined, null))).toContain("region_id IS NULL");
+  });
+
+  it("region scope composes with rep scope — both filters present and independent", () => {
+    const both = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", "rep-1", "11111111-1111-1111-1111-111111111111"));
+    expect(both).toContain("assigned_rep_id =");
+    expect(both).toContain("region_id =");
+  });
+
   it("sent evidence: stage-entry cohort on to_stage_id within the CT window, best-estimate $, distinct deal", () => {
     const text = extractSqlText(buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, "2026-05-24", "2026-05-30"));
     expect(text).toContain("to_stage_id"); // stage-ENTRY

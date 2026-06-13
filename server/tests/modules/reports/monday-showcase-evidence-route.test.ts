@@ -40,4 +40,20 @@ describe("parseShowcaseEvidenceParams", () => {
     expect(parseShowcaseEvidenceParams({ metric: "leads", leadStage: "New" }).leadStage).toBe("New");
     expect(() => parseShowcaseEvidenceParams({ metric: "won", leadStage: "New" })).toThrow(/leadStage/);
   });
+
+  it("maps regionId like repId: absent -> undefined, sentinel -> null (Unassigned), uuid -> that region", () => {
+    expect(parseShowcaseEvidenceParams({ metric: "won" }).regionId).toBeUndefined();
+    expect(parseShowcaseEvidenceParams({ metric: "won", regionId: "__unassigned__" }).regionId).toBeNull();
+    const uuid = "22222222-2222-2222-2222-222222222222";
+    expect(parseShowcaseEvidenceParams({ metric: "won", regionId: uuid }).regionId).toBe(uuid);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", regionId: "nope" })).toThrow(/regionId/);
+  });
+
+  it("accepts an explicit from/to period window, paired, ISO-validated", () => {
+    const p = parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-01", to: "2026-06-13" });
+    expect(p.from).toBe("2026-06-01");
+    expect(p.to).toBe("2026-06-13");
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-01" })).toThrow(/together/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "06/01/2026", to: "06/13/2026" })).toThrow(/ISO date/);
+  });
 });

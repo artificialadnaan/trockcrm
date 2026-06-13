@@ -1055,7 +1055,30 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
     throw new AppError(400, "leadStage is only valid for the leads metric");
   }
 
-  return { metric, mode, repId, band, leadStage };
+  // regionId: absent -> no region predicate (office-wide); the sentinel -> Unassigned (region_id IS NULL);
+  // otherwise a real region_config UUID. Mirrors repId.
+  const regionIdRaw = pickQueryValue(query.regionId);
+  let regionId: string | null | undefined;
+  if (regionIdRaw === undefined) regionId = undefined;
+  else if (regionIdRaw === UNASSIGNED_SENTINEL) regionId = null;
+  else regionId = requireUuid(regionIdRaw, "regionId");
+  const regionName = pickQueryValue(query.regionName);
+
+  // from/to: explicit period window for a region drill (paired; both or neither). Used to reconcile the
+  // windowed metrics to the region report's exact period instead of the mode-derived week.
+  const fromRaw = pickQueryValue(query.from);
+  const toRaw = pickQueryValue(query.to);
+  if ((fromRaw === undefined) !== (toRaw === undefined)) {
+    throw new AppError(400, "from and to must be provided together");
+  }
+  const isoDate = (v: string, label: string): string => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new AppError(400, `${label} must be an ISO date (YYYY-MM-DD)`);
+    return v;
+  };
+  const from = fromRaw === undefined ? undefined : isoDate(fromRaw, "from");
+  const to = toRaw === undefined ? undefined : isoDate(toRaw, "to");
+
+  return { metric, mode, repId, band, leadStage, regionId, regionName, from, to };
 }
 
 router.get("/monday-showcase/evidence", requireAnyRole, async (req, res, next) => {
