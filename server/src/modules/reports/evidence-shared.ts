@@ -32,7 +32,7 @@ function numberValue(value: number | string | null | undefined) {
 export type EvidenceScope =
   | { kind: "office" }
   | { kind: "rep"; repId: string | null; repName: string }
-  | { kind: "region"; regionId: string | null; regionName: string };
+  | { kind: "region"; regionName: string };
 
 /** A single supporting deal row behind a report number. */
 export interface ReportEvidenceRecord {

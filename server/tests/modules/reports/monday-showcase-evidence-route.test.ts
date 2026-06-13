@@ -41,12 +41,10 @@ describe("parseShowcaseEvidenceParams", () => {
     expect(() => parseShowcaseEvidenceParams({ metric: "won", leadStage: "New" })).toThrow(/leadStage/);
   });
 
-  it("maps regionId like repId: absent -> undefined, sentinel -> null (Unassigned), uuid -> that region", () => {
-    expect(parseShowcaseEvidenceParams({ metric: "won" }).regionId).toBeUndefined();
-    expect(parseShowcaseEvidenceParams({ metric: "won", regionId: "__unassigned__" }).regionId).toBeNull();
-    const uuid = "22222222-2222-2222-2222-222222222222";
-    expect(parseShowcaseEvidenceParams({ metric: "won", regionId: uuid }).regionId).toBe(uuid);
-    expect(() => parseShowcaseEvidenceParams({ metric: "won", regionId: "nope" })).toThrow(/regionId/);
+  it("accepts a region NAME (the report's displayed-region key); 'Unassigned' is the bucket; absent = office", () => {
+    expect(parseShowcaseEvidenceParams({ metric: "won" }).regionName).toBeUndefined();
+    expect(parseShowcaseEvidenceParams({ metric: "won", regionName: "West Coast" }).regionName).toBe("West Coast");
+    expect(parseShowcaseEvidenceParams({ metric: "won", regionName: "Unassigned" }).regionName).toBe("Unassigned");
   });
 
   it("accepts an explicit from/to period window, paired, ISO-validated", () => {
@@ -58,8 +56,7 @@ describe("parseShowcaseEvidenceParams", () => {
   });
 
   it("rejects a region scope for the leads metric (no region-scoped lead cohort to reconcile against)", () => {
-    expect(() => parseShowcaseEvidenceParams({ metric: "leads", regionId: "22222222-2222-2222-2222-222222222222" })).toThrow(/regionId/);
-    expect(() => parseShowcaseEvidenceParams({ metric: "leads", regionId: "__unassigned__" })).toThrow(/regionId/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "leads", regionName: "West Coast" })).toThrow(/regionName/);
   });
 
   it("rejects a non-calendar date and an inverted from/to window", () => {
@@ -67,10 +64,9 @@ describe("parseShowcaseEvidenceParams", () => {
     expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-13", to: "2026-06-01" })).toThrow(/on or before/);
   });
 
-  it("rejects combining repId and regionId (the scope header can only be one)", () => {
+  it("rejects combining repId and regionName (the scope header can only be one)", () => {
     const rep = "11111111-1111-1111-1111-111111111111";
-    const region = "22222222-2222-2222-2222-222222222222";
-    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: rep, regionId: region })).toThrow(/cannot be combined/);
-    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: "__unassigned__", regionId: "__unassigned__" })).toThrow(/cannot be combined/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: rep, regionName: "West Coast" })).toThrow(/cannot be combined/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: "__unassigned__", regionName: "Unassigned" })).toThrow(/cannot be combined/);
   });
 });

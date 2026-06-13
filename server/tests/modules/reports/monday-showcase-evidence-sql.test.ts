@@ -54,24 +54,22 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
     expect(unassigned).toContain("assigned_rep_id IS NULL");
   });
 
-  it("region scope adds a region_id filter (UUID / Unassigned IS NULL); office scope does not — so the drill reconciles to the region rollup", () => {
-    const REGION = "11111111-1111-1111-1111-111111111111";
+  it("region scope keys on the report's displayed-region expression (not region_id); office scope has none", () => {
+    const PREDICATE = "COALESCE(NULLIF(rc.name, ''), 'Unassigned') =";
     const wonOffice = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30"));
-    const wonRegion = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", undefined, REGION));
-    const wonUnassigned = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", undefined, null));
+    const wonWest = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", undefined, "West Coast"));
+    const wonUnassigned = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", undefined, "Unassigned"));
     // office-wide drill carries NO region predicate (reconciles to the office number)
-    expect(wonOffice).not.toContain("region_id =");
-    expect(wonOffice).not.toContain("'Unassigned') = 'Unassigned'");
-    // a named region scopes on region_id = <uuid>; Unassigned matches the region report's bucket
-    // expression EXACTLY (COALESCE(NULLIF(rc.name,''),'Unassigned') = 'Unassigned' — i.e. region_id IS
-    // NULL OR a blank/literal-"Unassigned" config), not a bare region_id IS NULL
-    expect(wonRegion).toContain("region_id =");
-    expect(wonRegion).toContain(REGION);
-    expect(wonUnassigned).toContain("COALESCE(NULLIF(rc.name, ''), 'Unassigned') = 'Unassigned'");
-    // the SAME region filter threads through the stage-entry (sent/estimated) and projection builders
-    expect(extractSqlText(buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, "2026-05-24", "2026-05-30", undefined, REGION))).toContain("region_id =");
-    expect(extractSqlText(buildProjectionEvidenceSql(undefined, undefined, REGION))).toContain("region_id =");
-    expect(extractSqlText(buildProjectionEvidenceSql(undefined, undefined, null))).toContain("'Unassigned') = 'Unassigned'");
+    expect(wonOffice).not.toContain(PREDICATE);
+    // a region drill keys on the SAME expression the report GROUPs by, so dup/inactive same-named configs
+    // fold together exactly as the clicked row does; the param is the displayed name ("West Coast"/"Unassigned")
+    expect(wonWest).toContain(PREDICATE);
+    expect(wonWest).toContain("West Coast");
+    expect(wonUnassigned).toContain(PREDICATE);
+    expect(wonUnassigned).toContain("Unassigned");
+    // the SAME region key threads through the stage-entry (sent/estimated) and projection builders
+    expect(extractSqlText(buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, "2026-05-24", "2026-05-30", undefined, "West Coast"))).toContain(PREDICATE);
+    expect(extractSqlText(buildProjectionEvidenceSql(undefined, undefined, "West Coast"))).toContain(PREDICATE);
   });
 
   it("sent evidence: stage-entry cohort on to_stage_id within the CT window, best-estimate $, distinct deal", () => {

@@ -1055,25 +1055,21 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
     throw new AppError(400, "leadStage is only valid for the leads metric");
   }
 
-  // regionId: absent -> no region predicate (office-wide); the sentinel -> Unassigned; otherwise a real
-  // region_config UUID. Mirrors repId. Leads have no region_id (region = company text) and the region
-  // report has no leads section, so a region-scoped leads drill has no cohort to reconcile against and is
-  // rejected — never returned as unfiltered rows under a region scope header.
-  const regionIdRaw = pickQueryValue(query.regionId);
-  let regionId: string | null | undefined;
-  if (regionIdRaw === undefined) regionId = undefined;
-  else if (regionIdRaw === UNASSIGNED_SENTINEL) regionId = null;
-  else regionId = requireUuid(regionIdRaw, "regionId");
-  if (regionId !== undefined && metric === "leads") {
-    throw new AppError(400, "regionId is not valid for the leads metric");
+  // regionName: absent -> no region predicate (office-wide); a string -> the displayed region row to
+  // drill, keyed on COALESCE(NULLIF(rc.name,''),'Unassigned') exactly as the region report groups (so a
+  // duplicate/inactive same-named config can't desync the drill). "Unassigned" = that bucket. Leads have
+  // no region and the region report has no leads section, so a region-scoped leads drill has no cohort to
+  // reconcile against and is rejected — never returned as unfiltered rows under a region scope header.
+  const regionName = pickQueryValue(query.regionName);
+  if (regionName !== undefined && metric === "leads") {
+    throw new AppError(400, "regionName is not valid for the leads metric");
   }
   // rep × region is not a representable scope (the response header is one or the other); the region
   // report drills by region only and the rep pack drills by rep only, so reject the combination rather
   // than return a rep×region subset total under a region-only header.
-  if (regionId !== undefined && repId !== undefined) {
-    throw new AppError(400, "repId and regionId cannot be combined");
+  if (regionName !== undefined && repId !== undefined) {
+    throw new AppError(400, "repId and regionName cannot be combined");
   }
-  const regionName = pickQueryValue(query.regionName);
 
   // from/to: explicit period window for a region drill (paired; both or neither). Used to reconcile the
   // windowed metrics to the region report's exact period instead of the mode-derived week.
@@ -1097,7 +1093,7 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
     throw new AppError(400, "from must be on or before to"); // ISO YYYY-MM-DD sorts chronologically
   }
 
-  return { metric, mode, repId, band, leadStage, regionId, regionName, from, to };
+  return { metric, mode, repId, band, leadStage, regionName, from, to };
 }
 
 router.get("/monday-showcase/evidence", requireAnyRole, async (req, res, next) => {
@@ -1107,8 +1103,8 @@ router.get("/monday-showcase/evidence", requireAnyRole, async (req, res, next) =
     // range) and the region scope — are director-only. A rep stays bounded to the mode-derived showcase
     // week; without this gate a rep could omit repId and pull office-wide evidence for any past range.
     const isDirector = req.user!.role === "admin" || req.user!.role === "director";
-    if (!isDirector && (options.from !== undefined || options.regionId !== undefined)) {
-      throw new AppError(403, "from/to and regionId are restricted to directors");
+    if (!isDirector && (options.from !== undefined || options.regionName !== undefined)) {
+      throw new AppError(403, "from/to and regionName are restricted to directors");
     }
     const data = await getMondayShowcaseEvidence(req.tenantDb!, options);
     await req.commitTransaction!();
