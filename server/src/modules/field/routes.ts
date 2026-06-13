@@ -229,7 +229,10 @@ function parseSharePhotoIds(raw: unknown): string[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new AppError(400, "photoIds must be a non-empty array of photo ids.");
   }
-  const ids = Array.from(new Set(raw.map((value) => String(value))));
+  // Canonicalize to lowercase: assertValidUuid accepts any case, but Postgres returns uuids in
+  // canonical lowercase, so we normalize here to keep the stored subset and every downstream
+  // comparison (membership validation, foundIds set) consistent regardless of client casing.
+  const ids = Array.from(new Set(raw.map((value) => String(value).toLowerCase())));
   if (ids.length > MAX_SHARE_PHOTOS) {
     throw new AppError(400, `A share link can include at most ${MAX_SHARE_PHOTOS} photos.`);
   }

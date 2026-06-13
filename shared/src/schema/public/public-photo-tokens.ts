@@ -22,6 +22,8 @@ export const publicPhotoTokens = pgTable(
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     lastAccessedAt: timestamp("last_accessed_at", { withTimezone: true }),
     accessCount: integer("access_count").default(0).notNull(),
+    // Subset scope (migration 0160): NULL = whole-deal token; non-NULL = only these photo ids.
+    photoIds: uuid("photo_ids").array(),
   },
   (table) => [
     index("public_photo_tokens_deal_idx").on(table.dealId),

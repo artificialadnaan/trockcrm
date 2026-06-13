@@ -661,23 +661,28 @@ describe("public photo token service", () => {
     expect(filesSql).not.toContain("ANY");
   });
 
-  it("assertPhotosBelongToDeal passes only when every id is an active photo on the deal", async () => {
+  it("assertPhotosBelongToDeal accepts only ids the deal's photo timeline returns (shared scope)", async () => {
     const { assertPhotosBelongToDeal } = await import("./service.js");
 
-    const okExec = vi.fn().mockResolvedValue({ rows: [{ id: PHOTO_A }, { id: PHOTO_B }] });
-    await expect(assertPhotosBelongToDeal({ execute: okExec } as any, "deal-1", [PHOTO_A, PHOTO_B])).resolves.toBeUndefined();
-    const validationSql = JSON.stringify(okExec.mock.calls[0][0]);
-    expect(validationSql).toContain("is_active");
-    expect(validationSql).toContain("category");
+    // Validates through getDealPhotoTimeline — the SAME scope as the field UI / public viewer
+    // (deal+lead lineage, category, active + latest-version, not-deleted). All ids returned -> ok.
+    getDealPhotoTimelineMock.mockResolvedValueOnce({ photos: [{ id: PHOTO_A }, { id: PHOTO_B }], pagination: {} });
+    await expect(assertPhotosBelongToDeal({} as any, "deal-1", [PHOTO_A, PHOTO_B])).resolves.toBeUndefined();
+    expect(getDealPhotoTimelineMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      1,
+      2,
+      expect.objectContaining({ photoIds: [PHOTO_A, PHOTO_B], includeDeleted: false }),
+    );
 
-    const missingExec = vi.fn().mockResolvedValue({ rows: [{ id: PHOTO_A }] });
-    await expect(assertPhotosBelongToDeal({ execute: missingExec } as any, "deal-1", [PHOTO_A, PHOTO_B])).rejects.toMatchObject({
-      statusCode: 400,
-    });
+    // An id the timeline hides (superseded version, wrong deal/lead lineage, non-photo) -> 400.
+    getDealPhotoTimelineMock.mockResolvedValueOnce({ photos: [{ id: PHOTO_A }], pagination: {} });
+    await expect(assertPhotosBelongToDeal({} as any, "deal-1", [PHOTO_A, PHOTO_B])).rejects.toMatchObject({ statusCode: 400 });
 
-    // No id list -> no query at all.
-    const emptyExec = vi.fn();
-    await expect(assertPhotosBelongToDeal({ execute: emptyExec } as any, "deal-1", [])).resolves.toBeUndefined();
-    expect(emptyExec).not.toHaveBeenCalled();
+    // No id list -> no timeline query at all.
+    getDealPhotoTimelineMock.mockClear();
+    await expect(assertPhotosBelongToDeal({} as any, "deal-1", [])).resolves.toBeUndefined();
+    expect(getDealPhotoTimelineMock).not.toHaveBeenCalled();
   });
 });

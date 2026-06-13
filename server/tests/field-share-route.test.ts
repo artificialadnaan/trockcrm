@@ -104,6 +104,20 @@ describe("POST /api/field/projects/:dealId/share", () => {
     expect(ttlMs).toBeLessThanOrEqual(7 * 24 * 3600 * 1000);
   });
 
+  it("canonicalizes uppercase photo UUIDs to lowercase before validating/minting", async () => {
+    withResolvedOfficeMock.mockImplementation(resolveOfficeRunning(FIELD_VISIBLE_DEAL));
+    generatePublicTokenMock.mockResolvedValue({ rawToken: "RAW-TOKEN", token: { id: "token-1", expiresAt: "2026-06-19T00:00:00.000Z" } });
+
+    const res = await request(createApp())
+      .post(`/api/field/projects/${VALID_DEAL}/share`)
+      .send({ photoIds: [PHOTO_A.toUpperCase()] });
+
+    expect(res.status).toBe(201);
+    // Stored + validated as canonical lowercase (matches Postgres), not the uppercase the client sent.
+    expect(assertPhotosBelongToDealMock).toHaveBeenCalledWith(expect.anything(), VALID_DEAL, [PHOTO_A]);
+    expect(generatePublicTokenMock).toHaveBeenCalledWith(expect.objectContaining({ photoIds: [PHOTO_A] }));
+  });
+
   it("rejects an empty photoIds list (400) before resolving anything", async () => {
     const res = await request(createApp()).post(`/api/field/projects/${VALID_DEAL}/share`).send({ photoIds: [] });
     expect(res.status).toBe(400);

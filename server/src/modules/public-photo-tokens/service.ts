@@ -139,25 +139,24 @@ export async function generatePublicToken(input: {
   };
 }
 
-// Validates (in the deal's tenant db) that every photo id is an ACTIVE photo on the given deal.
-// Throws 400 listing nothing sensitive if any id is missing — so a subset share token can never be
-// minted referencing another deal's photos (or a non-photo / deleted file). No-op for an empty list.
+// Validates that every requested photo id is one the deal's photo timeline would show — by running
+// the ids through the SAME getDealPhotoTimeline scope the field UI and public viewer use. That scope
+// covers deal+lead lineage (converted-lead photos via sourceLeadId), photo category, active +
+// latest-version (superseded versions excluded), and not-deleted. Reusing it means a sharable
+// selection exactly matches what the field app shows — no divergent membership rule. Throws 400 if any
+// id isn't returned (foreign deal, superseded version, non-photo, deleted). No-op for an empty list.
+// Callers must pass canonical (lowercase) uuids so ids match Postgres's lowercase form.
 export async function assertPhotosBelongToDeal(
   tenantDb: TenantDb,
   dealId: string,
   photoIds: string[]
 ): Promise<void> {
   if (photoIds.length === 0) return;
-  const result = await tenantDb.execute(sql`
-    SELECT id
-    FROM files
-    WHERE id = ANY(${photoIdsArrayParam(photoIds)})
-      AND deal_id = ${dealId}::uuid
-      AND category = 'photo'
-      AND deleted_at IS NULL
-      AND is_active = true
-  `);
-  const foundIds = new Set((((result as any).rows ?? result) as Array<{ id: string }>).map((row) => row.id));
+  const timeline = await getDealPhotoTimeline(tenantDb, dealId, 1, photoIds.length, {
+    photoIds,
+    includeDeleted: false,
+  });
+  const foundIds = new Set(timeline.photos.map((photo) => photo.id));
   const missing = photoIds.filter((id) => !foundIds.has(id));
   if (missing.length > 0) {
     throw new AppError(400, "One or more selected photos are not part of this project.");
