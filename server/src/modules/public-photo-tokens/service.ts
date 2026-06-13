@@ -122,6 +122,15 @@ function dealPhotoOwnershipSql(dealId: string) {
   return sql`(deal_id = ${dealId}::uuid OR lead_id = (SELECT source_lead_id FROM deals WHERE id = ${dealId}::uuid))`;
 }
 
+// Serve-time eligibility for per-photo lookups, mirroring getDealPhotoTimeline: only ACTIVE,
+// LATEST-version photos. A photo valid at mint time can be superseded later (uploadNewVersion adds an
+// active child with parent_file_id and leaves the original active), and the viewer re-hides it via the
+// same latest-version predicate. Without this, a direct/cached subset-share URL keeps serving a
+// superseded (or since-deactivated) photo the public viewer no longer lists.
+function latestActivePhotoSql() {
+  return sql` AND is_active = true AND NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`;
+}
+
 export async function generatePublicToken(input: {
   dealId: string;
   createdByUserId: string;
@@ -408,7 +417,7 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
       WHERE id = ${photoId}::uuid
         AND ${dealPhotoOwnershipSql(token.dealId)}
         AND category = 'photo'
-        AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}
+        AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}${latestActivePhotoSql()}
       LIMIT 1
     `);
     const photo = ((photoResult as any).rows ?? photoResult)[0];
@@ -469,7 +478,7 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
       WHERE id = ${photoId}::uuid
         AND ${dealPhotoOwnershipSql(token.dealId)}
         AND category = 'photo'
-        AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}
+        AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}${latestActivePhotoSql()}
       LIMIT 1
     `);
     return ((photoResult as any).rows ?? photoResult)[0];

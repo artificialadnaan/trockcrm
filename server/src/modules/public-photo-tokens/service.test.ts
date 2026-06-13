@@ -676,6 +676,10 @@ describe("public photo token service", () => {
     // The lookup matches the timeline's deal+source-lead scope, so a converted-lead photo resolves.
     expect(filesSql).toContain("source_lead_id");
     expect(filesSql).toContain("lead_id");
+    // ...and the timeline's serve-time eligibility: active + latest-version only (a superseded photo
+    // can't keep being served by a direct/cached subset URL after a newer version is uploaded).
+    expect(filesSql).toContain("is_active = true");
+    expect(filesSql).toContain("parent_file_id");
   });
 
   it("assertPhotosBelongToDeal accepts only ids the deal's photo timeline returns (shared scope)", async () => {
