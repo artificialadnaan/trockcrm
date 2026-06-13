@@ -13,7 +13,7 @@ const getObjectStreamMock = vi.hoisted(() => vi.fn());
 
 const ASSET_BASE = "https://api.test/api/public/photo-viewer";
 
-vi.mock("../../db.js", () => ({
+vi.mock("../../../src/db.js", () => ({
   db: { execute: executeMock },
   pool: { query: queryMock, connect: connectMock },
 }));
@@ -22,17 +22,17 @@ vi.mock("drizzle-orm/node-postgres", () => ({
   drizzle: (client: { query: (...args: unknown[]) => unknown }) => ({ execute: client.query }),
 }));
 
-vi.mock("../files/service.js", () => ({
+vi.mock("../../../src/modules/files/service.js", () => ({
   buildFileDownloadUrlFromRecord: buildFileDownloadUrlFromRecordMock,
   getDealPhotoTimeline: getDealPhotoTimelineMock,
   getFileDownloadUrl: getFileDownloadUrlMock,
 }));
 
-vi.mock("../files/audit-log-service.js", () => ({
+vi.mock("../../../src/modules/files/audit-log-service.js", () => ({
   logPhotoEvent: logPhotoEventMock,
 }));
 
-vi.mock("../../lib/r2-client.js", () => ({
+vi.mock("../../../src/lib/r2-client.js", () => ({
   getObjectStream: getObjectStreamMock,
 }));
 
@@ -51,7 +51,7 @@ describe("public photo token service", () => {
   });
 
   it("hashes public tokens before persistence and returns the raw token only once", async () => {
-    const { generatePublicToken, hashPublicPhotoToken } = await import("./service.js");
+    const { generatePublicToken, hashPublicPhotoToken } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValue({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", expires_at: null }] });
 
     const result = await generatePublicToken({ dealId: "deal-1", tenantId: "tenant-1", createdByUserId: "user-1" });
@@ -64,7 +64,7 @@ describe("public photo token service", () => {
   });
 
   it("verifies valid future-expiring tokens and records access", async () => {
-    const { verifyAndConsumeToken, hashPublicPhotoToken } = await import("./service.js");
+    const { verifyAndConsumeToken, hashPublicPhotoToken } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValue({
       rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }],
     });
@@ -86,7 +86,7 @@ describe("public photo token service", () => {
   it.each(["invalid token format", "missing hash match", "expired token", "revoked token"])(
     "rejects %s as not found",
     async () => {
-      const { verifyAndConsumeToken } = await import("./service.js");
+      const { verifyAndConsumeToken } = await import("../../../src/modules/public-photo-tokens/service.js");
       executeMock.mockResolvedValue({ rows: [] });
 
       await expect(verifyAndConsumeToken("bad-token")).rejects.toMatchObject({
@@ -97,7 +97,7 @@ describe("public photo token service", () => {
   );
 
   it("revokes a token with tenant scope and subsequent verification is rejected", async () => {
-    const { revokeToken, verifyAndConsumeToken } = await import("./service.js");
+    const { revokeToken, verifyAndConsumeToken } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1" }] }).mockResolvedValueOnce({ rows: [] });
 
     await expect(revokeToken("token-1", "admin-1", "tenant-1")).resolves.toBeUndefined();
@@ -109,7 +109,7 @@ describe("public photo token service", () => {
   });
 
   it("returns 404 when revocation misses the tenant scope", async () => {
-    const { revokeToken } = await import("./service.js");
+    const { revokeToken } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValue({ rows: [] });
 
     await expect(revokeToken("token-1", "admin-1", "tenant-2")).rejects.toMatchObject({
@@ -119,7 +119,7 @@ describe("public photo token service", () => {
   });
 
   it("lists only the requested deal and tenant tokens without exposing raw or hashed values", async () => {
-    const { listTokensForDeal } = await import("./service.js");
+    const { listTokensForDeal } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValue({
       rows: [
         {
@@ -173,7 +173,7 @@ describe("public photo token service", () => {
   });
 
   it("builds a public viewer response with field-safe deal and photo fields", async () => {
-    const { getPublicPhotoViewer } = await import("./service.js");
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -245,7 +245,7 @@ describe("public photo token service", () => {
   });
 
   it("does not sign non-image records for public viewer image URLs", async () => {
-    const { getPublicPhotoViewer } = await import("./service.js");
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -290,7 +290,7 @@ describe("public photo token service", () => {
   });
 
   it("serves R2-backed CompanyCam image records through the proxy instead of external URLs", async () => {
-    const { getPublicPhotoViewer } = await import("./service.js");
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -333,7 +333,7 @@ describe("public photo token service", () => {
   });
 
   it("does not serve non-JPEG R2 originals (HEIC) publicly — imageUrl is null", async () => {
-    const { getPublicPhotoViewer } = await import("./service.js");
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -376,7 +376,7 @@ describe("public photo token service", () => {
   });
 
   it("does not let image-looking display names override public non-image storage keys", async () => {
-    const { getPublicPhotoViewer } = await import("./service.js");
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -418,7 +418,7 @@ describe("public photo token service", () => {
   });
 
   it("preserves external image URLs with query strings when no R2 key is present", async () => {
-    const { getPublicPhotoViewer } = await import("./service.js");
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -460,7 +460,7 @@ describe("public photo token service", () => {
   });
 
   it("returns 404 for an unknown tenant while resolving the public viewer", async () => {
-    const { getPublicPhotoViewer } = await import("./service.js");
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValue({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [] });
 
@@ -468,7 +468,7 @@ describe("public photo token service", () => {
   });
 
   it("downloads R2 photos through the proxy (no presigned key URL) and writes public audit metadata", async () => {
-    const { getPublicPhotoDownload } = await import("./service.js");
+    const { getPublicPhotoDownload } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -493,7 +493,7 @@ describe("public photo token service", () => {
   });
 
   it("returns 404 when a download photo does not belong to the token deal", async () => {
-    const { getPublicPhotoDownload } = await import("./service.js");
+    const { getPublicPhotoDownload } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -506,7 +506,7 @@ describe("public photo token service", () => {
   });
 
   it("does NOT fall back to the external original when an R2 photo is a non-JPEG (no metadata leak via download)", async () => {
-    const { getPublicPhotoDownload } = await import("./service.js");
+    const { getPublicPhotoDownload } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -520,7 +520,7 @@ describe("public photo token service", () => {
   });
 
   it("returns a JPEG byte stream (no presigned key) for R2 photos and validates the token read-only", async () => {
-    const { getPublicPhotoAsset } = await import("./service.js");
+    const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
     const fakeStream = (async function* () { yield Buffer.from([0xff, 0xd8, 0xff, 0xd9]); })();
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
@@ -547,7 +547,7 @@ describe("public photo token service", () => {
   });
 
   it("404s non-JPEG R2 originals (HEIC) — un-strippable formats are not served publicly", async () => {
-    const { getPublicPhotoAsset } = await import("./service.js");
+    const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -561,7 +561,7 @@ describe("public photo token service", () => {
   });
 
   it("returns an external redirect target for CompanyCam photos without an R2 copy", async () => {
-    const { getPublicPhotoAsset } = await import("./service.js");
+    const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -582,7 +582,7 @@ describe("public photo token service", () => {
   const PHOTO_C = "33333333-3333-3333-3333-333333333333";
 
   it("persists photo_ids for a SUBSET token (whole-deal token stores NULL::uuid[])", async () => {
-    const { generatePublicToken } = await import("./service.js");
+    const { generatePublicToken } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValue({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", expires_at: null }] });
 
     await generatePublicToken({ dealId: "deal-1", tenantId: "tenant-1", createdByUserId: "user-1", photoIds: [PHOTO_A, PHOTO_B] });
@@ -597,7 +597,7 @@ describe("public photo token service", () => {
   });
 
   it("returns the token's photo subset from verifyAndConsumeToken / resolvePublicPhotoToken", async () => {
-    const { verifyAndConsumeToken, resolvePublicPhotoToken } = await import("./service.js");
+    const { verifyAndConsumeToken, resolvePublicPhotoToken } = await import("../../../src/modules/public-photo-tokens/service.js");
 
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1", photo_ids: [PHOTO_A, PHOTO_B] }] });
     const consumed = await verifyAndConsumeToken("raw");
@@ -609,7 +609,7 @@ describe("public photo token service", () => {
   });
 
   it("scopes the public viewer timeline to the token's photo subset", async () => {
-    const { getPublicPhotoViewer } = await import("./service.js");
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1", photo_ids: [PHOTO_A] }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -631,7 +631,7 @@ describe("public photo token service", () => {
   });
 
   it("enforces the subset in the per-photo asset query so an out-of-scope photo is unreachable", async () => {
-    const { getPublicPhotoAsset } = await import("./service.js");
+    const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", photo_ids: [PHOTO_A] }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -647,7 +647,7 @@ describe("public photo token service", () => {
   });
 
   it("does NOT add a subset filter to the asset query for a whole-deal token", async () => {
-    const { getPublicPhotoAsset } = await import("./service.js");
+    const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", photo_ids: null }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -662,7 +662,7 @@ describe("public photo token service", () => {
   });
 
   it("scopes per-photo asset lookups to deal + source-lead lineage (converted-lead photos resolve)", async () => {
-    const { getPublicPhotoAsset } = await import("./service.js");
+    const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", photo_ids: null }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
     tenantQueryMock
@@ -683,7 +683,7 @@ describe("public photo token service", () => {
   });
 
   it("assertPhotosBelongToDeal accepts only ids the deal's photo timeline returns (shared scope)", async () => {
-    const { assertPhotosBelongToDeal } = await import("./service.js");
+    const { assertPhotosBelongToDeal } = await import("../../../src/modules/public-photo-tokens/service.js");
 
     // Validates through getDealPhotoTimeline — the SAME scope as the field UI / public viewer
     // (deal+lead lineage, category, active + latest-version, not-deleted). All ids returned -> ok.
