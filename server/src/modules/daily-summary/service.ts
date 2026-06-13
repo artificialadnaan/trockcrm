@@ -249,6 +249,10 @@ export async function readWonToday(client: QueryClient, schema: string, date: st
  * - Attribute the row to the actual mover `sh.changed_by` (the same column that credits stage_moves in
  *   the usage breakdown), so the named Advanced rows agree with the "Who moved it" leaderboard — not the
  *   deal's current assignee.
+ * - Mover must be an ACTIVE, non-test REP (INNER JOIN on role='rep'): a stage move made by a service /
+ *   migration / admin account (e.g. "T Rock Migration Admin" doing HubSpot/bid-board sync advances) is
+ *   automated, not sales activity, and must not show as a "mover" — same rep population as the
+ *   leaderboard and hourly chart, so the whole email stays consistently rep-scoped.
  * - Reportable + non-test only, matching readWonToday, so test/on-hold noise can't reach leadership.
  */
 export async function readAdvancedToday(client: QueryClient, schema: string, date: string): Promise<AdvancedMove[]> {
@@ -265,7 +269,8 @@ export async function readAdvancedToday(client: QueryClient, schema: string, dat
                 sh.created_at
            FROM ${schema}.deal_stage_history sh
            JOIN ${schema}.deals d ON sh.deal_id = d.id
-           LEFT JOIN public.users u ON u.id = sh.changed_by
+           JOIN public.users u ON u.id = sh.changed_by
+                AND u.role = 'rep' AND u.is_active = true AND COALESCE(u.is_test_data, false) = false
            LEFT JOIN public.pipeline_stage_config fs ON sh.from_stage_id = fs.id
            LEFT JOIN public.pipeline_stage_config ts ON sh.to_stage_id = ts.id
           WHERE sh.created_at >= ($1::timestamp AT TIME ZONE '${BUSINESS_TIMEZONE}')

@@ -88,10 +88,14 @@ beforeAll(async () => {
       ('${uuid(13)}', 'Yesterday Move',   '${REP_A}', '${ST_EST}',  false),
       ('${uuid(14)}', 'Promoted then Won','${REP_A}', '${ST_WON}',  false),
       ('${uuid(15)}', 'Bounced Back',     '${REP_A}', '${ST_OPP}',  false),
-      ('${uuid(16)}', 'Test Advanced',    '${REP_A}', '${ST_EST}',  true);
+      ('${uuid(16)}', 'Test Advanced',    '${REP_A}', '${ST_EST}',  true),
+      ('${uuid(17)}', 'Sync Advanced',    '${REP_A}', '${ST_EST}',  false),
+      ('${uuid(18)}', 'Inactive Mover',   '${REP_A}', '${ST_EST}',  false);
     INSERT INTO office_test.deal_stage_history (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move, created_at) VALUES
       ('${uuid(10)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-12 13:00:00-05'),
       ('${uuid(10)}', '${ST_EST}', '${ST_NEG}', '${REP_B}', false, '2026-06-12 14:00:00-05'),
+      ('${uuid(17)}', '${ST_OPP}', '${ST_EST}', '${REP_C}', false, '2026-06-12 13:00:00-05'),
+      ('${uuid(18)}', '${ST_OPP}', '${ST_EST}', '${REP_D}', false, '2026-06-12 13:00:00-05'),
       ('${uuid(11)}', '${ST_NEG}', '${ST_WON}', '${REP_A}', false, '2026-06-12 15:00:00-05'),
       ('${uuid(12)}', '${ST_NEG}', '${ST_LOST}','${REP_A}', false, '2026-06-12 15:30:00-05'),
       ('${uuid(13)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-11 13:00:00-05'),
@@ -172,6 +176,12 @@ describe("readAdvancedToday — latest move per deal, terminal/backward-aware, m
     expect(names).not.toContain("Closed Deal");     // moved into Won (terminal)
     expect(names).not.toContain("Lost Deal");       // moved into Lost (terminal)
     expect(names).not.toContain("Yesterday Move");  // prior day
+  });
+  it("excludes moves made by a non-rep mover (service/admin account) or an inactive rep", async () => {
+    const adv = await readAdvancedToday(client(), "office_test", DATE);
+    const names = adv.map((a) => a.dealName);
+    expect(names).not.toContain("Sync Advanced");    // moved by REP_C (role=director, e.g. Migration Admin)
+    expect(names).not.toContain("Inactive Mover");   // moved by REP_D (role=rep but is_active=false)
   });
 });
 
