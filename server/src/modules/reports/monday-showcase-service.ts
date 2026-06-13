@@ -955,7 +955,11 @@ export async function getMondayShowcaseEvidence(
     value: hasValue ? num(r.value) : null,
     cohortDate: r.cohort_date == null ? null : String(r.cohort_date).slice(0, 10),
     companyName: r.company_name ? String(r.company_name) : null,
-    region: r.region ? String(r.region) : null,
+    // For a region drill every row is, by construction, in the clicked region_config bucket — so show that
+    // clicked region (matching the drawer header) rather than the deal's looser company.region text, which
+    // is a different taxonomy and would make a correctly-scoped row look mis-scoped. Other scopes keep the
+    // company-first region the showcase drawer was designed to show.
+    region: regionName ?? (r.region ? String(r.region) : null),
     dealType: r.deal_type ? String(r.deal_type) : null,
     daysInStage: r.days_in_stage == null ? null : Number(r.days_in_stage),
     winProbability: r.win_probability == null ? null : Number(r.win_probability),

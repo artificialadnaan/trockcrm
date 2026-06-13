@@ -83,7 +83,7 @@ beforeAll(async () => {
       ('${U("o5")}','O5','Open Unassigned est','${ST.est}',NULL,'2026-09-01','2026-02-01T10:00:00Z',15000);
   `);
   tdb = drizzle(pg);
-});
+}, 30000); // PGlite cold-start can exceed the default 10s hook timeout when runtime suites start in parallel
 
 afterAll(async () => {
   await pg?.close?.();
@@ -252,7 +252,7 @@ describe("getRegionReport — exclusions & edge cases", () => {
         ('${U("eo2")}','open normal','${E.opp}','${ER.west}','2026-06-10',60000,false);
     `);
     edb = drizzle(epg);
-  });
+  }, 30000); // PGlite cold-start can exceed the default 10s hook timeout under parallel runtime suites
   afterAll(async () => {
     await epg?.close?.();
   });

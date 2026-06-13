@@ -79,6 +79,9 @@ describe("region Won drill — keyed on the displayed-region name; dup configs f
     expect(wc.total.value).toBe(175000); // 100000 + 50000 + 25000
     expect(wc.records.map((rec) => rec.name).sort()).toEqual(["WC-A", "WC-B", "WC-C-DupCfg"]);
     expect(wc.scope).toEqual({ kind: "region", regionName: "West Coast" });
+    // every row displays the CLICKED region (not the company's looser text region), so a correctly-scoped
+    // row never looks mis-scoped in the drawer
+    expect(wc.records.every((rec) => rec.region === "West Coast")).toBe(true);
 
     const ec = await won("East Coast");
     expect(ec.total.count).toBe(1);
