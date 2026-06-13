@@ -112,6 +112,16 @@ function tokenPhotoScopeSql(photoIds: string[] | null) {
   return photoIds === null ? sql`` : sql` AND id = ANY(${photoIdsArrayParam(photoIds)})`;
 }
 
+// A token's deal may be a converted lead, whose photos live under files.lead_id = deals.source_lead_id.
+// The field timeline + public viewer include that lineage (buildDealPhotoScopeCondition), so the
+// per-photo asset/download lookups must use the SAME deal+source-lead scope — otherwise a lead-lineage
+// photo that the viewer lists (and that was minted into the token) 404s on its image/download. The
+// correlated subquery returns NULL for non-converted deals, so `lead_id = NULL` is never true and the
+// scope collapses to deal_id only.
+function dealPhotoOwnershipSql(dealId: string) {
+  return sql`(deal_id = ${dealId}::uuid OR lead_id = (SELECT source_lead_id FROM deals WHERE id = ${dealId}::uuid))`;
+}
+
 export async function generatePublicToken(input: {
   dealId: string;
   createdByUserId: string;
@@ -396,7 +406,7 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
       SELECT id, deal_id, category, file_extension, external_url, r2_key, mime_type
       FROM files
       WHERE id = ${photoId}::uuid
-        AND deal_id = ${token.dealId}::uuid
+        AND ${dealPhotoOwnershipSql(token.dealId)}
         AND category = 'photo'
         AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}
       LIMIT 1
@@ -457,7 +467,7 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
       SELECT id, r2_key, mime_type, file_extension, external_url
       FROM files
       WHERE id = ${photoId}::uuid
-        AND deal_id = ${token.dealId}::uuid
+        AND ${dealPhotoOwnershipSql(token.dealId)}
         AND category = 'photo'
         AND deleted_at IS NULL${tokenPhotoScopeSql(token.photoIds)}
       LIMIT 1

@@ -661,6 +661,23 @@ describe("public photo token service", () => {
     expect(filesSql).not.toContain("ANY");
   });
 
+  it("scopes per-photo asset lookups to deal + source-lead lineage (converted-lead photos resolve)", async () => {
+    const { getPublicPhotoAsset } = await import("./service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", photo_ids: null }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", r2_key: null, mime_type: "image/jpeg", file_extension: ".jpg", external_url: "https://img.companycam.com/full.jpg" }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await getPublicPhotoAsset("raw-token", "photo-1");
+    const filesSql = tenantQueryMock.mock.calls.map((call) => JSON.stringify(call[0])).join(" ");
+    // The lookup matches the timeline's deal+source-lead scope, so a converted-lead photo resolves.
+    expect(filesSql).toContain("source_lead_id");
+    expect(filesSql).toContain("lead_id");
+  });
+
   it("assertPhotosBelongToDeal accepts only ids the deal's photo timeline returns (shared scope)", async () => {
     const { assertPhotosBelongToDeal } = await import("./service.js");
 
