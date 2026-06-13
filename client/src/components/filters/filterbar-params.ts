@@ -200,6 +200,9 @@ export function deserializeFilters(params: URLSearchParams, prefix = ""): Filter
   if (sortDir === "asc" || sortDir === "desc") value.sortDir = sortDir;
 
   const scope = params.get("scope");
+  // "watched" is intentionally NOT accepted here: it is a deals page-toggle scope, never a FilterBar
+  // dimension (no deals FilterBar declares "scope"). If one ever does, widen this + ScopeValue +
+  // DEFAULT_SCOPE_OPTIONS (filter-bar.tsx) so a real watched request round-trips instead of dropping to mine.
   if (scope === "mine" || scope === "team" || scope === "all") value.scope = scope;
 
   const page = parseNumberParam(params.get("page"));

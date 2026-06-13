@@ -28,6 +28,15 @@ export function coerceScope(value: string | null): PipelineScope | null {
   return null;
 }
 
+// Non-deals-dashboard surfaces (leads list/stage, the director dashboard, the /pipeline board) all read
+// the SAME per-user scope preference but offer Mine|All only. Coerce the parked "team" and the
+// deals-only "watched" (both reachable via that shared preference) to "mine" so none of them ever render
+// an unlabeled, watched-filtered state. Deals-dashboard surfaces keep "watched". Single source of truth
+// so a new Mine/All surface can't silently re-leak watched (the Round-1 /pipeline miss).
+export function containNonDealsScope(scope: PipelineScope): "mine" | "all" {
+  return scope === "team" || scope === "watched" ? "mine" : scope;
+}
+
 function normalizeLeadStageRouteSort(value?: string) {
   return value === "name_asc" || value === "age_desc" ? value : "age_desc";
 }

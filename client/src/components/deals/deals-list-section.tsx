@@ -1384,9 +1384,11 @@ export function DealsListSection({
             className="rounded-lg border border-slate-200 bg-white p-8 text-center"
             aria-label="No watched deals"
           >
-            <p className="text-sm font-semibold text-slate-700">You&apos;re not watching any deals yet</p>
+            {/* Neutral "…here" copy: this section also mounts under a stage/drill-down filter, where the
+                watched set may be non-empty overall — so it must not claim the user watches nothing. */}
+            <p className="text-sm font-semibold text-slate-700">No watched deals to show here</p>
             <p className="mt-1 text-sm text-slate-500">
-              Open a deal and tap <span className="font-medium">&quot;Watch this deal&quot;</span> to add it here.
+              Watch a deal from its detail page (tap <span className="font-medium">&quot;Watch this deal&quot;</span>) to add it to this list.
             </p>
           </div>
         ) : (

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { coerceScope, normalizePipelineScope } from "@/lib/pipeline-scope";
+import { coerceScope, normalizePipelineScope, containNonDealsScope } from "@/lib/pipeline-scope";
 import { resolvePreferredScope } from "@/lib/scope-preferences";
 
 /**
@@ -28,5 +28,13 @@ describe("watched scope — shared client coercers", () => {
     expect(
       normalizePipelineScope({ role: "rep", requestedScope: "watched", entity: "leads" }).allowedScope
     ).toBe("mine");
+  });
+
+  it("containNonDealsScope coerces watched (+ parked team) → mine for every non-deals surface", () => {
+    // single source of truth for leads/director/pipeline containment — guards the Round-1 /pipeline miss
+    expect(containNonDealsScope("watched")).toBe("mine");
+    expect(containNonDealsScope("team")).toBe("mine");
+    expect(containNonDealsScope("mine")).toBe("mine");
+    expect(containNonDealsScope("all")).toBe("all");
   });
 });

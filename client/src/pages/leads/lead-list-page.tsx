@@ -20,7 +20,7 @@ import {
 } from "@/hooks/use-leads";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { useProjectTypes } from "@/hooks/use-pipeline-config";
-import type { PipelineScope } from "@/lib/pipeline-scope";
+import { containNonDealsScope, type PipelineScope } from "@/lib/pipeline-scope";
 import { cn } from "@/lib/utils";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 import { LeadsListSection } from "@/components/leads/leads-list-section";
@@ -255,14 +255,13 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   });
   // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we
   // actually render so the toggle and board never reach the dead "team" placeholder state.
-  // "watched" is a DEALS-ONLY scope but the scope preference is shared per-user across deals + leads,
-  // so coerce it to "mine" here too — leads has no watched filter (contained to deals).
-  const scope: "mine" | "team" | "all" =
-    requestedScope === "team" || requestedScope === "watched" ? "mine" : requestedScope;
+  // Leads offer Mine|All only; coerce the parked "team" and the deals-only "watched" (carried via the
+  // shared per-user scope preference) to "mine" — leads has no watched filter (contained to deals).
+  const scope = containNonDealsScope(requestedScope);
   // A parked ?scope=team bookmark is coerced to mine for this render; also rewrite the URL so
   // the stale scope/owner params do not persist and silently re-apply when switching scope (D-12b).
   useEffect(() => {
-    if (requestedScope !== "team") return;
+    if (requestedScope !== "team" && requestedScope !== "watched") return;
     const next = new URLSearchParams(searchParams);
     next.set("scope", "mine");
     next.delete("assignedRepId");

@@ -35,7 +35,7 @@ import {
   type TerminalOutcome,
 } from "@/lib/pipeline-terminal-filters";
 import type { Deal } from "@/hooks/use-deals";
-import type { PipelineScope } from "@/lib/pipeline-scope";
+import { containNonDealsScope, type PipelineScope } from "@/lib/pipeline-scope";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 import { derivePipelineBoardView } from "./pipeline-board-view";
 import { useSalesReps } from "@/hooks/use-sales-reps";
@@ -305,9 +305,9 @@ export function PipelinePage() {
     userId: user?.id,
     fallback: "mine",
   });
-  // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we
-  // actually render so the toggle and board never reach the dead "team" placeholder state.
-  const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
+  // /pipeline offers Mine|All only; coerce the parked "team" and the deals-dashboard-only "watched"
+  // (carried via the shared scope preference) to "mine". (A Watched pill here is a deferred v1 expansion.)
+  const scope = containNonDealsScope(requestedScope);
   const updateScope = (nextScope: PipelineScope) => {
     writeStoredScopePreference(user?.id, nextScope);
     const next = new URLSearchParams(searchParams);
