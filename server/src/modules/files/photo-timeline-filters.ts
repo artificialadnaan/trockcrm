@@ -33,6 +33,23 @@ export function describeDealPhotoTimelineFilters(filters: DealPhotoTimelineFilte
   return keys;
 }
 
+// "Latest active version" predicate for a `files`-rooted query. uploadNewVersion stores EVERY version
+// with parent_file_id = ROOT id (a flat chain, not root<-v2<-v3), and version is `integer NOT NULL
+// default 1`. So the previous `NOT EXISTS (child WHERE parent_file_id = files.id)` check only excluded
+// the ROOT — an intermediate v2 (no child points at it) wrongly read as latest once v3 existed.
+// This checks the whole version family — COALESCE(parent_file_id, id) groups root + all its children —
+// and excludes a row when any ACTIVE family member has a higher version. Single source of truth for the
+// timeline/viewer/mint AND the public-share asset/download, so they can never disagree on "latest".
+// Relies on the outer query being `FROM files` (matches the existing inline usage).
+export function latestActiveVersionCondition(): SQL {
+  return sql`NOT EXISTS (
+    SELECT 1 FROM files f2
+    WHERE COALESCE(f2.parent_file_id, f2.id) = COALESCE(files.parent_file_id, files.id)
+      AND f2.is_active = true
+      AND f2.version > files.version
+  )`;
+}
+
 async function buildDealPhotoScopeCondition(tenantDb: TenantDb, dealId: string): Promise<SQL> {
   const [deal] = await tenantDb
     .select({ sourceLeadId: deals.sourceLeadId })
@@ -62,7 +79,7 @@ export async function buildDealPhotoTimelineConditions(
     await buildDealPhotoScopeCondition(tenantDb, dealId),
     eq(files.category, "photo"),
     eq(files.isActive, true),
-    sql`NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`,
+    latestActiveVersionCondition(),
   ];
 
   if (!filters.includeDeleted) {
