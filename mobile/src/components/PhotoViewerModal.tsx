@@ -12,7 +12,7 @@ import {
   View,
   useWindowDimensions,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import type { FieldPhoto } from "../api/types";
 import { categoryLabel } from "../projects/field-projects";
@@ -78,6 +78,11 @@ export function PhotoViewerModal({
 
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose} transparent={false}>
+      {/* A fullScreen Modal renders in its own native window outside the app's SafeAreaProvider,
+          so the viewer's SafeAreaView needs its own provider to resolve real insets — otherwise
+          the Close button / counter land under the Dynamic Island and the detail panel runs under
+          the home indicator. (Matches the CameraCapture / ReviewTray pattern.) */}
+      <SafeAreaProvider>
       <View style={styles.backdrop}>
         <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
           <View style={styles.topBar}>
@@ -157,6 +162,7 @@ export function PhotoViewerModal({
           ) : null}
         </SafeAreaView>
       </View>
+      </SafeAreaProvider>
     </Modal>
   );
 }
