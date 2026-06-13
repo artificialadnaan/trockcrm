@@ -1055,13 +1055,18 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
     throw new AppError(400, "leadStage is only valid for the leads metric");
   }
 
-  // regionId: absent -> no region predicate (office-wide); the sentinel -> Unassigned (region_id IS NULL);
-  // otherwise a real region_config UUID. Mirrors repId.
+  // regionId: absent -> no region predicate (office-wide); the sentinel -> Unassigned; otherwise a real
+  // region_config UUID. Mirrors repId. Leads have no region_id (region = company text) and the region
+  // report has no leads section, so a region-scoped leads drill has no cohort to reconcile against and is
+  // rejected — never returned as unfiltered rows under a region scope header.
   const regionIdRaw = pickQueryValue(query.regionId);
   let regionId: string | null | undefined;
   if (regionIdRaw === undefined) regionId = undefined;
   else if (regionIdRaw === UNASSIGNED_SENTINEL) regionId = null;
   else regionId = requireUuid(regionIdRaw, "regionId");
+  if (regionId !== undefined && metric === "leads") {
+    throw new AppError(400, "regionId is not valid for the leads metric");
+  }
   const regionName = pickQueryValue(query.regionName);
 
   // from/to: explicit period window for a region drill (paired; both or neither). Used to reconcile the
@@ -1071,12 +1076,20 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
   if ((fromRaw === undefined) !== (toRaw === undefined)) {
     throw new AppError(400, "from and to must be provided together");
   }
+  // Format AND calendar validity (so "2026-02-31" can't pass the regex and then fail at SQL date casting).
   const isoDate = (v: string, label: string): string => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new AppError(400, `${label} must be an ISO date (YYYY-MM-DD)`);
+    const parsed = new Date(`${v}T00:00:00Z`);
+    if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== v) {
+      throw new AppError(400, `${label} is not a valid calendar date`);
+    }
     return v;
   };
   const from = fromRaw === undefined ? undefined : isoDate(fromRaw, "from");
   const to = toRaw === undefined ? undefined : isoDate(toRaw, "to");
+  if (from !== undefined && to !== undefined && from > to) {
+    throw new AppError(400, "from must be on or before to"); // ISO YYYY-MM-DD sorts chronologically
+  }
 
   return { metric, mode, repId, band, leadStage, regionId, regionName, from, to };
 }

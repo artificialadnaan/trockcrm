@@ -56,4 +56,14 @@ describe("parseShowcaseEvidenceParams", () => {
     expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-01" })).toThrow(/together/);
     expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "06/01/2026", to: "06/13/2026" })).toThrow(/ISO date/);
   });
+
+  it("rejects a region scope for the leads metric (no region-scoped lead cohort to reconcile against)", () => {
+    expect(() => parseShowcaseEvidenceParams({ metric: "leads", regionId: "22222222-2222-2222-2222-222222222222" })).toThrow(/regionId/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "leads", regionId: "__unassigned__" })).toThrow(/regionId/);
+  });
+
+  it("rejects a non-calendar date and an inverted from/to window", () => {
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-02-31", to: "2026-03-01" })).toThrow(/calendar date/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-13", to: "2026-06-01" })).toThrow(/on or before/);
+  });
 });
