@@ -188,13 +188,13 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
     lost_count: number;
   }>(
     await tenantDb.execute(sql`
-      SELECT ${REGION_NAME} AS region, ${REGION_ORDER} AS region_order,
+      SELECT ${REGION_NAME} AS region, MIN(${REGION_ORDER}) AS region_order,
         COALESCE(SUM(${wonVal}) FILTER (WHERE ${wonInWindow(from, to)}), 0) AS won_value,
         COUNT(*) FILTER (WHERE ${wonInWindow(from, to)})::int AS won_count,
         COUNT(*) FILTER (WHERE ${lostInWindow(from, to)})::int AS lost_count
       ${COMMON_JOINS}
       WHERE ${reportable} AND psc.slug IN (${slugList(TERMINAL_SLUGS)})
-      GROUP BY 1, 2`)
+      GROUP BY 1`)
   );
 
   // ---- 2) per-region open snapshot (pipeline + forecast bands + N/M coverage) ----
@@ -211,7 +211,7 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
     b0c: number; b0v: string; b1c: number; b1v: string; b2c: number; b2v: string; b3c: number; b3v: string;
   }>(
     await tenantDb.execute(sql`
-      SELECT ${REGION_NAME} AS region, ${REGION_ORDER} AS region_order,
+      SELECT ${REGION_NAME} AS region, MIN(${REGION_ORDER}) AS region_order,
         COALESCE(SUM(${openVal}), 0) AS open_value,
         COUNT(*)::int AS open_count,
         COUNT(*) FILTER (WHERE ${futureDated})::int AS n,
@@ -221,7 +221,7 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
         COUNT(*) FILTER (WHERE ${band("beyond_90")})::int AS b3c, COALESCE(SUM(${openVal}) FILTER (WHERE ${band("beyond_90")}),0) AS b3v
       ${COMMON_JOINS}
       WHERE ${reportable} AND ${OPEN_PREDICATE}
-      GROUP BY 1, 2`)
+      GROUP BY 1`)
   );
 
   // ---- 3) per-region × stage (snapshot open) ----
