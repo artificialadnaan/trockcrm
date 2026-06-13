@@ -23,6 +23,7 @@ import type {
   GenerateReportResponse,
   ReportsResponse,
   ReportDownloadResponse,
+  ShareLinkResponse,
 } from "./types";
 
 /**
@@ -68,6 +69,14 @@ export const getProjectPhotos = (
   dealId: string,
   params?: { category?: string; uploader?: string; from?: string; to?: string },
 ) => f<PhotosResponse>(`/field/projects/${dealId}/photos`, { query: params });
+
+// Mint an unauthenticated, 7-day public link to the SELECTED photos (photos-only; never mutates the
+// deal). Server contract: 201 { url, token: { id, expiresAt }, photoCount }.
+export const shareProjectPhotos = (
+  f: Fetcher,
+  dealId: string,
+  body: { photoIds: string[] },
+) => f<ShareLinkResponse>(`/field/projects/${dealId}/share`, { method: "POST", body });
 
 export const getPendingPhotos = (f: Fetcher) => f<PendingPhotosResponse>("/field/photos/pending");
 
