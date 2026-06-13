@@ -68,7 +68,12 @@ export function PhotoShareModal({
       const result = await shareProjectPhotos(fetcher, projectId, { photoIds: Array.from(selected) });
       // Link is created. Open the OS share sheet; if that fails, surface the URL so it isn't lost.
       try {
-        await Share.share({ message: buildShareMessage(result.url, result.photoCount), url: result.url });
+        const shareResult = await Share.share({ message: buildShareMessage(result.url, result.photoCount), url: result.url });
+        // User cancelled the sheet — the link exists, but don't claim success or close the picker.
+        if (shareResult.action === Share.dismissedAction) {
+          setBusy(false);
+          return;
+        }
       } catch {
         setError(`Link created — copy it to share: ${result.url}`);
         setBusy(false);
@@ -106,7 +111,7 @@ export function PhotoShareModal({
               <Text style={styles.link}>{allSelected ? "Clear all" : "Select all"}</Text>
             </Pressable>
           </View>
-          <Text style={styles.hint}>Selected photos get a private link anyone can open for 7 days.</Text>
+          <Text style={styles.hint}>Anyone with the link can view the selected photos for 7 days — no login needed.</Text>
           <View style={styles.grid}>
             {photos.map((photo) => {
               const isSelected = selected.has(photo.id);

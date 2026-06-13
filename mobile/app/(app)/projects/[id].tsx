@@ -316,7 +316,7 @@ export default function ProjectDetailScreen() {
         onClose={() => setShareOpen(false)}
         projectId={dealId}
         photos={filtered}
-        onShared={(n) => setNotice(`Share link created for ${n} photo${n === 1 ? "" : "s"}.`)}
+        onShared={(n) => setNotice(`Share link created for ${n} photo${n === 1 ? "" : "s"} — expires in 7 days.`)}
       />
     </SafeAreaView>
   );
