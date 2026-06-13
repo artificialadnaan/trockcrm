@@ -140,6 +140,7 @@ describe("region Pipeline drill — all open deals, name-folded, region-scoped, 
     expect(office.total.count).toBe(3);
     expect(office.total.value).toBe(15000);
     expect(wc.total.count + ua.total.count).toBe(office.total.count);
+    expect((wc.total.value ?? 0) + (ua.total.value ?? 0)).toBe(office.total.value); // value partitions too, not just count
   });
   it("a stageSlug narrows the pipeline drill to one region×stage heatmap cell", async () => {
     const inStage = await pipe("West Coast", "opportunity");

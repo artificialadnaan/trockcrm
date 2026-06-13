@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseShowcaseEvidenceParams } from "../../../src/modules/reports/routes.js";
+import { parseShowcaseEvidenceParams, assertShowcaseEvidenceAccess } from "../../../src/modules/reports/routes.js";
 
 // The evidence endpoint's query parsing/validation (the HTTP wiring is thin; this locks the contract).
 describe("parseShowcaseEvidenceParams", () => {
@@ -45,6 +45,29 @@ describe("parseShowcaseEvidenceParams", () => {
     expect(parseShowcaseEvidenceParams({ metric: "pipeline" }).metric).toBe("pipeline");
     expect(parseShowcaseEvidenceParams({ metric: "pipeline", stageSlug: "estimating" }).stageSlug).toBe("estimating");
     expect(() => parseShowcaseEvidenceParams({ metric: "won", stageSlug: "estimating" })).toThrow(/stageSlug/);
+  });
+});
+
+describe("assertShowcaseEvidenceAccess — the region drill's elevated surface is director-only", () => {
+  const opt = (over: Partial<ReturnType<typeof parseShowcaseEvidenceParams>>) =>
+    ({ metric: "won" as const, mode: "to_date" as const, ...over });
+
+  it("directors may use pipeline / from-to / regionName", () => {
+    expect(() => assertShowcaseEvidenceAccess(opt({ metric: "pipeline" }), true)).not.toThrow();
+    expect(() => assertShowcaseEvidenceAccess(opt({ from: "2026-06-01", to: "2026-06-13" }), true)).not.toThrow();
+    expect(() => assertShowcaseEvidenceAccess(opt({ regionName: "West Coast" }), true)).not.toThrow();
+  });
+
+  it("reps are blocked from the pipeline metric, an explicit window, and the region scope", () => {
+    expect(() => assertShowcaseEvidenceAccess(opt({ metric: "pipeline" }), false)).toThrow(/director/);
+    expect(() => assertShowcaseEvidenceAccess(opt({ from: "2026-06-01", to: "2026-06-13" }), false)).toThrow(/director/);
+    expect(() => assertShowcaseEvidenceAccess(opt({ regionName: "Unassigned" }), false)).toThrow(/director/);
+  });
+
+  it("reps keep the ordinary showcase drawer (won/projection, mode-week, no elevated params)", () => {
+    expect(() => assertShowcaseEvidenceAccess(opt({ metric: "won" }), false)).not.toThrow();
+    expect(() => assertShowcaseEvidenceAccess(opt({ metric: "projection" }), false)).not.toThrow();
+    expect(() => assertShowcaseEvidenceAccess(opt({ metric: "won", repId: "11111111-1111-1111-1111-111111111111" }), false)).not.toThrow();
   });
 
   it("accepts a region NAME (the report's displayed-region key); 'Unassigned' is the bucket; absent = office", () => {
