@@ -16,7 +16,7 @@ const ACTIVE = {
   leaderboard: [
     { rank: 1, name: "Kaleb", actions: 312, activeMinutes: 56, breakdown: { ...ZERO, created: 50, edits: 15, stageMoves: 2, activities: { email: 22 } } },
     // A worker with actions but NO browser session — must show "—", NEVER "0m".
-    { rank: 2, name: "Adnaan", actions: 188, activeMinutes: null, breakdown: { ...ZERO, created: 21, reports: 26 } },
+    { rank: 2, name: "Adnaan", actions: 188, activeMinutes: null, breakdown: { ...ZERO, created: 21, reports: 26, activities: { note: 1, task_completed: 1 } } },
     { rank: 3, name: "Zoe", actions: 0, activeMinutes: null, breakdown: { ...ZERO } },
   ],
   hourly: [{ hour: 8, reps: 4 }, { hour: 12, reps: 7 }],
@@ -61,6 +61,8 @@ describe("DailySummaryPage", () => {
     expect(html).toContain("The Hayward");
     expect(html).toContain("Opportunity"); // from-stage of the advance
     expect(html).toContain("50 created"); // breakdown is the value, not a bar
+    expect(html).toContain("1 note"); expect(html).not.toContain("1 notes"); // count-correct singular
+    expect(html).toContain("task completed"); expect(html).not.toContain("completeds"); // unknown type humanized
     expect(html).toContain("Activity by hour");
     expect(html).toContain("2.5h"); // team time spent (150 min) surfaced in the headline
     expect(html).toContain("Time"); // the Time stat label

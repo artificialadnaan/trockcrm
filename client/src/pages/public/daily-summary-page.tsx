@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
+import { breakdownLabel } from "@trock-crm/shared/types";
 import { useDailySummary, type LeaderRow, type RepBreakdown } from "@/hooks/use-daily-summary";
 
 const RED = "#CC0000";
@@ -16,13 +17,6 @@ const usdFull = (n: number | null | undefined) => (Number.isFinite(n) ? `$${Math
 // "minutes where present, — where absent, never 0m" — guarded so 0/negative also render "—".
 const minutesLabel = (m: number | null) =>
   m == null || !Number.isFinite(m) || m <= 0 ? "—" : `${num(m)}m`;
-function pluralizeActivity(type: string): string {
-  const known: Record<string, string> = {
-    email: "emails", note: "notes", call: "calls", meeting: "meetings", voicemail: "voicemails",
-    text: "texts", sms: "texts",
-  };
-  return known[type] ?? `${type.replace(/_/g, " ")}s`;
-}
 // Team time-spent: 0 -> "—"; < 1h -> minutes; otherwise hours to one decimal.
 function hoursLabel(totalMinutes: number | null | undefined): string {
   if (!Number.isFinite(totalMinutes) || Number(totalMinutes) <= 0) return "—";
@@ -193,7 +187,7 @@ function breakdownLine(r: LeaderRow): string {
   const acts = Object.entries(b.activities ?? {})
     .filter(([, n]) => n > 0)
     .sort((a, c) => c[1] - a[1] || a[0].localeCompare(c[0]))
-    .map(([type, n]) => [n, pluralizeActivity(type)] as [number, string]);
+    .map(([type, n]) => [n, type] as [number, string]);
   const parts: [number, string][] = [
     [b.created, "created"],
     [b.stageMoves, "moves"],
@@ -203,7 +197,7 @@ function breakdownLine(r: LeaderRow): string {
     [b.reports, "reports"],
   ];
   const nz = parts.filter(([n]) => n > 0);
-  return nz.length ? nz.map(([n, label]) => `${num(n)} ${label}`).join(", ") : "—";
+  return nz.length ? nz.map(([n, key]) => `${num(n)} ${breakdownLabel(key, n)}`).join(", ") : "—";
 }
 
 function Centered({ children }: { children: React.ReactNode }) {

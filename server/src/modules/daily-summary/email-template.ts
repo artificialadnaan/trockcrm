@@ -1,3 +1,4 @@
+import { breakdownLabel } from "@trock-crm/shared/types";
 import type { DailySummaryPayload, LeaderRow, RepBreakdown, WonDeal } from "./service.js";
 
 // Email-client-safe: tables + inline styles only (no <style>, flexbox, or JS — survives Outlook/Gmail).
@@ -52,14 +53,6 @@ function minutesLabel(activeMinutes: number | null): string {
   return `${num(activeMinutes)}m`;
 }
 
-/** Readable plural for an activity type key (email -> emails, site_visit -> site visits). */
-function pluralizeActivity(type: string): string {
-  const known: Record<string, string> = {
-    email: "emails", note: "notes", call: "calls", meeting: "meetings", voicemail: "voicemails",
-    text: "texts", sms: "texts",
-  };
-  return known[type] ?? `${type.replace(/_/g, " ")}s`;
-}
 
 /** Team time-spent: 0 -> "—" (no sessions); < 1h -> minutes; otherwise hours to one decimal. */
 function hoursLabel(totalMinutes: number | null | undefined): string {
@@ -74,7 +67,7 @@ function breakdownLine(b: RepBreakdown): string {
   const acts = Object.entries(b.activities)
     .filter(([, n]) => n > 0)
     .sort((a, c) => c[1] - a[1] || a[0].localeCompare(c[0]))
-    .map(([type, n]) => [n, pluralizeActivity(type)] as [number, string]);
+    .map(([type, n]) => [n, type] as [number, string]);
   const parts: [number, string][] = [
     [b.created, "created"],
     [b.stageMoves, "moves"],
@@ -84,7 +77,7 @@ function breakdownLine(b: RepBreakdown): string {
     [b.reports, "reports"],
   ];
   const nz = parts.filter(([n]) => n > 0).slice(0, 4);
-  return nz.length ? nz.map(([n, label]) => `${num(n)} ${label}`).join(", ") : "—";
+  return nz.length ? nz.map(([n, key]) => `${num(n)} ${breakdownLabel(key, n)}`).join(", ") : "—";
 }
 
 function sectionLabel(text: string, rightNote?: string): string {
