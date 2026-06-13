@@ -17,6 +17,12 @@ import {
   type RegionRow,
   type RegionMoverDeal,
 } from "./region-report-types";
+import { EvidenceDrawer } from "./monday-showcase/evidence-drawer";
+import type { EvidenceRequest } from "./monday-showcase/types";
+
+// A click on a region section number. The page adds the section's exact {from,to} period, so the drawer
+// reconciles to the clicked figure — the drill must never use a different window than the display did.
+type DrillFn = (req: Omit<EvidenceRequest, "from" | "to">) => void;
 
 // A small badge marking whether a metric responds to the period toggle (windowed on event dates) or is a
 // live snapshot (pipeline/forecast/stage-matrix) — so nobody reads a snapshot as period-scoped.
@@ -147,7 +153,7 @@ function MoversStrip({ movers }: { movers: RegionReportData["movers"] }) {
   );
 }
 
-function RegionCard({ r }: { r: RegionRow }) {
+function RegionCard({ r, onDrill }: { r: RegionRow; onDrill: DrillFn }) {
   return (
     <div
       className={`relative overflow-hidden rounded-xl border bg-white p-4 ${
@@ -161,8 +167,14 @@ function RegionCard({ r }: { r: RegionRow }) {
         ) : null}
       </div>
       <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
-        <Metric label="Won" value={usd(r.won.value)} sub={`${int(r.won.count)} deals`} />
-        <Metric label="Pipeline" value={usd(r.pipeline.value)} sub={`${int(r.pipeline.count)} open`} />
+        <Metric
+          label="Won" value={usd(r.won.value)} sub={`${int(r.won.count)} deals`}
+          onClick={r.won.count > 0 ? () => onDrill({ metric: "won", regionName: r.region, title: `${r.region} — Won`, subtitle: `${int(r.won.count)} deals · ${usd(r.won.value)}` }) : undefined}
+        />
+        <Metric
+          label="Pipeline" value={usd(r.pipeline.value)} sub={`${int(r.pipeline.count)} open`}
+          onClick={r.pipeline.count > 0 ? () => onDrill({ metric: "pipeline", regionName: r.region, title: `${r.region} — Open pipeline`, subtitle: `${int(r.pipeline.count)} open · ${usd(r.pipeline.value)}` }) : undefined}
+        />
         <Metric label="Win rate" value={pctLabel(r.winRate)} />
         <Metric label="Avg deal" value={r.avgDeal == null ? "—" : usd(r.avgDeal)} />
       </div>
@@ -177,23 +189,29 @@ function RegionCard({ r }: { r: RegionRow }) {
   );
 }
 
-function Metric({ label, value, sub }: { label: string; value: string; sub?: string }) {
-  return (
-    <div>
+function Metric({ label, value, sub, onClick }: { label: string; value: string; sub?: string; onClick?: () => void }) {
+  const body = (
+    <>
       <div className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
-      <div className="font-semibold tabular-nums text-slate-800">{value}</div>
+      <div className={`font-semibold tabular-nums ${onClick ? "text-sky-700 group-hover:underline" : "text-slate-800"}`}>{value}</div>
       {sub ? <div className="text-[10px] tabular-nums text-slate-400">{sub}</div> : null}
-    </div>
+    </>
+  );
+  if (!onClick) return <div>{body}</div>;
+  return (
+    <button type="button" onClick={onClick} className="group cursor-pointer text-left" title={`See the ${label.toLowerCase()} records behind this number`}>
+      {body}
+    </button>
   );
 }
 
-function RegionCards({ regions }: { regions: RegionRow[] }) {
+function RegionCards({ regions, onDrill }: { regions: RegionRow[]; onDrill: DrillFn }) {
   return (
     <section className="space-y-2">
       <h2 className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">By region</h2>
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {regions.map((r) => (
-          <RegionCard key={r.region} r={r} />
+          <RegionCard key={r.region} r={r} onDrill={onDrill} />
         ))}
       </div>
     </section>
@@ -207,7 +225,7 @@ const BAND_TONE: Record<(typeof PROJECTION_BAND_ORDER)[number], string> = {
   beyond_90: "bg-slate-400",
 };
 
-function ForecastSection({ regions }: { regions: RegionRow[] }) {
+function ForecastSection({ regions, onDrill }: { regions: RegionRow[]; onDrill: DrillFn }) {
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2">
@@ -223,15 +241,22 @@ function ForecastSection({ regions }: { regions: RegionRow[] }) {
               <div className="grid grid-cols-4 gap-2">
                 {PROJECTION_BAND_ORDER.map((band) => {
                   const cell = r.forecast.bands[band];
+                  const drillable = cell.count > 0;
                   return (
-                    <div key={band} className="rounded-lg border border-slate-200 p-2 text-center">
+                    <button
+                      key={band}
+                      type="button"
+                      disabled={!drillable}
+                      onClick={drillable ? () => onDrill({ metric: "projection", regionName: r.region, band, title: `${r.region} — Forecast ${PROJECTION_BAND_LABEL[band]}`, subtitle: `${int(cell.count)} dated · ${usd(cell.value)}` }) : undefined}
+                      className={`group rounded-lg border border-slate-200 p-2 text-center ${drillable ? "cursor-pointer hover:border-sky-300" : "cursor-default"}`}
+                    >
                       <div className="flex items-center justify-center gap-1">
                         <span className={`h-1.5 w-1.5 rounded-full ${BAND_TONE[band]}`} />
                         <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{PROJECTION_BAND_LABEL[band]}</span>
                       </div>
-                      <div className="mt-0.5 text-sm font-bold tabular-nums text-slate-800">{usd(cell.value)}</div>
+                      <div className={`mt-0.5 text-sm font-bold tabular-nums ${drillable ? "text-sky-700 group-hover:underline" : "text-slate-800"}`}>{usd(cell.value)}</div>
                       <div className="text-[10px] tabular-nums text-slate-400">{int(cell.count)} dated</div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -250,7 +275,7 @@ function ForecastSection({ regions }: { regions: RegionRow[] }) {
   );
 }
 
-function StageHeatmap({ data }: { data: RegionReportData }) {
+function StageHeatmap({ data, onDrill }: { data: RegionReportData; onDrill: DrillFn }) {
   const maxValue = Math.max(0, ...data.stageMatrix.map((c) => c.value));
   const cellOf = (region: string, slug: string) => data.stageMatrix.find((c) => c.region === region && c.stageSlug === slug);
   return (
@@ -288,17 +313,20 @@ function StageHeatmap({ data }: { data: RegionReportData }) {
                   // ratio against dark text at every intensity — no white-on-mid-indigo dead zone.
                   return (
                     <td key={`${r.region}-${col.slug}`} className="px-1.5 py-1.5 text-center">
-                      <div
-                        className="rounded-md px-2 py-1.5 tabular-nums"
+                      <button
+                        type="button"
+                        disabled={count === 0}
+                        onClick={count > 0 ? () => onDrill({ metric: "pipeline", regionName: r.region, stageSlug: col.slug, title: `${r.region} — ${col.name}`, subtitle: `${int(count)} open · ${usd(value)}` }) : undefined}
+                        className={`w-full rounded-md px-2 py-1.5 tabular-nums ${count > 0 ? "cursor-pointer hover:ring-1 hover:ring-sky-300" : "cursor-default"}`}
                         style={{
                           backgroundColor: count > 0 ? `rgba(79, 70, 229, ${0.06 + intensity * 0.55})` : "transparent",
                           color: count > 0 ? "rgb(30 41 59)" : "rgb(203 213 225)",
                         }}
-                        title={count > 0 ? `${int(count)} deals · ${usd(value)}` : "no open deals"}
+                        title={count > 0 ? `${int(count)} deals · ${usd(value)} — click for the records` : "no open deals"}
                       >
                         <span className="text-sm font-semibold">{count > 0 ? int(count) : "·"}</span>
                         {count > 0 ? <span className="ml-1 text-[10px] text-slate-500">{usd(value)}</span> : null}
-                      </div>
+                      </button>
                     </td>
                   );
                 })}
@@ -355,6 +383,10 @@ export function RegionReportPage() {
   const [periodKey, setPeriodKey] = useState<RegionPeriodKey>("mtd");
   const { from, to } = useMemo(() => resolveRegionPeriod(periodKey), [periodKey]);
   const { data, loading, error } = useRegionReport(from, to);
+  const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
+  // Every drill carries the SAME {from,to} the section numbers were computed with — the guarantee that the
+  // drawer total equals the clicked figure (the foundation reconciles given identical params).
+  const onDrill: DrillFn = (req) => setEvidence({ ...req, from, to });
 
   return (
     <div className="space-y-4 p-4">
@@ -386,12 +418,15 @@ export function RegionReportPage() {
         <div className="space-y-5">
           <SummaryCards data={data} />
           <MoversStrip movers={data.movers} />
-          <RegionCards regions={data.regions} />
-          <ForecastSection regions={data.regions} />
-          <StageHeatmap data={data} />
+          <RegionCards regions={data.regions} onDrill={onDrill} />
+          <ForecastSection regions={data.regions} onDrill={onDrill} />
+          <StageHeatmap data={data} onDrill={onDrill} />
           <TopRepsSection regions={data.regions} />
         </div>
       ) : null}
+
+      {/* The clicked number's supporting records — same drawer as Monday Showcase, reconciled by construction. */}
+      <EvidenceDrawer request={evidence} mode="completed" onClose={() => setEvidence(null)} />
     </div>
   );
 }

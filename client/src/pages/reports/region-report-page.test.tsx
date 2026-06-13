@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RegionReportData, RegionRow } from "./region-report-types";
+import type { EvidenceRequest } from "./monday-showcase/types";
 
 const hookState: { data: RegionReportData | null; loading: boolean; error: string | null } = {
   data: null,
@@ -11,10 +12,17 @@ const hookState: { data: RegionReportData | null; loading: boolean; error: strin
   error: null,
 };
 const hookCalls: Array<[string | undefined, string | undefined]> = [];
+// Capture the EvidenceRequest the page hands the drawer — the wiring's whole job is to pass the SAME
+// {regionName, from, to} the displayed number used, so the drill reconciles.
+const evidenceRequests: Array<EvidenceRequest | null> = [];
 vi.mock("@/hooks/use-reports", () => ({
   useRegionReport: (from?: string, to?: string) => {
     hookCalls.push([from, to]);
     return hookState;
+  },
+  useShowcaseEvidence: (request: EvidenceRequest | null) => {
+    evidenceRequests.push(request);
+    return { data: null, loading: false, error: null };
   },
 }));
 
@@ -204,6 +212,46 @@ describe("RegionReportPage", () => {
     expect(t).toContain("Reports by Region");
     expect(t).not.toContain("NaN");
     expect(t).toContain("—"); // null win rate / unassigned % render the safe placeholder
+  });
+
+  it("clicking a region's Won number drills with that region's NAME + the SAME period the section used", () => {
+    evidenceRequests.length = 0;
+    mount();
+    const [reportFrom, reportTo] = hookCalls[hookCalls.length - 1];
+    const btn = Array.from(container.querySelectorAll("button")).find(
+      (b) => (b.textContent ?? "").includes("Won") && (b.textContent ?? "").includes("$100,000") && (b.textContent ?? "").includes("1 deals")
+    );
+    expect(btn).toBeTruthy();
+    act(() => btn!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    const req = evidenceRequests[evidenceRequests.length - 1];
+    // region NAME (the report's GROUP-BY key), and the EXACT {from,to} the report data was fetched with
+    expect(req).toMatchObject({ metric: "won", regionName: "West Coast", from: reportFrom, to: reportTo });
+  });
+
+  it("clicking the Unassigned Pipeline number drills with regionName 'Unassigned' (matches the proven bucket)", () => {
+    evidenceRequests.length = 0;
+    mount();
+    const btn = Array.from(container.querySelectorAll("button")).find(
+      (b) => (b.textContent ?? "").includes("Pipeline") && (b.textContent ?? "").includes("$15,000")
+    );
+    expect(btn).toBeTruthy();
+    act(() => btn!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    const req = evidenceRequests[evidenceRequests.length - 1];
+    expect(req).toMatchObject({ metric: "pipeline", regionName: "Unassigned" });
+    expect(req!.from).toBeTruthy(); // the snapshot still carries the period for the director-gated endpoint
+  });
+
+  it("clicking a heatmap cell drills pipeline scoped to that region + stage", () => {
+    evidenceRequests.length = 0;
+    mount();
+    // West Coast × Opportunity cell shows count 1 / $60,000
+    const btn = Array.from(container.querySelectorAll("button")).find(
+      (b) => (b.getAttribute("title") ?? "").includes("click for the records") && (b.textContent ?? "").includes("$60,000")
+    );
+    expect(btn).toBeTruthy();
+    act(() => btn!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    const req = evidenceRequests[evidenceRequests.length - 1];
+    expect(req).toMatchObject({ metric: "pipeline", regionName: "West Coast", stageSlug: "opportunity" });
   });
 
   it("passes the resolved period as valid YYYY-MM-DD from/to into the data hook", () => {

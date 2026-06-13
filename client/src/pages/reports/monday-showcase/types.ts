@@ -87,7 +87,7 @@ export interface MondayShowcaseData {
 // Client mirror of the server MondayShowcaseEvidence payload (monday-showcase-service.ts). Every showcase
 // number is clickable; the drawer shows these records and their total EQUALS the clicked number.
 
-export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "leads";
+export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads";
 
 export interface EvidenceRecord {
   id: string;
@@ -138,6 +138,13 @@ export interface EvidenceRequest {
   repId?: string | null;
   band?: ProjectionBand;
   leadStage?: string;
+  /** Reports-by-Region drill: the clicked row's DISPLAY name (the report's GROUP-BY key; "Unassigned" =
+   *  that bucket). Carries the section's exact period so windowed metrics reconcile, and an optional stage
+   *  slug for a heatmap cell. These must be the SAME values the displayed section number was computed with. */
+  regionName?: string;
+  from?: string;
+  to?: string;
+  stageSlug?: string;
   title: string;
   subtitle?: string;
 }

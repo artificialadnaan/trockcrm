@@ -622,7 +622,7 @@ export async function getMondayShowcaseData(
 // count, by construction. Locked by monday-showcase-evidence-sql.test.ts (predicate identity) and
 // monday-showcase-evidence-reconciliation.runtime.test.ts (real-SQL: evidence === aggregate).
 
-export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "leads";
+export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads";
 
 /** A single supporting record (a deal, or a lead for the `leads` metric). */
 export interface EvidenceRecord {
@@ -814,6 +814,30 @@ export function buildProjectionEvidenceSql(repId?: string | null, band?: Project
 }
 
 /**
+ * Pipeline evidence: ALL open deals (active, non-terminal, reportable) with the SAME open best-estimate $
+ * basis as the Reports-by-Region "Open Pipeline" number — so the drill reconciles to that snapshot. This is
+ * deliberately NOT the projection metric, which is future-dated-only and would undercount the pipeline. An
+ * optional `stageSlug` narrows to one stage, reconciling to a single region×stage heatmap cell.
+ */
+export function buildPipelineEvidenceSql(repId?: string | null, regionName?: string, stageSlug?: string): SQL {
+  const stageFilter = stageSlug ? sql` AND psc.slug = ${stageSlug}` : sql``;
+  return sql`
+    SELECT ${dealEvidenceSelectSql(openValueSql("d"), "d.expected_close_date")}
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
+      AND d.is_active = true
+      AND psc.is_terminal = false${repScopeSql("d", repId)}${regionScopeSql(regionName)}${stageFilter}
+    ORDER BY value DESC, d.name
+  `;
+}
+
+/**
  * Lead evidence: active (open) lead rows -- same scope as buildLeadStatusSql -- optionally narrowed to one
  * lead stage. Leads carry no deal value (value column is NULL); the cohort date is the lead's created_at.
  */
@@ -852,6 +876,7 @@ const EVIDENCE_METRIC_LABEL: Record<EvidenceMetric, string> = {
   sent: "Sent",
   estimated: "Estimating",
   projection: "Projected (open)",
+  pipeline: "Open pipeline",
   leads: "Active leads",
 };
 
@@ -860,6 +885,7 @@ const EVIDENCE_DATE_AXIS_LABEL: Record<EvidenceMetric, string> = {
   sent: "Entered the sent stage",
   estimated: "Entered the estimating stage",
   projection: "Expected close date",
+  pipeline: "Open — expected close date",
   leads: "Lead created",
 };
 
@@ -873,6 +899,8 @@ export interface MondayShowcaseEvidenceOptions {
   band?: ProjectionBand;
   /** leads only -- one lead stage label. */
   leadStage?: string;
+  /** pipeline only -- one pipeline stage slug, to reconcile a single region×stage heatmap cell. */
+  stageSlug?: string;
   /** undefined = no region predicate (office-wide); a string = the displayed region row to drill, keyed on
    *  COALESCE(NULLIF(rc.name,''),'Unassigned') exactly as the region report groups. "Unassigned" = that bucket. */
   regionName?: string;
@@ -916,7 +944,7 @@ export async function getMondayShowcaseEvidence(
   const from = options.from ?? derived.from;
   const to = options.to ?? derived.to;
   const period: ShowcasePeriod = { from, to, mode, label: `${from} → ${to}` };
-  const { metric, repId, band, leadStage, regionName } = options;
+  const { metric, repId, band, leadStage, regionName, stageSlug } = options;
 
   let query: SQL;
   switch (metric) {
@@ -931,6 +959,9 @@ export async function getMondayShowcaseEvidence(
       break;
     case "projection":
       query = buildProjectionEvidenceSql(repId, band, regionName);
+      break;
+    case "pipeline":
+      query = buildPipelineEvidenceSql(repId, regionName, stageSlug);
       break;
     case "leads":
       // Leads have no region (their region is the company's text field); the region report has no leads

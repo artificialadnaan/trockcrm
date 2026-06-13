@@ -62,7 +62,9 @@ beforeAll(async () => {
       ('${d(6)}', 'WC-OutOfWindow', '${WON}',  '${REP}', '${CO}', '${R1}',  '2026-05-20', 99999,  NULL,  false, false),
       ('${d(7)}', 'WC-TestData',    '${WON}',  '${REP}', '${CO}', '${R1}',  '2026-06-06', 99999,  NULL,  true,  false),
       ('${d(8)}', 'WC-OnHold',      '${WON}',  '${REP}', '${CO}', '${R1}',  '2026-06-06', 99999,  NULL,  false, true),
-      ('${d(9)}', 'WC-Open',        '${OPEN}', '${REP}', '${CO}', '${R1}',  NULL,         NULL,   NULL,  false, false);
+      ('${d(9)}', 'WC-Open',        '${OPEN}', '${REP}', '${CO}', '${R1}',  NULL,         NULL,   5000,  false, false),
+      ('${d(20)}','WC-Open2-Dup',   '${OPEN}', '${REP}', '${CO}', '${R1B}', NULL,         NULL,   7000,  false, false),
+      ('${d(21)}','UA-Open',        '${OPEN}', '${REP}', '${CO}', NULL,     NULL,         NULL,   3000,  false, false);
   `);
   tdb = drizzle(pg);
 }, 30000); // PGlite cold-start + seed can exceed the default 10s beforeAll timeout under parallel CI
@@ -118,5 +120,31 @@ describe("region Won drill — keyed on the displayed-region name; dup configs f
     expect(office.records.some((rec) => rec.name === "WC-OutOfWindow")).toBe(false);
     expect(office.period.from).toBe(WINDOW.from);
     expect(office.period.to).toBe(WINDOW.to);
+  });
+});
+
+const pipe = (regionName: string | undefined, stageSlug?: string) =>
+  getMondayShowcaseEvidence(tdb, { metric: "pipeline", regionName, stageSlug, from: WINDOW.from, to: WINDOW.to });
+
+describe("region Pipeline drill — all open deals, name-folded, region-scoped, optional heatmap stage", () => {
+  it("pipeline = open deals in the region (dup configs fold), best-estimate value — NOT future-dated only", async () => {
+    const wc = await pipe("West Coast");
+    expect(wc.total.count).toBe(2); // WC-Open (R1) + WC-Open2-Dup (R1B, same display name) fold together
+    expect(wc.total.value).toBe(12000); // 5000 + 7000
+    const ua = await pipe("Unassigned");
+    expect(ua.total.count).toBe(1);
+    expect(ua.total.value).toBe(3000);
+  });
+  it("pipeline partition: West Coast + Unassigned = office open total (no leak/double-count)", async () => {
+    const [wc, ua, office] = await Promise.all([pipe("West Coast"), pipe("Unassigned"), pipe(undefined)]);
+    expect(office.total.count).toBe(3);
+    expect(office.total.value).toBe(15000);
+    expect(wc.total.count + ua.total.count).toBe(office.total.count);
+  });
+  it("a stageSlug narrows the pipeline drill to one region×stage heatmap cell", async () => {
+    const inStage = await pipe("West Coast", "opportunity");
+    expect(inStage.total.count).toBe(2); // both WC open deals are in the 'opportunity' stage
+    const otherStage = await pipe("West Coast", "estimating");
+    expect(otherStage.total.count).toBe(0); // none in 'estimating'
   });
 });

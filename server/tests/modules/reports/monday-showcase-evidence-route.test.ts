@@ -41,6 +41,12 @@ describe("parseShowcaseEvidenceParams", () => {
     expect(() => parseShowcaseEvidenceParams({ metric: "won", leadStage: "New" })).toThrow(/leadStage/);
   });
 
+  it("accepts the pipeline metric, and a stageSlug only for it", () => {
+    expect(parseShowcaseEvidenceParams({ metric: "pipeline" }).metric).toBe("pipeline");
+    expect(parseShowcaseEvidenceParams({ metric: "pipeline", stageSlug: "estimating" }).stageSlug).toBe("estimating");
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", stageSlug: "estimating" })).toThrow(/stageSlug/);
+  });
+
   it("accepts a region NAME (the report's displayed-region key); 'Unassigned' is the bucket; absent = office", () => {
     expect(parseShowcaseEvidenceParams({ metric: "won" }).regionName).toBeUndefined();
     expect(parseShowcaseEvidenceParams({ metric: "won", regionName: "West Coast" }).regionName).toBe("West Coast");
