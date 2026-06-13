@@ -459,7 +459,10 @@ export function DirectorDashboardPage() {
   // resolvePreferredScope validates against the shared PipelineScope union (which
   // still includes "team"), so a stored or URL ?scope=team can slip through. Team
   // is not offered on this dashboard -> coerce it to a scope we actually render.
-  const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
+  // "watched" is a deals-only scope; the scope preference is shared per-user, so coerce it (and the
+  // parked "team") to "mine" here — the director dashboard offers Mine/All only (contained to deals).
+  const scope: "mine" | "team" | "all" =
+    requestedScope === "team" || requestedScope === "watched" ? "mine" : requestedScope;
   const updateScope = (nextScope: PipelineScope) => {
     writeStoredScopePreference(user?.id, nextScope);
     const next = new URLSearchParams(searchParams);

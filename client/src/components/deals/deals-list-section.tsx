@@ -72,7 +72,7 @@ export type DealListSortState = {
 type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
-  scope?: "mine" | "team" | "all";
+  scope?: "mine" | "team" | "all" | "watched";
   workflowFamily?: Parameters<typeof usePipelineStages>[0];
   enableDateFilter?: boolean;
   enableExport?: boolean;
@@ -497,7 +497,7 @@ export function buildDealListParams(input: {
   sort: DealListSortState;
   page: number;
   limit: number;
-  scope?: "mine" | "team" | "all";
+  scope?: "mine" | "team" | "all" | "watched";
   dateField?: "updated" | "created" | "outcome";
 }) {
   const params = new URLSearchParams();
@@ -562,7 +562,7 @@ export async function fetchAllFilteredDeals(input: {
   dateTo?: string;
   isActive: DealListActiveFilter;
   sort: DealListSortState;
-  scope?: "mine" | "team" | "all";
+  scope?: "mine" | "team" | "all" | "watched";
   apiClient?: typeof api;
   dateField?: "updated" | "created" | "outcome";
 }) {
@@ -1378,6 +1378,16 @@ export function DealsListSection({
         ) : !queryEnabled || isInitialLoading ? (
           <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
             Loading deals...
+          </div>
+        ) : scope === "watched" && deals.length === 0 ? (
+          <div
+            className="rounded-lg border border-slate-200 bg-white p-8 text-center"
+            aria-label="No watched deals"
+          >
+            <p className="text-sm font-semibold text-slate-700">You&apos;re not watching any deals yet</p>
+            <p className="mt-1 text-sm text-slate-500">
+              Open a deal and tap <span className="font-medium">&quot;Watch this deal&quot;</span> to add it here.
+            </p>
           </div>
         ) : (
           <>

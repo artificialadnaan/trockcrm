@@ -39,16 +39,21 @@ function viewerMatchesRecordOffice(viewer: Viewer): boolean {
   return getViewerOfficeId(viewer) !== null;
 }
 
-export function normalizeCollaborativeScope(
+// Generic so the return type FOLLOWS the (already-whitelisted) input: deals pass a "…|watched" union
+// and get it back; leads pass a narrow "mine"|"team"|"all" (via their readListScope) and STAY narrow —
+// so this shared helper never widens leads' scope into "watched". Runtime only defaults undefined → "mine".
+export function normalizeCollaborativeScope<S extends "mine" | "team" | "all" | "watched">(
   _role: string,
-  requested: "mine" | "team" | "all" | undefined
-): "mine" | "team" | "all" {
+  requested: S | undefined
+): S | "mine" {
   return requested ?? "mine";
 }
 
 export function getCollaborativeReadRole(
   role: string,
-  requested: "mine" | "team" | "all" | undefined
+  // Type widened to accept the now-possible "watched"; the elevation BODY is intentionally unchanged
+  // — only requested === "all" elevates a rep, so "watched" keeps the viewer's own role (self-scoped).
+  requested: "mine" | "team" | "all" | "watched" | undefined
 ) {
   if (role === "rep" && requested === "all") {
     return "director";

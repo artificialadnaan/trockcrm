@@ -255,7 +255,10 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   });
   // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we
   // actually render so the toggle and board never reach the dead "team" placeholder state.
-  const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
+  // "watched" is a DEALS-ONLY scope but the scope preference is shared per-user across deals + leads,
+  // so coerce it to "mine" here too — leads has no watched filter (contained to deals).
+  const scope: "mine" | "team" | "all" =
+    requestedScope === "team" || requestedScope === "watched" ? "mine" : requestedScope;
   // A parked ?scope=team bookmark is coerced to mine for this render; also rewrite the URL so
   // the stale scope/owner params do not persist and silently re-apply when switching scope (D-12b).
   useEffect(() => {

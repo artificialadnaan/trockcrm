@@ -9,7 +9,13 @@ export function LeadStagePage() {
   const navigate = useNavigate();
   const { stageId } = useParams();
   const route = useNormalizedStageRoute("leads", stageId!);
-  const { data, loading, error } = useLeadStagePage({ stageId: stageId!, ...route.query });
+  // useNormalizedStageRoute already coerces a leads "watched" scope to the role default at runtime
+  // (deals-only scope); narrow the type here too so it matches the leads-only useLeadStagePage union.
+  const { data, loading, error } = useLeadStagePage({
+    stageId: stageId!,
+    ...route.query,
+    scope: route.query.scope === "watched" ? "mine" : route.query.scope,
+  });
   const summary = buildLeadStageSummary(data);
 
   if (route.needsRedirect) return <Navigate to={route.redirectTo} replace />;

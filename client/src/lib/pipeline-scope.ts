@@ -3,7 +3,7 @@ import { normalizeStagePageSort } from "@trock-crm/shared/types";
 import { useAuth } from "@/lib/auth";
 import { normalizeStagePageQuery } from "./pipeline-stage-page";
 
-export type PipelineScope = "mine" | "team" | "all";
+export type PipelineScope = "mine" | "team" | "all" | "watched";
 export type PipelineEntity = "leads" | "deals";
 export type PipelineRole = "rep" | "director" | "admin";
 
@@ -23,8 +23,8 @@ const ROLE_ALLOWED_SCOPES: Record<PipelineRole, readonly PipelineScope[]> = {
   admin: ["mine", "all"],
 };
 
-function coerceScope(value: string | null): PipelineScope | null {
-  if (value === "mine" || value === "team" || value === "all") return value;
+export function coerceScope(value: string | null): PipelineScope | null {
+  if (value === "mine" || value === "team" || value === "all" || value === "watched") return value;
   return null;
 }
 
@@ -38,7 +38,11 @@ export function normalizePipelineScope(input: {
   entity: PipelineEntity;
 }) {
   const role = input.role in ROLE_DEFAULT_SCOPE ? input.role : "rep";
-  const allowedScope = input.requestedScope && ROLE_ALLOWED_SCOPES[role].includes(input.requestedScope)
+  // "watched" is a DEALS-ONLY scope (the deal_subscriptions watch relation has no leads-list filter
+  // wired in v1), so it is allowed only for the deals entity; on leads it coerces to the role default.
+  const isAllowed = (scope: PipelineScope) =>
+    ROLE_ALLOWED_SCOPES[role].includes(scope) || (scope === "watched" && input.entity === "deals");
+  const allowedScope = input.requestedScope && isAllowed(input.requestedScope)
     ? input.requestedScope
     : ROLE_DEFAULT_SCOPE[role];
 
