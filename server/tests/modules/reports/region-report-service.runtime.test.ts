@@ -17,7 +17,10 @@ const U = (s: string) => {
   const hex = [...s].map((c) => (/[0-9a-f]/i.test(c) ? c : (c.charCodeAt(0) % 16).toString(16))).join("");
   return `00000000-0000-0000-0000-${hex.padStart(12, "0").slice(-12)}`;
 };
-const RC = { west: U("rc01"), central: U("rc02"), east: U("rc03") };
+// centralDup is a SECOND region_config row also named "Central" (different display_order) — region_config.name
+// is not unique. w3 below points at it, so "Central" totals reconcile only if the report folds same-named
+// configs into one row (GROUP BY display name, not name+order).
+const RC = { west: U("rc01"), central: U("rc02"), east: U("rc03"), centralDup: U("rc02b") };
 const ST = { opp: U("57001"), est: U("57002"), sent: U("57003"), won: U("57009"), lost: U("57010") };
 const REP = { alice: U("a01"), bob: U("a02") };
 const NOW = new Date("2026-05-27T18:00:00Z");
@@ -48,7 +51,7 @@ beforeAll(async () => {
 
     INSERT INTO users (id, display_name) VALUES ('${REP.alice}','Alice'),('${REP.bob}','Bob');
     INSERT INTO region_config (id, name, display_order, is_active) VALUES
-      ('${RC.west}','West Coast',1,true),('${RC.central}','Central',2,true),('${RC.east}','East Coast',3,true);
+      ('${RC.west}','West Coast',1,true),('${RC.central}','Central',2,true),('${RC.east}','East Coast',3,true),('${RC.centralDup}','Central',9,true);
     INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES
       ('${ST.opp}','Opportunity','opportunity',2,false),
       ('${ST.est}','Estimating','estimating',3,false),
@@ -60,7 +63,7 @@ beforeAll(async () => {
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, region_id, won_closed_date, awarded_amount) VALUES
       ('${U("w1")}','W1','Won West thisweek','${ST.won}','${REP.alice}','${RC.west}','2026-05-25',100000),
       ('${U("w2")}','W2','Won Central A','${ST.won}','${REP.alice}','${RC.central}','2026-05-26',40000),
-      ('${U("w3")}','W3','Won Central B','${ST.won}','${REP.bob}','${RC.central}','2026-05-24',60000),
+      ('${U("w3")}','W3','Won Central B','${ST.won}','${REP.bob}','${RC.centralDup}','2026-05-24',60000),
       ('${U("w4")}','W4','Won West OUTSIDE','${ST.won}','${REP.alice}','${RC.west}','2026-05-10',999000),
       ('${U("wp1")}','WP1','Won West prior','${ST.won}','${REP.alice}','${RC.west}','2026-05-18',30000),
       ('${U("wp2")}','WP2','Won Central prior','${ST.won}','${REP.bob}','${RC.central}','2026-05-19',20000);
@@ -80,7 +83,7 @@ beforeAll(async () => {
       ('${U("o5")}','O5','Open Unassigned est','${ST.est}',NULL,'2026-09-01','2026-02-01T10:00:00Z',15000);
   `);
   tdb = drizzle(pg);
-});
+}, 30000); // PGlite cold-start can exceed the default 10s hook timeout when runtime suites start in parallel
 
 afterAll(async () => {
   await pg?.close?.();
@@ -107,6 +110,10 @@ describe("getRegionReport — 6-section aggregation", () => {
     expect(west.avgDeal).toBe(100000);
 
     const central = r.regions.find((x) => x.region === "Central")!;
+    // w2 (config RC.central) + w3 (config RC.centralDup, a SECOND row also named "Central") fold into ONE
+    // "Central" row — proving the report sums same-named configs (GROUP BY name) rather than splitting or
+    // dropping one. The drill keys on the same display name, so the two reconcile by construction.
+    expect(r.regions.filter((x) => x.region === "Central")).toHaveLength(1);
     expect(central.won).toEqual({ value: 100000, count: 2 });
     expect(central.pipeline).toEqual({ value: 70000, count: 2 });
     expect(central.winRate).toBeCloseTo(50, 1); // won 2 / (2 + lost 2)
@@ -245,7 +252,7 @@ describe("getRegionReport — exclusions & edge cases", () => {
         ('${U("eo2")}','open normal','${E.opp}','${ER.west}','2026-06-10',60000,false);
     `);
     edb = drizzle(epg);
-  });
+  }, 30000); // PGlite cold-start can exceed the default 10s hook timeout under parallel runtime suites
   afterAll(async () => {
     await epg?.close?.();
   });

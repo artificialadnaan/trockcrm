@@ -1055,12 +1055,57 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
     throw new AppError(400, "leadStage is only valid for the leads metric");
   }
 
-  return { metric, mode, repId, band, leadStage };
+  // regionName: absent -> no region predicate (office-wide); a string -> the displayed region row to
+  // drill, keyed on COALESCE(NULLIF(rc.name,''),'Unassigned') exactly as the region report groups (so a
+  // duplicate/inactive same-named config can't desync the drill). "Unassigned" = that bucket. Leads have
+  // no region and the region report has no leads section, so a region-scoped leads drill has no cohort to
+  // reconcile against and is rejected — never returned as unfiltered rows under a region scope header.
+  const regionName = pickQueryValue(query.regionName);
+  if (regionName !== undefined && metric === "leads") {
+    throw new AppError(400, "regionName is not valid for the leads metric");
+  }
+  // rep × region is not a representable scope (the response header is one or the other); the region
+  // report drills by region only and the rep pack drills by rep only, so reject the combination rather
+  // than return a rep×region subset total under a region-only header.
+  if (regionName !== undefined && repId !== undefined) {
+    throw new AppError(400, "repId and regionName cannot be combined");
+  }
+
+  // from/to: explicit period window for a region drill (paired; both or neither). Used to reconcile the
+  // windowed metrics to the region report's exact period instead of the mode-derived week.
+  const fromRaw = pickQueryValue(query.from);
+  const toRaw = pickQueryValue(query.to);
+  if ((fromRaw === undefined) !== (toRaw === undefined)) {
+    throw new AppError(400, "from and to must be provided together");
+  }
+  // Format AND calendar validity (so "2026-02-31" can't pass the regex and then fail at SQL date casting).
+  const isoDate = (v: string, label: string): string => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new AppError(400, `${label} must be an ISO date (YYYY-MM-DD)`);
+    const parsed = new Date(`${v}T00:00:00Z`);
+    if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== v) {
+      throw new AppError(400, `${label} is not a valid calendar date`);
+    }
+    return v;
+  };
+  const from = fromRaw === undefined ? undefined : isoDate(fromRaw, "from");
+  const to = toRaw === undefined ? undefined : isoDate(toRaw, "to");
+  if (from !== undefined && to !== undefined && from > to) {
+    throw new AppError(400, "from must be on or before to"); // ISO YYYY-MM-DD sorts chronologically
+  }
+
+  return { metric, mode, repId, band, leadStage, regionName, from, to };
 }
 
 router.get("/monday-showcase/evidence", requireAnyRole, async (req, res, next) => {
   try {
     const options = parseShowcaseEvidenceParams(req.query as Record<string, unknown>);
+    // The Reports-by-Region drill's elevated params — an explicit {from,to} window (arbitrary historical
+    // range) and the region scope — are director-only. A rep stays bounded to the mode-derived showcase
+    // week; without this gate a rep could omit repId and pull office-wide evidence for any past range.
+    const isDirector = req.user!.role === "admin" || req.user!.role === "director";
+    if (!isDirector && (options.from !== undefined || options.regionName !== undefined)) {
+      throw new AppError(403, "from/to and regionName are restricted to directors");
+    }
     const data = await getMondayShowcaseEvidence(req.tenantDb!, options);
     await req.commitTransaction!();
     res.json({ data });

@@ -659,7 +659,8 @@ export interface EvidenceTotal {
 
 export type EvidenceScope =
   | { kind: "office" }
-  | { kind: "rep"; repId: string | null; repName: string };
+  | { kind: "rep"; repId: string | null; repName: string }
+  | { kind: "region"; regionName: string };
 
 export interface MondayShowcaseEvidence {
   metric: EvidenceMetric;
@@ -683,6 +684,23 @@ function repScopeSql(alias: string, repId?: string | null): SQL {
   if (repId === undefined) return sql``;
   if (repId === null) return sql` AND ${sql.raw(alias)}.assigned_rep_id IS NULL`;
   return sql` AND ${sql.raw(alias)}.assigned_rep_id = ${repId}::uuid`;
+}
+
+/**
+ * Optional per-region narrowing keyed on the DISPLAY-REGION name — the exact expression the
+ * Reports-by-Region rollup GROUPs by (COALESCE(NULLIF(rc.name, ''), 'Unassigned')). `undefined` = no
+ * region predicate (reconciles to the office number); a string = that displayed region row.
+ *
+ * Keying on the display name (not a single region_id) is what makes the drill reconcile to the clicked
+ * row: region_config.name is NOT unique, so duplicate / inactive same-named config rows are summed into
+ * ONE report row — a region_id predicate would return only one config's deals and undercount. The
+ * "Unassigned" row is just the literal name "Unassigned": region_id IS NULL, blank-named configs, and
+ * configs literally named "Unassigned" all fold there, matching the report's synthetic bucket exactly.
+ * Callers LEFT JOIN `region_config rc` (all the deal evidence builders do), so `rc` is in scope.
+ */
+function regionScopeSql(regionName?: string): SQL {
+  if (regionName === undefined) return sql``;
+  return sql` AND COALESCE(NULLIF(rc.name, ''), 'Unassigned') = ${regionName}`;
 }
 
 /**
@@ -715,7 +733,7 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
  * (close-date cohort on won_closed_date, Won stages, usable-won-date guard, reportable + test filters)
  * and the SAME awarded-first $ basis, so COUNT(rows) === Won count and SUM(value) === Won $.
  */
-export function buildWonEvidenceSql(from: string, to: string, repId?: string | null): SQL {
+export function buildWonEvidenceSql(from: string, to: string, repId?: string | null, regionName?: string): SQL {
   return sql`
     SELECT ${dealEvidenceSelectSql(aliasedEffectiveWonDealValueSql("d"), "d.won_closed_date")}
     FROM ${deals} d
@@ -729,7 +747,7 @@ export function buildWonEvidenceSql(from: string, to: string, repId?: string | n
       AND psc.slug IN (${slugInList(WON_STAGE_SLUGS)})
       AND ${aliasedHasUsableWonDateSql("d")}
       AND ${aliasedWonHsClosedWonDateSql("d")} >= ${from}::date
-      AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date${repScopeSql("d", repId)}
+      AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date${repScopeSql("d", repId)}${regionScopeSql(regionName)}
     ORDER BY value DESC, d.name
   `;
 }
@@ -744,7 +762,8 @@ export function buildStageEntryEvidenceSql(
   slugs: readonly string[],
   from: string,
   to: string,
-  repId?: string | null
+  repId?: string | null,
+  regionName?: string
 ): SQL {
   return sql`
     SELECT ${dealEvidenceSelectSql(openValueSql("d"), "entered.entered_at")}
@@ -763,7 +782,7 @@ export function buildStageEntryEvidenceSql(
     LEFT JOIN region_config rc ON rc.id = d.region_id
     LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
     WHERE COALESCE(d.is_test_data, false) = false
-      AND ${aliasedReportableDealFilterSql("d")}${repScopeSql("d", repId)}
+      AND ${aliasedReportableDealFilterSql("d")}${repScopeSql("d", repId)}${regionScopeSql(regionName)}
     ORDER BY value DESC, d.name
   `;
 }
@@ -773,7 +792,7 @@ export function buildStageEntryEvidenceSql(
  * buildProjectionBandsSql -- optionally narrowed to one 30/60/90 rung via the SAME band CASE, so the
  * per-band rows reconcile to that rung's count/$.
  */
-export function buildProjectionEvidenceSql(repId?: string | null, band?: ProjectionBand): SQL {
+export function buildProjectionEvidenceSql(repId?: string | null, band?: ProjectionBand, regionName?: string): SQL {
   const bandFilter = band
     ? sql` AND ${projectionBandSql("d.expected_close_date")} = ${band}`
     : sql``;
@@ -789,7 +808,7 @@ export function buildProjectionEvidenceSql(repId?: string | null, band?: Project
       AND ${aliasedReportableDealFilterSql("d")}
       AND d.is_active = true
       AND psc.is_terminal = false
-      AND ${futureDatedCloseDatePredicateSql("d.expected_close_date")}${repScopeSql("d", repId)}${bandFilter}
+      AND ${futureDatedCloseDatePredicateSql("d.expected_close_date")}${repScopeSql("d", repId)}${regionScopeSql(regionName)}${bandFilter}
     ORDER BY d.expected_close_date, value DESC
   `;
 }
@@ -854,6 +873,14 @@ export interface MondayShowcaseEvidenceOptions {
   band?: ProjectionBand;
   /** leads only -- one lead stage label. */
   leadStage?: string;
+  /** undefined = no region predicate (office-wide); a string = the displayed region row to drill, keyed on
+   *  COALESCE(NULLIF(rc.name,''),'Unassigned') exactly as the region report groups. "Unassigned" = that bucket. */
+  regionName?: string;
+  /** Explicit period override for the windowed metrics (won/sent/estimated) — a region drill passes the
+   *  Reports-by-Region report's exact {from,to} so the drawer reconciles to the clicked region number,
+   *  not a mode-derived week. Snapshot metrics (projection) ignore it. */
+  from?: string;
+  to?: string;
 }
 
 interface EvidenceRow {
@@ -883,25 +910,31 @@ export async function getMondayShowcaseEvidence(
 ): Promise<MondayShowcaseEvidence> {
   const mode: WeekMode = options.mode ?? "to_date";
   const now = options.now ?? new Date();
-  const { from, to } = getWtdPeriod(mode, now);
+  const derived = getWtdPeriod(mode, now);
+  // Region drills pass explicit {from,to} (the region report's window) so windowed metrics reconcile;
+  // everyone else uses the mode-derived week. Both are provided together or not at all.
+  const from = options.from ?? derived.from;
+  const to = options.to ?? derived.to;
   const period: ShowcasePeriod = { from, to, mode, label: `${from} → ${to}` };
-  const { metric, repId, band, leadStage } = options;
+  const { metric, repId, band, leadStage, regionName } = options;
 
   let query: SQL;
   switch (metric) {
     case "won":
-      query = buildWonEvidenceSql(from, to, repId);
+      query = buildWonEvidenceSql(from, to, repId, regionName);
       break;
     case "sent":
-      query = buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, from, to, repId);
+      query = buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, from, to, repId, regionName);
       break;
     case "estimated":
-      query = buildStageEntryEvidenceSql(ESTIMATED_STAGE_SLUGS, from, to, repId);
+      query = buildStageEntryEvidenceSql(ESTIMATED_STAGE_SLUGS, from, to, repId, regionName);
       break;
     case "projection":
-      query = buildProjectionEvidenceSql(repId, band);
+      query = buildProjectionEvidenceSql(repId, band, regionName);
       break;
     case "leads":
+      // Leads have no region (their region is the company's text field); the region report has no leads
+      // section, so a region-scoped leads drill is never requested — regionName is intentionally unused.
       query = buildLeadEvidenceSql(repId, leadStage);
       break;
     default: {
@@ -922,7 +955,11 @@ export async function getMondayShowcaseEvidence(
     value: hasValue ? num(r.value) : null,
     cohortDate: r.cohort_date == null ? null : String(r.cohort_date).slice(0, 10),
     companyName: r.company_name ? String(r.company_name) : null,
-    region: r.region ? String(r.region) : null,
+    // For a region drill every row is, by construction, in the clicked region_config bucket — so show that
+    // clicked region (matching the drawer header) rather than the deal's looser company.region text, which
+    // is a different taxonomy and would make a correctly-scoped row look mis-scoped. Other scopes keep the
+    // company-first region the showcase drawer was designed to show.
+    region: regionName ?? (r.region ? String(r.region) : null),
     dealType: r.deal_type ? String(r.deal_type) : null,
     daysInStage: r.days_in_stage == null ? null : Number(r.days_in_stage),
     winProbability: r.win_probability == null ? null : Number(r.win_probability),
@@ -935,7 +972,9 @@ export async function getMondayShowcaseEvidence(
   };
 
   let scope: EvidenceScope;
-  if (repId === undefined) {
+  if (regionName !== undefined) {
+    scope = { kind: "region", regionName };
+  } else if (repId === undefined) {
     scope = { kind: "office" };
   } else {
     const repName =

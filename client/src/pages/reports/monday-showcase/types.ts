@@ -114,7 +114,8 @@ export interface EvidenceTotal {
 
 export type EvidenceScope =
   | { kind: "office" }
-  | { kind: "rep"; repId: string | null; repName: string };
+  | { kind: "rep"; repId: string | null; repName: string }
+  | { kind: "region"; regionName: string };
 
 export interface MondayShowcaseEvidence {
   metric: EvidenceMetric;

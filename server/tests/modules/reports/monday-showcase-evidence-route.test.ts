@@ -40,4 +40,33 @@ describe("parseShowcaseEvidenceParams", () => {
     expect(parseShowcaseEvidenceParams({ metric: "leads", leadStage: "New" }).leadStage).toBe("New");
     expect(() => parseShowcaseEvidenceParams({ metric: "won", leadStage: "New" })).toThrow(/leadStage/);
   });
+
+  it("accepts a region NAME (the report's displayed-region key); 'Unassigned' is the bucket; absent = office", () => {
+    expect(parseShowcaseEvidenceParams({ metric: "won" }).regionName).toBeUndefined();
+    expect(parseShowcaseEvidenceParams({ metric: "won", regionName: "West Coast" }).regionName).toBe("West Coast");
+    expect(parseShowcaseEvidenceParams({ metric: "won", regionName: "Unassigned" }).regionName).toBe("Unassigned");
+  });
+
+  it("accepts an explicit from/to period window, paired, ISO-validated", () => {
+    const p = parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-01", to: "2026-06-13" });
+    expect(p.from).toBe("2026-06-01");
+    expect(p.to).toBe("2026-06-13");
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-01" })).toThrow(/together/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "06/01/2026", to: "06/13/2026" })).toThrow(/ISO date/);
+  });
+
+  it("rejects a region scope for the leads metric (no region-scoped lead cohort to reconcile against)", () => {
+    expect(() => parseShowcaseEvidenceParams({ metric: "leads", regionName: "West Coast" })).toThrow(/regionName/);
+  });
+
+  it("rejects a non-calendar date and an inverted from/to window", () => {
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-02-31", to: "2026-03-01" })).toThrow(/calendar date/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-13", to: "2026-06-01" })).toThrow(/on or before/);
+  });
+
+  it("rejects combining repId and regionName (the scope header can only be one)", () => {
+    const rep = "11111111-1111-1111-1111-111111111111";
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: rep, regionName: "West Coast" })).toThrow(/cannot be combined/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: "__unassigned__", regionName: "Unassigned" })).toThrow(/cannot be combined/);
+  });
 });
