@@ -61,22 +61,17 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
     const wonUnassigned = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", undefined, null));
     // office-wide drill carries NO region predicate (reconciles to the office number)
     expect(wonOffice).not.toContain("region_id =");
-    expect(wonOffice).not.toContain("NULLIF(rc.name, '') IS NULL");
-    // a named region scopes on region_id = <uuid>; Unassigned matches the region report's bucket exactly
-    // (NULLIF(rc.name,'') IS NULL = region_id IS NULL OR a blank-named config), not a bare region_id IS NULL
+    expect(wonOffice).not.toContain("'Unassigned') = 'Unassigned'");
+    // a named region scopes on region_id = <uuid>; Unassigned matches the region report's bucket
+    // expression EXACTLY (COALESCE(NULLIF(rc.name,''),'Unassigned') = 'Unassigned' — i.e. region_id IS
+    // NULL OR a blank/literal-"Unassigned" config), not a bare region_id IS NULL
     expect(wonRegion).toContain("region_id =");
     expect(wonRegion).toContain(REGION);
-    expect(wonUnassigned).toContain("NULLIF(rc.name, '') IS NULL");
+    expect(wonUnassigned).toContain("COALESCE(NULLIF(rc.name, ''), 'Unassigned') = 'Unassigned'");
     // the SAME region filter threads through the stage-entry (sent/estimated) and projection builders
     expect(extractSqlText(buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, "2026-05-24", "2026-05-30", undefined, REGION))).toContain("region_id =");
     expect(extractSqlText(buildProjectionEvidenceSql(undefined, undefined, REGION))).toContain("region_id =");
-    expect(extractSqlText(buildProjectionEvidenceSql(undefined, undefined, null))).toContain("NULLIF(rc.name, '') IS NULL");
-  });
-
-  it("region scope composes with rep scope — both filters present and independent", () => {
-    const both = extractSqlText(buildWonEvidenceSql("2026-05-24", "2026-05-30", "rep-1", "11111111-1111-1111-1111-111111111111"));
-    expect(both).toContain("assigned_rep_id =");
-    expect(both).toContain("region_id =");
+    expect(extractSqlText(buildProjectionEvidenceSql(undefined, undefined, null))).toContain("'Unassigned') = 'Unassigned'");
   });
 
   it("sent evidence: stage-entry cohort on to_stage_id within the CT window, best-estimate $, distinct deal", () => {

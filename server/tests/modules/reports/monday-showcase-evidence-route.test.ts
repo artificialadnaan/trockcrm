@@ -66,4 +66,11 @@ describe("parseShowcaseEvidenceParams", () => {
     expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-02-31", to: "2026-03-01" })).toThrow(/calendar date/);
     expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-13", to: "2026-06-01" })).toThrow(/on or before/);
   });
+
+  it("rejects combining repId and regionId (the scope header can only be one)", () => {
+    const rep = "11111111-1111-1111-1111-111111111111";
+    const region = "22222222-2222-2222-2222-222222222222";
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: rep, regionId: region })).toThrow(/cannot be combined/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: "__unassigned__", regionId: "__unassigned__" })).toThrow(/cannot be combined/);
+  });
 });

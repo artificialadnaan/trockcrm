@@ -1067,6 +1067,12 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
   if (regionId !== undefined && metric === "leads") {
     throw new AppError(400, "regionId is not valid for the leads metric");
   }
+  // rep × region is not a representable scope (the response header is one or the other); the region
+  // report drills by region only and the rep pack drills by rep only, so reject the combination rather
+  // than return a rep×region subset total under a region-only header.
+  if (regionId !== undefined && repId !== undefined) {
+    throw new AppError(400, "repId and regionId cannot be combined");
+  }
   const regionName = pickQueryValue(query.regionName);
 
   // from/to: explicit period window for a region drill (paired; both or neither). Used to reconcile the
@@ -1097,6 +1103,13 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
 router.get("/monday-showcase/evidence", requireAnyRole, async (req, res, next) => {
   try {
     const options = parseShowcaseEvidenceParams(req.query as Record<string, unknown>);
+    // The Reports-by-Region drill's elevated params — an explicit {from,to} window (arbitrary historical
+    // range) and the region scope — are director-only. A rep stays bounded to the mode-derived showcase
+    // week; without this gate a rep could omit repId and pull office-wide evidence for any past range.
+    const isDirector = req.user!.role === "admin" || req.user!.role === "director";
+    if (!isDirector && (options.from !== undefined || options.regionId !== undefined)) {
+      throw new AppError(403, "from/to and regionId are restricted to directors");
+    }
     const data = await getMondayShowcaseEvidence(req.tenantDb!, options);
     await req.commitTransaction!();
     res.json({ data });

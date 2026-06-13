@@ -692,14 +692,15 @@ function repScopeSql(alias: string, repId?: string | null): SQL {
  * Unassigned bucket; a string = that region_config UUID.
  *
  * Unassigned matches the region report's bucket EXACTLY: it keys on COALESCE(NULLIF(rc.name, ''),
- * 'Unassigned'), so a deal whose region_id points to a blank-named config row folds into Unassigned. A
- * plain `region_id IS NULL` would UNDER-count those, breaking the named+Unassigned = office identity.
- * `NULLIF(rc.name, '') IS NULL` covers both region_id IS NULL and blank-named configs. Callers LEFT JOIN
- * `region_config rc` (all the deal evidence builders do), so `rc` is in scope.
+ * 'Unassigned') = 'Unassigned', which folds in deals whose region_id IS NULL, points to a blank-named
+ * config row, OR points to a config row literally named "Unassigned" (the report skips those when
+ * building named rows). A plain `region_id IS NULL` would UNDER-count the latter two, breaking the
+ * named+Unassigned = office identity. Callers LEFT JOIN `region_config rc` (all the deal evidence
+ * builders do), so `rc` is in scope.
  */
 function regionScopeSql(alias: string, regionId?: string | null): SQL {
   if (regionId === undefined) return sql``;
-  if (regionId === null) return sql` AND NULLIF(rc.name, '') IS NULL`;
+  if (regionId === null) return sql` AND COALESCE(NULLIF(rc.name, ''), 'Unassigned') = 'Unassigned'`;
   return sql` AND ${sql.raw(alias)}.region_id = ${regionId}::uuid`;
 }
 
