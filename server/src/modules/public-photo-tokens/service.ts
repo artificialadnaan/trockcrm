@@ -7,7 +7,7 @@ import { db, pool } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
-import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
+import { latestActiveVersionCondition, type DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
 import { getObjectStream } from "../../lib/r2-client.js";
 import { isStrippableJpeg } from "./image-metadata.js";
 
@@ -123,12 +123,18 @@ function dealPhotoOwnershipSql(dealId: string) {
 }
 
 // Serve-time eligibility for per-photo lookups, mirroring getDealPhotoTimeline: only ACTIVE,
-// LATEST-version photos. A photo valid at mint time can be superseded later (uploadNewVersion adds an
-// active child with parent_file_id and leaves the original active), and the viewer re-hides it via the
-// same latest-version predicate. Without this, a direct/cached subset-share URL keeps serving a
+// LATEST-version photos. A photo valid at mint time can be superseded later, and the viewer re-hides it
+// via the SAME latest-version predicate; without this a direct/cached subset-share URL keeps serving a
 // superseded (or since-deactivated) photo the public viewer no longer lists.
-function latestActivePhotoSql() {
-  return sql` AND is_active = true AND NOT EXISTS (SELECT 1 FROM files f2 WHERE f2.parent_file_id = files.id AND f2.is_active = true)`;
+//
+// Routes through the canonical latestActiveVersionCondition (files/photo-timeline-filters.ts) — the single
+// source of truth shared by the timeline/viewer/mint AND this public-share asset/download, so they can
+// never disagree on "latest". (uploadNewVersion stores every version with parent_file_id = ROOT id, a flat
+// family; the helper groups by COALESCE(parent_file_id, id) and excludes a row when any ACTIVE family
+// member has a higher version — the old `NOT EXISTS child` check only excluded the root.)
+// Exported for the runtime test (PGlite) that proves a superseded non-root version is excluded.
+export function latestActivePhotoSql() {
+  return sql` AND is_active = true AND ${latestActiveVersionCondition()}`;
 }
 
 export async function generatePublicToken(input: {
