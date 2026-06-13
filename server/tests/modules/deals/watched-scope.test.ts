@@ -40,14 +40,19 @@ vi.mock("../../../src/modules/shared/mine-visibility.js", async (importActual) =
   return { ...actual, resolveMineVisibilityFeatures: async () => state.features };
 });
 
-// listDealStages reads the module-level db; stub so getDeals can resolve if it ever reaches that path.
+// The module-level db is read for the stage list (getDealsForPipeline + listDealStages). Return a
+// Won + Opportunity stage so getDealsForPipeline issues per-stage queries we can capture.
 vi.mock("../../../src/db.js", () => {
+  const stages = [
+    { id: "00000000-0000-0000-0000-0000000057a2", slug: "opportunity", name: "Opportunity", workflowFamily: "standard_deal", displayOrder: 1, isActivePipeline: true, isTerminal: false },
+    { id: "00000000-0000-0000-0000-0000000057a1", slug: "won", name: "Won", workflowFamily: "standard_deal", displayOrder: 9, isActivePipeline: true, isTerminal: true },
+  ];
   const chain: Record<string, unknown> = {};
   chain.select = () => chain;
   chain.from = () => chain;
   chain.where = () => chain;
-  chain.orderBy = () => Promise.resolve([]);
-  (chain as { then: unknown }).then = (resolve: (v: unknown) => unknown) => resolve([]);
+  chain.orderBy = () => Promise.resolve(stages);
+  (chain as { then: unknown }).then = (resolve: (v: unknown) => unknown) => resolve(stages);
   return { db: chain, pool: {} };
 });
 
@@ -84,6 +89,48 @@ describe("buildDealWatchedCondition — subscription predicate in isolation", ()
     expect(text).toContain("ds.deal_id = \"d\".id");
     expect(text).toContain("deal_subscriptions");
     expect(text).not.toContain("assigned_rep_id");
+  });
+
+  it("includeSubscriptionDeletedAt:false OMITS the deleted_at guard (offices whose table lacks the column)", () => {
+    expect(render(buildDealWatchedCondition(USER))).toContain("deleted_at is null");
+    expect(render(buildDealWatchedCondition(USER, { includeSubscriptionDeletedAt: false }))).not.toContain("deleted_at is null");
+    expect(render(buildAliasedDealWatchedCondition("d", USER, { includeSubscriptionDeletedAt: false }))).not.toContain("deleted_at is null");
+  });
+});
+
+describe("getDealsForPipeline (kanban) — watched arm composes correctly", () => {
+  it("scope=watched → per-stage WHERE carries the subscription predicate and NO Mine clauses", async () => {
+    state.features.dealSubscriptions = true;
+    const { db, wheres } = capturingTenantDb();
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await getDealsForPipeline(db, "rep", USER, { scope: "watched" } as any);
+    const subWheres = wheres.map(render).filter((w) => w.includes("deal_subscriptions"));
+    expect(subWheres.length).toBeGreaterThan(0);
+    for (const w of subWheres) expect(w).not.toContain("assigned_rep_id");
+  });
+
+  it("scope=watched + assignedRepId → ANDs the subscription predicate WITH the rep narrowing (assignedRepFilterHandled stays false)", async () => {
+    state.features.dealSubscriptions = true;
+    const { db, wheres } = capturingTenantDb();
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await getDealsForPipeline(db, "rep", USER, { scope: "watched", assignedRepId: USER } as any);
+    const w = wheres.map(render).find((x) => x.includes("deal_subscriptions"));
+    expect(w).toBeTruthy();
+    expect(w).toContain("assigned_rep_id");
+  });
+
+  it("scope=watched + no deal_subscriptions table → degrades to empty (false), not Mine/All", async () => {
+    state.features.dealSubscriptions = false;
+    const { db, wheres } = capturingTenantDb();
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await getDealsForPipeline(db, "rep", USER, { scope: "watched" } as any);
+    const rendered = wheres.map(render);
+    expect(rendered.some((w) => w.includes("deal_subscriptions"))).toBe(false);
+    expect(rendered.some((w) => /\bfalse\b/.test(w))).toBe(true);
+    state.features.dealSubscriptions = true;
   });
 });
 
