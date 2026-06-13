@@ -1256,6 +1256,16 @@ describe("DealListPage", () => {
     // Team is not an offered scope (D-12b).
     expect(html).not.toContain(">Team</button>");
   });
+  it("offers a third Watched scope pill and selects it for ?scope=watched (deals-only filter)", () => {
+    const html = renderPage("/deals?scope=watched", "rep");
+
+    // The new pill renders AND is active; Mine/All stay (unchanged).
+    expect(html).toContain('aria-pressed="true">Watched');
+    expect(html).toContain('aria-pressed="false">Mine');
+    expect(html).toContain('aria-pressed="false">All');
+    // watched survives end-to-end (not silently coerced to mine) — the board hook receives it.
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("watched", true, expect.any(Object), 1000, null, undefined);
+  });
   it("mounts the FULL FilterBar (incl. Rep, dl_-namespaced) on the BASE deal list, inheriting scope; Scope omitted", () => {
     renderPage("/deals?scope=mine", "director");
 

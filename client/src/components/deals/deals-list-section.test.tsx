@@ -250,6 +250,31 @@ describe("DealsListSection", () => {
     vi.restoreAllMocks();
   });
 
+  it("shows the Watched empty state when scope=watched and no deals", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [],
+      pagination: { page: 1, limit: 25, total: 0, totalPages: 0 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const html = render({ scope: "watched" });
+    expect(html).toContain("No watched deals to show here");
+    expect(html).toContain('aria-label="No watched deals"');
+  });
+
+  it("does NOT show the Watched empty state for scope=mine (Mine/All empty behavior unchanged)", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [],
+      pagination: { page: 1, limit: 25, total: 0, totalPages: 0 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const html = render({ scope: "mine" });
+    expect(html).not.toContain("No watched deals to show here");
+  });
+
   it("renders search, stage filter chips, owner select, and a table", () => {
     const html = render();
 
