@@ -66,7 +66,7 @@ describe("PublicPhotoViewerPage", () => {
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/public/photo-viewer/raw-token"));
     await vi.waitFor(() => expect(node.textContent).toContain("Portfolio Roof"));
     expect(node.textContent).toContain("123 Main St");
-    expect(node.querySelector('img[alt="Shared photo"]')).not.toBeNull();
+    expect(node.querySelector('img[alt^="Shared photo"]')).not.toBeNull();
     // No edit affordances and no leaked metadata anywhere in the rendered page.
     for (const leaked of ["Delete", "Edit", "Uploaded by", "Field User", "damage", "North slope", "TR-1"]) {
       expect(node.textContent).not.toContain(leaked);
@@ -99,7 +99,7 @@ describe("PublicPhotoViewerPage", () => {
     });
 
     const node = renderPage();
-    await vi.waitFor(() => expect(node.querySelectorAll('img[alt="Shared photo"]').length).toBe(3));
+    await vi.waitFor(() => expect(node.querySelectorAll('img[alt^="Shared photo"]').length).toBe(3));
     // Timestamps are not exposed, so there are no per-day headers or counts.
     expect(node.textContent).not.toMatch(/Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday/);
   });
@@ -122,7 +122,7 @@ describe("PublicPhotoViewerPage", () => {
     });
 
     const node = renderPage();
-    await vi.waitFor(() => expect(node.querySelector('img[alt="Shared photo"]')).not.toBeNull());
+    await vi.waitFor(() => expect(node.querySelector('img[alt^="Shared photo"]')).not.toBeNull());
     node.querySelector("button")?.click();
 
     await vi.waitFor(() =>

@@ -94,16 +94,19 @@ export function PublicPhotoViewerPage() {
           </div>
         ) : (
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-            {photos.map((photo) => (
+            {photos.map((photo, index) => (
               <button
                 key={photo.id}
                 type="button"
+                // Indexed, leak-free name: keeps each thumbnail distinct for assistive tech and
+                // role/name automation without exposing the photo's display name or any metadata.
+                aria-label={`Shared photo ${index + 1}`}
                 className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
                 onClick={() => setSelectedId(photo.id)}
               >
                 <div className="flex aspect-square items-center justify-center bg-slate-200">
                   {photo.imageUrl ? (
-                    <img src={photo.imageUrl} alt="Shared photo" className="h-full w-full object-cover" loading="lazy" />
+                    <img src={photo.imageUrl} alt={`Shared photo ${index + 1}`} className="h-full w-full object-cover" loading="lazy" />
                   ) : (
                     <FileText className="h-8 w-8 text-slate-400" />
                   )}
@@ -126,7 +129,7 @@ export function PublicPhotoViewerPage() {
                 <X className="h-5 w-5" />
               </button>
               {selectedPhoto.imageUrl ? (
-                <img src={selectedPhoto.imageUrl} alt="Shared photo" className="max-h-[90vh] max-w-full object-contain" />
+                <img src={selectedPhoto.imageUrl} alt={`Shared photo ${selectedIndex + 1}`} className="max-h-[90vh] max-w-full object-contain" />
               ) : (
                 <div className="flex flex-col items-center gap-3 px-6 text-center text-white">
                   <FileText className="h-12 w-12 text-white/75" />
