@@ -124,8 +124,11 @@ test("admin creates a public photo link, public viewer loads, downloads, then re
   await installPublicPhotoViewerMocks(publicPage, state);
   await publicPage.goto("/p/raw-public-token");
   await expect(publicPage.getByRole("heading", { name: "Public Photo Deal" })).toBeVisible();
-  await expect(publicPage.getByText("Public roof photo")).toBeVisible();
-  await publicPage.getByText("Public roof photo").click();
+  // Leak-free public payload: even though the API mock still returns a per-photo displayName, the
+  // viewer must NOT render it — thumbnails carry only a generic, indexed accessible name.
+  await expect(publicPage.getByText("Public roof photo")).toHaveCount(0);
+  await expect(publicPage.getByRole("button", { name: "Shared photo 1" })).toBeVisible();
+  await publicPage.getByRole("button", { name: "Shared photo 1" }).click();
   await expect(publicPage.getByRole("button", { name: "Download" })).toBeVisible();
 
   await page.getByRole("button", { name: "Revoke" }).click();
