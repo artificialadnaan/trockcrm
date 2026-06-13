@@ -14,6 +14,7 @@ const REP_A = "11111111-1111-1111-1111-111111111111";
 const REP_B = "11111111-1111-1111-1111-111111111112";
 const REP_C = "11111111-1111-1111-1111-111111111113"; // director — excluded from hourly
 const REP_D = "11111111-1111-1111-1111-111111111114"; // inactive rep — excluded from hourly
+const REP_E = "11111111-1111-1111-1111-111111111115"; // test-data rep — excluded as a mover
 const IMP = "11111111-1111-1111-1111-1111111111ff"; // impersonator
 const ST_WON = "22222222-2222-2222-2222-222222222221";
 const ST_OPP = "22222222-2222-2222-2222-222222222222";
@@ -57,6 +58,7 @@ beforeAll(async () => {
       ('${REP_B}', 'Sidney Monroe',  'rep',      true,  false),
       ('${REP_C}', 'Dana Director',  'director', true,  false),
       ('${REP_D}', 'Ivan Inactive',  'rep',      false, false),
+      ('${REP_E}', 'Terry TestUser', 'rep',      true,  true),
       ('${IMP}',   'Admin Imp',      'admin',    true,  false);
     INSERT INTO public.pipeline_stage_config (id, slug, name, is_terminal) VALUES
       ('${ST_WON}', '${WON_SLUG}', 'Won', true),
@@ -90,12 +92,17 @@ beforeAll(async () => {
       ('${uuid(15)}', 'Bounced Back',     '${REP_A}', '${ST_OPP}',  false),
       ('${uuid(16)}', 'Test Advanced',    '${REP_A}', '${ST_EST}',  true),
       ('${uuid(17)}', 'Sync Advanced',    '${REP_A}', '${ST_EST}',  false),
-      ('${uuid(18)}', 'Inactive Mover',   '${REP_A}', '${ST_EST}',  false);
+      ('${uuid(18)}', 'Inactive Mover',   '${REP_A}', '${ST_EST}',  false),
+      ('${uuid(19)}', 'Test User Mover',  '${REP_A}', '${ST_EST}',  false),
+      ('${uuid(20)}', 'Rep then Sync',    '${REP_A}', '${ST_NEG}',  false);
     INSERT INTO office_test.deal_stage_history (deal_id, from_stage_id, to_stage_id, changed_by, is_backward_move, created_at) VALUES
       ('${uuid(10)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-12 13:00:00-05'),
       ('${uuid(10)}', '${ST_EST}', '${ST_NEG}', '${REP_B}', false, '2026-06-12 14:00:00-05'),
       ('${uuid(17)}', '${ST_OPP}', '${ST_EST}', '${REP_C}', false, '2026-06-12 13:00:00-05'),
       ('${uuid(18)}', '${ST_OPP}', '${ST_EST}', '${REP_D}', false, '2026-06-12 13:00:00-05'),
+      ('${uuid(19)}', '${ST_OPP}', '${ST_EST}', '${REP_E}', false, '2026-06-12 13:00:00-05'),
+      ('${uuid(20)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-12 13:00:00-05'),
+      ('${uuid(20)}', '${ST_EST}', '${ST_NEG}', '${REP_C}', false, '2026-06-12 14:00:00-05'),
       ('${uuid(11)}', '${ST_NEG}', '${ST_WON}', '${REP_A}', false, '2026-06-12 15:00:00-05'),
       ('${uuid(12)}', '${ST_NEG}', '${ST_LOST}','${REP_A}', false, '2026-06-12 15:30:00-05'),
       ('${uuid(13)}', '${ST_OPP}', '${ST_EST}', '${REP_A}', false, '2026-06-11 13:00:00-05'),
@@ -177,11 +184,19 @@ describe("readAdvancedToday — latest move per deal, terminal/backward-aware, m
     expect(names).not.toContain("Lost Deal");       // moved into Lost (terminal)
     expect(names).not.toContain("Yesterday Move");  // prior day
   });
-  it("excludes moves made by a non-rep mover (service/admin account) or an inactive rep", async () => {
+  it("excludes moves made by a non-rep mover (service/admin account), an inactive rep, or a test-data rep", async () => {
     const adv = await readAdvancedToday(client(), "office_test", DATE);
     const names = adv.map((a) => a.dealName);
     expect(names).not.toContain("Sync Advanced");    // moved by REP_C (role=director, e.g. Migration Admin)
     expect(names).not.toContain("Inactive Mover");   // moved by REP_D (role=rep but is_active=false)
+    expect(names).not.toContain("Test User Mover");  // moved by REP_E (is_test_data=true)
+  });
+  it("filters the mover on the LATEST move: a rep advance followed by a non-rep move is excluded", async () => {
+    // "Rep then Sync": rep advance at 13:00, then a director (non-rep) move at 14:00. The latest move is
+    // the non-rep one, so the deal must NOT surface — the rep-scope check runs AFTER the latest row is
+    // chosen, never as a subquery filter that would resurface the older rep transition.
+    const adv = await readAdvancedToday(client(), "office_test", DATE);
+    expect(adv.map((a) => a.dealName)).not.toContain("Rep then Sync");
   });
 });
 
