@@ -136,6 +136,12 @@ describe("renderDailySummaryEmail", () => {
     expect(html).toContain("Adnaan"); // the mover is named on the row
   });
 
+  it("labels the leaderboard's trailing count column (not a bare unlabeled number)", () => {
+    const html = renderDailySummaryEmail(ACTIVE, PAGE_URL);
+    expect(html).toContain("Rep &middot; time &middot; activity"); // breakdown column header
+    expect(html).toMatch(/text-align:right[^>]*>Actions</); // the trailing count column is labeled "Actions"
+  });
+
   it("leaderboard shows the breakdown (the value), and enforces minutes/'—' (never 0m)", () => {
     const html = renderDailySummaryEmail(ACTIVE, PAGE_URL);
     expect(html).toContain("50 created"); // the breakdown IS the value, not a bar

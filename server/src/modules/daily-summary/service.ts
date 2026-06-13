@@ -249,6 +249,12 @@ export async function readWonToday(client: QueryClient, schema: string, date: st
  * - Attribute the row to the actual mover `sh.changed_by` (the same column that credits stage_moves in
  *   the usage breakdown), so the named Advanced rows agree with the "Who moved it" leaderboard — not the
  *   deal's current assignee.
+ * - Mover must be an ACTIVE, non-test REP: a stage move made by a service / migration / admin account
+ *   (e.g. "T Rock Migration Admin" doing HubSpot/bid-board sync advances) is automated, not sales
+ *   activity, and must not show as a "mover" — same rep population as the leaderboard and hourly chart.
+ *   This is computed as a FLAG in the subquery and filtered in the OUTER query (alongside terminal /
+ *   backward), AFTER DISTINCT ON has chosen the deal's true latest move — never as a subquery JOIN
+ *   filter, which would strip a later non-rep move and resurface an older rep move as a false advance.
  * - Reportable + non-test only, matching readWonToday, so test/on-hold noise can't reach leadership.
  */
 export async function readAdvancedToday(client: QueryClient, schema: string, date: string): Promise<AdvancedMove[]> {
@@ -262,6 +268,7 @@ export async function readAdvancedToday(client: QueryClient, schema: string, dat
                 fs.name AS from_stage, ts.name AS to_stage,
                 COALESCE(ts.is_terminal, false) AS to_terminal,
                 COALESCE(sh.is_backward_move, false) AS is_backward,
+                COALESCE(u.role = 'rep' AND u.is_active = true AND COALESCE(u.is_test_data, false) = false, false) AS mover_is_rep,
                 sh.created_at
            FROM ${schema}.deal_stage_history sh
            JOIN ${schema}.deals d ON sh.deal_id = d.id
@@ -276,6 +283,7 @@ export async function readAdvancedToday(client: QueryClient, schema: string, dat
        ) latest
       WHERE latest.to_terminal = false
         AND latest.is_backward = false
+        AND latest.mover_is_rep = true
       ORDER BY latest.created_at DESC`,
     [date],
   );

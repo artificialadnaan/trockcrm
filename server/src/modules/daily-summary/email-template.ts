@@ -113,19 +113,22 @@ function wonRows(won: WonDeal[]): string {
 function advancedRows(moves: DailySummaryPayload["advancedToday"]): string {
   if (moves.length === 0) return "";
   const shown = moves.slice(0, ADVANCED_EMAIL_CAP);
+  // Two-line stack per move: bold deal name on top, then "From → To · rep" at FULL width beneath — so a
+  // long stage phrase ("Estimate Sent to Client → Contract") never wraps mid-word against a cramped column.
   const rows = shown
     .map(
       (m) => `
       <tr>
-        <td style="padding:3px 8px 3px 0; font:13px Arial; color:${DARK}; white-space:nowrap;">&#9656; ${esc(m.dealName)}</td>
-        <td style="padding:3px 8px; font:13px Arial; color:${MUTE};">${esc(m.fromStage ?? "—")} &rarr; ${esc(m.toStage ?? "—")}</td>
-        <td style="padding:3px 0; font:13px Arial; color:${MUTE}; text-align:right;">${esc(m.repName)}</td>
+        <td style="padding:5px 0; border-bottom:1px solid #f1f5f9;">
+          <div style="font:bold 13px Arial; color:${DARK};">&#9656; ${esc(m.dealName)}</div>
+          <div style="font:12px Arial; color:${MUTE}; padding-top:1px;">${esc(m.fromStage ?? "—")} &rarr; ${esc(m.toStage ?? "—")} &middot; ${esc(m.repName)}</div>
+        </td>
       </tr>`,
     )
     .join("");
   const more =
     moves.length > ADVANCED_EMAIL_CAP
-      ? `<tr><td colspan="3" style="padding:4px 0 0; font:12px Arial; color:${RED};">+${moves.length - ADVANCED_EMAIL_CAP} more &rarr; full list on the page</td></tr>`
+      ? `<tr><td style="padding:5px 0 0; font:12px Arial; color:${RED};">+${moves.length - ADVANCED_EMAIL_CAP} more &rarr; full list on the page</td></tr>`
       : "";
   return `<table width="100%" cellpadding="0" cellspacing="0">${rows}${more}</table>`;
 }
@@ -135,7 +138,14 @@ function leaderRows(leaderboard: LeaderRow[]): string {
   if (top.length === 0) {
     return `<tr><td style="padding:8px 0; font:13px Arial; color:${MUTE};">Quiet day — no rep activity yet.</td></tr>`;
   }
-  return top
+  // Column header so the trailing count isn't a bare, unlabeled number to leadership.
+  const header = `
+      <tr>
+        <td></td>
+        <td style="font:bold 10px Arial; color:#94a3b8; text-transform:uppercase; letter-spacing:0.05em; padding-bottom:3px;">Rep &middot; time &middot; activity</td>
+        <td style="font:bold 10px Arial; color:#94a3b8; text-transform:uppercase; letter-spacing:0.05em; text-align:right; padding-bottom:3px;">Actions</td>
+      </tr>`;
+  return header + top
     .map(
       (r) => `
       <tr>

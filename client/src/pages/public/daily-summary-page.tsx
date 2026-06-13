@@ -97,11 +97,14 @@ export function DailySummaryPage() {
           {data.advancedToday.length ? (
             <table className="w-full text-sm">
               <tbody>
+                {/* Two-line stack: deal name, then "From → To · rep" at full width — the stage phrase
+                    gets room instead of wrapping mid-word in a cramped middle column. */}
                 {data.advancedToday.map((m, i) => (
                   <tr key={i} className="border-b border-slate-50 last:border-0">
-                    <td className="py-1.5 pr-3 text-slate-800 whitespace-nowrap">▸ {m.dealName}</td>
-                    <td className="py-1.5 px-3 text-slate-500">{m.fromStage ?? "—"} → {m.toStage ?? "—"}</td>
-                    <td className="py-1.5 text-right text-slate-500">{m.repName}</td>
+                    <td className="py-2">
+                      <div className="font-medium text-slate-800">▸ {m.dealName}</div>
+                      <div className="text-slate-500">{m.fromStage ?? "—"} → {m.toStage ?? "—"} · {m.repName}</div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
