@@ -33,6 +33,10 @@ const dialect = new PgDialect();
 // tenant-scoped enum. (Test-only allowlist — the value-fidelity guarantee that catches #674 holds
 // regardless of namespace; this only sharpens the type-relationship fidelity.)
 const TENANT_SCOPED_BARE_ENUMS = new Set<string>([
+  // activity_source_entity exists in BOTH public and office_* (migration 0021 creates it per-tenant
+  // with the tenant schema first in search_path, and activities.source_entity_type binds to that
+  // tenant copy — the public copy never retypes the column). So the column's true type is tenant-scoped.
+  "activity_source_entity",
   "company_industry",
   "contact_role",
   "deal_contact_role",
