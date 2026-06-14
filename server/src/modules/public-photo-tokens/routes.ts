@@ -116,6 +116,13 @@ publicPhotoViewerRoutes.get("/:token/photos/:photoId/download", async (req, res,
 publicPhotoViewerRoutes.get("/:token/photos/:photoId/image", async (req, res, next) => {
   try {
     const asset = await getPublicPhotoAsset(req.params.token, req.params.photoId);
+    // The public viewer page is served from a DIFFERENT origin than this API proxy (the frontend host /
+    // trockcam.com vs the API host), so the global helmet `Cross-Origin-Resource-Policy: same-origin` makes
+    // the browser block the cross-origin <img> (net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin). Relax CORP to
+    // cross-origin for this PUBLIC, already-exposure-locked asset only — identical bytes (deal number still
+    // hidden behind the proxy, EXIF still stripped); CORP governs who may embed, not what's served. The
+    // global same-origin default is untouched for every other route.
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
     if (asset.kind === "external") {
       res.redirect(302, asset.url);
       return;

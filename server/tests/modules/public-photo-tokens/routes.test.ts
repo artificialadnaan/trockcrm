@@ -1,7 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AppError } from "../../middleware/error-handler.js";
+import { AppError } from "../../../src/middleware/error-handler.js";
 
 const mocks = vi.hoisted(() => ({
   userRole: "admin",
@@ -41,12 +41,12 @@ const mocks = vi.hoisted(() => ({
   getDealById: vi.fn(),
 }));
 
-vi.mock("../../middleware/auth.js", () => ({ authMiddleware: mocks.authMiddleware }));
-vi.mock("../../middleware/field-auth.js", () => ({ requireCrmUser: mocks.requireCrmUser }));
-vi.mock("../../middleware/rbac.js", () => ({ requireAdmin: mocks.requireAdmin }));
-vi.mock("../../middleware/tenant.js", () => ({ tenantMiddleware: mocks.tenantMiddleware }));
-vi.mock("../deals/service.js", () => ({ getDealById: mocks.getDealById }));
-vi.mock("./service.js", () => ({
+vi.mock("../../../src/middleware/auth.js", () => ({ authMiddleware: mocks.authMiddleware }));
+vi.mock("../../../src/middleware/field-auth.js", () => ({ requireCrmUser: mocks.requireCrmUser }));
+vi.mock("../../../src/middleware/rbac.js", () => ({ requireAdmin: mocks.requireAdmin }));
+vi.mock("../../../src/middleware/tenant.js", () => ({ tenantMiddleware: mocks.tenantMiddleware }));
+vi.mock("../../../src/modules/deals/service.js", () => ({ getDealById: mocks.getDealById }));
+vi.mock("../../../src/modules/public-photo-tokens/service.js", () => ({
   generatePublicToken: mocks.generatePublicToken,
   getPublicPhotoViewer: mocks.getPublicPhotoViewer,
   getPublicPhotoDownload: mocks.getPublicPhotoDownload,
@@ -55,7 +55,7 @@ vi.mock("./service.js", () => ({
   revokeToken: mocks.revokeToken,
 }));
 
-import { adminPhotoTokenRoutes, publicPhotoViewerRoutes } from "./routes.js";
+import { adminPhotoTokenRoutes, publicPhotoViewerRoutes } from "../../../src/modules/public-photo-tokens/routes.js";
 
 // Collect a binary (image) response body into a Buffer for byte-level assertions.
 function binaryParser(res: any, cb: (err: Error | null, body: Buffer) => void) {
@@ -164,6 +164,9 @@ describe("public photo token routes", () => {
     expect(response.headers["content-type"]).toContain("image/jpeg");
     expect(response.headers["content-disposition"]).toContain("inline");
     expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    // Public viewer page is a different origin than this API proxy, so CORP must be cross-origin or the
+    // browser blocks the <img> (net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin). Regression guard.
+    expect(response.headers["cross-origin-resource-policy"]).toBe("cross-origin");
     expect(response.body.toString("latin1")).not.toContain("Exif");
     expect(response.body.toString("latin1")).not.toContain("GPSLatitude");
     expect(response.body.includes(Buffer.from([0x12, 0x34, 0x56]))).toBe(true); // image data preserved
@@ -191,6 +194,7 @@ describe("public photo token routes", () => {
 
     expect(response.status).toBe(302);
     expect(response.headers.location).toBe("https://img.companycam.com/full.jpg");
+    expect(response.headers["cross-origin-resource-policy"]).toBe("cross-origin");
   });
 
   it("returns 422 (not raw bytes) for a JPEG-labeled stream that ends before Start-Of-Scan", async () => {
