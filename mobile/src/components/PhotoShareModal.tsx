@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Image, Modal, Pressable, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../auth/AuthContext";
@@ -34,14 +34,22 @@ export function PhotoShareModal({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A successfully-minted link kept ONLY when the OS share sheet itself failed, so "Try again" can
+  // re-open the sheet with the same link instead of minting a fresh token.
+  const [retryLink, setRetryLink] = useState<{ url: string; photoCount: number } | null>(null);
+  // Monotonic id so a share that's in-flight when the user closes/cancels (or reopens) can detect it's
+  // been superseded and bail before opening the sheet or firing onShared.
+  const runIdRef = useRef(0);
 
   function reset() {
     setSelected(new Set());
     setBusy(false);
     setError(null);
+    setRetryLink(null);
   }
 
   function close() {
+    runIdRef.current += 1; // invalidate any in-flight share so it can't act after the picker closes
     reset();
     onClose();
   }
@@ -60,30 +68,60 @@ export function PhotoShareModal({
     setSelected(allSelected ? new Set() : new Set(photos.map((p) => p.id)));
   }
 
+  // Opens the OS share sheet for an already-minted link. Resolves true if shared, false if the user
+  // dismissed it; throws only if the sheet itself fails to present.
+  async function openShareSheet(url: string, photoCount: number): Promise<boolean> {
+    const result = await Share.share({ message: buildShareMessage(url, photoCount), url });
+    return result.action !== Share.dismissedAction;
+  }
+
   async function runShare() {
     if (selected.size === 0 || busy) return;
+    const myRun = (runIdRef.current += 1);
+    const isCurrent = () => runIdRef.current === myRun;
     setError(null);
+    setRetryLink(null);
     setBusy(true);
     try {
       const result = await shareProjectPhotos(fetcher, projectId, { photoIds: Array.from(selected) });
-      // Link is created. Open the OS share sheet; if that fails, surface the URL so it isn't lost.
+      if (!isCurrent()) return; // cancelled during the POST — drop the result silently
+      let shared: boolean;
       try {
-        const shareResult = await Share.share({ message: buildShareMessage(result.url, result.photoCount), url: result.url });
-        // User cancelled the sheet — the link exists, but don't claim success or close the picker.
-        if (shareResult.action === Share.dismissedAction) {
-          setBusy(false);
-          return;
-        }
+        shared = await openShareSheet(result.url, result.photoCount);
       } catch {
-        setError(`Link created — copy it to share: ${result.url}`);
+        if (!isCurrent()) return;
+        // Link minted but the sheet failed — keep it so the user can retry without re-minting.
+        setRetryLink({ url: result.url, photoCount: result.photoCount });
+        setError("Couldn't open the share sheet.");
         setBusy(false);
+        return;
+      }
+      if (!isCurrent()) return;
+      if (!shared) {
+        setBusy(false); // user dismissed the sheet
         return;
       }
       onShared?.(result.photoCount);
       close();
     } catch (e) {
+      if (!isCurrent()) return;
       setError(e instanceof Error ? e.message : "Couldn't create the share link.");
       setBusy(false);
+    }
+  }
+
+  async function runRetry() {
+    if (!retryLink) return;
+    const myRun = (runIdRef.current += 1);
+    const isCurrent = () => runIdRef.current === myRun;
+    try {
+      const shared = await openShareSheet(retryLink.url, retryLink.photoCount);
+      if (!isCurrent()) return;
+      if (!shared) return; // dismissed again — leave the retry banner up
+      onShared?.(retryLink.photoCount);
+      close();
+    } catch {
+      /* still failing — leave the retry banner for another attempt */
     }
   }
 
@@ -100,7 +138,7 @@ export function PhotoShareModal({
 
         {error ? (
           <View style={{ paddingHorizontal: theme.space.lg }}>
-            <Banner message={error} />
+            <Banner message={error} action={retryLink ? { label: "Try again", onPress: runRetry } : undefined} />
           </View>
         ) : null}
 
