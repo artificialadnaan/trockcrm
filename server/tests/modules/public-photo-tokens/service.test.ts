@@ -11,6 +11,7 @@ const getFileDownloadUrlMock = vi.hoisted(() => vi.fn());
 const logPhotoEventMock = vi.hoisted(() => vi.fn());
 const getObjectStreamMock = vi.hoisted(() => vi.fn());
 const getObjectBufferMock = vi.hoisted(() => vi.fn());
+const headObjectMock = vi.hoisted(() => vi.fn());
 
 const ASSET_BASE = "https://api.test/api/public/photo-viewer";
 
@@ -42,6 +43,7 @@ vi.mock("../../../src/modules/files/audit-log-service.js", () => ({
 vi.mock("../../../src/lib/r2-client.js", () => ({
   getObjectStream: getObjectStreamMock,
   getObjectBuffer: getObjectBufferMock,
+  headObject: headObjectMock,
 }));
 
 describe("public photo token service", () => {
@@ -57,6 +59,9 @@ describe("public photo token service", () => {
     logPhotoEventMock.mockReset();
     getObjectStreamMock.mockReset();
     getObjectBufferMock.mockReset();
+    headObjectMock.mockReset();
+    // Default: a small object so transcode tests pass the size gate (oversized test overrides).
+    headObjectMock.mockResolvedValue({ contentLength: 1024, contentType: "image/png" });
   });
 
   it("hashes public tokens before persistence and returns the raw token only once", async () => {
@@ -688,6 +693,21 @@ describe("public photo token service", () => {
 
     // The R2 fetch is outside the decode catch — a storage outage surfaces (->500), not a 404/422.
     await expect(getPublicPhotoAsset("raw-token", "photo-1")).rejects.toThrow("R2 unreachable");
+  });
+
+  it("422s (never buffers) when a non-JPEG original exceeds the transcode size cap", async () => {
+    const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", r2_key: "office_dallas/deals/TR-1/photos/huge.png", mime_type: "image/png", display_name: "x", file_extension: ".png", external_url: null }] })
+      .mockResolvedValueOnce({ rows: [] });
+    headObjectMock.mockResolvedValue({ contentLength: 200 * 1024 * 1024, contentType: "image/png" }); // 200 MB
+
+    await expect(getPublicPhotoAsset("raw-token", "photo-1")).rejects.toMatchObject({ statusCode: 422 });
+    expect(getObjectBufferMock).not.toHaveBeenCalled(); // gated by HEAD — the oversized object is never buffered
   });
 
   it("returns an external redirect target for CompanyCam photos without an R2 copy", async () => {

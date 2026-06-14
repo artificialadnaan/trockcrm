@@ -34,7 +34,11 @@ export function isTranscodableToJpeg(mimeType?: string | null, fileExtension?: s
  * original" — that is the whole point of the JPEG-only public surface.
  */
 export async function transcodeToStrippedJpeg(input: Buffer): Promise<Buffer> {
-  return sharp(input, { failOn: "none" })
+  // limitInputPixels caps the DECODED raster (a small highly-compressed file can decode to a
+  // gigapixel "pixel bomb"); ~50 MP covers any real photo (a 48 MP phone shot is 8000x6000) while
+  // bounding decode memory/CPU on this public, unauthenticated proxy. Pair with the byte-size gate in
+  // getPublicPhotoAsset, which bounds the INPUT buffer.
+  return sharp(input, { failOn: "none", limitInputPixels: 50_000_000 })
     .rotate()
     .jpeg({ quality: 82 })
     .toBuffer();
