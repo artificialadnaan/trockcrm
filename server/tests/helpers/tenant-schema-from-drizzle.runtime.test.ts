@@ -16,7 +16,7 @@ let db: PGlite;
 beforeAll(async () => {
   db = new PGlite();
   await db.exec(tenantSchemaSql("office_dallas", [activities, auditLog, usageDaily]));
-}, 30_000); // hook headroom for the Drizzle-derived schema build under parallel CI contention (Codex #715)
+}, 60_000); // hook headroom for the Drizzle-derived schema build under parallel CI contention (Codex #715)
 afterAll(async () => {
   await db?.close();
 });
@@ -61,7 +61,7 @@ describe("tenantSchemaSql — schema fidelity from Drizzle", () => {
     } finally {
       await ldb.close();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("round-trips array-typed column defaults: jsonb-array and text[] (renderDefault edge cases, #715)", async () => {
     // jsonb columns whose Drizzle default is a JS array must serialize as a JSON literal, NOT a PG
@@ -101,7 +101,7 @@ describe("tenantSchemaSql — schema fidelity from Drizzle", () => {
     } finally {
       await fdb.close();
     }
-  }, 30_000);
+  }, 60_000);
 
   it("reproduces NOT NULL constraints (audit_log.record_id is NOT NULL, as in prod)", async () => {
     await expect(

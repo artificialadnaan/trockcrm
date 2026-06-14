@@ -23,12 +23,31 @@ import type { PgTable } from "drizzle-orm/pg-core";
 const dialect = new PgDialect();
 
 // Enums that Drizzle declares as BARE pgEnums (unqualified, so `getSQLType()` can't tell us their
-// namespace) but that prod creates per-tenant-schema rather than in `public`. Verified against prod:
-// `lead_office` lives in each office_* schema, while the shared business enums (audit_action,
-// activity_type, contact_category, file_category, task_type, …) live in `public`. Any bare enum NOT
-// listed here defaults to `public`; an enum whose `getSQLType()` is already schema-qualified keeps
-// that schema verbatim. (Test-only; add to this set if a future tenant-scoped bare enum is needed.)
-const TENANT_SCOPED_BARE_ENUMS = new Set<string>(["lead_office"]);
+// namespace) but that prod creates per-tenant-schema rather than in `public`. Drizzle cannot
+// distinguish these from the public ones, so the set is sourced from prod: this is the EXACT set of
+// enum types that exist only in office_* schemas (not public), enumerated via
+//   SELECT typname, nspname FROM pg_type JOIN pg_namespace … JOIN pg_enum …
+// against the live DB (53 public-only, 14 tenant-only, 1 in both → activity_source_entity, which is
+// also in public so it correctly defaults there). Any bare enum NOT listed defaults to `public`; an
+// already-qualified `getSQLType()` keeps its schema verbatim. Re-run that query if migrations add a
+// tenant-scoped enum. (Test-only allowlist — the value-fidelity guarantee that catches #674 holds
+// regardless of namespace; this only sharpens the type-relationship fidelity.)
+const TENANT_SCOPED_BARE_ENUMS = new Set<string>([
+  "company_industry",
+  "contact_role",
+  "deal_contact_role",
+  "deal_scoping_intake_status",
+  "forecast_milestone_capture_source",
+  "forecast_milestone_key",
+  "lead_office",
+  "lead_scoping_intake_status",
+  "photo_address_source",
+  "photo_audit_event_type",
+  "photo_category",
+  "procore_photo_sync_status",
+  "property_type",
+  "workflow_route",
+]);
 
 /** True when a column default is a Drizzle SQL object (e.g. `sql\`gen_random_uuid()\``) rather than a
  *  plain JS literal — those carry a `queryChunks` array and must be rendered through the pg dialect. */
