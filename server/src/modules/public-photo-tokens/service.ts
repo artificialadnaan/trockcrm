@@ -8,7 +8,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
 import { latestActiveVersionCondition, type DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
-import { getObjectBuffer, getObjectStream, headObject } from "../../lib/r2-client.js";
+import { getObjectBuffer, getObjectStream, ObjectTooLargeError } from "../../lib/r2-client.js";
 import { isStrippableJpeg } from "./image-metadata.js";
 import { isTranscodableToJpeg, transcodeToStrippedJpeg } from "./image-transcode.js";
 
@@ -537,19 +537,16 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
     }
     if (isTranscodableToJpeg(photo.mime_type, photo.file_extension)) {
       // Re-encode the non-JPEG original to a metadata-free JPEG; NEVER stream the raw original (its
-      // EXIF/GPS can't be stripped by the JPEG-only stripper).
-      // Size-gate FIRST so we don't buffer an oversized object into memory (DoS guard). HEAD is cheap;
-      // it returns contentLength for any existing R2 object. (HEAD failure -> null -> fall through to
-      // the fetch, which surfaces a real R2 error as 500 rather than masking it.)
-      const head = await headObject(photo.r2_key);
-      if (head?.contentLength != null && head.contentLength > MAX_TRANSCODE_BYTES) {
-        throw new AppError(422, "Unprocessable image");
-      }
-      // The R2 fetch is OUTSIDE the decode catch so a storage/network outage surfaces (500), not a
-      // false 404/422. Backstop the size in case HEAD was unavailable/under-reported.
-      const { buffer } = await getObjectBuffer(photo.r2_key);
-      if (buffer.length > MAX_TRANSCODE_BYTES) {
-        throw new AppError(422, "Unprocessable image");
+      // EXIF/GPS can't be stripped by the JPEG-only stripper). getObjectBuffer enforces the size cap
+      // itself — it rejects on GET Content-Length and aborts the stream before over-accumulating — so an
+      // oversized object is NEVER fully buffered, even if HEAD/size metadata is unavailable (the DoS
+      // guard holds without a separate HEAD). A real R2/network outage propagates (->500), not masked.
+      let buffer: Buffer;
+      try {
+        ({ buffer } = await getObjectBuffer(photo.r2_key, { maxBytes: MAX_TRANSCODE_BYTES }));
+      } catch (err) {
+        if (err instanceof ObjectTooLargeError) throw new AppError(422, "Unprocessable image");
+        throw err;
       }
       // Only a decode failure (corrupt/unexpected bytes, or a pixel-bomb over limitInputPixels) is
       // mapped — to 422, mirroring the JPEG stripper — so we still never leak raw bytes.

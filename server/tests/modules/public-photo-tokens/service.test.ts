@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ObjectTooLargeError } from "../../../src/lib/r2-client.js";
 
 const executeMock = vi.hoisted(() => vi.fn());
 const queryMock = vi.hoisted(() => vi.fn());
@@ -11,7 +12,6 @@ const getFileDownloadUrlMock = vi.hoisted(() => vi.fn());
 const logPhotoEventMock = vi.hoisted(() => vi.fn());
 const getObjectStreamMock = vi.hoisted(() => vi.fn());
 const getObjectBufferMock = vi.hoisted(() => vi.fn());
-const headObjectMock = vi.hoisted(() => vi.fn());
 
 const ASSET_BASE = "https://api.test/api/public/photo-viewer";
 
@@ -40,10 +40,12 @@ vi.mock("../../../src/modules/files/audit-log-service.js", () => ({
   logPhotoEvent: logPhotoEventMock,
 }));
 
-vi.mock("../../../src/lib/r2-client.js", () => ({
+// Keep the real module (so ObjectTooLargeError is the SAME class the service does instanceof against),
+// overriding only the two R2 fetch fns.
+vi.mock("../../../src/lib/r2-client.js", async (importActual) => ({
+  ...(await importActual<typeof import("../../../src/lib/r2-client.js")>()),
   getObjectStream: getObjectStreamMock,
   getObjectBuffer: getObjectBufferMock,
-  headObject: headObjectMock,
 }));
 
 describe("public photo token service", () => {
@@ -59,9 +61,6 @@ describe("public photo token service", () => {
     logPhotoEventMock.mockReset();
     getObjectStreamMock.mockReset();
     getObjectBufferMock.mockReset();
-    headObjectMock.mockReset();
-    // Default: a small object so transcode tests pass the size gate (oversized test overrides).
-    headObjectMock.mockResolvedValue({ contentLength: 1024, contentType: "image/png" });
   });
 
   it("hashes public tokens before persistence and returns the raw token only once", async () => {
@@ -700,7 +699,10 @@ describe("public photo token service", () => {
       expect(asset.buffer.subarray(0, 8).equals(PNG_1X1.subarray(0, 8))).toBe(false);
       expect(asset.buffer.toString("latin1")).not.toContain("Exif");
     }
-    expect(getObjectBufferMock).toHaveBeenCalledWith("office_dallas/deals/TR-1/photos/shot.png");
+    expect(getObjectBufferMock).toHaveBeenCalledWith(
+      "office_dallas/deals/TR-1/photos/shot.png",
+      expect.objectContaining({ maxBytes: 40 * 1024 * 1024 }),
+    );
     expect(getObjectStreamMock).not.toHaveBeenCalled(); // raw original never streamed
   });
 
@@ -743,10 +745,15 @@ describe("public photo token service", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: "photo-1", r2_key: "office_dallas/deals/TR-1/photos/huge.png", mime_type: "image/png", display_name: "x", file_extension: ".png", external_url: null }] })
       .mockResolvedValueOnce({ rows: [] });
-    headObjectMock.mockResolvedValue({ contentLength: 200 * 1024 * 1024, contentType: "image/png" }); // 200 MB
+    // getObjectBuffer enforces the cap itself (GET Content-Length + streaming abort) and throws
+    // ObjectTooLargeError — so an oversized object is never fully buffered, even when HEAD is unavailable.
+    getObjectBufferMock.mockRejectedValue(new ObjectTooLargeError("office_dallas/deals/TR-1/photos/huge.png", 40 * 1024 * 1024));
 
     await expect(getPublicPhotoAsset("raw-token", "photo-1")).rejects.toMatchObject({ statusCode: 422 });
-    expect(getObjectBufferMock).not.toHaveBeenCalled(); // gated by HEAD — the oversized object is never buffered
+    expect(getObjectBufferMock).toHaveBeenCalledWith(
+      "office_dallas/deals/TR-1/photos/huge.png",
+      expect.objectContaining({ maxBytes: 40 * 1024 * 1024 }),
+    );
   });
 
   it("returns an external redirect target for CompanyCam photos without an R2 copy", async () => {
