@@ -660,7 +660,7 @@ describe("public photo token service", () => {
     expect(getObjectStreamMock).not.toHaveBeenCalled(); // raw original never streamed
   });
 
-  it("404s (never serves raw) when a non-JPEG transcode fails to decode", async () => {
+  it("422s (never serves raw) when a non-JPEG DECODE fails", async () => {
     const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1" }] });
     queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
@@ -671,7 +671,23 @@ describe("public photo token service", () => {
       .mockResolvedValueOnce({ rows: [] });
     getObjectBufferMock.mockResolvedValue({ buffer: Buffer.from("not-a-real-image"), contentType: "image/webp" });
 
-    await expect(getPublicPhotoAsset("raw-token", "photo-1")).rejects.toMatchObject({ statusCode: 404 });
+    // Decode failure -> 422 (unprocessable), mirroring the JPEG stripper; never the raw original.
+    await expect(getPublicPhotoAsset("raw-token", "photo-1")).rejects.toMatchObject({ statusCode: 422 });
+  });
+
+  it("propagates an R2 fetch failure as a real error (NOT a false 404) so outages aren't masked", async () => {
+    const { getPublicPhotoAsset } = await import("../../../src/modules/public-photo-tokens/service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", r2_key: "office_dallas/deals/TR-1/photos/shot.png", mime_type: "image/png", display_name: "x", file_extension: ".png", external_url: null }] })
+      .mockResolvedValueOnce({ rows: [] });
+    getObjectBufferMock.mockRejectedValue(new Error("R2 unreachable"));
+
+    // The R2 fetch is outside the decode catch — a storage outage surfaces (->500), not a 404/422.
+    await expect(getPublicPhotoAsset("raw-token", "photo-1")).rejects.toThrow("R2 unreachable");
   });
 
   it("returns an external redirect target for CompanyCam photos without an R2 copy", async () => {

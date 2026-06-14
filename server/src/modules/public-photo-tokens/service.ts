@@ -15,7 +15,7 @@ import { isTranscodableToJpeg, transcodeToStrippedJpeg } from "./image-transcode
 type TenantDb = NodePgDatabase<typeof schema>;
 
 const PUBLIC_TOKEN_BYTES = 32;
-const IMAGE_EXTENSIONS = new Set([".avif", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".webp"]);
+const IMAGE_EXTENSIONS = new Set([".avif", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
 
 export type PublicTokenStatus = "active" | "expired" | "revoked";
 
@@ -515,15 +515,18 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
     }
     if (isTranscodableToJpeg(photo.mime_type, photo.file_extension)) {
       // Re-encode the non-JPEG original to a metadata-free JPEG; NEVER stream the raw original (its
-      // EXIF/GPS can't be stripped by the JPEG-only stripper). If decoding fails (corrupt object, or
-      // an unexpectedly-undecodable format), 404 rather than leak raw bytes.
+      // EXIF/GPS can't be stripped by the JPEG-only stripper). The R2 fetch is OUTSIDE the catch so a
+      // storage/network outage surfaces as a real error (500), not a false 404; only a decode failure
+      // (corrupt/unexpected bytes) is mapped — to 422, mirroring the JPEG stripper — so we still never
+      // leak raw bytes.
+      const { buffer } = await getObjectBuffer(photo.r2_key);
+      let jpeg: Buffer;
       try {
-        const { buffer } = await getObjectBuffer(photo.r2_key);
-        const jpeg = await transcodeToStrippedJpeg(buffer);
-        return { kind: "jpeg-buffer", buffer: jpeg, contentType: "image/jpeg", filename: "photo.jpg" };
+        jpeg = await transcodeToStrippedJpeg(buffer);
       } catch {
-        throw new AppError(404, "Photo not found");
+        throw new AppError(422, "Unprocessable image");
       }
+      return { kind: "jpeg-buffer", buffer: jpeg, contentType: "image/jpeg", filename: "photo.jpg" };
     }
     throw new AppError(404, "Photo not found"); // un-decodable (HEIC/HEIF) — never served raw
   }
