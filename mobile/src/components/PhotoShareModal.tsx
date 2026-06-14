@@ -171,7 +171,7 @@ export function PhotoShareModal({
         <ScrollView contentContainerStyle={styles.body}>
           <View style={styles.rowBetween}>
             <SectionLabel>{selected.size} selected{atCap ? ` · max ${MAX_SHARE_PHOTOS}` : ""}</SectionLabel>
-            <Pressable onPress={toggleAll} hitSlop={8}>
+            <Pressable onPress={toggleAll} hitSlop={8} disabled={busy}>
               <Text style={styles.link}>{allSelected ? "Clear all" : "Select all"}</Text>
             </Pressable>
           </View>
@@ -186,7 +186,8 @@ export function PhotoShareModal({
                 <Pressable
                   key={photo.id}
                   onPress={() => toggle(photo.id)}
-                  style={{ width: cell, height: cell }}
+                  disabled={busy}
+                  style={[{ width: cell, height: cell }, busy && { opacity: 0.6 }]}
                   accessibilityRole="button"
                   accessibilityState={{ selected: isSelected }}
                   accessibilityLabel={`${isSelected ? "Selected" : "Select"} ${photo.displayName || "photo"}`}

@@ -71,7 +71,7 @@ export default function ProjectDetailScreen() {
   const [viewer, setViewer] = useState<{ photos: FieldPhoto[]; index: number } | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
   const availableTags = useMemo(() => tagsOf(allPhotos), [allPhotos]);
   const availableUploaders = useMemo(() => uploadersOf(allPhotos), [allPhotos]);
@@ -102,7 +102,7 @@ export default function ProjectDetailScreen() {
       const { url } = await getReportDownload(fetcher, reportId);
       await Linking.openURL(url);
     } catch {
-      setNotice("Couldn't open that report.");
+      setNotice({ message: "Couldn't open that report.", tone: "error" });
     }
   }
 
@@ -181,7 +181,7 @@ export default function ProjectDetailScreen() {
           />
         ) : null}
 
-        {notice ? <Banner message={notice} /> : null}
+        {notice ? <Banner message={notice.message} tone={notice.tone} /> : null}
 
         {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
         {allPhotos.length > 0 ? (
@@ -304,7 +304,7 @@ export default function ProjectDetailScreen() {
         projectId={dealId}
         photos={filtered}
         onGenerated={(report) => {
-          setNotice(`Report "${report.title}" generated.`);
+          setNotice({ message: `Report "${report.title}" generated.`, tone: "success" });
           void reportsQuery.refetch();
           if (report.pdfUrl) void Linking.openURL(report.pdfUrl);
         }}
@@ -315,7 +315,7 @@ export default function ProjectDetailScreen() {
         onClose={() => setShareOpen(false)}
         projectId={dealId}
         photos={filtered}
-        onShared={(n) => setNotice(`Share link created for ${n} photo${n === 1 ? "" : "s"} — expires in 7 days.`)}
+        onShared={(n) => setNotice({ message: `Share link created for ${n} photo${n === 1 ? "" : "s"} — expires in 7 days.`, tone: "success" })}
       />
     </SafeAreaView>
   );
