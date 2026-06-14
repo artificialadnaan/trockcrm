@@ -5,7 +5,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ACTIVITY_TYPES, AUDIT_ACTIONS } from "@trock-crm/shared/types";
-import { activities, auditLog, usageDaily } from "@trock-crm/shared/schema";
+import { activities, auditLog, files, leads, pipelineStageConfig, usageDaily } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "./tenant-schema-from-drizzle.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -41,6 +41,67 @@ describe("tenantSchemaSql — schema fidelity from Drizzle", () => {
     );
     expect(rows.map((r) => r.enumlabel)).toEqual([...AUDIT_ACTIONS]);
   });
+
+  it("places a tenant-scoped enum (lead_office) in the tenant schema, not public (Codex/CodeRabbit #715)", async () => {
+    // Prod-verified: lead_office lives per office_* schema, while audit_action lives in public. The
+    // helper must NOT collapse both into one shared public type. Build the leads table (uses
+    // lead_office) in a fresh DB and confirm lead_office landed in office_dallas, audit_action in public.
+    const ldb = new PGlite();
+    try {
+      await ldb.exec(tenantSchemaSql("office_dallas", [leads, auditLog]));
+      const ns = async (typname: string) =>
+        (
+          await ldb.query<{ nspname: string }>(
+            `SELECT n.nspname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = $1`,
+            [typname],
+          )
+        ).rows.map((r) => r.nspname);
+      expect(await ns("lead_office")).toEqual(["office_dallas"]);
+      expect(await ns("audit_action")).toEqual(["public"]);
+    } finally {
+      await ldb.close();
+    }
+  }, 30_000);
+
+  it("round-trips array-typed column defaults: jsonb-array and text[] (renderDefault edge cases, #715)", async () => {
+    // jsonb columns whose Drizzle default is a JS array must serialize as a JSON literal, NOT a PG
+    // array literal — the exact bug that surfaced building this helper. pipeline_stage_config has both
+    // an empty jsonb-array default (required_fields) and an array-of-objects one (stale_escalation_tiers).
+    const pdb = new PGlite();
+    try {
+      await pdb.exec(tenantSchemaSql("public", [pipelineStageConfig]));
+      await pdb.exec(
+        `INSERT INTO public.pipeline_stage_config (id, name, slug, display_order)
+         VALUES (gen_random_uuid(), 'Opportunity', 'opportunity', 1)`,
+      );
+      const { rows } = await pdb.query<{ required_fields: unknown; stale_escalation_tiers: unknown }>(
+        `SELECT required_fields, stale_escalation_tiers FROM public.pipeline_stage_config`,
+      );
+      expect(rows[0].required_fields).toEqual([]); // jsonb default []
+      expect(rows[0].stale_escalation_tiers).toEqual([
+        { days: 30, severity: "warning" },
+        { days: 60, severity: "escalation" },
+        { days: 90, severity: "critical" },
+      ]); // jsonb array-of-objects default
+    } finally {
+      await pdb.close();
+    }
+
+    // text[] default must serialize as a PG array literal '{}', NOT JSON '[]'.
+    const fdb = new PGlite();
+    try {
+      await fdb.exec(tenantSchemaSql("office_dallas", [files]));
+      await fdb.exec(
+        `INSERT INTO office_dallas.files
+         (id, category, display_name, system_filename, original_filename, mime_type, file_size_bytes, file_extension, r2_key, r2_bucket, uploaded_by)
+         VALUES (gen_random_uuid(), 'photo', 'p.jpg', 's.jpg', 'IMG.jpg', 'image/jpeg', 1, 'jpg', 'k', 'b', '${REP}')`,
+      );
+      const { rows } = await fdb.query<{ tags: unknown }>(`SELECT tags FROM office_dallas.files`);
+      expect(rows[0].tags).toEqual([]); // text[] default []
+    } finally {
+      await fdb.close();
+    }
+  }, 30_000);
 
   it("reproduces NOT NULL constraints (audit_log.record_id is NOT NULL, as in prod)", async () => {
     await expect(

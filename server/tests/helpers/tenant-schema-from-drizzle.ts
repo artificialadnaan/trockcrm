@@ -13,13 +13,22 @@
 // Scope (deliberate): column TYPES, enum value sets, NOT NULL, column defaults and PRIMARY KEYs are
 // reproduced verbatim. FOREIGN KEYS and INDEXES are intentionally omitted — test tables are islands
 // (we don't stand up the users/companies/deals graph just to insert a usage row), and types are what
-// caused the bugs. Enum types are created in `public` (their prod namespace — verified: audit_action,
-// activity_type et al. live in public, not the tenant schema) and referenced as public."<enum>".
+// caused the bugs. Enum types are created in their PROD namespace: shared business enums (audit_action,
+// activity_type, …) in `public`, genuinely tenant-scoped ones (lead_office) in the tenant schema — see
+// TENANT_SCOPED_BARE_ENUMS — so the type relationship matches prod rather than collapsing both.
 
 import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import type { PgTable } from "drizzle-orm/pg-core";
 
 const dialect = new PgDialect();
+
+// Enums that Drizzle declares as BARE pgEnums (unqualified, so `getSQLType()` can't tell us their
+// namespace) but that prod creates per-tenant-schema rather than in `public`. Verified against prod:
+// `lead_office` lives in each office_* schema, while the shared business enums (audit_action,
+// activity_type, contact_category, file_category, task_type, …) live in `public`. Any bare enum NOT
+// listed here defaults to `public`; an enum whose `getSQLType()` is already schema-qualified keeps
+// that schema verbatim. (Test-only; add to this set if a future tenant-scoped bare enum is needed.)
+const TENANT_SCOPED_BARE_ENUMS = new Set<string>(["lead_office"]);
 
 /** True when a column default is a Drizzle SQL object (e.g. `sql\`gen_random_uuid()\``) rather than a
  *  plain JS literal — those carry a `queryChunks` array and must be rendered through the pg dialect. */
@@ -57,7 +66,8 @@ function renderDefault(column: ReturnType<typeof getTableConfig>["columns"][numb
  * with "public" for cross-schema tables like pipeline_stage_config).
  */
 export function tenantSchemaSql(schemaName: string, tables: readonly PgTable[]): string {
-  const enums = new Map<string, readonly string[]>(); // enum SQL name -> values, deduped across tables
+  // enum key "schema.name" -> {schema, name, values}, deduped across tables/columns.
+  const enums = new Map<string, { schema: string; name: string; values: readonly string[] }>();
   const tableDDL: string[] = [];
 
   for (const table of tables) {
@@ -66,16 +76,20 @@ export function tenantSchemaSql(schemaName: string, tables: readonly PgTable[]):
 
     for (const column of cfg.columns) {
       let sqlType = column.getSQLType();
-      // Enum columns: in prod the shared business enums live in `public` (e.g. public.audit_action,
-      // public.activity_type — verified against office_dallas), NOT the tenant schema, so create and
-      // reference them there to preserve the production type namespace. getSQLType() returns either a
-      // bare name or an already-qualified "schema.name"; normalize to the bare name. (The rare
-      // genuinely-per-office enum like lead_office also lands in public here — a minor, functionally
-      // inert divergence, since value enforcement is identical regardless of namespace.)
+      // Enum columns: create+reference each enum in its PROD namespace so the type relationship matches
+      // prod. If getSQLType() is already schema-qualified ("public.workflow_family"), keep that schema.
+      // If it's bare, default to `public` (where the shared business enums live) unless it's a known
+      // tenant-scoped enum, which goes in this tenant's schema. (See TENANT_SCOPED_BARE_ENUMS.)
       if (column.enumValues && column.enumValues.length > 0) {
-        const bareName = sqlType.includes(".") ? sqlType.split(".").pop()!.replace(/"/g, "") : sqlType;
-        enums.set(bareName, column.enumValues);
-        sqlType = `public."${bareName}"`;
+        const qualified = sqlType.includes(".");
+        const enumName = (qualified ? sqlType.split(".").pop()! : sqlType).replace(/"/g, "");
+        const enumSchema = qualified
+          ? sqlType.split(".", 1)[0].replace(/"/g, "")
+          : TENANT_SCOPED_BARE_ENUMS.has(enumName)
+            ? schemaName
+            : "public";
+        enums.set(`${enumSchema}.${enumName}`, { schema: enumSchema, name: enumName, values: column.enumValues });
+        sqlType = `"${enumSchema}"."${enumName}"`;
       }
       const notNull = column.notNull ? " NOT NULL" : "";
       colDDL.push(`"${column.name}" ${sqlType}${notNull}${renderDefault(column)}`);
@@ -90,11 +104,11 @@ export function tenantSchemaSql(schemaName: string, tables: readonly PgTable[]):
     tableDDL.push(`CREATE TABLE ${schemaName}."${cfg.name}" (\n  ${colDDL.join(",\n  ")}\n);`);
   }
 
-  // Enums are created in `public` (prod namespace) and guarded against duplicate_object so multiple
-  // per-schema calls (office_dallas, office_atlanta, …) can each request the same shared enum.
-  const enumDDL = [...enums].map(
-    ([name, values]) =>
-      `DO $$ BEGIN CREATE TYPE public."${name}" AS ENUM (${values
+  // Each enum created in its resolved namespace, guarded against duplicate_object so multiple per-schema
+  // calls (office_dallas, office_atlanta, …) can each request the same shared `public` enum.
+  const enumDDL = [...enums.values()].map(
+    ({ schema, name, values }) =>
+      `DO $$ BEGIN CREATE TYPE "${schema}"."${name}" AS ENUM (${values
         .map((v) => `'${v.replace(/'/g, "''")}'`)
         .join(", ")}); EXCEPTION WHEN duplicate_object THEN null; END $$;`,
   );
