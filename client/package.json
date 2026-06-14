@@ -10,6 +10,8 @@
     "start": "npx serve dist -s -l 3000",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:runtime": "vitest run runtime.test --passWithNoTests=false",
     "test:e2e": "playwright test -c ../playwright.config.ts"
   },
   "dependencies": {

@@ -202,6 +202,40 @@ export function buildAliasedDealMineVisibilityCondition(
   )`;
 }
 
+// The "Watched" scope predicate = the deal_subscriptions EXISTS clause IN ISOLATION (NOT a 4th OR-arm
+// on the Mine builder: Mine's assigned_rep + activity clauses are unconditional, so reusing it would
+// over-broaden Watched). Mirrors the subscription clause used by buildDealMineVisibilityCondition.
+export function buildDealWatchedCondition(
+  userId: string,
+  options: { includeSubscriptionDeletedAt?: boolean } = {}
+) {
+  const deals = requireSchemaValue(schema.deals, "deals");
+  const dealSubscriptions = requireSchemaValue(schema.dealSubscriptions, "dealSubscriptions");
+  return sql`exists (
+    select 1
+    from ${dealSubscriptions} ds
+    where ds.deal_id = ${deals.id}
+      and ds.user_id = ${userId}
+      ${options.includeSubscriptionDeletedAt === false ? sql`` : sql`and ds.deleted_at is null`}
+  )`;
+}
+
+export function buildAliasedDealWatchedCondition(
+  alias: string,
+  userId: string,
+  options: { includeSubscriptionDeletedAt?: boolean } = {}
+) {
+  const recordAlias = sqlIdentifier(alias);
+  const dealSubscriptions = requireSchemaValue(schema.dealSubscriptions, "dealSubscriptions");
+  return sql`exists (
+    select 1
+    from ${dealSubscriptions} ds
+    where ds.deal_id = ${recordAlias}.id
+      and ds.user_id = ${userId}
+      ${options.includeSubscriptionDeletedAt === false ? sql`` : sql`and ds.deleted_at is null`}
+  )`;
+}
+
 export function buildLeadMineVisibilityCondition(
   userId: string,
   options: MineVisibilityOptions = {}

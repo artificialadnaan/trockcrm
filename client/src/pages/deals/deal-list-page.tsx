@@ -42,6 +42,7 @@ import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-p
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
   { value: "all", label: "All" },
+  { value: "watched", label: "Watched" },
 ] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
 const SLA_DRILLDOWN_PREVIEW_LIMIT = 1000;
@@ -443,7 +444,7 @@ export function getDashboardDealListView(input: {
 function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
   void role;
   const scope = searchParams.get("scope");
-  if (scope === "mine" || scope === "team" || scope === "all") return scope;
+  if (scope === "mine" || scope === "team" || scope === "all" || scope === "watched") return scope;
   return "mine";
 }
 

@@ -26,7 +26,7 @@
     "typecheck:tests:all": "npm run typecheck:tests --workspaces --if-present",
     "check:premerge": "npm run build && npm run typecheck:tests:all && npm run test:runtime",
     "test": "npm run test --workspace=server",
-    "test:runtime": "npm run test:runtime --workspace=server",
+    "test:runtime": "npm run test:runtime --workspaces --if-present",
     "validate:admin-users-volume": "node scripts/playwright-admin-users-volume-validation.mjs",
     "script": "node --import tsx scripts/run-script.ts",
     "seed:policy-recommendation-qualification": "node --import tsx scripts/seed-intervention-policy-recommendation-qualification.ts",

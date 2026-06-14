@@ -117,10 +117,10 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
 }
 
 function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
-  const scope = normalizeCollaborativeScope(
-    req.user!.role,
-    req.query.scope as "mine" | "team" | "all" | undefined
-  );
+  // Route the board/stage scope through readListScope (unknown — incl. the deals-only "watched" from
+  // the shared per-user scope preference — coerces to "mine"), so leads can never silent-ALL via the
+  // no-else service scope branch. Leads has no "watched" filter in v1; it is contained to deals.
+  const scope = normalizeCollaborativeScope(req.user!.role, readListScope(req.query.scope));
   return {
     role: getCollaborativeReadRole(req.user!.role, scope),
     userId: req.user!.id,
@@ -147,7 +147,9 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
   };
 }
 
-function readListScope(value: unknown): "mine" | "team" | "all" {
+// Exported for the watched-scope test. Leads has NO "watched" scope — an unknown value (incl. the
+// deals-only "watched" from the shared scope preference) coerces to "mine", containing watched to deals.
+export function readListScope(value: unknown): "mine" | "team" | "all" {
   return value === "mine" || value === "team" || value === "all" ? value : "mine";
 }
 

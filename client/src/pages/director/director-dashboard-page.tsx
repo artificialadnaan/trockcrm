@@ -35,7 +35,7 @@ import { DIRECTOR_DASHBOARD_ACTIONS } from "@/lib/director-dashboard-actions";
 import { getWorkflowRouteLabel } from "@/lib/pipeline-ownership";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { useAuth } from "@/lib/auth";
-import type { PipelineScope } from "@/lib/pipeline-scope";
+import { containNonDealsScope, type PipelineScope } from "@/lib/pipeline-scope";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 import { periodRevenueTarget, periodExpectedToDate, derivePace } from "@/lib/revenue-goal";
 
@@ -459,7 +459,9 @@ export function DirectorDashboardPage() {
   // resolvePreferredScope validates against the shared PipelineScope union (which
   // still includes "team"), so a stored or URL ?scope=team can slip through. Team
   // is not offered on this dashboard -> coerce it to a scope we actually render.
-  const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
+  // The director dashboard offers Mine|All only; coerce the parked "team" and the deals-only "watched"
+  // (carried via the shared per-user scope preference) to "mine".
+  const scope = containNonDealsScope(requestedScope);
   const updateScope = (nextScope: PipelineScope) => {
     writeStoredScopePreference(user?.id, nextScope);
     const next = new URLSearchParams(searchParams);

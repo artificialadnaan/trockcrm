@@ -47,6 +47,8 @@ import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-sc
 import {
   buildAliasedDealMineVisibilityCondition,
   buildDealMineVisibilityCondition,
+  buildAliasedDealWatchedCondition,
+  buildDealWatchedCondition,
   resolveMineVisibilityFeatures,
 } from "../shared/mine-visibility.js";
 import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
@@ -729,7 +731,7 @@ function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
 }
 
-type WorkspaceScope = "mine" | "team" | "all";
+type WorkspaceScope = "mine" | "team" | "all" | "watched";
 
 export interface DealBoardInput {
   role: string;
@@ -1259,7 +1261,10 @@ async function buildDealWorkspaceScope(
     filters.push(...terminalDateConditions);
   }
 
-  const mineVisibility = input.scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
+  const mineVisibility =
+    input.scope === "mine" || input.scope === "watched"
+      ? await resolveMineVisibilityFeatures(tenantDb)
+      : null;
 
   if (input.scope === "mine") {
     filters.push(
@@ -1268,6 +1273,16 @@ async function buildDealWorkspaceScope(
         includeCreatedBy: mineVisibility?.dealsCreatedByUserId,
         includeSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
       })
+    );
+  } else if (input.scope === "watched") {
+    // Watched = the deal_subscriptions relation in isolation. Capability-gate: an office without the
+    // table degrades to an empty result (false) — never coerced to Mine, never falling through to All.
+    filters.push(
+      mineVisibility?.dealSubscriptions
+        ? buildAliasedDealWatchedCondition("d", input.userId, {
+            includeSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
+          })
+        : sql`false`
     );
   } else if (input.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
@@ -1539,7 +1554,8 @@ export async function getDeals(
 
   conditions.push(excludeTestDataCondition("deals"));
 
-  const mineVisibility = scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
+  const mineVisibility =
+    scope === "mine" || scope === "watched" ? await resolveMineVisibilityFeatures(tenantDb) : null;
 
   if (scope === "mine") {
     conditions.push(
@@ -1548,6 +1564,15 @@ export async function getDeals(
         includeCreatedBy: mineVisibility?.dealsCreatedByUserId,
         includeSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
       })
+    );
+  } else if (scope === "watched") {
+    // Watched = the deal_subscriptions relation in isolation; capability-gate to empty when absent.
+    conditions.push(
+      mineVisibility?.dealSubscriptions
+        ? buildDealWatchedCondition(userId, {
+            includeSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
+          })
+        : sql`false`
     );
   } else if (scope === "team") {
     const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
@@ -2702,7 +2727,10 @@ export async function getDealsForPipeline(
   );
 
   const commonConditions: any[] = [];
-  const mineVisibility = filters?.scope === "mine" ? await resolveMineVisibilityFeatures(tenantDb) : null;
+  const mineVisibility =
+    filters?.scope === "mine" || filters?.scope === "watched"
+      ? await resolveMineVisibilityFeatures(tenantDb)
+      : null;
   let assignedRepFilterHandled = false;
 
   if (filters?.scope === "mine") {
@@ -2712,6 +2740,16 @@ export async function getDealsForPipeline(
         includeCreatedBy: mineVisibility?.dealsCreatedByUserId,
         includeSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
       })
+    );
+  } else if (filters?.scope === "watched") {
+    // Watched = the deal_subscriptions relation in isolation; capability-gate to empty when absent.
+    // Do NOT set assignedRepFilterHandled (mirrors Mine) so a per-stage assignedRep narrowing applies.
+    commonConditions.push(
+      mineVisibility?.dealSubscriptions
+        ? buildDealWatchedCondition(userId, {
+            includeSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
+          })
+        : sql`false`
     );
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);

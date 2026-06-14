@@ -72,7 +72,7 @@ export type DealListSortState = {
 type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
-  scope?: "mine" | "team" | "all";
+  scope?: "mine" | "team" | "all" | "watched";
   workflowFamily?: Parameters<typeof usePipelineStages>[0];
   enableDateFilter?: boolean;
   enableExport?: boolean;
@@ -177,6 +177,20 @@ export function dateRangeFromTerminalFilter(filter: TerminalDateFilter) {
     return toDatePresetRange(filter.preset);
   }
   return { from: daysAgo(Number(filter.preset)) };
+}
+
+// The Watched-scope empty state, extracted as a presentational component so it can be rendered in
+// isolation by a runtime test. Neutral "…here" copy: this list also mounts under a stage/drill-down
+// filter where the watched set may be non-empty overall, so it must not claim the user watches nothing.
+export function WatchedDealsEmptyState() {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-8 text-center" aria-label="No watched deals">
+      <p className="text-sm font-semibold text-slate-700">No watched deals to show here</p>
+      <p className="mt-1 text-sm text-slate-500">
+        Watch a deal from its detail page (tap <span className="font-medium">&quot;Watch this deal&quot;</span>) to add it to this list.
+      </p>
+    </div>
+  );
 }
 
 function formatShortDate(value: string | null | undefined) {
@@ -497,7 +511,7 @@ export function buildDealListParams(input: {
   sort: DealListSortState;
   page: number;
   limit: number;
-  scope?: "mine" | "team" | "all";
+  scope?: "mine" | "team" | "all" | "watched";
   dateField?: "updated" | "created" | "outcome";
 }) {
   const params = new URLSearchParams();
@@ -562,7 +576,7 @@ export async function fetchAllFilteredDeals(input: {
   dateTo?: string;
   isActive: DealListActiveFilter;
   sort: DealListSortState;
-  scope?: "mine" | "team" | "all";
+  scope?: "mine" | "team" | "all" | "watched";
   apiClient?: typeof api;
   dateField?: "updated" | "created" | "outcome";
 }) {
@@ -1379,6 +1393,8 @@ export function DealsListSection({
           <div className="rounded-lg border border-slate-200 bg-white p-6 text-sm font-semibold text-slate-500">
             Loading deals...
           </div>
+        ) : scope === "watched" && deals.length === 0 ? (
+          <WatchedDealsEmptyState />
         ) : (
           <>
             <div className="space-y-3 md:hidden" aria-label="Deals list cards">
