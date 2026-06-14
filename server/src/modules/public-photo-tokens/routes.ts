@@ -132,6 +132,12 @@ publicPhotoViewerRoutes.get("/:token/photos/:photoId/image", async (req, res, ne
     res.setHeader("Content-Disposition", `${disposition}; filename="${sanitizeFilename(asset.filename)}"`);
     res.setHeader("Cache-Control", "private, max-age=300");
     res.setHeader("X-Content-Type-Options", "nosniff");
+    if (asset.kind === "jpeg-buffer") {
+      // Already a freshly re-encoded, metadata-free JPEG (sharp transcode) — send as-is. No
+      // pipeStrippedJpeg needed (it's emitted clean, not streamed from a raw original).
+      res.end(asset.buffer);
+      return;
+    }
     await pipeStrippedJpeg(asset.stream, res);
   } catch (err) {
     // If we've already started streaming bytes, we can't change the status — just abort the response.

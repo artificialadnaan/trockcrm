@@ -173,6 +173,24 @@ describe("public photo token routes", () => {
     expect(mocks.getPublicPhotoAsset).toHaveBeenCalledWith("raw-token", "photo-1");
   });
 
+  it("sends a transcoded jpeg-buffer asset as-is (non-JPEG original re-encoded), with image/jpeg + CORP", async () => {
+    // A clean, already-stripped JPEG buffer (sharp output) — the route must send it directly, not
+    // run it back through the streaming stripper.
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0xff, 0xd9]);
+    mocks.getPublicPhotoAsset.mockResolvedValueOnce({ kind: "jpeg-buffer", buffer: jpeg, contentType: "image/jpeg", filename: "photo.jpg" });
+
+    const response = await request(createApp())
+      .get("/api/public/photo-viewer/raw-token/photos/photo-1/image")
+      .buffer()
+      .parse(binaryParser);
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toContain("image/jpeg");
+    expect(response.headers["content-disposition"]).toContain("inline");
+    expect(response.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+    expect(response.body.equals(jpeg)).toBe(true); // sent verbatim
+  });
+
   it("forces an attachment download when ?download=1 is set", async () => {
     const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xda, 0x00, 0x02, 0xff, 0xd9]);
     const stream = (async function* () { yield jpeg; })();
