@@ -9,6 +9,10 @@ import { theme } from "../theme/theme";
 import { Button, SectionLabel } from "./ui";
 import { Banner } from "./Banner";
 
+// Mirror the server cap (server/src/modules/field/routes.ts MAX_SHARE_PHOTOS) so a large gallery can't
+// post 201+ ids and get a 400 — we cap the selection client-side and tell the user.
+const MAX_SHARE_PHOTOS = 200;
+
 /**
  * Photo-share flow (mirrors the ReportBuilder select grid): multi-select a project's photos →
  * "Share link" → POST /field/projects/:id/share → open the iOS share sheet with the returned URL.
@@ -34,11 +38,12 @@ export function PhotoShareModal({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // A successfully-minted link kept ONLY when the OS share sheet itself failed, so "Try again" can
-  // re-open the sheet with the same link instead of minting a fresh token.
+  // A successfully-minted link kept ONLY when the OS share sheet itself failed, so the user can retry
+  // (re-open the same link, no re-mint) or copy the surfaced URL. Cleared whenever the selection
+  // changes so a retry can never share a link for a selection the user has since edited.
   const [retryLink, setRetryLink] = useState<{ url: string; photoCount: number } | null>(null);
-  // Monotonic id so a share that's in-flight when the user closes/cancels (or reopens) can detect it's
-  // been superseded and bail before opening the sheet or firing onShared.
+  // Monotonic id so a share that's in-flight when the user closes/cancels (or reopens) detects it's
+  // been superseded and bails before opening the sheet or firing onShared.
   const runIdRef = useRef(0);
 
   function reset() {
@@ -54,22 +59,36 @@ export function PhotoShareModal({
     onClose();
   }
 
+  // Any selection change invalidates a pending retry link (it was minted for the old set) and clears
+  // the stale error banner.
+  function clearStaleShare() {
+    setError(null);
+    setRetryLink(null);
+  }
+
   function toggle(id: string) {
+    clearStaleShare();
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        if (next.size >= MAX_SHARE_PHOTOS) return prev; // cap reached — ignore further selections
+        next.add(id);
+      }
       return next;
     });
   }
 
-  const allSelected = selected.size === photos.length && photos.length > 0;
+  const selectableCount = Math.min(photos.length, MAX_SHARE_PHOTOS);
+  const allSelected = selected.size === selectableCount && selectableCount > 0;
   function toggleAll() {
-    setSelected(allSelected ? new Set() : new Set(photos.map((p) => p.id)));
+    clearStaleShare();
+    setSelected(allSelected ? new Set() : new Set(photos.slice(0, MAX_SHARE_PHOTOS).map((p) => p.id)));
   }
 
-  // Opens the OS share sheet for an already-minted link. Resolves true if shared, false if the user
-  // dismissed it; throws only if the sheet itself fails to present.
+  // Opens the OS share sheet for an already-minted link. Resolves true if shared, false if dismissed;
+  // throws only if the sheet itself fails to present.
   async function openShareSheet(url: string, photoCount: number): Promise<boolean> {
     const result = await Share.share({ message: buildShareMessage(url, photoCount), url });
     return result.action !== Share.dismissedAction;
@@ -90,9 +109,9 @@ export function PhotoShareModal({
         shared = await openShareSheet(result.url, result.photoCount);
       } catch {
         if (!isCurrent()) return;
-        // Link minted but the sheet failed — keep it so the user can retry without re-minting.
+        // Link minted but the sheet failed — keep it so the user can retry OR copy the surfaced URL.
         setRetryLink({ url: result.url, photoCount: result.photoCount });
-        setError("Couldn't open the share sheet.");
+        setError("Couldn't open the share sheet. Copy the link below or try again.");
         setBusy(false);
         return;
       }
@@ -121,9 +140,11 @@ export function PhotoShareModal({
       onShared?.(retryLink.photoCount);
       close();
     } catch {
-      /* still failing — leave the retry banner for another attempt */
+      /* still failing — leave the retry banner + copyable URL for another attempt */
     }
   }
+
+  const atCap = selected.size >= MAX_SHARE_PHOTOS;
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={close} presentationStyle="pageSheet">
@@ -137,19 +158,27 @@ export function PhotoShareModal({
         </View>
 
         {error ? (
-          <View style={{ paddingHorizontal: theme.space.lg }}>
+          <View style={{ paddingHorizontal: theme.space.lg, gap: theme.space.xs }}>
             <Banner message={error} action={retryLink ? { label: "Try again", onPress: runRetry } : undefined} />
+            {retryLink ? (
+              <Text selectable style={styles.urlText}>
+                {retryLink.url}
+              </Text>
+            ) : null}
           </View>
         ) : null}
 
         <ScrollView contentContainerStyle={styles.body}>
           <View style={styles.rowBetween}>
-            <SectionLabel>{selected.size} selected</SectionLabel>
+            <SectionLabel>{selected.size} selected{atCap ? ` · max ${MAX_SHARE_PHOTOS}` : ""}</SectionLabel>
             <Pressable onPress={toggleAll} hitSlop={8}>
               <Text style={styles.link}>{allSelected ? "Clear all" : "Select all"}</Text>
             </Pressable>
           </View>
-          <Text style={styles.hint}>Anyone with the link can view the selected photos for 7 days — no login needed.</Text>
+          <Text style={styles.hint}>
+            Anyone with the link can view the selected photos for 7 days — no login needed.
+            {photos.length > MAX_SHARE_PHOTOS ? ` Up to ${MAX_SHARE_PHOTOS} per link.` : ""}
+          </Text>
           <View style={styles.grid}>
             {photos.map((photo) => {
               const isSelected = selected.has(photo.id);
@@ -206,6 +235,7 @@ const styles = StyleSheet.create({
   rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   hint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
+  urlText: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   thumb: { width: "100%", height: "100%", borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
   placeholder: { borderWidth: 1, borderColor: theme.color.border },
