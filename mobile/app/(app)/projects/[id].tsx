@@ -166,21 +166,20 @@ export default function ProjectDetailScreen() {
               disabled={filtered.length === 0}
               style={{ flex: 1 }}
             />
-            <Pressable
-              onPress={() => setShareOpen(true)}
-              disabled={filtered.length === 0}
-              accessibilityRole="button"
-              accessibilityLabel="Share photos"
-              style={({ pressed }) => [
-                styles.shareButton,
-                filtered.length === 0 && { opacity: 0.4 },
-                pressed && { opacity: 0.7 },
-              ]}
-            >
-              <Ionicons name="share-outline" size={22} color={theme.color.brandRed} />
-            </Pressable>
           </View>
         )}
+
+        {/* Share works cross-office: the endpoint resolves the deal's owning office and mints only a
+            public photo token (no deal mutation), so — unlike capture/report generation — it stays
+            available even on view-only off-office projects. */}
+        {filtered.length > 0 ? (
+          <Button
+            title="Share photos"
+            variant="ghost"
+            icon={<Ionicons name="share-outline" size={18} color={theme.color.brandRed} />}
+            onPress={() => setShareOpen(true)}
+          />
+        ) : null}
 
         {notice ? <Banner message={notice} /> : null}
 
@@ -328,16 +327,6 @@ const styles = StyleSheet.create({
   address: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textMuted },
   meta: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   actions: { flexDirection: "row", gap: theme.space.md },
-  shareButton: {
-    width: 52,
-    alignSelf: "stretch",
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: theme.color.border,
-    borderRadius: theme.radius.md,
-    backgroundColor: theme.color.surfaceCard,
-  },
   rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   // Muted so the "Filters" toggle doesn't compete with the red primary "Add photos".
