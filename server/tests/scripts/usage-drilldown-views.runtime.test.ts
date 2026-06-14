@@ -50,7 +50,7 @@ beforeAll(async () => {
     INSERT INTO office_dallas.usage_view_event (user_id, session_id, at, entity_type, route)
       VALUES ('${REP}', '${otherUserSession}', '${DATE}T14:10:00Z', 'deal', '/deals/cross-user');
   `);
-});
+}, 30_000); // hook headroom for the Drizzle-derived schema build under parallel CI contention (Codex #715)
 
 afterAll(async () => { await db?.close(); });
 

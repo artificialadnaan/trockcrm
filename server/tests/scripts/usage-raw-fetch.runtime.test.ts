@@ -54,7 +54,7 @@ beforeAll(async () => {
     INSERT INTO office_dallas.activities (type, ${ACT_SRC_COLS}, responsible_user_id, occurred_at, created_at) VALUES ('note', ${ACT_SRC_VALS}, '${REP}', '2026-06-01T13:20:00Z', '2026-06-01T13:20:00Z');
     INSERT INTO office_dallas.files (${FILE_COLS}, uploaded_by, created_at) VALUES (${FILE_VALS}, '${REP}', '2026-06-01T13:30:00Z');
   `);
-});
+}, 30_000); // generating the full Drizzle-derived schema is heavier than the old hand-rolled DDL; give the hook headroom under parallel CI contention (Codex #715)
 
 afterAll(async () => { await db?.close(); });
 

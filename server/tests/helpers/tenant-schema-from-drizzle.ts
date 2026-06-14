@@ -21,10 +21,14 @@ import type { PgTable } from "drizzle-orm/pg-core";
 
 const dialect = new PgDialect();
 
+/** True when a column default is a Drizzle SQL object (e.g. `sql\`gen_random_uuid()\``) rather than a
+ *  plain JS literal — those carry a `queryChunks` array and must be rendered through the pg dialect. */
 function isDrizzleSql(value: unknown): value is { queryChunks: unknown } {
   return typeof value === "object" && value !== null && "queryChunks" in value;
 }
 
+/** Render a column's DEFAULT clause from its Drizzle definition, keyed on the column's SQL type so
+ *  jsonb/array/scalar/SQL-function defaults each serialize correctly. Returns "" when there is none. */
 function renderDefault(column: ReturnType<typeof getTableConfig>["columns"][number]): string {
   if (!column.hasDefault) return "";
   const def = column.default as unknown;

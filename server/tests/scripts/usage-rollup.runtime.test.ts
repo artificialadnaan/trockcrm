@@ -43,7 +43,7 @@ beforeAll(async () => {
       INSERT INTO ${s}.usage_heartbeat (session_id, user_id, at) VALUES ('${sid}', '${REP}', '2026-06-01T14:00:30Z');
     `);
   }
-});
+}, 30_000); // generating the full Drizzle-derived schema (twice, fan-out) is heavier than the old hand-rolled DDL; give the hook headroom under parallel CI contention (Codex #715)
 
 afterAll(async () => { await db?.close(); });
 

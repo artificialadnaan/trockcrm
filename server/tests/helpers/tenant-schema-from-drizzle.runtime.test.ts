@@ -16,7 +16,7 @@ let db: PGlite;
 beforeAll(async () => {
   db = new PGlite();
   await db.exec(tenantSchemaSql("office_dallas", [activities, auditLog, usageDaily]));
-});
+}, 30_000); // hook headroom for the Drizzle-derived schema build under parallel CI contention (Codex #715)
 afterAll(async () => {
   await db?.close();
 });

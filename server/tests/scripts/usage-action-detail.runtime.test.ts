@@ -118,7 +118,7 @@ beforeAll(async () => {
       -- wrong user -> excluded
       ('${U("0f12")}', 'photo', 'admin.jpg', 'sys_0002.jpg', 'IMG_0002.jpg', 'image/jpeg', 1024, 'jpg', 'r2/0002', 'trock-files', '${DEAL1}', NULL, '${ADMIN}', '${t}')
   `);
-});
+}, 30_000); // generating the full Drizzle-derived schema is heavier than the old hand-rolled DDL; give the hook headroom under parallel CI contention (Codex #715)
 
 afterAll(async () => { await db?.close(); });
 
