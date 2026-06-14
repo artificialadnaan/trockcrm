@@ -1018,7 +1018,7 @@ router.get("/monday-showcase", requireAnyRole, async (req, res, next) => {
 
 // Reports Part 3 -- drill-to-evidence. Returns the supporting records behind ONE showcase number
 // (metric x scope x band/lead-stage), with a total that EQUALS that number (same canonical cohort).
-const EVIDENCE_METRICS = ["won", "sent", "estimated", "projection", "leads"] as const;
+const EVIDENCE_METRICS = ["won", "sent", "estimated", "projection", "pipeline", "leads"] as const;
 const PROJECTION_BANDS = ["0_30", "31_60", "61_90", "beyond_90"] as const;
 const UNASSIGNED_SENTINEL = "__unassigned__";
 
@@ -1053,6 +1053,12 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
   const leadStage = pickQueryValue(query.leadStage);
   if (leadStage !== undefined && metric !== "leads") {
     throw new AppError(400, "leadStage is only valid for the leads metric");
+  }
+
+  // stageSlug: a single pipeline stage, to reconcile one region×stage heatmap cell. Pipeline metric only.
+  const stageSlug = pickQueryValue(query.stageSlug);
+  if (stageSlug !== undefined && metric !== "pipeline") {
+    throw new AppError(400, "stageSlug is only valid for the pipeline metric");
   }
 
   // regionName: absent -> no region predicate (office-wide); a string -> the displayed region row to
@@ -1093,19 +1099,27 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
     throw new AppError(400, "from must be on or before to"); // ISO YYYY-MM-DD sorts chronologically
   }
 
-  return { metric, mode, repId, band, leadStage, regionName, from, to };
+  return { metric, mode, repId, band, leadStage, stageSlug, regionName, from, to };
+}
+
+/**
+ * The Reports-by-Region drill's elevated surface is director-only: an explicit {from,to} window
+ * (arbitrary historical range), the region scope, AND the `pipeline` metric (all office-wide open deals —
+ * it exists only for the region drill; the showcase rep drawer never requests it). Without this a rep
+ * could call ?metric=pipeline bare, or omit repId with from/to, and pull office-wide evidence they aren't
+ * scoped to. The showcase rep drawer (won/sent/estimated/projection/leads, mode-week, own repId) is unaffected.
+ */
+export function assertShowcaseEvidenceAccess(options: MondayShowcaseEvidenceOptions, isDirector: boolean): void {
+  if (isDirector) return;
+  if (options.from !== undefined || options.regionName !== undefined || options.metric === "pipeline") {
+    throw new AppError(403, "the pipeline metric, an explicit from/to window, and regionName are restricted to directors");
+  }
 }
 
 router.get("/monday-showcase/evidence", requireAnyRole, async (req, res, next) => {
   try {
     const options = parseShowcaseEvidenceParams(req.query as Record<string, unknown>);
-    // The Reports-by-Region drill's elevated params — an explicit {from,to} window (arbitrary historical
-    // range) and the region scope — are director-only. A rep stays bounded to the mode-derived showcase
-    // week; without this gate a rep could omit repId and pull office-wide evidence for any past range.
-    const isDirector = req.user!.role === "admin" || req.user!.role === "director";
-    if (!isDirector && (options.from !== undefined || options.regionName !== undefined)) {
-      throw new AppError(403, "from/to and regionName are restricted to directors");
-    }
+    assertShowcaseEvidenceAccess(options, req.user!.role === "admin" || req.user!.role === "director");
     const data = await getMondayShowcaseEvidence(req.tenantDb!, options);
     await req.commitTransaction!();
     res.json({ data });

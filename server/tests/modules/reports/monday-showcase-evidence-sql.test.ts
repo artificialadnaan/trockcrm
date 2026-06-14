@@ -3,6 +3,7 @@ import {
   buildWonEvidenceSql,
   buildStageEntryEvidenceSql,
   buildProjectionEvidenceSql,
+  buildPipelineEvidenceSql,
   buildLeadEvidenceSql,
 } from "../../../src/modules/reports/monday-showcase-service.js";
 import { SENT_STAGE_SLUGS, ESTIMATED_STAGE_SLUGS } from "../../../src/modules/reports/foundations.js";
@@ -102,6 +103,26 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
     expect(text).toContain("IS NOT NULL");
     // best-estimate basis
     expect(text.toLowerCase()).toContain("bid_board_total_sales");
+  });
+
+  it("pipeline evidence: ALL open deals (active, non-terminal, reportable) — NOT future-dated, so it reconciles to the region 'Open Pipeline'", () => {
+    const text = extractSqlText(buildPipelineEvidenceSql());
+    expect(text).toContain("d.is_active = true");
+    expect(text).toContain("is_terminal = false");
+    // open best-estimate basis (bid-board first), same as the region report's openVal
+    expect(text.toLowerCase()).toContain("bid_board_total_sales");
+    // crucially NOT future-dated (semantic check, not the literal word): the projection metric adds an
+    // `expected_close_date IS NOT NULL` future-date filter; the full-open-pipeline metric must NOT have it.
+    const projection = extractSqlText(buildProjectionEvidenceSql());
+    expect(projection).toMatch(/expected_close_date[\s\S]{0,40}IS NOT NULL/i);
+    expect(text).not.toMatch(/expected_close_date[\s\S]{0,40}IS NOT NULL/i);
+  });
+
+  it("pipeline evidence: a stageSlug narrows to one stage (reconciles to a single region×stage heatmap cell)", () => {
+    const text = extractSqlText(buildPipelineEvidenceSql(undefined, "West Coast", "estimating"));
+    expect(text).toContain("psc.slug =");
+    expect(text).toContain("estimating");
+    expect(text).toContain("COALESCE(NULLIF(rc.name, ''), 'Unassigned') ="); // region key still applied
   });
 
   it("projection evidence: a band scope narrows to exactly that 30/60/90 rung", () => {

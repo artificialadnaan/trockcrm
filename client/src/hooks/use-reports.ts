@@ -1424,6 +1424,13 @@ export function useShowcaseEvidence(
     }
     if (request.band) params.set("band", request.band);
     if (request.leadStage) params.set("leadStage", request.leadStage);
+    // Reports-by-Region drill: the displayed region row's name + the section's exact period (+ optional
+    // heatmap stage). Passing the same params the number was computed with is what keeps the drawer
+    // reconciled to the clicked figure. "Unassigned" is just the name (matches the server bucket predicate).
+    if (request.regionName !== undefined) params.set("regionName", request.regionName);
+    if (request.from) params.set("from", request.from);
+    if (request.to) params.set("to", request.to);
+    if (request.stageSlug) params.set("stageSlug", request.stageSlug);
 
     api<{ data: MondayShowcaseEvidence }>(`/reports/monday-showcase/evidence?${params.toString()}`)
       .then((result) => {
