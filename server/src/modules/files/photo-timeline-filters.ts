@@ -12,6 +12,9 @@ export interface DealPhotoTimelineFilters {
   from?: string;
   to?: string;
   includeDeleted?: boolean;
+  // Whitelist of photo ids — when set, the timeline returns ONLY these photos (used by subset
+  // public-share tokens). Empty/undefined = no whitelist (all photos in scope).
+  photoIds?: string[];
 }
 
 function normalizeList(values?: string[]): string[] {
@@ -29,6 +32,7 @@ export function describeDealPhotoTimelineFilters(filters: DealPhotoTimelineFilte
   if (tags.length > 0) keys.push("tags");
   if (uploaderIds.length > 0) keys.push("uploaded_by");
   if (filters.from || filters.to) keys.push("taken_at", "created_at");
+  if (normalizeList(filters.photoIds).length > 0) keys.push("photo_ids");
 
   return keys;
 }
@@ -100,6 +104,11 @@ export async function buildDealPhotoTimelineConditions(
 
   if (uploaderIds.length > 0) {
     conditions.push(inArray(files.uploadedBy, uploaderIds));
+  }
+
+  const photoIds = normalizeList(filters.photoIds);
+  if (photoIds.length > 0) {
+    conditions.push(inArray(files.id, photoIds));
   }
 
   if (tags.length > 0) {

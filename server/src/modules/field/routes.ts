@@ -27,6 +27,7 @@ import {
 } from "./photo-reports-service.js";
 import {
   assertAccessibleFieldCaptureTarget,
+  assertActiveFieldProject,
   FIELD_PROJECTS_MAX_FETCH,
   listFieldProjects,
   listFieldProjectPhotos,
@@ -52,6 +53,8 @@ import {
   type FieldOffice,
   type FieldTenantDb,
 } from "./cross-office.js";
+import { assertPhotosBelongToDeal, generatePublicToken } from "../public-photo-tokens/service.js";
+import { publicPhotoShareUrl } from "../public-photo-tokens/public-share-url.js";
 
 // Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
 // the GLOBAL cap when the cross-office picker merges per-office results.
@@ -210,6 +213,68 @@ fieldRoutes.delete("/projects/:dealId/star", requireFieldContractor, async (req,
       "Project not found",
     );
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Public share: mint an unauthenticated, 7-day, photos-only link to a SELECTED set of a project's
+// photos. Photos-only / terminal-safe — this creates a public_photo_tokens row and never mutates the
+// deal (works on Won/terminal projects, matching the field module's zero-deal-mutation contract). The
+// token is scoped to the resolved photo ids; the public viewer + asset/download enforce that subset.
+const SHARE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_SHARE_PHOTOS = 200;
+
+function parseSharePhotoIds(raw: unknown): string[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new AppError(400, "photoIds must be a non-empty array of photo ids.");
+  }
+  // Canonicalize to lowercase: assertValidUuid accepts any case, but Postgres returns uuids in
+  // canonical lowercase, so we normalize here to keep the stored subset and every downstream
+  // comparison (membership validation, foundIds set) consistent regardless of client casing.
+  const ids = Array.from(new Set(raw.map((value) => String(value).toLowerCase())));
+  if (ids.length > MAX_SHARE_PHOTOS) {
+    throw new AppError(400, `A share link can include at most ${MAX_SHARE_PHOTOS} photos.`);
+  }
+  ids.forEach((id) => assertValidUuid(id, "photoId"));
+  return ids;
+}
+
+fieldRoutes.post("/projects/:dealId/share", requireFieldContractor, async (req, res, next) => {
+  try {
+    const dealId = String(req.params.dealId);
+    assertValidUuid(dealId, "dealId");
+    const photoIds = parseSharePhotoIds(req.body?.photoIds);
+
+    // Resolve the deal's office (cross-office, read-only), then:
+    //   1. gate the deal to a FIELD-VISIBLE project (active-pipeline or Won-family, never Lost/
+    //      archived) — the same predicate the field browse + report paths use, so a share link can't
+    //      be minted for a deal the field app deliberately hides; and
+    //   2. validate that EVERY requested photo is an active photo on THIS deal.
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const { office } = await withResolvedOffice(
+      "deal",
+      dealId,
+      async (officeDb) => {
+        await assertActiveFieldProject(officeDb, access, dealId);
+        await assertPhotosBelongToDeal(officeDb, dealId, photoIds);
+      },
+      "Project not found",
+    );
+
+    const created = await generatePublicToken({
+      dealId,
+      createdByUserId: req.fieldUser!.id,
+      tenantId: office.id,
+      photoIds,
+      expiresAt: new Date(Date.now() + SHARE_LINK_TTL_MS),
+    });
+
+    res.status(201).json({
+      url: publicPhotoShareUrl(req, created.rawToken),
+      token: { id: created.token.id, expiresAt: created.token.expiresAt },
+      photoCount: photoIds.length,
+    });
   } catch (err) {
     next(err);
   }

@@ -45,6 +45,13 @@ describe("deal photo timeline filters", () => {
     expect(keys).toContain("taken_at");
     expect(keys).toContain("created_at");
   });
+
+  it("adds the photo_ids key only when a non-empty photoIds whitelist is provided", () => {
+    expect(describeDealPhotoTimelineFilters({})).not.toContain("photo_ids");
+    expect(describeDealPhotoTimelineFilters({ photoIds: [] })).not.toContain("photo_ids");
+    expect(describeDealPhotoTimelineFilters({ photoIds: ["  "] })).not.toContain("photo_ids");
+    expect(describeDealPhotoTimelineFilters({ photoIds: ["photo-1"] })).toContain("photo_ids");
+  });
 });
 
 describe("latestActiveVersionCondition", () => {

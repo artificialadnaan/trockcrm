@@ -14,6 +14,7 @@ import {
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
 import { findJpegHeaderEnd, stripJpegMetadata } from "./image-metadata.js";
+import { publicPhotoShareUrl } from "./public-share-url.js";
 
 // Cap on how much of a JPEG header we'll buffer while looking for Start-Of-Scan before giving up.
 // Real EXIF (even with a thumbnail) is well under this; anything larger is treated as unprocessable.
@@ -65,13 +66,6 @@ function requestContext(req: Request) {
     ipAddress: req.ip ?? null,
     userAgent: Array.isArray(userAgentHeader) ? userAgentHeader.join(", ") : userAgentHeader ?? null,
   };
-}
-
-function publicViewerBaseUrl(req: Request): string {
-  const configured = process.env.FRONTEND_URL?.trim();
-  if (configured) return configured.replace(/\/+$/, "");
-  const proto = req.get("x-forwarded-proto") ?? req.protocol;
-  return `${proto}://${req.get("host")}`;
 }
 
 // Absolute base URL of THIS API router (where the streaming photo proxy lives), used to build
@@ -172,7 +166,7 @@ adminPhotoTokenRoutes.post(
       res.status(201).json({
         token: result.token,
         rawToken: result.rawToken,
-        url: `${publicViewerBaseUrl(req)}/p/${encodeURIComponent(result.rawToken)}`,
+        url: publicPhotoShareUrl(req, result.rawToken),
       });
     } catch (err) {
       next(err);
