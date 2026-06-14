@@ -435,6 +435,32 @@ describe("public photo token service", () => {
     expect(result.photos[0].imageUrl).not.toContain("TR-1");
   });
 
+  it("does NOT advertise an oversized transcodable original — imageUrl null (placeholder, not a broken img)", async () => {
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "deal-1", name: "Public Deal", deal_number: "TR-1", property_address: "100 Main St, Dallas, TX" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    getDealPhotoTimelineMock.mockResolvedValue({
+      photos: [{
+        id: "photo-big-png", photoCategory: null, subcategory: null, displayName: "huge.png",
+        mimeType: "image/png", fileSizeBytes: 200 * 1024 * 1024, fileExtension: ".png",
+        description: null, takenAt: null, createdAt: "2026-05-01T00:01:00.000Z", uploadedBy: "user-1",
+        uploaderName: "Field User", uploaderAvatarUrl: null, latitude: null, longitude: null,
+        address: null, addressSource: null, geocodedAt: null, procoreSyncStatus: null,
+        externalThumbnailUrl: null, externalUrl: null, r2Key: "office_dallas/deals/TR-1/photos/huge.png",
+      }],
+    });
+    const result = await getPublicPhotoViewer("raw-token", { assetBaseUrl: ASSET_BASE });
+
+    // Over the transcode cap -> not advertised; the asset endpoint would 422 it, so the viewer shows the
+    // same placeholder it uses for unservable images (no broken <img>).
+    expect(result.photos[0]).toMatchObject({ id: "photo-big-png", imageUrl: null });
+  });
+
   it("does not let image-looking display names override public non-image storage keys", async () => {
     const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
@@ -568,6 +594,19 @@ describe("public photo token service", () => {
     expect(result).toEqual({ url: `${ASSET_BASE}/raw-token/photos/photo-1/image?download=1`, filename: "photo.jpg" });
     expect(result.url).not.toContain("TR-1");
     expect(result.url).not.toContain(".png");
+  });
+
+  it("404s an oversized transcodable download (mirrors the asset size cap — no broken download button)", async () => {
+    const { getPublicPhotoDownload } = await import("../../../src/modules/public-photo-tokens/service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: "photo-1", deal_id: "deal-1", category: "photo", display_name: "huge", file_extension: ".png", external_url: null, r2_key: "office_dallas/deals/TR-1/photos/huge.png", mime_type: "image/png", file_size_bytes: 200 * 1024 * 1024 }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(getPublicPhotoDownload("raw-token", "photo-1", { assetBaseUrl: ASSET_BASE })).rejects.toMatchObject({ statusCode: 404 });
   });
 
   it("returns 404 when a download photo does not belong to the token deal", async () => {
