@@ -22,6 +22,8 @@ import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { PhotoGrid } from "../../../src/components/PhotoGrid";
 import { PhotoViewerModal } from "../../../src/components/PhotoViewerModal";
 import { ReportBuilder } from "../../../src/components/ReportBuilder";
+import { PhotoShareModal } from "../../../src/components/PhotoShareModal";
+import { Ionicons } from "@expo/vector-icons";
 
 const GROUPINGS: { value: PhotoGrouping; label: string }[] = [
   { value: "date", label: "Date" },
@@ -68,6 +70,7 @@ export default function ProjectDetailScreen() {
   // filter change can never desync the viewer onto a different photo.
   const [viewer, setViewer] = useState<{ photos: FieldPhoto[]; index: number } | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const availableTags = useMemo(() => tagsOf(allPhotos), [allPhotos]);
@@ -163,6 +166,19 @@ export default function ProjectDetailScreen() {
               disabled={filtered.length === 0}
               style={{ flex: 1 }}
             />
+            <Pressable
+              onPress={() => setShareOpen(true)}
+              disabled={filtered.length === 0}
+              accessibilityRole="button"
+              accessibilityLabel="Share photos"
+              style={({ pressed }) => [
+                styles.shareButton,
+                filtered.length === 0 && { opacity: 0.4 },
+                pressed && { opacity: 0.7 },
+              ]}
+            >
+              <Ionicons name="share-outline" size={22} color={theme.color.brandRed} />
+            </Pressable>
           </View>
         )}
 
@@ -294,6 +310,14 @@ export default function ProjectDetailScreen() {
           if (report.pdfUrl) void Linking.openURL(report.pdfUrl);
         }}
       />
+
+      <PhotoShareModal
+        visible={shareOpen}
+        onClose={() => setShareOpen(false)}
+        projectId={dealId}
+        photos={filtered}
+        onShared={(n) => setNotice(`Share link created for ${n} photo${n === 1 ? "" : "s"} — expires in 7 days.`)}
+      />
     </SafeAreaView>
   );
 }
@@ -304,6 +328,16 @@ const styles = StyleSheet.create({
   address: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textMuted },
   meta: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   actions: { flexDirection: "row", gap: theme.space.md },
+  shareButton: {
+    width: 52,
+    alignSelf: "stretch",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.color.surfaceCard,
+  },
   rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
   // Muted so the "Filters" toggle doesn't compete with the red primary "Add photos".

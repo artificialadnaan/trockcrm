@@ -28,6 +28,12 @@ export type PhotosResponse = {
   photos: FieldPhoto[];
   pagination?: { page: number; perPage: number; total: number };
 };
+// Public photo-share link (POST /field/projects/:dealId/share). url = the unauthenticated viewer link.
+export type ShareLinkResponse = {
+  url: string;
+  token: { id: string; expiresAt: string | null };
+  photoCount: number;
+};
 export type PendingPhotosResponse = { photos: FieldPhoto[] };
 export type ConfirmUploadResponse = { photo: FieldPhoto };
 export type AssignTargetResponse = { photo: FieldPhoto };
