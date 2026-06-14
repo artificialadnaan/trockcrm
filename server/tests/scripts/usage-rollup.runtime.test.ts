@@ -1,7 +1,18 @@
 // server/tests/scripts/usage-rollup.runtime.test.ts
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  activities,
+  auditLog,
+  dealStageHistory,
+  files,
+  usageDaily,
+  usageHeartbeat,
+  usageSession,
+  usageViewEvent,
+} from "@trock-crm/shared/schema";
 import { rollupOfficeDay, pruneRolledUpRaw } from "../../src/scripts/usage-rollup.js";
+import { tenantSchemaSql } from "../helpers/tenant-schema-from-drizzle.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const REP = U("0001");
@@ -11,17 +22,21 @@ const client = () => ({ query: (sql: string, params?: unknown[]) => db.query(sql
 beforeAll(async () => {
   db = new PGlite();
   for (const s of ["office_dallas", "office_atlanta"]) {
-    await db.exec(`
-      CREATE SCHEMA ${s};
-      CREATE TABLE ${s}.usage_session (id uuid primary key default gen_random_uuid(), user_id uuid, started_at timestamptz default now(), last_heartbeat_at timestamptz, ended_at timestamptz, active_seconds int default 0, user_agent text, impersonator_id uuid, created_at timestamptz default now());
-      CREATE TABLE ${s}.usage_heartbeat (id bigserial primary key, session_id uuid, user_id uuid, at timestamptz);
-      CREATE TABLE ${s}.usage_view_event (id bigserial primary key, user_id uuid, session_id uuid, at timestamptz, entity_type text, entity_id uuid, route text, label_snapshot text);
-      CREATE TABLE ${s}.audit_log (id bigserial primary key, table_name text, action text, changed_by uuid, impersonator_id uuid, changes jsonb, created_at timestamptz);
-      CREATE TABLE ${s}.deal_stage_history (id uuid primary key default gen_random_uuid(), deal_id uuid, to_stage_id uuid, changed_by uuid, created_at timestamptz);
-      CREATE TABLE ${s}.activities (id uuid primary key default gen_random_uuid(), type text, responsible_user_id uuid, performed_by_user_id uuid, occurred_at timestamptz, created_at timestamptz);
-      CREATE TABLE ${s}.files (id uuid primary key default gen_random_uuid(), uploaded_by uuid, created_at timestamptz);
-      CREATE TABLE ${s}.usage_daily (user_id uuid, date date, active_seconds int default 0, session_count int default 0, view_count int default 0, action_count int default 0, breakdown jsonb not null, first_active_at timestamptz, last_active_at timestamptz, rolled_up_at timestamptz not null default now(), primary key (user_id, date));
-    `);
+    // Schema generated from the REAL Drizzle definitions (#677): audit_log.action and activities.type
+    // are the real enums, usage_daily keeps its composite (user_id, date) PK — all verbatim from the
+    // table objects, so the rollup's reads run against prod-accurate types. FKs/indexes omitted.
+    await db.exec(
+      tenantSchemaSql(s, [
+        usageSession,
+        usageHeartbeat,
+        usageViewEvent,
+        auditLog,
+        dealStageHistory,
+        activities,
+        files,
+        usageDaily,
+      ]),
+    );
     const sid = U(s === "office_dallas" ? "00d1" : "00a1");
     await db.exec(`
       INSERT INTO ${s}.usage_session (id, user_id, started_at) VALUES ('${sid}', '${REP}', '2026-06-01T14:00:00Z');
