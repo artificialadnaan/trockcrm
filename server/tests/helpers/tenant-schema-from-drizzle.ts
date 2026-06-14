@@ -13,8 +13,8 @@
 // Scope (deliberate): column TYPES, enum value sets, NOT NULL, column defaults and PRIMARY KEYs are
 // reproduced verbatim. FOREIGN KEYS and INDEXES are intentionally omitted — test tables are islands
 // (we don't stand up the users/companies/deals graph just to insert a usage row), and types are what
-// caused the bugs. Enum columns are emitted as a schema-qualified CREATE TYPE to match prod's
-// per-office-schema enums.
+// caused the bugs. Enum types are created in `public` (their prod namespace — verified: audit_action,
+// activity_type et al. live in public, not the tenant schema) and referenced as public."<enum>".
 
 import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import type { PgTable } from "drizzle-orm/pg-core";
@@ -66,10 +66,16 @@ export function tenantSchemaSql(schemaName: string, tables: readonly PgTable[]):
 
     for (const column of cfg.columns) {
       let sqlType = column.getSQLType();
-      // Enum columns: getSQLType() returns the bare enum name; collect its values and schema-qualify.
+      // Enum columns: in prod the shared business enums live in `public` (e.g. public.audit_action,
+      // public.activity_type — verified against office_dallas), NOT the tenant schema, so create and
+      // reference them there to preserve the production type namespace. getSQLType() returns either a
+      // bare name or an already-qualified "schema.name"; normalize to the bare name. (The rare
+      // genuinely-per-office enum like lead_office also lands in public here — a minor, functionally
+      // inert divergence, since value enforcement is identical regardless of namespace.)
       if (column.enumValues && column.enumValues.length > 0) {
-        enums.set(sqlType, column.enumValues);
-        sqlType = `${schemaName}."${sqlType}"`;
+        const bareName = sqlType.includes(".") ? sqlType.split(".").pop()!.replace(/"/g, "") : sqlType;
+        enums.set(bareName, column.enumValues);
+        sqlType = `public."${bareName}"`;
       }
       const notNull = column.notNull ? " NOT NULL" : "";
       colDDL.push(`"${column.name}" ${sqlType}${notNull}${renderDefault(column)}`);
@@ -84,9 +90,13 @@ export function tenantSchemaSql(schemaName: string, tables: readonly PgTable[]):
     tableDDL.push(`CREATE TABLE ${schemaName}."${cfg.name}" (\n  ${colDDL.join(",\n  ")}\n);`);
   }
 
+  // Enums are created in `public` (prod namespace) and guarded against duplicate_object so multiple
+  // per-schema calls (office_dallas, office_atlanta, …) can each request the same shared enum.
   const enumDDL = [...enums].map(
     ([name, values]) =>
-      `CREATE TYPE ${schemaName}."${name}" AS ENUM (${values.map((v) => `'${v.replace(/'/g, "''")}'`).join(", ")});`,
+      `DO $$ BEGIN CREATE TYPE public."${name}" AS ENUM (${values
+        .map((v) => `'${v.replace(/'/g, "''")}'`)
+        .join(", ")}); EXCEPTION WHEN duplicate_object THEN null; END $$;`,
   );
 
   return [`CREATE SCHEMA IF NOT EXISTS ${schemaName};`, ...enumDDL, ...tableDDL].join("\n");

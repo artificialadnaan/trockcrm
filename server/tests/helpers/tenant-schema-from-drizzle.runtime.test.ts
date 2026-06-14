@@ -22,20 +22,22 @@ afterAll(async () => {
 });
 
 describe("tenantSchemaSql — schema fidelity from Drizzle", () => {
-  it("emits the activity_type enum with EVERY real ACTIVITY_TYPES value (not a hand-picked subset)", async () => {
+  it("emits the activity_type enum in public with EVERY real ACTIVITY_TYPES value (not a hand-picked subset)", async () => {
+    // Created in `public` to match prod's namespace (audit_action/activity_type live in public, not
+    // the tenant schema) — verified via the n.nspname = 'public' join.
     const { rows } = await db.query<{ enumlabel: string }>(
       `SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
        JOIN pg_namespace n ON n.oid = t.typnamespace
-       WHERE t.typname = 'activity_type' AND n.nspname = 'office_dallas' ORDER BY e.enumsortorder`,
+       WHERE t.typname = 'activity_type' AND n.nspname = 'public' ORDER BY e.enumsortorder`,
     );
     expect(rows.map((r) => r.enumlabel)).toEqual([...ACTIVITY_TYPES]);
   });
 
-  it("emits the audit_action enum from AUDIT_ACTIONS", async () => {
+  it("emits the audit_action enum in public from AUDIT_ACTIONS", async () => {
     const { rows } = await db.query<{ enumlabel: string }>(
       `SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid
        JOIN pg_namespace n ON n.oid = t.typnamespace
-       WHERE t.typname = 'audit_action' AND n.nspname = 'office_dallas' ORDER BY e.enumsortorder`,
+       WHERE t.typname = 'audit_action' AND n.nspname = 'public' ORDER BY e.enumsortorder`,
     );
     expect(rows.map((r) => r.enumlabel)).toEqual([...AUDIT_ACTIONS]);
   });
