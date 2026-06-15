@@ -98,10 +98,12 @@ export async function loadSession(): Promise<Session | null> {
     await clearSession();
     return null;
   }
-  // If the stored token is already expired, drop it and route straight to login (no app flash + 401
-  // bounce). The server still rejects an expired token on every request — this is a UX pre-check only.
+  // If the stored token looks expired, route straight to login (no app flash + 401 bounce) — but do NOT
+  // delete it. This check trusts the device clock; a fast/wrong clock could judge a server-valid token
+  // expired, and a destructive delete would log the user out irreversibly even after the clock corrects.
+  // The server's 401 on a genuinely invalid token remains the authority that clears the session (signOut);
+  // if the clock self-corrects, a later launch restores the still-valid token.
   if (isTokenExpired(parsed.token)) {
-    await clearSession();
     return null;
   }
   return {

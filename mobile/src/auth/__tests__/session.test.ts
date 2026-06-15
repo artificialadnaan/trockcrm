@@ -1,3 +1,4 @@
+import * as SecureStore from "expo-secure-store";
 import { isTokenExpired, loadSession, saveSession, clearSession, type Session } from "../session";
 
 // In-memory expo-secure-store (store lives inside the factory to dodge jest.mock hoisting).
@@ -51,10 +52,12 @@ describe("loadSession expiry pre-check", () => {
     await clearSession();
   });
 
-  it("drops + clears an already-expired stored token (route to login, no app flash)", async () => {
+  it("routes an expired token to login (null) WITHOUT deleting it — clock-skew safe", async () => {
     await saveSession(session(jwtWithExp(Math.floor(Date.now() / 1000) - 60)));
+    (SecureStore.deleteItemAsync as jest.Mock).mockClear();
     expect(await loadSession()).toBeNull();
-    expect(await loadSession()).toBeNull(); // it was cleared, not just hidden
+    // Non-destructive: a fast/wrong device clock must not irreversibly wipe a server-valid token.
+    expect(SecureStore.deleteItemAsync).not.toHaveBeenCalled();
   });
 
   it("returns the session for a non-expired token", async () => {
