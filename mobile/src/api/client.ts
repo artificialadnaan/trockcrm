@@ -20,7 +20,12 @@ export type ApiFetchOptions = {
   /** JSON-serializable request body. */
   body?: unknown;
   query?: QueryParams;
-  /** Called on 401/403 so the caller can clear the session. */
+  /**
+   * Called ONLY on 401 (authentication failure — token missing/expired/invalid) so the caller can
+   * clear the session and re-prompt login. NOT called on 403: a 403 is an *authorization* failure
+   * (CSRF/RBAC/permission on a specific action), not a dead session — surfacing it as an error must
+   * not sign the user out.
+   */
   onUnauthorized?: () => void;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -96,7 +101,9 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
   }
 
   if (!res.ok) {
-    if (res.status === 401 || res.status === 403) onUnauthorized?.();
+    // ONLY a 401 (auth failure) clears the session. A 403 is authorization (CSRF/RBAC/permission) and
+    // must surface as an error without signing the user out — see onUnauthorized's doc above.
+    if (res.status === 401) onUnauthorized?.();
     let message = `Request failed (${res.status})`;
     try {
       const parsed = (await res.json()) as { error?: { message?: string } | string };
