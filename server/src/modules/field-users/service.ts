@@ -13,6 +13,10 @@ const INVITE_TTL_DAYS = 7;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MINUTES = 15;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// FIELD session lifetime — long-lived so crews don't re-authenticate every time they open T-Rock Cam.
+// Scoped to the field token only (passed to signJwt's expiresIn); the CRM/admin default (24h) is
+// untouched. Tradeoff: a stateless 30-day token has no server-side revocation yet (tracked follow-up).
+const FIELD_JWT_EXPIRES_IN = "30d";
 
 export type InviteStatus = "accepted" | "pending" | "expired" | "revoked";
 export type FieldUserStatusFilter = "all" | "active" | "inactive" | "pending-invite";
@@ -498,7 +502,7 @@ export async function acceptFieldInvite(input: { token: string; password: string
     officeId: user.office_id,
     role: "field_contractor",
     authMethod: "local",
-  });
+  }, { expiresIn: FIELD_JWT_EXPIRES_IN });
   const responseUser = toFieldUserResponse(user);
 
   await db.transaction(async (tx) => {
@@ -651,7 +655,7 @@ export async function loginFieldUser(input: { email: string; password: string })
     officeId: user.office_id,
     role: user.role as UserRole,
     authMethod: "local",
-  });
+  }, { expiresIn: FIELD_JWT_EXPIRES_IN });
   await db.execute(sql`
     UPDATE user_local_auth
     SET last_login_at = now(),

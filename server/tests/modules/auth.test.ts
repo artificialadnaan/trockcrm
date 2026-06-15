@@ -41,4 +41,14 @@ describe("JWT auth", () => {
     expect(decoded).toHaveProperty("iat");
     expect(decoded).toHaveProperty("exp");
   });
+
+  it("defaults to the 24h (CRM/admin) lifetime when no override is given", () => {
+    const decoded = verifyJwt(signJwt(claims)) as JwtClaims & { iat: number; exp: number };
+    expect(decoded.exp - decoded.iat).toBe(24 * 60 * 60); // 24h, unchanged for CRM/admin
+  });
+
+  it("honors an expiresIn override (the field surface passes a longer 30d lifetime)", () => {
+    const decoded = verifyJwt(signJwt(claims, { expiresIn: "30d" })) as JwtClaims & { iat: number; exp: number };
+    expect(decoded.exp - decoded.iat).toBe(30 * 24 * 60 * 60); // 30d for the field token only
+  });
 });

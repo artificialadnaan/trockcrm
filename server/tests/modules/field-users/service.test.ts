@@ -392,11 +392,14 @@ describe("field user service helpers", () => {
     const result = await acceptFieldInvite({ token: "raw-token", password: "correct-password-12" });
 
     expect(authMocks.hashPassword).toHaveBeenCalledWith("correct-password-12");
-    expect(authMocks.signJwt).toHaveBeenCalledWith(expect.objectContaining({
-      userId: result.user.id,
-      role: "field_contractor",
-      authMethod: "local",
-    }));
+    expect(authMocks.signJwt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: result.user.id,
+        role: "field_contractor",
+        authMethod: "local",
+      }),
+      { expiresIn: "30d" }, // field session is long-lived (scoped to the field caller)
+    );
     expect(result.token).toBe("jwt-token");
     expect(result.user).toMatchObject({
       email: "field@example.com",
@@ -482,10 +485,13 @@ describe("field user service helpers", () => {
     await expect(acceptFieldInvite({ token: "raw-token", password: "correct-password-12" }))
       .rejects.toThrow("duplicate key value violates unique constraint");
 
-    expect(authMocks.signJwt).toHaveBeenCalledWith(expect.objectContaining({
-      role: "field_contractor",
-      authMethod: "local",
-    }));
+    expect(authMocks.signJwt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: "field_contractor",
+        authMethod: "local",
+      }),
+      { expiresIn: "30d" },
+    );
     expect(dbMocks.transaction).toHaveBeenCalledTimes(1);
     expect(dbMocks.execute).toHaveBeenCalledTimes(2);
   });
@@ -549,6 +555,8 @@ describe("field user service helpers", () => {
     const result = await loginFieldUser({ email: "field@example.com", password: "correct-password-12" });
 
     expect(authMocks.verifyPassword).toHaveBeenCalledWith("correct-password-12", "hash");
+    // Field login mints a long-lived (30d) token — scoped to the field caller, not the CRM default.
+    expect(authMocks.signJwt).toHaveBeenCalledWith(expect.any(Object), { expiresIn: "30d" });
     expect(result.token).toBe("jwt-token");
     expect(result.user).toEqual({
       id: "user-1",

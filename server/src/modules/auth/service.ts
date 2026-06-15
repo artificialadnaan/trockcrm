@@ -1,4 +1,4 @@
-import jwt from "jsonwebtoken";
+import jwt, { type SignOptions } from "jsonwebtoken";
 import crypto from "crypto";
 import { eq, and, like } from "drizzle-orm";
 import { pool } from "../../db.js";
@@ -17,10 +17,13 @@ function getJwtSecret(): string {
   return secret || "dev-secret-change-in-production";
 }
 
+// Default token lifetime for the CRM/admin surface. Do NOT change this for the field session — the
+// FIELD callers pass a longer options.expiresIn instead (field-users/service.ts FIELD_JWT_EXPIRES_IN),
+// so CRM/admin tokens are unaffected.
 const JWT_EXPIRES_IN = "24h";
 
-export function signJwt(claims: JwtClaims): string {
-  return jwt.sign(claims, getJwtSecret(), { expiresIn: JWT_EXPIRES_IN });
+export function signJwt(claims: JwtClaims, options?: { expiresIn?: SignOptions["expiresIn"] }): string {
+  return jwt.sign(claims, getJwtSecret(), { expiresIn: options?.expiresIn ?? JWT_EXPIRES_IN });
 }
 
 export function verifyJwt(token: string): JwtClaims {
