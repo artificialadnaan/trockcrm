@@ -204,7 +204,10 @@ export default function CaptureScreen() {
     // import path; else the live session GPS; else back-patch when getLiveGps() lands.
     const exifMeta = extractExifMetadata(shot.exif);
     const gps = cameraGpsRef.current;
-    const takenAt = exifMeta.takenAt ?? new Date().toISOString();
+    // Per-photo mode commits a shot only after its note is dismissed, so fall back to the shutter
+    // timestamp (shot.capturedAt, always stamped at capture) rather than commit-time now() — keeps the
+    // recorded capture time at when it was shot, not when it was annotated.
+    const takenAt = exifMeta.takenAt ?? shot.capturedAt;
     let metadata: PhotoMetadata;
     if (hasCoords(exifMeta)) {
       metadata = { ...exifMeta, takenAt };
