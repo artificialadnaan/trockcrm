@@ -6,6 +6,11 @@ export interface JwtClaims {
   officeId: string;
   role: UserRole;
   authMethod?: "local" | "dev";
+  // Token audience/surface. Tokens minted for the FIELD app (T-Rock Cam / client-field) carry
+  // surface:"field"; CRM/admin tokens leave it unset. CRM auth (authMiddleware) REJECTS any token with
+  // surface:"field" regardless of the user's current role — so a long-lived field token can never be
+  // replayed against CRM routes, even if the user is later promoted. (Field routes accept it normally.)
+  surface?: "field";
 }
 
 export interface AuthenticatedUser {

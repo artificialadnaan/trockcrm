@@ -41,4 +41,21 @@ describe("JWT auth", () => {
     expect(decoded).toHaveProperty("iat");
     expect(decoded).toHaveProperty("exp");
   });
+
+  it("defaults to the 24h (CRM/admin) lifetime when no override is given", () => {
+    const decoded = verifyJwt(signJwt(claims)) as JwtClaims & { iat: number; exp: number };
+    expect(decoded.exp - decoded.iat).toBe(24 * 60 * 60);
+  });
+
+  it("honors an expiresIn override (the field surface passes a 30d lifetime)", () => {
+    const decoded = verifyJwt(signJwt(claims, { expiresIn: "30d" })) as JwtClaims & { iat: number; exp: number };
+    expect(decoded.exp - decoded.iat).toBe(30 * 24 * 60 * 60);
+  });
+
+  it("round-trips the surface:'field' audience claim", () => {
+    const decoded = verifyJwt(signJwt({ ...claims, surface: "field" }));
+    expect(decoded.surface).toBe("field");
+    // CRM/admin tokens (no surface) decode with surface undefined.
+    expect(verifyJwt(signJwt(claims)).surface).toBeUndefined();
+  });
 });

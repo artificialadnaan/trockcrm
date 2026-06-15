@@ -29,6 +29,16 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
     }
 
     const claims = verifyJwt(token);
+
+    // FIELD tokens (surface:"field", e.g. the long-lived T-Rock Cam session) are valid ONLY on field
+    // routes (requireFieldContractor). Reject them on every CRM route — regardless of the user's current
+    // role — so a field token can never be replayed against CRM/admin, even if the user is later promoted
+    // or granted a CRM office override (#722). CRM/admin tokens carry no surface and pass through here, so
+    // CRM login/auth is unaffected.
+    if (claims.surface === "field") {
+      throw new AppError(401, "This session is not valid for CRM access");
+    }
+
     const user = await getUserById(claims.userId);
 
     if (!user || !user.isActive) {

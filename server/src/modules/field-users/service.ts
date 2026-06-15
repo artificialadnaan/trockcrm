@@ -13,6 +13,12 @@ const INVITE_TTL_DAYS = 7;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MINUTES = 15;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// FIELD session: long-lived so crews don't re-authenticate every time they open T-Rock Cam. Safe to
+// apply to EVERY field-app role (incl. CRM-capable admin/director/rep/construction) because field tokens
+// carry surface:"field" and CRM auth (authMiddleware) rejects that surface outright — so a field token
+// can never reach CRM routes regardless of role/expiry/later-promotion. CRM/admin tokens are minted
+// elsewhere (24h, no surface). No revocation yet (#717).
+const FIELD_JWT_EXPIRES_IN = "30d";
 
 export type InviteStatus = "accepted" | "pending" | "expired" | "revoked";
 export type FieldUserStatusFilter = "all" | "active" | "inactive" | "pending-invite";
@@ -498,7 +504,8 @@ export async function acceptFieldInvite(input: { token: string; password: string
     officeId: user.office_id,
     role: "field_contractor",
     authMethod: "local",
-  });
+    surface: "field",
+  }, { expiresIn: FIELD_JWT_EXPIRES_IN });
   const responseUser = toFieldUserResponse(user);
 
   await db.transaction(async (tx) => {
@@ -645,13 +652,16 @@ export async function loginFieldUser(input: { email: string; password: string })
     throw new AppError(401, "Invalid email or password");
   }
 
+  // 30d for ALL field-app roles — the surface:"field" stamp (rejected by CRM authMiddleware) is what
+  // keeps it safe, so no role/override scoping is needed here.
   const jwtToken = signJwt({
     userId: user.id,
     email: user.email,
     officeId: user.office_id,
     role: user.role as UserRole,
     authMethod: "local",
-  });
+    surface: "field",
+  }, { expiresIn: FIELD_JWT_EXPIRES_IN });
   await db.execute(sql`
     UPDATE user_local_auth
     SET last_login_at = now(),

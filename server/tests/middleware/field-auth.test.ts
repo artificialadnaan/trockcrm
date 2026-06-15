@@ -79,6 +79,18 @@ describe("field auth middleware", () => {
     }
   );
 
+  it("ACCEPTS a field-audience token (surface:'field') — the field path is not affected by the CRM guard", async () => {
+    mocks.verifyJwt.mockReturnValue({ userId: "user-1", authMethod: "local", surface: "field" });
+    mocks.getUserById.mockResolvedValueOnce(createUser({ role: "field_contractor" }));
+    const req = createRequest();
+    const next = vi.fn() as NextFunction;
+
+    await requireFieldContractor(req, {} as Response, next);
+
+    expect(next).toHaveBeenCalledWith(); // accepted (no error) — only CRM authMiddleware rejects surface:field
+    expect(req.fieldUser).toMatchObject({ id: "user-1", role: "field_contractor" });
+  });
+
   it("rejects missing and invalid field tokens with 401", async () => {
     const missingReq = createRequest({ cookies: {}, headers: {} });
     const missingNext = vi.fn() as NextFunction;
