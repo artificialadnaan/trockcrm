@@ -98,6 +98,9 @@ describe("public photo token routes", () => {
     });
     mocks.getPublicPhotoDownload.mockResolvedValue({ url: "https://example.test/photo.jpg", filename: "Roof.jpg" });
     delete process.env.FRONTEND_URL;
+    // Clear the new public-share base too, so the suite is independent of the ambient shell env (it now
+    // takes precedence over FRONTEND_URL — a CI job with it set would otherwise fail the URL assertions).
+    delete process.env.PUBLIC_SHARE_BASE_URL;
   });
 
   it("returns public viewer data and excludes CRM-internal fields", async () => {
