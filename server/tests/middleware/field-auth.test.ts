@@ -97,23 +97,24 @@ describe("field auth middleware", () => {
     expect(invalidNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 401 });
   });
 
-  it("rejects inactive and unsupported field users with 403", async () => {
+  it("rejects inactive and unsupported field users with 401 (account-identity failure → re-login)", async () => {
     mocks.getUserById.mockResolvedValueOnce(createUser({ isActive: false }));
     const inactiveNext = vi.fn() as NextFunction;
 
     await requireFieldContractor(createRequest(), {} as Response, inactiveNext);
 
-    expect(inactiveNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
+    // 401 (not 403) so the client re-prompts login — the deactivation backstop for the long-lived token.
+    expect(inactiveNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 401 });
 
     mocks.getUserById.mockResolvedValueOnce(createUser({ role: "sales_manager" }));
     const unsupportedNext = vi.fn() as NextFunction;
 
     await requireFieldContractor(createRequest(), {} as Response, unsupportedNext);
 
-    expect(unsupportedNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 403 });
+    expect(unsupportedNext.mock.calls[0]?.[0]).toMatchObject({ statusCode: 401 });
   });
 
-  it("rejects local field sessions that require a password change", async () => {
+  it("rejects local field sessions that require a password change with 401", async () => {
     mocks.getUserLocalAuthGate.mockResolvedValueOnce({
       mustChangePassword: true,
       isEnabled: true,
@@ -127,7 +128,7 @@ describe("field auth middleware", () => {
 
     const error = next.mock.calls[0]?.[0];
     expect(error).toMatchObject({
-      statusCode: 403,
+      statusCode: 401,
       message: "Field app access requires password change",
     });
   });

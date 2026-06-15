@@ -52,11 +52,16 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
     if (!user) {
       throw new AppError(401, "Authentication required");
     }
+    // Account-IDENTITY failures (the account itself is no longer valid for the field app) return 401, NOT
+    // 403, so the client treats them like an invalid session and re-prompts login. This is the deactivation
+    // backstop for the long-lived (30d) stateless field token: a deactivated or role-revoked user is
+    // bounced on their next request (re-login then fails in loginFieldUser, which also rejects inactive /
+    // wrong-role accounts -> clean lockout, no loop). 403 is reserved for per-ACTION authorization below.
     if (!FIELD_APP_ALLOWED_ROLE_SET.has(user.role as UserRole)) {
-      throw new AppError(403, "Field app access required");
+      throw new AppError(401, "Field app access required");
     }
     if (!user.isActive) {
-      throw new AppError(403, "Field user is inactive");
+      throw new AppError(401, "Field user is inactive");
     }
 
     const authMethod = claims.authMethod;
@@ -71,8 +76,13 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
     ) {
       throw new AppError(401, "Local login is no longer enabled for this user");
     }
+    // Account-state gate -> 401 (treated as an invalid session) for consistency with the identity checks
+    // above. NOTE: loginFieldUser does NOT block must-change-password, so on a client without a
+    // change-password flow (mobile) the user is bounced to login and re-login won't clear the gate until
+    // the password is changed elsewhere — same as the pre-401-only behavior. Follow-up: a mobile
+    // change-password flow or a login-time block would make this UX clean.
     if (localAuthGate.mustChangePassword) {
-      throw new AppError(403, "Field app access requires password change");
+      throw new AppError(401, "Field app access requires password change");
     }
 
     const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
