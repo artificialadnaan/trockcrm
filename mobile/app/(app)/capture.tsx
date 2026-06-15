@@ -13,8 +13,9 @@ import { assignPhotoTarget, getTranscriptionConfig } from "../../src/api/endpoin
 import type { FieldCaptureTarget } from "../../src/api/types";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
 import { runConcurrentUploads, uploadCapture, type CaptureTargetRef } from "../../src/capture/upload";
-import { applyGpsToPending, effectiveCaption, reconcileUploadGps, type SessionPhoto } from "../../src/capture/session-photo";
+import { applyGpsToPending, buildCaptureUploadInput, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
+import { DEFAULT_CAPTURE_MODE, loadCaptureMode, saveCaptureMode, type CaptureMode } from "../../src/capture/capture-mode";
 import { Badge, Button, EmptyState, TextInput } from "../../src/components/ui";
 import { Banner } from "../../src/components/Banner";
 import { CategoryPicker } from "../../src/components/CategoryPicker";
@@ -87,6 +88,9 @@ export default function CaptureScreen() {
     { tone: "error" | "success"; text: string; viewTarget?: SelectedTarget } | null
   >(null);
   const [cameraOpen, setCameraOpen] = useState(false);
+  // Camera mode: per-photo (document-as-you-go, the default) vs. batch (burst then
+  // caption in the tray). Loaded from / persisted to secure-store so it sticks.
+  const [mode, setMode] = useState<CaptureMode>(DEFAULT_CAPTURE_MODE);
   const keyCounter = useRef(0);
   // Live GPS fetched once per camera session so burst shots aren't each blocked
   // on a fresh fix (a burst is at one location); applied to every shot.
@@ -104,6 +108,16 @@ export default function CaptureScreen() {
   // The camera session cameraGpsRef belongs to — scopes upload-time reconciliation
   // so a later session's fix can't geotag an earlier session's shot.
   const cameraGpsSessionRef = useRef<number | null>(null);
+
+  // Restore the saved camera mode once on mount (default applies until it resolves).
+  useEffect(() => {
+    void loadCaptureMode().then(setMode);
+  }, []);
+
+  function changeMode(next: CaptureMode) {
+    setMode(next);
+    void saveCaptureMode(next);
+  }
 
   const pendingQuery = usePendingPhotos();
   const transcribeConfig = useQuery({
@@ -184,7 +198,7 @@ export default function CaptureScreen() {
     setCameraOpen(true);
   }
 
-  function onCameraCapture(shot: CapturedShot) {
+  function onCameraCapture(shot: CapturedShot, caption: string) {
     const key = nextKey();
     // Honor the shot's own EXIF (DateTimeOriginal + any embedded GPS), mirroring the
     // import path; else the live session GPS; else back-patch when getLiveGps() lands.
@@ -203,7 +217,7 @@ export default function CaptureScreen() {
     }
     setPhotos((prev) => [
       ...prev,
-      { key, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption: "", cameraSession: cameraSessionRef.current },
+      { key, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: cameraSessionRef.current },
     ]);
   }
 
@@ -270,20 +284,15 @@ export default function CaptureScreen() {
     const sessionGps = cameraGpsRef.current;
     const gpsSession = cameraGpsSessionRef.current;
     const ref = targetRef(target);
+    // One mapping for every shot: per-photo caption wins over the batch caption, and a
+    // resolved session GPS reconciles only into still-ungeotagged shots FROM THAT session
+    // (an earlier session's shot is never geotagged with it). The note a crew dictated for
+    // a shot rides with THAT shot — see session-photo.buildCaptureUploadInput.
     const results = await runConcurrentUploads(photos, 3, (sp) =>
-      uploadCapture(fetcher, {
-        uri: sp.uri,
-        width: sp.width,
-        height: sp.height,
-        target: ref,
-        category,
-        // Per-photo caption wins; batch caption is the fallback for un-captioned photos.
-        caption: effectiveCaption(sp.caption, batchCaption),
-        tags,
-        // Reconcile a resolved session GPS into still-ungeotagged shots FROM THAT
-        // session only — an earlier session's shot is never geotagged with it.
-        metadata: reconcileUploadGps(sp, sessionGps, gpsSession),
-      }),
+      uploadCapture(
+        fetcher,
+        buildCaptureUploadInput(sp, { target: ref, category, tags, batchCaption, sessionGps, gpsSession }),
+      ),
     );
 
     const failedKeys = photos.filter((_, i) => results[i]?.status === "rejected").map((p) => p.key);
@@ -388,6 +397,32 @@ export default function CaptureScreen() {
             }
           />
         ) : null}
+
+        {/* Camera mode — per-photo (document-as-you-go) vs. batch (burst, caption after) */}
+        <View style={styles.modeRow}>
+          <Text style={styles.modeLabel}>Camera</Text>
+          <View style={styles.segment}>
+            {([
+              ["perPhoto", "One at a time"],
+              ["batch", "Batch"],
+            ] as const).map(([value, label]) => {
+              const active = mode === value;
+              return (
+                <Pressable
+                  key={value}
+                  onPress={() => changeMode(value)}
+                  disabled={uploading}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active, disabled: uploading }}
+                  accessibilityLabel={`${label} camera mode`}
+                  style={[styles.segBtn, active && styles.segBtnActive]}
+                >
+                  <Text style={[styles.segText, active && styles.segTextActive]}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
 
         {/* Capture actions */}
         <View style={styles.actions}>
@@ -521,6 +556,8 @@ export default function CaptureScreen() {
             onClose={() => setCameraOpen(false)}
             count={photos.length}
             recent={photos.slice(-5).map((p) => p.uri)}
+            annotatePerShot={mode === "perPhoto"}
+            voiceEnabled={transcribeConfig.data?.configured ?? false}
           />
         </Suspense>
       ) : null}
@@ -566,6 +603,20 @@ const styles = StyleSheet.create({
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   linkDisabled: { opacity: 0.4 },
   targetActions: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
+  modeRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
+  modeLabel: { fontFamily: theme.font.medium, fontSize: 13, color: theme.color.textMuted },
+  segment: {
+    flexDirection: "row",
+    backgroundColor: theme.color.surfaceMuted,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    padding: 2,
+  },
+  segBtn: { paddingHorizontal: theme.space.md, paddingVertical: 6, borderRadius: theme.radius.sm },
+  segBtnActive: { backgroundColor: theme.color.surfaceCard, borderWidth: 1, borderColor: theme.color.border },
+  segText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textMuted },
+  segTextActive: { color: theme.color.textPrimary },
   actions: { flexDirection: "row", gap: theme.space.md },
   fieldLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   hint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },

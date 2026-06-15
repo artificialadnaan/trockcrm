@@ -1,4 +1,6 @@
 import type { PhotoMetadata } from "./metadata";
+// Type-only import (erased at runtime — no cycle: upload.ts does not import this module).
+import type { CaptureTargetRef, CaptureUploadInput } from "./upload";
 
 /**
  * A photo collected in the capture session (from the burst camera or a library
@@ -63,4 +65,34 @@ export function reconcileUploadGps(
   if (!sessionGps || sessionGps.latitude === undefined || sessionGps.longitude === undefined) return m;
   if (photo.cameraSession === undefined || photo.cameraSession !== gpsSession) return m;
   return { ...m, latitude: sessionGps.latitude, longitude: sessionGps.longitude, addressSource: sessionGps.addressSource };
+}
+
+/**
+ * Build the exact upload payload for ONE photo — the single mapping `upload()` uses
+ * for every shot. Keeps each photo's OWN caption (effectiveCaption: individual over
+ * batch) and its OWN reconciled metadata bound to that photo, so the note a crew
+ * dictated for a shot always rides with THAT shot and never bleeds onto another.
+ * Pure (no fetcher/network) so this correctness is unit-tested without a device.
+ */
+export function buildCaptureUploadInput(
+  photo: SessionPhoto,
+  ctx: {
+    target: CaptureTargetRef;
+    category: string | null;
+    tags: string[];
+    batchCaption: string;
+    sessionGps: PhotoMetadata | null;
+    gpsSession: number | null;
+  },
+): CaptureUploadInput {
+  return {
+    uri: photo.uri,
+    width: photo.width,
+    height: photo.height,
+    target: ctx.target,
+    category: ctx.category,
+    caption: effectiveCaption(photo.caption, ctx.batchCaption),
+    tags: ctx.tags,
+    metadata: reconcileUploadGps(photo, ctx.sessionGps, ctx.gpsSession),
+  };
 }
