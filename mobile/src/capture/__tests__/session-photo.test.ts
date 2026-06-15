@@ -1,4 +1,10 @@
-import { applyGpsToPending, effectiveCaption, reconcileUploadGps, type SessionPhoto } from "../session-photo";
+import {
+  applyGpsToPending,
+  buildCaptureUploadInput,
+  effectiveCaption,
+  reconcileUploadGps,
+  type SessionPhoto,
+} from "../session-photo";
 
 describe("effectiveCaption (individual overrides batch)", () => {
   it("uses the per-photo caption when set", () => {
@@ -85,5 +91,65 @@ describe("reconcileUploadGps (scope the upload fix to the shot's camera session)
     const p = shot(1);
     expect(reconcileUploadGps(p, { takenAt: "x" }, 1)).toBe(p.metadata);
     expect(reconcileUploadGps(p, null, 1)).toBe(p.metadata);
+  });
+});
+
+// THE core correctness of document-as-you-go: the note a crew dictates for a shot
+// must ride with THAT shot and never bleed onto another, all the way to the upload
+// payload. This is the single mapping upload() uses for every photo.
+describe("buildCaptureUploadInput (per-photo note attaches to the RIGHT photo)", () => {
+  const photo = (over: Partial<SessionPhoto>): SessionPhoto => ({
+    key: "k",
+    uri: "file://x.jpg",
+    metadata: { takenAt: "t" },
+    caption: "",
+    ...over,
+  });
+  const ctx = (over: Partial<Parameters<typeof buildCaptureUploadInput>[1]> = {}) => ({
+    target: { dealId: "d1" },
+    category: "Roof",
+    tags: ["north"],
+    batchCaption: "site walk",
+    sessionGps: null,
+    gpsSession: null,
+    ...over,
+  });
+
+  it("keeps each photo's own caption + uri together; un-captioned photos inherit the batch", () => {
+    const a = photo({ key: "sp-1", uri: "file://A.jpg", caption: "cracked flashing, NE corner" });
+    const b = photo({ key: "sp-2", uri: "file://B.jpg", caption: "" });
+
+    const inA = buildCaptureUploadInput(a, ctx());
+    const inB = buildCaptureUploadInput(b, ctx());
+
+    expect(inA).toMatchObject({ uri: "file://A.jpg", caption: "cracked flashing, NE corner" });
+    expect(inB).toMatchObject({ uri: "file://B.jpg", caption: "site walk" });
+    // Batch metadata threads through unchanged on every photo.
+    expect(inA).toMatchObject({ target: { dealId: "d1" }, category: "Roof", tags: ["north"] });
+  });
+
+  it("maps a whole batch positionally — note[i] stays with photo[i], no bleed", () => {
+    const photos = [
+      photo({ uri: "0", caption: "zero" }),
+      photo({ uri: "1", caption: "" }),
+      photo({ uri: "2", caption: "two" }),
+    ];
+    const inputs = photos.map((p) => buildCaptureUploadInput(p, ctx({ batchCaption: "fallback" })));
+    expect(inputs.map((i) => i.uri)).toEqual(["0", "1", "2"]);
+    expect(inputs.map((i) => i.caption)).toEqual(["zero", "fallback", "two"]);
+  });
+
+  it("emits null caption when the photo and the batch are both blank", () => {
+    expect(buildCaptureUploadInput(photo({ caption: "  " }), ctx({ batchCaption: "" })).caption).toBeNull();
+  });
+
+  it("reconciles a resolved session GPS into the matching session's ungeotagged shot", () => {
+    const fix = { latitude: 32.7, longitude: -96.8, addressSource: "live_gps" as const, takenAt: "x" };
+    const shot = photo({ caption: "c", cameraSession: 2, metadata: { takenAt: "t" } });
+    const input = buildCaptureUploadInput(shot, ctx({ sessionGps: fix, gpsSession: 2 }));
+    expect(input.metadata).toMatchObject({ latitude: 32.7, longitude: -96.8, takenAt: "t" });
+    // ...but a different session's shot is left as-is.
+    const other = photo({ caption: "c", cameraSession: 1, metadata: { takenAt: "t" } });
+    expect(buildCaptureUploadInput(other, ctx({ sessionGps: fix, gpsSession: 2 })).metadata.latitude).toBeUndefined();
   });
 });

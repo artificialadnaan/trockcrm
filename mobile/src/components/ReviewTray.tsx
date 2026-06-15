@@ -15,8 +15,8 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { theme } from "../theme/theme";
 import type { SessionPhoto } from "../capture/session-photo";
-import { Button, TextInput } from "./ui";
-import { VoiceRecorder } from "./VoiceRecorder";
+import { Button } from "./ui";
+import { PhotoCaptionEditor } from "./PhotoCaptionEditor";
 
 const GAP = 8;
 const COLUMNS = 3;
@@ -115,39 +115,32 @@ export function ReviewTray({
             <Pressable style={styles.backdrop} onPress={closeSheet} accessibilityLabel="Close caption editor" />
             {selected ? (
               <SafeAreaView edges={["bottom"]} style={styles.sheet}>
-                <View style={styles.editorHead}>
-                  <Image source={{ uri: selected.uri }} style={styles.editorThumb} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.editorLabel}>Caption for this photo</Text>
-                    <Text style={styles.editorHint}>Optional — leave blank to use the shared caption below.</Text>
-                  </View>
-                  <Pressable
-                    onPress={() => confirmRemove(selected.key)}
-                    disabled={disabled || voiceBusy}
-                    hitSlop={12}
-                    accessibilityRole="button"
-                    accessibilityLabel="Remove photo"
-                  >
-                    <Text style={[styles.remove, (disabled || voiceBusy) && styles.removeDisabled]}>Remove</Text>
-                  </Pressable>
-                </View>
-                <TextInput
-                  value={selected.caption}
-                  onChangeText={(text) => onSetCaption(selected.key, text)}
-                  editable={!disabled}
-                  placeholder="Describe this photo"
-                  accessibilityLabel="Photo caption"
-                  multiline
+                {/* Shared editor body; functional append in the parent avoids overwriting on rapid
+                    transcripts, and while dictation is recording/transcribing the sheet is held open
+                    (closeSheet/Done are guarded by voiceBusy). */}
+                <PhotoCaptionEditor
+                  uri={selected.uri}
+                  caption={selected.caption}
+                  onChangeCaption={(text) => onSetCaption(selected.key, text)}
+                  onAppendCaption={(text) => onAppendCaption(selected.key, text)}
+                  voiceEnabled={voiceEnabled}
+                  onBusyChange={setVoiceBusy}
+                  disabled={disabled}
                   autoFocus
-                  style={styles.captionInput}
+                  hint="Optional — leave blank to use the shared caption below."
+                  headerRight={
+                    <Pressable
+                      onPress={() => confirmRemove(selected.key)}
+                      disabled={disabled || voiceBusy}
+                      hitSlop={12}
+                      accessibilityRole="button"
+                      accessibilityLabel="Remove photo"
+                    >
+                      <Text style={[styles.remove, (disabled || voiceBusy) && styles.removeDisabled]}>Remove</Text>
+                    </Pressable>
+                  }
+                  footer={<Button title="Done" onPress={closeSheet} disabled={voiceBusy} />}
                 />
-                {/* Voice dictation — parity with the batch caption (was never wired into this sheet).
-                    Functional append in the parent avoids overwriting on rapid transcripts; while it's
-                    recording/transcribing the sheet is held open (closeSheet/Done are guarded). */}
-                {voiceEnabled ? (
-                  <VoiceRecorder onTranscript={(text) => onAppendCaption(selected.key, text)} onBusyChange={setVoiceBusy} />
-                ) : null}
-                <Button title="Done" onPress={closeSheet} disabled={voiceBusy} />
               </SafeAreaView>
             ) : null}
           </KeyboardAvoidingView>
@@ -185,11 +178,6 @@ const styles = StyleSheet.create({
     padding: theme.space.lg,
     gap: theme.space.md,
   },
-  editorHead: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
-  editorThumb: { width: 48, height: 48, borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
-  editorLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
-  editorHint: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
   remove: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.danger },
   removeDisabled: { opacity: 0.4 },
-  captionInput: { minHeight: 80, textAlignVertical: "top", paddingTop: 10, paddingBottom: 10 },
 });
