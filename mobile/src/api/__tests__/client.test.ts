@@ -61,6 +61,14 @@ describe("apiFetch", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
+  it("does NOT invoke onUnauthorized on 403 (authorization, not auth) but still throws ApiError(403)", async () => {
+    mockFetch(async () => ({ ok: false, status: 403, json: async () => ({ error: { message: "forbidden" } }) }));
+    const onUnauthorized = jest.fn();
+    await expect(apiFetch("/field/projects/x/share", { method: "POST", body: {}, onUnauthorized }))
+      .rejects.toMatchObject({ status: 403, message: "forbidden" });
+    expect(onUnauthorized).not.toHaveBeenCalled(); // a 403 must never sign the user out
+  });
+
   it("returns undefined for 204 No Content", async () => {
     mockFetch(async () => ({
       ok: true,
