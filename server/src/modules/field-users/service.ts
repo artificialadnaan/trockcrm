@@ -14,8 +14,11 @@ const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MINUTES = 15;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // FIELD session lifetime — long-lived so crews don't re-authenticate every time they open T-Rock Cam.
-// Scoped to the field token only (passed to signJwt's expiresIn); the CRM/admin default (24h) is
-// untouched. Tradeoff: a stateless 30-day token has no server-side revocation yet (tracked follow-up).
+// Applied ONLY to pure field_contractor tokens (invites are always field_contractor; field-login uses it
+// only when the user's role is field_contractor). CRM-capable roles (admin/director/rep/construction)
+// that can also field-login keep the 24h default, since their token works on CRM routes too. The CRM/admin
+// signer default (24h) is untouched. Tradeoff: a stateless 30-day token has no server-side revocation yet
+// (tracked follow-up).
 const FIELD_JWT_EXPIRES_IN = "30d";
 
 export type InviteStatus = "accepted" | "pending" | "expired" | "revoked";
@@ -649,13 +652,16 @@ export async function loginFieldUser(input: { email: string; password: string })
     throw new AppError(401, "Invalid email or password");
   }
 
+  // 30d ONLY for pure field users (field_contractor). loginFieldUser also admits CRM roles
+  // (admin/director/rep/construction), and their token is usable on CRM/admin routes — so minting THOSE
+  // for 30d would extend the CRM session past its 24h lifetime. CRM roles keep the 24h default.
   const jwtToken = signJwt({
     userId: user.id,
     email: user.email,
     officeId: user.office_id,
     role: user.role as UserRole,
     authMethod: "local",
-  }, { expiresIn: FIELD_JWT_EXPIRES_IN });
+  }, user.role === "field_contractor" ? { expiresIn: FIELD_JWT_EXPIRES_IN } : undefined);
   await db.execute(sql`
     UPDATE user_local_auth
     SET last_login_at = now(),

@@ -569,6 +569,28 @@ describe("field user service helpers", () => {
     });
   });
 
+  it("mints a 24h (not 30d) token when a CRM role field-logs-in (token is CRM-capable)", async () => {
+    dbMocks.execute
+      .mockResolvedValueOnce({ rows: [{
+        id: "user-2",
+        email: "rep@example.com",
+        display_name: "Rep User",
+        first_name: "Rep",
+        last_name: "User",
+        role: "rep",
+        office_id: "11111111-1111-1111-1111-111111111111",
+        is_active: true,
+        is_enabled: true,
+        password_hash: "hash",
+      }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await loginFieldUser({ email: "rep@example.com", password: "correct-password-12" });
+
+    // CRM-capable role -> NO 30d override (default 24h), so a field-login token can't extend a CRM session.
+    expect(authMocks.signJwt).toHaveBeenCalledWith(expect.objectContaining({ role: "rep" }), undefined);
+  });
+
   it("tracks failed field-login attempts and locks after the existing local-auth threshold", async () => {
     dbMocks.execute
       .mockResolvedValueOnce({ rows: [{
