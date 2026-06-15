@@ -31,7 +31,10 @@ function isLinkCreationEnabled(): boolean {
 }
 
 function publicViewerBaseUrl(): string {
-  return (process.env.FRONTEND_URL ?? "http://localhost:5173").replace(/\/+$/, "");
+  // Mirror server/src/modules/public-photo-tokens/public-share-url.ts precedence so Procore-minted /p
+  // links use the same branded, same-origin host as admin/field shares: PUBLIC_SHARE_BASE_URL, then
+  // FRONTEND_URL, then localhost.
+  return (process.env.PUBLIC_SHARE_BASE_URL?.trim() || process.env.FRONTEND_URL?.trim() || "http://localhost:5173").replace(/\/+$/, "");
 }
 
 function hashToken(token: string): string {

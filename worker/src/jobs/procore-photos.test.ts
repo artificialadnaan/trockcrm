@@ -30,6 +30,7 @@ describe("procore photo worker", () => {
     delete process.env.PROCORE_CLIENT_SECRET;
     delete process.env.PROCORE_COMPANY_ID;
     delete process.env.FRONTEND_URL;
+    delete process.env.PUBLIC_SHARE_BASE_URL; // new precedence over FRONTEND_URL — keep tests env-independent
   });
 
   afterEach(() => {
