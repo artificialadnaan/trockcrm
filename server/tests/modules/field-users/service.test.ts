@@ -591,6 +591,28 @@ describe("field user service helpers", () => {
     expect(authMocks.signJwt).toHaveBeenCalledWith(expect.objectContaining({ role: "rep" }), undefined);
   });
 
+  it("mints a 24h token for a field_contractor who holds a CRM role_override in another office", async () => {
+    dbMocks.execute
+      .mockResolvedValueOnce({ rows: [{
+        id: "user-3",
+        email: "fieldoverride@example.com",
+        display_name: "Field Override",
+        first_name: "Field",
+        last_name: "Override",
+        role: "field_contractor",
+        office_id: "11111111-1111-1111-1111-111111111111",
+        is_active: true,
+        is_enabled: true,
+        password_hash: "hash",
+      }] })
+      .mockResolvedValueOnce({ rows: [{ "?column?": 1 }] }); // a CRM-capable role_override exists for another office
+
+    await loginFieldUser({ email: "fieldoverride@example.com", password: "correct-password-12" });
+
+    // CRM-capable via x-office-id override -> token must NOT be 30d (would extend CRM access past 24h).
+    expect(authMocks.signJwt).toHaveBeenCalledWith(expect.objectContaining({ role: "field_contractor" }), undefined);
+  });
+
   it("tracks failed field-login attempts and locks after the existing local-auth threshold", async () => {
     dbMocks.execute
       .mockResolvedValueOnce({ rows: [{

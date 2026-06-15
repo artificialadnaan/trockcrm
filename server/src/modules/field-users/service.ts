@@ -652,16 +652,32 @@ export async function loginFieldUser(input: { email: string; password: string })
     throw new AppError(401, "Invalid email or password");
   }
 
-  // 30d ONLY for pure field users (field_contractor). loginFieldUser also admits CRM roles
-  // (admin/director/rep/construction), and their token is usable on CRM/admin routes — so minting THOSE
-  // for 30d would extend the CRM session past its 24h lifetime. CRM roles keep the 24h default.
+  // 30d ONLY for users who are field-only on EVERY surface: primary role field_contractor AND no
+  // CRM-capable role_override in any office. loginFieldUser admits CRM roles (admin/director/rep/
+  // construction), AND a field_contractor can hold a CRM role_override for another office — in both cases
+  // the token is usable on CRM/admin routes (authMiddleware applies the override when x-office-id is
+  // sent), so a 30d token would extend the CRM session past its 24h lifetime. Anyone CRM-capable keeps
+  // the 24h default.
+  let isFieldOnly = false;
+  if (user.role === "field_contractor") {
+    // Only a primary field_contractor can be field-only — but they may still hold a CRM-capable
+    // role_override for another office, which makes the token usable on CRM routes via x-office-id. Query
+    // only in this branch (CRM primary roles are 24h regardless, so no need to hit the DB for them).
+    const overrideRows = await db.execute(sql`
+      SELECT 1 FROM user_office_access
+      WHERE user_id = ${user.id}::uuid AND role_override IS NOT NULL AND role_override <> 'field_contractor'
+      LIMIT 1
+    `);
+    const rows = (overrideRows as any)?.rows ?? overrideRows ?? [];
+    isFieldOnly = (rows?.length ?? 0) === 0;
+  }
   const jwtToken = signJwt({
     userId: user.id,
     email: user.email,
     officeId: user.office_id,
     role: user.role as UserRole,
     authMethod: "local",
-  }, user.role === "field_contractor" ? { expiresIn: FIELD_JWT_EXPIRES_IN } : undefined);
+  }, isFieldOnly ? { expiresIn: FIELD_JWT_EXPIRES_IN } : undefined);
   await db.execute(sql`
     UPDATE user_local_auth
     SET last_login_at = now(),
