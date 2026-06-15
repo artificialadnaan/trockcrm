@@ -658,6 +658,10 @@ export async function loginFieldUser(input: { email: string; password: string })
   // the token is usable on CRM/admin routes (authMiddleware applies the override when x-office-id is
   // sent), so a 30d token would extend the CRM session past its 24h lifetime. Anyone CRM-capable keeps
   // the 24h default.
+  // KNOWN LIMITATION (point-in-time): this binds the decision at mint, not the token's future use. If a
+  // field_contractor is PROMOTED or granted a CRM role_override within the 30d window, their existing
+  // token becomes CRM-capable for its remaining life. The durable fix is a field token audience/scope
+  // claim that CRM middleware rejects — tracked in #722 (would also let all field roles get 30d safely).
   let isFieldOnly = false;
   if (user.role === "field_contractor") {
     // Only a primary field_contractor can be field-only — but they may still hold a CRM-capable
