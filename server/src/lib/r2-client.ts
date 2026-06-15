@@ -198,18 +198,43 @@ export async function headObject(
   }
 }
 
+// Thrown by getObjectBuffer when an object exceeds the caller's maxBytes — distinct from a real R2
+// failure so callers can map it (e.g. 422) without masking storage/network outages (which propagate).
+export class ObjectTooLargeError extends Error {
+  constructor(public readonly r2Key: string, public readonly limit: number) {
+    super(`R2 object ${r2Key} exceeds ${limit} bytes`);
+    this.name = "ObjectTooLargeError";
+  }
+}
+
 export async function getObjectBuffer(
-  r2Key: string
+  r2Key: string,
+  opts?: { maxBytes?: number }
 ): Promise<{ buffer: Buffer; contentType?: string; contentLength?: number }> {
   const client = getClient();
   const bucket = getBucket();
   const resp = await client.send(
     new GetObjectCommand({ Bucket: bucket, Key: r2Key })
   );
-  const chunks: Uint8Array[] = [];
-  const stream = resp.Body as AsyncIterable<Uint8Array> | undefined;
+  const max = opts?.maxBytes;
+  const stream = resp.Body as (AsyncIterable<Uint8Array> & { destroy?: (err?: Error) => void }) | undefined;
   if (!stream) throw new Error(`R2 object ${r2Key} has no body`);
+  // Reject before reading the body when the server-reported size already exceeds the cap. GET returns
+  // Content-Length even where a separate HEAD is unavailable, so this guard holds without one. Destroy
+  // the live response stream first — leaving an unread body open can exhaust sockets on repeat hits.
+  if (max != null && resp.ContentLength != null && resp.ContentLength > max) {
+    stream.destroy?.();
+    throw new ObjectTooLargeError(r2Key, max);
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   for await (const chunk of stream) {
+    total += chunk.byteLength;
+    // Abort BEFORE accumulating past the cap, defending against an absent/under-reported Content-Length.
+    if (max != null && total > max) {
+      stream.destroy?.();
+      throw new ObjectTooLargeError(r2Key, max);
+    }
     chunks.push(chunk);
   }
   return {

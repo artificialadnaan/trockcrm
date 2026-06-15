@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { S3Client } from "@aws-sdk/client-s3";
 
-// Mock the AWS SDK modules
+// Mock the AWS SDK modules. A hoisted sendMock lets individual tests control S3 responses.
+const sendMock = vi.hoisted(() => vi.fn());
 vi.mock("@aws-sdk/client-s3", () => ({
   S3Client: vi.fn().mockImplementation(() => ({
-    send: vi.fn(),
+    send: sendMock,
   })),
   PutObjectCommand: vi.fn(),
   PutBucketCorsCommand: vi.fn(),
@@ -98,6 +100,58 @@ describe("R2 Client", () => {
         "http://localhost:5173",
         "http://localhost:3000",
       ]);
+    });
+  });
+
+  describe("getObjectBuffer size cap", () => {
+    const KEY = "office_dallas/deals/TR-1/photos/huge.png";
+    beforeEach(() => {
+      // The outer beforeEach's vi.restoreAllMocks() strips the S3Client implementation — re-apply it so
+      // getClient() returns a client whose .send is our controllable sendMock.
+      (S3Client as unknown as { mockImplementation: (fn: () => unknown) => void }).mockImplementation(() => ({ send: sendMock }));
+      process.env.R2_ACCOUNT_ID = "acct";
+      process.env.R2_ACCESS_KEY_ID = "key";
+      process.env.R2_SECRET_ACCESS_KEY = "secret";
+      process.env.R2_BUCKET_NAME = "bucket";
+      sendMock.mockReset();
+    });
+
+    function fakeBody(chunks: Uint8Array[], destroy: () => void, onIterate?: () => void) {
+      return {
+        destroy,
+        async *[Symbol.asyncIterator]() {
+          onIterate?.();
+          for (const c of chunks) yield c;
+        },
+      };
+    }
+
+    it("rejects (ObjectTooLargeError) + destroys the stream when Content-Length exceeds maxBytes — body never read", async () => {
+      const destroy = vi.fn();
+      let iterated = false;
+      sendMock.mockResolvedValue({ Body: fakeBody([new Uint8Array(10)], destroy, () => { iterated = true; }), ContentLength: 100 * 1024 * 1024 });
+      const { getObjectBuffer, ObjectTooLargeError } = await import("../../src/lib/r2-client.js");
+
+      await expect(getObjectBuffer(KEY, { maxBytes: 1024 })).rejects.toBeInstanceOf(ObjectTooLargeError);
+      expect(destroy).toHaveBeenCalled();
+      expect(iterated).toBe(false); // the oversized body is never streamed
+    });
+
+    it("aborts + destroys mid-stream when chunks exceed maxBytes despite an absent Content-Length", async () => {
+      const destroy = vi.fn();
+      sendMock.mockResolvedValue({ Body: fakeBody([new Uint8Array(800), new Uint8Array(800)], destroy) }); // no ContentLength
+      const { getObjectBuffer, ObjectTooLargeError } = await import("../../src/lib/r2-client.js");
+
+      await expect(getObjectBuffer(KEY, { maxBytes: 1000 })).rejects.toBeInstanceOf(ObjectTooLargeError);
+      expect(destroy).toHaveBeenCalled();
+    });
+
+    it("returns the buffer when within the cap", async () => {
+      sendMock.mockResolvedValue({ Body: fakeBody([new Uint8Array([1, 2, 3])], vi.fn()), ContentLength: 3, ContentType: "image/png" });
+      const { getObjectBuffer } = await import("../../src/lib/r2-client.js");
+
+      const { buffer } = await getObjectBuffer(KEY, { maxBytes: 1024 });
+      expect(buffer.equals(Buffer.from([1, 2, 3]))).toBe(true);
     });
   });
 });

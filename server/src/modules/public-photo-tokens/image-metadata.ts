@@ -13,7 +13,9 @@ function isJpeg(buf: Buffer): boolean {
 }
 
 export function isStrippableJpeg(mimeType?: string | null, fileExtension?: string | null): boolean {
-  const mime = mimeType?.trim().toLowerCase();
+  // Drop any MIME parameters (e.g. `image/jpeg; charset=binary`) before the exact-match check, mirroring
+  // isTranscodableToJpeg, so a parameterized-but-valid JPEG type isn't wrongly treated as non-servable.
+  const mime = mimeType?.split(";")[0]?.trim().toLowerCase();
   if (mime) return mime === "image/jpeg" || mime === "image/jpg";
   const ext = fileExtension?.trim().toLowerCase().replace(/^\.?/, "");
   return ext === "jpg" || ext === "jpeg";

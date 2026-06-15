@@ -8,13 +8,19 @@ import { AppError } from "../../middleware/error-handler.js";
 import { getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
 import { latestActiveVersionCondition, type DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
-import { getObjectStream } from "../../lib/r2-client.js";
+import { getObjectBuffer, getObjectStream, ObjectTooLargeError } from "../../lib/r2-client.js";
 import { isStrippableJpeg } from "./image-metadata.js";
+import { isTranscodableToJpeg, transcodeToStrippedJpeg } from "./image-transcode.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
 const PUBLIC_TOKEN_BYTES = 32;
-const IMAGE_EXTENSIONS = new Set([".avif", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".webp"]);
+const IMAGE_EXTENSIONS = new Set([".avif", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
+// Upper bound on a non-JPEG original we'll buffer + transcode on the public proxy. The field upload has
+// no size cap, so without this a large (or maliciously large) shared PNG/WebP would be read fully into
+// memory and decoded — a memory/CPU DoS vector on this unauthenticated endpoint. JPEGs are unaffected
+// (they stream). 40 MB is generous for any real photo; anything larger 422s (placeholder).
+const MAX_TRANSCODE_BYTES = 40 * 1024 * 1024;
 
 export type PublicTokenStatus = "active" | "expired" | "revoked";
 
@@ -348,14 +354,34 @@ function publicPhotoAssetUrl(assetBaseUrl: string, rawToken: string, photoId: st
   return download ? `${url}?download=1` : url;
 }
 
+// Whether an R2-backed photo can be served through the public proxy. JPEGs stream (size-independent);
+// non-JPEG rasters are buffered + transcoded, so they're capped at MAX_TRANSCODE_BYTES. An oversized
+// transcodable photo is therefore NOT servable — so the viewer/download advertise nothing (placeholder),
+// matching the asset endpoint's 422, instead of a broken <img>. Unknown/NaN size is treated as
+// within-cap (the asset endpoint's HEAD-gate is the authoritative backstop). HEIC/HEIF (no libheif) and
+// non-rasters are never servable.
+function isPublicProxyServable(
+  mimeType: string | null | undefined,
+  fileExtension: string | null | undefined,
+  fileSizeBytes: number | string | null | undefined,
+): boolean {
+  if (isStrippableJpeg(mimeType, fileExtension)) return true;
+  if (isTranscodableToJpeg(mimeType, fileExtension)) {
+    const size = fileSizeBytes == null ? null : Number(fileSizeBytes);
+    return size == null || Number.isNaN(size) || size <= MAX_TRANSCODE_BYTES;
+  }
+  return false;
+}
+
 function publicPhotoImageUrl(photo: any, assetBaseUrl: string | undefined, rawToken: string): string | null {
   if (!isPublicPhotoImagePreviewable(photo)) return null;
-  // R2-backed photos are streamed through the API proxy (key hidden, EXIF stripped) — but ONLY for
-  // JPEG, the one format we can strip. Non-JPEG R2 originals (HEIC/PNG/WebP/GIF) could carry
-  // un-strippable GPS, so they are NOT exposed on the public surface. External (CompanyCam CDN) URLs
-  // don't carry the deal number and are served directly.
+  // R2-backed photos are served through the API proxy (object key hidden, metadata stripped). JPEGs are
+  // EXIF-stripped on the fly; PNG/WebP/GIF/AVIF/TIFF originals are re-encoded server-side to a
+  // metadata-free JPEG by the proxy (getPublicPhotoAsset) — the raw original is NEVER served. Non-servable
+  // cases (HEIC/HEIF, or a transcodable original over the size cap) return null => placeholder, no failed
+  // request. External (CompanyCam CDN) URLs don't carry the deal number and are served directly.
   if (photo.r2Key) {
-    if (!isStrippableJpeg(photo.mimeType, photo.fileExtension)) return null;
+    if (!isPublicProxyServable(photo.mimeType, photo.fileExtension, photo.fileSizeBytes)) return null;
     return assetBaseUrl ? publicPhotoAssetUrl(assetBaseUrl, rawToken, photo.id) : null;
   }
   return photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
@@ -418,7 +444,7 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
   const token = await verifyAndConsumeToken(rawToken);
   return withPublicPhotoTenant(token.tenantId, async (tenantDb) => {
     const photoResult = await tenantDb.execute(sql`
-      SELECT id, deal_id, category, file_extension, external_url, r2_key, mime_type
+      SELECT id, deal_id, category, file_extension, external_url, r2_key, mime_type, file_size_bytes
       FROM files
       WHERE id = ${photoId}::uuid
         AND ${dealPhotoOwnershipSql(token.dealId)}
@@ -431,16 +457,22 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
 
     const filename = publicDownloadFilename(photo.file_extension);
     // Mirror the image proxy exactly so the download path can't expose anything the viewer hides:
-    //   - R2 JPEG        -> proxy ?download=1 (key hidden, EXIF stripped)
-    //   - R2 non-JPEG    -> 404 (un-strippable original is never served publicly — do NOT fall back
-    //                      to its external_url, which would leak the unstripped metadata)
-    //   - external only  -> the CompanyCam CDN URL (no R2 copy; no deal number in the key)
+    //   - R2 JPEG               -> proxy ?download=1 (key hidden, EXIF stripped)
+    //   - R2 PNG/WebP/... (<cap) -> proxy ?download=1 (re-encoded to a metadata-free JPEG; raw never served)
+    //   - R2 HEIC/HEIF or oversized transcodable -> 404 (not servable; do NOT fall back to external_url,
+    //                       which would leak the unstripped original)
+    //   - external only         -> the CompanyCam CDN URL (no R2 copy; no deal number in the key)
     let result: { url: string; filename: string };
     if (photo.r2_key) {
-      if (!isStrippableJpeg(photo.mime_type, photo.file_extension) || !context.assetBaseUrl) {
+      if (!context.assetBaseUrl || !isPublicProxyServable(photo.mime_type, photo.file_extension, photo.file_size_bytes)) {
         throw new AppError(404, "Photo not found");
       }
-      result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename };
+      if (isStrippableJpeg(photo.mime_type, photo.file_extension)) {
+        result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename };
+      } else {
+        // Transcodable non-JPEG within the size cap -> served as a transcoded JPEG, so the download is photo.jpg.
+        result = { url: publicPhotoAssetUrl(context.assetBaseUrl, rawToken, String(photo.id), true), filename: "photo.jpg" };
+      }
     } else if (photo.external_url) {
       result = { url: photo.external_url, filename };
     } else {
@@ -465,15 +497,17 @@ export async function getPublicPhotoDownload(rawToken: string, photoId: string, 
 
 export type PublicPhotoAsset =
   | { kind: "external"; url: string }
-  | { kind: "jpeg-stream"; stream: AsyncIterable<Uint8Array>; contentType: string; filename: string };
+  | { kind: "jpeg-stream"; stream: AsyncIterable<Uint8Array>; contentType: string; filename: string }
+  | { kind: "jpeg-buffer"; buffer: Buffer; contentType: string; filename: string };
 
 /**
  * Resolves a single photo for the public viewer proxy. R2-backed JPEGs return a raw byte stream the
- * route strips + streams (key never exposed, EXIF removed); external (CompanyCam) photos return a
- * redirect target. NON-JPEG R2 originals (HEIC/PNG/WebP/GIF) are 404'd — we can't strip their
- * metadata, so they are not served on the public surface. Token validated read-only (no access_count
- * increment); the photo row is read in the tenant transaction, which is released before opening the
- * R2 stream so a pooled connection is never held across network I/O.
+ * route strips + streams (key never exposed, EXIF removed); R2-backed NON-JPEG rasters
+ * (PNG/WebP/GIF/AVIF/TIFF) are re-encoded server-side to a metadata-free JPEG buffer — the raw
+ * original is NEVER streamed. External (CompanyCam) photos return a redirect target. Formats we can't
+ * decode (HEIC/HEIF — no libheif in sharp's prebuilt) are 404'd, never served raw. Token validated
+ * read-only (no access_count increment); the photo row is read in the tenant transaction, which is
+ * released before the R2 fetch so a pooled connection is never held across network I/O.
  */
 export async function getPublicPhotoAsset(rawToken: string, photoId: string): Promise<PublicPhotoAsset> {
   const token = await resolvePublicPhotoToken(rawToken);
@@ -492,16 +526,39 @@ export async function getPublicPhotoAsset(rawToken: string, photoId: string): Pr
 
   if (!photo) throw new AppError(404, "Photo not found");
   if (photo.r2_key) {
-    if (!isStrippableJpeg(photo.mime_type, photo.file_extension)) {
-      throw new AppError(404, "Photo not found"); // non-JPEG R2 original is not served publicly
+    if (isStrippableJpeg(photo.mime_type, photo.file_extension)) {
+      const object = await getObjectStream(photo.r2_key);
+      return {
+        kind: "jpeg-stream",
+        stream: object.stream,
+        contentType: "image/jpeg",
+        filename: publicDownloadFilename(photo.file_extension),
+      };
     }
-    const object = await getObjectStream(photo.r2_key);
-    return {
-      kind: "jpeg-stream",
-      stream: object.stream,
-      contentType: "image/jpeg",
-      filename: publicDownloadFilename(photo.file_extension),
-    };
+    if (isTranscodableToJpeg(photo.mime_type, photo.file_extension)) {
+      // Re-encode the non-JPEG original to a metadata-free JPEG; NEVER stream the raw original (its
+      // EXIF/GPS can't be stripped by the JPEG-only stripper). getObjectBuffer enforces the size cap
+      // itself — it rejects on GET Content-Length and aborts the stream before over-accumulating — so an
+      // oversized object is NEVER fully buffered, even if HEAD/size metadata is unavailable (the DoS
+      // guard holds without a separate HEAD). A real R2/network outage propagates (->500), not masked.
+      let buffer: Buffer;
+      try {
+        ({ buffer } = await getObjectBuffer(photo.r2_key, { maxBytes: MAX_TRANSCODE_BYTES }));
+      } catch (err) {
+        if (err instanceof ObjectTooLargeError) throw new AppError(422, "Unprocessable image");
+        throw err;
+      }
+      // Only a decode failure (corrupt/unexpected bytes, or a pixel-bomb over limitInputPixels) is
+      // mapped — to 422, mirroring the JPEG stripper — so we still never leak raw bytes.
+      let jpeg: Buffer;
+      try {
+        jpeg = await transcodeToStrippedJpeg(buffer);
+      } catch {
+        throw new AppError(422, "Unprocessable image");
+      }
+      return { kind: "jpeg-buffer", buffer: jpeg, contentType: "image/jpeg", filename: "photo.jpg" };
+    }
+    throw new AppError(404, "Photo not found"); // un-decodable (HEIC/HEIF) — never served raw
   }
   if (photo.external_url) return { kind: "external", url: photo.external_url };
   throw new AppError(404, "Photo not found");
