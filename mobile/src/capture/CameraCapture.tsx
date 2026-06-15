@@ -16,7 +16,11 @@ import { theme } from "../theme/theme";
 import { Button } from "../components/ui";
 import { PhotoCaptionEditor } from "../components/PhotoCaptionEditor";
 
-export type CapturedShot = { uri: string; width?: number; height?: number; exif?: Record<string, unknown> };
+// `capturedAt` is the shutter timestamp, stamped at capture time. In per-photo mode the shot isn't
+// committed until the note sheet is dismissed, so the parent uses this (not commit-time now()) as the
+// fallback takenAt when EXIF has no DateTimeOriginal — otherwise leaving the sheet open would drift the
+// recorded capture time to annotation time and skew metadata / date sorting.
+export type CapturedShot = { uri: string; width?: number; height?: number; exif?: Record<string, unknown>; capturedAt: string };
 
 /**
  * Full-screen BURST camera with two modes (driven by `annotatePerShot`):
@@ -69,6 +73,8 @@ export default function CameraCapture({
           width: photo.width,
           height: photo.height,
           exif: photo.exif as Record<string, unknown>,
+          // Stamp the shutter time now so a later per-photo annotation can't drift the takenAt.
+          capturedAt: new Date().toISOString(),
         };
         if (annotatePerShot) {
           // Don't commit yet — prompt for this shot's note first, then commit on Save/Skip.
@@ -107,10 +113,12 @@ export default function CameraCapture({
     setVoiceBusy(false);
   }
 
-  // Hardware back / dismiss gesture must not silently drop a shot mid-annotation or cut off
-  // an in-flight voice transcription — require an explicit Save & next / Skip / Discard first.
+  // Hardware back / dismiss gesture (and the Done button) must not silently drop a shot. Block while a
+  // capture is in flight (busy — closing before takePictureAsync resolves would setPending on an unmounted
+  // component and lose the shot), while a shot is pending its note, or mid voice-transcription. Require an
+  // explicit Save & next / Skip / Discard first.
   function handleRequestClose() {
-    if (voiceBusy || pending) return;
+    if (busy || voiceBusy || pending) return;
     onClose();
   }
 
@@ -144,7 +152,7 @@ export default function CameraCapture({
                   <Text style={styles.counter}>
                     {count} photo{count === 1 ? "" : "s"}
                   </Text>
-                  <Pressable onPress={onClose} hitSlop={12} accessibilityLabel="Done capturing">
+                  <Pressable onPress={handleRequestClose} hitSlop={12} accessibilityLabel="Done capturing">
                     <Text style={styles.done}>Done</Text>
                   </Pressable>
                 </View>
