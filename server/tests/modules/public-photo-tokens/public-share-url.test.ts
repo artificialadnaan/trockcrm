@@ -21,10 +21,10 @@ describe("publicViewerBaseUrl", () => {
   });
 
   it("prefers PUBLIC_SHARE_BASE_URL (branded domain) over FRONTEND_URL and the request host, trimming trailing slash", () => {
-    process.env.PUBLIC_SHARE_BASE_URL = "https://trockcam.com/";
+    process.env.PUBLIC_SHARE_BASE_URL = "https://photos.trockcam.com/";
     process.env.FRONTEND_URL = "https://frontend-production-bcab.up.railway.app";
     const req = fakeReq({ host: "api-production-ad218.up.railway.app", "x-forwarded-proto": "https" });
-    expect(publicViewerBaseUrl(req)).toBe("https://trockcam.com"); // NOT the railway subdomain or api host
+    expect(publicViewerBaseUrl(req)).toBe("https://photos.trockcam.com"); // NOT the railway subdomain or api host
   });
 
   it("falls back to FRONTEND_URL when PUBLIC_SHARE_BASE_URL is unset (back-compat)", () => {
@@ -53,8 +53,8 @@ describe("publicPhotoShareUrl", () => {
   });
 
   it("appends /p/<token> (URL-encoded) to the branded base", () => {
-    process.env.PUBLIC_SHARE_BASE_URL = "https://trockcam.com";
+    process.env.PUBLIC_SHARE_BASE_URL = "https://photos.trockcam.com";
     expect(publicPhotoShareUrl(fakeReq({ host: "api.example.com", "x-forwarded-proto": "https" }), "Ab3_x-Yz"))
-      .toBe("https://trockcam.com/p/Ab3_x-Yz");
+      .toBe("https://photos.trockcam.com/p/Ab3_x-Yz");
   });
 });
