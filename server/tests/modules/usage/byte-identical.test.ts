@@ -10,92 +10,54 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  activities,
+  auditLog,
+  dealStageHistory,
+  files,
+  usageDaily,
+  usageHeartbeat,
+  usageSession,
+  usageViewEvent,
+} from "@trock-crm/shared/schema";
 import { buildLiveDay, readUsageDaily } from "../../../src/modules/usage/read-service.js";
 import { rollupOfficeDay } from "../../../src/scripts/usage-rollup.js";
+import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const REP = U("0001");
 const DATE = "2026-06-01";
 const S1 = U("00a1");
 const S2 = U("00a2");
+// Minimal valid fills for prod NOT NULL columns the rollup/live path doesn't read (the Drizzle-derived
+// schema enforces them). Local constants, not a shared factory, so each INSERT stays inline.
+const REC = U("0d01"); // audit_log.record_id (NOT NULL)
+const ACT_SRC_COLS = "source_entity_type, source_entity_id";
+const ACT_SRC_VALS = `'deal', '${U("0de1")}'`;
+const FILE_COLS =
+  "category, display_name, system_filename, original_filename, mime_type, file_size_bytes, file_extension, r2_key, r2_bucket";
+const FILE_VALS = "'photo', 'f.jpg', 'sys.jpg', 'IMG.jpg', 'image/jpeg', 1024, 'jpg', 'r2/k', 'trock-files'";
 
 let db: PGlite;
 const client = () => ({ query: (sql: string, params?: unknown[]) => db.query(sql, params as any[]) }) as any;
 
 beforeAll(async () => {
   db = new PGlite();
-  await db.exec(`
-    CREATE SCHEMA office_dallas;
-    CREATE TABLE office_dallas.usage_session (
-      id uuid primary key default gen_random_uuid(),
-      user_id uuid,
-      started_at timestamptz default now(),
-      last_heartbeat_at timestamptz,
-      ended_at timestamptz,
-      active_seconds int default 0,
-      user_agent text,
-      impersonator_id uuid,
-      created_at timestamptz default now()
-    );
-    CREATE TABLE office_dallas.usage_heartbeat (
-      id bigserial primary key,
-      session_id uuid,
-      user_id uuid,
-      at timestamptz
-    );
-    CREATE TABLE office_dallas.usage_view_event (
-      id bigserial primary key,
-      user_id uuid,
-      session_id uuid,
-      at timestamptz,
-      entity_type text,
-      entity_id uuid,
-      route text,
-      label_snapshot text
-    );
-    CREATE TABLE office_dallas.audit_log (
-      id bigserial primary key,
-      table_name text,
-      action text,
-      changed_by uuid,
-      impersonator_id uuid,
-      changes jsonb,
-      created_at timestamptz
-    );
-    CREATE TABLE office_dallas.deal_stage_history (
-      id uuid primary key default gen_random_uuid(),
-      deal_id uuid,
-      to_stage_id uuid,
-      changed_by uuid,
-      created_at timestamptz
-    );
-    CREATE TABLE office_dallas.activities (
-      id uuid primary key default gen_random_uuid(),
-      type text,
-      responsible_user_id uuid,
-      performed_by_user_id uuid,
-      occurred_at timestamptz,
-      created_at timestamptz
-    );
-    CREATE TABLE office_dallas.files (
-      id uuid primary key default gen_random_uuid(),
-      uploaded_by uuid,
-      created_at timestamptz
-    );
-    CREATE TABLE office_dallas.usage_daily (
-      user_id uuid,
-      date date,
-      active_seconds int default 0,
-      session_count int default 0,
-      view_count int default 0,
-      action_count int default 0,
-      breakdown jsonb not null,
-      first_active_at timestamptz,
-      last_active_at timestamptz,
-      rolled_up_at timestamptz not null default now(),
-      primary key (user_id, date)
-    );
-  `);
+  // Schema from the real Drizzle definitions (#677): the byte-identical live-vs-rollup proof now runs
+  // against prod-accurate types (real audit_action/activity_type enums, real NOT NULL columns,
+  // usage_daily's composite (user_id, date) PK) instead of hand-rolled DDL. FKs/indexes omitted.
+  await db.exec(
+    tenantSchemaSql("office_dallas", [
+      usageSession,
+      usageHeartbeat,
+      usageViewEvent,
+      auditLog,
+      dealStageHistory,
+      activities,
+      files,
+      usageDaily,
+    ]),
+  );
 
   // Insert a closed-day fixture for 2026-06-01 covering every breakdown field:
   // 2 real sessions, 3 heartbeats (spread over 5 minutes), 2 view events (deal + report),
@@ -114,20 +76,20 @@ beforeAll(async () => {
       ('${REP}', '${S1}', '${DATE}T14:00:31Z', 'deal', '/deals/x'),
       ('${REP}', '${S2}', '${DATE}T14:05:46Z', 'report', '/reports/usage');
 
-    INSERT INTO office_dallas.audit_log (table_name, action, changed_by, impersonator_id, created_at) VALUES
-      ('deals', 'insert', '${REP}', NULL, '${DATE}T13:00:00Z'),
-      ('leads', 'update', '${REP}', NULL, '${DATE}T13:05:00Z');
+    INSERT INTO office_dallas.audit_log (table_name, record_id, action, changed_by, impersonator_id, created_at) VALUES
+      ('deals', '${REC}', 'insert', '${REP}', NULL, '${DATE}T13:00:00Z'),
+      ('leads', '${REC}', 'update', '${REP}', NULL, '${DATE}T13:05:00Z');
 
     INSERT INTO office_dallas.deal_stage_history (deal_id, to_stage_id, changed_by, created_at) VALUES
       ('${U("0dd1")}', '${U("0501")}', '${REP}', '${DATE}T13:10:00Z');
 
-    INSERT INTO office_dallas.activities (type, responsible_user_id, occurred_at, created_at) VALUES
-      ('note', '${REP}', '${DATE}T13:20:00Z', '${DATE}T13:20:00Z');
+    INSERT INTO office_dallas.activities (type, ${ACT_SRC_COLS}, responsible_user_id, occurred_at, created_at) VALUES
+      ('note', ${ACT_SRC_VALS}, '${REP}', '${DATE}T13:20:00Z', '${DATE}T13:20:00Z');
 
-    INSERT INTO office_dallas.files (uploaded_by, created_at) VALUES
-      ('${REP}', '${DATE}T13:30:00Z');
+    INSERT INTO office_dallas.files (${FILE_COLS}, uploaded_by, created_at) VALUES
+      (${FILE_VALS}, '${REP}', '${DATE}T13:30:00Z');
   `);
-});
+}, 60_000); // generating the full Drizzle-derived schema is heavier than the old hand-rolled DDL; give the hook headroom under parallel CI contention (Codex #715)
 
 afterAll(async () => { await db?.close(); });
 

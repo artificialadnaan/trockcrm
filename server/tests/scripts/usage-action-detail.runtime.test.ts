@@ -1,6 +1,19 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  activities,
+  auditLog,
+  contacts,
+  dealStageHistory,
+  deals,
+  emails,
+  files,
+  leads,
+  pipelineStageConfig,
+  tasks,
+} from "@trock-crm/shared/schema";
 import { readActionDetail } from "../../src/modules/usage/read-service.js";
+import { tenantSchemaSql } from "../helpers/tenant-schema-from-drizzle.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const REP = U("0001");
@@ -20,51 +33,37 @@ const client = () => ({ query: (sql: string, params?: unknown[]) => db.query(sql
 
 beforeAll(async () => {
   db = new PGlite();
+  // Schema is generated from the REAL Drizzle table definitions (#677) — activities.type is the full
+  // 13-value activity_type enum and audit_log.action is the real audit_action enum, BY CONSTRUCTION,
+  // not a hand-picked subset that can drift from prod. FKs/indexes are omitted (types are the point).
+  await db.exec(
+    tenantSchemaSql("office_dallas", [
+      deals,
+      leads,
+      dealStageHistory,
+      auditLog,
+      tasks,
+      contacts,
+      emails,
+      activities,
+      files,
+    ]),
+  );
+  await db.exec(tenantSchemaSql("public", [pipelineStageConfig]));
+  // Inserts now satisfy the real NOT NULL columns (deal_number/stage_id, the lead/email/file required
+  // sets, activities.source_entity_*) — i.e. prod-valid rows. Columns the read path doesn't touch are
+  // filled with minimal valid values; the label-resolution columns (name/title/subject) are unchanged.
   await db.exec(`
-    CREATE SCHEMA office_dallas;
-    CREATE TABLE office_dallas.deals (id uuid primary key, name text);
-    CREATE TABLE office_dallas.leads (id uuid primary key, name text);
-    CREATE TABLE office_dallas.deal_stage_history (
-      id uuid primary key default gen_random_uuid(),
-      deal_id uuid, from_stage_id uuid, to_stage_id uuid, changed_by uuid, created_at timestamptz
-    );
-    CREATE TABLE office_dallas.audit_log (
-      id bigserial primary key,
-      table_name text, record_id uuid, action text,
-      changed_by uuid, impersonator_id uuid,
-      entity_type text, entity_name_snapshot text,
-      changes jsonb, created_at timestamptz
-    );
-    -- Per-entity label sources for the create/edit bucket (real types: tasks.title/contacts/emails
-    -- are varchar, like prod). Stage names live in public.pipeline_stage_config (cross-schema).
-    CREATE TABLE office_dallas.tasks (id uuid primary key, title varchar(500), deal_id uuid);
-    CREATE TABLE office_dallas.contacts (id uuid primary key, first_name varchar(255), last_name varchar(255));
-    CREATE TABLE office_dallas.emails (id uuid primary key, subject varchar(1000));
-    CREATE TABLE public.pipeline_stage_config (id uuid primary key, name varchar(255));
-    -- Notes/uploads are sourced from these tables (NOT audit_log), with the aggregate's crediting +
-    -- dating, so the detail reconciles with the leaderboard breakdown. activities.type is a real ENUM
-    -- here (as in prod) — a text column would hide the "COALESCE types ... cannot be matched" bug.
-    CREATE TYPE office_dallas.activity_type AS ENUM ('call', 'note', 'email', 'meeting');
-    CREATE TABLE office_dallas.activities (
-      id uuid primary key, type office_dallas.activity_type,
-      responsible_user_id uuid, performed_by_user_id uuid,
-      deal_id uuid, lead_id uuid, subject text,
-      occurred_at timestamptz, created_at timestamptz
-    );
-    CREATE TABLE office_dallas.files (
-      id uuid primary key, display_name text, original_filename text,
-      deal_id uuid, lead_id uuid, uploaded_by uuid, created_at timestamptz
-    );
-  `);
-  await db.exec(`
-    INSERT INTO office_dallas.deals (id, name) VALUES ('${DEAL1}', 'Tides on Duneville');
-    INSERT INTO office_dallas.leads (id, name) VALUES ('${LEAD1}', 'Muir Lake');
+    INSERT INTO office_dallas.deals (id, deal_number, name, stage_id) VALUES ('${DEAL1}', 'D-1', 'Tides on Duneville', '${STG_OPP}');
+    INSERT INTO office_dallas.leads (id, company_id, property_id, name, stage_id, assigned_rep_id, office_code, office)
+      VALUES ('${LEAD1}', '${U("0c0a")}', '${U("0b0a")}', 'Muir Lake', '${STG_OPP}', '${REP}', 'dallas', 'dfw');
     -- live entities whose create-audit rows resolve a real label by record_id (no snapshot stored)
-    INSERT INTO office_dallas.tasks (id, title, deal_id) VALUES ('${TASK1}', 'Follow up with Hayward', '${DEAL1}');
-    INSERT INTO office_dallas.contacts (id, first_name, last_name) VALUES ('${CONTACT1}', 'Jessica', 'Stanley');
-    INSERT INTO office_dallas.emails (id, subject) VALUES ('${EMAIL1}', 'RE: window sealant');
-    INSERT INTO public.pipeline_stage_config (id, name) VALUES
-      ('${STG_OPP}', 'Opportunity'), ('${STG_EST}', 'Estimate'), ('${STG_WON}', 'Won');
+    INSERT INTO office_dallas.tasks (id, title, type, assigned_to, deal_id) VALUES ('${TASK1}', 'Follow up with Hayward', 'manual', '${REP}', '${DEAL1}');
+    INSERT INTO office_dallas.contacts (id, first_name, last_name, category) VALUES ('${CONTACT1}', 'Jessica', 'Stanley', 'client');
+    INSERT INTO office_dallas.emails (id, subject, graph_message_id, direction, from_address, to_addresses, user_id, sent_at)
+      VALUES ('${EMAIL1}', 'RE: window sealant', 'gmsg-1', 'inbound', 'a@b.com', ARRAY['c@d.com'], '${REP}', '${"2026-06-01T14:00:00Z"}');
+    INSERT INTO public.pipeline_stage_config (id, name, slug, display_order) VALUES
+      ('${STG_OPP}', 'Opportunity', 'opportunity', 1), ('${STG_EST}', 'Estimate', 'estimate', 2), ('${STG_WON}', 'Won', 'won', 3);
   `);
   // All at 2026-06-01 14:00Z (= 09:00 America/Chicago on 06-01).
   const t = "2026-06-01T14:00:00Z";
@@ -101,25 +100,25 @@ beforeAll(async () => {
   // Notes from the activities table — aggregate crediting (COALESCE performed_by/responsible) + dating
   // (COALESCE occurred_at/created_at). Two count for REP; the wrong-user and out-of-range ones do not.
   await db.exec(`
-    INSERT INTO office_dallas.activities (id, type, responsible_user_id, performed_by_user_id, deal_id, lead_id, subject, occurred_at, created_at) VALUES
+    INSERT INTO office_dallas.activities (id, type, source_entity_type, source_entity_id, responsible_user_id, performed_by_user_id, deal_id, lead_id, subject, occurred_at, created_at) VALUES
       -- A: performed_by REP (credited even though the audit row for this activity has no REP-only signal) -> counts
-      ('${U("0ac1")}', 'call', '${ADMIN}', '${REP}', '${DEAL1}', NULL, 'Logged call', '${t}', '${t}'),
+      ('${U("0ac1")}', 'call', 'deal', '${DEAL1}', '${ADMIN}', '${REP}', '${DEAL1}', NULL, 'Logged call', '${t}', '${t}'),
       -- B: performed_by NULL, responsible REP (COALESCE crediting) -> counts. NULL subject + no
       -- deal/lead, so the label falls through to a.type::text — exercises the enum cast in COALESCE.
-      ('${U("0ac2")}', 'note', '${REP}', NULL, NULL, NULL, NULL, '${t}', '${t}'),
+      ('${U("0ac2")}', 'note', 'deal', '${DEAL1}', '${REP}', NULL, NULL, NULL, NULL, '${t}', '${t}'),
       -- C: performed_by ADMIN -> wrong user, excluded
-      ('${U("0ac3")}', 'call', '${ADMIN}', '${ADMIN}', '${DEAL1}', NULL, 'Admin call', '${t}', '${t}'),
+      ('${U("0ac3")}', 'call', 'deal', '${DEAL1}', '${ADMIN}', '${ADMIN}', '${DEAL1}', NULL, 'Admin call', '${t}', '${t}'),
       -- D: occurred_at out of range (dated by occurred_at, NOT created_at) -> excluded
-      ('${U("0ac4")}', 'note', '${REP}', '${REP}', NULL, NULL, 'Backdated', '2026-06-03T14:00:00Z', '${t}')
+      ('${U("0ac4")}', 'note', 'deal', '${DEAL1}', '${REP}', '${REP}', NULL, NULL, 'Backdated', '2026-06-03T14:00:00Z', '${t}')
   `);
   // Uploads from the files table — credited by uploaded_by, dated by created_at.
   await db.exec(`
-    INSERT INTO office_dallas.files (id, display_name, original_filename, deal_id, lead_id, uploaded_by, created_at) VALUES
-      ('${U("0f11")}', 'photo.jpg', 'IMG_0001.jpg', '${DEAL1}', NULL, '${REP}', '${t}'),
+    INSERT INTO office_dallas.files (id, category, display_name, system_filename, original_filename, mime_type, file_size_bytes, file_extension, r2_key, r2_bucket, deal_id, lead_id, uploaded_by, created_at) VALUES
+      ('${U("0f11")}', 'photo', 'photo.jpg', 'sys_0001.jpg', 'IMG_0001.jpg', 'image/jpeg', 1024, 'jpg', 'r2/0001', 'trock-files', '${DEAL1}', NULL, '${REP}', '${t}'),
       -- wrong user -> excluded
-      ('${U("0f12")}', 'admin.jpg', 'IMG_0002.jpg', '${DEAL1}', NULL, '${ADMIN}', '${t}')
+      ('${U("0f12")}', 'photo', 'admin.jpg', 'sys_0002.jpg', 'IMG_0002.jpg', 'image/jpeg', 1024, 'jpg', 'r2/0002', 'trock-files', '${DEAL1}', NULL, '${ADMIN}', '${t}')
   `);
-});
+}, 60_000); // generating the full Drizzle-derived schema is heavier than the old hand-rolled DDL; give the hook headroom under parallel CI contention (Codex #715)
 
 afterAll(async () => { await db?.close(); });
 
