@@ -87,8 +87,10 @@ export default function CameraCapture({
   }
 
   // Commit the pending shot with the note (Save & next) or without one (Skip), then
-  // return to the live camera for the next shot.
+  // return to the live camera for the next shot. The voiceBusy guard mirrors the
+  // disabled buttons defensively — never commit mid-dictation (would drop the transcript).
   function commit(caption: string) {
+    if (voiceBusy) return;
     const shot = pending;
     if (!shot) return;
     setPending(null);
@@ -99,13 +101,21 @@ export default function CameraCapture({
 
   // Drop the pending shot entirely (a fat-fingered frame) — nothing is added.
   function discard() {
+    if (voiceBusy) return;
     setPending(null);
     setDraft("");
     setVoiceBusy(false);
   }
 
+  // Hardware back / dismiss gesture must not silently drop a shot mid-annotation or cut off
+  // an in-flight voice transcription — require an explicit Save & next / Skip / Discard first.
+  function handleRequestClose() {
+    if (voiceBusy || pending) return;
+    onClose();
+  }
+
   return (
-    <Modal visible animationType="slide" presentationStyle="fullScreen" onRequestClose={onClose}>
+    <Modal visible animationType="slide" presentationStyle="fullScreen" onRequestClose={handleRequestClose}>
       {/* A Modal renders in its own native window outside the app's SafeAreaProvider,
           so the overlay's SafeAreaView needs its own provider to resolve real insets —
           otherwise the counter/Done land under the status bar / Dynamic Island. */}
