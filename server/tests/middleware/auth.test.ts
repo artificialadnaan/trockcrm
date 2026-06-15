@@ -100,4 +100,21 @@ describe("authMiddleware", () => {
       mustChangePassword: false,
     });
   });
+
+  it("rejects field-audience tokens (surface:'field') on CRM routes, regardless of role", async () => {
+    // Same CRM-capable user (role 'rep' from beforeEach) but the token is field-stamped.
+    mocks.verifyJwt.mockReturnValue({ userId: "user-1", authMethod: "local", surface: "field" });
+    const req = createRequest();
+    const next = vi.fn() as NextFunction;
+
+    await authMiddleware(req, createResponse(), next);
+
+    const error = next.mock.calls[0]?.[0];
+    expect(error?.statusCode).toBe(401);
+    expect(error?.message).toBe("This session is not valid for CRM access");
+    // Rejected by the audience guard BEFORE any user/role/office lookup — so no role can make it work,
+    // and a promoted field user's existing token still can't reach CRM.
+    expect(mocks.getUserById).not.toHaveBeenCalled();
+    expect(req.user).toBeUndefined();
+  });
 });
