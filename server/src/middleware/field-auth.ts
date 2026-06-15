@@ -79,8 +79,9 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
     // Account-state gate -> 401 (treated as an invalid session) for consistency with the identity checks
     // above. NOTE: loginFieldUser does NOT block must-change-password, so on a client without a
     // change-password flow (mobile) the user is bounced to login and re-login won't clear the gate until
-    // the password is changed elsewhere — same as the pre-401-only behavior. Follow-up: a mobile
-    // change-password flow or a login-time block would make this UX clean.
+    // the password is changed elsewhere — same as the pre-401-only behavior.
+    // TODO(#721): give mobile a change-password flow OR block must-change-password at field login so this
+    // doesn't become a login-then-bounce cycle for mobile users.
     if (localAuthGate.mustChangePassword) {
       throw new AppError(401, "Field app access requires password change");
     }
