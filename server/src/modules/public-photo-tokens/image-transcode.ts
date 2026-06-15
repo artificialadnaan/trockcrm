@@ -12,7 +12,9 @@ const TRANSCODABLE_EXT = new Set(["png", "webp", "gif", "avif", "tif", "tiff"]);
  * isStrippableJpeg's mime-first-then-extension precedence.
  */
 export function isTranscodableToJpeg(mimeType?: string | null, fileExtension?: string | null): boolean {
-  const mime = mimeType?.trim().toLowerCase();
+  // Drop any MIME parameters (e.g. CompanyCam stores `image/png; charset=UTF-8` verbatim) before the
+  // exact-match allowlist, else a parameterized-but-valid type would be wrongly rejected.
+  const mime = mimeType?.split(";")[0]?.trim().toLowerCase();
   if (mime) return TRANSCODABLE_MIME.has(mime);
   const ext = fileExtension?.trim().toLowerCase().replace(/^\.?/, "");
   return ext ? TRANSCODABLE_EXT.has(ext) : false;
@@ -40,6 +42,9 @@ export async function transcodeToStrippedJpeg(input: Buffer): Promise<Buffer> {
   // getPublicPhotoAsset, which bounds the INPUT buffer.
   return sharp(input, { failOn: "none", limitInputPixels: 50_000_000 })
     .rotate()
+    // JPEG has no alpha channel; flatten transparency onto white first so transparent PNG/WebP/GIF
+    // screenshots, logos, or annotations don't render with black boxes/halos. No-op for opaque images.
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
     .jpeg({ quality: 82 })
     .toBuffer();
 }

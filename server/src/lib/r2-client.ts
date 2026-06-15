@@ -217,19 +217,24 @@ export async function getObjectBuffer(
     new GetObjectCommand({ Bucket: bucket, Key: r2Key })
   );
   const max = opts?.maxBytes;
+  const stream = resp.Body as (AsyncIterable<Uint8Array> & { destroy?: (err?: Error) => void }) | undefined;
+  if (!stream) throw new Error(`R2 object ${r2Key} has no body`);
   // Reject before reading the body when the server-reported size already exceeds the cap. GET returns
-  // Content-Length even where a separate HEAD is unavailable, so this guard holds without one.
+  // Content-Length even where a separate HEAD is unavailable, so this guard holds without one. Destroy
+  // the live response stream first — leaving an unread body open can exhaust sockets on repeat hits.
   if (max != null && resp.ContentLength != null && resp.ContentLength > max) {
+    stream.destroy?.();
     throw new ObjectTooLargeError(r2Key, max);
   }
   const chunks: Uint8Array[] = [];
-  const stream = resp.Body as AsyncIterable<Uint8Array> | undefined;
-  if (!stream) throw new Error(`R2 object ${r2Key} has no body`);
   let total = 0;
   for await (const chunk of stream) {
     total += chunk.byteLength;
     // Abort BEFORE accumulating past the cap, defending against an absent/under-reported Content-Length.
-    if (max != null && total > max) throw new ObjectTooLargeError(r2Key, max);
+    if (max != null && total > max) {
+      stream.destroy?.();
+      throw new ObjectTooLargeError(r2Key, max);
+    }
     chunks.push(chunk);
   }
   return {
