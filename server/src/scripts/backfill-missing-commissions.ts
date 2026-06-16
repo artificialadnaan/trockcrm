@@ -12,13 +12,20 @@
  *   • Idempotent — calculateCommissionForDeal short-circuits on an existing (deal_id, rep_user_id) row
  *     (skipped_existing), so re-running writes nothing new. Safe to run after configuring missing rates.
  *   • Per-office — fans out over every office_* schema (or a single --tenant=office_x).
- *   • Attributed to the deal's assigned rep (the commission owner): triggeredByUserId = assigned_rep_id,
- *     so created_by / audit changed_by is the rep whose earned commission this is.
+ *   • The commission OWNER (deal_signed_commissions.rep_user_id) is the deal's assigned rep, set by
+ *     calculateCommissionForDeal. The backfill OPERATOR (--actor) is stamped as created_by + audit
+ *     changed_by, so the trail truthfully records who created these historical rows.
+ *   • Skips any deal that already has ANY commission row (a reassigned deal keeps its original-rep row),
+ *     so it can never insert a second row and double-pay.
  *
  * USAGE (dry-run is the DEFAULT — nothing is written without --execute):
- *   railway run --service=Postgres npx tsx scripts/backfill-missing-commissions.ts                  # dry-run, all offices
- *   railway run --service=Postgres npx tsx scripts/backfill-missing-commissions.ts --tenant=office_dallas
- *   railway run --service=Postgres npx tsx scripts/backfill-missing-commissions.ts --execute         # WRITE
+ *   railway run --service=Postgres npx tsx server/src/scripts/backfill-missing-commissions.ts                       # dry-run, all offices
+ *   railway run --service=Postgres npx tsx server/src/scripts/backfill-missing-commissions.ts --tenant=office_dallas
+ *   railway run --service=Postgres npx tsx server/src/scripts/backfill-missing-commissions.ts --execute --actor=<uuid>   # WRITE
+ *
+ * --execute REQUIRES --actor=<uuid> (the operator/system user stamped as created_by + audit changed_by).
+ * --tenant=/--actor= must use the '=' form (the space-separated form is rejected to avoid silently
+ * widening the blast radius).
  *
  * Dry-run is FAITHFUL: it runs the real calculateCommissionForDeal inside a transaction and rolls it
  * back, so the reported status/amount is exactly what --execute would write.
@@ -61,6 +68,7 @@ const LOST_STAGE_SLUGS = "('lost','production_lost','service_lost','closed_lost'
 
 // Office schemas only — validated before interpolating into SET search_path (--tenant is user input).
 const OFFICE_SCHEMA_RE = /^office_[a-z0-9_]+$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Active, non-lost, non-test signed deals with an assigned rep and NO commission row for that rep. */
 export async function findBackfillCandidates(query: QueryFn): Promise<BackfillCandidate[]> {
@@ -77,9 +85,11 @@ export async function findBackfillCandidates(query: QueryFn): Promise<BackfillCa
       AND COALESCE(d.is_test_data, false) = false
       AND d.is_active = true
       AND d.assigned_rep_id IS NOT NULL
+      -- Skip a deal that already has ANY commission row (any rep), not just one for the CURRENT assigned
+      -- rep: a reassigned deal keeps its row booked to the ORIGINAL rep, and inserting a second row for the
+      -- new assignee would double-pay/double-count the deal. A deal already carrying commission is "handled".
       AND NOT EXISTS (
-        SELECT 1 FROM deal_signed_commissions x
-        WHERE x.deal_id = d.id AND x.rep_user_id = d.assigned_rep_id
+        SELECT 1 FROM deal_signed_commissions x WHERE x.deal_id = d.id
       )
     ORDER BY d.deal_number
   `);
@@ -96,12 +106,18 @@ export async function findBackfillCandidates(query: QueryFn): Promise<BackfillCa
 async function runOne(
   tenantDb: TenantDb,
   candidate: BackfillCandidate,
+  actorUserId: string | null,
   execute: boolean
 ): Promise<CalculateCommissionResult> {
   const input = {
     dealId: candidate.dealId,
     contractSignedDate: candidate.signedDate,
-    triggeredByUserId: candidate.repId, // commission owner = the deal's assigned rep
+    // The commission OWNER (dsc.rep_user_id) is the deal's assigned rep, set by calculateCommissionForDeal
+    // itself. triggeredByUserId only stamps created_by + the audit changed_by — for a WRITE it must be the
+    // BACKFILL OPERATOR (--actor, enforced upstream), NOT the earning rep, so the trail truthfully records
+    // who created these historical rows. On a DRY-RUN (rolled back, never persisted) we fall back to the
+    // assigned rep, which is a real user — so the throwaway INSERT doesn't trip the created_by FK.
+    triggeredByUserId: actorUserId ?? candidate.repId,
   };
   if (execute) {
     return tenantDb.transaction((tx) => calculateCommissionForDeal(tx, input));
@@ -122,7 +138,7 @@ async function runOne(
 export async function backfillTenantCommissions(
   tenantDb: TenantDb,
   query: QueryFn,
-  opts: { schema: string; execute: boolean }
+  opts: { schema: string; execute: boolean; actorUserId: string | null }
 ): Promise<BackfillSummary> {
   const candidates = await findBackfillCandidates(query);
   const byStatus: Record<CalculateCommissionStatus, number> = {
@@ -136,7 +152,7 @@ export async function backfillTenantCommissions(
   const rows: BackfillSummary["rows"] = [];
 
   for (const candidate of candidates) {
-    const result = await runOne(tenantDb, candidate, opts.execute);
+    const result = await runOne(tenantDb, candidate, opts.actorUserId, opts.execute);
     byStatus[result.status] += 1;
     if (result.status === "created" && result.amount) {
       totalCommissionCreated += Number(result.amount);
@@ -154,10 +170,39 @@ export async function backfillTenantCommissions(
   };
 }
 
-function parseArgs(argv: string[]): { tenant: string | null; execute: boolean } {
-  const tenantArg = argv.find((a) => a.startsWith("--tenant="));
-  const tenant = tenantArg ? tenantArg.split("=")[1] : null;
-  return { tenant: tenant && tenant !== "all" ? tenant : null, execute: argv.includes("--execute") };
+export function parseArgs(argv: string[]): { tenant: string | null; execute: boolean; actorUserId: string | null } {
+  // --tenant / --actor are execution-safety controls. Reject the space-separated form (--tenant office_x)
+  // and empty values — silently ignoring them would widen the blast radius (fall back to ALL tenants) or
+  // drop the audit actor. Only the --key=value form is accepted.
+  for (const key of ["--tenant", "--actor"]) {
+    if (argv.includes(key)) {
+      throw new Error(`Use ${key}=<value> (with '='); the space-separated form is rejected.`);
+    }
+  }
+  const readValue = (key: string): string | null => {
+    const arg = argv.find((a) => a.startsWith(`${key}=`));
+    if (!arg) return null;
+    const value = arg.slice(key.length + 1);
+    if (!value) throw new Error(`${key}= requires a value.`);
+    return value;
+  };
+  const tenant = readValue("--tenant");
+  const execute = argv.includes("--execute");
+  const actor = readValue("--actor");
+  // A WRITE must record a real operator/system actor in created_by + the audit trail — never default it.
+  if (execute && !actor) {
+    throw new Error("--execute requires --actor=<uuid> (the operator/system user recorded as created_by + audit changed_by).");
+  }
+  if (actor && !UUID_RE.test(actor)) {
+    throw new Error(`--actor must be a UUID, got ${JSON.stringify(actor)}.`);
+  }
+  return {
+    tenant: tenant && tenant !== "all" ? tenant : null,
+    execute,
+    // null on a dry-run without --actor → runOne falls back to the deal's assigned rep (a real user, so
+    // the rolled-back INSERT doesn't FK-fail). --execute always carries a real --actor (enforced above).
+    actorUserId: actor,
+  };
 }
 
 async function discoverTenants(client: pg.Client): Promise<string[]> {
@@ -182,7 +227,7 @@ function printSummary(s: BackfillSummary): void {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
-  const { tenant, execute } = parseArgs(argv);
+  const { tenant, execute, actorUserId } = parseArgs(argv);
   const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
   try {
@@ -203,6 +248,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       const summary = await backfillTenantCommissions(tenantDb, (sql, params) => client.query(sql, params as never), {
         schema: t,
         execute,
+        actorUserId,
       });
       printSummary(summary);
       grandCreated += summary.byStatus.created;
