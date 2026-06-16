@@ -194,7 +194,7 @@ router.get("/admin/users/:id", requireAdmin, async (req: Request, res: Response,
 
 router.patch("/admin/users/:id", requireAdmin, async (req: Request, res: Response) => {
   try {
-    const user = await updateUser(req.params.id as string, req.body);
+    const user = await updateUser(req.params.id as string, req.body, req.user!.id);
     return res.json({ user });
   } catch (err: any) {
     return res.status(err.statusCode ?? 500).json({ error: err.message ?? String(err) });

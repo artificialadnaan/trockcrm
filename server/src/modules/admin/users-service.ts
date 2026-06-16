@@ -10,7 +10,18 @@ import {
 } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { isAssignableCrmRole, type CrmAssignableRole } from "@trock-crm/shared/types";
+import { isAssignableCrmRole, type CrmAssignableRole, type UserRole } from "@trock-crm/shared/types";
+import {
+  isProhibitedSelfChange,
+  isFieldContractorTransition,
+  wouldRemoveLastActiveAdmin,
+} from "@trock-crm/shared/lib/userProvisioningGuards";
+import {
+  bumpTokensValidAfter,
+  revokeLocalAuthOnDeactivate,
+  clearLocalAuthRevocation,
+  closeUserSseConnections,
+} from "../auth/session-invalidation.js";
 import {
   getLocalAuthStatus,
   type LocalAuthStatus,
@@ -184,7 +195,7 @@ export async function updateUser(
   id: string,
   input: Partial<{
     displayName: string;
-    role: "admin" | "director" | "rep";
+    role: "admin" | "director" | "rep" | "construction";
     officeId: string;
     reportsTo: string | null;
     isActive: boolean;
@@ -197,9 +208,10 @@ export async function updateUser(
     newCustomerShareFloor: number;
     newCustomerWindowMonths: number;
     commissionConfigActive: boolean;
-  }>
+  }>,
+  actorUserId: string
 ) {
-  return db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const existing = await tx
       .select()
       .from(users)
@@ -208,6 +220,27 @@ export async function updateUser(
 
     const existingUser = existing[0];
     if (!existingUser) throw new AppError(404, "User not found");
+
+    const nextRole = input.role as UserRole | undefined;
+
+    // --- Guards (decisions are gate-proven pure predicates) ---
+    if (isProhibitedSelfChange({ actorId: actorUserId, targetId: id, nextIsActive: input.isActive, currentRole: existingUser.role, nextRole })) {
+      throw new AppError(403, "You can't deactivate or change your own role");
+    }
+    if (isFieldContractorTransition(existingUser.role, nextRole)) {
+      throw new AppError(403, "Field contractors are managed in the field-user flow");
+    }
+    const strippingAdmin =
+      existingUser.role === "admin" && (input.isActive === false || (nextRole !== undefined && nextRole !== "admin"));
+    if (strippingAdmin) {
+      const [{ count }] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(users)
+        .where(and(eq(users.role, "admin"), eq(users.isActive, true), sql`${users.id} <> ${id}`));
+      if (wouldRemoveLastActiveAdmin({ currentRole: existingUser.role, nextRole, nextIsActive: input.isActive, otherActiveAdminCount: count })) {
+        throw new AppError(409, "Cannot remove the last active admin");
+      }
+    }
 
     const updates: Record<string, unknown> = {};
     if (input.displayName !== undefined) updates.displayName = input.displayName;
@@ -231,6 +264,21 @@ export async function updateUser(
             .returning()
         )[0]
       : existingUser;
+
+    // --- Session-kill wiring (epoch + revocation; SSE teardown happens post-commit) ---
+    const now = new Date();
+    const deactivating = input.isActive === false && existingUser.isActive === true;
+    const reactivating = input.isActive === true && existingUser.isActive === false;
+    const roleChanged = nextRole !== undefined && nextRole !== existingUser.role;
+    if (deactivating) {
+      await bumpTokensValidAfter(tx, id, now);
+      await revokeLocalAuthOnDeactivate(tx, id, actorUserId, now);
+    } else if (reactivating) {
+      await clearLocalAuthRevocation(tx, id, now);
+    }
+    if (roleChanged) {
+      await bumpTokensValidAfter(tx, id, now);
+    }
 
     const hasCommissionPatch =
       input.commissionRate !== undefined ||
@@ -296,8 +344,13 @@ export async function updateUser(
         });
     }
 
-    return updated;
+    return { updated, deactivated: deactivating };
   });
+
+  // Best-effort, post-commit: drop the deactivated user's live SSE streams immediately. The
+  // authoritative gate remains the per-request is_active + tokens_valid_after re-check.
+  if (result.deactivated) closeUserSseConnections(id);
+  return result.updated;
 }
 
 export async function grantOfficeAccess(
