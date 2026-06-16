@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { cn } from "@/lib/utils";
+import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
 import { usePlatformUsageReport, formatActiveTime, type PlatformUsageRow } from "@/hooks/use-platform-usage-report";
 
 // A rep at or below this many actions for the period is flagged as "gone dark".
@@ -12,6 +13,37 @@ const HEALTHY_ACTIVE_RATIO = 0.5;
 
 // Shared column template — header and rows must stay in lockstep.
 const GRID = "grid grid-cols-[2rem_minmax(0,1fr)_5.5rem_5rem_4.5rem] items-center gap-3";
+
+// Sort columns for the leaderboard. The combined "Rep · Actions" column carries TWO independent
+// sort controls in its header (rep = alpha by name, actions = the numeric ranking + the default);
+// the body cell keeps name + count + bar together. Telemetry columns sort numerically.
+// Exported so the sort behavior is unit-tested against the real PlatformUsageRow type.
+export const PLATFORM_USAGE_SORT_COLUMNS: ReadonlyArray<SortColumn<PlatformUsageRow>> = [
+  { key: "rep", type: "text", accessor: (r) => r.rep.displayName },
+  // Actions always renders a real number (incl. 0), so it sorts on the raw value.
+  { key: "actions", type: "number", accessor: (r) => r.usage.actionCount },
+  // The muted telemetry columns (Active / Sessions / Views) render "—" for the not-yet-populated
+  // case, so their sort accessor returns undefined for exactly that case (→ blanks last in both
+  // directions) — matching the displayed em dash, so visually-empty rows never compare as 0 and
+  // beat reps with real telemetry on an ascending sort. The empty conditions mirror MutedValue's
+  // `empty` prop on each cell (activeSeconds===0 / sessionCount===0 / viewsAreEmpty).
+  { key: "active", type: "number", accessor: (r) => (r.usage.activeSeconds === 0 ? undefined : r.usage.activeSeconds) },
+  { key: "sessions", type: "number", accessor: (r) => (r.usage.sessionCount === 0 ? undefined : r.usage.sessionCount) },
+  {
+    key: "views",
+    type: "number",
+    accessor: (r) => (viewsAreEmpty(r.usage.viewCount, r.usage.sessionCount) ? undefined : r.usage.viewCount),
+  },
+];
+
+// Human label per sort key, for the leaderboard subtitle (kept honest as the user re-sorts).
+const PLATFORM_USAGE_SORT_LABELS: Record<string, string> = {
+  rep: "rep name",
+  actions: "actions",
+  active: "active time",
+  sessions: "sessions",
+  views: "views",
+};
 
 // Window labels. These format a CT-resolved business-date STRING (YYYY-MM-DD, already bounded to
 // America/Chicago by the server) — NOT a timestamp. The weekday is read straight off the calendar
@@ -49,11 +81,13 @@ export function PlatformUsagePage() {
   const [anchorDate, setAnchorDate] = useState<string>(() => searchParams.get("date") ?? "");
   const { data, loading, error } = usePlatformUsageReport({ grain, date: anchorDate || undefined });
 
-  // Headline ranking is by Actions desc — the proportion bars make 46-vs-0 read at a glance.
-  const rows = useMemo<PlatformUsageRow[]>(() => {
-    if (!data) return [];
-    return [...data.leaderboard].sort((a, b) => b.usage.actionCount - a.usage.actionCount);
-  }, [data]);
+  // Headline ranking defaults to Actions desc (the proportion bars make 46-vs-0 read at a glance);
+  // every column is now click-sortable via the shared hook, with that default preserved.
+  const leaderboard = data?.leaderboard ?? [];
+  const { sortedRows: rows, toggle, getHeaderProps, sortState } = useTableSort(leaderboard, PLATFORM_USAGE_SORT_COLUMNS, {
+    initialSort: { key: "actions", dir: "desc" },
+  });
+  const sortedByLabel = PLATFORM_USAGE_SORT_LABELS[sortState?.key ?? "actions"] ?? "actions";
   const maxActions = useMemo(() => rows.reduce((m, r) => Math.max(m, r.usage.actionCount), 0), [rows]);
 
   // Clicking a rep row opens their detail, carrying the current period (grain/date) AND the active
@@ -162,9 +196,9 @@ export function PlatformUsagePage() {
 
           <div className="flex items-baseline justify-between">
             <h2 className="text-sm font-semibold text-slate-700">Leaderboard</h2>
-            <span className="text-xs text-slate-400">Ranked by actions · {isCurrent ? relWord : win}</span>
+            <span className="text-xs text-slate-400">Sorted by {sortedByLabel} · {isCurrent ? relWord : win}</span>
           </div>
-          <Leaderboard rows={rows} maxActions={maxActions} detailHref={detailHref} />
+          <Leaderboard rows={rows} maxActions={maxActions} detailHref={detailHref} toggle={toggle} getHeaderProps={getHeaderProps} />
 
           <p className="text-xs leading-relaxed text-slate-400">
             Sessions and Views show <span className="font-medium text-slate-500">—</span> until telemetry is
@@ -232,10 +266,14 @@ function Leaderboard({
   rows,
   maxActions,
   detailHref,
+  toggle,
+  getHeaderProps,
 }: {
   rows: PlatformUsageRow[];
   maxActions: number;
   detailHref: (repId: string) => string;
+  toggle: (key: string) => void;
+  getHeaderProps: (key: string) => { active: boolean; dir: "asc" | "desc" | null };
 }) {
   if (rows.length === 0) {
     return (
@@ -244,6 +282,19 @@ function Leaderboard({
       </div>
     );
   }
+  const headerCell = (key: string, label: string, numeric: boolean) => {
+    const hp = getHeaderProps(key);
+    return (
+      <SortHeaderButton
+        label={label}
+        numeric={numeric}
+        active={hp.active}
+        dir={hp.dir}
+        onClick={() => toggle(key)}
+        className="text-[11px] font-semibold uppercase tracking-wide text-slate-400"
+      />
+    );
+  };
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
       <div
@@ -253,10 +304,15 @@ function Leaderboard({
         )}
       >
         <div>#</div>
-        <div>Rep · Actions</div>
-        <div className="text-right">Active</div>
-        <div className="text-right">Sessions</div>
-        <div className="text-right">Views</div>
+        {/* Combined column, two independent sort controls: Rep (alpha) and Actions (the ranking). */}
+        <div className="flex items-center gap-1">
+          {headerCell("rep", "Rep", false)}
+          <span className="text-slate-300" aria-hidden="true">·</span>
+          {headerCell("actions", "Actions", false)}
+        </div>
+        <div className="text-right">{headerCell("active", "Active", true)}</div>
+        <div className="text-right">{headerCell("sessions", "Sessions", true)}</div>
+        <div className="text-right">{headerCell("views", "Views", true)}</div>
       </div>
       <div className="divide-y divide-slate-50">
         {rows.map((r, i) => (

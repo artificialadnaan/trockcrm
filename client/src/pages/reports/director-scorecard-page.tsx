@@ -1,7 +1,9 @@
+import type { ReactNode } from "react";
 import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
-import { useDirectorScorecardReport } from "@/hooks/use-reports";
+import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
+import { useDirectorScorecardReport, type DirectorScorecardReport } from "@/hooks/use-reports";
 import { sheetsFromReport } from "@/lib/excel-export";
 import {
   DealLink,
@@ -15,6 +17,88 @@ import {
   formatNumber,
   formatPercent,
 } from "./performance-report-ui";
+
+type RepPerfRow = DirectorScorecardReport["repPerformance"][number];
+type AtRiskDealRow = DirectorScorecardReport["topAtRiskDeals"][number];
+
+type SortedColumn<Row> = SortColumn<Row> & {
+  header: string;
+  numeric: boolean;
+  cell: (row: Row) => ReactNode;
+};
+
+const HEADER_CLASS = "text-xs font-black uppercase tracking-[0.14em] text-slate-500";
+
+const REP_PERF_COLUMNS: ReadonlyArray<SortedColumn<RepPerfRow>> = [
+  { key: "repName", type: "text", accessor: (r) => r.repName, header: "Rep Name", numeric: false, cell: (r) => <span className="font-semibold text-slate-900">{r.repName}</span> },
+  { key: "openDeals", type: "number", accessor: (r) => r.openDeals, header: "Open Deals", numeric: true, cell: (r) => formatNumber(r.openDeals) },
+  { key: "pipelineValue", type: "number", accessor: (r) => r.pipelineValue, header: "Pipeline Value", numeric: true, cell: (r) => formatCurrency(r.pipelineValue) },
+  { key: "wonThisPeriod", type: "number", accessor: (r) => r.wonThisPeriod, header: "Won This Period", numeric: true, cell: (r) => formatNumber(r.wonThisPeriod) },
+  { key: "winRate", type: "number", accessor: (r) => r.winRate, header: "Win Rate", numeric: true, cell: (r) => formatPercent(r.winRate) },
+  { key: "activityScore", type: "number", accessor: (r) => r.activityScore, header: "Activity Score", numeric: true, cell: (r) => formatNumber(r.activityScore) },
+];
+
+const TOP_ATRISK_COLUMNS: ReadonlyArray<SortedColumn<AtRiskDealRow>> = [
+  { key: "dealName", type: "text", accessor: (r) => r.dealName, header: "Deal Name", numeric: false, cell: (r) => <DealLink dealId={r.dealId}>{r.dealName}</DealLink> },
+  { key: "ownerName", type: "text", accessor: (r) => r.ownerName, header: "Owner", numeric: false, cell: (r) => r.ownerName },
+  { key: "stageName", type: "text", accessor: (r) => r.stageName, header: "Stage", numeric: false, cell: (r) => r.stageName },
+  { key: "daysInStage", type: "number", accessor: (r) => r.daysInStage, header: "Days In Stage", numeric: true, cell: (r) => formatNumber(r.daysInStage) },
+  { key: "value", type: "number", accessor: (r) => r.value, header: "Value", numeric: true, cell: (r) => formatCurrency(r.value) },
+  { key: "lastActivityDate", type: "date", accessor: (r) => r.lastActivityDate, header: "Last Activity Date", numeric: false, cell: (r) => formatDate(r.lastActivityDate) },
+];
+
+function SortableReportTable<Row>({
+  rows,
+  columns,
+  getRowKey,
+}: {
+  rows: Row[];
+  columns: ReadonlyArray<SortedColumn<Row>>;
+  getRowKey: (row: Row) => string;
+}) {
+  const { sortedRows, toggle, getHeaderProps } = useTableSort(rows, columns);
+  if (rows.length === 0) return <EmptyState />;
+  return (
+    <div className="overflow-x-auto">
+      <table className="min-w-full text-sm">
+        <thead className={`text-left ${HEADER_CLASS}`}>
+          <tr>
+            {columns.map((col) => {
+              const hp = getHeaderProps(col.key);
+              return (
+                <th
+                  key={col.key}
+                  className={col.numeric ? "py-2 text-right" : "py-2"}
+                  aria-sort={hp.active ? (hp.dir === "asc" ? "ascending" : "descending") : "none"}
+                >
+                  <SortHeaderButton
+                    label={col.header}
+                    numeric={col.numeric}
+                    active={hp.active}
+                    dir={hp.dir}
+                    onClick={() => toggle(col.key)}
+                    className={HEADER_CLASS}
+                  />
+                </th>
+              );
+            })}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {sortedRows.map((row) => (
+            <tr key={getRowKey(row)}>
+              {columns.map((col) => (
+                <td key={col.key} className={col.numeric ? "py-3 text-right tabular-nums" : "py-3"}>
+                  {col.cell(row)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export function DirectorScorecardPage() {
   const { query } = useReportFilters();
@@ -55,27 +139,7 @@ export function DirectorScorecardPage() {
           </section>
 
           <ReportPanel title="Rep Performance">
-            {data.repPerformance.length === 0 ? <EmptyState /> : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead className="text-left text-xs font-black uppercase tracking-[0.14em] text-slate-500">
-                    <tr><th className="py-2">Rep Name</th><th>Open Deals</th><th>Pipeline Value</th><th>Won This Period</th><th>Win Rate</th><th>Activity Score</th></tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {data.repPerformance.map((row) => (
-                      <tr key={row.repName}>
-                        <td className="py-3 font-semibold text-slate-900">{row.repName}</td>
-                        <td>{formatNumber(row.openDeals)}</td>
-                        <td>{formatCurrency(row.pipelineValue)}</td>
-                        <td>{formatNumber(row.wonThisPeriod)}</td>
-                        <td>{formatPercent(row.winRate)}</td>
-                        <td>{formatNumber(row.activityScore)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            <SortableReportTable rows={data.repPerformance} columns={REP_PERF_COLUMNS} getRowKey={(r) => r.repName} />
           </ReportPanel>
 
           <ReportPanel title="Office Comparison">
@@ -92,27 +156,7 @@ export function DirectorScorecardPage() {
           </ReportPanel>
 
           <ReportPanel title="Top 5 At-Risk Deals">
-            {data.topAtRiskDeals.length === 0 ? <EmptyState /> : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead className="text-left text-xs font-black uppercase tracking-[0.14em] text-slate-500">
-                    <tr><th className="py-2">Deal Name</th><th>Owner</th><th>Stage</th><th>Days In Stage</th><th>Value</th><th>Last Activity Date</th></tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {data.topAtRiskDeals.map((deal) => (
-                      <tr key={deal.dealId}>
-                        <td className="py-3"><DealLink dealId={deal.dealId}>{deal.dealName}</DealLink></td>
-                        <td>{deal.ownerName}</td>
-                        <td>{deal.stageName}</td>
-                        <td>{formatNumber(deal.daysInStage)}</td>
-                        <td>{formatCurrency(deal.value)}</td>
-                        <td>{formatDate(deal.lastActivityDate)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            <SortableReportTable rows={data.topAtRiskDeals} columns={TOP_ATRISK_COLUMNS} getRowKey={(r) => r.dealId} />
           </ReportPanel>
         </>
       ) : null}
