@@ -13,17 +13,19 @@ describe("SortHeaderButton", () => {
     expect(html).toContain("text-slate-300"); // muted neutral chevron
   });
 
-  it("marks ascending state", () => {
+  it("marks ascending state in both data-sort and the accessible name", () => {
     const html = renderToStaticMarkup(
       <SortHeaderButton label="Value" active dir="asc" onClick={() => {}} />,
     );
     expect(html).toContain('data-sort="ascending"');
+    expect(html).toContain('aria-label="Sort by Value, sorted ascending"');
   });
 
-  it("marks descending state", () => {
+  it("marks descending state in both data-sort and the accessible name", () => {
     const html = renderToStaticMarkup(
       <SortHeaderButton label="Value" active dir="desc" onClick={() => {}} />,
     );
     expect(html).toContain('data-sort="descending"');
+    expect(html).toContain('aria-label="Sort by Value, sorted descending"');
   });
 });

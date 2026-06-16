@@ -47,8 +47,19 @@ describe("compareDate", () => {
     ]);
   });
 
-  it("puts null/unparseable dates last in both directions", () => {
+  it("puts null dates last in both directions", () => {
     expect(["2026-01-01", null].sort((a, b) => compareDate(a, b, "asc"))).toEqual(["2026-01-01", null]);
     expect(["2026-01-01", null].sort((a, b) => compareDate(a, b, "desc"))).toEqual(["2026-01-01", null]);
+  });
+
+  it("puts unparseable date strings last in both directions", () => {
+    expect(["2026-01-01", "not-a-date"].sort((a, b) => compareDate(a, b, "asc"))).toEqual([
+      "2026-01-01",
+      "not-a-date",
+    ]);
+    expect(["2026-01-01", "not-a-date"].sort((a, b) => compareDate(a, b, "desc"))).toEqual([
+      "2026-01-01",
+      "not-a-date",
+    ]);
   });
 });

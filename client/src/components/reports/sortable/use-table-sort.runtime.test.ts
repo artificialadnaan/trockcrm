@@ -18,12 +18,16 @@ const COLUMNS: ReadonlyArray<SortColumn<RepRow>> = [
   { key: "openDeals", type: "number", accessor: (r) => r.openDeals },
 ];
 
-async function renderHook(options?: UseTableSortOptions) {
+async function renderHook(
+  options?: UseTableSortOptions,
+  rows: RepRow[] = ROWS,
+  columns: ReadonlyArray<SortColumn<RepRow>> = COLUMNS,
+) {
   const container = document.createElement("div");
   const root = createRoot(container);
   let api: UseTableSortResult<RepRow>;
   function Probe() {
-    api = useTableSort(ROWS, COLUMNS, options);
+    api = useTableSort(rows, columns, options);
     return null;
   }
   await act(async () => {
@@ -70,8 +74,18 @@ describe("useTableSort", () => {
     expect(hook.current.sortedRows.map((r) => r.openDeals)).toEqual([100, 10, 9]);
   });
 
-  it("is stable: equal keys keep incoming order", async () => {
-    const hook = await renderHook();
-    expect(hook.current.sortedRows.map((r) => r.repName)).toEqual(["Colby", "ana", "Beth"]);
+  it("is stable under an active sort: tied keys keep incoming order in both directions", async () => {
+    // Three rows sharing the SAME openDeals value — sorting by it must preserve their input order.
+    const tied: RepRow[] = [
+      { repName: "First", openDeals: 5, pipelineValue: 0, wonThisPeriod: 0, winRate: 0, activityScore: 0 },
+      { repName: "Second", openDeals: 5, pipelineValue: 0, wonThisPeriod: 0, winRate: 0, activityScore: 0 },
+      { repName: "Third", openDeals: 5, pipelineValue: 0, wonThisPeriod: 0, winRate: 0, activityScore: 0 },
+    ];
+    const cols: ReadonlyArray<SortColumn<RepRow>> = [{ key: "openDeals", type: "number", accessor: (r) => r.openDeals }];
+    const hook = await renderHook(undefined, tied, cols);
+    await hook.act(() => hook.current.toggle("openDeals")); // desc
+    expect(hook.current.sortedRows.map((r) => r.repName)).toEqual(["First", "Second", "Third"]);
+    await hook.act(() => hook.current.toggle("openDeals")); // asc — ties still stable
+    expect(hook.current.sortedRows.map((r) => r.repName)).toEqual(["First", "Second", "Third"]);
   });
 });

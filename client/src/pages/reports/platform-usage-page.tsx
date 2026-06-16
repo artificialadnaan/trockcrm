@@ -24,6 +24,15 @@ const PLATFORM_USAGE_SORT_COLUMNS: ReadonlyArray<SortColumn<PlatformUsageRow>> =
   { key: "views", type: "number", accessor: (r) => r.usage.viewCount },
 ];
 
+// Human label per sort key, for the leaderboard subtitle (kept honest as the user re-sorts).
+const PLATFORM_USAGE_SORT_LABELS: Record<string, string> = {
+  rep: "rep",
+  actions: "actions",
+  active: "active time",
+  sessions: "sessions",
+  views: "views",
+};
+
 // Window labels. These format a CT-resolved business-date STRING (YYYY-MM-DD, already bounded to
 // America/Chicago by the server) — NOT a timestamp. The weekday is read straight off the calendar
 // parts via Date.UTC(...).getUTCDay() so there is ZERO timezone conversion. Do NOT "improve" this
@@ -63,9 +72,10 @@ export function PlatformUsagePage() {
   // Headline ranking defaults to Actions desc (the proportion bars make 46-vs-0 read at a glance);
   // every column is now click-sortable via the shared hook, with that default preserved.
   const leaderboard = data?.leaderboard ?? [];
-  const { sortedRows: rows, toggle, getHeaderProps } = useTableSort(leaderboard, PLATFORM_USAGE_SORT_COLUMNS, {
+  const { sortedRows: rows, toggle, getHeaderProps, sortState } = useTableSort(leaderboard, PLATFORM_USAGE_SORT_COLUMNS, {
     initialSort: { key: "actions", dir: "desc" },
   });
+  const sortedByLabel = PLATFORM_USAGE_SORT_LABELS[sortState?.key ?? "actions"] ?? "actions";
   const maxActions = useMemo(() => rows.reduce((m, r) => Math.max(m, r.usage.actionCount), 0), [rows]);
 
   // Clicking a rep row opens their detail, carrying the current period (grain/date) AND the active
@@ -174,7 +184,7 @@ export function PlatformUsagePage() {
 
           <div className="flex items-baseline justify-between">
             <h2 className="text-sm font-semibold text-slate-700">Leaderboard</h2>
-            <span className="text-xs text-slate-400">Ranked by actions · {isCurrent ? relWord : win}</span>
+            <span className="text-xs text-slate-400">Sorted by {sortedByLabel} · {isCurrent ? relWord : win}</span>
           </div>
           <Leaderboard rows={rows} maxActions={maxActions} detailHref={detailHref} toggle={toggle} getHeaderProps={getHeaderProps} />
 

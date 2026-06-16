@@ -18,13 +18,22 @@ export interface SortHeaderButtonProps {
 export function SortHeaderButton({ label, active, dir, numeric, onClick, className }: SortHeaderButtonProps) {
   const sortAttr = !active ? "none" : dir === "asc" ? "ascending" : "descending";
   const labelText = typeof label === "string" ? label : undefined;
+  // Communicate the active sort state through the accessible name so screen-reader users hear it
+  // ("Sort by Value, sorted descending"). aria-sort itself belongs on the host <th>, which this
+  // container-agnostic button can't own (it also renders inside grid <div>s), so the direction is
+  // carried in the name instead.
+  const accessibleName = labelText
+    ? active
+      ? `Sort by ${labelText}, sorted ${dir === "asc" ? "ascending" : "descending"}`
+      : `Sort by ${labelText}`
+    : "Sort column";
   return (
     <button
       type="button"
       onClick={onClick}
       data-sort={sortAttr}
-      aria-label={labelText ? `Sort by ${labelText}` : "Sort column"}
-      title={labelText ? `Sort by ${labelText}` : "Sort"}
+      aria-label={accessibleName}
+      title={accessibleName}
       className={cn(
         "inline-flex items-center gap-1 transition hover:text-slate-800",
         numeric ? "flex-row-reverse" : "",
