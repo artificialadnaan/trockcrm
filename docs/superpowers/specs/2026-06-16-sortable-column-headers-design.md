@@ -151,7 +151,7 @@ Row type: `DirectorScorecardReport.repPerformance[]` / `.topAtRiskDeals[]` (`hoo
 
 Row type: `CustomerConcentrationReport.topCustomers[]` / `.staleCustomers[]`.
 
-**Top 20 Customers** — `initialSort: null` (server order; top-3 red highlight rows stay highlighted regardless of sort since the highlight is index-based today — **note:** highlight will follow re-sort, i.e. it marks the top 3 *as displayed*; confirm acceptable, else key the highlight off rank. Default: keep index-based = "top 3 shown").
+**Top 20 Customers** — `initialSort: null` (server order). The top-3 red highlight is **pinned to the concentration ranking, not the display order**: capture the first three `companyId`s from the *incoming* (server-ranked-by-concentration) array once, and highlight rows whose `companyId` is in that set — so the same three customers stay flagged regardless of how the table is sorted. The flag means "your most-concentrated accounts" (a property of the data), so it must not move when the user sorts by name/date/etc.
 | Column | type | accessor |
 | --- | --- | --- |
 | Company Name | text | `companyName` |
@@ -182,7 +182,7 @@ Row type: `AtRiskRecord` (`pages/reports/part4-types.ts`). `initialSort: null` (
 | Owner | text | `repName` |
 | Stage | text | `stageLabel` |
 | In stage | number | `daysInStage` (nullable) |
-| Why at-risk | text | `reason` (custom `compare` on the badge label "No close date" / "Past due", so it sorts by what's shown) |
+| Why at-risk | text | `reason` (custom `compare` that sorts by the rendered badge category via an **explicit order map** — e.g. `{ stale_dated: 0, no_date: 1 }` — so it groups cleanly: all "Past due" together, then all "No close date" together. Deliberate grouping, not incidental alphabetical on the label spelling. Direction flips the group order; within a group the stable sort preserves server order.) |
 | $ at risk | number | `value` |
 
 ### D. Platform Usage — Leaderboard — `platform-usage-page.tsx`
