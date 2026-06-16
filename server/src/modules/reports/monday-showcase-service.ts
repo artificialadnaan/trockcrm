@@ -29,6 +29,7 @@ import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   getWtdPeriod,
   sundayWeekBucketSql,
+  sundayWeekStart,
   BUSINESS_TIMEZONE,
   type WeekMode,
 } from "../../lib/period.js";
@@ -451,13 +452,20 @@ export async function computeWeeklyTrend(
   tenantDb: TenantDb,
   { from, to, repId }: { from: string; to: string; repId?: string }
 ): Promise<ShowcaseWeek[]> {
-  const trendFrom = shiftIsoDays(from, -7 * 7); // 7 prior weeks + the current one
+  // Anchor the 8 trailing weeks on the Sunday of the period END, NOT the window start `from`. For weekly
+  // modes `from` is already a Sunday so this is a no-op (to_date: to=today → this Sunday = from; completed:
+  // to=Saturday → that week's Sunday = from). But for MTD/YTD `from` is first-of-month / Jan-1, rarely a
+  // Sunday — reusing it would (a) end the trend at the start of the month/year instead of near today and
+  // (b) emit non-Sunday buckets that miss the Sunday-grouped cohort query (sundayWeekBucketSql). Snapping
+  // `to` to its Sunday keeps the trend ending at/near the current week and Sunday-aligned in every mode.
+  const anchorSunday = sundayWeekStart(to);
+  const trendFrom = shiftIsoDays(anchorSunday, -7 * 7); // 7 prior weeks + the current one
   const trendRows = await tenantDb.execute(buildWeeklyCohortTrendSql(trendFrom, to, repId));
   const trendByWeek = new Map<string, { estimating: number; sent: number }>();
   for (const r of rowsFromExecute<{ week_start: string; estimating: unknown; sent: unknown }>(trendRows)) {
     trendByWeek.set(String(r.week_start).slice(0, 10), { estimating: num(r.estimating), sent: num(r.sent) });
   }
-  const weekStarts = eightWeekStartsEndingAt(from);
+  const weekStarts = eightWeekStartsEndingAt(anchorSunday);
   const weeklyTrend: ShowcaseWeek[] = [];
   for (const weekStart of weekStarts) {
     const cohort = trendByWeek.get(weekStart) ?? { estimating: 0, sent: 0 };

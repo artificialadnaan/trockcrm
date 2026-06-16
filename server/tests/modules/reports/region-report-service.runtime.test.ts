@@ -224,7 +224,8 @@ describe("getRegionReport — exclusions & edge cases", () => {
       INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES
         ('${E.opp}','Opportunity','opportunity',2,false),('${E.won}','Won','won',7,true),('${E.lost}','Lost','lost',8,true);
 
-      -- West WON, in-window — normal + archived (is_active=false, must COUNT) + boundary on the from-date.
+      -- West WON, in-window — normal + archived (is_active=false, soft-deleted per #699 -> EXCLUDED) +
+      -- boundary on the from-date.
       INSERT INTO deals (id, name, stage_id, region_id, won_closed_date, awarded_amount, is_active, on_hold, is_test_data) VALUES
         ('${U("en1")}','normal','${E.won}','${ER.west}','2026-05-25',100000,true,false,false),
         ('${U("ear")}','archived','${E.won}','${ER.west}','2026-05-26',40000,false,false,false),
@@ -257,22 +258,26 @@ describe("getRegionReport — exclusions & edge cases", () => {
     await epg?.close?.();
   });
 
-  it("counts archived (is_active=false) wins, excludes on_hold/test_data, respects window boundaries", async () => {
+  it("EXCLUDES archived (is_active=false, soft-deleted) wins, excludes on_hold/test_data, respects window boundaries", async () => {
+    // Convention change (PR #733): the region Won card now requires d.is_active = true, matching the
+    // canonical Won card (getWonCloseSummary) AND the Won evidence drawer (buildWonEvidenceSql). Supersedes
+    // the #699-era "archived-Won counted" model: per #699 winning never sets is_active=false, so an
+    // is_active=false Won is a soft-delete and is dropped from BOTH card and drawer (reconciliation intact).
     const r = await getRegionReport(edb, { from: "2026-05-24", to: "2026-05-27", now: NOW });
     const west = r.regions.find((x) => x.region === "West Coast")!;
-    // 100k normal + 40k archived + 10k boundary-from; on_hold/test_data/after-to excluded.
-    expect(west.won).toEqual({ value: 150000, count: 3 });
-    // West win rate = won 3 / (won 3 + lost 2) = 60%. Lost = elw (lost_at 05-25) + elf (actual_close_date
+    // 100k normal + 10k boundary-from; the 40k archived (soft-deleted) win + on_hold/test_data/after-to excluded.
+    expect(west.won).toEqual({ value: 110000, count: 2 });
+    // West win rate = won 2 / (won 2 + lost 2) = 50%. Lost = elw (lost_at 05-25) + elf (actual_close_date
     // DATE-fallback on the 05-24 from-boundary, used as-is); etz (lost_at → business 05-23) is EXCLUDED by the
     // business-tz window. Proves lost windowing isn't session-tz-dependent AND the DATE arm isn't shifted.
-    expect(west.winRate).toBeCloseTo(60, 1);
+    expect(west.winRate).toBeCloseTo(50, 1);
   });
 
   it("maps NULL-region wins to the Unassigned segment and reconciles to office", async () => {
     const r = await getRegionReport(edb, { from: "2026-05-24", to: "2026-05-27", now: NOW });
     const un = r.regions.find((x) => x.region === "Unassigned")!;
     expect(un.won).toEqual({ value: 25000, count: 1 });
-    expect(r.summary.totalWon.value).toBe(175000); // 150k West + 25k Unassigned
+    expect(r.summary.totalWon.value).toBe(135000); // 110k West (archived 40k excluded) + 25k Unassigned
     expect(r.summary.totalWon.value).toBe(r.regions.reduce((s, x) => s + x.won.value, 0));
   });
 

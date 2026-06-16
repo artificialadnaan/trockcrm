@@ -6,6 +6,12 @@ import { getWonCloseSummary } from "../../../src/modules/dashboard/service.js";
 import { WON_STAGE_SLUGS } from "../../../src/modules/shared/pipeline-terminal-stages.js";
 
 /**
+ * CONVENTION (PR #733): Supersedes the #699-era Won convention (reportable = on_hold-only, NOT is_active).
+ * As of PR #733 the Won basis (B2 Leaderboard + report-builder + Won-card/region evidence) additionally
+ * requires is_active=true; soft-deleted/archived Won deals are excluded. No-op in prod today (0 soft-deleted
+ * Won); future-affecting when a Won deal is archived. This test asserts the NEW model explicitly (the
+ * inactive April win below is now EXCLUDED, not counted).
+ *
  * REAL-SQL (PGlite) proof for report-builder Decision 1 + the Won-reconciliation follow-ups:
  *  - A full-Won-scope report forces the canonical won_closed_date axis AND the awarded-first Won
  *    value, and reconciles to getWonCloseSummary — EXCLUDING inactive (soft-deleted, per PR #699) Won

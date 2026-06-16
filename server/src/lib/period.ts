@@ -32,6 +32,16 @@ function dayOfWeek(isoDate: string): number {
 }
 
 /**
+ * The most-recent Sunday on/before `isoDate` (the canonical week-start), business-tz-safe and date-only.
+ * This is the SAME "snap back to Sunday" getWtdPeriod uses for its weekly anchor; exported so trend
+ * surfaces can derive a Sunday anchor from an arbitrary date (e.g. the MTD/YTD period END) instead of
+ * reusing a non-Sunday window start. Returns YYYY-MM-DD.
+ */
+export function sundayWeekStart(isoDate: string): string {
+  return shiftDays(isoDate, -dayOfWeek(isoDate));
+}
+
+/**
  * The canonical Sunday-Saturday week period, business-tz anchored.
  * - "to_date":   from = most-recent Sunday, to = today  (the LIVE dashboard "week-to-date").
  * - "completed": the full PRIOR Sun-Sat box -- from = prior Sunday, to = prior Saturday  (the
@@ -57,7 +67,7 @@ export function getWtdPeriod(mode: WeekMode, now: Date = new Date()): { from: st
     }
     return { from: `${anchor.getUTCFullYear()}-01-01`, to: today };
   }
-  const thisSunday = shiftDays(today, -dayOfWeek(today));
+  const thisSunday = sundayWeekStart(today);
   if (mode === "to_date") {
     return { from: thisSunday, to: today };
   }

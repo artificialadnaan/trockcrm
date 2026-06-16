@@ -11,6 +11,7 @@ import {
 import { DrillNumber, DRILL_UNDERLINE } from "./drill";
 import { usd, int, signed, ACCENT, BAND_BAR, DeltaChip, Sparkline, type AccentKey } from "../evidence-kit";
 import { ScrollSyncX } from "../scroll-sync-x";
+import { periodWord, shouldShowWowDelta } from "../week-mode";
 
 // Every variant below renders a slice of the SAME payload -- so Won/Sent/Estimated/Projection figures
 // are identical across all of them by construction (locked server-side by the reconciliation test). Every
@@ -118,11 +119,16 @@ export function VariantA1Funnel({ data }: { data: MondayShowcaseData }) {
 }
 
 // First load now defaults to "last full week" (completed), so any "this week" copy must follow the mode —
-// otherwise last week's numbers render labelled "this week" until the user notices the toggle.
-const weekWord = (mode: MondayShowcaseData["period"]["mode"]) => (mode === "to_date" ? "this week" : "last week");
+// otherwise last week's numbers render labelled "this week" until the user notices the toggle. The MTD/YTD
+// modes get their own explicit words ("Month to date" / "Year to date") via the shared periodWord, so a
+// month/year view is never mislabeled "last week". Aliased to keep the call sites terse.
+const weekWord = periodWord;
 
 export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
   const spikeIndex = data.weeklyTrend.slice(-8).findIndex((w) => w.spikeExcluded);
+  // The DeltaChip is week-over-week; its baseline (the 7 days before the period start) is meaningless for
+  // MTD/YTD (whole month vs the last week of the prior month; Jan1–today vs Dec25–31). Hide it there.
+  const showWow = shouldShowWowDelta(data.period.mode);
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       {data.departments.map((d) => {
@@ -132,7 +138,7 @@ export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
             <span className={`absolute inset-y-0 left-0 w-1 ${accent.bar}`} />
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{d.label}</span>
-              <DeltaChip delta={d.deltaCountWoW} />
+              {showWow && <DeltaChip delta={d.deltaCountWoW} />}
             </div>
             <div className={`mt-1 text-3xl font-extrabold tabular-nums ${d.deferred ? "text-slate-300" : accent.text}`}>
               {d.deferred ? "—" : int(d.count ?? 0)}
