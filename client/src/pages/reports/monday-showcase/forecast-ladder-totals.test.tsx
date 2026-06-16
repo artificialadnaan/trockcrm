@@ -81,9 +81,14 @@ function render() {
   return open;
 }
 
-function clickButtonContaining(text: string) {
+function buttonContaining(text: string): HTMLButtonElement {
   const btn = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes(text));
   if (!btn) throw new Error(`no button containing "${text}"`);
+  return btn as HTMLButtonElement;
+}
+
+function clickButtonContaining(text: string) {
+  const btn = buttonContaining(text);
   act(() => btn.dispatchEvent(new MouseEvent("click", { bubbles: true })));
 }
 
@@ -127,5 +132,57 @@ describe("B4 Forecast Ladder — office column totals row", () => {
     expect(req.metric).toBe("projection");
     expect(req.band).toBe("0_30");
     expect(req.repId).toBeUndefined(); // office-wide, not a single rep
+  });
+});
+
+// Sums of the fixture ladders (these are globally unique $ values so each can only come from a totals cell).
+const officeSumValue = fixture.officeProjection.bands.reduce((s, b) => s + b.value, 0); // 15499
+const officeSumCount = fixture.officeProjection.bands.reduce((s, b) => s + b.count, 0); // 6
+const aliceSumValue = fixture.reps[0].projection.bands.reduce((s, b) => s + b.value, 0); // 6000
+const baileySumValue = fixture.reps[1].projection.bands.reduce((s, b) => s + b.value, 0); // 9499
+
+describe("B4 Forecast Ladder — Total of all timelines column", () => {
+  it("renders a Total cell on the office box summing $ and dated count across all bands", () => {
+    render();
+    const text = container.textContent ?? "";
+    expect(text).toContain("$15,499"); // 9999 + 2500 + 3000 + 0
+    expect(text.toLowerCase()).toContain("total");
+    // the office Total cell carries the summed dated count
+    const cell = buttonContaining("$15,499");
+    expect(cell.textContent ?? "").toContain(`${officeSumCount} dated`); // 6 dated
+    expect(cell.textContent ?? "").not.toContain("NaN");
+  });
+
+  it("renders a Total cell on each per-rep box summing $ and dated count across all bands", () => {
+    render();
+    const text = container.textContent ?? "";
+    expect(text).toContain("$6,000"); // Alice: 4000 + 2000
+    expect(text).toContain("$9,499"); // Bailey: 5999 + 500 + 3000
+    const alice = buttonContaining("$6,000");
+    expect(alice.textContent ?? "").toContain("3 dated"); // 1 + 2
+  });
+
+  it("office Total reconciles to the sum of the per-rep Totals (by construction)", () => {
+    expect(officeSumValue).toBe(aliceSumValue + baileySumValue);
+  });
+
+  it("office Total cell drills into ALL-BANDS office projection (band omitted, no repId)", () => {
+    const open = render();
+    clickButtonContaining("$15,499");
+    expect(open).toHaveBeenCalledTimes(1);
+    const req = open.mock.calls[0][0];
+    expect(req.metric).toBe("projection");
+    expect(req.band).toBeUndefined(); // all timelines
+    expect(req.repId).toBeUndefined(); // office-wide
+  });
+
+  it("per-rep Total cell drills into ALL-BANDS projection for that rep (band omitted)", () => {
+    const open = render();
+    clickButtonContaining("$6,000"); // Alice Total
+    expect(open).toHaveBeenCalledTimes(1);
+    const req = open.mock.calls[0][0];
+    expect(req.metric).toBe("projection");
+    expect(req.band).toBeUndefined(); // all timelines
+    expect(req.repId).toBe("rep-1");
   });
 });
