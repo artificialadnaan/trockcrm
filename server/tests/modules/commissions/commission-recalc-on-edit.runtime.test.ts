@@ -93,7 +93,7 @@ describe("commission recalc-on-edit (real Drizzle-derived schema)", () => {
     expect(result.status).toBe("created");
 
     const rows = await dscRows();
-    expect(rows).toHaveLength(1); // remove-then-insert ⇒ never a duplicate
+    expect(rows).toHaveLength(1); // update-in-place ⇒ the same single row, never a duplicate
     expect(Number(rows[0].amount)).toBe(4000); // 200000 × 0.02 — recomputed from CURRENT source value
     expect(rows[0].contract_signed_date_at_signing).toBe("2026-02-01"); // re-stamped to the new date
 
