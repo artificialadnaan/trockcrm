@@ -91,6 +91,21 @@ export function useAdminUsers() {
     await load();
   };
 
+  const createUser = async (input: {
+    email: string;
+    displayName: string;
+    firstName?: string;
+    lastName?: string;
+    role: "admin" | "director" | "rep" | "construction";
+    officeId: string;
+    sendInvite?: boolean;
+  }) => {
+    return api<{ user: AdminUser; invite: { sent: boolean; error?: string } }>("/admin/users", {
+      method: "POST",
+      json: input,
+    });
+  };
+
   const updateUsersBulk = async (ids: string[], input: Partial<AdminUser>) => {
     const results = await Promise.allSettled(
       ids.map((id) => api(`/admin/users/${id}`, {
@@ -162,6 +177,7 @@ export function useAdminUsers() {
     error,
     refetch: load,
     updateUser,
+    createUser,
     updateUsersBulk,
     grantAccess,
     revokeAccess,
