@@ -37,7 +37,11 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
-import { calculateCommissionForDeal, removeCommissionForDeal } from "../commissions/service.js";
+import {
+  calculateCommissionForDeal,
+  recalculateCommissionForDeal,
+  removeCommissionForDeal,
+} from "../commissions/service.js";
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
@@ -3329,13 +3333,55 @@ export async function setDealContractSignedDate(
       });
     }
 
-    // Commission fires only on null → date. Edits and clears do not
-    // recalculate (per Decision 5; recalc-on-edit is a TODO follow-up).
-    const isInitialSign = oldValue == null && newValue != null;
-    if (isInitialSign) {
+    // Commission re-fires on every contract-date TRANSITION (recalc-on-edit), all inside this
+    // transaction so the stored commission can never disagree with the stored signed date:
+    //   null → date   : initial sign → calculate
+    //   date → date'  : correction   → recalculate (remove the stale row, recompute from the deal's
+    //                                  CURRENT source value/rate, re-stamp contract_signed_date_at_signing)
+    //   date → null   : clear        → remove (no signed date ⇒ no commission; a lingering row is a
+    //                                  PHANTOM payout — worse than a missing one)
+    // The transition is keyed on the EFFECTIVE signed date — contract_signed_at::date FIRST, then
+    // contract_signed_date (canonical precedence, below). The reseed/import path can populate
+    // contract_signed_at WITHOUT contract_signed_date, and the app treats _at as the canonical signed-date
+    // source; keying off contract_signed_date alone would (a) miss the clear on an _at-only row (commission
+    // left orphaned) and (b) misroute a correction on an _at-only row as an initial calc that skips the row.
+    // A same-value re-save already short-circuited above UNLESS it reached here only to reconcile a stale
+    // won_closed_date (same effective date) — then the date is unchanged, so commission must NOT be churned.
+    // CANONICAL precedence: contract_signed_at::date FIRST, then contract_signed_date — matching this
+    // service's read/reporting paths (contractSignedDateForReporting = COALESCE(contract_signed_at::date,
+    // contract_signed_date)). So on a row where the two diverge, normalizing contract_signed_date to the
+    // existing _at value leaves the canonical effective date unchanged and does NOT churn the commission.
+    const oldEffectiveSignedDate = dateStringFromTimestamp(oldContractSignedAt) ?? oldValue;
+    const newEffectiveSignedDate = dateStringFromTimestamp(newContractSignedAt) ?? newValue;
+    if (oldEffectiveSignedDate !== newEffectiveSignedDate) {
+      if (oldEffectiveSignedDate == null) {
+        // null → signed: initial commission calc.
+        await calculateCommissionForDeal(tx, {
+          dealId,
+          contractSignedDate: newEffectiveSignedDate as string,
+          triggeredByUserId: userId,
+        });
+      } else if (newEffectiveSignedDate == null) {
+        // signed → cleared: remove the row (no signed date ⇒ no commission; a lingering row is a phantom payout).
+        await removeCommissionForDeal(tx, dealId, userId);
+      } else {
+        // corrected: recompute IN PLACE — attribution-preserving + all-or-nothing (never deletes to $0).
+        await recalculateCommissionForDeal(tx, {
+          dealId,
+          contractSignedDate: newEffectiveSignedDate,
+          triggeredByUserId: userId,
+        });
+      }
+    } else if (newEffectiveSignedDate != null && oldValue == null && newValue != null) {
+      // The effective date is UNCHANGED, but the contract_signed_date COLUMN was just normalized from null
+      // to its existing contract_signed_at value (an imported/reseeded _at-only row). Such a deal may have
+      // been signed but never calculated (no commission row), and the pre-effective-date logic created it
+      // on this null→date column transition — preserve that: ensure the commission exists.
+      // calculateCommissionForDeal is idempotent (skips when a row already exists), so a never-calculated
+      // import deal finally gets its commission while an already-paid one is untouched.
       await calculateCommissionForDeal(tx, {
         dealId,
-        contractSignedDate: newValue,
+        contractSignedDate: newEffectiveSignedDate,
         triggeredByUserId: userId,
       });
     }
@@ -3390,4 +3436,11 @@ function normalizeContractSignedAt(value: Date | string | null | undefined): Dat
 
 function timestampKey(value: Date | null): string | null {
   return value ? value.toISOString() : null;
+}
+
+// The date-only (YYYY-MM-DD, UTC) of a contract_signed_at timestamp — the fallback signed-date source
+// when contract_signed_date is null (reseed/import _at-only rows). contractSignedAtFromDate stores _at at
+// UTC midnight of the date, so this round-trips cleanly for app-set rows.
+function dateStringFromTimestamp(value: Date | null): string | null {
+  return value ? value.toISOString().slice(0, 10) : null;
 }

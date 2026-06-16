@@ -179,18 +179,8 @@ export async function calculateCommissionForDeal(
 }
 
 /**
- * Recompute a deal's commission from its CURRENT values: delete any existing commission row(s) for the
- * deal (audited), then re-run calculateCommissionForDeal so the snapshot reflects the new source value.
- *
- * calculateCommissionForDeal is idempotent (it short-circuits on an existing (deal_id, rep_user_id) row),
- * so a stale commission can only be corrected by removing the old row first. Used when a change order's
- * amount/date is edited — a stale commission after a CO amount edit is a real payout error. The delete +
- * re-insert run in the caller's per-request transaction, so there is never a duplicate row and never a
- * committed window with no row. Returns the same status discriminator as a fresh calc.
- */
-/**
- * Delete every commission row for a deal (each audited), returning the count removed. Used both by the
- * recompute (delete + re-create) and when a change order is deleted — a voided CO must not leave an earned
+ * Delete every commission row for a deal (each audited), returning the count removed. Used by the
+ * contract-date CLEAR (date → null) and when a change order is deleted — a voided CO must not leave an earned
  * commission behind (some earned-commission report queries join deals without an is_active filter, so a
  * soft-deleted CO's commission would otherwise linger). changedBy may be null for a system/cascade actor.
  */
@@ -223,6 +213,23 @@ export async function removeCommissionForDeal(
   return removed.length;
 }
 
+/**
+ * Recompute a deal's commission from its CURRENT source value — ATTRIBUTION-PRESERVING and ALL-OR-NOTHING.
+ *
+ * Each existing commission row is updated IN PLACE, keyed on its own `rep_user_id`, so a date/amount
+ * correction recomputes the AMOUNT against the booked rep — it NEVER re-attributes commission to a deal's
+ * later reassigned owner (a date edit must not move earned commission, just as a reassignment doesn't).
+ *
+ * ALL-OR-NOTHING: if an existing row can no longer be validly recomputed (its booked rep has no active
+ * commission rate, or the deal has no source value), that row is LEFT INTACT — a correction never deletes
+ * earned commission down to $0. This is the deliberate fix for the delete-then-maybe-skip hazard, where a
+ * blind delete + re-create would commit the delete while the re-create returned skipped_*.
+ *
+ * If the deal has NO existing commission row, this falls through to a fresh calculateCommissionForDeal for
+ * the current assigned rep (e.g. correcting the date on a signed-but-never-calculated import deal). Runs
+ * inside the caller's transaction, so the in-place updates are atomic with the deal edit. Used by the
+ * contract-date edit path (setDealContractSignedDate) and the change-order amount/date edit.
+ */
 export async function recalculateCommissionForDeal(
   tenantDb: TenantDb,
   input: {
@@ -231,6 +238,84 @@ export async function recalculateCommissionForDeal(
     triggeredByUserId: string;
   }
 ): Promise<CalculateCommissionResult> {
-  await removeCommissionForDeal(tenantDb, input.dealId, input.triggeredByUserId);
-  return calculateCommissionForDeal(tenantDb, input);
+  const existingRows = await tenantDb
+    .select({
+      id: dealSignedCommissions.id,
+      repUserId: dealSignedCommissions.repUserId,
+      amount: dealSignedCommissions.amount,
+      sourceValueKind: dealSignedCommissions.sourceValueKind,
+      sourceValueAmount: dealSignedCommissions.sourceValueAmount,
+      appliedRate: dealSignedCommissions.appliedRate,
+      contractSignedDateAtSigning: dealSignedCommissions.contractSignedDateAtSigning,
+    })
+    .from(dealSignedCommissions)
+    .where(eq(dealSignedCommissions.dealId, input.dealId));
+
+  // No prior commission → behave as a fresh calc for the deal's CURRENT assigned rep.
+  if (existingRows.length === 0) {
+    return calculateCommissionForDeal(tenantDb, input);
+  }
+
+  const [deal] = await tenantDb
+    .select({
+      awardedAmount: deals.awardedAmount,
+      bidEstimate: deals.bidEstimate,
+      ddEstimate: deals.ddEstimate,
+    })
+    .from(deals)
+    .where(eq(deals.id, input.dealId))
+    .limit(1);
+  const sourceValue = deal ? resolveSourceValue(deal) : null;
+
+  let recomputed = 0;
+  for (const row of existingRows) {
+    // The rate is the BOOKED rep's current rate — attribution stays with row.repUserId, never the deal's
+    // (possibly reassigned) current assignedRepId.
+    const [settings] = await tenantDb
+      .select({
+        commissionRate: userCommissionSettings.commissionRate,
+        isActive: userCommissionSettings.isActive,
+      })
+      .from(userCommissionSettings)
+      .where(eq(userCommissionSettings.userId, row.repUserId))
+      .limit(1);
+
+    // ALL-OR-NOTHING: cannot validly recompute → LEAVE THE ROW INTACT (no delete, no zeroing).
+    if (!sourceValue || !settings || !settings.isActive || Number(settings.commissionRate) <= 0) {
+      continue;
+    }
+
+    const appliedRate = settings.commissionRate;
+    const amount = multiplyDecimalStrings(sourceValue.amount, appliedRate);
+    await tenantDb
+      .update(dealSignedCommissions)
+      .set({
+        sourceValueKind: sourceValue.kind,
+        sourceValueAmount: sourceValue.amount,
+        appliedRate,
+        amount,
+        contractSignedDateAtSigning: input.contractSignedDate,
+        calculatedAt: new Date(),
+      })
+      .where(eq(dealSignedCommissions.id, row.id));
+
+    await writeAuditLog(tenantDb, {
+      tableName: "deal_signed_commissions",
+      recordId: row.id,
+      action: "update",
+      changedBy: input.triggeredByUserId,
+      changes: {
+        amount: { from: row.amount, to: amount },
+        sourceValueKind: { from: row.sourceValueKind, to: sourceValue.kind },
+        sourceValueAmount: { from: row.sourceValueAmount, to: sourceValue.amount },
+        appliedRate: { from: row.appliedRate, to: appliedRate },
+        contractSignedDateAtSigning: { from: row.contractSignedDateAtSigning, to: input.contractSignedDate },
+      },
+    });
+    recomputed += 1;
+  }
+
+  // No caller inspects this result today. "created" when ≥1 row was recomputed; otherwise every existing
+  // row was PRESERVED intact (no active rate / no source value) — reported as skipped_no_rate.
+  return recomputed > 0 ? { status: "created" } : { status: "skipped_no_rate" };
 }
