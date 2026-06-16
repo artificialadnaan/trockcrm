@@ -233,20 +233,31 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.map((r) => (
-          <TableRow
-            key={r.id}
-            className="group cursor-pointer"
-            onClick={() => onOpenRecord(r)}
-            title={`Open the ${ev.metric === "leads" ? "lead" : "deal"} record`}
-          >
-            {columns.map((col) => (
-              <TableCell key={col.key} className={cn("px-3", col.numeric ? "text-right tabular-nums" : "text-left")}>
-                {col.render(r)}
-              </TableCell>
-            ))}
+        {rows.length === 0 ? (
+          // Empty cohort (e.g. an empty 0–30d projection band): keep the headers above so the column
+          // set — including Win % — stays consistent with non-empty cohorts, and show the empty-state
+          // copy as a single spanning row instead of swapping the whole table out.
+          <TableRow className="hover:bg-transparent">
+            <TableCell colSpan={columns.length} className="px-3 py-6 text-center text-sm text-muted-foreground">
+              No supporting records for this number in this period.
+            </TableCell>
           </TableRow>
-        ))}
+        ) : (
+          rows.map((r) => (
+            <TableRow
+              key={r.id}
+              className="group cursor-pointer"
+              onClick={() => onOpenRecord(r)}
+              title={`Open the ${ev.metric === "leads" ? "lead" : "deal"} record`}
+            >
+              {columns.map((col) => (
+                <TableCell key={col.key} className={cn("px-3", col.numeric ? "text-right tabular-nums" : "text-left")}>
+                  {col.render(r)}
+                </TableCell>
+              ))}
+            </TableRow>
+          ))
+        )}
       </TableBody>
     </Table>
   );
@@ -298,24 +309,19 @@ export function EvidenceDrawer({
         ) : data ? (
           <div className="flex min-h-0 flex-col gap-3">
             <ReconciliationBanner ev={data} />
-            {data.records.length === 0 ? (
-              <div className="rounded-lg border bg-slate-50 p-6 text-center text-sm text-muted-foreground">
-                No supporting records for this number in this period.
-              </div>
-            ) : (
-              <>
-                <ScrollSyncX
-                  className="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-100"
-                  bodyClassName="min-h-0 flex-1 overflow-auto"
-                >
-                  <EvidenceTable ev={data} onOpenRecord={openRecord} />
-                </ScrollSyncX>
-                <p className="px-1 text-xs text-muted-foreground">
-                  Shown on the {data.dateAxisLabel.toLowerCase()} axis — the cohort this number is defined on.
-                  Click a column to sort; click a row to open the record.
-                </p>
-              </>
-            )}
+            {/* Always render the table (with headers) — even for an empty cohort — so the column set,
+                notably the Win % column, stays consistent across bands. The empty-state message lives
+                inside the table body (EvidenceTable) instead of swapping the whole table out. */}
+            <ScrollSyncX
+              className="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-100"
+              bodyClassName="min-h-0 flex-1 overflow-auto"
+            >
+              <EvidenceTable ev={data} onOpenRecord={openRecord} />
+            </ScrollSyncX>
+            <p className="px-1 text-xs text-muted-foreground">
+              Shown on the {data.dateAxisLabel.toLowerCase()} axis — the cohort this number is defined on.
+              Click a column to sort; click a row to open the record.
+            </p>
           </div>
         ) : null}
       </DialogContent>
