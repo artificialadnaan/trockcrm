@@ -11,22 +11,16 @@ import { DrillProvider } from "./monday-showcase/drill";
 import { EvidenceDrawer } from "./monday-showcase/evidence-drawer";
 import { DEFAULT_WEEK_MODE, WEEK_MODE_LABELS, type WeekMode } from "./week-mode";
 import {
-  VariantA1Funnel,
-  VariantA2Scoreboard,
   VariantA3Lanes,
   VariantExecHero,
-  VariantB1Scorecards,
   VariantB2Leaderboard,
   VariantB3LoadLane,
   VariantB4ForecastLadder,
 } from "./monday-showcase/variants";
 
 const VARIANT_COMPONENT: Record<ShowcaseVariantKey, ComponentType<{ data: MondayShowcaseData }>> = {
-  A1: VariantA1Funnel,
-  A2: VariantA2Scoreboard,
-  A3: VariantA3Lanes,
   HERO: VariantExecHero,
-  B1: VariantB1Scorecards,
+  A3: VariantA3Lanes,
   B2: VariantB2Leaderboard,
   B3: VariantB3LoadLane,
   B4: VariantB4ForecastLadder,

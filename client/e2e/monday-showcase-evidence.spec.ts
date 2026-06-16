@@ -1,9 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installCommonApiMocks } from "./helpers/mock-api";
+import { SHOWCASE_VARIANTS } from "../src/pages/reports/monday-showcase/types";
 
 // Reports Part 3 -- drill-to-evidence + richer visuals. Mocks the showcase + evidence endpoints so the
 // real components render with representative data (DB-independent), asserts a clicked number opens a
-// drawer whose total reconciles to it, and captures the 8 variants + the drawer for design review.
+// drawer whose total reconciles to it, and captures every consolidated variant + the drawer for design
+// review. The variant list is sourced from SHOWCASE_VARIANTS so it can't drift from the registry (the
+// 8->5 consolidation removed A1/A2/B1; the Exec survivor is now labeled "Exec · One Glance").
 
 // Screenshots are opt-in (design-review capture); the assertions below run in CI regardless.
 const SHOT_DIR = process.env.SHOWCASE_SHOT_DIR;
@@ -127,16 +130,10 @@ async function setup(page: Page) {
   await page.setViewportSize({ width: 1440, height: 1000 });
 }
 
-const VARIANTS = [
-  "Exec · One-Glance Hero",
-  "A1 · Throughput Funnel",
-  "A2 · Department Scoreboard",
-  "A3 · Momentum Lanes",
-  "B1 · Roll-Call Scorecards",
-  "B2 · Leaderboard",
-  "B3 · Rep Load Lane",
-  "B4 · Forecast Ladder",
-];
+// Sourced from the registry so the spec tracks the consolidated 5-variant set (HERO "Exec · One Glance",
+// A3, B2, B3, B4) and never drifts back to the removed A1/A2/B1 buttons.
+const VARIANTS = SHOWCASE_VARIANTS.map((v) => v.label);
+const HERO_LABEL = SHOWCASE_VARIANTS.find((v) => v.key === "HERO")!.label;
 
 test("Monday showcase: all variants render + drill opens a reconciling drawer", async ({ page }) => {
   await setup(page);
@@ -154,7 +151,7 @@ test("Monday showcase: all variants render + drill opens a reconciling drawer", 
   }
 
   // Drill: open the exec hero Won tile -> drawer with a reconciliation banner.
-  await page.getByRole("button", { name: "Exec · One-Glance Hero", exact: true }).click();
+  await page.getByRole("button", { name: HERO_LABEL, exact: true }).click();
   await page.getByText("Won this week").click();
   await expect(page.getByText("reconcile to it by construction")).toBeVisible();
   await expect(page.getByText(/records/).first()).toBeVisible();

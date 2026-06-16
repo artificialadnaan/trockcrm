@@ -73,7 +73,7 @@ export function Sparkline({
   const max = Math.max(1, ...values);
   const lastIdx = values.length - 1;
   return (
-    <div className="flex items-end gap-1" style={{ height }} aria-hidden>
+    <div className="flex items-end gap-1" style={{ height }} data-testid="sparkline" aria-hidden>
       {values.map((v, i) => {
         const isSpike = spikeIndex === i;
         const isLast = highlightLast && i === lastIdx;
