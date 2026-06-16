@@ -730,8 +730,9 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
 
 /**
  * Won evidence: the deal rows behind the Won count/$ -- byte-identical predicate to getWonCloseSummary
- * (close-date cohort on won_closed_date, Won stages, usable-won-date guard, reportable + test filters)
- * and the SAME awarded-first $ basis, so COUNT(rows) === Won count and SUM(value) === Won $.
+ * (close-date cohort on won_closed_date, is_active=true basis-alignment guard, Won stages,
+ * usable-won-date guard, reportable + test filters) and the SAME awarded-first $ basis, so
+ * COUNT(rows) === Won count and SUM(value) === Won $.
  */
 export function buildWonEvidenceSql(from: string, to: string, repId?: string | null, regionName?: string): SQL {
   return sql`
@@ -744,6 +745,7 @@ export function buildWonEvidenceSql(from: string, to: string, repId?: string | n
     LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedActiveDealCountFilterSql("d")}
+      AND d.is_active = true
       AND psc.slug IN (${slugInList(WON_STAGE_SLUGS)})
       AND ${aliasedHasUsableWonDateSql("d")}
       AND ${aliasedWonHsClosedWonDateSql("d")} >= ${from}::date

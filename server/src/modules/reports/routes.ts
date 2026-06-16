@@ -84,7 +84,16 @@ import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { getRegionReport } from "./region-report-service.js";
 import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, classifyViewsState, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
-import { businessToday, shiftBusinessDate, getWtdPeriod } from "../../lib/period.js";
+import { businessToday, shiftBusinessDate, getWtdPeriod, type WeekMode } from "../../lib/period.js";
+
+// Parse the showcase/report period toggle. Accepts the four canonical modes; anything else (incl.
+// absent) defaults to "to_date" (live WTD), matching the prior behavior. mtd/ytd resolve to
+// first-of-month/Jan-1 → today windows that are byte-identical to the client resolveDatePreset, so the
+// B2 Leaderboard reconciles to the Deals Dashboard for the same preset.
+function parseWeekMode(modeRaw: string | undefined): WeekMode {
+  if (modeRaw === "completed" || modeRaw === "mtd" || modeRaw === "ytd") return modeRaw;
+  return "to_date";
+}
 
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
@@ -1007,7 +1016,7 @@ router.post(
 router.get("/monday-showcase", requireAnyRole, async (req, res, next) => {
   try {
     const modeRaw = pickQueryValue(req.query.mode);
-    const mode = modeRaw === "completed" ? "completed" : "to_date";
+    const mode = parseWeekMode(modeRaw);
     const data = await getMondayShowcaseData(req.tenantDb!, { mode });
     await req.commitTransaction!();
     res.json({ data });
@@ -1030,7 +1039,7 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
   const metric = metricRaw as EvidenceMetric;
 
   const modeRaw = pickQueryValue(query.mode);
-  const mode = modeRaw === "completed" ? "completed" : "to_date";
+  const mode = parseWeekMode(modeRaw);
 
   // repId: absent -> office-wide (undefined, so it reconciles to the office number); the sentinel ->
   // the Unassigned (null) bucket; otherwise a real rep UUID.
@@ -1151,7 +1160,7 @@ router.get("/rep-pack", requireDirector, async (req, res, next) => {
     const repIdRaw = pickQueryValue(req.query.repId);
     const repId = repIdRaw === undefined ? undefined : requireUuid(repIdRaw, "repId");
     const modeRaw = pickQueryValue(req.query.mode);
-    const mode = modeRaw === "completed" ? "completed" : "to_date";
+    const mode = parseWeekMode(modeRaw);
     const data = await getRepPackData(req.tenantDb!, { repId, mode });
     await req.commitTransaction!();
     res.json({ data });

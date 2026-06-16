@@ -8,8 +8,9 @@ import { WON_STAGE_SLUGS } from "../../../src/modules/shared/pipeline-terminal-s
 /**
  * REAL-SQL (PGlite) proof for report-builder Decision 1 + the Won-reconciliation follow-ups:
  *  - A full-Won-scope report forces the canonical won_closed_date axis AND the awarded-first Won
- *    value, and reconciles to getWonCloseSummary — INCLUDING inactive terminal Won deals (no
- *    is_active=true forced) and excluding null-won-date deals only for period-bounded reports.
+ *    value, and reconciles to getWonCloseSummary — EXCLUDING inactive (soft-deleted, per PR #699) Won
+ *    deals (is_active=true forced, matching the card) and excluding null-won-date deals only for
+ *    period-bounded reports.
  *  - avg_cycle_time for a Won report ages by won_closed_date, not actual_close_date.
  *  - The "reconciles to the card" note appears ONLY for a full Won-stage scope; a Won SUBSET says it
  *    will NOT match the full card.
@@ -44,7 +45,7 @@ beforeAll(async () => {
     -- wonMar: ACTIVE won; won Mar / created Jan; awarded(100k) != bid_board(70k); actual_close_date NULL
     INSERT INTO deals (id, assigned_rep_id, stage_id, is_active, won_closed_date, created_at, awarded_amount, bid_board_total_sales) VALUES
       ('${D.wonMar}','${REP}','${ST.won}', true, '2026-03-15','2026-01-05T00:00:00Z', 100000, 70000);
-    -- wonAprInactive: INACTIVE terminal won (the normal case) — must still be counted
+    -- wonAprInactive: INACTIVE Won = soft-deleted per #699 (winning never sets is_active=false) — EXCLUDED
     INSERT INTO deals (id, assigned_rep_id, stage_id, is_active, won_closed_date, created_at, awarded_amount) VALUES
       ('${D.wonAprInactive}','${REP}','${ST.won}', false, '2026-04-10','2026-03-20T00:00:00Z', 50000),
       -- wonNull: won but no won date -> excluded from period reports, counted all-time, no cycle age
@@ -60,7 +61,7 @@ afterAll(async () => {
 });
 
 describe("report-builder Won reports reconcile to the Won card", () => {
-  it("full Won scope, period-bounded: won_closed_date axis + canonical value + INACTIVE wins, reconciles to getWonCloseSummary", async () => {
+  it("full Won scope, period-bounded: won_closed_date axis + canonical value; inactive (soft-deleted) wins EXCLUDED, reconciles to getWonCloseSummary", async () => {
     const range = { from: "2026-01-01", to: "2026-12-31" };
     const result = await runReportBuilder(tdb, {
       ...admin,
@@ -71,18 +72,19 @@ describe("report-builder Won reports reconcile to the Won card", () => {
 
     const march = result.rows.find((r) => r.month === "2026-03");
     expect(Number(march!.total_value)).toBeCloseTo(100000, 2); // canonical awarded-first, not 70k
-    // The inactive April win is counted (no is_active=true forced).
+    // The inactive (soft-deleted, per #699) April win is now EXCLUDED — is_active=true forced to match
+    // the canonical Won card.
     const april = result.rows.find((r) => r.month === "2026-04");
-    expect(Number(april!.total_value)).toBeCloseTo(50000, 2);
+    expect(april).toBeUndefined();
 
     const reportTotal = result.rows.reduce((s, r) => s + Number(r.total_value), 0);
     const card = await getWonCloseSummary(tdb, range);
-    expect(card.totalValue).toBeCloseTo(150000, 2); // active wonMar + INACTIVE wonApr; wonNull excluded
+    expect(card.totalValue).toBeCloseTo(100000, 2); // active wonMar only; inactive wonApr + null wonNull excluded
     expect(reportTotal).toBeCloseTo(card.totalValue, 2);
     expect(result.notes?.[0]).toMatch(/reconcile/i);
   });
 
-  it("all-time full Won scope counts null-won-date AND inactive deals", async () => {
+  it("all-time full Won scope counts null-won-date deals but EXCLUDES inactive (soft-deleted) deals", async () => {
     const result = await runReportBuilder(tdb, {
       ...admin,
       dimensions: ["rep"],
@@ -90,8 +92,8 @@ describe("report-builder Won reports reconcile to the Won card", () => {
       filters: { stage: ALL_WON },
     });
     const row = result.rows.find((r) => r.rep === "Alice")!;
-    expect(Number(row.deal_count)).toBe(3); // wonMar + inactive wonApr + null-date wonNull
-    expect(Number(row.total_value)).toBeCloseTo(180000, 2); // 100k + 50k + 30k (awarded-first)
+    expect(Number(row.deal_count)).toBe(2); // wonMar + null-date wonNull; inactive wonApr excluded (#699)
+    expect(Number(row.total_value)).toBeCloseTo(130000, 2); // 100k + 30k (awarded-first); inactive 50k dropped
   });
 
   it("Won-scoped avg_cycle_time ages by won_closed_date, not actual_close_date", async () => {
@@ -102,10 +104,10 @@ describe("report-builder Won reports reconcile to the Won card", () => {
       filters: { stage: ALL_WON },
     });
     const row = result.rows.find((r) => r.rep === "Alice")!;
-    // wonMar: 2026-03-15 - 2026-01-05 = 69d; wonApr: 2026-04-10 - 2026-03-20 = 21d; wonNull: no won
-    // date -> excluded from the average. avg = (69 + 21) / 2 = 45. actual_close_date is NULL for all,
-    // so the pre-fix actual_close_date basis would have produced 0 / excluded every row.
-    expect(Number(row.avg_cycle_time)).toBeCloseTo(45, 0);
+    // wonMar: 2026-03-15 - 2026-01-05 = 69d. wonApr is inactive (soft-deleted, #699) -> excluded;
+    // wonNull has no won date -> excluded from the average. So the average is wonMar's 69 days alone.
+    // actual_close_date is NULL for all, so the pre-fix actual_close_date basis would have produced 0.
+    expect(Number(row.avg_cycle_time)).toBeCloseTo(69, 0);
   });
 
   it("a Won SUBSET does not promise card reconciliation", async () => {
