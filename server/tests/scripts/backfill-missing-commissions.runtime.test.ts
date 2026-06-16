@@ -25,6 +25,7 @@ const R3 = U("0003"); // original rep on a reassigned deal (has rate)
 const ACTOR = U("0ac7"); // backfill operator (created_by + audit actor)
 const WON = U("0500");
 const LOST = U("0501");
+const CANCELED = U("0502"); // deal_canceled — canonical lost slug
 
 const D_HAS_DATE = U("0de1"); // has date + rep w/ rate + no row → CREATE
 const D_NO_DATE = U("0de2"); // no contract date → not a candidate
@@ -33,6 +34,8 @@ const D_HAS_ROW = U("0de4"); // has date but already has a commission row → no
 const D_LOST = U("0de5"); // has date but lost stage → not a candidate
 const D_AT_ONLY = U("0de6"); // contract_signed_at only (no date column) → CREATE
 const D_REASSIGNED = U("0de7"); // row booked to R3, later reassigned to R1 → NOT a candidate (no double-pay)
+const D_CANCELED = U("0de8"); // signed but in deal_canceled (canonical lost) → NOT a candidate
+const D_CO_CHILD = U("0de9"); // is_change_order=true, signed, no row → NOT a candidate (no retro CO payout)
 
 let pg: PGlite;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -58,7 +61,7 @@ beforeAll(async () => {
        ('${R3}','Rep Three','r3@x.com','rep','${OFFICE}')`
   );
   await pg.exec(`INSERT INTO public.pipeline_stage_config (id, name, slug, display_order) VALUES
-    ('${WON}','Won','won',9), ('${LOST}','Lost','lost',10)`);
+    ('${WON}','Won','won',9), ('${LOST}','Lost','lost',10), ('${CANCELED}','Canceled','deal_canceled',11)`);
   await pg.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES
     ('${R1}', 0.020000, true), ('${R3}', 0.030000, true)`);
 
@@ -72,6 +75,13 @@ beforeAll(async () => {
   await pg.exec(ins(D_LOST, LOST, R1, "2026-01-12", null, 70000));
   await pg.exec(ins(D_AT_ONLY, WON, R1, null, "2026-02-01T00:00:00.000Z", 200000));
   await pg.exec(ins(D_REASSIGNED, WON, R1, "2026-01-18", null, 90000)); // currently assigned to R1...
+  await pg.exec(ins(D_CANCELED, CANCELED, R1, "2026-01-22", null, 60000)); // signed but canonical-lost → excluded
+  // A change-order child (is_change_order=true) with a signed date + rep + amount + no commission row —
+  // exactly the migrated-CO shape the backfill must NOT retroactively pay.
+  await pg.exec(
+    `INSERT INTO public.deals (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, contract_signed_date, is_change_order)
+     VALUES ('${D_CO_CHILD}','de9','CO Child','${WON}','${R1}', 30000, '2026-01-25', true)`
+  );
   // D_HAS_ROW already has its commission row; D_REASSIGNED has a row booked to its ORIGINAL rep R3 (the
   // deal was later reassigned to R1). The backfill must skip BOTH — never insert a second row.
   await pg.exec(
@@ -90,10 +100,12 @@ describe("commission backfill", () => {
     const candidates = await findBackfillCandidates(query);
     const ids = candidates.map((c) => c.dealId).sort();
     expect(ids).toEqual([D_HAS_DATE, D_NO_RATE, D_AT_ONLY].sort());
-    // Excludes no-date, lost, the already-rowed deal, AND the reassigned deal (row booked to its original
-    // rep R3) — the latter is the P1 double-pay guard.
+    // Excludes: no-date, lost, the already-rowed deal, the reassigned deal (double-pay guard), a
+    // deal_canceled deal (canonical lost), and a change-order child (no retroactive CO payout).
     expect(ids).not.toContain(D_HAS_ROW);
     expect(ids).not.toContain(D_REASSIGNED);
+    expect(ids).not.toContain(D_CANCELED);
+    expect(ids).not.toContain(D_CO_CHILD);
     // The _at-only deal's signed date comes from contract_signed_at::date.
     expect(candidates.find((c) => c.dealId === D_AT_ONLY)?.signedDate).toBe("2026-02-01");
   });

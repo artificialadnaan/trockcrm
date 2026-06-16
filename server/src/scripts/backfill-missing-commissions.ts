@@ -36,6 +36,7 @@ import { pathToFileURL } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
+import { LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
   calculateCommissionForDeal,
   type CalculateCommissionResult,
@@ -64,13 +65,19 @@ export interface BackfillSummary {
   rows: Array<BackfillCandidate & { status: CalculateCommissionStatus; amount: string | null }>;
 }
 
-const LOST_STAGE_SLUGS = "('lost','production_lost','service_lost','closed_lost')";
+// The CANONICAL lost-stage set (includes deal_canceled) — sourced from the shared constant so the backfill
+// can't drift from how the rest of the app classifies lost deals (which it excludes from earned commission).
+// Trusted compile-time constants, safe to interpolate.
+const LOST_STAGE_SLUGS = `(${LOST_DEAL_STAGE_SLUGS.map((s) => `'${s}'`).join(",")})`;
 
 // Office schemas only — validated before interpolating into SET search_path (--tenant is user input).
 const OFFICE_SCHEMA_RE = /^office_[a-z0-9_]+$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Active, non-lost, non-test signed deals with an assigned rep and NO commission row for that rep. */
+/**
+ * Active, non-lost (canonical slugs, incl. deal_canceled), non-test, non-change-order signed deals with an
+ * assigned rep and NO existing commission row (any rep).
+ */
 export async function findBackfillCandidates(query: QueryFn): Promise<BackfillCandidate[]> {
   const { rows } = await query(`
     SELECT d.id AS deal_id, d.deal_number, d.assigned_rep_id AS rep_id, u.display_name AS rep_name,
@@ -85,6 +92,10 @@ export async function findBackfillCandidates(query: QueryFn): Promise<BackfillCa
       AND COALESCE(d.is_test_data, false) = false
       AND d.is_active = true
       AND d.assigned_rep_id IS NOT NULL
+      -- Exclude change-order children: migrateLegacyChangeOrders deliberately creates historical CO
+      -- children WITHOUT commission (they don't retroactively earn), and a live CO that DOES earn already
+      -- got its row on creation. Backfilling COs would mint retroactive payouts for the migrated set.
+      AND COALESCE(d.is_change_order, false) = false
       -- Skip a deal that already has ANY commission row (any rep), not just one for the CURRENT assigned
       -- rep: a reassigned deal keeps its row booked to the ORIGINAL rep, and inserting a second row for the
       -- new assignee would double-pay/double-count the deal. A deal already carrying commission is "handled".
