@@ -10,6 +10,7 @@ import {
 } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { isAssignableCrmRole, type CrmAssignableRole } from "@trock-crm/shared/types";
 import {
   getLocalAuthStatus,
   type LocalAuthStatus,
@@ -129,6 +130,54 @@ export async function getUserById(id: string) {
     .where(eq(userOfficeAccess.userId, id));
 
   return { ...userRows[0], officeAccess: accessRows };
+}
+
+export interface CreateCrmUserInput {
+  email: string;
+  displayName: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  role: string;
+  officeId: string;
+  reportsTo?: string | null;
+}
+
+// Pure, throwing validation — the create-flow's gate of record. The role decision is the gate-proven
+// isAssignableCrmRole; the rest are simple presence checks.
+export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input is CreateCrmUserInput & { role: CrmAssignableRole } {
+  if (!input.email?.trim()) throw new AppError(400, "Email is required");
+  if (!input.displayName?.trim()) throw new AppError(400, "Display name is required");
+  if (!input.officeId?.trim()) throw new AppError(400, "Office is required");
+  if (input.role === "field_contractor") throw new AppError(400, "Field contractors are created in the field-user flow");
+  if (!isAssignableCrmRole(input.role)) throw new AppError(400, `Invalid role: ${input.role}`);
+}
+
+export async function createCrmUser(input: CreateCrmUserInput, actorUserId: string) {
+  assertCreatableCrmUser(input);
+  const email = input.email.trim().toLowerCase();
+
+  const office = await db.select({ id: offices.id, isActive: offices.isActive }).from(offices).where(eq(offices.id, input.officeId)).limit(1);
+  if (!office[0]) throw new AppError(400, "Office not found");
+  if (!office[0].isActive) throw new AppError(400, "Office is not active");
+
+  const existing = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
+  if (existing[0]) throw new AppError(409, "A user with this email already exists");
+
+  const [created] = await db
+    .insert(users)
+    .values({
+      email,
+      displayName: input.displayName.trim(),
+      firstName: input.firstName?.trim() || null,
+      lastName: input.lastName?.trim() || null,
+      role: input.role as CrmAssignableRole,
+      officeId: input.officeId,
+      reportsTo: input.reportsTo ?? null,
+      isActive: true,
+      createdByUserId: actorUserId,
+    })
+    .returning();
+  return created;
 }
 
 export async function updateUser(

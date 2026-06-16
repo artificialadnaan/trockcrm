@@ -13,7 +13,7 @@ import {
   listOffices, getOfficeById, createOffice, updateOffice,
 } from "./offices-service.js";
 import {
-  getUsersWithStats, getUserById, getUserLocalAuthEvents, updateUser, grantOfficeAccess, revokeOfficeAccess,
+  getUsersWithStats, getUserById, getUserLocalAuthEvents, updateUser, grantOfficeAccess, revokeOfficeAccess, createCrmUser,
 } from "./users-service.js";
 import { importExternalUsers } from "./user-import-service.js";
 import { previewUserInvite, revokeUserInvite, sendUserInvite } from "../auth/local-auth-service.js";
@@ -159,6 +159,24 @@ router.post("/admin/users/import-external", requireAdmin, async (_req: Request, 
   try {
     const summary = await importExternalUsers();
     return res.json(summary);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/admin/users", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const user = await createCrmUser(req.body, req.user!.id);
+    let invite: { sent: boolean; error?: string } = { sent: false };
+    if (req.body?.sendInvite !== false) {
+      try {
+        await sendUserInvite({ userId: user.id, sentByUserId: req.user!.id });
+        invite = { sent: true };
+      } catch (e: any) {
+        invite = { sent: false, error: e?.message ?? "Invite failed" };
+      }
+    }
+    return res.status(201).json({ user, invite });
   } catch (err) {
     return next(err);
   }
