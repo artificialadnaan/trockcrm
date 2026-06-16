@@ -11,6 +11,8 @@ import {
 } from "@/components/ui/dialog";
 import { EmailManualAssignmentDialog } from "./email-manual-assignment-dialog";
 import { sendEmail, type EmailAssociationTarget } from "@/hooks/use-emails";
+import { getSignature } from "@/hooks/use-signature";
+import DOMPurify from "dompurify";
 
 interface EmailComposeDialogProps {
   open: boolean;
@@ -63,6 +65,9 @@ export function EmailComposeDialog({
   const [associationPickerOpen, setAssociationPickerOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The sender's stored signature is appended server-side at send (single source of truth); we fetch
+  // it here only to show a read-only "will be added" preview so the user sees what goes out.
+  const [signature, setSignature] = useState("");
 
   useEffect(() => {
     if (!open) return;
@@ -72,6 +77,9 @@ export function EmailComposeDialog({
     setBody(defaultBody ?? "");
     setAssociation(defaultAssociation);
     setError(null);
+    void getSignature()
+      .then(setSignature)
+      .catch(() => setSignature(""));
   }, [defaultAssociation, defaultBody, defaultSubject, defaultTo, open]);
 
   const canSend = Boolean(association && to.trim() && subject.trim() && !sending);
@@ -200,6 +208,18 @@ export function EmailComposeDialog({
               onChange={(e) => setBody(e.target.value)}
             />
           </div>
+
+          {signature ? (
+            <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-3">
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                Your signature will be added
+              </p>
+              <div
+                className="text-sm text-slate-700"
+                dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(signature) }}
+              />
+            </div>
+          ) : null}
 
           {error && (
             <p className="text-sm text-red-600">{error}</p>

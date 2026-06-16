@@ -14,11 +14,13 @@ import {
   contactDealAssociations,
   tasks,
   userGraphTokens,
+  users,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { graphRequest } from "../../lib/graph-client.js";
 import { getValidAccessToken, isGraphAuthConfigured } from "./graph-auth.js";
+import { composeBodyWithSignature } from "./signature-compose.js";
 import { completeTask } from "../tasks/service.js";
 import { evaluateTaskRules } from "../tasks/rules/evaluator.js";
 import { TASK_RULES } from "../tasks/rules/config.js";
@@ -1051,6 +1053,16 @@ export async function getEmailAssignmentQueue(
 /**
  * Send an email via MS Graph API and log it in the emails table.
  */
+/** Fetch the sender's stored signature (public.users, reachable via tenantDb) and append it. */
+async function appendUserSignature(tenantDb: TenantDb, userId: string, bodyHtml: string): Promise<string> {
+  const [row] = await tenantDb
+    .select({ emailSignature: users.emailSignature })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return composeBodyWithSignature(bodyHtml, row?.emailSignature);
+}
+
 export async function sendEmail(
   tenantDb: TenantDb,
   userId: string,
@@ -1061,6 +1073,12 @@ export async function sendEmail(
     throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
   }
   const outboundAssignment = outboundAssociation.assignment;
+
+  // Append the sender's CRM signature to the OUTBOUND body BEFORE both the dev-mock store and the
+  // real Graph send — so it ships in-payload (Graph content + the stored outbound row both include
+  // it; the Sent-folder copy then matches). Scope: user-composed mail only (this function);
+  // system/Resend mail (sendSystemEmail) never reaches here, so it's never signed.
+  input.bodyHtml = await appendUserSignature(tenantDb, userId, input.bodyHtml);
 
   // Dev mode: store email locally without sending via Graph
   if (!isGraphAuthConfigured()) {
