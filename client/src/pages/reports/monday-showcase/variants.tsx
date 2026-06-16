@@ -33,141 +33,11 @@ function CoverageCaption({ ladder }: { ladder: ProjectionLadder }) {
   return <p className="mt-1 text-[11px] text-slate-400">{ladder.coverageCaption}</p>;
 }
 
-/** Per-rep projection rungs, band-colored and each drillable to its rung's deals. */
-function ProjectionRungs({
-  ladder,
-  repId,
-  repName,
-  compact = false,
-}: {
-  ladder: ProjectionLadder;
-  repId: string | null;
-  repName: string;
-  compact?: boolean;
-}) {
-  return (
-    <div className={`grid grid-cols-4 ${compact ? "gap-1.5" : "gap-2"}`}>
-      {ladder.bands.map((b) => (
-        <DrillNumber
-          key={b.band}
-          request={{ metric: "projection", repId, band: b.band, title: `${repName} — Projected ${PROJECTION_BAND_LABEL[b.band]}` }}
-          className="block"
-        >
-          <div className="rounded-lg border border-slate-200 bg-white p-2 text-center">
-            <div className="flex items-center justify-center gap-1">
-              <span className={`h-1.5 w-1.5 rounded-full ${BAND_BAR[b.band]}`} />
-              <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{PROJECTION_BAND_LABEL[b.band]}</span>
-            </div>
-            <div className="mt-0.5 text-base font-bold tabular-nums text-slate-800">{int(b.count)}</div>
-            <div className="text-[10px] tabular-nums text-slate-400">{usd(b.value)}</div>
-          </div>
-        </DrillNumber>
-      ))}
-    </div>
-  );
-}
-
-// ---------------- Report A (weekly per-department) ----------------
-
-export function VariantA1Funnel({ data }: { data: MondayShowcaseData }) {
-  const order: Array<DepartmentMetric["key"]> = ["estimating", "sent", "won", "collected"];
-  const depts = order.map((k) => data.departments.find((d) => d.key === k)!).filter(Boolean);
-  return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-stretch gap-2">
-        {depts.map((d, i) => {
-          const accent = ACCENT[d.key as AccentKey];
-          const tile = (
-            <div
-              className={`relative min-w-[160px] overflow-hidden rounded-xl border bg-gradient-to-b to-white p-3.5 ${d.deferred ? "border-dashed border-slate-200 from-slate-50" : `border-slate-200 ${accent.grad}`}`}
-            >
-              <span className={`absolute inset-y-0 left-0 w-1 ${accent.bar}`} />
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{d.label}</div>
-                {!d.deferred && <ArrowUpRight className="h-3.5 w-3.5 text-slate-300" />}
-              </div>
-              <div className={`mt-1 text-3xl font-extrabold tabular-nums ${d.deferred ? "text-slate-300" : accent.text}`}>
-                {d.deferred ? "—" : int(d.count ?? 0)}
-              </div>
-              <div className="text-[11px] tabular-nums text-slate-400">
-                {d.deferred ? "deferred" : `${usd(d.value?.amount ?? 0)} · ${basisLabel(d)}`}
-              </div>
-            </div>
-          );
-          return (
-            <div key={d.key} className="flex items-center gap-2">
-              {d.deferred || d.key === "collected" ? (
-                tile
-              ) : (
-                <DrillNumber
-                  request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — ${weekWord(data.period.mode)}` }}
-                  className="block"
-                >
-                  {tile}
-                </DrillNumber>
-              )}
-              {i < depts.length - 1 && <div className="text-xl text-slate-300">›</div>}
-            </div>
-          );
-        })}
-      </div>
-      <p className="text-xs text-slate-400">
-        Same-week throughput, not a cohort conversion — Estimated/Sent are stage-entry cohorts, Won is a close-date cohort.
-      </p>
-    </div>
-  );
-}
-
 // First load now defaults to "last full week" (completed), so any "this week" copy must follow the mode —
 // otherwise last week's numbers render labelled "this week" until the user notices the toggle. The MTD/YTD
 // modes get their own explicit words ("Month to date" / "Year to date") via the shared periodWord, so a
 // month/year view is never mislabeled "last week". Aliased to keep the call sites terse.
 const weekWord = periodWord;
-
-export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
-  const spikeIndex = data.weeklyTrend.slice(-8).findIndex((w) => w.spikeExcluded);
-  // The DeltaChip is week-over-week; its baseline (the 7 days before the period start) is meaningless for
-  // MTD/YTD (whole month vs the last week of the prior month; Jan1–today vs Dec25–31). Hide it there.
-  const showWow = shouldShowWowDelta(data.period.mode);
-  return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      {data.departments.map((d) => {
-        const accent = ACCENT[d.key as AccentKey];
-        const inner = (
-          <div className={`relative h-full overflow-hidden rounded-xl border p-3.5 ${d.deferred ? "border-dashed border-slate-200 bg-slate-50" : "border-slate-200 bg-white"}`}>
-            <span className={`absolute inset-y-0 left-0 w-1 ${accent.bar}`} />
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{d.label}</span>
-              {showWow && <DeltaChip delta={d.deltaCountWoW} />}
-            </div>
-            <div className={`mt-1 text-3xl font-extrabold tabular-nums ${d.deferred ? "text-slate-300" : accent.text}`}>
-              {d.deferred ? "—" : int(d.count ?? 0)}
-            </div>
-            <div className="text-[11px] tabular-nums text-slate-400">
-              {d.deferred ? "Awaiting finance source" : `${usd(d.value?.amount ?? 0)} · ${basisLabel(d)}`}
-            </div>
-            {!d.deferred && d.sparkline.length > 0 && (
-              <div className="mt-2">
-                <Sparkline values={d.sparkline} spikeIndex={spikeIndex} barClass={accent.bar} highlightLast />
-              </div>
-            )}
-          </div>
-        );
-        return d.deferred || d.key === "collected" ? (
-          <div key={d.key}>{inner}</div>
-        ) : (
-          <DrillNumber
-            key={d.key}
-            request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — ${weekWord(data.period.mode)}` }}
-            className="block text-left"
-          >
-            {inner}
-          </DrillNumber>
-        );
-      })}
-    </div>
-  );
-}
 
 export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
   const lanes: Array<{ key: "estimating" | "sent" | "won"; label: string }> = [
@@ -249,35 +119,62 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
   );
 }
 
-// ---------------- Exec hero (split-out tile) ----------------
+// ---------------- Exec · One Glance (consolidation survivor: A1 + A2 + Hero) ----------------
 
+// Hybrid survivor of the old A1 (Throughput Funnel), A2 (Department Scoreboard), and Hero (One-Glance):
+// Hero's big gradient-tile presentation carrying A2's data richness. It renders all FOUR departments
+// (incl. Collected — the metric A1/A2 surfaced that the old 3-tile Hero dropped) sourced from
+// `data.departments`, where each metric's WoW DeltaChip and 8-week Sparkline live. Reading departments
+// (not the leaner `data.execHero`) is what lets one tile carry count + value + delta + trend together; the
+// core three still reconcile with execHero by construction (same server payload).
 export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
   const periodLabel = weekWord(data.period.mode);
-  const tiles: Array<{ label: string; metric: EvidenceMetric; accent: AccentKey; value: { count: number; value: { amount: number; basisLabel: string } } }> = [
-    { label: "Won", metric: "won", accent: "won", value: data.execHero.won },
-    { label: "Sent", metric: "sent", accent: "sent", value: data.execHero.sent },
-    { label: "Estimated", metric: "estimated", accent: "estimating", value: data.execHero.estimated },
-  ];
+  const spikeIndex = data.weeklyTrend.slice(-8).findIndex((w) => w.spikeExcluded);
+  // Won-first exec emphasis, then the upstream funnel, then Collected (deferred finance source) last.
+  const order: Array<DepartmentMetric["key"]> = ["won", "sent", "estimating", "collected"];
+  const depts = order
+    .map((k) => data.departments.find((d) => d.key === k))
+    .filter((d): d is DepartmentMetric => Boolean(d));
   return (
-    <div className="grid gap-4 sm:grid-cols-3">
-      {tiles.map((t) => {
-        const accent = ACCENT[t.accent];
-        return (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {depts.map((d) => {
+        const accent = ACCENT[d.key as AccentKey];
+        const tile = (
+          <div
+            className={`group relative h-full overflow-hidden rounded-2xl border bg-gradient-to-br to-white p-6 shadow-sm transition-shadow hover:shadow-md ${d.deferred ? "border-dashed border-slate-200 from-slate-50" : `border-slate-200 ${accent.grad}`}`}
+          >
+            <span className={`absolute inset-x-0 top-0 h-1 ${accent.bar}`} />
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">{d.label} {periodLabel}</div>
+              <div className="flex items-center gap-1.5">
+                <DeltaChip delta={d.deltaCountWoW} />
+                {!d.deferred && <ArrowUpRight className="h-4 w-4 text-slate-300 transition-colors group-hover:text-slate-500" />}
+              </div>
+            </div>
+            <div className={`mt-2 text-5xl font-extrabold tabular-nums ${d.deferred ? "text-slate-300" : accent.text}`}>
+              {d.deferred ? "—" : int(d.count ?? 0)}
+            </div>
+            <div className="mt-1 text-sm font-medium tabular-nums text-slate-600">
+              {d.deferred ? "deferred" : usd(d.value?.amount ?? 0)}
+            </div>
+            <div className="mt-0.5 text-[10px] text-slate-400">{d.deferred ? "Awaiting finance source" : basisLabel(d)}</div>
+            {d.sparkline.length > 0 && (
+              <div className="mt-3">
+                <Sparkline values={d.sparkline} spikeIndex={spikeIndex} barClass={accent.bar} highlightLast />
+              </div>
+            )}
+          </div>
+        );
+        // Collected has no evidence cohort (deferred finance source), so it isn't drillable.
+        return d.deferred || d.key === "collected" ? (
+          <div key={d.key}>{tile}</div>
+        ) : (
           <DrillNumber
-            key={t.label}
-            request={{ metric: t.metric, title: `${t.label} — ${periodLabel}` }}
+            key={d.key}
+            request={{ metric: DEPT_TO_METRIC[d.key as "estimating" | "sent" | "won"], title: `${d.label} — ${periodLabel}` }}
             className="block text-left"
           >
-            <div className={`group relative overflow-hidden rounded-2xl border border-slate-200 bg-gradient-to-br to-white p-6 shadow-sm transition-shadow hover:shadow-md ${accent.grad}`}>
-              <span className={`absolute inset-x-0 top-0 h-1 ${accent.bar}`} />
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">{t.label} {periodLabel}</div>
-                <ArrowUpRight className="h-4 w-4 text-slate-300 transition-colors group-hover:text-slate-500" />
-              </div>
-              <div className={`mt-2 text-5xl font-extrabold tabular-nums ${accent.text}`}>{int(t.value.count)}</div>
-              <div className="mt-1 text-sm font-medium tabular-nums text-slate-600">{usd(t.value.value.amount)}</div>
-              <div className="mt-0.5 text-[10px] text-slate-400">{t.value.value.basisLabel}</div>
-            </div>
+            {tile}
           </DrillNumber>
         );
       })}
@@ -286,44 +183,8 @@ export function VariantExecHero({ data }: { data: MondayShowcaseData }) {
 }
 
 // ---------------- Report B (per-rep) ----------------
-
-export function VariantB1Scorecards({ data }: { data: MondayShowcaseData }) {
-  return (
-    <div className="grid gap-3 md:grid-cols-2">
-      {data.reps.map((rep) => (
-        <div key={rep.repId ?? "unassigned"} className="rounded-xl border border-slate-200 bg-white p-3.5">
-          <div className="flex items-baseline justify-between">
-            <span className="font-semibold text-slate-800">{rep.repName}</span>
-            <span className="text-sm text-slate-500">
-              <DrillNumber request={{ metric: "won", repId: rep.repId, title: `${rep.repName} — Won` }} className={`font-bold text-emerald-700 ${DRILL_UNDERLINE} px-0.5`}>
-                {int(rep.closed.count)}
-              </DrillNumber>{" "}
-              closed · <span className="tabular-nums">{usd(rep.closed.value.amount)}</span>
-            </span>
-          </div>
-          <div className="mt-2">
-            <ProjectionRungs ladder={rep.projection} repId={rep.repId} repName={rep.repName} compact />
-          </div>
-          <CoverageCaption ladder={rep.projection} />
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-            <DrillNumber request={{ metric: "sent", repId: rep.repId, title: `${rep.repName} — Sent` }} className="rounded-full bg-sky-50 px-2 py-0.5 font-medium text-sky-700 ring-1 ring-sky-200">
-              Sent {int(rep.sentThisWeek.count)}
-            </DrillNumber>
-            {rep.leadStatus.map((ls) => (
-              <DrillNumber
-                key={ls.stageLabel}
-                request={{ metric: "leads", repId: rep.repId, leadStage: ls.stageLabel, title: `${rep.repName} — ${ls.stageLabel} leads` }}
-                className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600 ring-1 ring-slate-200"
-              >
-                {ls.stageLabel}: {int(ls.count)}
-              </DrillNumber>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
+// (B1 Roll-Call Scorecards removed in the consolidation — its per-rep Sent + lead-status content lives on
+//  in B2 Leaderboard and B3 Rep Load Lane below.)
 
 type SortKey = "closed" | "projected" | "sent" | "leads";
 
@@ -466,9 +327,6 @@ export function VariantB3LoadLane({ data }: { data: MondayShowcaseData }) {
 }
 
 export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) {
-  // Σ value across the office projection bands — computed once and reused by both the header "projected"
-  // caption and the "Total of all timelines" cell so the two can never drift.
-  const officeTotalValue = data.officeProjection.bands.reduce((sum, b) => sum + b.value, 0);
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-violet-200 bg-gradient-to-r from-violet-50 to-white p-3 text-sm text-violet-900">
@@ -484,10 +342,10 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
         <div className="mb-2 flex items-baseline justify-between">
           <span className="text-sm font-black uppercase tracking-wide text-slate-700">All reps · office total</span>
           <span className="text-xs font-bold tabular-nums text-slate-600">
-            {usd(officeTotalValue)} projected
+            {usd(data.officeProjection.bands.reduce((sum, b) => sum + b.value, 0))} projected
           </span>
         </div>
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-4 gap-2">
           {data.officeProjection.bands.map((b) => (
             <DrillNumber
               key={b.band}
@@ -506,24 +364,6 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
               </div>
             </DrillNumber>
           ))}
-          {/* Total of all timelines: Σ across every band. Omitting `band` makes the drawer open the
-              band-less (all-bands) office projection, which reconciles to the four band cells by construction. */}
-          <DrillNumber
-            request={{ metric: "projection", title: "Projected all timelines — office" }}
-            className="block"
-          >
-            <div className="rounded-lg border border-slate-300 border-l-4 border-l-violet-500 bg-violet-50/60 p-2 text-center">
-              <div className="flex items-center justify-center gap-1">
-                <span className="text-[10px] font-bold uppercase tracking-wide text-violet-600">Total</span>
-              </div>
-              <div className="mt-0.5 text-sm font-black tabular-nums text-slate-900">
-                {usd(officeTotalValue)}
-              </div>
-              <div className="mt-1 inline-block rounded bg-violet-200 px-1.5 py-0.5 text-[10px] tabular-nums text-violet-800">
-                {int(data.officeProjection.bands.reduce((sum, b) => sum + b.count, 0))} dated
-              </div>
-            </div>
-          </DrillNumber>
         </div>
       </div>
 
@@ -543,7 +383,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                 · <span className="tabular-nums">{usd(rep.closed.value.amount)}</span>
               </span>
             </div>
-            <div className="grid grid-cols-5 gap-2">
+            <div className="grid grid-cols-4 gap-2">
               {rep.projection.bands.map((b) => (
                 <DrillNumber
                   key={b.band}
@@ -562,24 +402,6 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                   </div>
                 </DrillNumber>
               ))}
-              {/* Total of all timelines: Σ across this rep's bands. Band omitted -> all-bands drill; reconciles
-                  to the four band cells by construction (and the office Total = Σ of these per-rep Totals). */}
-              <DrillNumber
-                request={{ metric: "projection", repId: rep.repId, title: `${rep.repName} — Projected all timelines` }}
-                className="block"
-              >
-                <div className="rounded-lg border border-slate-200 border-l-4 border-l-violet-400 bg-violet-50/50 p-2 text-center">
-                  <div className="flex items-center justify-center gap-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wide text-violet-600">Total</span>
-                  </div>
-                  <div className="mt-0.5 text-sm font-bold tabular-nums text-slate-800">
-                    {usd(rep.projection.bands.reduce((sum, b) => sum + b.value, 0))}
-                  </div>
-                  <div className="mt-1 inline-block rounded bg-violet-100 px-1.5 py-0.5 text-[10px] tabular-nums text-violet-700">
-                    {int(rep.projection.bands.reduce((sum, b) => sum + b.count, 0))} dated
-                  </div>
-                </div>
-              </DrillNumber>
             </div>
             <p className="mt-2 text-[10px] text-slate-400">{rep.projection.coverageCaption}</p>
           </div>

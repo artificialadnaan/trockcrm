@@ -2,13 +2,40 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VariantExecHero, VariantB1Scorecards } from "./variants";
+import { VariantExecHero } from "./variants";
 import { DrillProvider } from "./drill";
-import type { MondayShowcaseData, EvidenceRequest } from "./types";
+import { SHOWCASE_VARIANTS } from "./types";
+import type { MondayShowcaseData, EvidenceRequest, DepartmentMetric } from "./types";
+
+// The hybrid Exec survivor (consolidation Group 1) reads data.departments (where deltaCountWoW + sparkline
+// live), so the fixture must populate all FOUR departments incl. Collected.
+const dept = (
+  key: DepartmentMetric["key"],
+  label: string,
+  count: number,
+  amount: number,
+  deltaCountWoW: number,
+  sparkline: number[],
+  deferred = false,
+): DepartmentMetric => ({
+  key,
+  label,
+  count,
+  value: { amount, basisLabel: key === "won" ? "Awarded-first won value" : "Best current estimate" },
+  deltaCountWoW,
+  sparkline,
+  deferred,
+});
 
 const base: MondayShowcaseData = {
   period: { from: "2026-05-24", to: "2026-05-27", mode: "to_date", label: "2026-05-24 → 2026-05-27" },
-  departments: [],
+  departments: [
+    dept("estimating", "Estimated", 5, 50, -1, [1, 2, 3, 2, 4, 3, 5, 5]),
+    dept("sent", "Sent", 13, 100, 2, [3, 4, 6, 5, 7, 9, 11, 13]),
+    dept("won", "Won", 12, 3_900_000, 4, [2, 3, 5, 4, 8, 9, 10, 12]),
+    // Collected is deferred in prod but carries delta + sparkline so the hybrid surfaces them when present.
+    dept("collected", "Collected", 7, 1_200_000, 1, [1, 2, 2, 3, 4, 5, 6, 7], true),
+  ],
   execHero: {
     won: { count: 12, value: { amount: 3_900_000, basisLabel: "Awarded-first won value" } },
     sent: { count: 13, value: { amount: 100, basisLabel: "Best current estimate" } },
@@ -60,6 +87,40 @@ function clickButtonContaining(text: string) {
   });
 }
 
+describe("Monday showcase consolidation", () => {
+  it("registry no longer offers the removed A1 / A2 / B1 variants", () => {
+    const keys = SHOWCASE_VARIANTS.map((v) => v.key);
+    expect(keys).not.toContain("A1");
+    expect(keys).not.toContain("A2");
+    expect(keys).not.toContain("B1");
+    // Survivors of the consolidation stay selectable.
+    expect(keys).toEqual(expect.arrayContaining(["A3", "HERO", "B2", "B3", "B4"]));
+    // HERO (the hybrid survivor) must still exist so the page's useState("HERO") default is valid.
+    expect(keys).toContain("HERO");
+  });
+
+  it("hybrid Exec survivor renders all FOUR metrics incl. Collected, each with a WoW delta chip and a sparkline", () => {
+    act(() => {
+      root.render(
+        <DrillProvider open={vi.fn()}>
+          <VariantExecHero data={base} />
+        </DrillProvider>
+      );
+    });
+    const text = container.textContent ?? "";
+    // All four departments are present (A2's richness folded into Hero's big tiles).
+    for (const label of ["Estimated", "Sent", "Won", "Collected"]) {
+      expect(text).toContain(label);
+    }
+    // Each metric shows its WoW delta chip (DeltaChip renders text ending in "WoW") ...
+    const deltaChips = [...container.querySelectorAll("span")].filter((s) => s.textContent?.includes("WoW"));
+    expect(deltaChips.length).toBe(4);
+    // ... and its 8-week sparkline (Sparkline marks its container aria-hidden).
+    const sparklines = container.querySelectorAll("[aria-hidden]");
+    expect(sparklines.length).toBe(4);
+  });
+});
+
 describe("Monday showcase drill wiring", () => {
   it("exec hero: clicking the Won tile opens office Won evidence (no repId)", () => {
     const open = vi.fn<(r: EvidenceRequest) => void>();
@@ -78,31 +139,17 @@ describe("Monday showcase drill wiring", () => {
     expect(req.title).toMatch(/Won/);
   });
 
-  it("B1: clicking a rep's lead chip opens that rep+stage lead evidence", () => {
+  it("hybrid exec: the deferred Collected tile is not drillable", () => {
     const open = vi.fn<(r: EvidenceRequest) => void>();
     act(() => {
       root.render(
         <DrillProvider open={open}>
-          <VariantB1Scorecards data={base} />
+          <VariantExecHero data={base} />
         </DrillProvider>
       );
     });
-    clickButtonContaining("New: 4");
-    expect(open).toHaveBeenCalledTimes(1);
-    expect(open.mock.calls[0][0]).toMatchObject({ metric: "leads", repId: "rep-1", leadStage: "New" });
-  });
-
-  it("B1: clicking a rep's closed count opens that rep's Won evidence", () => {
-    const open = vi.fn<(r: EvidenceRequest) => void>();
-    act(() => {
-      root.render(
-        <DrillProvider open={open}>
-          <VariantB1Scorecards data={base} />
-        </DrillProvider>
-      );
-    });
-    clickButtonContaining("2"); // the closed count chip
-    expect(open).toHaveBeenCalled();
-    expect(open.mock.calls[0][0]).toMatchObject({ metric: "won", repId: "rep-1" });
+    // Collected has no evidence cohort; clicking its tile must NOT open a drawer.
+    const collectedBtn = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Collected"));
+    expect(collectedBtn).toBeUndefined();
   });
 });
