@@ -177,9 +177,22 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
   ];
   const weeks = data.weeklyTrend.slice(-8);
   const lastIdx = weeks.length - 1;
-  // The last bucket is only "in progress" in the live week-to-date view; in completed-week mode the
-  // server returned a full prior Sun-Sat week, so don't mislabel it.
-  const lastInProgress = data.period.mode === "to_date";
+  // A3 renders weeklyTrend; its displayed value is the LAST bucket — ALWAYS one Sunday-week, never the
+  // page-period total. So A3 needs WEEKLY wording even when the page toggle is MTD/YTD (the shared
+  // periodWord would mislabel a one-week number "Month/Year to date"). The last bucket is the current,
+  // in-progress week in every mode EXCEPT "completed" (which returns the prior full Sun–Sat week); for
+  // to_date/mtd/ytd the trend anchors on this week's Sunday and the bucket runs Sunday → today.
+  const lastInProgress = data.period.mode !== "completed";
+  const laneWord = lastInProgress ? "this week" : "last week";
+  // Drill scoping (CodeRabbit P2 — reconciliation): in weekly modes (to_date/completed) the page period
+  // EQUALS this last bucket, so A3's mode-scoped drill opens evidence that reconciles to the bar. In
+  // MTD/YTD the page period is a whole month/year while the bar is still ONE week, so a mode-scoped drill
+  // would open month/year evidence that does NOT match the clicked weekly number (card != drawer). The
+  // evidence API can express an explicit {from,to} week, but assertShowcaseEvidenceAccess restricts an
+  // explicit window to directors and the showcase is rep-accessible, so we can't make every viewer's
+  // weekly drill carry it. We therefore make A3's weekly number NON-drillable in MTD/YTD (plain text), so
+  // it can never open a mismatched drawer; A1/A2/Hero drill the period TOTAL and are unaffected.
+  const weeklyDrillable = data.period.mode === "to_date" || data.period.mode === "completed";
   return (
     <div className="space-y-4">
       {lanes.map((lane) => {
@@ -199,10 +212,15 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
                 <span className="text-sm font-semibold text-slate-700">{lane.label}</span>
               </div>
               <span className="text-xs text-slate-400">
-                {weekWord(data.period.mode)}{" "}
-                <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — ${weekWord(data.period.mode)}` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
-                  {int(current)}
-                </DrillNumber>{" "}
+                {laneWord}{" "}
+                {weeklyDrillable ? (
+                  <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — ${laneWord}` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
+                    {int(current)}
+                  </DrillNumber>
+                ) : (
+                  // MTD/YTD: a weekly bucket value — not drillable (would open period-scoped evidence).
+                  <span className={`font-semibold ${accent.text} px-0.5 tabular-nums`}>{int(current)}</span>
+                )}{" "}
                 · 8wk avg <span className="tabular-nums">{avg.toFixed(1)}</span>{" "}
                 <span className={delta > 0 ? "text-emerald-600" : delta < 0 ? "text-rose-600" : "text-slate-400"}>({signed(delta)})</span>
                 {lastInProgress && <span className="ml-1 italic text-slate-400">· current week in progress</span>}
