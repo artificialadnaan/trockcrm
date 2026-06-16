@@ -28,4 +28,14 @@ describe("SortHeaderButton", () => {
     expect(html).toContain('data-sort="descending"');
     expect(html).toContain('aria-label="Sort by Value, sorted descending"');
   });
+
+  it("does not announce a direction when active but dir is null", () => {
+    // Not reachable through the hook, but the prop type allows it — must not claim "descending".
+    const html = renderToStaticMarkup(
+      <SortHeaderButton label="Value" active dir={null} onClick={() => {}} />,
+    );
+    expect(html).toContain('data-sort="none"');
+    expect(html).toContain('aria-label="Sort by Value"');
+    expect(html).not.toContain("sorted descending");
+  });
 });

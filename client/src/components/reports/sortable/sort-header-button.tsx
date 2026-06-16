@@ -16,14 +16,18 @@ export interface SortHeaderButtonProps {
 // `className` is passthrough so each report keeps its own header typography; this adds only the
 // click + 3-state caret affordance.
 export function SortHeaderButton({ label, active, dir, numeric, onClick, className }: SortHeaderButtonProps) {
-  const sortAttr = !active ? "none" : dir === "asc" ? "ascending" : "descending";
+  // Only treat the column as sorted when a real direction is present. active + dir=null is not
+  // reachable through the hook (getHeaderProps couples them), but the prop type permits it, so guard
+  // against announcing a false "descending" if a caller ever passes the inconsistent combo.
+  const hasDir = active && (dir === "asc" || dir === "desc");
+  const sortAttr = !hasDir ? "none" : dir === "asc" ? "ascending" : "descending";
   const labelText = typeof label === "string" ? label : undefined;
   // Communicate the active sort state through the accessible name so screen-reader users hear it
   // ("Sort by Value, sorted descending"). aria-sort itself belongs on the host <th>, which this
   // container-agnostic button can't own (it also renders inside grid <div>s), so the direction is
   // carried in the name instead.
   const accessibleName = labelText
-    ? active
+    ? hasDir
       ? `Sort by ${labelText}, sorted ${dir === "asc" ? "ascending" : "descending"}`
       : `Sort by ${labelText}`
     : "Sort column";
@@ -41,7 +45,7 @@ export function SortHeaderButton({ label, active, dir, numeric, onClick, classNa
       )}
     >
       {label}
-      {!active ? (
+      {!hasDir ? (
         <ChevronsUpDown className="h-3 w-3 text-slate-300" aria-hidden="true" />
       ) : dir === "asc" ? (
         <ArrowUp className="h-3 w-3 text-slate-600" aria-hidden="true" />
