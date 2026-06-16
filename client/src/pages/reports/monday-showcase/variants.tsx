@@ -460,7 +460,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
             {usd(data.officeProjection.bands.reduce((sum, b) => sum + b.value, 0))} projected
           </span>
         </div>
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-5 gap-2">
           {data.officeProjection.bands.map((b) => (
             <DrillNumber
               key={b.band}
@@ -479,6 +479,24 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
               </div>
             </DrillNumber>
           ))}
+          {/* Total of all timelines: Σ across every band. Omitting `band` makes the drawer open the
+              band-less (all-bands) office projection, which reconciles to the four band cells by construction. */}
+          <DrillNumber
+            request={{ metric: "projection", title: "Projected all timelines — office" }}
+            className="block"
+          >
+            <div className="rounded-lg border border-slate-300 border-l-4 border-l-violet-500 bg-violet-50/60 p-2 text-center">
+              <div className="flex items-center justify-center gap-1">
+                <span className="text-[10px] font-bold uppercase tracking-wide text-violet-600">Total</span>
+              </div>
+              <div className="mt-0.5 text-sm font-black tabular-nums text-slate-900">
+                {usd(data.officeProjection.bands.reduce((sum, b) => sum + b.value, 0))}
+              </div>
+              <div className="mt-1 inline-block rounded bg-violet-200 px-1.5 py-0.5 text-[10px] tabular-nums text-violet-800">
+                {int(data.officeProjection.bands.reduce((sum, b) => sum + b.count, 0))} dated
+              </div>
+            </div>
+          </DrillNumber>
         </div>
       </div>
 
@@ -498,7 +516,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                 · <span className="tabular-nums">{usd(rep.closed.value.amount)}</span>
               </span>
             </div>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-5 gap-2">
               {rep.projection.bands.map((b) => (
                 <DrillNumber
                   key={b.band}
@@ -517,6 +535,24 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                   </div>
                 </DrillNumber>
               ))}
+              {/* Total of all timelines: Σ across this rep's bands. Band omitted -> all-bands drill; reconciles
+                  to the four band cells by construction (and the office Total = Σ of these per-rep Totals). */}
+              <DrillNumber
+                request={{ metric: "projection", repId: rep.repId, title: `${rep.repName} — Projected all timelines` }}
+                className="block"
+              >
+                <div className="rounded-lg border border-slate-200 border-l-4 border-l-violet-400 bg-violet-50/50 p-2 text-center">
+                  <div className="flex items-center justify-center gap-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-violet-600">Total</span>
+                  </div>
+                  <div className="mt-0.5 text-sm font-bold tabular-nums text-slate-800">
+                    {usd(rep.projection.bands.reduce((sum, b) => sum + b.value, 0))}
+                  </div>
+                  <div className="mt-1 inline-block rounded bg-violet-100 px-1.5 py-0.5 text-[10px] tabular-nums text-violet-700">
+                    {int(rep.projection.bands.reduce((sum, b) => sum + b.count, 0))} dated
+                  </div>
+                </div>
+              </DrillNumber>
             </div>
             <p className="mt-2 text-[10px] text-slate-400">{rep.projection.coverageCaption}</p>
           </div>
