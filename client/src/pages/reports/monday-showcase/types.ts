@@ -161,7 +161,9 @@ export const PROJECTION_BAND_LABEL: Record<ProjectionBand, string> = {
 export const SHOWCASE_VARIANTS = [
   // Exec is the consolidated survivor of the old A1 (Throughput Funnel) + A2 (Department Scoreboard) +
   // Hero (One-Glance): Hero's big-tile presentation carrying A2's data richness (all 4 departments incl.
-  // Collected, each with a WoW delta chip + 8-week sparkline). A3 stays as a distinct momentum view.
+  // Collected). The 3 non-deferred departments each carry a WoW delta chip + 8-week sparkline; Collected
+  // is a deferred placeholder (no chip/sparkline) until a finance source is wired. A3 stays as a distinct
+  // momentum view.
   { key: "HERO", group: "Exec", label: "Exec · One Glance" },
   { key: "A3", group: "Report A", label: "A3 · Momentum Lanes" },
   // B1 (Roll-Call Scorecards) was removed; its per-rep Sent + lead-status content lives on in B2/B3.

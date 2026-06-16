@@ -8,7 +8,10 @@ import { SHOWCASE_VARIANTS } from "./types";
 import type { MondayShowcaseData, EvidenceRequest, DepartmentMetric } from "./types";
 
 // The hybrid Exec survivor (consolidation Group 1) reads data.departments (where deltaCountWoW + sparkline
-// live), so the fixture must populate all FOUR departments incl. Collected.
+// live). The contract (assembleMondayShowcase): the THREE non-deferred departments (estimating/sent/won)
+// carry real count/value/delta/sparkline; Collected is a DEFERRED placeholder — count/value/deltaCountWoW
+// null and sparkline [] — never zero- or real-filled, until a finance source is wired. So the hybrid shows
+// a delta chip + sparkline only for the three non-deferred depts; Collected renders as "—"/"deferred".
 const dept = (
   key: DepartmentMetric["key"],
   label: string,
@@ -33,8 +36,17 @@ const base: MondayShowcaseData = {
     dept("estimating", "Estimated", 5, 50, -1, [1, 2, 3, 2, 4, 3, 5, 5]),
     dept("sent", "Sent", 13, 100, 2, [3, 4, 6, 5, 7, 9, 11, 13]),
     dept("won", "Won", 12, 3_900_000, 4, [2, 3, 5, 4, 8, 9, 10, 12]),
-    // Collected is deferred in prod but carries delta + sparkline so the hybrid surfaces them when present.
-    dept("collected", "Collected", 7, 1_200_000, 1, [1, 2, 2, 3, 4, 5, 6, 7], true),
+    // Collected matches the server contract: a deferred placeholder with null count/value/delta and an
+    // empty sparkline (no finance source yet), so the hybrid surfaces NO chip/sparkline for it.
+    {
+      key: "collected",
+      label: "Collected",
+      count: null,
+      value: null,
+      deltaCountWoW: null,
+      sparkline: [],
+      deferred: true,
+    },
   ],
   execHero: {
     won: { count: 12, value: { amount: 3_900_000, basisLabel: "Awarded-first won value" } },
@@ -99,7 +111,7 @@ describe("Monday showcase consolidation", () => {
     expect(keys).toContain("HERO");
   });
 
-  it("hybrid Exec survivor renders all FOUR metrics incl. Collected, each with a WoW delta chip and a sparkline", () => {
+  it("hybrid Exec survivor renders all FOUR tiles; the 3 non-deferred carry a WoW chip + sparkline, Collected renders deferred", () => {
     act(() => {
       root.render(
         <DrillProvider open={vi.fn()}>
@@ -112,12 +124,17 @@ describe("Monday showcase consolidation", () => {
     for (const label of ["Estimated", "Sent", "Won", "Collected"]) {
       expect(text).toContain(label);
     }
-    // Each metric shows its WoW delta chip (DeltaChip renders text ending in "WoW") ...
+    // Exactly the THREE non-deferred metrics show a WoW delta chip (DeltaChip returns null for a null delta,
+    // so the deferred Collected dept contributes none).
     const deltaChips = [...container.querySelectorAll("span")].filter((s) => s.textContent?.includes("WoW"));
-    expect(deltaChips.length).toBe(4);
-    // ... and its 8-week sparkline (Sparkline marks its container aria-hidden).
+    expect(deltaChips.length).toBe(3);
+    // ... and a sparkline each (Sparkline marks its container aria-hidden; gated on sparkline.length > 0, so
+    // Collected's empty sparkline renders none).
     const sparklines = container.querySelectorAll("[aria-hidden]");
-    expect(sparklines.length).toBe(4);
+    expect(sparklines.length).toBe(3);
+    // Collected renders as the deferred placeholder: a "—" count and the "deferred" value, no chip/sparkline.
+    expect(text).toContain("—");
+    expect(text).toContain("deferred");
   });
 });
 
