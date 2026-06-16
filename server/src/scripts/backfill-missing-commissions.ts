@@ -57,7 +57,10 @@ export interface BackfillSummary {
   rows: Array<BackfillCandidate & { status: CalculateCommissionStatus; amount: string | null }>;
 }
 
-const NON_LOST = "('lost','production_lost','service_lost','closed_lost')";
+const LOST_STAGE_SLUGS = "('lost','production_lost','service_lost','closed_lost')";
+
+// Office schemas only — validated before interpolating into SET search_path (--tenant is user input).
+const OFFICE_SCHEMA_RE = /^office_[a-z0-9_]+$/;
 
 /** Active, non-lost, non-test signed deals with an assigned rep and NO commission row for that rep. */
 export async function findBackfillCandidates(query: QueryFn): Promise<BackfillCandidate[]> {
@@ -70,7 +73,7 @@ export async function findBackfillCandidates(query: QueryFn): Promise<BackfillCa
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     LEFT JOIN public.users u ON u.id = d.assigned_rep_id
     WHERE (d.contract_signed_at IS NOT NULL OR d.contract_signed_date IS NOT NULL)
-      AND psc.slug NOT IN ${NON_LOST}
+      AND psc.slug NOT IN ${LOST_STAGE_SLUGS}
       AND COALESCE(d.is_test_data, false) = false
       AND d.is_active = true
       AND d.assigned_rep_id IS NOT NULL
@@ -184,6 +187,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   await client.connect();
   try {
     const tenants = tenant ? [tenant] : await discoverTenants(client);
+    // Guard the search_path interpolation: every tenant (especially a user-supplied --tenant=) must be a
+    // valid office_* schema identifier — no quotes/semicolons/spaces — so it cannot be a SQL-injection vector.
+    for (const t of tenants) {
+      if (!OFFICE_SCHEMA_RE.test(t)) {
+        throw new Error(`Refusing unsafe tenant schema name: ${JSON.stringify(t)} (expected /^office_[a-z0-9_]+$/)`);
+      }
+    }
     console.log(`${execute ? "WRITE" : "DRY-RUN (no writes)"} — tenants: ${tenants.join(", ")}`);
     let grandCreated = 0;
     let grandAmount = 0;
