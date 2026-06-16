@@ -122,7 +122,7 @@ describe("PlatformUsagePage — window legibility", () => {
     expect(html).toContain("Week of Jun 7–13"); // window sub-header + chip range
     expect(html).toContain("Actions this week"); // window-aware metric label
     expect(html).toContain("Active this week"); // reps-active eyebrow
-    expect(html).toContain("Ranked by actions · this week"); // leaderboard caption
+    expect(html).toContain("Sorted by actions · this week"); // leaderboard caption (default actions sort)
     expect(html).toContain("→ Week of Jun 7–13"); // date-input range chip
   });
 
@@ -147,7 +147,7 @@ describe("PlatformUsagePage — window legibility", () => {
     const html = render("/reports/performance/platform-usage?grain=week&date=2026-06-03");
     // Explicit window label on the metric cards + caption...
     expect(html).toContain("Actions · Week of Jun 1–7");
-    expect(html).toContain("Ranked by actions · Week of Jun 1–7");
+    expect(html).toContain("Sorted by actions · Week of Jun 1–7");
     // ...and the negative control: relative words must not leak anywhere for a non-current window.
     // ("Today" the button keeps its capital T, so the lowercase checks below don't match it.)
     expect(html).not.toContain("this week");
