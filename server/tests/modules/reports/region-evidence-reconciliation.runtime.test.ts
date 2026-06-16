@@ -193,7 +193,7 @@ describe("region Won CARD ↔ DRAWER reconcile — soft-deleted (is_active=false
       );
       INSERT INTO users (id, display_name) VALUES ('${RP}','Rep One');
       INSERT INTO region_config (id, name, display_order, is_active) VALUES ('${RW}','West Coast',1,true);
-      INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES ('${SW}','Won','won',7,true);
+      INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES ('${SW}','Won','${WON_SLUG}',7,true);
       -- Two LIVE wins + one SOFT-DELETED (is_active=false) win, all in-window for West Coast.
       INSERT INTO deals (id, name, stage_id, assigned_rep_id, region_id, won_closed_date, awarded_amount, is_active) VALUES
         ('${liveA}','Live A','${SW}','${RP}','${RW}','2026-06-05',100000,true),

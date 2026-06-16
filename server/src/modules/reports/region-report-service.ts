@@ -277,8 +277,7 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
     await tenantDb.execute(sql`
       SELECT ${REGION_NAME} AS region, ${weekBucket} AS wk, COALESCE(SUM(${wonVal}),0) AS val
       ${COMMON_JOINS}
-      WHERE ${reportable} AND psc.slug IN (${slugList(WON_STAGE_SLUGS)}) AND d.is_active = true AND ${aliasedHasUsableWonDateSql("d")}
-        AND ${wonDate} >= ${sparkFrom}::date AND ${wonDate} <= ${sparkTo}::date
+      WHERE ${reportable} AND ${wonInWindow(sparkFrom, sparkTo)}
       GROUP BY 1, 2`)
   );
 

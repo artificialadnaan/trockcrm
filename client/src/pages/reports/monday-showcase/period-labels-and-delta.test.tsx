@@ -81,6 +81,7 @@ describe("period labels (FIX 2) — every mode gets explicit wording", () => {
     renderWithDrill(<VariantExecHero data={dataFor("completed")} />);
     expect(container.textContent).toContain("last week");
     act(() => root.unmount());
+    container.remove();
     root = createRoot((container = document.createElement("div")));
     document.body.appendChild(container);
     renderWithDrill(<VariantExecHero data={dataFor("to_date")} />);
@@ -101,6 +102,7 @@ describe("WoW delta chips (FIX 3) — hidden for MTD/YTD", () => {
     expect(container.textContent).toContain("WoW"); // DeltaChip suffix
 
     act(() => root.unmount());
+    container.remove();
     root = createRoot((container = document.createElement("div")));
     document.body.appendChild(container);
     renderWithDrill(<VariantA2Scoreboard data={dataFor("mtd")} />);
