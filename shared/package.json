@@ -24,6 +24,10 @@
     "./lib/rfpReviewerEmails": {
       "types": "./dist/lib/rfpReviewerEmails.d.ts",
       "default": "./dist/lib/rfpReviewerEmails.js"
+    },
+    "./lib/userProvisioningGuards": {
+      "types": "./dist/lib/userProvisioningGuards.d.ts",
+      "default": "./dist/lib/userProvisioningGuards.js"
     }
   },
   "scripts": {
