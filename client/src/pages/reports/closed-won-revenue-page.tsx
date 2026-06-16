@@ -52,8 +52,8 @@ export function ClosedWonRevenuePage() {
             <Panel title="Monthly Booked Revenue" description="Booked revenue trend by month.">
               <TrendChart data={data.monthlyRevenue.map((row) => ({ label: row.label, revenue: row.totalRevenue }))} xKey="label" barKey="revenue" barName="Revenue" leftFormat="currency" />
             </Panel>
-            <Panel title="Revenue by Region" description="Share of total booked revenue.">
-              <ValueBarChart data={data.byRegion.map((row) => ({ regionName: row.regionName, totalRevenue: row.totalRevenue }))} xKey="regionName" yKey="totalRevenue" name="Revenue" />
+            <Panel title="Revenue by Region" description="Top 15 regions by booked revenue; the rest roll into Other. Full list in the table below.">
+              <ValueBarChart data={data.byRegion.map((row) => ({ regionName: row.regionName, totalRevenue: row.totalRevenue }))} xKey="regionName" yKey="totalRevenue" name="Revenue" topN={15} />
             </Panel>
           </div>
 

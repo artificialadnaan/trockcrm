@@ -641,10 +641,28 @@ export async function getClosedWonRevenueReport(
     const regionRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT
         COALESCE(
-          NULLIF(TRIM(d.region_classification), ''),
-          -- Normalize each component (NULLIF(TRIM(..),'')) BEFORE concatenating: CONCAT_WS skips NULLs
-          -- but NOT empty strings, so a blank city/state would otherwise leak ", TX" / "Dallas, " labels.
-          NULLIF(TRIM(CONCAT_WS(', ', NULLIF(TRIM(d.property_city), ''), NULLIF(TRIM(d.property_state), ''))), ''),
+          -- (1) region_classification (operator-curated, takes precedence). Structural normalization only:
+          -- collapse internal whitespace runs to one space and collapse any space/comma run that contains a
+          -- comma down to a single ", " (so "Houston ,  TX" / "X,, Y" don't fragment), then trim stray edges.
+          NULLIF(
+            TRIM(BOTH ' ,' FROM
+              REGEXP_REPLACE(
+                REGEXP_REPLACE(d.region_classification, '\\s+', ' ', 'g'),
+                '[\\s,]*,[\\s,]*', ', ', 'g'
+              )
+            ),
+            ''
+          ),
+          -- (2) Fallback to property city/state. CASE-FOLD so spelling variants collapse: INITCAP the city,
+          -- UPPER the state, and collapse internal whitespace/stray commas in each component FIRST. Rebuild
+          -- the label from the cleaned components (CONCAT_WS), so "dallas"/"Dallas"/"DAllas" + "TX"/"tx"/"Tx"
+          -- all become "Dallas, TX", "Austin," becomes "Austin, TX" (no double comma), and a blank city +
+          -- "GA" yields "GA" rather than ", GA".
+          NULLIF(TRIM(CONCAT_WS(
+            ', ',
+            INITCAP(NULLIF(TRIM(REGEXP_REPLACE(d.property_city, '[\\s,]+', ' ', 'g')), '')),
+            UPPER(NULLIF(TRIM(REGEXP_REPLACE(d.property_state, '[\\s,]+', ' ', 'g')), ''))
+          )), ''),
           'Unassigned Region'
         ) AS "regionName",
         COUNT(*)::int AS "wonDeals",

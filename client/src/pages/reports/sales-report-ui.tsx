@@ -152,28 +152,62 @@ export function DataTable({ children }: { children: React.ReactNode }) {
 
 export { TableBody, TableCell, TableHead, TableHeader, TableRow };
 
+/**
+ * Keep the top-N rows by `yKey` and roll the remainder into a single "Other (k)" bucket. Pure so it can be
+ * unit-tested. Used by the Revenue-by-Region chart: even after the server case-folds region spellings there
+ * are ~46 regions, far too many for a legible bar chart, so the long tail collapses into one bar. The data
+ * TABLE keeps the full normalized list, so the chart's bars + "Other" reconcile exactly to the table total.
+ */
+export function rollupTopN(
+  data: Array<Record<string, unknown>>,
+  xKey: string,
+  yKey: string,
+  topN: number,
+  otherLabel = "Other",
+): Array<Record<string, unknown>> {
+  if (topN <= 0 || data.length <= topN) return data;
+  const sorted = [...data].sort((a, b) => Number(b[yKey] ?? 0) - Number(a[yKey] ?? 0));
+  const head = sorted.slice(0, topN);
+  const tail = sorted.slice(topN);
+  const otherTotal = tail.reduce((acc, row) => acc + Number(row[yKey] ?? 0), 0);
+  return [...head, { [xKey]: `${otherLabel} (${tail.length})`, [yKey]: otherTotal }];
+}
+
 export function ValueBarChart({
   data,
   xKey,
   yKey,
   name,
+  topN,
 }: {
   data: Array<Record<string, unknown>>;
   xKey: string;
   yKey: string;
   name: string;
+  /** When set, cap to the top-N rows by value and roll the rest into "Other"; also angles the x labels so
+   *  every remaining category stays readable. Omit for charts with few categories (default behavior). */
+  topN?: number;
 }) {
+  const chartData = topN ? rollupTopN(data, xKey, yKey, topN) : data;
+  const dense = Boolean(topN);
   return (
-    <div className="h-80 w-full">
+    <div className={dense ? "h-96 w-full" : "h-80 w-full"}>
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 10, right: 20, left: 12, bottom: 20 }}>
+        <BarChart data={chartData} margin={{ top: 10, right: 20, left: 12, bottom: dense ? 80 : 20 }}>
           <CartesianGrid strokeDasharray="3 3" vertical={false} />
-          <XAxis dataKey={xKey} tick={{ fontSize: 12 }} />
+          <XAxis
+            dataKey={xKey}
+            tick={{ fontSize: 12 }}
+            interval={dense ? 0 : undefined}
+            angle={dense ? -35 : undefined}
+            textAnchor={dense ? "end" : undefined}
+            height={dense ? 80 : undefined}
+          />
           <YAxis tickFormatter={(value) => `$${Math.round(Number(value) / 1000)}k`} tick={{ fontSize: 12 }} />
           <Tooltip formatter={(value) => formatCurrency(Number(value))} />
           <Legend />
           <Bar dataKey={yKey} name={name} radius={[4, 4, 0, 0]}>
-            {data.map((_, index) => <Cell key={index} fill={CHART_COLORS[index % CHART_COLORS.length]} />)}
+            {chartData.map((_, index) => <Cell key={index} fill={CHART_COLORS[index % CHART_COLORS.length]} />)}
           </Bar>
         </BarChart>
       </ResponsiveContainer>
