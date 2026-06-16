@@ -23,7 +23,14 @@ const PLATFORM_USAGE_SORT_COLUMNS: ReadonlyArray<SortColumn<PlatformUsageRow>> =
   { key: "actions", type: "number", accessor: (r) => r.usage.actionCount },
   { key: "active", type: "number", accessor: (r) => r.usage.activeSeconds },
   { key: "sessions", type: "number", accessor: (r) => r.usage.sessionCount },
-  { key: "views", type: "number", accessor: (r) => r.usage.viewCount },
+  // Views renders "—" when viewsAreEmpty (no session / not-yet-populated). Sort that as a blank
+  // (undefined → last in both directions) so the visually-empty rows don't compare as 0 and beat
+  // reps with real view telemetry on an ascending sort.
+  {
+    key: "views",
+    type: "number",
+    accessor: (r) => (viewsAreEmpty(r.usage.viewCount, r.usage.sessionCount) ? undefined : r.usage.viewCount),
+  },
 ];
 
 // Human label per sort key, for the leaderboard subtitle (kept honest as the user re-sorts).

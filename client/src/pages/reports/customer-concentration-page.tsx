@@ -46,7 +46,11 @@ function CcSortHead<Row>({
         {columns.map((col) => {
           const hp = getHeaderProps(col.key);
           return (
-            <th key={col.key} className={col.numeric ? "py-2 text-right" : "py-2"}>
+            <th
+              key={col.key}
+              className={col.numeric ? "py-2 text-right" : "py-2"}
+              aria-sort={hp.active ? (hp.dir === "asc" ? "ascending" : "descending") : "none"}
+            >
               <SortHeaderButton
                 label={col.header}
                 numeric={col.numeric}
