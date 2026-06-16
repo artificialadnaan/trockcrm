@@ -14,12 +14,12 @@ const HEALTHY_ACTIVE_RATIO = 0.5;
 // Shared column template — header and rows must stay in lockstep.
 const GRID = "grid grid-cols-[2rem_minmax(0,1fr)_5.5rem_5rem_4.5rem] items-center gap-3";
 
-// Sort columns for the leaderboard. The "rep" key drives the Rep · Actions header (alpha by rep);
-// the telemetry columns sort numerically. viewCount is nullable → blanks sort last.
-// The combined "Rep · Actions" column leads with the action count + proportion bar and is the
-// leaderboard's headline metric, so its header sorts by actions (which is also the default). The
-// grid has no separate Actions column, so this is the single control for the actions ranking.
-const PLATFORM_USAGE_SORT_COLUMNS: ReadonlyArray<SortColumn<PlatformUsageRow>> = [
+// Sort columns for the leaderboard. The combined "Rep · Actions" column carries TWO independent
+// sort controls in its header (rep = alpha by name, actions = the numeric ranking + the default);
+// the body cell keeps name + count + bar together. Telemetry columns sort numerically.
+// Exported so the sort behavior is unit-tested against the real PlatformUsageRow type.
+export const PLATFORM_USAGE_SORT_COLUMNS: ReadonlyArray<SortColumn<PlatformUsageRow>> = [
+  { key: "rep", type: "text", accessor: (r) => r.rep.displayName },
   { key: "actions", type: "number", accessor: (r) => r.usage.actionCount },
   { key: "active", type: "number", accessor: (r) => r.usage.activeSeconds },
   { key: "sessions", type: "number", accessor: (r) => r.usage.sessionCount },
@@ -35,6 +35,7 @@ const PLATFORM_USAGE_SORT_COLUMNS: ReadonlyArray<SortColumn<PlatformUsageRow>> =
 
 // Human label per sort key, for the leaderboard subtitle (kept honest as the user re-sorts).
 const PLATFORM_USAGE_SORT_LABELS: Record<string, string> = {
+  rep: "rep name",
   actions: "actions",
   active: "active time",
   sessions: "sessions",
@@ -300,7 +301,12 @@ function Leaderboard({
         )}
       >
         <div>#</div>
-        <div>{headerCell("actions", "Rep · Actions", false)}</div>
+        {/* Combined column, two independent sort controls: Rep (alpha) and Actions (the ranking). */}
+        <div className="flex items-center gap-1">
+          {headerCell("rep", "Rep", false)}
+          <span className="text-slate-300" aria-hidden="true">·</span>
+          {headerCell("actions", "Actions", false)}
+        </div>
         <div className="text-right">{headerCell("active", "Active", true)}</div>
         <div className="text-right">{headerCell("sessions", "Sessions", true)}</div>
         <div className="text-right">{headerCell("views", "Views", true)}</div>
