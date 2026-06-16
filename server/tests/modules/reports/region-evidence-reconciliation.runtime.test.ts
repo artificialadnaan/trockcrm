@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { getMondayShowcaseEvidence } from "../../../src/modules/reports/monday-showcase-service.js";
+import { getRegionReport } from "../../../src/modules/reports/region-report-service.js";
 import { WON_STAGE_SLUGS } from "../../../src/modules/shared/pipeline-terminal-stages.js";
 
 // REAL-SQL (PGlite) proof that a region Won drill reconciles to the region report row it was clicked on.
@@ -147,5 +148,78 @@ describe("region Pipeline drill — all open deals, name-folded, region-scoped, 
     expect(inStage.total.count).toBe(2); // both WC open deals are in the 'opportunity' stage
     const otherStage = await pipe("West Coast", "estimating");
     expect(otherStage.total.count).toBe(0); // none in 'estimating'
+  });
+});
+
+// FIX 4 (the load-bearing one) — the region Won CARD (getRegionReport) and the click-to-records DRAWER
+// (getMondayShowcaseEvidence → buildWonEvidenceSql) must count the SAME Won set. PR #733 added
+// `is_active = true` to the drawer but NOT to the region card, so a SOFT-DELETED (is_active=false) Won deal
+// showed in the card number but vanished from its records — half-applied, the worst outcome. This proves
+// both surfaces now exclude the soft-deleted Won, and that the card number byte-reconciles to the drawer.
+describe("region Won CARD ↔ DRAWER reconcile — soft-deleted (is_active=false) Won excluded from BOTH", () => {
+  const WIN = { from: "2026-06-01", to: "2026-06-13" };
+  const NOW = new Date("2026-06-13T18:00:00Z");
+  const RW = "66666666-6666-6666-6666-66666666cc01"; // "West Coast"
+  const SW = "66666666-6666-6666-6666-66666666cc09"; // Won stage
+  const RP = "66666666-6666-6666-6666-66666666cc0a"; // rep
+  const liveA = "66666666-6666-6666-6666-0000000000a1";
+  const liveB = "66666666-6666-6666-6666-0000000000a2";
+  const soft = "66666666-6666-6666-6666-0000000000a3";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let cdb: any;
+  let cpg: PGlite;
+
+  beforeAll(async () => {
+    cpg = new PGlite();
+    await cpg.exec(`SET TimeZone='UTC';`);
+    await cpg.exec(`
+      CREATE TABLE users (id uuid PRIMARY KEY, display_name text NOT NULL);
+      CREATE TABLE region_config (id uuid PRIMARY KEY, name text NOT NULL, display_order int NOT NULL, is_active boolean NOT NULL DEFAULT true);
+      CREATE TABLE companies (id uuid PRIMARY KEY, name text, region text);
+      CREATE TABLE project_type_config (id uuid PRIMARY KEY, name text);
+      CREATE TABLE pipeline_stage_config (
+        id uuid PRIMARY KEY, name text NOT NULL, slug text UNIQUE NOT NULL,
+        display_order int NOT NULL DEFAULT 0, workflow_family text NOT NULL DEFAULT 'standard_deal',
+        is_terminal boolean NOT NULL DEFAULT false
+      );
+      CREATE TABLE deals (
+        id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
+        assigned_rep_id uuid, company_id uuid, region_id uuid, project_type_id uuid, project_type text,
+        on_hold boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true,
+        is_test_data boolean NOT NULL DEFAULT false, win_probability int,
+        won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,
+        expected_close_date date, created_at timestamptz NOT NULL DEFAULT now(),
+        awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, bid_board_total_sales numeric
+      );
+      INSERT INTO users (id, display_name) VALUES ('${RP}','Rep One');
+      INSERT INTO region_config (id, name, display_order, is_active) VALUES ('${RW}','West Coast',1,true);
+      INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES ('${SW}','Won','${WON_SLUG}',7,true);
+      -- Two LIVE wins + one SOFT-DELETED (is_active=false) win, all in-window for West Coast.
+      INSERT INTO deals (id, name, stage_id, assigned_rep_id, region_id, won_closed_date, awarded_amount, is_active) VALUES
+        ('${liveA}','Live A','${SW}','${RP}','${RW}','2026-06-05',100000,true),
+        ('${liveB}','Live B','${SW}','${RP}','${RW}','2026-06-10',50000,true),
+        ('${soft}','Soft-deleted (archived)','${SW}','${RP}','${RW}','2026-06-08',40000,false);
+    `);
+    cdb = drizzle(cpg);
+  }, 30000);
+  afterAll(async () => { await cpg?.close?.(); });
+
+  it("card Won == drawer Won, and the soft-deleted Won is in NEITHER", async () => {
+    const report = await getRegionReport(cdb, { from: WIN.from, to: WIN.to, now: NOW });
+    const west = report.regions.find((x) => x.region === "West Coast")!;
+    const drawer = await getMondayShowcaseEvidence(cdb, { metric: "won", regionName: "West Coast", from: WIN.from, to: WIN.to });
+
+    // CARD: only the two live wins (40k soft-deleted excluded).
+    expect(west.won).toEqual({ value: 150000, count: 2 });
+    // DRAWER: same totals, and the soft-deleted deal is absent from the records.
+    expect(drawer.total).toMatchObject({ count: 2, value: 150000 });
+    expect(drawer.records.map((r) => r.id).sort()).toEqual([liveA, liveB].sort());
+    expect(drawer.records.some((r) => r.id === soft)).toBe(false);
+
+    // RECONCILIATION GUARANTEE: card number byte-matches the drawer it opens.
+    expect(west.won.count).toBe(drawer.total.count);
+    expect(west.won.value).toBe(drawer.total.value);
+    // office summary reconciles too.
+    expect(report.summary.totalWon).toEqual({ value: 150000, count: 2 });
   });
 });

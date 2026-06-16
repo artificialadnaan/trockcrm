@@ -2330,6 +2330,11 @@ export async function getWonCloseSummary(
   // The won-date guard reads the app-owned deals.won_closed_date column via
   // aliasedWonHsClosedWonDateSql, so the >= / <= / IS NOT NULL positions each emit
   // one compact column-reference predicate (NOT a try_parse_hs_close_date call).
+  // BASIS ALIGNMENT (Item 3): add `d.is_active = true` so this byte-matches the Deals Dashboard Won
+  // column predicate (deals/service.ts ~2827). The on_hold reportable filter above does NOT catch a
+  // plain (non-CO) soft-deleted Won deal (deleteDeal sets only is_active=false), so this explicit guard
+  // is what makes the B2 Leaderboard reconcile to /deals. Numerically a no-op today (0 soft-deleted Won
+  // in prod); guarantees future reconciliation. LIVE Won (is_active=true) stays counted.
   const result = await tenantDb.execute(sql`
     SELECT
       COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS won_count,
@@ -2338,6 +2343,7 @@ export async function getWonCloseSummary(
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedActiveDealCountFilterSql("d")}
+      AND d.is_active = true
       AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       AND ${aliasedHasUsableWonDateSql("d")}
       AND ${aliasedWonHsClosedWonDateSql("d")} >= ${options.from}::date
@@ -2360,7 +2366,8 @@ export interface CanonicalRepWonRow {
 
 // Wave 1 (P0-1 reconciliation): LIVE per-rep decomposition of getWonCloseSummary.
 // The WHERE clause is byte-identical to the Closed card above (won_closed_date basis,
-// test-data exclusion, Won stages, usable-won-date guard, period bounds, scope) — the
+// test-data exclusion, is_active=true basis-alignment guard, Won stages, usable-won-date guard, period
+// bounds, scope) — the
 // ONLY additions are `assigned_rep_id` in SELECT and a GROUP BY. Therefore
 // SUM(rows.closedValue) === getWonCloseSummary().totalValue and SUM(rows.winsCount) ===
 // .count BY CONSTRUCTION, under every scope/period. This retires the stale
@@ -2380,6 +2387,7 @@ export async function getCanonicalRepWonSummary(
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedActiveDealCountFilterSql("d")}
+      AND d.is_active = true
       AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       AND ${aliasedHasUsableWonDateSql("d")}
       AND ${aliasedWonHsClosedWonDateSql("d")} >= ${options.from}::date

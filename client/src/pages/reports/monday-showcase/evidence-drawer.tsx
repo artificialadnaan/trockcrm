@@ -14,6 +14,7 @@ import { useShowcaseEvidence } from "@/hooks/use-reports";
 import { usd, int, winPct } from "../format";
 import { ScrollSyncX } from "../scroll-sync-x";
 import type { EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence } from "./types";
+import type { WeekMode } from "../week-mode";
 
 // Literal-day formatting (no UTC-midnight off-by-one), matching the app's date-only rendering (#572).
 function formatCohortDate(iso: string | null): string {
@@ -269,7 +270,7 @@ export function EvidenceDrawer({
   onClose,
 }: {
   request: EvidenceRequest | null;
-  mode: "to_date" | "completed";
+  mode: WeekMode;
   onClose: () => void;
 }) {
   const navigate = useNavigate();

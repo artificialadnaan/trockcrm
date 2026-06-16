@@ -11,6 +11,7 @@ import {
 import { DrillNumber, DRILL_UNDERLINE } from "./drill";
 import { usd, int, signed, ACCENT, BAND_BAR, DeltaChip, Sparkline, type AccentKey } from "../evidence-kit";
 import { ScrollSyncX } from "../scroll-sync-x";
+import { periodWord, shouldShowWowDelta } from "../week-mode";
 
 // Every variant below renders a slice of the SAME payload -- so Won/Sent/Estimated/Projection figures
 // are identical across all of them by construction (locked server-side by the reconciliation test). Every
@@ -118,11 +119,16 @@ export function VariantA1Funnel({ data }: { data: MondayShowcaseData }) {
 }
 
 // First load now defaults to "last full week" (completed), so any "this week" copy must follow the mode —
-// otherwise last week's numbers render labelled "this week" until the user notices the toggle.
-const weekWord = (mode: MondayShowcaseData["period"]["mode"]) => (mode === "to_date" ? "this week" : "last week");
+// otherwise last week's numbers render labelled "this week" until the user notices the toggle. The MTD/YTD
+// modes get their own explicit words ("Month to date" / "Year to date") via the shared periodWord, so a
+// month/year view is never mislabeled "last week". Aliased to keep the call sites terse.
+const weekWord = periodWord;
 
 export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
   const spikeIndex = data.weeklyTrend.slice(-8).findIndex((w) => w.spikeExcluded);
+  // The DeltaChip is week-over-week; its baseline (the 7 days before the period start) is meaningless for
+  // MTD/YTD (whole month vs the last week of the prior month; Jan1–today vs Dec25–31). Hide it there.
+  const showWow = shouldShowWowDelta(data.period.mode);
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       {data.departments.map((d) => {
@@ -132,7 +138,7 @@ export function VariantA2Scoreboard({ data }: { data: MondayShowcaseData }) {
             <span className={`absolute inset-y-0 left-0 w-1 ${accent.bar}`} />
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{d.label}</span>
-              <DeltaChip delta={d.deltaCountWoW} />
+              {showWow && <DeltaChip delta={d.deltaCountWoW} />}
             </div>
             <div className={`mt-1 text-3xl font-extrabold tabular-nums ${d.deferred ? "text-slate-300" : accent.text}`}>
               {d.deferred ? "—" : int(d.count ?? 0)}
@@ -171,9 +177,22 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
   ];
   const weeks = data.weeklyTrend.slice(-8);
   const lastIdx = weeks.length - 1;
-  // The last bucket is only "in progress" in the live week-to-date view; in completed-week mode the
-  // server returned a full prior Sun-Sat week, so don't mislabel it.
-  const lastInProgress = data.period.mode === "to_date";
+  // A3 renders weeklyTrend; its displayed value is the LAST bucket — ALWAYS one Sunday-week, never the
+  // page-period total. So A3 needs WEEKLY wording even when the page toggle is MTD/YTD (the shared
+  // periodWord would mislabel a one-week number "Month/Year to date"). The last bucket is the current,
+  // in-progress week in every mode EXCEPT "completed" (which returns the prior full Sun–Sat week); for
+  // to_date/mtd/ytd the trend anchors on this week's Sunday and the bucket runs Sunday → today.
+  const lastInProgress = data.period.mode !== "completed";
+  const laneWord = lastInProgress ? "this week" : "last week";
+  // Drill scoping (CodeRabbit P2 — reconciliation): in weekly modes (to_date/completed) the page period
+  // EQUALS this last bucket, so A3's mode-scoped drill opens evidence that reconciles to the bar. In
+  // MTD/YTD the page period is a whole month/year while the bar is still ONE week, so a mode-scoped drill
+  // would open month/year evidence that does NOT match the clicked weekly number (card != drawer). The
+  // evidence API can express an explicit {from,to} week, but assertShowcaseEvidenceAccess restricts an
+  // explicit window to directors and the showcase is rep-accessible, so we can't make every viewer's
+  // weekly drill carry it. We therefore make A3's weekly number NON-drillable in MTD/YTD (plain text), so
+  // it can never open a mismatched drawer; A1/A2/Hero drill the period TOTAL and are unaffected.
+  const weeklyDrillable = data.period.mode === "to_date" || data.period.mode === "completed";
   return (
     <div className="space-y-4">
       {lanes.map((lane) => {
@@ -193,10 +212,15 @@ export function VariantA3Lanes({ data }: { data: MondayShowcaseData }) {
                 <span className="text-sm font-semibold text-slate-700">{lane.label}</span>
               </div>
               <span className="text-xs text-slate-400">
-                {weekWord(data.period.mode)}{" "}
-                <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — ${weekWord(data.period.mode)}` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
-                  {int(current)}
-                </DrillNumber>{" "}
+                {laneWord}{" "}
+                {weeklyDrillable ? (
+                  <DrillNumber request={{ metric: DEPT_TO_METRIC[lane.key], title: `${lane.label} — ${laneWord}` }} className={`font-semibold ${accent.text} ${DRILL_UNDERLINE} px-0.5`}>
+                    {int(current)}
+                  </DrillNumber>
+                ) : (
+                  // MTD/YTD: a weekly bucket value — not drillable (would open period-scoped evidence).
+                  <span className={`font-semibold ${accent.text} px-0.5 tabular-nums`}>{int(current)}</span>
+                )}{" "}
                 · 8wk avg <span className="tabular-nums">{avg.toFixed(1)}</span>{" "}
                 <span className={delta > 0 ? "text-emerald-600" : delta < 0 ? "text-rose-600" : "text-slate-400"}>({signed(delta)})</span>
                 {lastInProgress && <span className="ml-1 italic text-slate-400">· current week in progress</span>}

@@ -14,7 +14,7 @@ const LANES: Array<{ key: "estimating" | "sent" | "won"; label: string; accent: 
   { key: "won", label: "Won", accent: "won" },
 ];
 
-function RepTrend({ trend, mode }: { trend: ShowcaseWeek[]; mode: "to_date" | "completed" }) {
+function RepTrend({ trend, mode }: { trend: ShowcaseWeek[]; mode: WeekMode }) {
   const weeks = trend.slice(-8);
   const lastIdx = weeks.length - 1;
   const lastInProgress = mode === "to_date";
@@ -68,7 +68,7 @@ function HeadlineTile({ label, accent, count, value, request }: { label: string;
   );
 }
 
-function Pack({ rep, trend, mode }: { rep: RepShowcaseRow; trend: ShowcaseWeek[]; mode: "to_date" | "completed" }) {
+function Pack({ rep, trend, mode }: { rep: RepShowcaseRow; trend: ShowcaseWeek[]; mode: WeekMode }) {
   const projected = rep.projection.bands.reduce((s, b) => s + b.count, 0);
   const leadsTotal = rep.leadStatus.reduce((s, l) => s + l.count, 0);
   return (

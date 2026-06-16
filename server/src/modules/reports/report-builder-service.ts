@@ -223,10 +223,13 @@ function buildFilters(
     sql`COALESCE(d.is_test_data, false) = false`,
     aliasedReportableDealFilterSql("d"),
   ];
-  // A Won-scoped report must NOT force is_active=true: terminal Won deals are legitimately inactive,
-  // and the canonical Won surfaces (getWonCloseSummary) count them — forcing is_active here would
-  // undercount the Won total. Non-Won reports keep the active-pipeline scope.
-  if (!options.wonScoped) clauses.push(sql`d.is_active = true`);
+  // Force is_active=true for EVERY scope, including Won. Per PR #699 (soft-deleted-won-hidden) winning
+  // never sets is_active=false — the ONLY is_active=false Won deals are soft-deletes — so the canonical
+  // Won card (getWonCloseSummary) now requires is_active=true too. Mirroring it here keeps the
+  // report-builder ↔ Won-card reconciliation guarantee true universally (not just in prod where the
+  // soft-deleted-Won census is 0). (Older note: "terminal Won deals are legitimately inactive and stay
+  // counted" — superseded; that scenario does not occur, see #699.)
+  clauses.push(sql`d.is_active = true`);
   // Period-bounded Won reports require a usable won date so a Won-stage deal with no won date isn't
   // placed in a window/bucket. All-time Won reports omit this guard (see runReportBuilder) so those
   // deals still count — matching the canonical helper's all-time behavior.

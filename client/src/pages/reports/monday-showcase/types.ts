@@ -2,6 +2,8 @@
 // monday-showcase-service.ts). The 8 variants all render slices of ONE instance of this, so they
 // reconcile by construction -- keep this in lockstep with the server contract.
 
+import type { WeekMode } from "../week-mode";
+
 export type DepartmentKey = "estimating" | "sent" | "won" | "collected";
 export type ProjectionBand = "0_30" | "31_60" | "61_90" | "beyond_90";
 
@@ -68,7 +70,7 @@ export interface ShowcaseWeek {
 export interface ShowcasePeriod {
   from: string;
   to: string;
-  mode: "to_date" | "completed";
+  mode: WeekMode;
   label: string;
 }
 

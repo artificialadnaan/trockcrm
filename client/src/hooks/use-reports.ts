@@ -6,6 +6,7 @@ import type {
   EvidenceRequest,
 } from "@/pages/reports/monday-showcase/types";
 import type { RepPackData, AtRiskWatchlist } from "@/pages/reports/part4-types";
+import type { WeekMode } from "@/pages/reports/week-mode";
 import type { RegionReportData } from "@/pages/reports/region-report-types";
 
 export interface SavedReport {
@@ -1361,7 +1362,7 @@ export async function runReportBuilder(input: ReportBuilderRequest) {
 }
 
 // Reports Part 2 -- the Monday showcase. ONE payload feeds all 8 variants (so they reconcile).
-export function useMondayShowcase(mode: "to_date" | "completed" = "to_date") {
+export function useMondayShowcase(mode: WeekMode = "to_date") {
   const [data, setData] = useState<MondayShowcaseData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1399,7 +1400,7 @@ export function useMondayShowcase(mode: "to_date" | "completed" = "to_date") {
 // can't show stale evidence under a newer heading.
 export function useShowcaseEvidence(
   request: EvidenceRequest | null,
-  mode: "to_date" | "completed"
+  mode: WeekMode
 ) {
   const [data, setData] = useState<MondayShowcaseEvidence | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1450,7 +1451,7 @@ export function useShowcaseEvidence(
 }
 
 // Reports Part 4 -- B·1 Rep 1:1 Pack. repId undefined lets the server default to the top rep.
-export function useRepPack(repId: string | undefined, mode: "to_date" | "completed") {
+export function useRepPack(repId: string | undefined, mode: WeekMode) {
   const [data, setData] = useState<RepPackData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
