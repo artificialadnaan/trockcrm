@@ -245,6 +245,7 @@ export async function recalculateCommissionForDeal(
       amount: dealSignedCommissions.amount,
       sourceValueAmount: dealSignedCommissions.sourceValueAmount,
       appliedRate: dealSignedCommissions.appliedRate,
+      contractSignedDateAtSigning: dealSignedCommissions.contractSignedDateAtSigning,
     })
     .from(dealSignedCommissions)
     .where(eq(dealSignedCommissions.dealId, input.dealId));
@@ -306,7 +307,7 @@ export async function recalculateCommissionForDeal(
         amount: { from: row.amount, to: amount },
         sourceValueAmount: { from: row.sourceValueAmount, to: sourceValue.amount },
         appliedRate: { from: row.appliedRate, to: appliedRate },
-        contractSignedDateAtSigning: { from: null, to: input.contractSignedDate },
+        contractSignedDateAtSigning: { from: row.contractSignedDateAtSigning, to: input.contractSignedDate },
       },
     });
     recomputed += 1;
