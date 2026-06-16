@@ -442,6 +442,9 @@ export function VariantB3LoadLane({ data }: { data: MondayShowcaseData }) {
 }
 
 export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) {
+  // Σ value across the office projection bands — computed once and reused by both the header "projected"
+  // caption and the "Total of all timelines" cell so the two can never drift.
+  const officeTotalValue = data.officeProjection.bands.reduce((sum, b) => sum + b.value, 0);
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-violet-200 bg-gradient-to-r from-violet-50 to-white p-3 text-sm text-violet-900">
@@ -457,7 +460,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
         <div className="mb-2 flex items-baseline justify-between">
           <span className="text-sm font-black uppercase tracking-wide text-slate-700">All reps · office total</span>
           <span className="text-xs font-bold tabular-nums text-slate-600">
-            {usd(data.officeProjection.bands.reduce((sum, b) => sum + b.value, 0))} projected
+            {usd(officeTotalValue)} projected
           </span>
         </div>
         <div className="grid grid-cols-5 gap-2">
@@ -490,7 +493,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                 <span className="text-[10px] font-bold uppercase tracking-wide text-violet-600">Total</span>
               </div>
               <div className="mt-0.5 text-sm font-black tabular-nums text-slate-900">
-                {usd(data.officeProjection.bands.reduce((sum, b) => sum + b.value, 0))}
+                {usd(officeTotalValue)}
               </div>
               <div className="mt-1 inline-block rounded bg-violet-200 px-1.5 py-0.5 text-[10px] tabular-nums text-violet-800">
                 {int(data.officeProjection.bands.reduce((sum, b) => sum + b.count, 0))} dated
