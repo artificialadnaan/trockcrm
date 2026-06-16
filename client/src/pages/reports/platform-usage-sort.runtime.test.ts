@@ -56,15 +56,19 @@ describe("Platform Usage leaderboard sort columns", () => {
     expect(hook.current.sortedRows.map((r) => r.usage.actionCount)).toEqual([312, 188, 0]);
   });
 
-  it("sorts blank view counts (no session) last in both directions", async () => {
-    const lastName = (api: UseTableSortResult<PlatformUsageRow>) => {
-      const names = api.sortedRows.map((r) => r.rep.displayName);
-      return names[names.length - 1];
-    };
+  // The muted telemetry columns render "—" for the not-yet-populated case (Zane: no session, 0
+  // active, 0 views) and must sort that row LAST in both directions — never as a zero-fill that
+  // beats reps with real telemetry on an ascending sort.
+  const lastName = (api: UseTableSortResult<PlatformUsageRow>) => {
+    const names = api.sortedRows.map((r) => r.rep.displayName);
+    return names[names.length - 1];
+  };
+
+  it.each(["views", "sessions", "active"])("sorts blank %s last in both directions", async (key) => {
     const hook = await renderHook();
-    await hook.act(() => hook.current.toggle("views")); // numeric → desc first
+    await hook.act(() => hook.current.toggle(key)); // numeric → desc first
     expect(lastName(hook.current)).toBe("Zane");
-    await hook.act(() => hook.current.toggle("views")); // asc
+    await hook.act(() => hook.current.toggle(key)); // asc
     expect(lastName(hook.current)).toBe("Zane");
   });
 });

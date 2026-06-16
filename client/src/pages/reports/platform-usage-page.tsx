@@ -20,12 +20,15 @@ const GRID = "grid grid-cols-[2rem_minmax(0,1fr)_5.5rem_5rem_4.5rem] items-cente
 // Exported so the sort behavior is unit-tested against the real PlatformUsageRow type.
 export const PLATFORM_USAGE_SORT_COLUMNS: ReadonlyArray<SortColumn<PlatformUsageRow>> = [
   { key: "rep", type: "text", accessor: (r) => r.rep.displayName },
+  // Actions always renders a real number (incl. 0), so it sorts on the raw value.
   { key: "actions", type: "number", accessor: (r) => r.usage.actionCount },
-  { key: "active", type: "number", accessor: (r) => r.usage.activeSeconds },
-  { key: "sessions", type: "number", accessor: (r) => r.usage.sessionCount },
-  // Views renders "—" when viewsAreEmpty (no session / not-yet-populated). Sort that as a blank
-  // (undefined → last in both directions) so the visually-empty rows don't compare as 0 and beat
-  // reps with real view telemetry on an ascending sort.
+  // The muted telemetry columns (Active / Sessions / Views) render "—" for the not-yet-populated
+  // case, so their sort accessor returns undefined for exactly that case (→ blanks last in both
+  // directions) — matching the displayed em dash, so visually-empty rows never compare as 0 and
+  // beat reps with real telemetry on an ascending sort. The empty conditions mirror MutedValue's
+  // `empty` prop on each cell (activeSeconds===0 / sessionCount===0 / viewsAreEmpty).
+  { key: "active", type: "number", accessor: (r) => (r.usage.activeSeconds === 0 ? undefined : r.usage.activeSeconds) },
+  { key: "sessions", type: "number", accessor: (r) => (r.usage.sessionCount === 0 ? undefined : r.usage.sessionCount) },
   {
     key: "views",
     type: "number",
