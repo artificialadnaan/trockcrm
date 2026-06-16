@@ -3340,23 +3340,31 @@ export async function setDealContractSignedDate(
     //                                  CURRENT source value/rate, re-stamp contract_signed_date_at_signing)
     //   date → null   : clear        → remove (no signed date ⇒ no commission; a lingering row is a
     //                                  PHANTOM payout — worse than a missing one)
-    // A same-value re-save already short-circuited above UNLESS it reached here only to reconcile a
-    // stale won_closed_date (same contract date) — in that case the date is unchanged, so the stored
-    // commission is already correct and must NOT be churned.
-    const contractDateChanged = oldValue !== newValue;
-    if (contractDateChanged) {
-      if (oldValue == null) {
+    // The transition is keyed on the EFFECTIVE signed date — contract_signed_date with a
+    // contract_signed_at::date fallback. The reseed/import path can populate contract_signed_at WITHOUT
+    // contract_signed_date, and the app treats _at as an equal signed-date source; keying off
+    // contract_signed_date alone would (a) miss the clear on an _at-only row (commission left orphaned)
+    // and (b) misroute a correction on an _at-only row as an initial calc that skips the existing row.
+    // A same-value re-save already short-circuited above UNLESS it reached here only to reconcile a stale
+    // won_closed_date (same effective date) — then the date is unchanged, so commission must NOT be churned.
+    const oldEffectiveSignedDate = oldValue ?? dateStringFromTimestamp(oldContractSignedAt);
+    const newEffectiveSignedDate = newValue ?? dateStringFromTimestamp(newContractSignedAt);
+    if (oldEffectiveSignedDate !== newEffectiveSignedDate) {
+      if (oldEffectiveSignedDate == null) {
+        // null → signed: initial commission calc.
         await calculateCommissionForDeal(tx, {
           dealId,
-          contractSignedDate: newValue as string,
+          contractSignedDate: newEffectiveSignedDate as string,
           triggeredByUserId: userId,
         });
-      } else if (newValue == null) {
+      } else if (newEffectiveSignedDate == null) {
+        // signed → cleared: remove the row (no signed date ⇒ no commission; a lingering row is a phantom payout).
         await removeCommissionForDeal(tx, dealId, userId);
       } else {
+        // corrected: recompute IN PLACE — attribution-preserving + all-or-nothing (never deletes to $0).
         await recalculateCommissionForDeal(tx, {
           dealId,
-          contractSignedDate: newValue,
+          contractSignedDate: newEffectiveSignedDate,
           triggeredByUserId: userId,
         });
       }
@@ -3412,4 +3420,11 @@ function normalizeContractSignedAt(value: Date | string | null | undefined): Dat
 
 function timestampKey(value: Date | null): string | null {
   return value ? value.toISOString() : null;
+}
+
+// The date-only (YYYY-MM-DD, UTC) of a contract_signed_at timestamp — the fallback signed-date source
+// when contract_signed_date is null (reseed/import _at-only rows). contractSignedAtFromDate stores _at at
+// UTC midnight of the date, so this round-trips cleanly for app-set rows.
+function dateStringFromTimestamp(value: Date | null): string | null {
+  return value ? value.toISOString().slice(0, 10) : null;
 }

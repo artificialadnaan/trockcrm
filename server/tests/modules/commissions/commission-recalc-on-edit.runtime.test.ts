@@ -143,4 +143,58 @@ describe("commission recalc-on-edit (real Drizzle-derived schema)", () => {
     expect(created.status).toBe("created");
     expect(Number((await pg.query<{ amount: string }>(`SELECT amount FROM public.deal_signed_commissions WHERE deal_id='${norateDeal}'`)).rows[0].amount)).toBe(500); // 50000 × 0.01
   }, 30_000);
+
+  // CodeRabbit bug 2: a date correction recomputes against the BOOKED rep, it does not re-attribute
+  // commission to a deal's later reassigned owner.
+  it("recalc PRESERVES the original rep attribution when the deal was reassigned after signing", async () => {
+    const dealId = U("0da2");
+    const repA = U("00a1");
+    const repB = U("00b2");
+    await pg.exec(
+      `INSERT INTO public.deals (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount)
+       VALUES ('${dealId}', 'D-2', 'Reassigned Deal', '${STAGE}', '${repA}', 100000)`,
+    );
+    await pg.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES ('${repA}', 0.020000, true)`);
+    await pg.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES ('${repB}', 0.050000, true)`);
+    // Commission booked to rep A on signing.
+    await calculateCommissionForDeal(tdb, { dealId, contractSignedDate: "2026-01-01", triggeredByUserId: repA });
+    // Deal reassigned to rep B AFTER signing (normal ownership change — must not move the booked commission).
+    await pg.exec(`UPDATE public.deals SET assigned_rep_id = '${repB}' WHERE id = '${dealId}'`);
+
+    await recalculateCommissionForDeal(tdb, { dealId, contractSignedDate: "2026-02-01", triggeredByUserId: repA });
+
+    const { rows } = await pg.query<{ rep_user_id: string; amount: string }>(
+      `SELECT rep_user_id, amount FROM public.deal_signed_commissions WHERE deal_id = '${dealId}'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].rep_user_id).toBe(repA); // attribution stayed with the ORIGINAL rep, not rep B
+    expect(Number(rows[0].amount)).toBe(2000); // recomputed at rep A's 2% (100000 × 0.02), NOT rep B's 5%
+  }, 30_000);
+
+  // CodeRabbit bug 1 (the critical one): an edit that cannot validly recompute must LEAVE the existing
+  // row intact — never delete-then-skip, which would silently wipe earned commission to $0.
+  it("recalc PRESERVES the existing row when the booked rep's rate is gone (no delete-then-skip data loss)", async () => {
+    const dealId = U("0da3");
+    const rep = U("00c3");
+    await pg.exec(
+      `INSERT INTO public.deals (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount)
+       VALUES ('${dealId}', 'D-3', 'Deactivated-Rep Deal', '${STAGE}', '${rep}', 100000)`,
+    );
+    await pg.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES ('${rep}', 0.020000, true)`);
+    await calculateCommissionForDeal(tdb, { dealId, contractSignedDate: "2026-01-01", triggeredByUserId: rep });
+
+    // The rep's commission settings are deactivated, and the source value also changed — the recompute
+    // CANNOT produce a valid replacement.
+    await pg.exec(`UPDATE public.user_commission_settings SET is_active = false WHERE user_id = '${rep}'`);
+    await pg.exec(`UPDATE public.deals SET awarded_amount = 999999 WHERE id = '${dealId}'`);
+
+    const result = await recalculateCommissionForDeal(tdb, { dealId, contractSignedDate: "2026-02-01", triggeredByUserId: rep });
+    expect(result.status).toBe("skipped_no_rate"); // nothing recomputed
+
+    const { rows } = await pg.query<{ amount: string }>(
+      `SELECT amount FROM public.deal_signed_commissions WHERE deal_id = '${dealId}'`,
+    );
+    expect(rows).toHaveLength(1); // the row is STILL THERE — no data loss
+    expect(Number(rows[0].amount)).toBe(2000); // original booked amount preserved (NOT 999999×rate, NOT $0)
+  }, 30_000);
 });

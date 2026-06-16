@@ -4,7 +4,17 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getStageById: vi.fn(),
 }));
 
+// Mock the commission helpers so these tests assert ROUTING (which helper fires per contract-date
+// transition) — the money correctness of each helper (attribution-preserving + all-or-nothing recompute)
+// is proven against the real schema in commissions/commission-recalc-on-edit.runtime.test.ts.
+vi.mock("../../../src/modules/commissions/service.js", () => ({
+  calculateCommissionForDeal: vi.fn().mockResolvedValue({ status: "created" }),
+  recalculateCommissionForDeal: vi.fn().mockResolvedValue({ status: "created" }),
+  removeCommissionForDeal: vi.fn().mockResolvedValue(1),
+}));
+
 const pipelineService = await import("../../../src/modules/pipeline/service.js");
+const commissions = await import("../../../src/modules/commissions/service.js");
 import { setDealContractSignedDate } from "../../../src/modules/deals/service.js";
 
 interface FakeDealRow {
@@ -26,8 +36,6 @@ function makeTenantDb(initial: FakeDealRow | null) {
     updateCalls: [] as Array<Record<string, unknown>>,
     commissionInserts: [] as Array<Record<string, unknown>>,
     commissionRows: [] as Array<{ id: string; dealId: string; repUserId: string }>,
-    commissionDeletes: [] as Array<{ id: string; dealId: string; repUserId: string }>,
-    deleteCalls: 0,
     jobInserts: [] as Array<Record<string, unknown>>,
     selectCalls: 0,
     lockedSelects: 0,
@@ -129,23 +137,6 @@ function makeTenantDb(initial: FakeDealRow | null) {
         },
       };
     },
-    delete() {
-      // removeCommissionForDeal: delete(deal_signed_commissions).where(...).returning({...}). The fake
-      // removes every seeded commission row for the deal (matching the real per-deal delete) and records
-      // the removal so transition routing (clear → remove, edit → recalc) is observable.
-      state.deleteCalls += 1;
-      return {
-        where() {
-          return {
-            returning() {
-              const removed = state.commissionRows.splice(0);
-              state.commissionDeletes.push(...removed);
-              return Promise.resolve(removed.map((r) => ({ id: r.id, amount: "0", repUserId: r.repUserId })));
-            },
-          };
-        },
-      };
-    },
     transaction(callback: (tx: unknown) => unknown) {
       return callback(tenantDb);
     },
@@ -156,6 +147,9 @@ function makeTenantDb(initial: FakeDealRow | null) {
 describe("setDealContractSignedDate", () => {
   beforeEach(() => {
     delete process.env.ENABLE_CONTRACT_SIGNED_HANDOFF;
+    vi.mocked(commissions.calculateCommissionForDeal).mockClear();
+    vi.mocked(commissions.recalculateCommissionForDeal).mockClear();
+    vi.mocked(commissions.removeCommissionForDeal).mockClear();
     vi.mocked(pipelineService.getStageById).mockReset();
     vi.mocked(pipelineService.getStageById).mockResolvedValue({
       id: "stage-contract",
@@ -275,50 +269,78 @@ describe("setDealContractSignedDate", () => {
     expect(tenantDb._state.auditInserts).toHaveLength(0);
   });
 
-  it("hook fires commission calculation on null → date transition", async () => {
+  it("routes null → date to calculate (initial sign)", async () => {
     const tenantDb = makeTenantDb({ id: "deal-1", contractSignedDate: null });
     await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-09-15", "admin-1", "office-1");
-    // Calls: 1 deal-load + (commission path: deal again, settings, dedup)
-    // The exact count depends on the commission service's internal queries.
-    // We assert >1 to prove the commission path was entered (would be
-    // exactly 1 if the hook failed to fire).
-    expect(tenantDb._state.selectCalls).toBeGreaterThan(1);
+
+    expect(commissions.calculateCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.calculateCommissionForDeal).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({ dealId: "deal-1", contractSignedDate: "2026-09-15", triggeredByUserId: "admin-1" })
+    );
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
   });
 
-  it("REMOVES the commission row on date → null (clear) — no signed date ⇒ no phantom payout", async () => {
+  it("routes date → null (clear) to REMOVE — no signed date ⇒ no phantom payout", async () => {
     const tenantDb = makeTenantDb({
       id: "deal-1",
       contractSignedDate: "2026-09-15",
       contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
     });
-    // Seed the existing earned-commission row the prior sign produced.
-    tenantDb._state.commissionRows.push({ id: "commission-1", dealId: "deal-1", repUserId: "rep-1" });
-
     await setDealContractSignedDate(tenantDb as never, "deal-1", null, "admin-1", "office-1");
 
-    // Clear → removeCommissionForDeal: the stale row is deleted, none remain.
-    expect(tenantDb._state.deleteCalls).toBe(1);
-    expect(tenantDb._state.commissionDeletes).toHaveLength(1);
-    expect(tenantDb._state.commissionRows).toHaveLength(0);
-    expect(tenantDb._state.commissionInserts).toHaveLength(0);
+    expect(commissions.removeCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.removeCommissionForDeal).toHaveBeenCalledWith(tenantDb, "deal-1", "admin-1");
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
   });
 
-  it("RECALCULATES (removes stale row + re-enters calc) on date → different date (edit)", async () => {
+  it("routes date → different date (correction) to RECALCULATE (attribution-preserving, all-or-nothing)", async () => {
     const tenantDb = makeTenantDb({
       id: "deal-1",
       contractSignedDate: "2026-09-15",
       contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
     });
-    tenantDb._state.commissionRows.push({ id: "commission-1", dealId: "deal-1", repUserId: "rep-1" });
-
     await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-12-01", "admin-1", "office-1");
 
-    // Edit → recalculateCommissionForDeal: the stale row is removed first, then calculate re-runs
-    // (re-entering the commission select path; it skips here because this minimal fake returns no
-    // rep/settings — the real-types runtime test asserts the recomputed amount).
-    expect(tenantDb._state.deleteCalls).toBe(1);
-    expect(tenantDb._state.commissionDeletes).toHaveLength(1);
-    expect(tenantDb._state.selectCalls).toBeGreaterThan(1);
+    expect(commissions.recalculateCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.recalculateCommissionForDeal).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({ dealId: "deal-1", contractSignedDate: "2026-12-01", triggeredByUserId: "admin-1" })
+    );
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+  });
+
+  // Bug 3 (CodeRabbit): an _at-only signed row (contract_signed_at set, contract_signed_date null — the
+  // reseed/import shape) must transition off the EFFECTIVE signed date, not contract_signed_date alone.
+  it("CLEAR on an _at-only signed row (date null, _at set) still routes to REMOVE", async () => {
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      contractSignedDate: null, // date column never populated
+      contractSignedAt: new Date("2026-09-15T00:00:00.000Z"), // but _at IS set (reseed shape)
+    });
+    // Clearing sets both to null. Keyed on the effective date, this is signed → cleared.
+    await setDealContractSignedDate(tenantDb as never, "deal-1", null, "admin-1", "office-1");
+
+    expect(commissions.removeCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
+  });
+
+  it("CORRECTION on an _at-only signed row routes to RECALCULATE (not a misrouted initial calc)", async () => {
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      contractSignedDate: null,
+      contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
+    });
+    await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-12-01", "admin-1", "office-1");
+
+    // Effective old = 2026-09-15 (from _at), new = 2026-12-01 → correction → recalc, NOT initial calc.
+    expect(commissions.recalculateCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
   });
 
   it("emits deal.contract.signed once on contract_signed_at null → value when flag is on and deal is in Contract", async () => {
