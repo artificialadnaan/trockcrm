@@ -6,6 +6,7 @@ import {
 } from "../modules/auth/service.js";
 import { getUserLocalAuthGate } from "../modules/auth/local-auth-service.js";
 import { AppError } from "./error-handler.js";
+import { isTokenStaleByEpoch } from "@trock-crm/shared/lib/userProvisioningGuards";
 import type { AuthenticatedUser } from "@trock-crm/shared/types";
 
 // Extend Express Request
@@ -43,6 +44,10 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
 
     if (!user || !user.isActive) {
       throw new AppError(401, "User not found or inactive");
+    }
+
+    if (isTokenStaleByEpoch(claims.iat, user.tokensValidAfter?.getTime() ?? null)) {
+      throw new AppError(401, "Session expired, please sign in again");
     }
 
     const localAuthGate = await getUserLocalAuthGate(user.id);
