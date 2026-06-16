@@ -128,9 +128,9 @@ describe("Monday showcase consolidation", () => {
     // so the deferred Collected dept contributes none).
     const deltaChips = [...container.querySelectorAll("span")].filter((s) => s.textContent?.includes("WoW"));
     expect(deltaChips.length).toBe(3);
-    // ... and a sparkline each (Sparkline marks its container aria-hidden; gated on sparkline.length > 0, so
-    // Collected's empty sparkline renders none).
-    const sparklines = container.querySelectorAll("[aria-hidden]");
+    // ... and a sparkline each (Sparkline tags its root data-testid="sparkline"; gated on sparkline.length > 0,
+    // so Collected's empty sparkline renders none).
+    const sparklines = container.querySelectorAll('[data-testid="sparkline"]');
     expect(sparklines.length).toBe(3);
     // Collected renders as the deferred placeholder: a "—" count and the "deferred" value, no chip/sparkline.
     expect(text).toContain("—");
