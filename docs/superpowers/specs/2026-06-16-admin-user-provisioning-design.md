@@ -38,19 +38,30 @@ ALTER TABLE public.users ADD COLUMN IF NOT EXISTS tokens_valid_after timestamptz
 ```
 Nullable; `NULL` ⇒ no epoch (every existing token stays valid). Mirror in `shared/src/schema/public/users.ts` (`tokensValidAfter: timestamp("tokens_valid_after", { withTimezone: true })`). Migrations auto-run on deploy (per `[[migrations-auto-run-on-deploy]]`).
 
-### 2. Session-kill primitive — `server/src/modules/auth/session-invalidation.ts` (new)
+### 2. Security decision predicates — `shared/src/lib/userProvisioningGuards.ts` (new, PURE)
 
-The single place that "invalidates a user's sessions." Pure-ish, composable, called from `updateUser`.
+Every security-critical DECISION is a pure, side-effect-free function here, typed against the real `UserRole`. Both the server (enforcement) and the gate-executed runtime tests import these — so the exact decision logic is gate-proven (see Testing). Used by the client dialog too where useful.
 
-- `bumpTokensValidAfter(tx, userId, at: Date)` — `UPDATE users SET tokens_valid_after = at WHERE id = userId`. The durable "kill all sessions issued before now" primitive (future-proofs Azure SSO / any cached-auth path).
-- `revokeLocalAuthOnDeactivate(tx, userId, actorUserId, at)` — set `user_local_auth.revoked_at = at, revoked_by_user_id = actorUserId` so re-login is blocked (middleware already checks `revokedAt`); append a `user_local_auth_events` row (`event_type` e.g. `deactivated`).
-- `clearLocalAuthRevocation(tx, userId, at)` — on reactivate, clear `revoked_at/revoked_by_user_id` so the user can log in again (a fresh login mints a token with `iat > tokens_valid_after`, so it passes).
-- `closeUserSseConnections(userId): number` — added to `sse-manager.ts`: iterate `connections.get(userId)`, write a terminal `event: session_invalidated` then `res.end()` each, delete the user's set; returns count. **Runs after the DB commit, not inside the tx** (it's in-memory). Single-instance/in-process assumption matches the existing SSE + eventBus design; on multi-instance it's best-effort per-instance, with the epoch + `is_active` re-check bounding exposure on other instances. Documented as such.
+- `CRM_ASSIGNABLE_ROLES = ["admin","director","rep","construction"] as const`; `isAssignableCrmRole(role: string): role is CrmAssignableRole`.
+- `isTokenStaleByEpoch(iatSeconds: number | undefined, tokensValidAfterMs: number | null): boolean` → `tokensValidAfterMs != null && iatSeconds != null && iatSeconds * 1000 < tokensValidAfterMs`. (Strict `<`; second-granularity `iat` from `jsonwebtoken` is set automatically.)
+- `isProhibitedSelfChange(args: { actorId: string; targetId: string; nextIsActive?: boolean; currentRole: UserRole; nextRole?: UserRole }): boolean` → true when `actorId === targetId` and (`nextIsActive === false` OR a role change). Drives the self-deactivate/self-demote guard.
+- `isFieldContractorTransition(currentRole: UserRole, nextRole: UserRole | undefined): boolean` → true when `nextRole === "field_contractor"` OR (`currentRole === "field_contractor"` && nextRole is a CRM role). Drives the both-directions block.
+- `wouldRemoveLastActiveAdmin(args: { currentRole: UserRole; nextRole?: UserRole; nextIsActive?: boolean; otherActiveAdminCount: number }): boolean` → true when the change strips admin-ness from an admin (`currentRole === "admin"` and (`nextIsActive === false` OR (`nextRole` set and `!== "admin"`))) and `otherActiveAdminCount === 0`. The DB supplies the count; the decision is pure.
 
-### 3. Middleware epoch check — pure predicate + two call sites
+### 3. Session-kill effects — `server/src/modules/auth/session-invalidation.ts` (new)
 
-- Pure helper in `session-invalidation.ts`: `isTokenStaleByEpoch(iatSeconds: number | undefined, tokensValidAfter: Date | null): boolean` → `tokensValidAfter != null && iatSeconds != null && iatSeconds * 1000 < tokensValidAfter.getTime()`. (Strict `<`; second-granularity `iat` from `jsonwebtoken` is set automatically. Extend `verifyJwt`'s return to surface `iat`: `JwtClaims & { iat?: number; exp?: number }`.)
-- `authMiddleware` (`auth.ts`) and `requireFieldContractor` (`field-auth.ts`): after fetching `user`, `if (isTokenStaleByEpoch(claims.iat, user.tokensValidAfter)) throw new AppError(401, "Session expired, please sign in again")`. Placed right after the existing `!user.isActive` check.
+The effectful side (DB writes + in-memory SSE), called from `updateUser`. Imports the pure predicates above where relevant.
+
+- `bumpTokensValidAfter(tx, userId, at: Date)` — `UPDATE users SET tokens_valid_after = at`. The durable "kill all sessions issued before now" primitive (future-proofs Azure SSO / any cached-auth path).
+- `revokeLocalAuthOnDeactivate(tx, userId, actorUserId, at)` — set `user_local_auth.revoked_at = at, revoked_by_user_id = actorUserId` (middleware already checks `revokedAt`); append a `user_local_auth_events` row.
+- `clearLocalAuthRevocation(tx, userId, at)` — on reactivate, clear `revoked_at/revoked_by_user_id` so the user can log in again (a fresh login mints a token with `iat > tokens_valid_after`).
+- `closeUserSseConnections(userId): number` — added to `sse-manager.ts`: iterate `connections.get(userId)`, write a terminal `event: session_invalidated`, `res.end()` each, delete the user's set; returns count. **Runs after the DB commit** (in-memory).
+
+### 3a. Middleware epoch check — two call sites (thin glue over the pure predicate)
+
+`authMiddleware` (`auth.ts`) and `requireFieldContractor` (`field-auth.ts`): after fetching `user`, `if (isTokenStaleByEpoch(claims.iat, user.tokensValidAfter?.getTime() ?? null)) throw new AppError(401, "Session expired, please sign in again")`, right after the existing `!user.isActive` check. Extend `verifyJwt`'s return to surface `iat`: `JwtClaims & { iat?: number; exp?: number }`.
+
+**Authoritative security gate (the architecture you asked me to confirm):** the DB-backed `tokens_valid_after` epoch + the per-request `is_active` re-check are read from the shared database on **every** request by **every** instance, so a deactivated/role-changed user's next request is rejected regardless of which instance held their SSE. `closeUserSseConnections` is **best-effort fast-path cleanup only**, never the security boundary; the only residual on a scaled-out deployment is a still-open stream on another instance briefly echoing that user's own server-pushed notifications until it errors/reconnects — not an access-control bypass.
 
 ### 4. Add-User create flow
 
@@ -64,10 +75,10 @@ The single place that "invalidates a user's sessions." Pure-ish, composable, cal
 
 ### 5. Guards in `updateUser` (extend signature with `actorUserId`)
 
-`updateUser(id, input, actorUserId)` — route passes `req.user!.id`. Inside the existing transaction, before applying the base-user patch:
-- **Self-protect:** if `id === actorUserId` and (`input.isActive === false` or `input.role` changes the actor's role) ⇒ `AppError(403, "You can't deactivate or change your own role")`.
-- **field_contractor transitions:** if `input.role === "field_contractor"` ⇒ `403` ("managed in the field-user flow"); if `existingUser.role === "field_contractor"` and `input.role` is a CRM role ⇒ `403` (same). Keeps the two lifecycles separate.
-- **Last active admin:** if the change removes admin-ness from an admin — `existingUser.role === "admin"` and (`input.isActive === false` or (`input.role` set and `!== "admin"`)) — count `users` where `role = "admin" AND is_active = true AND id <> :id`; if `0` ⇒ `AppError(409, "Cannot remove the last active admin")`. Global (matches the global-admin decision).
+`updateUser(id, input, actorUserId)` — route passes `req.user!.id`. Inside the existing transaction, before applying the base-user patch. Each guard is a thin throw over a **pure predicate** from `userProvisioningGuards.ts` (so the decision is gate-proven):
+- **Self-protect:** `if (isProhibitedSelfChange({ actorId: actorUserId, targetId: id, nextIsActive: input.isActive, currentRole: existingUser.role, nextRole: input.role })) throw AppError(403, "You can't deactivate or change your own role")`.
+- **field_contractor transitions:** `if (isFieldContractorTransition(existingUser.role, input.role)) throw AppError(403, "Field contractors are managed in the field-user flow")`. Blocks both directions; keeps the two lifecycles separate.
+- **Last active admin:** count `users` where `role = "admin" AND is_active = true AND id <> :id` → `otherActiveAdminCount`; `if (wouldRemoveLastActiveAdmin({ currentRole: existingUser.role, nextRole: input.role, nextIsActive: input.isActive, otherActiveAdminCount })) throw AppError(409, "Cannot remove the last active admin")`. Global (matches the global-admin decision). The DB read supplies the count; the gate-executed predicate makes the decision.
 - **Session-kill wiring** (inside the same tx where possible, SSE after commit):
   - `input.isActive` true→false (deactivate): `bumpTokensValidAfter(now)` + `revokeLocalAuthOnDeactivate(actor, now)`; after commit, `closeUserSseConnections(id)`.
   - `input.isActive` false→true (reactivate): `clearLocalAuthRevocation(now)` (leave `tokens_valid_after` as-is — old tokens stay dead; fresh login works).
@@ -94,12 +105,23 @@ The single place that "invalidates a user's sessions." Pure-ish, composable, cal
 
 ## Testing (real types; no invented shapes)
 
-CI runs only client `*.runtime.test.*` (`[[client-test-and-ci-gate]]`); server vitest lives in `server/tests/**` and the gate compiles but does not execute it (`[[server-test-harness]]`). So: put the **pure, high-value logic behind exported pure helpers** and test those; DB-touching services get server vitest (capture-WHERE / PGlite per the harness) runnable locally; the UI dialog gets a client `*.runtime.test.*` so at least one slice executes in CI.
+**Gate-execution fact (verified):** `check:premerge` → `test:runtime` runs `--workspaces --if-present`, and BOTH the **server** and **client** workspaces have a `test:runtime` script (`vitest run runtime.test`). A `check:premerge` run executed **567 server runtime tests (81 files)** *and* the client runtime suite. So **`*.runtime.test.*` files in BOTH `server/tests/**` and `client/src/**` EXECUTE in the CI gate.** Only the 524 plain server `*.test.ts` (run by `npm test`) are gate-compiled-but-not-executed. Therefore every security-critical decision is gate-executed — no "ran locally only" gap.
 
-- **Pure helpers (server vitest, fast):** `isTokenStaleByEpoch` (null epoch ⇒ never stale; `iat` before/after/equal boundary); `CRM_ASSIGNABLE_ROLES` membership / `assertAssignableCrmRole`; the guard predicates extracted as pure functions (`wouldRemoveLastAdmin(count, change)`, `isProhibitedSelfChange(...)`, `isFieldContractorTransition(from,to)`), tested against the real `UserRole` type.
-- **Service (server vitest):** `createCrmUser` sets `createdByUserId`/`isActive`, rejects `field_contractor` (400) and duplicate email (409); `updateUser` deactivate path sets `tokens_valid_after` + `revoked_at` and calls `closeUserSseConnections`; reactivate clears `revoked_at`; role change bumps epoch; each guard returns the right status.
-- **SSE (server vitest):** `closeUserSseConnections` ends every registered `res` for the user and empties the registry; returns the count; no-op for an unknown user.
-- **UI (client `*.runtime.test.tsx`):** the Add-User dialog renders the role options (`admin/director/rep/construction`, no `field_contractor`) + the office select + the invite checkbox; the deactivate confirm dialog renders its warning copy. Real types from `@trock-crm/shared/types` (`UserRole`).
+**Which security checks run in the gate (the airtight list — all PURE predicates in `shared/src/lib/userProvisioningGuards.ts`, proven by `server/tests/admin/user-provisioning-guards.runtime.test.ts`, gate-executed):**
+1. `isTokenStaleByEpoch` — null epoch ⇒ never stale; `iat` strictly-before ⇒ stale; equal/after ⇒ valid; undefined `iat` ⇒ not stale.
+2. `isAssignableCrmRole` / `CRM_ASSIGNABLE_ROLES` — the four CRM roles accepted; `field_contractor` and junk rejected.
+3. `isProhibitedSelfChange` — self + deactivate ⇒ true; self + role change ⇒ true; self + no-op ⇒ false; other user ⇒ false.
+4. `isFieldContractorTransition` — into `field_contractor` ⇒ true; out of `field_contractor` to a CRM role ⇒ true; CRM↔CRM ⇒ false.
+5. `wouldRemoveLastActiveAdmin` — admin deactivate/demote with `otherActiveAdminCount === 0` ⇒ true; with `> 0` ⇒ false; non-admin target ⇒ false.
+
+These run with `--passWithNoTests=false`, so a renamed/missing file fails the gate rather than silently passing.
+
+**Service + effect tests (also `server/tests/**/*.runtime.test.*`, gate-executed; capture-WHERE / PGlite per `[[server-test-harness]]` for DB-touching paths):**
+- `createCrmUser` sets `createdByUserId`/`isActive`, rejects `field_contractor` (400) and duplicate email (409); validates office.
+- `updateUser` deactivate sets `tokens_valid_after` + `revoked_at` and invokes `closeUserSseConnections`; reactivate clears `revoked_at`; role change bumps the epoch; each guard surfaces the right status code (the predicate decision is already covered by #1–5; these assert the wiring).
+- `closeUserSseConnections` ends every registered `res` for the user, empties the registry, returns the count; no-op for an unknown user (in-memory, gate-executed).
+
+**UI (client `*.runtime.test.tsx`, gate-executed):** the Add-User dialog renders the role options (`admin/director/rep/construction`, no `field_contractor`) + office select + invite checkbox; the deactivate confirm dialog renders its warning copy. Real `UserRole` from `@trock-crm/shared/types`.
 
 ## Out of scope (explicit)
 
