@@ -3,6 +3,7 @@ import { Loader2 } from "lucide-react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useAtRiskWatchlist } from "@/hooks/use-reports";
 import { PipelineStageTable, type PipelineStageTableColumn } from "@/components/pipeline/pipeline-stage-table";
+import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
 import { usd, int, formatDayShort } from "./evidence-kit";
 import type { AtRiskRecord } from "./part4-types";
 
@@ -14,6 +15,19 @@ const REASON_BADGE: Record<AtRiskRecord["reason"], { label: string; cls: string 
   stale_dated: { label: "Past due", cls: "bg-rose-50 text-rose-700 ring-rose-200" },
   no_date: { label: "No close date", cls: "bg-amber-50 text-amber-700 ring-amber-200" },
 };
+
+// Explicit reason ranking so the "Why at-risk" column GROUPS by category (all Past due, then all
+// No close date) — deliberate grouping, not incidental alphabetical on the badge label spelling.
+const REASON_ORDER: Record<AtRiskRecord["reason"], number> = { stale_dated: 0, no_date: 1 };
+
+const AT_RISK_SORT_COLUMNS: ReadonlyArray<SortColumn<AtRiskRecord>> = [
+  { key: "deal", type: "text", accessor: (r) => r.name },
+  { key: "owner", type: "text", accessor: (r) => r.repName },
+  { key: "stage", type: "text", accessor: (r) => r.stageLabel },
+  { key: "days", type: "number", accessor: (r) => r.daysInStage },
+  { key: "reason", type: "text", accessor: (r) => r.reason, compare: (a, b) => REASON_ORDER[a.reason] - REASON_ORDER[b.reason] },
+  { key: "value", type: "number", accessor: (r) => r.value },
+];
 
 function SummaryCard({ label, count, value, tone }: { label: string; count: number; value: number; tone: string }) {
   return (
@@ -65,10 +79,27 @@ export function AtRiskPage() {
     };
   }, [data, records, repFilter]);
 
+  // initialSort null preserves the server's $-at-risk-desc order until the user clicks a header.
+  const { sortedRows, toggle, getHeaderProps } = useTableSort(records, AT_RISK_SORT_COLUMNS);
+
+  const sortHeader = (key: string, label: string, numeric = false) => {
+    const hp = getHeaderProps(key);
+    return (
+      <SortHeaderButton
+        label={label}
+        numeric={numeric}
+        active={hp.active}
+        dir={hp.dir}
+        onClick={() => toggle(key)}
+        className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500"
+      />
+    );
+  };
+
   const columns: Array<PipelineStageTableColumn<AtRiskRecord>> = [
     {
       key: "deal",
-      header: "Deal",
+      header: sortHeader("deal", "Deal"),
       render: (r) => (
         <div className="min-w-0">
           <div className="truncate font-medium text-slate-800">{r.name}</div>
@@ -76,19 +107,19 @@ export function AtRiskPage() {
         </div>
       ),
     },
-    { key: "owner", header: "Owner", render: (r) => <span className="text-slate-600">{r.repName}</span> },
-    { key: "stage", header: "Stage", render: (r) => <span className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{r.stageLabel || "—"}</span> },
-    { key: "days", header: "In stage", cellClassName: "whitespace-nowrap tabular-nums text-slate-500", render: (r) => (r.daysInStage == null ? "—" : `${int(r.daysInStage)}d`) },
+    { key: "owner", header: sortHeader("owner", "Owner"), render: (r) => <span className="text-slate-600">{r.repName}</span> },
+    { key: "stage", header: sortHeader("stage", "Stage"), render: (r) => <span className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">{r.stageLabel || "—"}</span> },
+    { key: "days", header: sortHeader("days", "In stage", true), cellClassName: "whitespace-nowrap tabular-nums text-slate-500", render: (r) => (r.daysInStage == null ? "—" : `${int(r.daysInStage)}d`) },
     {
       key: "reason",
-      header: "Why at-risk",
+      header: sortHeader("reason", "Why at-risk"),
       render: (r) => {
         const b = REASON_BADGE[r.reason];
         const close = r.reason === "stale_dated" && r.expectedCloseDate ? ` · ${formatDayShort(r.expectedCloseDate)}` : "";
         return <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ${b.cls}`}>{b.label}{close}</span>;
       },
     },
-    { key: "value", header: "$ at risk", headClassName: "text-right", cellClassName: "text-right font-semibold tabular-nums text-slate-800", render: (r) => usd(r.value) },
+    { key: "value", header: sortHeader("value", "$ at risk", true), headClassName: "text-right", cellClassName: "text-right font-semibold tabular-nums text-slate-800", render: (r) => usd(r.value) },
   ];
 
   return (
@@ -134,9 +165,9 @@ export function AtRiskPage() {
             </div>
           ) : (
             <PipelineStageTable
-              rows={records}
+              rows={sortedRows}
               columns={columns}
-              pagination={{ page: 1, pageSize: records.length, total: records.length, totalPages: 1 }}
+              pagination={{ page: 1, pageSize: sortedRows.length, total: sortedRows.length, totalPages: 1 }}
               onPageChange={() => {}}
               onRowClick={(r) => navigate({ pathname: `/deals/${r.id}`, search })}
               getRowKey={(r) => r.id}
