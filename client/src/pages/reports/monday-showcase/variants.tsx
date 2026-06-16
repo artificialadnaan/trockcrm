@@ -319,6 +319,23 @@ export function VariantB3LoadLane({ data }: { data: MondayShowcaseData }) {
               Closed {int(rep.closed.count)}
             </DrillNumber>
           </div>
+          {/* Per-stage lead drill (inherited from the removed B1 Roll-Call Scorecards): the "Leads N" pill
+              above opens ALL active leads, but each lead stage is also independently drillable here so the
+              stage-specific evidence B1 surfaced (leadStage-scoped) stays reachable on the consolidated B3. */}
+          {rep.leadStatus.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-slate-400">by stage:</span>
+              {rep.leadStatus.map((ls) => (
+                <DrillNumber
+                  key={ls.stageLabel}
+                  request={{ metric: "leads", repId: rep.repId, leadStage: ls.stageLabel, title: `${rep.repName} — ${ls.stageLabel} leads` }}
+                  className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600 ring-1 ring-slate-200"
+                >
+                  {ls.stageLabel}: {int(ls.count)}
+                </DrillNumber>
+              ))}
+            </div>
+          )}
           <CoverageCaption ladder={rep.projection} />
         </div>
       ))}

@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VariantExecHero } from "./variants";
+import { VariantExecHero, VariantB3LoadLane } from "./variants";
 import { DrillProvider } from "./drill";
 import { SHOWCASE_VARIANTS } from "./types";
 import type { MondayShowcaseData, EvidenceRequest, DepartmentMetric } from "./types";
@@ -118,6 +118,55 @@ describe("Monday showcase consolidation", () => {
     // ... and its 8-week sparkline (Sparkline marks its container aria-hidden).
     const sparklines = container.querySelectorAll("[aria-hidden]");
     expect(sparklines.length).toBe(4);
+  });
+});
+
+// Regression guard for the 8->5 consolidation: B1 (Roll-Call Scorecards) provided per-rep STAGE-SPECIFIC
+// lead drills (one pill per lead stage, each opening the evidence for THAT stage via leadStage). B1 was
+// removed; B3 (Rep Load Lane) is its consolidated survivor for lead status. This locks that B3 still exposes
+// the per-stage lead drill — not just an aggregate metric:"leads" — so the capability isn't silently lost.
+describe("Monday showcase per-stage lead drill (B1 -> B3 preservation)", () => {
+  // A rep carrying MULTIPLE lead stages, so an aggregate-only drill would be lossy.
+  const multiStage: MondayShowcaseData = {
+    ...base,
+    reps: [
+      {
+        ...base.reps[0],
+        leadStatus: [
+          { stageLabel: "New", count: 4 },
+          { stageLabel: "Contacted", count: 2 },
+          { stageLabel: "Qualified", count: 1 },
+        ],
+      },
+    ],
+  };
+
+  it("B3 renders a drill affordance for EACH lead stage that passes leadStage scoped to that stage + rep", () => {
+    const open = vi.fn<(r: EvidenceRequest) => void>();
+    act(() => {
+      root.render(
+        <DrillProvider open={open}>
+          <VariantB3LoadLane data={multiStage} />
+        </DrillProvider>
+      );
+    });
+    // Clicking the per-stage "Contacted" affordance must open the stage-specific lead evidence.
+    clickButtonContaining("Contacted");
+    expect(open).toHaveBeenCalledTimes(1);
+    const req = open.mock.calls[0][0];
+    expect(req.metric).toBe("leads");
+    expect(req.repId).toBe("rep-1");
+    expect(req.leadStage).toBe("Contacted");
+    expect(req.title).toMatch(/Contacted/);
+
+    // Every lead stage on the rep must be independently drillable by stage (not just an aggregate total).
+    for (const stage of ["New", "Contacted", "Qualified"]) {
+      open.mockClear();
+      clickButtonContaining(`${stage}:`);
+      const r = open.mock.calls[0][0];
+      expect(r.metric).toBe("leads");
+      expect(r.leadStage).toBe(stage);
+    }
   });
 });
 
