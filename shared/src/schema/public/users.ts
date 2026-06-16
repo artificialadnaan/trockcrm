@@ -36,4 +36,5 @@ export const users = pgTable("users", {
   createdByUserId: uuid("created_by_user_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  tokensValidAfter: timestamp("tokens_valid_after", { withTimezone: true }),
 });
