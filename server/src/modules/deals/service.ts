@@ -37,7 +37,11 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
-import { calculateCommissionForDeal, removeCommissionForDeal } from "../commissions/service.js";
+import {
+  calculateCommissionForDeal,
+  recalculateCommissionForDeal,
+  removeCommissionForDeal,
+} from "../commissions/service.js";
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
@@ -3329,15 +3333,33 @@ export async function setDealContractSignedDate(
       });
     }
 
-    // Commission fires only on null → date. Edits and clears do not
-    // recalculate (per Decision 5; recalc-on-edit is a TODO follow-up).
-    const isInitialSign = oldValue == null && newValue != null;
-    if (isInitialSign) {
-      await calculateCommissionForDeal(tx, {
-        dealId,
-        contractSignedDate: newValue,
-        triggeredByUserId: userId,
-      });
+    // Commission re-fires on every contract-date TRANSITION (recalc-on-edit), all inside this
+    // transaction so the stored commission can never disagree with the stored signed date:
+    //   null → date   : initial sign → calculate
+    //   date → date'  : correction   → recalculate (remove the stale row, recompute from the deal's
+    //                                  CURRENT source value/rate, re-stamp contract_signed_date_at_signing)
+    //   date → null   : clear        → remove (no signed date ⇒ no commission; a lingering row is a
+    //                                  PHANTOM payout — worse than a missing one)
+    // A same-value re-save already short-circuited above UNLESS it reached here only to reconcile a
+    // stale won_closed_date (same contract date) — in that case the date is unchanged, so the stored
+    // commission is already correct and must NOT be churned.
+    const contractDateChanged = oldValue !== newValue;
+    if (contractDateChanged) {
+      if (oldValue == null) {
+        await calculateCommissionForDeal(tx, {
+          dealId,
+          contractSignedDate: newValue as string,
+          triggeredByUserId: userId,
+        });
+      } else if (newValue == null) {
+        await removeCommissionForDeal(tx, dealId, userId);
+      } else {
+        await recalculateCommissionForDeal(tx, {
+          dealId,
+          contractSignedDate: newValue,
+          triggeredByUserId: userId,
+        });
+      }
     }
 
     // The Procore create-project handoff fires on an initial sign, but is suppressed when the deal

@@ -26,6 +26,8 @@ function makeTenantDb(initial: FakeDealRow | null) {
     updateCalls: [] as Array<Record<string, unknown>>,
     commissionInserts: [] as Array<Record<string, unknown>>,
     commissionRows: [] as Array<{ id: string; dealId: string; repUserId: string }>,
+    commissionDeletes: [] as Array<{ id: string; dealId: string; repUserId: string }>,
+    deleteCalls: 0,
     jobInserts: [] as Array<Record<string, unknown>>,
     selectCalls: 0,
     lockedSelects: 0,
@@ -124,6 +126,23 @@ function makeTenantDb(initial: FakeDealRow | null) {
           }
           state.auditInserts.push(value);
           return Promise.resolve();
+        },
+      };
+    },
+    delete() {
+      // removeCommissionForDeal: delete(deal_signed_commissions).where(...).returning({...}). The fake
+      // removes every seeded commission row for the deal (matching the real per-deal delete) and records
+      // the removal so transition routing (clear → remove, edit → recalc) is observable.
+      state.deleteCalls += 1;
+      return {
+        where() {
+          return {
+            returning() {
+              const removed = state.commissionRows.splice(0);
+              state.commissionDeletes.push(...removed);
+              return Promise.resolve(removed.map((r) => ({ id: r.id, amount: "0", repUserId: r.repUserId })));
+            },
+          };
         },
       };
     },
@@ -266,25 +285,40 @@ describe("setDealContractSignedDate", () => {
     expect(tenantDb._state.selectCalls).toBeGreaterThan(1);
   });
 
-  it("hook does NOT fire commission calculation on date → null (clear)", async () => {
+  it("REMOVES the commission row on date → null (clear) — no signed date ⇒ no phantom payout", async () => {
     const tenantDb = makeTenantDb({
       id: "deal-1",
       contractSignedDate: "2026-09-15",
       contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
     });
+    // Seed the existing earned-commission row the prior sign produced.
+    tenantDb._state.commissionRows.push({ id: "commission-1", dealId: "deal-1", repUserId: "rep-1" });
+
     await setDealContractSignedDate(tenantDb as never, "deal-1", null, "admin-1", "office-1");
-    // Only the initial deal-load should have happened. No commission path.
-    expect(tenantDb._state.selectCalls).toBe(1);
+
+    // Clear → removeCommissionForDeal: the stale row is deleted, none remain.
+    expect(tenantDb._state.deleteCalls).toBe(1);
+    expect(tenantDb._state.commissionDeletes).toHaveLength(1);
+    expect(tenantDb._state.commissionRows).toHaveLength(0);
+    expect(tenantDb._state.commissionInserts).toHaveLength(0);
   });
 
-  it("hook does NOT fire commission calculation on date → different date (edit)", async () => {
+  it("RECALCULATES (removes stale row + re-enters calc) on date → different date (edit)", async () => {
     const tenantDb = makeTenantDb({
       id: "deal-1",
       contractSignedDate: "2026-09-15",
       contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
     });
+    tenantDb._state.commissionRows.push({ id: "commission-1", dealId: "deal-1", repUserId: "rep-1" });
+
     await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-12-01", "admin-1", "office-1");
-    expect(tenantDb._state.selectCalls).toBe(1);
+
+    // Edit → recalculateCommissionForDeal: the stale row is removed first, then calculate re-runs
+    // (re-entering the commission select path; it skips here because this minimal fake returns no
+    // rep/settings — the real-types runtime test asserts the recomputed amount).
+    expect(tenantDb._state.deleteCalls).toBe(1);
+    expect(tenantDb._state.commissionDeletes).toHaveLength(1);
+    expect(tenantDb._state.selectCalls).toBeGreaterThan(1);
   });
 
   it("emits deal.contract.signed once on contract_signed_at null → value when flag is on and deal is in Contract", async () => {
