@@ -95,6 +95,28 @@ export function pushToUser(userId: string, event: string, data: unknown): void {
 }
 
 /**
+ * Force-close every SSE stream for a user (best-effort fast-path cleanup on deactivate). NOT the
+ * security boundary — the per-request is_active + tokens_valid_after re-check is. Returns the count
+ * closed. In-memory + per-instance by design (matches the in-process eventBus).
+ */
+export function closeUserSseConnections(userId: string): number {
+  const userConns = connections.get(userId);
+  if (!userConns || userConns.size === 0) return 0;
+  let closed = 0;
+  for (const conn of userConns) {
+    try {
+      writeSse(conn.res, `event: session_invalidated\ndata: {}\n\n`);
+      conn.res.end();
+    } catch {
+      // already dead; counting it as closed is fine
+    }
+    closed++;
+  }
+  connections.delete(userId);
+  return closed;
+}
+
+/**
  * Get the number of active SSE connections (for diagnostics).
  */
 export function getConnectionCount(): number {
