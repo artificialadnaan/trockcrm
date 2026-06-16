@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { cn } from "@/lib/utils";
+import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
 import { usePlatformUsageReport, formatActiveTime, type PlatformUsageRow } from "@/hooks/use-platform-usage-report";
 
 // A rep at or below this many actions for the period is flagged as "gone dark".
@@ -12,6 +13,16 @@ const HEALTHY_ACTIVE_RATIO = 0.5;
 
 // Shared column template — header and rows must stay in lockstep.
 const GRID = "grid grid-cols-[2rem_minmax(0,1fr)_5.5rem_5rem_4.5rem] items-center gap-3";
+
+// Sort columns for the leaderboard. The "rep" key drives the Rep · Actions header (alpha by rep);
+// the telemetry columns sort numerically. viewCount is nullable → blanks sort last.
+const PLATFORM_USAGE_SORT_COLUMNS: ReadonlyArray<SortColumn<PlatformUsageRow>> = [
+  { key: "rep", type: "text", accessor: (r) => r.rep.displayName },
+  { key: "actions", type: "number", accessor: (r) => r.usage.actionCount },
+  { key: "active", type: "number", accessor: (r) => r.usage.activeSeconds },
+  { key: "sessions", type: "number", accessor: (r) => r.usage.sessionCount },
+  { key: "views", type: "number", accessor: (r) => r.usage.viewCount },
+];
 
 // Window labels. These format a CT-resolved business-date STRING (YYYY-MM-DD, already bounded to
 // America/Chicago by the server) — NOT a timestamp. The weekday is read straight off the calendar
@@ -49,11 +60,12 @@ export function PlatformUsagePage() {
   const [anchorDate, setAnchorDate] = useState<string>(() => searchParams.get("date") ?? "");
   const { data, loading, error } = usePlatformUsageReport({ grain, date: anchorDate || undefined });
 
-  // Headline ranking is by Actions desc — the proportion bars make 46-vs-0 read at a glance.
-  const rows = useMemo<PlatformUsageRow[]>(() => {
-    if (!data) return [];
-    return [...data.leaderboard].sort((a, b) => b.usage.actionCount - a.usage.actionCount);
-  }, [data]);
+  // Headline ranking defaults to Actions desc (the proportion bars make 46-vs-0 read at a glance);
+  // every column is now click-sortable via the shared hook, with that default preserved.
+  const leaderboard = data?.leaderboard ?? [];
+  const { sortedRows: rows, toggle, getHeaderProps } = useTableSort(leaderboard, PLATFORM_USAGE_SORT_COLUMNS, {
+    initialSort: { key: "actions", dir: "desc" },
+  });
   const maxActions = useMemo(() => rows.reduce((m, r) => Math.max(m, r.usage.actionCount), 0), [rows]);
 
   // Clicking a rep row opens their detail, carrying the current period (grain/date) AND the active
@@ -164,7 +176,7 @@ export function PlatformUsagePage() {
             <h2 className="text-sm font-semibold text-slate-700">Leaderboard</h2>
             <span className="text-xs text-slate-400">Ranked by actions · {isCurrent ? relWord : win}</span>
           </div>
-          <Leaderboard rows={rows} maxActions={maxActions} detailHref={detailHref} />
+          <Leaderboard rows={rows} maxActions={maxActions} detailHref={detailHref} toggle={toggle} getHeaderProps={getHeaderProps} />
 
           <p className="text-xs leading-relaxed text-slate-400">
             Sessions and Views show <span className="font-medium text-slate-500">—</span> until telemetry is
@@ -232,10 +244,14 @@ function Leaderboard({
   rows,
   maxActions,
   detailHref,
+  toggle,
+  getHeaderProps,
 }: {
   rows: PlatformUsageRow[];
   maxActions: number;
   detailHref: (repId: string) => string;
+  toggle: (key: string) => void;
+  getHeaderProps: (key: string) => { active: boolean; dir: "asc" | "desc" | null };
 }) {
   if (rows.length === 0) {
     return (
@@ -244,6 +260,19 @@ function Leaderboard({
       </div>
     );
   }
+  const headerCell = (key: string, label: string, numeric: boolean) => {
+    const hp = getHeaderProps(key);
+    return (
+      <SortHeaderButton
+        label={label}
+        numeric={numeric}
+        active={hp.active}
+        dir={hp.dir}
+        onClick={() => toggle(key)}
+        className="text-[11px] font-semibold uppercase tracking-wide text-slate-400"
+      />
+    );
+  };
   return (
     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
       <div
@@ -253,10 +282,10 @@ function Leaderboard({
         )}
       >
         <div>#</div>
-        <div>Rep · Actions</div>
-        <div className="text-right">Active</div>
-        <div className="text-right">Sessions</div>
-        <div className="text-right">Views</div>
+        <div>{headerCell("rep", "Rep · Actions", false)}</div>
+        <div className="text-right">{headerCell("active", "Active", true)}</div>
+        <div className="text-right">{headerCell("sessions", "Sessions", true)}</div>
+        <div className="text-right">{headerCell("views", "Views", true)}</div>
       </div>
       <div className="divide-y divide-slate-50">
         {rows.map((r, i) => (
