@@ -3368,6 +3368,18 @@ export async function setDealContractSignedDate(
           triggeredByUserId: userId,
         });
       }
+    } else if (newEffectiveSignedDate != null && oldValue == null && newValue != null) {
+      // The effective date is UNCHANGED, but the contract_signed_date COLUMN was just normalized from null
+      // to its existing contract_signed_at value (an imported/reseeded _at-only row). Such a deal may have
+      // been signed but never calculated (no commission row), and the pre-effective-date logic created it
+      // on this null→date column transition — preserve that: ensure the commission exists.
+      // calculateCommissionForDeal is idempotent (skips when a row already exists), so a never-calculated
+      // import deal finally gets its commission while an already-paid one is untouched.
+      await calculateCommissionForDeal(tx, {
+        dealId,
+        contractSignedDate: newEffectiveSignedDate,
+        triggeredByUserId: userId,
+      });
     }
 
     // The Procore create-project handoff fires on an initial sign, but is suppressed when the deal

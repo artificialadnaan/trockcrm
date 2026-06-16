@@ -343,6 +343,25 @@ describe("setDealContractSignedDate", () => {
     expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
   });
 
+  // Codex P2: NORMALIZING an _at-only row — setting the date COLUMN to MATCH the existing _at date — has
+  // an unchanged effective date, but a signed-but-never-calculated import deal must still get its
+  // commission (the pre-effective-date null→date path created it). calculateCommissionForDeal is
+  // idempotent, so an already-paid deal is untouched.
+  it("NORMALIZING an _at-only row (date column null→its _at date) still runs calculate (idempotent)", async () => {
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      contractSignedDate: null,
+      contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
+    });
+    await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-09-15", "admin-1", "office-1");
+
+    // Effective date unchanged (2026-09-15 == 2026-09-15) but the date column went null→value → calculate
+    // (creates the missing commission for a never-calculated import; skips if one already exists).
+    expect(commissions.calculateCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
+  });
+
   it("emits deal.contract.signed once on contract_signed_at null → value when flag is on and deal is in Contract", async () => {
     process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "true";
     const tenantDb = makeTenantDb({
