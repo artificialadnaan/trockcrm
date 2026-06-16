@@ -97,10 +97,16 @@ describe("commission recalc-on-edit (real Drizzle-derived schema)", () => {
     expect(Number(rows[0].amount)).toBe(4000); // 200000 × 0.02 — recomputed from CURRENT source value
     expect(rows[0].contract_signed_date_at_signing).toBe("2026-02-01"); // re-stamped to the new date
 
-    // CodeRabbit follow-up: the audit `from` captures the actual PREVIOUS signed date (2026-01-01 from the
-    // initial calc), not a hardcoded null.
+    // CodeRabbit follow-ups: the recompute audit captures the actual PREVIOUS signed date (2026-01-01
+    // from the initial calc, not a hardcoded null), and tracks sourceValueKind (parity with the insert
+    // audit) so a kind transition would be auditable.
     const audit = (
-      await pg.query<{ changes: { contractSignedDateAtSigning?: { from: unknown; to: unknown } } }>(
+      await pg.query<{
+        changes: {
+          contractSignedDateAtSigning?: { from: unknown; to: unknown };
+          sourceValueKind?: { from: unknown; to: unknown };
+        };
+      }>(
         `SELECT changes FROM public.audit_log
          WHERE table_name = 'deal_signed_commissions' AND action = 'update'
          ORDER BY created_at DESC LIMIT 1`,
@@ -108,6 +114,7 @@ describe("commission recalc-on-edit (real Drizzle-derived schema)", () => {
     ).rows[0];
     expect(String(audit.changes.contractSignedDateAtSigning?.from)).toContain("2026-01-01");
     expect(String(audit.changes.contractSignedDateAtSigning?.to)).toContain("2026-02-01");
+    expect(audit.changes.sourceValueKind).toEqual({ from: "awarded_amount", to: "awarded_amount" });
   });
 
   it("recalc is idempotent — running it again leaves exactly one identical row", async () => {

@@ -243,6 +243,7 @@ export async function recalculateCommissionForDeal(
       id: dealSignedCommissions.id,
       repUserId: dealSignedCommissions.repUserId,
       amount: dealSignedCommissions.amount,
+      sourceValueKind: dealSignedCommissions.sourceValueKind,
       sourceValueAmount: dealSignedCommissions.sourceValueAmount,
       appliedRate: dealSignedCommissions.appliedRate,
       contractSignedDateAtSigning: dealSignedCommissions.contractSignedDateAtSigning,
@@ -305,6 +306,7 @@ export async function recalculateCommissionForDeal(
       changedBy: input.triggeredByUserId,
       changes: {
         amount: { from: row.amount, to: amount },
+        sourceValueKind: { from: row.sourceValueKind, to: sourceValue.kind },
         sourceValueAmount: { from: row.sourceValueAmount, to: sourceValue.amount },
         appliedRate: { from: row.appliedRate, to: appliedRate },
         contractSignedDateAtSigning: { from: row.contractSignedDateAtSigning, to: input.contractSignedDate },
