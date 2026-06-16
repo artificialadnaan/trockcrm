@@ -3340,15 +3340,19 @@ export async function setDealContractSignedDate(
     //                                  CURRENT source value/rate, re-stamp contract_signed_date_at_signing)
     //   date → null   : clear        → remove (no signed date ⇒ no commission; a lingering row is a
     //                                  PHANTOM payout — worse than a missing one)
-    // The transition is keyed on the EFFECTIVE signed date — contract_signed_date with a
-    // contract_signed_at::date fallback. The reseed/import path can populate contract_signed_at WITHOUT
-    // contract_signed_date, and the app treats _at as an equal signed-date source; keying off
-    // contract_signed_date alone would (a) miss the clear on an _at-only row (commission left orphaned)
-    // and (b) misroute a correction on an _at-only row as an initial calc that skips the existing row.
+    // The transition is keyed on the EFFECTIVE signed date — contract_signed_at::date FIRST, then
+    // contract_signed_date (canonical precedence, below). The reseed/import path can populate
+    // contract_signed_at WITHOUT contract_signed_date, and the app treats _at as the canonical signed-date
+    // source; keying off contract_signed_date alone would (a) miss the clear on an _at-only row (commission
+    // left orphaned) and (b) misroute a correction on an _at-only row as an initial calc that skips the row.
     // A same-value re-save already short-circuited above UNLESS it reached here only to reconcile a stale
     // won_closed_date (same effective date) — then the date is unchanged, so commission must NOT be churned.
-    const oldEffectiveSignedDate = oldValue ?? dateStringFromTimestamp(oldContractSignedAt);
-    const newEffectiveSignedDate = newValue ?? dateStringFromTimestamp(newContractSignedAt);
+    // CANONICAL precedence: contract_signed_at::date FIRST, then contract_signed_date — matching this
+    // service's read/reporting paths (contractSignedDateForReporting = COALESCE(contract_signed_at::date,
+    // contract_signed_date)). So on a row where the two diverge, normalizing contract_signed_date to the
+    // existing _at value leaves the canonical effective date unchanged and does NOT churn the commission.
+    const oldEffectiveSignedDate = dateStringFromTimestamp(oldContractSignedAt) ?? oldValue;
+    const newEffectiveSignedDate = dateStringFromTimestamp(newContractSignedAt) ?? newValue;
     if (oldEffectiveSignedDate !== newEffectiveSignedDate) {
       if (oldEffectiveSignedDate == null) {
         // null → signed: initial commission calc.

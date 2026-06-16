@@ -362,6 +362,24 @@ describe("setDealContractSignedDate", () => {
     expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
   });
 
+  // Codex follow-up: canonical precedence is _at-first. On a row where contract_signed_date and
+  // contract_signed_at DIVERGE, normalizing the date column to the existing _at value leaves the canonical
+  // effective date unchanged → the commission must NOT be churned (no recalc that could change amount/rate).
+  it("normalizing a DIVERGENT date column to the existing _at value does NOT churn commission (_at-first)", async () => {
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      contractSignedDate: "2026-03-01", // date column disagrees with _at
+      contractSignedAt: new Date("2026-01-15T00:00:00.000Z"), // canonical signed date = 2026-01-15
+    });
+    // Admin sets the date column to match the canonical _at date.
+    await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-01-15", "admin-1", "office-1");
+
+    // Canonical effective date (2026-01-15) is unchanged → no commission helper fires.
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
+  });
+
   it("emits deal.contract.signed once on contract_signed_at null → value when flag is on and deal is in Contract", async () => {
     process.env.ENABLE_CONTRACT_SIGNED_HANDOFF = "true";
     const tenantDb = makeTenantDb({
