@@ -272,7 +272,11 @@ describe("useNotificationStream", () => {
 
 describe("useNotificationStream session invalidation", () => {
   beforeEach(() => {
-    // The static registry persists across tests; reset so each test sees only its own connection.
+    // Reset the shared hoisted mocks (not just the static registry) so this test isn't order-coupled
+    // to prior tests' apiMock implementations. Bootstrap unread-count resolves cleanly.
+    apiMock.mockReset();
+    resolveApiBaseMock.mockClear();
+    apiMock.mockResolvedValue({ count: 0 });
     FakeEventSource.instances.length = 0;
   });
 
