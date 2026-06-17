@@ -3464,7 +3464,11 @@ export async function setDealEstimator(
     const [existing] = await tx
       .select()
       .from(deals)
-      .where(eq(deals.id, dealId))
+      // FINDING 2 (Codex): require is_active=true. Without it, a soft-deleted (is_active=false) deal id
+      // supplied directly to PATCH /deals/:id/estimator would let an admin mutate a deal the detail/edit
+      // flows hide. Filtering here makes a soft-deleted deal return null so the route 404s BEFORE any
+      // estimator change — mirrors getDealById's default-active behavior. The FOR UPDATE lock is kept.
+      .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
       .limit(1)
       .for("update");
     if (!existing) return null;
@@ -3476,6 +3480,21 @@ export async function setDealEstimator(
         409,
         "A change order's estimator is inherited from the parent deal, not editable here.",
         "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
+
+    // P1: a Bid-Board-owned deal sources its estimator from the Procore/Bid Board mirror. The next sync
+    // (buildBidBoardMirrorFieldChanges) overwrites estimator_user_id DIRECTLY with NO commission
+    // re-attribution, so a manual pick here would mint/strip a deal_signed_commissions row and then be
+    // silently reverted — leaving the dsc row attributed to the manually-picked estimator while the deal
+    // points at the Bid Board one. Block the manual edit at the authoritative layer (a direct API call,
+    // not just the UI). is_bid_board_owned is the canonical ownership column the mirror itself stamps
+    // (bid-board-sync sets it true on every mirrored deal); BB deals get their estimator from the sync.
+    if (existing.isBidBoardOwned === true) {
+      throw new AppError(
+        409,
+        "Estimator on a Bid Board-owned deal is managed by the Bid Board sync and can't be edited here.",
+        "BID_BOARD_OWNED_ESTIMATOR_LOCKED"
       );
     }
 
@@ -3491,11 +3510,27 @@ export async function setDealEstimator(
 
     // A NEW estimator is validated exactly like a reassignment assignee (exists, active, same office).
     if (newEstimator != null) {
+      // FINDING 1 (Codex): validate the new estimator against the ACTIVE SELECTED office (x-office-id, which
+      // the route threads in as officeId), NOT the deal's cosmetic project-number PREFIX and NOT the current
+      // owner's office. Inside the shared validateDealReassignmentAssignee, two inputs can override the
+      // active-office fallback:
+      //   1. dealOfficeCode (the prefix): a NON-null value TAKES PRECEDENCE over the passed office, so passing
+      //      existing.officeCode would wrongly reject a valid SAME-TENANT estimator with
+      //      DEAL_REASSIGNMENT_OFFICE_MISMATCH — pass null so the prefix can't take precedence.
+      //   2. currentAssignedRepId (the owner): a non-null value OVERRIDES the active-office fallback with the
+      //      CURRENT OWNER's office (else-branch: `if (currentAssignedRepId) dealOfficeId = currentOwner.officeId`),
+      //      which would validate the estimator against the owner's office instead of the active selected office.
+      // Pass NO current owner (null) so the active office isn't overridden, and pass the active officeId as the
+      // fallback. This validates the estimator against the ACTIVE office, matching WHITE #748's honor-the-active-
+      // office pattern.
+      // NOTE: WHITE's PR #748 owns validateDealReassignmentAssignee (a SEPARATE multi-office
+      // user_office_access bug) — do NOT edit that shared function; this is a CALL-SITE-only fix that keeps
+      // validating against the active selected office and stays correct after #748 merges.
       await validateDealReassignmentAssignee(
         tx,
         newEstimator,
-        existing.officeCode,
-        owner,
+        null,
+        null,
         officeId ?? undefined
       );
     }

@@ -68,6 +68,7 @@ import {
   useDealDetail,
   deleteDeal as apiDeleteDeal,
   updateDeal as apiUpdateDeal,
+  updateDealEstimator as apiUpdateDealEstimator,
   type DealDetail,
 } from "@/hooks/use-deals";
 import { useLeadDetail } from "@/hooks/use-leads";
@@ -1062,6 +1063,56 @@ function DealRightRail({
       setReassigning(false);
     }
   }
+
+  // Estimator editing is leadership-only (matches the dedicated PATCH /deals/:id/estimator RBAC).
+  // The picker reuses the already-loaded sales-rep list (that endpoint returns all active CRM users
+  // incl. estimators); when editing is allowed (admin/director) salesReps is guaranteed loaded
+  // because canReassignDeal is a superset of canEditEstimator.
+  const canEditEstimator = currentUser?.role === "admin" || currentUser?.role === "director";
+  // P1: the estimator is READ-ONLY on a Bid Board-owned deal. The server is authoritative — it 409s
+  // (BID_BOARD_OWNED_ESTIMATOR_LOCKED) because the next Bid Board mirror overwrites estimator_user_id
+  // directly with no commission re-attribution, so a manual pick here would desync the dsc row. Mirror the
+  // page's ownership notion (the is_bid_board_owned column OR inferred ownership) used to hide every other
+  // edit control, so the estimator picker is hidden on the SAME deals and never renders an editable control
+  // the sync would clobber. Client is at worst slightly more conservative than the column-only server gate.
+  const estimatorBidBoardOwned = Boolean(deal.isBidBoardOwned || deal.bidBoardOwnership?.isOwned);
+  const [savingEstimator, setSavingEstimator] = useState(false);
+  const [estimatorError, setEstimatorError] = useState<string | null>(null);
+  const estimatorName = formatNullable(deal.estimatorUserName ?? deal.estimatorUserId);
+  const estimatorOptions = [...salesReps];
+  if (deal.estimatorUserId && !estimatorOptions.some((rep) => rep.id === deal.estimatorUserId)) {
+    estimatorOptions.unshift({
+      id: deal.estimatorUserId,
+      displayName: deal.estimatorUserName ?? "Current estimator",
+    });
+  }
+
+  async function handleEstimatorChange(nextIdRaw: string) {
+    const nextId = nextIdRaw || null;
+    if (nextId === (deal.estimatorUserId ?? null) || savingEstimator) return;
+    setSavingEstimator(true);
+    setEstimatorError(null);
+    try {
+      // Mirror the deal record load (useDealDetail above passes the same `officeId`): a cross-office
+      // estimator edit must target the office the deal was read from, not the viewer's active office.
+      await apiUpdateDealEstimator(deal.id, nextId, { officeId });
+      toast.success(nextId ? "Estimator updated" : "Estimator cleared");
+      // FINDING 3 (Codex): the post-save refetch is isolated in its OWN try/catch (mirrors handleHoldToggle)
+      // so a refetch failure can NEVER surface as a save error — the estimator PATCH already succeeded. The
+      // outer catch reflects ONLY the PATCH result; a failed refetch just soft-warns the user to reload.
+      try {
+        await onReassigned();
+      } catch {
+        toast.info("Estimator updated. Refresh the page to see the latest detail state.");
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to update estimator";
+      setEstimatorError(message);
+      toast.error(message);
+    } finally {
+      setSavingEstimator(false);
+    }
+  }
   const headerDisplayNumber = formatDealDisplayNumber(deal);
   const dealWithOptionalContact = deal as DealDetail & {
     primaryContactName?: string | null;
@@ -1123,6 +1174,62 @@ function DealRightRail({
                   </div>
                 ) : null}
               </div>
+            }
+          />
+          <DetailRailItem
+            label="Estimator"
+            value={
+              // FINDING 2 (Codex): a change order's estimator is INHERITED from the parent deal and the server
+              // 409s (CHANGE_ORDER_FIELD_LOCKED) on any edit, so never render an editable picker on a CO —
+              // show the resolved estimator read-only with an inherited note. The editable picker stays gated
+              // on (canEditEstimator && !deal.isChangeOrder) via this short-circuit.
+              deal.isChangeOrder ? (
+                <div className="space-y-1">
+                  <span>{estimatorName}</span>
+                  <p className="text-xs italic text-slate-500">
+                    Inherited from the parent deal.
+                  </p>
+                </div>
+              ) : estimatorBidBoardOwned ? (
+                // P1: a Bid Board-owned deal's estimator comes from the Procore/Bid Board mirror and the
+                // server 409s (BID_BOARD_OWNED_ESTIMATOR_LOCKED) on any edit, so show it READ-ONLY with a
+                // managed-by-sync note instead of an editable picker — even for a director.
+                <div className="space-y-1">
+                  <span>{estimatorName}</span>
+                  <p className="text-xs italic text-slate-500">
+                    Managed by the Bid Board sync.
+                  </p>
+                </div>
+              ) : canEditEstimator ? (
+                <div className="space-y-1">
+                  <select
+                    aria-label="Edit estimator"
+                    className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900"
+                    disabled={salesRepsLoading || savingEstimator}
+                    value={deal.estimatorUserId ?? ""}
+                    onChange={(event) => {
+                      void handleEstimatorChange(event.currentTarget.value);
+                    }}
+                  >
+                    <option value="">— None —</option>
+                    {estimatorOptions.map((rep) => (
+                      <option key={rep.id} value={rep.id}>
+                        {rep.displayName}
+                      </option>
+                    ))}
+                  </select>
+                  {estimatorError ? (
+                    <p className="text-xs font-medium text-red-600">{estimatorError}</p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <span>{estimatorName}</span>
+                  <p className="text-xs italic text-slate-500">
+                    Only admins and directors can edit the estimator.
+                  </p>
+                </div>
+              )
             }
           />
         </DetailRailSection>
