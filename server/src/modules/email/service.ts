@@ -1189,6 +1189,7 @@ export async function sendEmail(
     .onConflictDoNothing()
     .returning();
 
+  let adopted = false;
   if (!emailRecord) {
     // Lost the race — the worker already stored the Sent-folder copy. Adopt it (key on the stable
     // internet_message_id when we have it; otherwise on the graph message id).
@@ -1206,9 +1207,27 @@ export async function sendEmail(
       )
       .limit(1);
     emailRecord = existing;
+    adopted = true;
   }
   if (!emailRecord) {
     throw new AppError(500, "Failed to persist the sent email record.");
+  }
+
+  if (adopted) {
+    // The worker stored this Sent copy with a CONTACT-DERIVED/ambiguous assignment (recipient match), but
+    // the sender chose an EXPLICIT association here — that one wins. Overwrite the assignment fields and
+    // mark assigned. (The worker also already created the activity + refreshed stats, so those side
+    // effects are skipped below for the adopted case to avoid duplicates.)
+    const [reconciled] = await tenantDb
+      .update(emails)
+      .set({
+        contactId: outboundAssociation.links.contactId,
+        ...outboundAssignment,
+        assignmentStatus: "assigned",
+      })
+      .where(eq(emails.id, emailRecord.id))
+      .returning();
+    emailRecord = reconciled ?? emailRecord;
   }
 
   if (outboundAssociation.links.dealId) {
@@ -1231,25 +1250,29 @@ export async function sendEmail(
     emailRecord.threadBindingId = binding.id;
   }
 
-  // Create activity record for the unified feed
-  await tenantDb.insert(activities).values({
-    type: "email",
-    responsibleUserId: userId,
-    performedByUserId: userId,
-    sourceEntityType: outboundAssociation.links.sourceEntityType,
-    sourceEntityId: outboundAssociation.links.sourceEntityId,
-    companyId: outboundAssociation.links.companyId,
-    propertyId: outboundAssociation.links.propertyId,
-    leadId: outboundAssociation.links.leadId,
-    dealId: outboundAssociation.links.dealId,
-    contactId: outboundAssociation.links.contactId,
-    emailId: emailRecord.id,
-    subject: input.subject,
-    body: stripHtml(input.bodyHtml).substring(0, 1000),
-    occurredAt: new Date(),
-  });
+  // Create activity record for the unified feed — but ONLY when this call actually inserted the email.
+  // For an adopted row the worker already wrote the activity + refreshed stats; repeating them here would
+  // double-create the activity and redundantly re-stat.
+  if (!adopted) {
+    await tenantDb.insert(activities).values({
+      type: "email",
+      responsibleUserId: userId,
+      performedByUserId: userId,
+      sourceEntityType: outboundAssociation.links.sourceEntityType,
+      sourceEntityId: outboundAssociation.links.sourceEntityId,
+      companyId: outboundAssociation.links.companyId,
+      propertyId: outboundAssociation.links.propertyId,
+      leadId: outboundAssociation.links.leadId,
+      dealId: outboundAssociation.links.dealId,
+      contactId: outboundAssociation.links.contactId,
+      emailId: emailRecord.id,
+      subject: input.subject,
+      body: stripHtml(input.bodyHtml).substring(0, 1000),
+      occurredAt: new Date(),
+    });
 
-  await refreshEmailStatsForEmailRecord(tenantDb, emailRecord);
+    await refreshEmailStatsForEmailRecord(tenantDb, emailRecord);
+  }
 
   return emailRecord;
 }

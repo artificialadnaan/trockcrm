@@ -100,7 +100,10 @@ async function setupSchema(pg: PGlite) {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       deal_number text, name text, company_id uuid, stage_id uuid,
       property_address text, property_city text, property_state text, property_zip text,
-      is_active boolean DEFAULT true
+      is_active boolean DEFAULT true,
+      source_lead_id uuid,
+      email_count int DEFAULT 0,
+      last_email_at timestamptz
     );
     CREATE TABLE ${SCHEMA}.contact_deal_associations (contact_id uuid, deal_id uuid);
     CREATE TABLE ${SCHEMA}.email_thread_bindings (
@@ -312,13 +315,68 @@ describe("Sent-folder selective store + recipient match", () => {
     );
 
     expect(stored).toBe(true);
-    const row = await db.query<{ direction: string; from_address: string; contact_id: string; deal_id: string }>(
-      `SELECT direction, from_address, contact_id, deal_id FROM ${SCHEMA}.emails WHERE graph_message_id = 'graph-sent-1'`
+    const row = await db.query<{
+      direction: string; from_address: string; contact_id: string; deal_id: string; assignment_status: string;
+    }>(
+      `SELECT direction, from_address, contact_id, deal_id, assignment_status
+         FROM ${SCHEMA}.emails WHERE graph_message_id = 'graph-sent-1'`
     );
     expect(row.rows[0].direction).toBe("outbound");
     expect(row.rows[0].from_address).toBe("rep@trockgc.com"); // sender stored as the rep
     expect(row.rows[0].contact_id).toBe(CONTACT); // matched on the recipient
     expect(row.rows[0].deal_id).toBe(DEAL);
+    // F1: auto-assigned sent email reflects status=assigned (not the default 'unassigned').
+    expect(row.rows[0].assignment_status).toBe("assigned");
+
+    // F2: the outbound activity records the rep as the performer → deal shows in their "mine".
+    const act = await db.query<{ performed_by_user_id: string }>(
+      `SELECT performed_by_user_id FROM ${SCHEMA}.activities WHERE deal_id = '${DEAL}' LIMIT 1`
+    );
+    expect(act.rows[0].performed_by_user_id).toBe(USER_ID);
+
+    // F3: the auto-associated deal's email counters are refreshed (not stale).
+    const deal = await db.query<{ email_count: number; last_email_at: string | null }>(
+      `SELECT email_count, last_email_at FROM ${SCHEMA}.deals WHERE id = '${DEAL}'`
+    );
+    expect(deal.rows[0].email_count).toBe(1);
+    expect(deal.rows[0].last_email_at).not.toBeNull();
+  });
+});
+
+describe("Sent-folder legacy adoption — tightened matching (no mis-adoption)", () => {
+  it("does NOT adopt an OLD CRM row that only shares conversation+subject (different time/recipients)", async () => {
+    // An OLD pre-feature CRM send: NULL imid, conv-shared, but sent 10 days ago to a DIFFERENT client.
+    await db.query(
+      `INSERT INTO ${SCHEMA}.emails
+         (graph_message_id, internet_message_id, graph_conversation_id, direction, from_address, to_addresses, subject, user_id, sent_at)
+       VALUES ('graph-old-crm', NULL, 'conv-shared', 'outbound', 'rep@trockgc.com', ARRAY['old-client@acme.com'],
+               'Re: Project', '${USER_ID}', now() - interval '10 days')`
+    );
+    // Also seed a contact so the NEW message is selective-stored.
+    await db.query(
+      `INSERT INTO ${SCHEMA}.contacts (id, email, is_active) VALUES ('00000000-0000-4000-8000-0000000000ca', 'new-client@beta.com', true)`
+    );
+
+    // A NEW Outlook message: same conversation+subject, but now, to a different recipient.
+    const stored = await processMailMessage(
+      db, SCHEMA, USER_ID, OFFICE_ID,
+      { id: "graph-new", internetMessageId: "<new-M@trock>", conversationId: "conv-shared",
+        from: { emailAddress: { address: "rep@trockgc.com" } },
+        toRecipients: [{ emailAddress: { address: "new-client@beta.com" } }], subject: "Re: Project",
+        body: { content: "x" }, sentDateTime: new Date().toISOString() },
+      "outbound"
+    );
+
+    expect(stored).toBe(true); // stored as its OWN row, NOT adopted onto the old one
+    // The old CRM row's imid stays NULL (not hijacked); the new message keeps its own Message-ID.
+    const old = await db.query<{ internet_message_id: string | null }>(
+      `SELECT internet_message_id FROM ${SCHEMA}.emails WHERE graph_message_id = 'graph-old-crm'`
+    );
+    expect(old.rows[0].internet_message_id).toBeNull();
+    const fresh = await db.query<{ internet_message_id: string }>(
+      `SELECT internet_message_id FROM ${SCHEMA}.emails WHERE graph_message_id = 'graph-new'`
+    );
+    expect(fresh.rows[0].internet_message_id).toBe("<new-M@trock>");
   });
 });
 

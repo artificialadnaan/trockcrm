@@ -595,12 +595,20 @@ export async function processMailMessage(
   // message's Message-ID onto it and skip the insert. Self-limiting — once every pre-feature send is
   // adopted, no NULL-imid outbound rows remain and this never fires again.
   if (isOutbound && internetMessageId && conversationId) {
+    // Match conversation + subject + RECIPIENTS + a tight send-time window. The recipients and the ±1-day
+    // window stop a NEW Outlook message from stamping its Message-ID onto an OLD CRM row that merely shares
+    // a conversation+subject (which would drop the real Sent item and break later dedup). A genuine
+    // CRM-composed row and its Sent-folder copy ARE the same message — same recipients, same send time —
+    // so the real adoption still matches.
     const legacy = await client.query(
       `SELECT id FROM ${schemaName}.emails
         WHERE user_id = $1 AND direction = 'outbound' AND internet_message_id IS NULL
           AND graph_conversation_id = $2 AND subject = $3
+          -- case-insensitive recipient overlap (worker lowercases to/cc; sendEmail stores as-composed)
+          AND EXISTS (SELECT 1 FROM unnest(to_addresses) addr WHERE lower(addr) = ANY($4::text[]))
+          AND sent_at BETWEEN ($5::timestamptz - interval '1 day') AND ($5::timestamptz + interval '1 day')
         ORDER BY sent_at DESC LIMIT 1`,
-      [userId, conversationId, subject]
+      [userId, conversationId, subject, toAddresses, sentAt]
     );
     if (legacy.rows.length > 0) {
       await client.query(
@@ -672,13 +680,20 @@ export async function processMailMessage(
       : null;
   const bindingId = promotedBinding?.id ?? activeThreadBinding?.id ?? provisionalThreadBinding?.id ?? null;
 
+  // Persist assignment_status from the RESOLVED assignment rather than letting it default to 'unassigned'.
+  // The reused insert would otherwise leave an auto-assigned email (deal/entity resolved) looking
+  // unassigned in status views — undercutting the auto-assign the sync just did. (deriveAssignmentStatus
+  // parity: assigned when a deal or entity is attached.)
+  const assignmentStatus =
+    assignment.assignedDealId || assignment.assignedEntityId ? "assigned" : "unassigned";
+
   const [insertResult] = [await client.query(
     `INSERT INTO ${schemaName}.emails
      (graph_message_id, internet_message_id, graph_conversation_id, direction, from_address, to_addresses, cc_addresses,
       subject, body_preview, body_html, has_attachments, contact_id, deal_id,
       assigned_entity_type, assigned_entity_id, assignment_confidence, assignment_ambiguity_reason,
-      thread_binding_id, user_id, sent_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+      thread_binding_id, user_id, sent_at, assignment_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
      ON CONFLICT DO NOTHING
      RETURNING id`,
     [
@@ -702,6 +717,7 @@ export async function processMailMessage(
       bindingId,
       userId,
       sentAt,
+      assignmentStatus,
     ]
   )];
 
@@ -732,14 +748,19 @@ export async function processMailMessage(
       ?? contactMatch?.id
       ?? null;
   const responsibleUserId = userId;
+  // Outbound = the rep performed the send → set performed_by_user_id so the deal shows in their "mine"
+  // (mine-visibility filters on performed_by_user_id = userId, like CRM sendEmail). Inbound was received,
+  // not performed, so it stays NULL.
+  const performedByUserId = isOutbound ? userId : null;
   if (activitySourceEntityType && activitySourceEntityId) {
     await client.query(
       `INSERT INTO ${schemaName}.activities
        (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
         deal_id, contact_id, email_id, subject, body, occurred_at)
-       VALUES ('email', $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         responsibleUserId,
+        performedByUserId,
         activitySourceEntityType,
         activitySourceEntityId,
         association.dealId, // may be null if 0 or multiple deals
@@ -750,6 +771,15 @@ export async function processMailMessage(
         sentAt,
       ]
     );
+  }
+
+  // Refresh the auto-associated deal's email counters (email_count / last_email_at) so they're not stale —
+  // the CRM sendEmail + manual-association paths do this; the sync must too. Mirrors the deal branch of
+  // server stats-service.refreshEntityEmailStats, qualified to the office schema (the worker runs outside a
+  // search_path). Deal is the stat target a sent/received email auto-associates to; company/lead cascades
+  // stay with the server's full refresh on the CRM paths.
+  if (association.dealId) {
+    await refreshDealEmailStatsRaw(client, schemaName, association.dealId);
   }
 
   // createClassificationTaskRaw hardcodes an INBOUND-flavored task (type='inbound_email',
@@ -826,6 +856,38 @@ export async function processMailMessage(
   );
 
   return true;
+}
+
+/**
+ * Refresh a deal's email_count / last_email_at after an email is stored against it (worker context).
+ * Qualified to the office schema; mirrors the deal branch of server stats-service.refreshEntityEmailStats
+ * (same `assignment_status <> 'ignored'` filter and deal/lead source-lead matching) so the worker-synced
+ * counters agree with the CRM-composed and manual-association paths.
+ */
+async function refreshDealEmailStatsRaw(
+  client: any,
+  schemaName: string,
+  dealId: string
+): Promise<void> {
+  await client.query(
+    `UPDATE ${schemaName}.deals AS d
+        SET email_count = (
+              SELECT COUNT(e.id)::int FROM ${schemaName}.emails e
+               WHERE e.assignment_status <> 'ignored'
+                 AND ((e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
+                   OR e.deal_id = d.id
+                   OR (d.source_lead_id IS NOT NULL AND e.assigned_entity_type = 'lead' AND e.assigned_entity_id = d.source_lead_id))
+            ),
+            last_email_at = (
+              SELECT MAX(e.sent_at) FROM ${schemaName}.emails e
+               WHERE e.assignment_status <> 'ignored'
+                 AND ((e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
+                   OR e.deal_id = d.id
+                   OR (d.source_lead_id IS NOT NULL AND e.assigned_entity_type = 'lead' AND e.assigned_entity_id = d.source_lead_id))
+            )
+      WHERE d.id = $1`,
+    [dealId]
+  );
 }
 
 /**

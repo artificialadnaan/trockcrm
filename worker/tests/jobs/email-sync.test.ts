@@ -126,6 +126,11 @@ function createQueryMock(options: {
       return { rows: [] };
     }
 
+    // Deal email-stat refresh (email_count / last_email_at) after an email is associated to a deal.
+    if (sql.includes("UPDATE office_beta.deals") && sql.includes("email_count")) {
+      return { rows: [] };
+    }
+
     if (sql.startsWith("INSERT INTO office_beta.activities")) {
       return { rows: [] };
     }
