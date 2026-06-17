@@ -3518,9 +3518,26 @@ export async function setDealEstimator(
       },
     });
 
-    // Re-attribute the additive estimator commission. A departing estimator distinct from the owner has
-    // their scoped row removed; an arriving estimator is minted (rateless ⇒ nothing minted ⇒ net $0).
-    if (oldEstimator != null && oldEstimator !== owner) {
+    // A change order's estimator is INHERITED from its parent (it is base-deal-only for commission), so
+    // propagate the new estimator to every ACTIVE change-order child in the same transaction. This is
+    // MONEY-NEUTRAL: CO children never mint or remove an estimator commission row (only the base deal
+    // does) — we only keep the inherited estimator_user_id in sync for display/attribution.
+    await tx
+      .update(deals)
+      .set({ estimatorUserId: newEstimator, updatedAt: now })
+      .where(
+        and(
+          eq(deals.parentDealId, dealId),
+          eq(deals.isChangeOrder, true),
+          eq(deals.isActive, true)
+        )
+      );
+
+    // Re-attribute the additive estimator commission on the BASE deal. A departing estimator has their
+    // scoped, role-filtered row removed (removeEstimatorCommissionForDeal can NEVER touch the owner row —
+    // it deletes only attribution_role='estimator'), so it is safe to call whenever the estimator changes
+    // away; the oldEstimator===newEstimator no-op short-circuit above already excludes the unchanged case.
+    if (oldEstimator != null) {
       await removeEstimatorCommissionForDeal(tx, {
         dealId,
         estimatorUserId: oldEstimator,

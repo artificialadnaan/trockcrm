@@ -12,6 +12,7 @@
 // (removeEstimatorCommissionForDeal — a (deal_id, rep_user_id) delete), NEVER removeCommissionForDeal
 // (which deletes ALL rows incl. the owner). Proven below by owner-row survival on every estimator edit.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import {
@@ -52,11 +53,12 @@ async function dscRows(dealId: string) {
     applied_rate: string;
     source_value_amount: string;
     source_value_kind: string;
+    attribution_role: string;
     contract_signed_date_at_signing: string;
     id: string;
     calculated_at: string;
   }>(
-    `SELECT id, rep_user_id, amount, applied_rate, source_value_amount, source_value_kind,
+    `SELECT id, rep_user_id, amount, applied_rate, source_value_amount, source_value_kind, attribution_role,
             contract_signed_date_at_signing::text AS contract_signed_date_at_signing,
             calculated_at::text AS calculated_at
      FROM public.deal_signed_commissions WHERE deal_id = '${dealId}' ORDER BY amount DESC`,
@@ -94,6 +96,11 @@ beforeAll(async () => {
       users,
       offices,
     ]),
+  );
+  // tenantSchemaSql intentionally omits indexes/constraints, but the tx-safe insert now relies on the
+  // (deal_id, rep_user_id) UNIQUE for ON CONFLICT DO NOTHING — recreate it so the conflict path is exercised.
+  await pg.exec(
+    `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`,
   );
   tdb = drizzle(pg);
 
@@ -139,8 +146,10 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     const est = rowFor(rows, ESTA)!;
     expect(Number(owner.amount)).toBe(2000); // 100000 × 0.02 (owner full cut)
     expect(Number(owner.applied_rate)).toBe(0.02);
+    expect(owner.attribution_role).toBe("owner"); // role stamped so the estimator delete can never hit it
     expect(Number(est.amount)).toBe(5000); // 100000 × 0.05 (estimator's OWN rate — additive)
     expect(Number(est.applied_rate)).toBe(0.05);
+    expect(est.attribution_role).toBe("estimator");
     // Same source value drives both rows.
     expect(owner.source_value_kind).toBe("awarded_amount");
     expect(est.source_value_kind).toBe("awarded_amount");
@@ -231,12 +240,16 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     const estaBefore = rowFor(await dscRows(D), ESTA)!;
     expect(Number(estaBefore.amount)).toBe(5000);
 
-    // ESTA's rate is later deactivated.
-    await pg.exec(`UPDATE public.user_commission_settings SET is_active=false WHERE user_id='${ESTA}'`);
-    // Re-assign the SAME estimator → no-op short-circuit → no remove, no mint.
-    await setDealEstimator(tdb, D, ESTA, OWNER);
-    // Restore for later tests.
-    await pg.exec(`UPDATE public.user_commission_settings SET is_active=true WHERE user_id='${ESTA}'`);
+    // ESTA's rate is later deactivated. try/finally so the restore ALWAYS runs even if the assertion or
+    // setDealEstimator throws — otherwise ESTA's rate would stay inactive and poison later tests.
+    try {
+      await pg.exec(`UPDATE public.user_commission_settings SET is_active=false WHERE user_id='${ESTA}'`);
+      // Re-assign the SAME estimator → no-op short-circuit → no remove, no mint.
+      await setDealEstimator(tdb, D, ESTA, OWNER);
+    } finally {
+      // Restore for later tests.
+      await pg.exec(`UPDATE public.user_commission_settings SET is_active=true WHERE user_id='${ESTA}'`);
+    }
 
     const rows = await dscRows(D);
     expect(rows).toHaveLength(2);
@@ -256,13 +269,16 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     expect(rows).toHaveLength(1);
     expect(rowFor(rows, OWNER)).toEqual(ownerBefore);
 
-    // Clear it → oldEstimator===owner so the scoped remove is hard-guarded (would otherwise delete the owner row).
+    // Clear it → removeEstimatorCommissionForDeal IS now called (estimator was owner), but its DELETE is
+    // role-scoped to attribution_role='estimator', so the owner's role='owner' row is never matched: 0
+    // deleted, owner row survives.
     await setDealEstimator(tdb, D, null, OWNER);
     rows = await dscRows(D);
     expect(rows).toHaveLength(1);
     expect(rowFor(rows, OWNER)).toEqual(ownerBefore);
 
-    // Direct hard-guard proof: removeEstimatorCommissionForDeal with estimator===owner returns 0 and deletes nothing.
+    // Direct role-scoped proof: removeEstimatorCommissionForDeal for a deal whose only row is the OWNER's
+    // (role='owner') returns 0 and deletes nothing — the role predicate, not a userid check, protects it.
     const removed = await removeEstimatorCommissionForDeal(tdb, {
       dealId: D,
       estimatorUserId: OWNER,
@@ -290,9 +306,13 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     });
     expect(mint.status).toBe("skipped_change_order");
 
-    // Even at sign time a CO mints only the owner row, never the estimator.
+    // Even at sign time a CO mints the OWNER row but NEVER the estimator (base-deal-only).
     await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
     const rows = await dscRows(D);
+    const ownerRow = rowFor(rows, OWNER);
+    expect(ownerRow).toBeDefined(); // the owner row WAS minted (a CO still earns the owner's full cut)
+    expect(ownerRow!.attribution_role).toBe("owner");
+    expect(Number(ownerRow!.amount)).toBe(2000); // 100000 × 0.02
     expect(rowFor(rows, ESTA)).toBeUndefined();
     expect(rows.every((r) => r.rep_user_id !== ESTA)).toBe(true);
   });
@@ -332,7 +352,7 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     expect(Number(rowFor(rows, ESTA)!.amount)).toBe(5000);
   });
 
-  // 11. idempotency: re-running mint returns skipped_existing (SELECT-before-INSERT / 23505 backstop), no dup.
+  // 11. idempotency: re-running mint returns skipped_existing (ON CONFLICT DO NOTHING → empty returning), no dup.
   it("mint is idempotent — a re-run returns skipped_existing and never creates a duplicate row", async () => {
     const D = U("0d11");
     await seedDeal(D, { estimator: ESTA });
@@ -346,5 +366,129 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     });
     expect(again.status).toBe("skipped_existing");
     expect(await dscRows(D)).toHaveLength(2); // no duplicate
+  });
+
+  // 12. TX-SAFETY (FIX 1): a duplicate insert hits ON CONFLICT DO NOTHING (NOT a caught 23505), so the
+  // surrounding transaction stays VALID — a subsequent statement in the SAME tx still commits. A caught
+  // 23505 would have left the tx ABORTED, failing this follow-up write with "current transaction is aborted".
+  it("a duplicate mint inside a tx returns skipped_existing AND leaves the transaction valid (no 23505 abort)", async () => {
+    const D = U("0d12");
+    await seedDeal(D, { estimator: ESTA });
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
+    expect(await dscRows(D)).toHaveLength(2);
+
+    await tdb.transaction(async (tx: typeof tdb) => {
+      // Re-mint the (already-present) estimator row → ON CONFLICT DO NOTHING → skipped_existing, no throw.
+      const again = await mintEstimatorCommissionForDeal(tx, {
+        dealId: D,
+        estimatorUserId: ESTA,
+        triggeredByUserId: OWNER,
+      });
+      expect(again.status).toBe("skipped_existing");
+      // Subsequent write in the SAME tx must succeed — proof the tx was never aborted by a unique violation.
+      await tx.update(deals).set({ name: "still-valid-after-conflict" }).where(eq(deals.id, D));
+    });
+
+    // The tx COMMITTED (no abort): the follow-up update is visible, and still no duplicate commission row.
+    const after = await pg.query<{ name: string }>(`SELECT name FROM public.deals WHERE id='${D}'`);
+    expect(after.rows[0].name).toBe("still-valid-after-conflict");
+    expect(await dscRows(D)).toHaveLength(2);
+  });
+
+  // 13. OWNER-SAFE DELETE (FIX 2, scenario a): estimator==owner at sign (only the OWNER row exists), then
+  // the owner is REASSIGNED, then the estimator is changed. The role-scoped delete must NOT touch the
+  // owner's row even though its rep_user_id matches the departing estimator.
+  it("estimator==owner-at-sign → reassign owner → change estimator deletes NO owner row (role-scoped)", async () => {
+    const D = U("0d13");
+    // Signed with estimator === owner === OWNER → only the OWNER full-cut row is minted (no estimator row).
+    await seedDeal(D, { estimator: OWNER });
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
+    let rows = await dscRows(D);
+    expect(rows).toHaveLength(1);
+    const ownerBefore = rowFor(rows, OWNER)!;
+    expect(ownerBefore.attribution_role).toBe("owner");
+
+    // Reassign the OWNER to ESTA (the dsc owner row stays booked to OWNER — reassignment never moves it).
+    await pg.exec(`UPDATE public.deals SET assigned_rep_id='${ESTA}' WHERE id='${D}'`);
+
+    // Now change the estimator OWNER→ESTB. oldEstimator(OWNER) !== current owner(ESTA), so the removal
+    // fires for rep=OWNER — but role-scoping (attribution_role='estimator') spares the OWNER's role='owner' row.
+    await setDealEstimator(tdb, D, ESTB, OWNER);
+
+    rows = await dscRows(D);
+    // The owner row SURVIVES byte-identical; ESTB's additive estimator row is minted.
+    expect(rowFor(rows, OWNER)).toEqual(ownerBefore);
+    const estb = rowFor(rows, ESTB)!;
+    expect(estb).toBeDefined();
+    expect(estb.attribution_role).toBe("estimator");
+    expect(Number(estb.amount)).toBe(3000); // 100000 × 0.03
+    expect(rows).toHaveLength(2);
+  });
+
+  // 14. OWNER-SAFE DELETE (FIX 2, scenario b): owner O + distinct estimator E, then O is reassigned TO E.
+  // Clearing the estimator must STILL remove E's estimator-role row (the old userid short-circuit would
+  // have wrongly skipped it because estimator===current-owner), while the original owner's row survives.
+  it("owner O + est E → reassign O→E → clear estimator removes E's estimator-role row (owner row kept)", async () => {
+    const D = U("0d14");
+    await seedDeal(D, { estimator: ESTA }); // owner OWNER, estimator ESTA
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
+    let rows = await dscRows(D);
+    expect(rows).toHaveLength(2);
+    const ownerBefore = rowFor(rows, OWNER)!;
+    expect(rowFor(rows, ESTA)!.attribution_role).toBe("estimator");
+
+    // Reassign the OWNER to ESTA — now the deal's current owner IS the (still-set) estimator.
+    await pg.exec(`UPDATE public.deals SET assigned_rep_id='${ESTA}' WHERE id='${D}'`);
+
+    // Clear the estimator. estimator(ESTA) === current owner(ESTA), yet the estimator-role row for ESTA must
+    // still be removed (role-scoped delete targets attribution_role='estimator', not the owner's row).
+    await setDealEstimator(tdb, D, null, OWNER);
+
+    rows = await dscRows(D);
+    expect(rowFor(rows, ESTA)).toBeUndefined(); // ESTA's ESTIMATOR-role row removed correctly
+    expect(rowFor(rows, OWNER)).toEqual(ownerBefore); // the original owner full-cut row survives
+    expect(rows).toHaveLength(1);
+  });
+
+  // 15. CO-CHILD PROPAGATION (FIX 4): editing the parent's estimator follows down to ACTIVE change-order
+  // children (inherited estimator), but inactive children are left alone and NO estimator commission row is
+  // ever minted for any CO child (base-deal-only).
+  it("setDealEstimator propagates to ACTIVE CO children only, minting NO estimator commission for them", async () => {
+    const PARENT = U("0d15");
+    const CO_ACTIVE = U("0c15");
+    const CO_INACTIVE = U("0c16");
+    await seedDeal(PARENT, { estimator: ESTA });
+    await calculateCommissionForDeal(tdb, { dealId: PARENT, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
+    // Two CO children inheriting estimator ESTA: one active, one soft-deleted (is_active=false).
+    const insCo = (id: string, active: boolean) =>
+      pg.exec(
+        `INSERT INTO public.deals
+           (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, estimator_user_id,
+            is_change_order, parent_deal_id, is_active, office_code, contract_signed_date)
+         VALUES ('${id}', 'CO-${id.slice(-4)}', 'CO ${id.slice(-4)}', '${STAGE}', '${OWNER}', 25000, '${ESTA}',
+            true, '${PARENT}', ${active}, NULL, '2026-01-01')`,
+      );
+    await insCo(CO_ACTIVE, true);
+    await insCo(CO_INACTIVE, false);
+
+    // Change the parent estimator ESTA→ESTB.
+    await setDealEstimator(tdb, PARENT, ESTB, OWNER);
+
+    const estimatorOf = async (id: string) =>
+      (await pg.query<{ estimator_user_id: string | null }>(
+        `SELECT estimator_user_id FROM public.deals WHERE id='${id}'`,
+      )).rows[0].estimator_user_id;
+    expect(await estimatorOf(PARENT)).toBe(ESTB); // parent updated
+    expect(await estimatorOf(CO_ACTIVE)).toBe(ESTB); // ACTIVE CO child follows the parent
+    expect(await estimatorOf(CO_INACTIVE)).toBe(ESTA); // inactive CO child untouched
+
+    // Money-neutral: neither CO child ever gets an estimator commission row.
+    expect(await dscRows(CO_ACTIVE)).toHaveLength(0);
+    expect(await dscRows(CO_INACTIVE)).toHaveLength(0);
+    // The base deal's estimator row was re-attributed ESTA→ESTB (additive, owner row intact).
+    const parentRows = await dscRows(PARENT);
+    expect(rowFor(parentRows, OWNER)?.attribution_role).toBe("owner");
+    expect(rowFor(parentRows, ESTB)?.attribution_role).toBe("estimator");
+    expect(rowFor(parentRows, ESTA)).toBeUndefined();
   });
 });

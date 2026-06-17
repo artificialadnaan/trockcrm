@@ -126,6 +126,9 @@ describe("setDealEstimator routing", () => {
     const db = makeTenantDb({ id: "d", estimatorUserId: A, assignedRepId: OWNER });
     const result = await setDealEstimator(db, "d", A, OWNER);
     expect(result).toBeTruthy();
+    // The no-op still takes the row lock first (SELECT ... FOR UPDATE) before deciding nothing changed —
+    // so the read is serialized against a concurrent estimator edit even on the short-circuit path.
+    expect(db._state.lockedSelects).toBe(1);
     expect(db._state.updateCalls).toHaveLength(0);
     expect(db._state.auditInserts).toHaveLength(0);
     expect(commissions.mintEstimatorCommissionForDeal).not.toHaveBeenCalled();
@@ -173,10 +176,17 @@ describe("setDealEstimator routing", () => {
     expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
   });
 
-  it("owner→null does NOT call the scoped remove (oldEstimator === owner is filtered out)", async () => {
+  it("owner→null calls the scoped remove (the owner row is now protected by attribution_role, not a userid filter)", async () => {
     const db = makeTenantDb({ id: "d", estimatorUserId: OWNER, assignedRepId: OWNER });
     await setDealEstimator(db, "d", null, OWNER);
-    expect(commissions.removeEstimatorCommissionForDeal).not.toHaveBeenCalled();
+    // The estimator changed away (OWNER→null), so the scoped remove fires even though oldEstimator===owner.
+    // It is SAFE because removeEstimatorCommissionForDeal deletes only attribution_role='estimator' rows —
+    // the owner's role='owner' row can never match (proven against the real schema in the runtime test).
+    expect(commissions.removeEstimatorCommissionForDeal).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ dealId: "d", estimatorUserId: OWNER, ownerUserId: OWNER }),
+    );
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
     expect(commissions.mintEstimatorCommissionForDeal).not.toHaveBeenCalled();
   });
 });

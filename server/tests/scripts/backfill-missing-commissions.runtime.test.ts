@@ -51,6 +51,11 @@ beforeAll(async () => {
   await pg.exec(
     tenantSchemaSql("public", [users, pipelineStageConfig, deals, userCommissionSettings, dealSignedCommissions, auditLog])
   );
+  // tenantSchemaSql omits indexes/constraints; calculateCommissionForDeal now inserts with ON CONFLICT on
+  // the (deal_id, rep_user_id) UNIQUE, so recreate it for the backfill's insert path.
+  await pg.exec(
+    `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`
+  );
   tdb = drizzle(pg);
 
   const OFFICE = U("0f01");

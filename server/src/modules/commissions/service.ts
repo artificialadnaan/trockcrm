@@ -29,6 +29,11 @@ export interface CalculateCommissionResult {
   appliedRate?: string;
   sourceValueAmount?: string;
   sourceValueKind?: CommissionSourceValueKind;
+  // The additive ESTIMATOR side-effect outcome of calculateCommissionForDeal, when one applies (a rated,
+  // distinct, non-CO estimator). Backward-compatible: `status` above always describes the OWNER row, so
+  // existing callers that read `.status`/`.amount` are unaffected. `undefined` when no estimator applies.
+  // Consumed by the owner-backfill tally so estimator rows minted as a side effect are not undercounted.
+  estimator?: { status: CalculateCommissionStatus; repUserId?: string; amount?: string };
 }
 
 interface ResolvedSourceValue {
@@ -60,27 +65,21 @@ function multiplyDecimalStrings(value: string, rate: string): string {
   return product.toFixed(2);
 }
 
-/** True when an error (or any error in its `cause` chain) is a Postgres unique_violation (23505).
- *  node-postgres surfaces the code on the error itself; drizzle/PGlite wrap it under `.cause`. */
-function isUniqueViolation(err: unknown): boolean {
-  let cur: unknown = err;
-  for (let i = 0; i < 5 && cur != null; i++) {
-    if (typeof (cur as { code?: unknown }).code === "string" && (cur as { code: string }).code === "23505") {
-      return true;
-    }
-    cur = (cur as { cause?: unknown }).cause;
-  }
-  return false;
-}
-
 /**
  * Insert ONE earned-commission row for a single rep at THAT rep's own rate — the shared primitive behind
  * both the owner mint and the estimator mint, so the two can never drift in how they resolve rate / source
  * value / idempotency / audit. Resolves the rep's user_commission_settings (skipped_no_rate when missing,
- * inactive, or rate ≤ 0); resolves the deal's source value (skipped_no_value when none); SELECT-before-
- * INSERT on (deal_id, rep_user_id) (skipped_existing on hit); else INSERTs the row + an insert audit. A
- * concurrent duplicate that slips past the SELECT trips the UNIQUE constraint — caught here as 23505 and
- * returned as skipped_existing so a race never throws out of the surrounding transaction.
+ * inactive, or rate ≤ 0); resolves the deal's source value (skipped_no_value when none); then INSERTs the
+ * row + an insert audit.
+ *
+ * IDEMPOTENCY IS TRANSACTION-SAFE: the INSERT uses ON CONFLICT (deal_id, rep_user_id) DO NOTHING, so a
+ * duplicate (idempotent retry OR a concurrent winner) yields an EMPTY `.returning()` WITHOUT raising a
+ * 23505 — returned as skipped_existing while the surrounding transaction STAYS VALID. (A caught 23505
+ * would NOT recover the tx: in Postgres the unique violation aborts it, so the caller's later statements
+ * and the commit would fail. ON CONFLICT avoids the abort entirely.)
+ *
+ * `role` stamps attribution_role so the OWNER's full-cut row and an ESTIMATOR's additive row stay
+ * distinguishable even after an owner reassignment (the estimator-removal path keys on it).
  */
 async function insertCommissionRowForRep(
   tx: TenantDb,
@@ -92,7 +91,8 @@ async function insertCommissionRowForRep(
   },
   repUserId: string,
   contractSignedDate: string,
-  triggeredByUserId: string
+  triggeredByUserId: string,
+  role: "owner" | "estimator"
 ): Promise<CalculateCommissionResult> {
   const sourceValue = resolveSourceValue(deal);
   if (!sourceValue) {
@@ -112,54 +112,35 @@ async function insertCommissionRowForRep(
     return { status: "skipped_no_rate" };
   }
 
-  // Idempotency guard. SELECT before INSERT and short-circuit on hit so a retry doesn't trip the UNIQUE
-  // constraint and abort the surrounding deal-update transaction.
-  const [existing] = await tx
-    .select({ id: dealSignedCommissions.id })
-    .from(dealSignedCommissions)
-    .where(
-      and(
-        eq(dealSignedCommissions.dealId, deal.id),
-        eq(dealSignedCommissions.repUserId, repUserId)
-      )
-    )
-    .limit(1);
-
-  if (existing) {
-    console.warn(
-      `[commissions] skipped duplicate insert for deal=${deal.id} rep=${repUserId}: existing commission row ${existing.id}`
-    );
-    return { status: "skipped_existing" };
-  }
-
   const appliedRate = settings.commissionRate;
   const amount = multiplyDecimalStrings(sourceValue.amount, appliedRate);
 
-  let inserted: { id: string } | undefined;
-  try {
-    [inserted] = await tx
-      .insert(dealSignedCommissions)
-      .values({
-        dealId: deal.id,
-        repUserId,
-        sourceValueKind: sourceValue.kind,
-        sourceValueAmount: sourceValue.amount,
-        appliedRate,
-        amount,
-        contractSignedDateAtSigning: contractSignedDate,
-        createdBy: triggeredByUserId,
-      })
-      .returning({ id: dealSignedCommissions.id });
-  } catch (err) {
-    // A concurrent insert won the race between our SELECT and INSERT — the row now exists; treat as
-    // skipped_existing rather than letting the unique violation abort the transaction.
-    if (isUniqueViolation(err)) {
-      console.warn(
-        `[commissions] concurrent duplicate insert for deal=${deal.id} rep=${repUserId} caught (23505)`
-      );
-      return { status: "skipped_existing" };
-    }
-    throw err;
+  // Tx-safe idempotency: ON CONFLICT (deal_id, rep_user_id) DO NOTHING. An existing row (retry) or a
+  // concurrent insert that wins the race yields an EMPTY returning() — no 23505, so the transaction is
+  // never aborted. An empty result ⇒ the row already exists ⇒ skipped_existing.
+  const [inserted] = await tx
+    .insert(dealSignedCommissions)
+    .values({
+      dealId: deal.id,
+      repUserId,
+      attributionRole: role,
+      sourceValueKind: sourceValue.kind,
+      sourceValueAmount: sourceValue.amount,
+      appliedRate,
+      amount,
+      contractSignedDateAtSigning: contractSignedDate,
+      createdBy: triggeredByUserId,
+    })
+    .onConflictDoNothing({
+      target: [dealSignedCommissions.dealId, dealSignedCommissions.repUserId],
+    })
+    .returning({ id: dealSignedCommissions.id });
+
+  if (!inserted) {
+    console.warn(
+      `[commissions] skipped duplicate insert for deal=${deal.id} rep=${repUserId}: row already exists (ON CONFLICT DO NOTHING)`
+    );
+    return { status: "skipped_existing" };
   }
 
   await writeAuditLog(tx, {
@@ -235,7 +216,8 @@ export async function calculateCommissionForDeal(
     deal,
     deal.assignedRepId,
     input.contractSignedDate,
-    input.triggeredByUserId
+    input.triggeredByUserId,
+    "owner"
   );
 
   // Additive estimator row: a rated, distinct, non-change-order estimator earns an ADDITIONAL row at the
@@ -243,23 +225,35 @@ export async function calculateCommissionForDeal(
   // base-deal-only — it never mints an estimator row. The rate check lives inside insertCommissionRowForRep
   // (a rateless estimator simply yields skipped_no_rate and no row). Minting at sign time here is also what
   // closes the contract-date clear→resign gap: a clear removes ALL rows, and re-signing re-mints BOTH.
+  let estimatorResult: CalculateCommissionResult | undefined;
   if (
     !deal.isChangeOrder &&
     deal.estimatorUserId != null &&
     deal.estimatorUserId !== deal.assignedRepId
   ) {
-    await insertCommissionRowForRep(
+    estimatorResult = await insertCommissionRowForRep(
       tenantDb,
       deal,
       deal.estimatorUserId,
       input.contractSignedDate,
-      input.triggeredByUserId
+      input.triggeredByUserId,
+      "estimator"
     );
   }
 
-  // The returned status describes the OWNER row (callers historically inspect the owner outcome). The
-  // estimator row is an additive side effect that never changes the owner's reported result.
-  return ownerResult;
+  // The top-level status describes the OWNER row (callers historically inspect the owner outcome). The
+  // estimator row is an additive side effect — surfaced under `.estimator` (backward-compatible) so the
+  // owner-backfill tally can account for the estimator rows it mints instead of undercounting them.
+  return {
+    ...ownerResult,
+    estimator: estimatorResult
+      ? {
+          status: estimatorResult.status,
+          repUserId: deal.estimatorUserId ?? undefined,
+          amount: estimatorResult.amount,
+        }
+      : undefined,
+  };
 }
 
 /**
@@ -371,6 +365,9 @@ export async function recalculateCommissionForDeal(
 
     const appliedRate = settings.commissionRate;
     const amount = multiplyDecimalStrings(sourceValue.amount, appliedRate);
+    // In-place, keyed on row.id. Deliberately recomputes ONLY amount/rate/source/date — it never touches
+    // rep_user_id OR attribution_role, so a row stays booked to its original rep AND keeps its owner-vs-
+    // estimator role across a date/amount correction (attribution-preserving).
     await tenantDb
       .update(dealSignedCommissions)
       .set({
@@ -473,36 +470,51 @@ export async function mintEstimatorCommissionForDeal(
     deal,
     input.estimatorUserId,
     effectiveSignedDate,
-    input.triggeredByUserId
+    input.triggeredByUserId,
+    "estimator"
   );
 }
 
 /**
- * Remove ONLY the estimator's commission row (scoped to (deal_id, estimator_user_id)) — the manual
- * estimator-removal counterpart. HARD GUARD: if the estimator IS the owner, return 0 without deleting,
- * so this can never wipe the owner's full-cut row. This is deliberately NOT removeCommissionForDeal,
- * which deletes EVERY row for the deal (owner included). Each deleted row is audited. Returns the count
- * removed. MUST run inside the caller's transaction.
+ * Remove ONLY the estimator's ADDITIVE commission row — the manual estimator-removal counterpart.
+ *
+ * STRUCTURAL OWNER-ROW GUARD: the DELETE is scoped to (deal_id, rep_user_id = estimator,
+ * attribution_role = 'estimator'), so it can NEVER touch an OWNER full-cut row (which carries
+ * attribution_role = 'owner'). This is the load-bearing money-safety fix: after an OWNER reassignment the
+ * deal's rep_user_id alone could no longer tell owner-vs-estimator apart, so the prior (deal_id, rep)
+ * delete could wipe an owner row whose rep happened to match a departing estimator. The role predicate
+ * makes that impossible.
+ *
+ * The role predicate REPLACES (and is strictly stronger than) the old estimator===owner userid short-
+ * circuit, which is deliberately NOT kept: it both failed to guard the real bug (there ownerUserId was the
+ * REASSIGNED owner ≠ the estimator, so it never fired) AND it would wrongly block a legitimate removal in
+ * the inverse case — a former estimator who later BECOMES the deal's reassigned owner still has a real
+ * estimator-role row that must be removable when the estimator is cleared. `ownerUserId` is retained on the
+ * input for caller/audit context (it no longer gates the delete; the role predicate is the sole guarantee).
+ *
+ * This is deliberately NOT removeCommissionForDeal, which deletes EVERY row for the deal (owner included).
+ * Each deleted row is audited. Returns the count removed. MUST run inside the caller's transaction.
  */
 export async function removeEstimatorCommissionForDeal(
   tx: TenantDb,
   input: {
     dealId: string;
     estimatorUserId: string;
+    // Retained for caller/audit context. The role-scoped DELETE — not a userid comparison — is what
+    // protects the owner row, so this is intentionally not used to gate the delete (see doc above).
     ownerUserId: string | null;
     triggeredByUserId: string | null;
   }
 ): Promise<number> {
-  if (input.estimatorUserId === input.ownerUserId) {
-    // Never delete the owner row via the estimator path.
-    return 0;
-  }
   const removed = await tx
     .delete(dealSignedCommissions)
     .where(
       and(
         eq(dealSignedCommissions.dealId, input.dealId),
-        eq(dealSignedCommissions.repUserId, input.estimatorUserId)
+        eq(dealSignedCommissions.repUserId, input.estimatorUserId),
+        // Role-scoped: an OWNER row (attribution_role = 'owner') can never match, so the owner's full cut
+        // is structurally protected even when estimator === the deal's (reassigned) current owner.
+        eq(dealSignedCommissions.attributionRole, "estimator")
       )
     )
     .returning({
