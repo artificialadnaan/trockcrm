@@ -36,12 +36,19 @@ const QUARANTINE = [
   //     local macOS/CT dev box, so the first inventory missed them. Verify burn-down under CI conditions. ---
   // backfill script hardcodes "/private/tmp" (macOS-only) -> ENOENT on Linux CI. Fix: path.join(os.tmpdir(), ...).
   "tests/scripts/backfill-procore-bid-board-ids.test.ts",
+  // --- Colocated server/src/** suites, now visible after adding src/** to `include` (#747). ---
+  // stale source-text assertion: greps the lead service source for 'nextAssignedRepId: input.assignedRepId',
+  // which the code no longer contains. Fix: assert behavior, not source text.
+  "src/modules/leads/assignment-task-source.test.ts",
 ];
 
 export default mergeConfig(
   base,
   defineConfig({
     test: {
+      // Base `include` is only tests/**; the gate must also run the colocated server/src/**/*.test.ts
+      // unit suites (r2-client, projects/service, reports, etc.) that were otherwise invisible (#747).
+      include: ["tests/**/*.test.ts", "src/**/*.test.ts"],
       exclude: [...configDefaults.exclude, ...QUARANTINE],
     },
   }),
