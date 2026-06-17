@@ -70,7 +70,7 @@ function createQueryMock(options: {
       return { rows: [{ set_config: params?.[0] ?? null }] };
     }
 
-    if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("slug = 'estimating'")) {
+    if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("MIN(display_order)")) {
       return { rows: [{ display_order: 2 }] };
     }
 
@@ -347,7 +347,7 @@ describe("email sync inbound message routing", () => {
           typeof sql === "string" &&
           sql.includes("INSERT INTO office_beta.emails") &&
           Array.isArray(params) &&
-          params[10] === "deal-1"
+          params[12] === "deal-1" // dealId moved 10→12 after internet_message_id + direction params were added
       )
     ).toBe(true);
     expect(
@@ -425,7 +425,7 @@ describe("email sync inbound message routing", () => {
           typeof sql === "string" &&
           sql.includes("INSERT INTO office_beta.emails") &&
           Array.isArray(params) &&
-          params[10] === "deal-1"
+          params[12] === "deal-1" // dealId moved 10→12 after internet_message_id + direction params were added
       )
     ).toBe(true);
     expect(

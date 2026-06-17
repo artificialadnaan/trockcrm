@@ -97,12 +97,13 @@ export interface EmailAssignmentQueueItem {
   suggestedAssignment: EmailAssignmentResult;
 }
 
-// Directions that can sit in the unassigned/assignment queue. Sent emails captured from Outlook (not
-// composed in the CRM) can land here too — a rep's sent-to-a-known-contact email whose recipient maps to
-// 0 or multiple deals needs manual assignment, same as an inbound one. This constant is the SINGLE source
-// of truth so every assignable-direction site (the SQL queue predicate, the JS candidate check, the
-// unassigned-count condition) agrees — a sent email counted by the queue must also survive the JS filter,
-// or count and items diverge.
+// Directions that can sit in the ASSIGNMENT QUEUE (the surface a rep uses to assign mail to a deal). Sent
+// emails captured from Outlook can land here too — a rep's sent-to-a-known-contact email whose recipient
+// maps to 0 or multiple deals needs manual assignment, same as an inbound one. SINGLE source of truth for
+// the TWO queue sites only — the SQL queue predicate (getEmailAssignmentQueue) and the JS candidate check
+// (isEmailAssignmentQueueCandidate) — so a sent email counted by the queue also survives the JS filter
+// (count == items). It deliberately does NOT touch the inbox unread/unassigned predicate, which stays
+// inbound-only so Sent mail never shows as "unread".
 const ASSIGNABLE_DIRECTIONS = ["inbound", "outbound"] as const;
 
 export function isEmailAssignmentQueueCandidate(emailRow: {
@@ -117,9 +118,13 @@ export function isEmailAssignmentQueueCandidate(emailRow: {
   );
 }
 
+// INBOX "unread/unassigned" badge predicate — stays INBOUND-ONLY. The client's needs-attention/unread
+// count is an inbox concept; a rep's own Sent mail must never show as "unread". The outbound relaxation
+// for making sent mail assignable lives ONLY in the assignment-queue predicate (getEmailAssignmentQueue)
+// and isEmailAssignmentQueueCandidate — NOT here.
 function emailIsUnassignedCondition() {
   return and(
-    inArray(emails.direction, ASSIGNABLE_DIRECTIONS),
+    eq(emails.direction, "inbound"),
     eq(emails.assignmentStatus, "unassigned"),
     isNull(emails.assignedEntityId),
     isNull(emails.dealId),
@@ -1158,8 +1163,11 @@ export async function sendEmail(
     throw new AppError(502, `Failed to send email draft via Microsoft: ${JSON.stringify(sendResult.data)}`);
   }
 
-  // Store the email record
-  const [emailRecord] = await tenantDb
+  // Store the email record. onConflictDoNothing closes the CRM-send-vs-worker race: if the Sent-folder
+  // sync already stored this message's copy (same user + internet_message_id, enforced by the partial
+  // unique index from migration 0161), this insert no-ops and we adopt the existing row below — the DB
+  // enforces the dedup instead of relying on insert ordering.
+  let [emailRecord] = await tenantDb
     .insert(emails)
     .values({
       graphMessageId,
@@ -1178,7 +1186,30 @@ export async function sendEmail(
       userId,
       sentAt: new Date(),
     })
+    .onConflictDoNothing()
     .returning();
+
+  if (!emailRecord) {
+    // Lost the race — the worker already stored the Sent-folder copy. Adopt it (key on the stable
+    // internet_message_id when we have it; otherwise on the graph message id).
+    const [existing] = await tenantDb
+      .select()
+      .from(emails)
+      .where(
+        internetMessageId
+          ? and(
+              eq(emails.userId, userId),
+              eq(emails.internetMessageId, internetMessageId),
+              eq(emails.direction, "outbound")
+            )
+          : eq(emails.graphMessageId, graphMessageId)
+      )
+      .limit(1);
+    emailRecord = existing;
+  }
+  if (!emailRecord) {
+    throw new AppError(500, "Failed to persist the sent email record.");
+  }
 
   if (outboundAssociation.links.dealId) {
     const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, userId);

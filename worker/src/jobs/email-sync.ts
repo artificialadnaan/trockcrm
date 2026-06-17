@@ -211,7 +211,7 @@ export async function runEmailSync(): Promise<void> {
     const tokenRows = await client.query(
       `SELECT ugt.user_id, ugt.access_token, ugt.refresh_token,
               ugt.home_account_id, ugt.token_expires_at, ugt.last_delta_link,
-              ugt.last_inbox_delta_link, ugt.last_sent_delta_link,
+              ugt.last_inbox_delta_link, ugt.last_sent_delta_link, ugt.last_inbox_sync_at,
               ugt.last_sync_at, u.office_id, u.email AS user_email
        FROM public.user_graph_tokens ugt
        JOIN public.users u ON u.id = ugt.user_id
@@ -235,38 +235,18 @@ export async function runEmailSync(): Promise<void> {
           continue;
         }
 
-        // Fix 4: Wrap in BEGIN/COMMIT so the advisory xact lock persists for the full sync
-        await client.query("BEGIN");
-
-        // Acquire per-user advisory lock to prevent concurrent syncs for the same user
-        const lockResult = await client.query(
-          "SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired",
-          [tokenRow.user_id]
-        );
-        if (!lockResult.rows[0]?.acquired) {
-          await client.query("COMMIT");
-          console.log(
-            `[Worker:email-sync] Skipping user ${tokenRow.user_id} — sync already in progress`
-          );
-          continue;
-        }
-
-        // Fix 5: Refresh token if expired before attempting sync
+        // Refresh token if within 5 min of expiry (single-statement UPDATE — autocommit, no wrapping txn).
         const expiresAt = new Date(tokenRow.token_expires_at);
-        const bufferMs = 5 * 60 * 1000; // refresh if within 5 minutes of expiry
-        if (expiresAt.getTime() - Date.now() < bufferMs) {
+        if (expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {
           const refreshedToken = await refreshTokenForWorker(client, tokenRow);
-          if (!refreshedToken) {
-            await client.query("COMMIT");
-            continue; // reauth marked inside refreshTokenForWorker
-          }
+          if (!refreshedToken) continue; // reauth marked inside refreshTokenForWorker
           tokenRow.access_token = refreshedToken;
         }
 
-        await syncUserEmails(client, tokenRow);
-        await client.query("COMMIT");
+        // Sync folders, EACH in its own transaction so a Sent-folder failure can't roll back the
+        // already-committed Inbox sync (the Inbox pipeline is live in prod).
+        await syncUserMailbox(client, tokenRow);
       } catch (err: any) {
-        await client.query("ROLLBACK").catch(() => {});
         console.error(
           `[Worker:email-sync] Failed for user ${tokenRow.user_id}:`,
           err.message
@@ -282,7 +262,7 @@ export async function runEmailSync(): Promise<void> {
              SET status = 'reauth_needed', error_message = $1, updated_at = NOW()
              WHERE user_id = $2`,
             [`Sync failed: ${err.message}`, tokenRow.user_id]
-          );
+          ).catch(() => {});
         }
       }
     }
@@ -300,19 +280,62 @@ interface MailFolderSync {
   direction: "inbound" | "outbound";
   cursorColumn: "last_inbox_delta_link" | "last_sent_delta_link";
   syncAtColumn: "last_inbox_sync_at" | "last_sent_sync_at";
-  dateField: "receivedDateTime" | "sentDateTime";
   // Where this run's delta resumes from (null → fresh 7-day query).
   initialCursor: string | null;
 }
 
-async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
-  const { user_id, access_token, office_id } = tokenRow;
+/**
+ * Choose the inbox delta cursor to resume from.
+ *
+ * Before this worker version, prod advanced a single `last_delta_link` for the inbox. Migration 0129
+ * backfilled `last_inbox_delta_link = last_delta_link` ONCE and then it froze, while the old worker kept
+ * advancing `last_delta_link` — so for a user the new worker hasn't synced yet, `last_delta_link` is the
+ * LIVE cursor and `last_inbox_delta_link` is stale. `last_inbox_sync_at` is only ever written by THIS
+ * worker, so its presence means the new worker has taken over the inbox and `last_inbox_delta_link` is now
+ * authoritative. Preferring the stale cursor would resume from an expired delta link → large replay or a
+ * persistent Graph delta failure on every run.
+ */
+export function pickInboxStartCursor(tokenRow: {
+  last_inbox_sync_at?: unknown;
+  last_inbox_delta_link?: string | null;
+  last_delta_link?: string | null;
+}): string | null {
+  if (tokenRow.last_inbox_sync_at) {
+    return tokenRow.last_inbox_delta_link ?? null;
+  }
+  return tokenRow.last_delta_link ?? tokenRow.last_inbox_delta_link ?? null;
+}
 
-  // Decrypt access token (stored encrypted at rest)
+function buildMailFolders(tokenRow: any): MailFolderSync[] {
+  return [
+    {
+      folder: "inbox",
+      direction: "inbound",
+      cursorColumn: "last_inbox_delta_link",
+      syncAtColumn: "last_inbox_sync_at",
+      initialCursor: pickInboxStartCursor(tokenRow),
+    },
+    {
+      folder: "sentitems",
+      direction: "outbound",
+      cursorColumn: "last_sent_delta_link",
+      syncAtColumn: "last_sent_sync_at",
+      initialCursor: tokenRow.last_sent_delta_link ?? null,
+    },
+  ];
+}
+
+/**
+ * Sync a user's mailbox folders, EACH IN ITS OWN TRANSACTION. Isolating folders is critical: a Sent-folder
+ * failure must never roll back the Inbox sync that already committed (the Inbox pipeline is live in prod).
+ * The per-user advisory lock is taken per folder-transaction to prevent concurrent syncs of the same user.
+ */
+async function syncUserMailbox(client: any, tokenRow: any): Promise<void> {
+  const { user_id, access_token, office_id } = tokenRow;
   const currentAccessToken = decrypt(access_token);
 
-  // Resolve the office schema for this user
-  const officeResult = await poolClient.query(
+  // Resolve the office schema for this user (read — no transaction needed).
+  const officeResult = await client.query(
     "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
     [office_id]
   );
@@ -326,30 +349,39 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
   }
   const schemaName = `office_${officeSlug}`;
 
-  const folders: MailFolderSync[] = [
-    {
-      folder: "inbox",
-      direction: "inbound",
-      cursorColumn: "last_inbox_delta_link",
-      syncAtColumn: "last_inbox_sync_at",
-      dateField: "receivedDateTime",
-      // Back-compat: the first run after the cursor split reuses the legacy single cursor so we don't
-      // re-pull 7 days of inbox. After this run the inbox advances on last_inbox_delta_link and the legacy
-      // last_delta_link is left frozen (read-only fallback).
-      initialCursor: tokenRow.last_inbox_delta_link ?? tokenRow.last_delta_link ?? null,
-    },
-    {
-      folder: "sentitems",
-      direction: "outbound",
-      cursorColumn: "last_sent_delta_link",
-      syncAtColumn: "last_sent_sync_at",
-      dateField: "sentDateTime",
-      initialCursor: tokenRow.last_sent_delta_link ?? null,
-    },
-  ];
-
-  for (const f of folders) {
-    await syncUserMailFolder(poolClient, currentAccessToken, user_id, office_id, schemaName, f);
+  for (const f of buildMailFolders(tokenRow)) {
+    try {
+      await client.query("BEGIN");
+      // Per-user advisory lock prevents concurrent syncs of the same user; held for this folder's txn.
+      const lockResult = await client.query(
+        "SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired",
+        [user_id]
+      );
+      if (!lockResult.rows[0]?.acquired) {
+        await client.query("COMMIT");
+        console.log(`[Worker:email-sync] Skipping user ${user_id} — sync already in progress`);
+        break;
+      }
+      await syncUserMailFolder(client, currentAccessToken, user_id, office_id, schemaName, f);
+      await client.query("COMMIT");
+    } catch (err: any) {
+      await client.query("ROLLBACK").catch(() => {});
+      console.error(`[Worker:email-sync] ${f.folder} sync failed for user ${user_id}:`, err.message);
+      // A 401 means the token is dead for ALL folders → mark reauth and stop. Any other folder error
+      // (e.g. a transient Graph error on Sent) is ISOLATED here: the already-committed Inbox sync is
+      // untouched, so the live inbound pipeline keeps working.
+      if (err.message?.includes("401") || err.message?.includes("InvalidAuthenticationToken")) {
+        await client
+          .query(
+            `UPDATE public.user_graph_tokens
+             SET status = 'reauth_needed', error_message = $1, updated_at = NOW()
+             WHERE user_id = $2`,
+            [`Sync failed: ${err.message}`, user_id]
+          )
+          .catch(() => {});
+        break;
+      }
+    }
   }
 }
 
@@ -363,12 +395,20 @@ async function syncUserMailFolder(
 ): Promise<void> {
   // First sync for this folder: messages endpoint with select fields (last 7 days).
   // Subsequent syncs: the stored delta link (which encodes the original $select).
+  //
+  // CRITICAL: Graph message-delta only supports a `receivedDateTime` $filter — NOT `sentDateTime`
+  // (which 400s with ErrorInvalidUrlQuery). Sent Items rows DO carry receivedDateTime, so we filter both
+  // folders on it; outbound additionally selects sentDateTime for the stored sent_at. (Inbox uses this
+  // exact receivedDateTime filter in prod today, so it's known-supported.)
   let deltaUrl: string;
   if (f.initialCursor) {
     deltaUrl = f.initialCursor;
   } else {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    deltaUrl = `/me/mailFolders/${f.folder}/messages/delta?$select=id,internetMessageId,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,body,hasAttachments,${f.dateField}&$filter=${f.dateField} ge ${sevenDaysAgo}`;
+    const selectFields =
+      "id,internetMessageId,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,body,hasAttachments,receivedDateTime" +
+      (f.direction === "outbound" ? ",sentDateTime" : "");
+    deltaUrl = `/me/mailFolders/${f.folder}/messages/delta?$select=${selectFields}&$filter=receivedDateTime ge ${sevenDaysAgo}`;
   }
 
   // Fetch messages page by page via delta
@@ -541,12 +581,35 @@ export async function processMailMessage(
   const bodyPreview = (msg.bodyPreview ?? "").substring(0, 500);
   const bodyHtml = msg.body?.content ?? "";
   const hasAttachments = msg.hasAttachments ?? false;
-  // Inbound is timestamped by receipt; outbound by send time.
-  const messageDate = isOutbound ? msg.sentDateTime : msg.receivedDateTime;
+  // Inbound is timestamped by receipt; outbound by send time (falling back to receivedDateTime, which
+  // Sent Items rows also carry, since the delta $select uses it).
+  const messageDate = isOutbound ? (msg.sentDateTime ?? msg.receivedDateTime) : msg.receivedDateTime;
   const sentAt = messageDate ? new Date(messageDate) : new Date();
   const mailboxAccountId = await resolveMailboxAccountIdForSyncedUser(client, userId);
   const normalizedSubject = normalizeEmailSubject(subject);
   const participantFingerprint = buildParticipantFingerprint(toAddresses, ccAddresses);
+
+  // First-Sent-scan transition: a CRM-composed send made BEFORE this feature has internet_message_id = NULL
+  // (it was never captured), so its Sent-folder copy won't match the dedup above and would double-store.
+  // Adopt: if a legacy outbound row (NULL imid, same mailbox + conversation + subject) exists, stamp this
+  // message's Message-ID onto it and skip the insert. Self-limiting — once every pre-feature send is
+  // adopted, no NULL-imid outbound rows remain and this never fires again.
+  if (isOutbound && internetMessageId && conversationId) {
+    const legacy = await client.query(
+      `SELECT id FROM ${schemaName}.emails
+        WHERE user_id = $1 AND direction = 'outbound' AND internet_message_id IS NULL
+          AND graph_conversation_id = $2 AND subject = $3
+        ORDER BY sent_at DESC LIMIT 1`,
+      [userId, conversationId, subject]
+    );
+    if (legacy.rows.length > 0) {
+      await client.query(
+        `UPDATE ${schemaName}.emails SET internet_message_id = $1 WHERE id = $2`,
+        [internetMessageId, legacy.rows[0].id]
+      );
+      return false;
+    }
+  }
 
   // Participant match differs by direction:
   //   inbound  — the SENDER is the external party → match from_address against contacts.
@@ -616,7 +679,7 @@ export async function processMailMessage(
       assigned_entity_type, assigned_entity_id, assignment_confidence, assignment_ambiguity_reason,
       thread_binding_id, user_id, sent_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-     ON CONFLICT (graph_message_id) DO NOTHING
+     ON CONFLICT DO NOTHING
      RETURNING id`,
     [
       graphMessageId,

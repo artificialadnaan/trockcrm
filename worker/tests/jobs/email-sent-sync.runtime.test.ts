@@ -33,6 +33,7 @@ const processMailMessage = (mod as any).processMailMessage as (
   msg: any,
   direction: "inbound" | "outbound"
 ) => Promise<boolean>;
+const pickInboxStartCursor = (mod as any).pickInboxStartCursor as (row: any) => string | null;
 
 const SCHEMA = "office_test";
 const OFFICE_ID = "00000000-0000-4000-8000-000000000fff";
@@ -85,6 +86,10 @@ async function setupSchema(pg: PGlite) {
       sent_at timestamptz NOT NULL,
       synced_at timestamptz NOT NULL DEFAULT now()
     );
+    -- Mirrors migration 0161: DB-level dedup for the CRM-send-vs-worker race (outbound only, per mailbox).
+    CREATE UNIQUE INDEX emails_outbound_internet_message_id_uq
+      ON ${SCHEMA}.emails (user_id, internet_message_id)
+      WHERE internet_message_id IS NOT NULL AND direction = 'outbound';
 
     CREATE TABLE ${SCHEMA}.contacts (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -212,6 +217,61 @@ describe("Sent-folder dedup (load-bearing)", () => {
     );
     const row = await db.query<{ body_html: string }>(`SELECT body_html FROM ${SCHEMA}.emails LIMIT 1`);
     expect(row.rows[0].body_html).toBe("CRM body"); // option (a): trust the compose-time body
+  });
+
+  it("adopts a legacy NULL-imid CRM send (pre-feature) instead of double-storing its Sent copy", async () => {
+    // A CRM send made before this feature: stored with NO internet_message_id (never captured).
+    await db.query(
+      `INSERT INTO ${SCHEMA}.emails
+         (graph_message_id, internet_message_id, graph_conversation_id, direction, from_address, to_addresses, subject, user_id, sent_at)
+       VALUES ('graph-legacy', NULL, 'conv-legacy', 'outbound', 'rep@trockgc.com', ARRAY['client@acme.com'],
+               'Legacy subject', '${USER_ID}', now())`
+    );
+
+    // First Sent scan sees the same message (now carrying a Message-ID).
+    const stored = await processMailMessage(
+      db, SCHEMA, USER_ID, OFFICE_ID,
+      { id: "graph-legacy-sent", internetMessageId: "<legacy-M@trock>", conversationId: "conv-legacy",
+        from: { emailAddress: { address: "rep@trockgc.com" } },
+        toRecipients: [{ emailAddress: { address: "client@acme.com" } }], subject: "Legacy subject",
+        body: { content: "x" }, sentDateTime: new Date().toISOString() },
+      "outbound"
+    );
+
+    expect(stored).toBe(false); // not double-stored
+    expect(await emailCount("outbound")).toBe(1); // still the single legacy row...
+    const row = await db.query<{ internet_message_id: string }>(
+      `SELECT internet_message_id FROM ${SCHEMA}.emails WHERE graph_message_id = 'graph-legacy'`
+    );
+    expect(row.rows[0].internet_message_id).toBe("<legacy-M@trock>"); // ...now with the Message-ID adopted
+  });
+});
+
+describe("pickInboxStartCursor (P1: avoid resuming from the stale 0129 cursor)", () => {
+  it("uses last_delta_link (the old worker's live cursor) before the new worker has synced the inbox", () => {
+    expect(
+      pickInboxStartCursor({
+        last_inbox_sync_at: null,
+        last_inbox_delta_link: "STALE-0129-backfill",
+        last_delta_link: "LIVE-old-worker",
+      })
+    ).toBe("LIVE-old-worker");
+  });
+
+  it("uses last_inbox_delta_link once the new worker has taken over (last_inbox_sync_at set)", () => {
+    expect(
+      pickInboxStartCursor({
+        last_inbox_sync_at: new Date().toISOString(),
+        last_inbox_delta_link: "FRESH-new-worker",
+        last_delta_link: "now-frozen",
+      })
+    ).toBe("FRESH-new-worker");
+  });
+
+  it("returns null (fresh 7-day query) for a brand-new mailbox with no cursors", () => {
+    expect(
+      pickInboxStartCursor({ last_inbox_sync_at: null, last_inbox_delta_link: null, last_delta_link: null })
+    ).toBe(null);
   });
 });
 
