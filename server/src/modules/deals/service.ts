@@ -951,11 +951,26 @@ async function validateDealReassignmentAssignee(
       .limit(1);
     const normalizedTargetOfficeCode = resolveOfficeCodeFromOffice(targetOffice ?? null);
     if (normalizedTargetOfficeCode !== normalizedDealOfficeCode) {
-      throw new AppError(
-        400,
-        "Deals can only be reassigned to users in the same office",
-        "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
+      // The rep's PRIMARY office differs from the deal's office, but a multi-office
+      // rep may still hold an explicit additional-office grant (user_office_access)
+      // covering it. Honor that grant — but only one the rep already holds; this
+      // does not widen access. Match by office CODE (dfw/atl) because several
+      // office records can fold to the same code (e.g. "Dallas Office"/"DFW Office").
+      const accessibleOffices = await tenantDb
+        .select({ slug: offices.slug, name: offices.name })
+        .from(userOfficeAccess)
+        .innerJoin(offices, eq(offices.id, userOfficeAccess.officeId))
+        .where(eq(userOfficeAccess.userId, assigneeId));
+      const hasAdditionalOfficeGrant = accessibleOffices.some(
+        (office) => resolveOfficeCodeFromOffice(office) === normalizedDealOfficeCode
       );
+      if (!hasAdditionalOfficeGrant) {
+        throw new AppError(
+          400,
+          "Deals can only be reassigned to users in the same office",
+          "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
+        );
+      }
     }
     return;
   }
@@ -971,11 +986,21 @@ async function validateDealReassignmentAssignee(
   }
 
   if (dealOfficeId && targetUser.officeId !== dealOfficeId) {
-    throw new AppError(
-      400,
-      "Deals can only be reassigned to users in the same office",
-      "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
-    );
+    // Same fallback as the officeCode branch and validateAssignee: a rep whose
+    // primary office differs may still hold an explicit additional-office grant
+    // (user_office_access) to the deal's office. Honor an already-held grant.
+    const [access] = await tenantDb
+      .select()
+      .from(userOfficeAccess)
+      .where(and(eq(userOfficeAccess.userId, assigneeId), eq(userOfficeAccess.officeId, dealOfficeId)))
+      .limit(1);
+    if (!access) {
+      throw new AppError(
+        400,
+        "Deals can only be reassigned to users in the same office",
+        "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
+      );
+    }
   }
 }
 
