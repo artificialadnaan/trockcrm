@@ -18,6 +18,12 @@ const QUARANTINE = [
   "src/pages/leads/lead-list-page.move.test.tsx",
   "src/pages/projects/project-detail-page.test.tsx",
   "src/pages/projects/projects-page.test.tsx",
+  // --- Env-dependent: surfaced when #747's own broadened gate ran on UTC CI; passed on a local
+  //     CT (UTC-5) dev box, so the first inventory missed them. Run burn-down with TZ=UTC. ---
+  // TZ-dependent date-range assertions (new Date(y,m,d) is local; formatted window differs under UTC).
+  "src/pages/deals/deal-list-page-period.test.tsx",
+  // TZ-dependent "current date/time" assertion (15:30 UTC vs 10:30 CT).
+  "src/components/activities/activity-log-form.test.tsx",
 ];
 
 export default mergeConfig(

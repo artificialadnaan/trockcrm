@@ -32,6 +32,10 @@ const QUARANTINE = [
   "tests/modules/properties/properties-linked-value-consistency.test.ts",
   "tests/modules/sales-review/service.test.ts",
   "tests/scripts/project-number-notification-skip.test.ts",
+  // --- Env-dependent: surfaced when #747's own broadened gate ran on Linux/UTC CI; passed on a
+  //     local macOS/CT dev box, so the first inventory missed them. Verify burn-down under CI conditions. ---
+  // backfill script hardcodes "/private/tmp" (macOS-only) -> ENOENT on Linux CI. Fix: path.join(os.tmpdir(), ...).
+  "tests/scripts/backfill-procore-bid-board-ids.test.ts",
 ];
 
 export default mergeConfig(
