@@ -2,6 +2,14 @@ import { pool } from "../db.js";
 import crypto from "crypto";
 
 const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
+
+// RED email-signature coordination — body-on-dedup-collision policy.
+// Default OFF = OPTION (a): when a Sent-folder copy collides with an existing row on internet_message_id,
+// trust the CRM compose-time body and skip cleanly. Flip to true ONLY if signatures are appended
+// SERVER-SIDE (Exchange transport rule / Outlook client signature), where the CRM never sees the final
+// as-sent body — then OPTION (b) lets the Sent-folder copy win the body field so the stored copy matches
+// what the client actually received. See .audit/outlook-graph-sync-discovery.md.
+const SENT_COPY_WINS_BODY_ON_COLLISION = false;
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
 const SERVER_EMAIL_ASSIGNMENT_MODULE = `${SERVER_MODULE_ROOT}/email/assignment-service.js` as string;
@@ -203,6 +211,7 @@ export async function runEmailSync(): Promise<void> {
     const tokenRows = await client.query(
       `SELECT ugt.user_id, ugt.access_token, ugt.refresh_token,
               ugt.home_account_id, ugt.token_expires_at, ugt.last_delta_link,
+              ugt.last_inbox_delta_link, ugt.last_sent_delta_link, ugt.last_inbox_sync_at,
               ugt.last_sync_at, u.office_id, u.email AS user_email
        FROM public.user_graph_tokens ugt
        JOIN public.users u ON u.id = ugt.user_id
@@ -217,47 +226,41 @@ export async function runEmailSync(): Promise<void> {
     console.log(`[Worker:email-sync] Processing ${tokenRows.rows.length} users`);
 
     for (const tokenRow of tokenRows.rows) {
+      // Skip if last sync was less than 60 seconds ago (before taking the lock).
+      if (
+        tokenRow.last_sync_at &&
+        Date.now() - new Date(tokenRow.last_sync_at).getTime() < 60_000
+      ) {
+        continue;
+      }
+
+      // SESSION-level advisory lock for the WHOLE user (token refresh + both folders). Serializes
+      // overlapping cron runs so two can't refresh the same user's cached MSAL token concurrently — the
+      // loser of that race rotates/invalidates the refresh token and wrongly marks the mailbox
+      // reauth_needed (the dark-mailbox failure mode). A SESSION lock (not xact) spans the independent
+      // per-folder transactions without holding one open; released in finally (and auto-released if the
+      // connection drops).
+      const lock = await client.query(
+        "SELECT pg_try_advisory_lock(hashtext($1)) AS acquired",
+        [tokenRow.user_id]
+      );
+      if (!lock.rows[0]?.acquired) {
+        console.log(`[Worker:email-sync] Skipping user ${tokenRow.user_id} — another run holds the lock`);
+        continue;
+      }
       try {
-        // Skip if last sync was less than 60 seconds ago (prevents overlap with slow syncs)
-        if (
-          tokenRow.last_sync_at &&
-          Date.now() - new Date(tokenRow.last_sync_at).getTime() < 60_000
-        ) {
-          continue;
-        }
-
-        // Fix 4: Wrap in BEGIN/COMMIT so the advisory xact lock persists for the full sync
-        await client.query("BEGIN");
-
-        // Acquire per-user advisory lock to prevent concurrent syncs for the same user
-        const lockResult = await client.query(
-          "SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired",
-          [tokenRow.user_id]
-        );
-        if (!lockResult.rows[0]?.acquired) {
-          await client.query("COMMIT");
-          console.log(
-            `[Worker:email-sync] Skipping user ${tokenRow.user_id} — sync already in progress`
-          );
-          continue;
-        }
-
-        // Fix 5: Refresh token if expired before attempting sync
+        // Refresh token if within 5 min of expiry — UNDER the lock, so concurrent runs can't race the cache.
         const expiresAt = new Date(tokenRow.token_expires_at);
-        const bufferMs = 5 * 60 * 1000; // refresh if within 5 minutes of expiry
-        if (expiresAt.getTime() - Date.now() < bufferMs) {
+        if (expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {
           const refreshedToken = await refreshTokenForWorker(client, tokenRow);
-          if (!refreshedToken) {
-            await client.query("COMMIT");
-            continue; // reauth marked inside refreshTokenForWorker
-          }
+          if (!refreshedToken) continue; // reauth marked inside; finally still unlocks
           tokenRow.access_token = refreshedToken;
         }
 
-        await syncUserEmails(client, tokenRow);
-        await client.query("COMMIT");
+        // Sync folders, EACH in its own transaction so a Sent-folder failure can't roll back the
+        // already-committed Inbox sync (the Inbox pipeline is live in prod).
+        await syncUserMailbox(client, tokenRow);
       } catch (err: any) {
-        await client.query("ROLLBACK").catch(() => {});
         console.error(
           `[Worker:email-sync] Failed for user ${tokenRow.user_id}:`,
           err.message
@@ -273,8 +276,12 @@ export async function runEmailSync(): Promise<void> {
              SET status = 'reauth_needed', error_message = $1, updated_at = NOW()
              WHERE user_id = $2`,
             [`Sync failed: ${err.message}`, tokenRow.user_id]
-          );
+          ).catch(() => {});
         }
+      } finally {
+        await client
+          .query("SELECT pg_advisory_unlock(hashtext($1))", [tokenRow.user_id])
+          .catch(() => {});
       }
     }
 
@@ -284,25 +291,69 @@ export async function runEmailSync(): Promise<void> {
   }
 }
 
-async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
-  const { user_id, access_token, last_delta_link, office_id } = tokenRow;
+// One mailbox folder to delta-sync. Inbox carries inbound mail; Sent Items carries the rep's own
+// outbound mail — including emails composed directly in Outlook, which never enter the CRM otherwise.
+interface MailFolderSync {
+  folder: "inbox" | "sentitems";
+  direction: "inbound" | "outbound";
+  cursorColumn: "last_inbox_delta_link" | "last_sent_delta_link";
+  syncAtColumn: "last_inbox_sync_at" | "last_sent_sync_at";
+  // Where this run's delta resumes from (null → fresh 7-day query).
+  initialCursor: string | null;
+}
 
-  // Decrypt access token (stored encrypted at rest)
+/**
+ * Choose the inbox delta cursor to resume from.
+ *
+ * Before this worker version, prod advanced a single `last_delta_link` for the inbox. Migration 0129
+ * backfilled `last_inbox_delta_link = last_delta_link` ONCE and then it froze, while the old worker kept
+ * advancing `last_delta_link` — so for a user the new worker hasn't synced yet, `last_delta_link` is the
+ * LIVE cursor and `last_inbox_delta_link` is stale. `last_inbox_sync_at` is only ever written by THIS
+ * worker, so its presence means the new worker has taken over the inbox and `last_inbox_delta_link` is now
+ * authoritative. Preferring the stale cursor would resume from an expired delta link → large replay or a
+ * persistent Graph delta failure on every run.
+ */
+export function pickInboxStartCursor(tokenRow: {
+  last_inbox_sync_at?: unknown;
+  last_inbox_delta_link?: string | null;
+  last_delta_link?: string | null;
+}): string | null {
+  if (tokenRow.last_inbox_sync_at) {
+    return tokenRow.last_inbox_delta_link ?? null;
+  }
+  return tokenRow.last_delta_link ?? tokenRow.last_inbox_delta_link ?? null;
+}
+
+function buildMailFolders(tokenRow: any): MailFolderSync[] {
+  return [
+    {
+      folder: "inbox",
+      direction: "inbound",
+      cursorColumn: "last_inbox_delta_link",
+      syncAtColumn: "last_inbox_sync_at",
+      initialCursor: pickInboxStartCursor(tokenRow),
+    },
+    {
+      folder: "sentitems",
+      direction: "outbound",
+      cursorColumn: "last_sent_delta_link",
+      syncAtColumn: "last_sent_sync_at",
+      initialCursor: tokenRow.last_sent_delta_link ?? null,
+    },
+  ];
+}
+
+/**
+ * Sync a user's mailbox folders, EACH IN ITS OWN TRANSACTION. Isolating folders is critical: a Sent-folder
+ * failure must never roll back the Inbox sync that already committed (the Inbox pipeline is live in prod).
+ * The per-user advisory lock is taken per folder-transaction to prevent concurrent syncs of the same user.
+ */
+async function syncUserMailbox(client: any, tokenRow: any): Promise<void> {
+  const { user_id, access_token, office_id } = tokenRow;
   const currentAccessToken = decrypt(access_token);
 
-  // Determine delta URL
-  // First sync: use messages endpoint with select fields (last 7 days)
-  // Subsequent syncs: use the stored delta link
-  let deltaUrl: string;
-  if (last_delta_link) {
-    deltaUrl = last_delta_link;
-  } else {
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    deltaUrl = `/me/mailFolders/inbox/messages/delta?$select=id,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,body,hasAttachments,receivedDateTime&$filter=receivedDateTime ge ${sevenDaysAgo}`;
-  }
-
-  // Resolve the office schema for this user
-  const officeResult = await poolClient.query(
+  // Resolve the office schema for this user (read — no transaction needed).
+  const officeResult = await client.query(
     "SELECT slug FROM public.offices WHERE id = $1 AND is_active = true",
     [office_id]
   );
@@ -316,13 +367,75 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
   }
   const schemaName = `office_${officeSlug}`;
 
+  for (const f of buildMailFolders(tokenRow)) {
+    try {
+      // The caller (runEmailSync) holds a SESSION-level advisory lock for this user across refresh + both
+      // folders, so concurrent same-user syncs are already excluded — each folder just needs its own
+      // transaction for failure isolation.
+      await client.query("BEGIN");
+      await syncUserMailFolder(client, currentAccessToken, user_id, office_id, schemaName, f);
+      await client.query("COMMIT");
+    } catch (err: any) {
+      await client.query("ROLLBACK").catch(() => {});
+      console.error(`[Worker:email-sync] ${f.folder} sync failed for user ${user_id}:`, err.message);
+      // A 401 means the token is dead for ALL folders → mark reauth and stop.
+      if (err.message?.includes("401") || err.message?.includes("InvalidAuthenticationToken")) {
+        await client
+          .query(
+            `UPDATE public.user_graph_tokens
+             SET status = 'reauth_needed', error_message = $1, updated_at = NOW()
+             WHERE user_id = $2`,
+            [`Sync failed: ${err.message}`, user_id]
+          )
+          .catch(() => {});
+        break;
+      }
+      // INBOX failures must NOT be isolated: Inbox runs first, so swallowing a non-401 inbox error and
+      // letting a successful Sent sync advance last_sync_at would make the worker LOOK healthy while
+      // inbound silently stops (the inbox cursor never advanced). Re-throw so this user's sync aborts the
+      // round (last_sync_at not bumped) and retries next run. Only SENT failures are isolated — Inbox has
+      // already committed + advanced its own cursor by the time Sent runs, so the live inbound pipeline is
+      // safe and a transient Sent error shouldn't abort it.
+      if (f.folder === "inbox") {
+        throw err;
+      }
+    }
+  }
+}
+
+async function syncUserMailFolder(
+  poolClient: any,
+  accessToken: string,
+  userId: string,
+  officeId: string,
+  schemaName: string,
+  f: MailFolderSync
+): Promise<void> {
+  // First sync for this folder: messages endpoint with select fields (last 7 days).
+  // Subsequent syncs: the stored delta link (which encodes the original $select).
+  //
+  // CRITICAL: Graph message-delta only supports a `receivedDateTime` $filter — NOT `sentDateTime`
+  // (which 400s with ErrorInvalidUrlQuery). Sent Items rows DO carry receivedDateTime, so we filter both
+  // folders on it; outbound additionally selects sentDateTime for the stored sent_at. (Inbox uses this
+  // exact receivedDateTime filter in prod today, so it's known-supported.)
+  let deltaUrl: string;
+  if (f.initialCursor) {
+    deltaUrl = f.initialCursor;
+  } else {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const selectFields =
+      "id,internetMessageId,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,body,hasAttachments,receivedDateTime" +
+      (f.direction === "outbound" ? ",sentDateTime" : "");
+    deltaUrl = `/me/mailFolders/${f.folder}/messages/delta?$select=${selectFields}&$filter=receivedDateTime ge ${sevenDaysAgo}`;
+  }
+
   // Fetch messages page by page via delta
   let nextLink: string | null = deltaUrl;
   let newDeltaLink: string | null = null;
   let totalProcessed = 0;
 
   while (nextLink) {
-    const result: GraphFetchResult<any> = await graphFetch(currentAccessToken, nextLink);
+    const result: GraphFetchResult<any> = await graphFetch(accessToken, nextLink);
 
     if (!result.ok) {
       if (result.status === 401) {
@@ -339,12 +452,13 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
       // Skip deleted/removed messages from delta (they have @removed)
       if (msg["@removed"]) continue;
 
-      const processed = await processInboundMessage(
+      const processed = await processMailMessage(
         poolClient,
         schemaName,
-        user_id,
-        office_id,
-        msg
+        userId,
+        officeId,
+        msg,
+        f.direction
       );
       if (processed) totalProcessed++;
     }
@@ -357,31 +471,34 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
     }
   }
 
-  // Update the delta link and last sync time
+  // Persist the folder's own cursor + per-folder sync time + the overall heartbeat. The split cursor
+  // columns (last_inbox_delta_link / last_sent_delta_link) are hardcoded literals from MailFolderSync,
+  // never user input — safe to interpolate.
   if (newDeltaLink) {
     await poolClient.query(
       `UPDATE public.user_graph_tokens
-       SET last_delta_link = $1, last_sync_at = NOW(), updated_at = NOW()
+       SET ${f.cursorColumn} = $1, ${f.syncAtColumn} = NOW(), last_sync_at = NOW(), updated_at = NOW()
        WHERE user_id = $2`,
-      [newDeltaLink, user_id]
+      [newDeltaLink, userId]
     );
   } else {
     await poolClient.query(
-      `UPDATE public.user_graph_tokens SET last_sync_at = NOW(), updated_at = NOW() WHERE user_id = $1`,
-      [user_id]
+      `UPDATE public.user_graph_tokens
+       SET ${f.syncAtColumn} = NOW(), last_sync_at = NOW(), updated_at = NOW()
+       WHERE user_id = $1`,
+      [userId]
     );
   }
 
   if (totalProcessed > 0) {
     console.log(
-      `[Worker:email-sync] User ${user_id}: synced ${totalProcessed} new emails`
+      `[Worker:email-sync] User ${userId}: synced ${totalProcessed} new ${f.direction} emails from ${f.folder}`
     );
   }
 }
 
 /**
- * Process a single inbound message from Graph delta.
- * Returns true if the email was stored (matched a contact), false if skipped.
+ * Process a single inbound (Inbox) message from Graph delta. Thin wrapper — see processMailMessage.
  */
 export async function processInboundMessage(
   client: any,
@@ -390,15 +507,83 @@ export async function processInboundMessage(
   officeId: string,
   msg: any
 ): Promise<boolean> {
+  return processMailMessage(client, schemaName, userId, officeId, msg, "inbound");
+}
+
+/**
+ * Process a single outbound (Sent Items) message from Graph delta. Thin wrapper — see processMailMessage.
+ */
+export async function processSentMessage(
+  client: any,
+  schemaName: string,
+  userId: string,
+  officeId: string,
+  msg: any
+): Promise<boolean> {
+  return processMailMessage(client, schemaName, userId, officeId, msg, "outbound");
+}
+
+/**
+ * Process a single message from a Graph delta page.
+ *
+ * Inbound (Inbox): matches the SENDER against CRM contacts; stores every message; fires inbound side
+ * effects (email.received event, reply-task evaluation).
+ *
+ * Outbound (Sent Items): matches the RECIPIENTS (rep → client); SELECTIVE — stores only when a recipient
+ * is a known contact or the thread is already bound, so sent-to-noise stays out of the assignment queue;
+ * dedups on internet_message_id so a CRM-composed email isn't double-stored when its Sent-folder copy
+ * (different graph id, same Message-ID) is synced; skips the inbound-only side effects.
+ *
+ * Returns true if the email was stored, false if skipped (dedup / not selective / conflict).
+ */
+export async function processMailMessage(
+  client: any,
+  schemaName: string,
+  userId: string,
+  officeId: string,
+  msg: any,
+  direction: "inbound" | "outbound"
+): Promise<boolean> {
+  const isOutbound = direction === "outbound";
   const graphMessageId = msg.id;
   if (!graphMessageId) return false;
+  const internetMessageId: string | null = msg.internetMessageId ?? null;
 
-  // Dedup check: graph_message_id is UNIQUE
+  // Dedup 1 (both directions): graph_message_id is UNIQUE.
   const existing = await client.query(
     `SELECT id FROM ${schemaName}.emails WHERE graph_message_id = $1 LIMIT 1`,
     [graphMessageId]
   );
   if (existing.rows.length > 0) return false;
+
+  // Dedup 2 (outbound only): the Sent-folder copy of a message the CRM already stored (a CRM-composed
+  // send, or an earlier sync) carries a DIFFERENT graph id but the SAME internet_message_id. Skip it so
+  // the outbound email is stored exactly once.
+  //
+  // Scope the match to THIS mailbox's own outbound rows (user_id + direction='outbound'). The RFC822
+  // Message-ID is identical across a message's copies in DIFFERENT mailboxes — for an internal A→B email,
+  // A's Sent copy and B's Inbox copy share it. A tenant-wide match would let B's inbound row swallow A's
+  // outbound copy (data loss). The only collision we dedup is A's own CRM-composed row vs A's Sent copy.
+  if (isOutbound && internetMessageId) {
+    const existingByMid = await client.query(
+      `SELECT id FROM ${schemaName}.emails
+        WHERE internet_message_id = $1 AND user_id = $2 AND direction = 'outbound' LIMIT 1`,
+      [internetMessageId, userId]
+    );
+    if (existingByMid.rows.length > 0) {
+      // OPTION (b) fallback (default OFF): let the Sent-folder copy win the body field — only relevant
+      // when a signature is appended server-side and the CRM's stored body predates it.
+      if (SENT_COPY_WINS_BODY_ON_COLLISION) {
+        await client.query(
+          `UPDATE ${schemaName}.emails
+              SET body_html = $1, body_preview = $2
+            WHERE internet_message_id = $3 AND user_id = $4 AND direction = 'outbound'`,
+          [msg.body?.content ?? "", (msg.bodyPreview ?? "").substring(0, 500), internetMessageId, userId]
+        );
+      }
+      return false;
+    }
+  }
 
   // Extract addresses
   const fromAddress =
@@ -414,16 +599,55 @@ export async function processInboundMessage(
   const bodyPreview = (msg.bodyPreview ?? "").substring(0, 500);
   const bodyHtml = msg.body?.content ?? "";
   const hasAttachments = msg.hasAttachments ?? false;
-  const sentAt = msg.receivedDateTime
-    ? new Date(msg.receivedDateTime)
-    : new Date();
+  // Inbound is timestamped by receipt; outbound by send time (falling back to receivedDateTime, which
+  // Sent Items rows also carry, since the delta $select uses it).
+  const messageDate = isOutbound ? (msg.sentDateTime ?? msg.receivedDateTime) : msg.receivedDateTime;
+  const sentAt = messageDate ? new Date(messageDate) : new Date();
   const mailboxAccountId = await resolveMailboxAccountIdForSyncedUser(client, userId);
   const normalizedSubject = normalizeEmailSubject(subject);
   const participantFingerprint = buildParticipantFingerprint(toAddresses, ccAddresses);
 
-  // Selective sync: for inbound emails, match ONLY the sender (from_address)
-  // against CRM contacts — not to/cc which are internal mailbox addresses.
-  const matchAddresses = fromAddress ? [fromAddress] : [];
+  // First-Sent-scan transition: a CRM-composed send made BEFORE this feature has internet_message_id = NULL
+  // (it was never captured), so its Sent-folder copy won't match the dedup above and would double-store.
+  // Adopt: if a legacy outbound row (NULL imid, same mailbox + conversation + subject) exists, stamp this
+  // message's Message-ID onto it and skip the insert. Self-limiting — once every pre-feature send is
+  // adopted, no NULL-imid outbound rows remain and this never fires again.
+  if (isOutbound && internetMessageId && conversationId) {
+    // Match conversation + subject + RECIPIENTS + a tight send-time window. The recipients and the ±1-day
+    // window stop a NEW Outlook message from stamping its Message-ID onto an OLD CRM row that merely shares
+    // a conversation+subject (which would drop the real Sent item and break later dedup). A genuine
+    // CRM-composed row and its Sent-folder copy ARE the same message — same recipients, same send time —
+    // so the real adoption still matches.
+    const legacy = await client.query(
+      `SELECT id FROM ${schemaName}.emails
+        WHERE user_id = $1 AND direction = 'outbound' AND internet_message_id IS NULL
+          AND graph_conversation_id = $2 AND subject = $3
+          -- case-insensitive recipient overlap (worker lowercases to/cc; sendEmail stores as-composed)
+          AND EXISTS (SELECT 1 FROM unnest(to_addresses) addr WHERE lower(addr) = ANY($4::text[]))
+          AND sent_at BETWEEN ($5::timestamptz - interval '1 day') AND ($5::timestamptz + interval '1 day')
+        -- Pick the row CLOSEST to this Sent copy's timestamp, not merely the newest: with multiple
+        -- pre-feature CRM sends in the window, ORDER BY newest could stamp THIS message's Message-ID onto
+        -- a different (newer) row, dropping the real one and breaking later dedup.
+        ORDER BY ABS(EXTRACT(EPOCH FROM (sent_at - $5::timestamptz))) ASC LIMIT 1`,
+      [userId, conversationId, subject, toAddresses, sentAt]
+    );
+    if (legacy.rows.length > 0) {
+      await client.query(
+        `UPDATE ${schemaName}.emails SET internet_message_id = $1 WHERE id = $2`,
+        [internetMessageId, legacy.rows[0].id]
+      );
+      return false;
+    }
+  }
+
+  // Participant match differs by direction:
+  //   inbound  — the SENDER is the external party → match from_address against contacts.
+  //   outbound — the rep is the sender → match the RECIPIENTS (to/cc) against contacts.
+  const matchAddresses = isOutbound
+    ? [...toAddresses, ...ccAddresses]
+    : fromAddress
+      ? [fromAddress]
+      : [];
   const [contactMatch, activeThreadBinding, provisionalThreadBinding, assignmentModule] = await Promise.all([
     findContactByEmailRaw(client, schemaName, matchAddresses),
     getActiveThreadBindingRaw(client, schemaName, mailboxAccountId, conversationId),
@@ -440,6 +664,14 @@ export async function processInboundMessage(
         leadCandidates: [],
       };
   const authoritativeBinding = activeThreadBinding ?? provisionalThreadBinding;
+
+  // SELECTIVE SENT-SYNC: inbound stores every Inbox message, but a rep's Sent Items also holds mail to
+  // no-reply/newsletter/internal addresses. Store an outbound email only when it ties to a known CRM
+  // record — a matched recipient contact OR an already-bound thread — so the shared assignment queue
+  // surfaces real sent-to-contact mail, not noise. (Inbound is unaffected.)
+  if (isOutbound && !contactMatch && !authoritativeBinding) {
+    return false;
+  }
 
   const assignment = authoritativeBinding
     ? {
@@ -467,20 +699,74 @@ export async function processInboundMessage(
     provisionalThreadBinding && conversationId
       ? await promoteProvisionalBindingRaw(client, schemaName, provisionalThreadBinding.id, conversationId)
       : null;
-  const bindingId = promotedBinding?.id ?? activeThreadBinding?.id ?? provisionalThreadBinding?.id ?? null;
+  let bindingId = promotedBinding?.id ?? activeThreadBinding?.id ?? provisionalThreadBinding?.id ?? null;
+
+  // Seed a thread binding when an ASSIGNED outbound send is the first CRM-seen message in its conversation.
+  // The CRM sendEmail path seeds one (seedOutboundThreadBinding); the Sent-folder sync must too — otherwise
+  // a later Inbox reply on this conversationId finds no binding and falls back to ambiguous/no assignment.
+  // We have the real conversationId here, so seed a CONCRETE (non-provisional) binding keyed on it; the
+  // partial-unique ON CONFLICT absorbs a race with the CRM seed.
+  if (isOutbound && assignment.assignedDealId && conversationId && !bindingId) {
+    const seeded = await client.query(
+      `INSERT INTO ${schemaName}.email_thread_bindings
+         (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence,
+          assignment_reason, created_by, updated_by)
+       VALUES ($1, 'microsoft_graph', $2, $3, 'outbound_sync_seed', 'high', 'outbound_sent_sync', $4, $4)
+       ON CONFLICT (mailbox_account_id, provider, provider_conversation_id)
+         WHERE detached_at IS NULL AND provider_conversation_id IS NOT NULL
+         DO NOTHING
+       RETURNING id`,
+      [mailboxAccountId, conversationId, assignment.assignedDealId, userId]
+    );
+    if (seeded.rows.length > 0) {
+      bindingId = seeded.rows[0].id;
+    } else {
+      // Another path won the binding for this conversation between the earlier getActiveThreadBindingRaw
+      // lookup and this insert. ON CONFLICT DO NOTHING returned no row, so adopt the EXISTING binding —
+      // use its id AND follow its deal, so this message and the thread don't diverge onto different deals.
+      const existing = await client.query(
+        `SELECT id, deal_id FROM ${schemaName}.email_thread_bindings
+          WHERE mailbox_account_id = $1 AND provider = 'microsoft_graph' AND provider_conversation_id = $2
+            AND detached_at IS NULL
+          LIMIT 1`,
+        [mailboxAccountId, conversationId]
+      );
+      if (existing.rows.length > 0) {
+        bindingId = existing.rows[0].id;
+        if (existing.rows[0].deal_id) {
+          assignment.assignedDealId = existing.rows[0].deal_id;
+          assignment.assignedEntityType = "deal";
+          assignment.assignedEntityId = existing.rows[0].deal_id;
+        }
+      }
+    }
+  }
+
+  // Persist assignment_status from the RESOLVED assignment rather than letting it default to 'unassigned'.
+  // Mark 'assigned' ONLY for a confident assignment — a deal/entity attached AND no ambiguity. An
+  // AMBIGUOUS resolution (e.g. company-fallback with an ambiguity_reason / requiresClassificationTask)
+  // must stay 'unassigned' so it remains visible in the assignment queue (which filters status=unassigned
+  // AND ambiguity_reason IS NOT NULL); marking it 'assigned' would hide it from the rep who needs to
+  // resolve it. (deriveAssignmentStatus parity, plus the ambiguity guard.)
+  const isAmbiguous =
+    assignment.requiresClassificationTask === true || assignment.ambiguityReason != null;
+  const assignmentStatus =
+    (assignment.assignedDealId || assignment.assignedEntityId) && !isAmbiguous ? "assigned" : "unassigned";
 
   const [insertResult] = [await client.query(
     `INSERT INTO ${schemaName}.emails
-     (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, cc_addresses,
+     (graph_message_id, internet_message_id, graph_conversation_id, direction, from_address, to_addresses, cc_addresses,
       subject, body_preview, body_html, has_attachments, contact_id, deal_id,
       assigned_entity_type, assigned_entity_id, assignment_confidence, assignment_ambiguity_reason,
-      thread_binding_id, user_id, sent_at)
-     VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-     ON CONFLICT (graph_message_id) DO NOTHING
+      thread_binding_id, user_id, sent_at, assignment_status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+     ON CONFLICT DO NOTHING
      RETURNING id`,
     [
       graphMessageId,
+      internetMessageId,
       conversationId,
+      direction,
       fromAddress,
       toAddresses,
       ccAddresses,
@@ -497,6 +783,7 @@ export async function processInboundMessage(
       bindingId,
       userId,
       sentAt,
+      assignmentStatus,
     ]
   )];
 
@@ -511,34 +798,69 @@ export async function processInboundMessage(
     activeDealNames: contactContext.dealCandidates.map((d) => `${d.dealNumber} ${d.name}`.trim()),
   };
 
-  // Create activity record AFTER deal association so deal_id is included in the INSERT
-  // (no separate UPDATE needed)
-  const activitySourceEntityType =
-    association.dealId
-      ? "deal"
-      : assignment.assignedEntityType === "company" && assignment.assignedEntityId
-        ? "company"
-        : contactMatch?.id
-          ? "contact"
-          : null;
-  const activitySourceEntityId =
-    association.dealId
-      ?? assignment.assignedEntityId
-      ?? contactMatch?.id
-      ?? null;
+  // For a deal-assigned email, the activity's parent link columns + the parent-company stat target come
+  // FROM THE DEAL (company/property/lead), exactly like CRM sendEmail's resolveOutboundAssociation.
+  let dealParents: { company_id: string | null; property_id: string | null; source_lead_id: string | null } | null =
+    null;
+  if (association.dealId) {
+    const dp = await client.query(
+      `SELECT company_id, property_id, source_lead_id FROM ${schemaName}.deals WHERE id = $1 LIMIT 1`,
+      [association.dealId]
+    );
+    dealParents = dp.rows[0] ?? null;
+  }
+
+  // Derive source_entity_type + ALL link columns so they agree (a lead/property assignment must NOT fall
+  // back to source_entity_type='contact' while lead_id/property_id are set) and mirror the CRM path.
+  let activitySourceEntityType: string | null = null;
+  let activitySourceEntityId: string | null = null;
+  let activityCompanyId: string | null = null;
+  let activityLeadId: string | null = null;
+  let activityPropertyId: string | null = null;
+  if (association.dealId) {
+    activitySourceEntityType = "deal";
+    activitySourceEntityId = association.dealId;
+    activityCompanyId = dealParents?.company_id ?? null;
+    activityPropertyId = dealParents?.property_id ?? null;
+    activityLeadId = dealParents?.source_lead_id ?? null;
+  } else if (assignment.assignedEntityType === "company" && assignment.assignedEntityId) {
+    activitySourceEntityType = "company";
+    activitySourceEntityId = assignment.assignedEntityId;
+    activityCompanyId = assignment.assignedEntityId;
+  } else if (assignment.assignedEntityType === "lead" && assignment.assignedEntityId) {
+    activitySourceEntityType = "lead";
+    activitySourceEntityId = assignment.assignedEntityId;
+    activityLeadId = assignment.assignedEntityId;
+  } else if (assignment.assignedEntityType === "property" && assignment.assignedEntityId) {
+    activitySourceEntityType = "property";
+    activitySourceEntityId = assignment.assignedEntityId;
+    activityPropertyId = assignment.assignedEntityId;
+  } else if (contactMatch?.id) {
+    activitySourceEntityType = "contact";
+    activitySourceEntityId = contactMatch.id;
+  }
+
   const responsibleUserId = userId;
+  // Outbound = the rep performed the send → set performed_by_user_id so the deal shows in their "mine"
+  // (mine-visibility filters on performed_by_user_id = userId, like CRM sendEmail). Inbound was received,
+  // not performed, so it stays NULL.
+  const performedByUserId = isOutbound ? userId : null;
   if (activitySourceEntityType && activitySourceEntityId) {
     await client.query(
       `INSERT INTO ${schemaName}.activities
        (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
-        deal_id, contact_id, email_id, subject, body, occurred_at)
-       VALUES ('email', $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        deal_id, contact_id, company_id, lead_id, property_id, email_id, subject, body, occurred_at)
+       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         responsibleUserId,
+        performedByUserId,
         activitySourceEntityType,
         activitySourceEntityId,
         association.dealId, // may be null if 0 or multiple deals
         contactMatch?.id ?? null,
+        activityCompanyId,
+        activityLeadId,
+        activityPropertyId,
         emailId,
         subject,
         bodyPreview.substring(0, 1000),
@@ -547,7 +869,32 @@ export async function processInboundMessage(
     );
   }
 
-  if (assignment.requiresClassificationTask) {
+  // Refresh email counters for EVERY stat target the email resolved to (mirrors the CRM path's
+  // collectEmailStatTargetsForEmail + the deal→parent-company cascade + the server's contact branch).
+  // Deduped so a company reached via both an assignment and a deal isn't refreshed twice.
+  const statTargets = new Map<string, "deal" | "company" | "lead" | "contact">();
+  if (association.dealId) {
+    statTargets.set(`deal:${association.dealId}`, "deal");
+    if (dealParents?.company_id) statTargets.set(`company:${dealParents.company_id}`, "company");
+  }
+  if (
+    assignment.assignedEntityId &&
+    (assignment.assignedEntityType === "company" ||
+      assignment.assignedEntityType === "lead" ||
+      assignment.assignedEntityType === "deal")
+  ) {
+    statTargets.set(`${assignment.assignedEntityType}:${assignment.assignedEntityId}`, assignment.assignedEntityType);
+  }
+  if (contactMatch?.id) statTargets.set(`contact:${contactMatch.id}`, "contact");
+  for (const [key, type] of statTargets) {
+    await refreshEntityEmailStatsRaw(client, schemaName, type, key.slice(key.indexOf(":") + 1));
+  }
+
+  // createClassificationTaskRaw hardcodes an INBOUND-flavored task (type='inbound_email',
+  // source_event='email.received'), so it must not fire for outbound. The outbound email still surfaces
+  // in the assignment queue via its assignment_ambiguity_reason on the row (set in the INSERT above) —
+  // the task is a separate, inbound-only nudge.
+  if (!isOutbound && assignment.requiresClassificationTask) {
     await createClassificationTaskRaw(client, schemaName, {
       officeId,
       emailId,
@@ -559,7 +906,8 @@ export async function processInboundMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (association.dealId) {
+  } else if (!isOutbound && association.dealId) {
+    // Reply-task evaluation ("a client replied → maybe a follow-up task") is an INBOUND concern only.
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -583,23 +931,25 @@ export async function processInboundMessage(
     );
   }
 
-  // Emit email.received event via job_queue
-  await client.query(
-    `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-     VALUES ('domain_event', $1, $2, 'pending', NOW())`,
-    [
-      JSON.stringify({
-        eventName: "email.received",
-        emailId,
-        contactId: contactMatch?.id ?? null,
-        contactName: contactMatch ? `${contactMatch.first_name} ${contactMatch.last_name}` : fromAddress,
-        fromAddress,
-        subject,
-        userId,
-      }),
-      officeId, // pass actual office so notification handler resolves correct tenant
-    ]
-  );
+  // Emit email.received event via job_queue — INBOUND only; a sent email is not a "received" event.
+  if (!isOutbound) {
+    await client.query(
+      `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+       VALUES ('domain_event', $1, $2, 'pending', NOW())`,
+      [
+        JSON.stringify({
+          eventName: "email.received",
+          emailId,
+          contactId: contactMatch?.id ?? null,
+          contactName: contactMatch ? `${contactMatch.first_name} ${contactMatch.last_name}` : fromAddress,
+          fromAddress,
+          subject,
+          userId,
+        }),
+        officeId, // pass actual office so notification handler resolves correct tenant
+      ]
+    );
+  }
 
   await client.query(
     `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
@@ -617,6 +967,70 @@ export async function processInboundMessage(
 }
 
 /**
+ * Refresh email_count / last_email_at for a deal/company/lead an email resolved to (worker context).
+ * Qualified to the office schema; mirrors the deal/company/lead branches of server
+ * stats-service.refreshEntityEmailStats (same `assignment_status <> 'ignored'` filter and per-type
+ * matching) so the worker-synced counters agree with the CRM-composed and manual-association paths.
+ * (Contact has no server stat branch, so it is intentionally not refreshed.)
+ */
+async function refreshEntityEmailStatsRaw(
+  client: any,
+  schemaName: string,
+  entityType: "deal" | "company" | "lead" | "contact",
+  entityId: string
+): Promise<void> {
+  if (entityType === "deal") {
+    const match = `e.assignment_status <> 'ignored'
+       AND ((e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
+         OR e.deal_id = d.id
+         OR (d.source_lead_id IS NOT NULL AND e.assigned_entity_type = 'lead' AND e.assigned_entity_id = d.source_lead_id))`;
+    await client.query(
+      `UPDATE ${schemaName}.deals AS d
+          SET email_count = (SELECT COUNT(e.id)::int FROM ${schemaName}.emails e WHERE ${match}),
+              last_email_at = (SELECT MAX(e.sent_at) FROM ${schemaName}.emails e WHERE ${match})
+        WHERE d.id = $1`,
+      [entityId]
+    );
+  } else if (entityType === "lead") {
+    const match = `e.assignment_status <> 'ignored' AND e.assigned_entity_type = 'lead' AND e.assigned_entity_id = $1`;
+    await client.query(
+      `UPDATE ${schemaName}.leads AS l
+          SET email_count = (SELECT COUNT(*)::int FROM ${schemaName}.emails e WHERE ${match}),
+              last_email_at = (SELECT MAX(e.sent_at) FROM ${schemaName}.emails e WHERE ${match})
+        WHERE l.id = $1`,
+      [entityId]
+    );
+  } else if (entityType === "contact") {
+    // contact: mirrors the server's contact branch (assigned-to-contact OR contact_id).
+    const match = `e.assignment_status <> 'ignored' AND ((e.assigned_entity_type = 'contact' AND e.assigned_entity_id = $1) OR e.contact_id = $1)`;
+    await client.query(
+      `UPDATE ${schemaName}.contacts AS c
+          SET email_count = (SELECT COUNT(*)::int FROM ${schemaName}.emails e WHERE ${match}),
+              last_email_at = (SELECT MAX(e.sent_at) FROM ${schemaName}.emails e WHERE ${match})
+        WHERE c.id = $1`,
+      [entityId]
+    );
+  } else {
+    // company: counts emails directly on the company, on any of its deals/contacts, or assigned to its
+    // leads/deals/contacts — mirrors the server's company branch exactly.
+    const match = `e.assignment_status <> 'ignored' AND (
+        (e.assigned_entity_type = 'company' AND e.assigned_entity_id = $1)
+        OR e.deal_id IN (SELECT id FROM ${schemaName}.deals WHERE company_id = $1)
+        OR e.contact_id IN (SELECT id FROM ${schemaName}.contacts WHERE company_id = $1)
+        OR (e.assigned_entity_type = 'lead' AND e.assigned_entity_id IN (SELECT id FROM ${schemaName}.leads WHERE company_id = $1))
+        OR (e.assigned_entity_type = 'deal' AND e.assigned_entity_id IN (SELECT id FROM ${schemaName}.deals WHERE company_id = $1))
+        OR (e.assigned_entity_type = 'contact' AND e.assigned_entity_id IN (SELECT id FROM ${schemaName}.contacts WHERE company_id = $1)))`;
+    await client.query(
+      `UPDATE ${schemaName}.companies AS c
+          SET email_count = (SELECT COUNT(*)::int FROM ${schemaName}.emails e WHERE ${match}),
+              last_email_at = (SELECT MAX(e.sent_at) FROM ${schemaName}.emails e WHERE ${match})
+        WHERE c.id = $1`,
+      [entityId]
+    );
+  }
+}
+
+/**
  * Find a CRM contact by email address using raw SQL (worker context).
  */
 async function findContactByEmailRaw(
@@ -626,13 +1040,18 @@ async function findContactByEmailRaw(
 ): Promise<{ id: string; first_name: string; last_name: string; company_id: string | null } | null> {
   if (emailAddresses.length === 0) return null;
 
-  // Build parameterized IN clause
-  const placeholders = emailAddresses.map((_, i) => `$${i + 1}`).join(", ");
+  // Build parameterized IN clause. Deterministic pick: outbound passes multiple recipients (To then Cc),
+  // so order the match by the address's position in the input list — the first/highest-priority recipient
+  // wins instead of an arbitrary LIMIT 1. (Inbound passes a single address, so this is a no-op there.)
+  const lowered = emailAddresses.map((e) => e.toLowerCase());
+  const placeholders = lowered.map((_, i) => `$${i + 1}`).join(", ");
+  const orderParam = `$${lowered.length + 1}`;
   const result = await client.query(
     `SELECT id, first_name, last_name, company_id FROM ${schemaName}.contacts
      WHERE LOWER(email) IN (${placeholders}) AND is_active = true
+     ORDER BY array_position(${orderParam}::text[], LOWER(email))
      LIMIT 1`,
-    emailAddresses.map((e) => e.toLowerCase())
+    [...lowered, lowered]
   );
 
   return result.rows[0] ?? null;

@@ -97,18 +97,31 @@ export interface EmailAssignmentQueueItem {
   suggestedAssignment: EmailAssignmentResult;
 }
 
+// Directions that can sit in the ASSIGNMENT QUEUE (the surface a rep uses to assign mail to a deal). Sent
+// emails captured from Outlook can land here too — a rep's sent-to-a-known-contact email whose recipient
+// maps to 0 or multiple deals needs manual assignment, same as an inbound one. SINGLE source of truth for
+// the TWO queue sites only — the SQL queue predicate (getEmailAssignmentQueue) and the JS candidate check
+// (isEmailAssignmentQueueCandidate) — so a sent email counted by the queue also survives the JS filter
+// (count == items). It deliberately does NOT touch the inbox unread/unassigned predicate, which stays
+// inbound-only so Sent mail never shows as "unread".
+const ASSIGNABLE_DIRECTIONS = ["inbound", "outbound"] as const;
+
 export function isEmailAssignmentQueueCandidate(emailRow: {
   direction: "inbound" | "outbound";
   assignmentAmbiguityReason: string | null;
   assignmentStatus?: string | null;
 }) {
   return (
-    emailRow.direction === "inbound" &&
+    (ASSIGNABLE_DIRECTIONS as readonly string[]).includes(emailRow.direction) &&
     emailRow.assignmentAmbiguityReason != null &&
     (emailRow.assignmentStatus ?? "unassigned") === "unassigned"
   );
 }
 
+// INBOX "unread/unassigned" badge predicate — stays INBOUND-ONLY. The client's needs-attention/unread
+// count is an inbox concept; a rep's own Sent mail must never show as "unread". The outbound relaxation
+// for making sent mail assignable lives ONLY in the assignment-queue predicate (getEmailAssignmentQueue)
+// and isEmailAssignmentQueueCandidate — NOT here.
 function emailIsUnassignedCondition() {
   return and(
     eq(emails.direction, "inbound"),
@@ -956,7 +969,7 @@ export async function getEmailAssignmentQueue(
   const offset = (page - 1) * limit;
 
   const conditions: any[] = [
-    eq(emails.direction, "inbound"),
+    inArray(emails.direction, ASSIGNABLE_DIRECTIONS),
     eq(emails.assignmentStatus, filters.status ?? "unassigned"),
   ];
 
@@ -974,7 +987,11 @@ export async function getEmailAssignmentQueue(
       or(
         sql`${emails.subject} ILIKE ${term}`,
         sql`${emails.bodyPreview} ILIKE ${term}`,
-        sql`${emails.fromAddress} ILIKE ${term}`
+        sql`${emails.fromAddress} ILIKE ${term}`,
+        // Outbound queue items have the rep as fromAddress — match on the recipient too so a sent email
+        // is searchable by the customer's address.
+        sql`array_to_string(${emails.toAddresses}, ',') ILIKE ${term}`,
+        sql`array_to_string(${emails.ccAddresses}, ',') ILIKE ${term}`
       )
     );
   }
@@ -1126,6 +1143,10 @@ export async function sendEmail(
   const graphMessageId = draft.id ?? `sent-${crypto.randomUUID()}`;
   const graphConversationId: string | null = draft.conversationId ?? null;
   const fromAddress: string = draft.from?.emailAddress?.address ?? "";
+  // Capture the stable RFC822 Message-ID now, at draft creation, while the message id still resolves.
+  // The Sent-folder sync later reads this same message back (with a DIFFERENT graph id) and dedups on
+  // this value — without it, every CRM-composed email double-stores when its Sent copy is synced.
+  const internetMessageId: string | null = draft.internetMessageId ?? null;
 
   // Step 2: Send the draft
   const sendResult = await graphRequest({
@@ -1142,11 +1163,15 @@ export async function sendEmail(
     throw new AppError(502, `Failed to send email draft via Microsoft: ${JSON.stringify(sendResult.data)}`);
   }
 
-  // Store the email record
-  const [emailRecord] = await tenantDb
+  // Store the email record. onConflictDoNothing closes the CRM-send-vs-worker race: if the Sent-folder
+  // sync already stored this message's copy (same user + internet_message_id, enforced by the partial
+  // unique index from migration 0163), this insert no-ops and we adopt the existing row below — the DB
+  // enforces the dedup instead of relying on insert ordering.
+  let [emailRecord] = await tenantDb
     .insert(emails)
     .values({
       graphMessageId,
+      internetMessageId,
       graphConversationId,
       direction: "outbound",
       fromAddress,
@@ -1161,7 +1186,53 @@ export async function sendEmail(
       userId,
       sentAt: new Date(),
     })
+    .onConflictDoNothing()
     .returning();
+
+  let adopted = false;
+  // The worker's row BEFORE reconcile — its (guessed) assignment targets need re-stat'ing afterward, since
+  // this email no longer counts toward them once it's reattributed to the explicit CRM association.
+  let adoptedPriorEmail: typeof emails.$inferSelect | null = null;
+  if (!emailRecord) {
+    // Lost the race — the worker already stored the Sent-folder copy. Adopt it (key on the stable
+    // internet_message_id when we have it; otherwise on the graph message id).
+    const [existing] = await tenantDb
+      .select()
+      .from(emails)
+      .where(
+        internetMessageId
+          ? and(
+              eq(emails.userId, userId),
+              eq(emails.internetMessageId, internetMessageId),
+              eq(emails.direction, "outbound")
+            )
+          : eq(emails.graphMessageId, graphMessageId)
+      )
+      .limit(1);
+    emailRecord = existing;
+    adoptedPriorEmail = existing ?? null;
+    adopted = true;
+  }
+  if (!emailRecord) {
+    throw new AppError(500, "Failed to persist the sent email record.");
+  }
+
+  if (adopted) {
+    // The worker stored this Sent copy with a CONTACT-DERIVED/ambiguous assignment (recipient match), but
+    // the sender chose an EXPLICIT association here — that one wins. Overwrite the assignment fields and
+    // mark assigned. (The worker also already created the activity + refreshed stats, so those side
+    // effects are skipped below for the adopted case to avoid duplicates.)
+    const [reconciled] = await tenantDb
+      .update(emails)
+      .set({
+        contactId: outboundAssociation.links.contactId,
+        ...outboundAssignment,
+        assignmentStatus: "assigned",
+      })
+      .where(eq(emails.id, emailRecord.id))
+      .returning();
+    emailRecord = reconciled ?? emailRecord;
+  }
 
   if (outboundAssociation.links.dealId) {
     const mailboxAccountId = await resolveMailboxAccountIdForCrmUser(tenantDb, userId);
@@ -1183,7 +1254,13 @@ export async function sendEmail(
     emailRecord.threadBindingId = binding.id;
   }
 
-  // Create activity record for the unified feed
+  // Activity for the unified feed. For an ADOPTED row the worker already wrote an activity (with its
+  // guessed target) — RECONCILE rather than blanket-skip: drop the worker's activity and write one carrying
+  // the EXPLICIT CRM association, so the feed points at the deal/company the sender actually chose. (Without
+  // this, a divergent worker guess leaves the activity + counters on the wrong target.)
+  if (adopted) {
+    await tenantDb.delete(activities).where(eq(activities.emailId, emailRecord.id));
+  }
   await tenantDb.insert(activities).values({
     type: "email",
     responsibleUserId: userId,
@@ -1201,7 +1278,12 @@ export async function sendEmail(
     occurredAt: new Date(),
   });
 
+  // Refresh the EXPLICIT targets; for an adopted row also re-stat the worker's PRIOR targets (this email
+  // no longer counts toward them after the reattribution), so neither side's counters go stale.
   await refreshEmailStatsForEmailRecord(tenantDb, emailRecord);
+  if (adopted && adoptedPriorEmail) {
+    await refreshEmailStatsForEmailRecord(tenantDb, adoptedPriorEmail);
+  }
 
   return emailRecord;
 }
@@ -1215,6 +1297,8 @@ async function createMockSentEmail(
   input: SendEmailInput
 ): Promise<any> {
   const graphMessageId = `dev-sent-${crypto.randomUUID()}`;
+  // Mirror the live path: a deterministic Message-ID so a same-message Sent-folder copy dedups in dev too.
+  const internetMessageId = `<dev-${graphMessageId}@trockconstruction.com>`;
   const outboundAssociation = await resolveOutboundAssociation(tenantDb, input);
   if (!outboundAssociation) {
     throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
@@ -1225,6 +1309,7 @@ async function createMockSentEmail(
     .insert(emails)
     .values({
       graphMessageId,
+      internetMessageId,
       direction: "outbound",
       fromAddress: "dev-user@trockconstruction.com",
       toAddresses: input.to,
