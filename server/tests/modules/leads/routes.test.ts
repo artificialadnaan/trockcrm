@@ -240,7 +240,11 @@ async function invokeLeadDetailRoute(leadRoutes?: unknown) {
   return { req, res, next };
 }
 
-async function invokeLeadCreateRoute(body: Record<string, unknown>, leadRoutes?: unknown) {
+async function invokeLeadCreateRoute(
+  body: Record<string, unknown>,
+  leadRoutes?: unknown,
+  userOverride: Record<string, unknown> = {},
+) {
   const routes = leadRoutes ?? (await loadLeadRoutes());
   const handler = findRouteHandler(routes, "post", "/");
   const req = {
@@ -250,6 +254,7 @@ async function invokeLeadCreateRoute(body: Record<string, unknown>, leadRoutes?:
       id: "rep-1",
       role: "rep",
       activeOfficeId: "office-1",
+      ...userOverride,
     },
     officeSlug: "atlanta",
     commitTransaction: vi.fn(async () => {}),
@@ -455,30 +460,36 @@ describe("lead stage transition route", () => {
     );
   });
 
-  it("threads the authenticated request user through as the lead-creation actor", async () => {
+  it("threads the authenticated request user (the actor), not the assignee, as the lead-creation actor", async () => {
     const leadRoutes = await loadLeadRoutes();
     serviceMocks.createLead.mockResolvedValueOnce({
       id: "lead-created",
       verificationStatus: "not_required",
     });
 
+    // A non-rep actor (director) creating a lead ASSIGNED to a DIFFERENT rep. Using distinct ids for
+    // the actor (req.user.id) and the assignee (body.assignedRepId) is what makes this assertion
+    // meaningful: it proves the route sources actorUserId from the acting user, so a regression that
+    // passed the assignee (repId) as actorUserId would fail here — attributing the assignment task +
+    // audit to the wrong user when a manager creates a lead for another rep.
     const { req, res } = await invokeLeadCreateRoute(
       {
         companyId: "company-1",
         propertyId: "property-1",
         name: "Actor Threaded Lead",
+        assignedRepId: "rep-assignee-2",
       },
-      leadRoutes
+      leadRoutes,
+      { id: "manager-9", role: "director" }
     );
 
-    // The route must pass req.user.id as actorUserId so the assignment task + audit attribute to the
-    // acting user. Behavioral replacement for the deleted brittle source-text grep
-    // (src/modules/leads/assignment-task-source.test.ts); the service-side wiring of that actor into
+    // Behavioral replacement for the deleted brittle source-text grep
+    // (src/modules/leads/assignment-task-source.test.ts); the service-side wiring of this actor into
     // createAssignmentTaskIfNeeded is covered by tests/modules/leads/service.test.ts.
     expect(res.statusCode).toBe(201);
     expect(serviceMocks.createLead).toHaveBeenCalledWith(
       req.tenantDb,
-      expect.objectContaining({ actorUserId: "rep-1" })
+      expect.objectContaining({ actorUserId: "manager-9", assignedRepId: "rep-assignee-2" })
     );
   });
 
