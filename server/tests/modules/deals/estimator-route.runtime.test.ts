@@ -169,6 +169,44 @@ describe("PATCH /api/deals/:id/estimator — RBAC", () => {
     expect(dealsServiceMocks.setDealEstimator).not.toHaveBeenCalled();
   });
 
+  // FINDING 3: an OMITTED estimatorUserId key must NOT be treated as an explicit null/clear. A `{}`
+  // body (or any body without the key) is a client bug, so it must 422 and NEVER reach the service —
+  // otherwise a stray request would silently wipe the deal's estimator (and its commission row).
+  it("rejects an empty {} body with 422 and never clears the estimator", async () => {
+    const app = createApp(createUser("admin"));
+    const res = await request(app)
+      .patch("/api/deals/deal-1/estimator")
+      .send({});
+    expect(res.status).toBe(422);
+    expect(dealsServiceMocks.setDealEstimator).not.toHaveBeenCalled();
+  });
+
+  it("rejects a body that omits estimatorUserId (other keys present) with 422", async () => {
+    const app = createApp(createUser("admin"));
+    const res = await request(app)
+      .patch("/api/deals/deal-1/estimator")
+      .send({ somethingElse: "x" });
+    expect(res.status).toBe(422);
+    expect(dealsServiceMocks.setDealEstimator).not.toHaveBeenCalled();
+  });
+
+  // The explicit-null clear path stays intact alongside the absent-key rejection above.
+  it("still clears on an EXPLICIT estimatorUserId: null (200) — distinct from an omitted key", async () => {
+    dealsServiceMocks.setDealEstimator.mockResolvedValue({ id: "deal-1", estimatorUserId: null });
+    const app = createApp(createUser("admin"));
+    const res = await request(app)
+      .patch("/api/deals/deal-1/estimator")
+      .send({ estimatorUserId: null });
+    expect(res.status).toBe(200);
+    expect(dealsServiceMocks.setDealEstimator).toHaveBeenCalledWith(
+      expect.any(Object),
+      "deal-1",
+      null,
+      "admin-1",
+      "office-1"
+    );
+  });
+
   it("maps the service 409 CHANGE_ORDER_FIELD_LOCKED through", async () => {
     dealsServiceMocks.setDealEstimator.mockRejectedValueOnce(
       new AppError(

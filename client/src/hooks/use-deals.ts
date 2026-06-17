@@ -661,7 +661,14 @@ export async function createServiceOpportunity(
   });
 }
 
-export type UpdateDealPayload = Partial<Deal> & {
+// estimatorUserId/estimatorUserName are READ-ONLY/display-only on the wire: they live on the read
+// Deal shape (so the picker can render `deal.estimatorUserName`) but are EXCLUDED from the writable
+// generic-update payload. The generic updateDeal (PATCH /deals/:id) is rep-reachable, so allowing
+// estimatorUserId here would let a rep re-attribute the commission-bearing estimator field. It must
+// change ONLY through the dedicated, leadership-gated updateDealEstimator (PATCH /deals/:id/estimator).
+// The server already drops estimator from updateDeal's allowlist; this Omit closes the client-type
+// hole too (defense in depth).
+export type UpdateDealPayload = Omit<Partial<Deal>, "estimatorUserId" | "estimatorUserName"> & {
   migrationMode?: boolean;
 };
 
@@ -672,10 +679,19 @@ export async function updateDeal(dealId: string, input: UpdateDealPayload) {
 // Dedicated estimator mutation — hits PATCH /deals/:id/estimator (admin/director only), NOT the
 // generic updateDeal: estimator is intentionally out of updateDeal's allowlist, so the generic path
 // can never change it (which would leak edit access to the assigned rep). Pass null to clear.
-export async function updateDealEstimator(dealId: string, estimatorUserId: string | null) {
+// The office option mirrors the deal record load (useDealDetail) so a cross-office edit targets the
+// SAME tenant the deal was read from; without it the PATCH would hit the default/active office.
+// The estimatorUserId key is ALWAYS sent (even when null) so the server can distinguish an explicit
+// clear from an omitted field.
+export async function updateDealEstimator(
+  dealId: string,
+  estimatorUserId: string | null,
+  options: OfficeRequestOptions = {}
+) {
   return api<{ deal: Deal }>(`/deals/${dealId}/estimator`, {
     method: "PATCH",
     json: { estimatorUserId },
+    ...getOfficeRequestOptions(options.officeId),
   });
 }
 

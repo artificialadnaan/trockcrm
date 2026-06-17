@@ -1988,7 +1988,14 @@ router.patch(
   requireRole("admin", "director"),
   async (req, res, next) => {
     try {
-      const raw = req.body?.estimatorUserId;
+      // Distinguish an ABSENT field from an explicit null: a `{}` (or estimator-less) body must NOT
+      // silently CLEAR the estimator — that requires an explicit `estimatorUserId: null`. An omitted
+      // key is a client bug, so reject it (422) rather than wiping commission attribution by accident.
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!("estimatorUserId" in body)) {
+        throw new AppError(422, "estimatorUserId is required (send null to clear the estimator)");
+      }
+      const raw = body.estimatorUserId;
       let estimatorUserId: string | null;
       if (raw == null || raw === "") {
         estimatorUserId = null;

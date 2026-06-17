@@ -8,6 +8,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { ReactNode } from "react";
 import { DealDetailPage } from "./deal-detail-page";
+// Type-only import: survives the vi.mock of @/hooks/use-deals (mocks replace runtime values, not types)
+// so the FINDING-1 type guard below checks the REAL UpdateDealPayload shape at typecheck:tests time.
+import type { UpdateDealPayload } from "@/hooks/use-deals";
 
 // Mirrors deal-detail-page.test.tsx scaffolding, but additionally surfaces the dedicated
 // `updateDealEstimator` mutation so the estimator picker (admin/director only, native <select>)
@@ -389,7 +392,9 @@ describe("DealDetailPage estimator picker", () => {
       select!.dispatchEvent(new Event("change", { bubbles: true }));
     });
 
-    expect(mocks.updateDealEstimatorMock).toHaveBeenCalledWith("deal-1", "est-2");
+    // FINDING 2: the office option is forwarded, mirroring the deal record load. With no officeId in
+    // the URL it resolves to null (the default tenant), but the option is always present in the call.
+    expect(mocks.updateDealEstimatorMock).toHaveBeenCalledWith("deal-1", "est-2", { officeId: null });
     expect(refetch).toHaveBeenCalled();
   });
 
@@ -412,7 +417,31 @@ describe("DealDetailPage estimator picker", () => {
       select!.dispatchEvent(new Event("change", { bubbles: true }));
     });
 
-    expect(mocks.updateDealEstimatorMock).toHaveBeenCalledWith("deal-1", null);
+    expect(mocks.updateDealEstimatorMock).toHaveBeenCalledWith("deal-1", null, { officeId: null });
+  });
+
+  it("forwards the deal's office context (x-office-id tenant) on the estimator PATCH", async () => {
+    mocks.useAuthMock.mockReturnValueOnce({ user: { id: "director-1", role: "director", activeOfficeId: "office-1" } });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ estimatorUserId: "est-1", estimatorUserName: "Casey Estimator" }),
+    });
+
+    // The detail route carries ?officeId — the same value useDealDetail loaded the record with. The
+    // estimator PATCH must reuse it so a cross-office edit hits the right tenant, not the default one.
+    mounted = mountPage("/deals/deal-1?officeId=office-9");
+
+    const select = mounted.container.querySelector('select[aria-label="Edit estimator"]') as HTMLSelectElement | null;
+    expect(select).toBeTruthy();
+
+    await act(async () => {
+      select!.value = "est-2";
+      select!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(mocks.updateDealEstimatorMock).toHaveBeenCalledWith("deal-1", "est-2", { officeId: "office-9" });
   });
 
   it("admins see the editable estimator <select>", () => {
@@ -427,6 +456,22 @@ describe("DealDetailPage estimator picker", () => {
     const html = renderPage();
     expect(html).toContain('aria-label="Edit estimator"');
     expect(html).toContain("— None —");
+  });
+
+  // FINDING 1: estimatorUserId/estimatorUserName are read-only/display-only on the Deal shape but are
+  // EXCLUDED from UpdateDealPayload, so the generic (rep-reachable) updateDeal can never smuggle the
+  // commission-bearing estimator field. The @ts-expect-error lines are verified at typecheck:tests
+  // time; the runtime body is a no-op so the spec still EXECUTES under the runtime gate.
+  it("type guard: the generic updateDeal payload cannot carry estimatorUserId / estimatorUserName", () => {
+    // @ts-expect-error estimatorUserId is excluded from UpdateDealPayload (dedicated route only)
+    const withEstimatorId: UpdateDealPayload = { estimatorUserId: "11111111-1111-4111-8111-111111111111" };
+    // @ts-expect-error estimatorUserName is excluded from UpdateDealPayload (read-only/display-only)
+    const withEstimatorName: UpdateDealPayload = { estimatorUserName: "Casey Estimator" };
+    // An allowlisted field still type-checks, proving the Omit didn't break the generic payload.
+    const allowed: UpdateDealPayload = { name: "Renamed" };
+    void withEstimatorId;
+    void withEstimatorName;
+    expect(allowed.name).toBe("Renamed");
   });
 
   it("reps see the estimator read-only with a leadership-only note (no edit control)", () => {

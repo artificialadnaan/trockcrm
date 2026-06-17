@@ -1086,7 +1086,9 @@ function DealRightRail({
     setSavingEstimator(true);
     setEstimatorError(null);
     try {
-      await apiUpdateDealEstimator(deal.id, nextId);
+      // Mirror the deal record load (useDealDetail above passes the same `officeId`): a cross-office
+      // estimator edit must target the office the deal was read from, not the viewer's active office.
+      await apiUpdateDealEstimator(deal.id, nextId, { officeId });
       toast.success(nextId ? "Estimator updated" : "Estimator cleared");
       await onReassigned();
     } catch (err) {
