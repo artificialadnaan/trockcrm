@@ -12,9 +12,9 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { isAssignableCrmRole, type CrmAssignableRole, type UserRole } from "@trock-crm/shared/types";
 import {
-  isProhibitedSelfChange,
-  isFieldContractorTransition,
-  wouldRemoveLastActiveAdmin,
+  stripsAdminPrivilege,
+  evaluateUpdateUserGuards,
+  planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
 import {
   bumpTokensValidAfter,
@@ -171,24 +171,34 @@ export async function createCrmUser(input: CreateCrmUserInput, actorUserId: stri
   if (!office[0]) throw new AppError(400, "Office not found");
   if (!office[0].isActive) throw new AppError(400, "Office is not active");
 
-  const existing = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
+  // Pre-check is case-insensitive (the stored constraint is case-sensitive, but emails are normalized
+  // to lowercase on insert, so this catches mixed-case existing rows too).
+  const existing = await db.select({ id: users.id }).from(users).where(sql`lower(${users.email}) = ${email}`).limit(1);
   if (existing[0]) throw new AppError(409, "A user with this email already exists");
 
-  const [created] = await db
-    .insert(users)
-    .values({
-      email,
-      displayName: input.displayName.trim(),
-      firstName: input.firstName?.trim() || null,
-      lastName: input.lastName?.trim() || null,
-      role: input.role as CrmAssignableRole,
-      officeId: input.officeId,
-      reportsTo: input.reportsTo ?? null,
-      isActive: true,
-      createdByUserId: actorUserId,
-    })
-    .returning();
-  return created;
+  try {
+    const [created] = await db
+      .insert(users)
+      .values({
+        email,
+        displayName: input.displayName.trim(),
+        firstName: input.firstName?.trim() || null,
+        lastName: input.lastName?.trim() || null,
+        role: input.role,
+        officeId: input.officeId,
+        reportsTo: input.reportsTo ?? null,
+        isActive: true,
+        createdByUserId: actorUserId,
+      })
+      .returning();
+    return created;
+  } catch (e: unknown) {
+    // Lost the race to a concurrent insert with the same email -> the unique constraint fires (23505).
+    if (e && typeof e === "object" && (e as { code?: string }).code === "23505") {
+      throw new AppError(409, "A user with this email already exists");
+    }
+    throw e;
+  }
 }
 
 export async function updateUser(
@@ -223,24 +233,28 @@ export async function updateUser(
 
     const nextRole = input.role as UserRole | undefined;
 
-    // --- Guards (decisions are gate-proven pure predicates) ---
-    if (isProhibitedSelfChange({ actorId: actorUserId, targetId: id, nextIsActive: input.isActive, currentRole: existingUser.role, nextRole })) {
-      throw new AppError(403, "You can't deactivate or change your own role");
-    }
-    if (isFieldContractorTransition(existingUser.role, nextRole)) {
-      throw new AppError(403, "Field contractors are managed in the field-user flow");
-    }
-    const strippingAdmin =
-      existingUser.role === "admin" && (input.isActive === false || (nextRole !== undefined && nextRole !== "admin"));
-    if (strippingAdmin) {
-      const [{ count }] = await tx
-        .select({ count: sql<number>`count(*)::int` })
+    // --- Guards (decision + enforcement composition are gate-proven pure functions) ---
+    // Only count active admins when admin privilege is actually being stripped, and lock the FULL
+    // active-admin set FOR UPDATE so two concurrent admin-strips serialize (no last-admin TOCTOU:
+    // the second tx blocks, then re-reads the first's committed deactivation and sees count 0).
+    let otherActiveAdminCount = Number.MAX_SAFE_INTEGER;
+    if (stripsAdminPrivilege(existingUser.role, nextRole, input.isActive)) {
+      const activeAdmins = await tx
+        .select({ id: users.id })
         .from(users)
-        .where(and(eq(users.role, "admin"), eq(users.isActive, true), sql`${users.id} <> ${id}`));
-      if (wouldRemoveLastActiveAdmin({ currentRole: existingUser.role, nextRole, nextIsActive: input.isActive, otherActiveAdminCount: count })) {
-        throw new AppError(409, "Cannot remove the last active admin");
-      }
+        .where(and(eq(users.role, "admin"), eq(users.isActive, true)))
+        .for("update");
+      otherActiveAdminCount = activeAdmins.filter((row) => row.id !== id).length;
     }
+    const violation = evaluateUpdateUserGuards({
+      actorId: actorUserId,
+      targetId: id,
+      currentRole: existingUser.role,
+      nextRole,
+      nextIsActive: input.isActive,
+      otherActiveAdminCount,
+    });
+    if (violation) throw new AppError(violation.status, violation.message);
 
     const updates: Record<string, unknown> = {};
     if (input.displayName !== undefined) updates.displayName = input.displayName;
@@ -267,18 +281,15 @@ export async function updateUser(
 
     // --- Session-kill wiring (epoch + revocation; SSE teardown happens post-commit) ---
     const now = new Date();
-    const deactivating = input.isActive === false && existingUser.isActive === true;
-    const reactivating = input.isActive === true && existingUser.isActive === false;
-    const roleChanged = nextRole !== undefined && nextRole !== existingUser.role;
-    if (deactivating) {
-      await bumpTokensValidAfter(tx, id, now);
-      await revokeLocalAuthOnDeactivate(tx, id, actorUserId, now);
-    } else if (reactivating) {
-      await clearLocalAuthRevocation(tx, id, now);
-    }
-    if (roleChanged) {
-      await bumpTokensValidAfter(tx, id, now);
-    }
+    const plan = planSessionInvalidation({
+      currentIsActive: existingUser.isActive,
+      currentRole: existingUser.role,
+      nextIsActive: input.isActive,
+      nextRole,
+    });
+    if (plan.bumpEpoch) await bumpTokensValidAfter(tx, id, now);
+    if (plan.revokeLocalAuth) await revokeLocalAuthOnDeactivate(tx, id, actorUserId, now);
+    if (plan.clearLocalAuthRevocation) await clearLocalAuthRevocation(tx, id, now);
 
     const hasCommissionPatch =
       input.commissionRate !== undefined ||
@@ -344,12 +355,12 @@ export async function updateUser(
         });
     }
 
-    return { updated, deactivated: deactivating };
+    return { updated, closeStreams: plan.closeStreams };
   });
 
   // Best-effort, post-commit: drop the deactivated user's live SSE streams immediately. The
   // authoritative gate remains the per-request is_active + tokens_valid_after re-check.
-  if (result.deactivated) closeUserSseConnections(id);
+  if (result.closeStreams) closeUserSseConnections(id);
   return result.updated;
 }
 

@@ -5,6 +5,9 @@ import {
   isProhibitedSelfChange,
   isFieldContractorTransition,
   wouldRemoveLastActiveAdmin,
+  stripsAdminPrivilege,
+  evaluateUpdateUserGuards,
+  planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
 
 describe("isTokenStaleByEpoch", () => {
@@ -80,5 +83,93 @@ describe("wouldRemoveLastActiveAdmin", () => {
   });
   it("editing an admin without dropping admin-ness is fine", () => {
     expect(wouldRemoveLastActiveAdmin({ currentRole: "admin", nextRole: "admin", otherActiveAdminCount: 0 })).toBe(false);
+  });
+});
+
+describe("stripsAdminPrivilege", () => {
+  it("true when an admin is deactivated or demoted", () => {
+    expect(stripsAdminPrivilege("admin", undefined, false)).toBe(true);
+    expect(stripsAdminPrivilege("admin", "rep", undefined)).toBe(true);
+  });
+  it("false for a non-admin, or an admin kept admin/active", () => {
+    expect(stripsAdminPrivilege("rep", undefined, false)).toBe(false);
+    expect(stripsAdminPrivilege("admin", "admin", undefined)).toBe(false);
+    expect(stripsAdminPrivilege("admin", undefined, undefined)).toBe(false);
+  });
+});
+
+describe("evaluateUpdateUserGuards (enforcement wiring: guard -> HTTP status)", () => {
+  const base = { actorId: "actor", targetId: "target", currentRole: "rep" as const, otherActiveAdminCount: 5 };
+  it("returns null when nothing is violated", () => {
+    expect(evaluateUpdateUserGuards({ ...base, nextRole: "director" })).toBeNull();
+  });
+  it("self-change -> 403", () => {
+    expect(evaluateUpdateUserGuards({ ...base, actorId: "x", targetId: "x", currentRole: "admin", nextIsActive: false })).toEqual({
+      status: 403,
+      message: "You can't deactivate or change your own role",
+    });
+  });
+  it("field_contractor transition -> 403 (takes priority over admin checks)", () => {
+    expect(evaluateUpdateUserGuards({ ...base, nextRole: "field_contractor" })).toEqual({
+      status: 403,
+      message: "Field contractors are managed in the field-user flow",
+    });
+  });
+  it("removing the last active admin -> 409", () => {
+    expect(evaluateUpdateUserGuards({ ...base, currentRole: "admin", nextIsActive: false, otherActiveAdminCount: 0 })).toEqual({
+      status: 409,
+      message: "Cannot remove the last active admin",
+    });
+  });
+  it("deactivating an admin is allowed when another active admin remains", () => {
+    expect(evaluateUpdateUserGuards({ ...base, currentRole: "admin", nextIsActive: false, otherActiveAdminCount: 1 })).toBeNull();
+  });
+  it("self-change is checked before the admin count (priority order)", () => {
+    // self + last admin: self-change (403) wins over last-admin (409)
+    expect(evaluateUpdateUserGuards({ actorId: "x", targetId: "x", currentRole: "admin", nextIsActive: false, otherActiveAdminCount: 0 })).toEqual({
+      status: 403,
+      message: "You can't deactivate or change your own role",
+    });
+  });
+});
+
+describe("planSessionInvalidation (effects wiring)", () => {
+  it("deactivate -> bump epoch + revoke + close streams (no clear)", () => {
+    expect(planSessionInvalidation({ currentIsActive: true, currentRole: "rep", nextIsActive: false })).toEqual({
+      bumpEpoch: true,
+      revokeLocalAuth: true,
+      clearLocalAuthRevocation: false,
+      closeStreams: true,
+    });
+  });
+  it("reactivate -> clear revocation only", () => {
+    expect(planSessionInvalidation({ currentIsActive: false, currentRole: "rep", nextIsActive: true })).toEqual({
+      bumpEpoch: false,
+      revokeLocalAuth: false,
+      clearLocalAuthRevocation: true,
+      closeStreams: false,
+    });
+  });
+  it("role change (active user) -> bump epoch only", () => {
+    expect(planSessionInvalidation({ currentIsActive: true, currentRole: "rep", nextRole: "director" })).toEqual({
+      bumpEpoch: true,
+      revokeLocalAuth: false,
+      clearLocalAuthRevocation: false,
+      closeStreams: false,
+    });
+  });
+  it("no-op edit (display name only) -> no session effects", () => {
+    expect(planSessionInvalidation({ currentIsActive: true, currentRole: "rep" })).toEqual({
+      bumpEpoch: false,
+      revokeLocalAuth: false,
+      clearLocalAuthRevocation: false,
+      closeStreams: false,
+    });
+  });
+  it("deactivate AND role change still bumps once (boolean OR)", () => {
+    const plan = planSessionInvalidation({ currentIsActive: true, currentRole: "rep", nextIsActive: false, nextRole: "director" });
+    expect(plan.bumpEpoch).toBe(true);
+    expect(plan.revokeLocalAuth).toBe(true);
+    expect(plan.closeStreams).toBe(true);
   });
 });
