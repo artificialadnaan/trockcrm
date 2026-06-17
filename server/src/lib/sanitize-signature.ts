@@ -76,13 +76,33 @@ const OPTIONS: sanitizeHtml.IOptions = {
 };
 
 /**
+ * Truncate to at most `maxBytes` UTF-8 bytes (not UTF-16 code units — multibyte content must not
+ * bypass the cap), without splitting a multibyte char. Binary-search the longest char-prefix whose
+ * UTF-8 length fits, then back off a trailing lone high surrogate.
+ */
+function truncateToUtf8Bytes(str: string, maxBytes: number): string {
+  if (Buffer.byteLength(str, "utf8") <= maxBytes) return str;
+  let lo = 0;
+  let hi = str.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (Buffer.byteLength(str.slice(0, mid), "utf8") <= maxBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  if (lo > 0 && lo < str.length) {
+    const last = str.charCodeAt(lo - 1);
+    if (last >= 0xd800 && last <= 0xdbff) lo -= 1; // don't end on a lone high surrogate
+  }
+  return str.slice(0, lo);
+}
+
+/**
  * Returns sanitized signature HTML, or "" for null/empty/over-limit input (graceful — an empty
- * signature means "append nothing"). Over-limit input is truncated before parse so a huge paste
- * can't be used as a DoS.
+ * signature means "append nothing"). Over-limit input is truncated to the BYTE cap before parse so a
+ * huge (or multibyte) paste can't be used as a DoS.
  */
 export function sanitizeSignatureHtml(input: string | null | undefined): string {
   if (!input) return "";
-  const bounded = input.length > MAX_SIGNATURE_HTML_BYTES ? input.slice(0, MAX_SIGNATURE_HTML_BYTES) : input;
-  const clean = sanitizeHtml(bounded, OPTIONS).trim();
-  return clean;
+  const bounded = truncateToUtf8Bytes(input, MAX_SIGNATURE_HTML_BYTES);
+  return sanitizeHtml(bounded, OPTIONS).trim();
 }

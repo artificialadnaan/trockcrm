@@ -54,7 +54,10 @@ router.get("/:userId/:asset", async (req: Request, res: Response, next: NextFunc
     const stream = object.stream as AsyncIterable<Uint8Array> & { pipe?: (dest: Response) => void; on?: Function };
     if (typeof stream.pipe === "function") {
       stream.on?.("error", () => {
+        // Pre-headers: send a 404. Post-headers (mid-stream error): end the response so the
+        // connection closes instead of hanging until the client times out.
         if (!res.headersSent) res.status(404).end();
+        else res.end();
       });
       stream.pipe(res);
     } else {

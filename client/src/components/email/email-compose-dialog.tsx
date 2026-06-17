@@ -77,9 +77,14 @@ export function EmailComposeDialog({
     setBody(defaultBody ?? "");
     setAssociation(defaultAssociation);
     setError(null);
-    void getSignature()
+    // Abort on close/reopen so a late-resolving fetch from a previous open can't set a stale signature.
+    const controller = new AbortController();
+    void getSignature(controller.signal)
       .then(setSignature)
-      .catch(() => setSignature(""));
+      .catch(() => {
+        if (!controller.signal.aborted) setSignature("");
+      });
+    return () => controller.abort();
   }, [defaultAssociation, defaultBody, defaultSubject, defaultTo, open]);
 
   const canSend = Boolean(association && to.trim() && subject.trim() && !sending);

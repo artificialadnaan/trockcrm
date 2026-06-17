@@ -45,4 +45,10 @@ describe("sanitizeSignatureHtml", () => {
     const out = sanitizeSignatureHtml(huge);
     expect(out.length).toBeLessThanOrEqual(50_010);
   });
+
+  it("caps by UTF-8 BYTES, not UTF-16 code units (multibyte can't bypass the cap)", () => {
+    // 30k '€' = 30k code units but 90k UTF-8 bytes — a code-unit cap (30k < 50k) would let it through.
+    const out = sanitizeSignatureHtml("<p>" + "€".repeat(30_000) + "</p>");
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(50_010);
+  });
 });

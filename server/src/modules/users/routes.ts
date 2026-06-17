@@ -1,5 +1,4 @@
 import { Router, type Request } from "express";
-import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { users } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
@@ -8,18 +7,15 @@ import { listUsers } from "../admin/users-service.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { sanitizeSignatureHtml, MAX_SIGNATURE_HTML_BYTES } from "../../lib/sanitize-signature.js";
 import { generateUploadUrl, isR2Configured } from "../../lib/r2-client.js";
+import {
+  SIGNATURE_LOGO_TYPES,
+  SIGNATURE_LOGO_MAX_BYTES,
+  signatureLogoKey,
+  assertOwnedSignatureLogoKey,
+  enforceSignatureLogoSize,
+} from "./signature-logo.js";
 
 const router = Router();
-
-// Allowed signature-logo image types → file extension. The logo is stored in R2 and referenced by
-// an <img> URL (never base64-embedded), so it must be a real hosted image of a known type.
-const SIGNATURE_LOGO_TYPES: Record<string, string> = {
-  "image/png": "png",
-  "image/jpeg": "jpg",
-  "image/gif": "gif",
-  "image/webp": "webp",
-};
-const SIGNATURE_LOGO_MAX_BYTES = 1_000_000; // 1 MB
 
 function publicSignatureLogoBaseUrl(req: Request): string {
   const proto = req.get("x-forwarded-proto") ?? req.protocol;
@@ -130,7 +126,8 @@ router.patch("/me/signature", async (req, res, next) => {
     if (raw != null && typeof raw !== "string") {
       throw new AppError(400, "emailSignature must be a string");
     }
-    if (typeof raw === "string" && raw.length > MAX_SIGNATURE_HTML_BYTES) {
+    // Byte cap (UTF-8), not UTF-16 code units — multibyte content must not bypass the limit.
+    if (typeof raw === "string" && Buffer.byteLength(raw, "utf8") > MAX_SIGNATURE_HTML_BYTES) {
       throw new AppError(413, "Signature is too large");
     }
     const clean = sanitizeSignatureHtml(raw);
@@ -145,20 +142,37 @@ router.patch("/me/signature", async (req, res, next) => {
   }
 });
 
-// Presigned PUT for a signature logo. Stored under the user's OWN folder; served permanently +
-// publicly by GET /api/public/signature-logo/:userId/:asset (R2 exposes no public URL of its own).
+// Step 1: presigned PUT for a signature logo, under the user's OWN folder. We do NOT hand back a
+// usable public URL here — a presigned PUT can't bound the uploaded size, so the URL is only issued
+// by /confirm after the server verifies the actual object size.
 router.post("/me/signature-logo/upload-url", async (req, res, next) => {
   try {
     if (!isR2Configured()) throw new AppError(503, "Image storage is not configured.");
     const contentType = typeof (req.body ?? {}).contentType === "string" ? req.body.contentType : "";
     const ext = SIGNATURE_LOGO_TYPES[contentType];
     if (!ext) throw new AppError(400, "Logo must be a PNG, JPEG, GIF, or WebP image.");
-    const asset = `${randomUUID()}.${ext}`;
-    const r2Key = `signature-logos/${req.user!.id}/${asset}`;
+    const r2Key = signatureLogoKey(req.user!.id, ext);
     const upload = await generateUploadUrl(r2Key, contentType, SIGNATURE_LOGO_MAX_BYTES);
+    await req.commitTransaction!();
+    res.json({ uploadUrl: upload.uploadUrl, r2Key, maxBytes: SIGNATURE_LOGO_MAX_BYTES });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Step 2: after the client PUTs the bytes, confirm the upload. The server enforces the size cap by
+// reading the object's REAL size and deleting it if oversized (the client size check is cosmetic and
+// bypassable) — only then is a servable public URL returned. The key must be the caller's own.
+router.post("/me/signature-logo/confirm", async (req, res, next) => {
+  try {
+    if (!isR2Configured()) throw new AppError(503, "Image storage is not configured.");
+    const r2Key = typeof (req.body ?? {}).r2Key === "string" ? req.body.r2Key : "";
+    assertOwnedSignatureLogoKey(r2Key, req.user!.id);
+    await enforceSignatureLogoSize(r2Key); // headObject → delete + 413 if over the cap
+    const asset = r2Key.slice(`signature-logos/${req.user!.id}/`.length);
     const publicUrl = `${publicSignatureLogoBaseUrl(req)}/${req.user!.id}/${asset}`;
     await req.commitTransaction!();
-    res.json({ uploadUrl: upload.uploadUrl, publicUrl, r2Key, maxBytes: SIGNATURE_LOGO_MAX_BYTES });
+    res.json({ publicUrl });
   } catch (err) {
     next(err);
   }
