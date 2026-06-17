@@ -1901,6 +1901,14 @@ router.post("/", async (req, res, next) => {
       creationContext: _creationContext,
       sourceLeadWriteMode: _sourceLeadWriteMode,
       migrationMode: _migrationMode,
+      // Estimator is a commission-attribution field that may ONLY be set through the dedicated,
+      // leadership-gated PATCH /:id/estimator route (which audits the change and re-attributes the
+      // estimator commission row). Pull it out of `...rest` so a create payload can never smuggle it
+      // in — the server createDeal insert already ignores it, but this keeps create a strict no-write
+      // path for estimator even if that insert ever changes (matches updateDeal's allowlist exclusion
+      // and the client-side WritableDealFields Omit). estimatorUserName is a read-only display alias.
+      estimatorUserId: _estimatorUserId,
+      estimatorUserName: _estimatorUserName,
       ...rest
     } = body;
     if (!name || !stageId) {
@@ -1988,6 +1996,14 @@ router.patch(
   requireRole("admin", "director"),
   async (req, res, next) => {
     try {
+      // Per-deal access gate (parity with PATCH /:id and the change-order routes): estimator is a
+      // commission-attribution mutation, so prove the caller can reach THIS specific deal — its
+      // office/scope — before any read or write, for EVERY request shape (set / no-op / explicit
+      // null-clear). requireRole above only proves leadership in the abstract; this binds it to the
+      // deal, so a leader acting on a deal outside their accessible scope is rejected here (404/403)
+      // before setDealEstimator runs — not left to the service's later existence check.
+      await assertDealRouteAccess(req, req.params.id as string);
+
       // Distinguish an ABSENT field from an explicit null: a `{}` (or estimator-less) body must NOT
       // silently CLEAR the estimator — that requires an explicit `estimatorUserId: null`. An omitted
       // key is a client bug, so reject it (422) rather than wiping commission attribution by accident.

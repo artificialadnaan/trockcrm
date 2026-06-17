@@ -234,6 +234,69 @@ describe("PATCH /api/deals/:id/estimator — RBAC", () => {
   });
 });
 
+// The per-deal access gate: requireRole proves leadership in the abstract; this binds it to THIS deal's
+// office/scope. Estimator is a commission-attribution mutation, so — like PATCH /:id and the change-order
+// routes — the route must assert the caller can reach the deal before any read or write, for every
+// request shape (set / no-op / explicit null-clear). assertDealCollaboratorAccess is mocked here (it has
+// its own tests); these prove the route DELEGATES to it and rejects when it rejects.
+describe("PATCH /api/deals/:id/estimator — per-deal access gate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dealsServiceMocks.setDealEstimator.mockReset();
+    dealsServiceMocks.setDealEstimator.mockResolvedValue({
+      id: "deal-1",
+      estimatorUserId: ESTIMATOR_ID,
+    });
+  });
+
+  it("asserts access for THIS deal before the service runs (within scope → allowed)", async () => {
+    const app = createApp(createUser("director"));
+    const res = await request(app)
+      .patch("/api/deals/deal-1/estimator")
+      .send({ estimatorUserId: ESTIMATOR_ID });
+    expect(res.status).toBe(200);
+    expect(accessMocks.assertDealCollaboratorAccess).toHaveBeenCalledWith(
+      expect.any(Object),
+      "deal-1",
+      expect.objectContaining({ id: "director-1", role: "director" })
+    );
+    // The gate must run BEFORE the mutation, never after.
+    const gateOrder = accessMocks.assertDealCollaboratorAccess.mock.invocationCallOrder[0];
+    const serviceOrder = dealsServiceMocks.setDealEstimator.mock.invocationCallOrder[0];
+    expect(gateOrder).toBeLessThan(serviceOrder);
+  });
+
+  // A director acting on a deal OUTSIDE their accessible scope is rejected for EVERY shape — including
+  // the null-CLEAR path, which inside the service skips the new-estimator office validation entirely.
+  it.each([
+    { label: "set", body: { estimatorUserId: ESTIMATOR_ID } as Record<string, unknown> },
+    { label: "null-clear", body: { estimatorUserId: null } as Record<string, unknown> },
+  ])(
+    "rejects a director outside the deal's office with 403 ($label) and never reaches the service",
+    async ({ body }) => {
+      accessMocks.assertDealCollaboratorAccess.mockRejectedValueOnce(
+        new AppError(403, "Access denied: deal is outside your office.")
+      );
+      const app = createApp(createUser("director"));
+      const res = await request(app).patch("/api/deals/deal-1/estimator").send(body);
+      expect(res.status).toBe(403);
+      expect(dealsServiceMocks.setDealEstimator).not.toHaveBeenCalled();
+    }
+  );
+
+  it("returns 404 from the access gate when the deal is not in the caller's scope and never reaches the service", async () => {
+    accessMocks.assertDealCollaboratorAccess.mockRejectedValueOnce(
+      new AppError(404, "Deal not found")
+    );
+    const app = createApp(createUser("director"));
+    const res = await request(app)
+      .patch("/api/deals/deal-1/estimator")
+      .send({ estimatorUserId: ESTIMATOR_ID });
+    expect(res.status).toBe(404);
+    expect(dealsServiceMocks.setDealEstimator).not.toHaveBeenCalled();
+  });
+});
+
 // The load-bearing guarantee: estimator is intentionally OUT of updateDeal's allowlist, so a
 // caller cannot smuggle estimatorUserId through the generic PATCH /deals/:id (which the assigned
 // rep can reach) — that would leak rep-level access to a commission-attribution field. This drives

@@ -627,7 +627,16 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
   return { deal, loading, error, refetch: fetchDeal };
 }
 
-export async function createDeal(input: Partial<Deal> & { name: string; stageId: string }, options: OfficeRequestOptions = {}) {
+// estimatorUserId/estimatorUserName are READ-ONLY/display-only on the wire: they live on the read
+// Deal shape (so the picker can render `deal.estimatorUserName`) but must NEVER be writable through a
+// generic create or update payload — both POST /deals and PATCH /deals/:id are reachable by the
+// assigned rep, so allowing estimator on either would let a rep set/re-attribute the commission-bearing
+// estimator field. It changes ONLY through the dedicated, leadership-gated estimator route
+// (PATCH /deals/:id/estimator). The server already excludes estimator from both the create insert/forward
+// and updateDeal's allowlist; this shared Omit closes the client-type hole on BOTH paths (defense in depth).
+export type WritableDealFields = Omit<Deal, "estimatorUserId" | "estimatorUserName">;
+
+export async function createDeal(input: Partial<WritableDealFields> & { name: string; stageId: string }, options: OfficeRequestOptions = {}) {
   return api<{ deal: Deal }>("/deals", {
     method: "POST",
     json: input,
@@ -661,14 +670,11 @@ export async function createServiceOpportunity(
   });
 }
 
-// estimatorUserId/estimatorUserName are READ-ONLY/display-only on the wire: they live on the read
-// Deal shape (so the picker can render `deal.estimatorUserName`) but are EXCLUDED from the writable
-// generic-update payload. The generic updateDeal (PATCH /deals/:id) is rep-reachable, so allowing
-// estimatorUserId here would let a rep re-attribute the commission-bearing estimator field. It must
-// change ONLY through the dedicated, leadership-gated updateDealEstimator (PATCH /deals/:id/estimator).
-// The server already drops estimator from updateDeal's allowlist; this Omit closes the client-type
-// hole too (defense in depth).
-export type UpdateDealPayload = Omit<Partial<Deal>, "estimatorUserId" | "estimatorUserName"> & {
+// Generic update payload: the same writable surface as create (estimator excluded — see
+// WritableDealFields above) plus the migration toggle. The generic updateDeal (PATCH /deals/:id) is
+// rep-reachable, so the Omit is what keeps a rep from re-attributing the commission-bearing estimator
+// field through it; estimator changes ONLY via the dedicated updateDealEstimator (PATCH /deals/:id/estimator).
+export type UpdateDealPayload = Partial<WritableDealFields> & {
   migrationMode?: boolean;
 };
 
