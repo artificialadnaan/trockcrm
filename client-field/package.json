@@ -10,7 +10,8 @@
     "start": "npx serve dist -s -l 3000",
     "typecheck": "tsc -b --force",
     "typecheck:tests": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --coverage"
+    "test": "vitest run --coverage",
+    "test:ci": "vitest run --config vitest.ci.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.8",
