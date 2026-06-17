@@ -173,6 +173,9 @@ export async function backfillTenantCommissions(
     // calculateCommissionForDeal (the backfill path) never returns this — change orders are excluded
     // upstream — but the shared status union now carries it (estimator-mint only), so the counter must too.
     skipped_change_order: 0,
+    // Owner-row-gate status — owner-side rows never carry it (the owner row IS the gate), but the shared
+    // status union now includes it (estimator-mint only), so the counter must enumerate it too.
+    skipped_no_owner_row: 0,
   };
   // Separate tally for the additive estimator rows minted as a side effect (calculateCommissionForDeal
   // now reports its estimator outcome under `.estimator`). Same status union as the owner tally.
@@ -183,6 +186,9 @@ export async function backfillTenantCommissions(
     skipped_no_value: 0,
     skipped_no_rate: 0,
     skipped_change_order: 0,
+    // The estimator side CAN return this: a candidate whose owner has no active rate mints no owner row, so
+    // the gated estimator mint is skipped_no_owner_row and the deal stays at ZERO rows (still backfillable).
+    skipped_no_owner_row: 0,
   };
   let totalCommissionCreated = 0;
   let totalEstimatorCommissionCreated = 0;

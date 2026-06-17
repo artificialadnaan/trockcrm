@@ -597,4 +597,81 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     expect(owner.attribution_role).toBe("owner");
     expect(Number(owner.amount)).toBe(2000); // 100000 × 0.02 (owner full cut only)
   });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────────────
+  // OWNER-ROW INVARIANT — 3rd facet (FINDING A): the estimator's ADDITIVE row must NEVER be the first/only
+  // deal_signed_commissions row on a deal. If the OWNER mint is skipped (e.g. the owner has no active rate)
+  // while a distinct estimator IS rated, the pre-fix code minted the estimator row alone — orphaning the
+  // owner AND blinding the #736 owner backfill (it skips any deal that already carries ANY dsc row), so the
+  // owner never got a row even after gaining a rate. The mint is now GATED on an existing owner row.
+  // ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+  // Owner with NO active rate, but a distinct estimator with a rate. assigned_rep_id is ESTNR (active user,
+  // no commission settings) so the owner mint skips; estimator_user_id is ESTA (5%). seedDeal hardcodes the
+  // owner, so this one is inserted directly to give it a rateless owner.
+  async function seedRatelessOwnerDeal(id: string) {
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, estimator_user_id,
+          is_change_order, office_code, contract_signed_date)
+       VALUES ('${id}', 'D-${id.slice(-4)}', 'Deal ${id.slice(-4)}', '${STAGE}', '${ESTNR}', 100000, '${ESTA}',
+          false, NULL, '2026-01-01')`,
+    );
+  }
+
+  // 20. SIGN-TIME (the FINDING A scenario): rateless owner + rated distinct estimator. The owner mint is
+  // skipped_no_rate (no owner row), so the estimator mint is gated → skipped_no_owner_row, and NOTHING is
+  // written. The deal stays at ZERO dsc rows — no orphan estimator row, and the owner backfill can STILL
+  // find and fix the deal once the owner gains a rate.
+  it("sign-time: rateless owner + rated distinct estimator mints NEITHER row (estimator gated → zero rows)", async () => {
+    const D = U("0d20");
+    await seedRatelessOwnerDeal(D);
+
+    const res = await calculateCommissionForDeal(tdb, {
+      dealId: D,
+      contractSignedDate: "2026-01-01",
+      triggeredByUserId: OWNER,
+    });
+    expect(res.status).toBe("skipped_no_rate"); // owner has no active rate → no owner row minted
+    expect(res.estimator?.status).toBe("skipped_no_owner_row"); // estimator gated on the missing owner row
+
+    // ZERO rows: the estimator row is never the first/only dsc row → owner not orphaned, deal still backfillable.
+    expect(await dscRows(D)).toHaveLength(0);
+  });
+
+  // 21. DIRECT-HELPER GATE: a SIGNED deal carrying NO owner row → mintEstimatorCommissionForDeal returns
+  // skipped_no_owner_row and writes nothing (the additive estimator row can never stand alone).
+  it("mint helper: a signed deal with NO owner row is skipped_no_owner_row (estimator never stands alone)", async () => {
+    const D = U("0d21");
+    await seedRatelessOwnerDeal(D);
+
+    // No owner row was ever minted (owner ESTNR has no rate). Call the mint helper directly for the estimator.
+    const mint = await mintEstimatorCommissionForDeal(tdb, {
+      dealId: D,
+      estimatorUserId: ESTA,
+      triggeredByUserId: OWNER,
+    });
+    expect(mint.status).toBe("skipped_no_owner_row");
+    expect(await dscRows(D)).toHaveLength(0);
+  });
+
+  // 22. REGRESSION: when the owner row DOES exist, the gate passes and the estimator row still mints. Guards
+  // against the gate over-firing and silently dropping legitimate estimator commission.
+  it("regression: when the owner row EXISTS, the gate passes and the estimator row still mints", async () => {
+    const D = U("0d22");
+    await seedDeal(D, { estimator: null }); // owner = OWNER (2% rate)
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
+    expect(rowFor(await dscRows(D), OWNER)).toBeTruthy(); // owner row exists
+
+    const mint = await mintEstimatorCommissionForDeal(tdb, {
+      dealId: D,
+      estimatorUserId: ESTA,
+      triggeredByUserId: OWNER,
+    });
+    expect(mint.status).toBe("created");
+    const rows = await dscRows(D);
+    expect(rows).toHaveLength(2);
+    expect(Number(rowFor(rows, ESTA)!.amount)).toBe(5000); // 100000 × 0.05 (additive estimator cut)
+    expect(rowFor(rows, OWNER)!.attribution_role).toBe("owner");
+  });
 });

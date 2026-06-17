@@ -20,7 +20,13 @@ export type CalculateCommissionStatus =
   | "skipped_no_rate"
   // Only the estimator-mint path returns this (a change order is base-deal-only: it never mints an
   // estimator row). Added to the shared union so estimator helpers type-check against the same result.
-  | "skipped_change_order";
+  | "skipped_change_order"
+  // OWNER-ROW INVARIANT (3rd facet): the estimator-mint path returns this when the deal has NO booked
+  // OWNER row (attribution_role = 'owner'). The estimator's additive row must NEVER be the first/only dsc
+  // row on a deal — otherwise the owner is orphaned AND the #736 owner backfill (which skips any deal that
+  // already carries ANY dsc row) is blinded to the deal, so the owner never gets a row even after they
+  // gain a rate. Gating the mint on an existing owner row keeps a rateless-owner deal at ZERO rows.
+  | "skipped_no_owner_row";
 
 export interface CalculateCommissionResult {
   status: CalculateCommissionStatus;
@@ -231,20 +237,24 @@ export async function calculateCommissionForDeal(
   // proxy — if estimator did equal the owner, the estimator insert would conflict on (deal_id, rep_user_id)
   // and onConflictDoNothing would skip it anyway (the OWNER-ROW INVARIANT backstop). Reassignment can't
   // break this branch because it only runs at sign time, before any reassignment.
+  //
+  // OWNER-ROW INVARIANT (3rd facet): the estimator mint is routed through mintEstimatorCommissionForDeal —
+  // the SINGLE helper that gates on an EXISTING owner row — rather than inserting directly. So if the owner
+  // mint above was skipped (e.g. skipped_no_rate: the owner has no active rate), the estimator helper sees
+  // NO owner row and returns skipped_no_owner_row, minting nothing. That keeps the estimator row from ever
+  // becoming the first/only dsc row on a deal (no orphaned owner; the #736 owner backfill still finds the
+  // deal). When the owner mint succeeded the owner row exists, so the gate passes and the estimator mints.
   let estimatorResult: CalculateCommissionResult | undefined;
   if (
     !deal.isChangeOrder &&
     deal.estimatorUserId != null &&
     deal.estimatorUserId !== deal.assignedRepId
   ) {
-    estimatorResult = await insertCommissionRowForRep(
-      tenantDb,
-      deal,
-      deal.estimatorUserId,
-      input.contractSignedDate,
-      input.triggeredByUserId,
-      "estimator"
-    );
+    estimatorResult = await mintEstimatorCommissionForDeal(tenantDb, {
+      dealId: deal.id,
+      estimatorUserId: deal.estimatorUserId,
+      triggeredByUserId: input.triggeredByUserId,
+    });
   }
 
   // The top-level status describes the OWNER row (callers historically inspect the owner outcome). The
@@ -429,6 +439,8 @@ function effectiveSignedDateOf(deal: {
  *   • the deal is a change order              → skipped_change_order (base-deal-only)
  *   • the estimator already BOOKS a dsc row   → skipped_existing (never a 2nd cut for the same person)
  *   • the deal has no effective signed date   → skipped_no_value (an unsigned deal earns nothing)
+ *   • the deal has NO booked OWNER row        → skipped_no_owner_row (the estimator row must never be the
+ *                                               first/only dsc row — see OWNER-ROW INVARIANT below)
  * Otherwise delegates to the shared insert primitive (rateless estimator ⇒ skipped_no_rate / no row;
  * already-minted ⇒ skipped_existing). MUST run inside the caller's transaction.
  *
@@ -492,6 +504,29 @@ export async function mintEstimatorCommissionForDeal(
   const effectiveSignedDate = effectiveSignedDateOf(deal);
   if (!effectiveSignedDate) {
     return { status: "skipped_no_value" };
+  }
+
+  // OWNER-ROW INVARIANT (3rd facet, the load-bearing money-safety gate): the estimator's ADDITIVE row must
+  // NEVER be the first/only deal_signed_commissions row on a deal. Mint it ONLY when an OWNER row
+  // (attribution_role = 'owner') already exists on the deal. If none exists — e.g. the owner had no active
+  // rate at sign time, so calculateCommissionForDeal's owner mint returned skipped_no_rate and wrote no row
+  // — minting the estimator alone would ORPHAN the owner AND blind the #736 owner backfill (it skips any
+  // deal already carrying ANY dsc row), so the owner would never get a row even after gaining a rate. This
+  // SINGLE helper gate covers every call site: sign-time calc (owner is minted just before, so the row
+  // exists iff the owner succeeded), the manual setDealEstimator edit, and the backfill. A signed-but-
+  // rateless-owner deal therefore stays at ZERO rows, exactly so the owner backfill can still find it.
+  const [ownerRow] = await tx
+    .select({ id: dealSignedCommissions.id })
+    .from(dealSignedCommissions)
+    .where(
+      and(
+        eq(dealSignedCommissions.dealId, deal.id),
+        eq(dealSignedCommissions.attributionRole, "owner")
+      )
+    )
+    .limit(1);
+  if (!ownerRow) {
+    return { status: "skipped_no_owner_row" };
   }
 
   return insertCommissionRowForRep(
