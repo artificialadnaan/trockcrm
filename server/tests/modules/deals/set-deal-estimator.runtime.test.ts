@@ -224,6 +224,94 @@ function makeOfficeAwareTenantDb(opts: {
   return tenantDb;
 }
 
+// Grant-aware fake: the new estimator's PRIMARY users.officeId differs from the active office, but a
+// user_office_access grant may bridge it. Proves validateAssignee honors held grants (the #748 multi-office
+// bug class CodeRabbit flagged): a Dallas+Atlanta estimator is accepted on the active office's deal IFF a
+// grant exists. The reassignment helper's primary-office-only fallback would have rejected the grant case.
+function makeGrantTenantDb(opts: { estimatorOfficeId: string; grantRows: unknown[] }) {
+  const state = {
+    deal: {
+      id: "d",
+      estimatorUserId: null,
+      assignedRepId: OWNER,
+      isActive: true,
+      isChangeOrder: false,
+      isBidBoardOwned: false,
+      officeCode: null as string | null,
+    } as FakeDeal,
+    updateCalls: [] as Array<Record<string, unknown>>,
+    accessQueried: false,
+  };
+  const tenantDb: any = {
+    _state: state,
+    select() {
+      return {
+        from(table: any) {
+          const name = getTableName(table);
+          const rows = () => {
+            if (name === "users") {
+              return [{ id: B, isActive: true, officeId: opts.estimatorOfficeId, displayName: "B" }];
+            }
+            if (name === "user_office_access") {
+              state.accessQueried = true;
+              return opts.grantRows;
+            }
+            if (name === "deals") {
+              return state.deal.isActive === false ? [] : [{ ...state.deal }];
+            }
+            return [];
+          };
+          return {
+            where() {
+              return {
+                limit() {
+                  const p = Promise.resolve(rows());
+                  return {
+                    for() {
+                      return p;
+                    },
+                    then(onf: (v: unknown[]) => unknown) {
+                      return p.then(onf);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+    update() {
+      return {
+        set(values: Record<string, unknown>) {
+          state.updateCalls.push(values);
+          return {
+            where() {
+              Object.assign(state.deal, values);
+              return {
+                returning() {
+                  return Promise.resolve([{ ...state.deal }]);
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+    insert() {
+      return {
+        values() {
+          return Promise.resolve();
+        },
+      };
+    },
+    transaction(cb: (tx: unknown) => unknown) {
+      return cb(tenantDb);
+    },
+  };
+  return tenantDb;
+}
+
 const OWNER = "owner-1";
 const B = "est-b";
 
@@ -293,6 +381,36 @@ describe("setDealEstimator — Codex findings (runtime)", () => {
     // office, so this assertion is the regression guard for the call-site fix.
     expect(db._state.userIdsQueried).toContain(B);
     expect(db._state.userIdsQueried).not.toContain(OWNER);
+  });
+
+  // #748 bug class (CodeRabbit): the estimator office check must honor user_office_access grants. A
+  // multi-office estimator whose PRIMARY office (o2/ATL) differs from the active office (o1/DFW) but who
+  // HOLDS a grant to o1 is ACCEPTED — validateAssignee consults user_office_access, unlike the reassignment
+  // helper's primary-officeId-only fallback that would have rejected the pick.
+  it("accepts a multi-office estimator who reaches the active office via a user_office_access grant", async () => {
+    const db = makeGrantTenantDb({
+      estimatorOfficeId: "o2", // primary office differs from the active office o1
+      grantRows: [{ id: "grant-1", userId: B, officeId: "o1" }], // but holds a grant to o1
+    });
+    const result = await setDealEstimator(db, "d", B, OWNER, "o1");
+    expect(result).toBeTruthy();
+    expect((result as { estimatorUserId?: string | null }).estimatorUserId).toBe(B);
+    expect(db._state.updateCalls[0]?.estimatorUserId).toBe(B);
+    // The grant table was actually consulted (proves the primary-office mismatch fell through to the grant check).
+    expect(db._state.accessQueried).toBe(true);
+    expect(commissions.mintEstimatorCommissionForDeal).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ dealId: "d", estimatorUserId: B }),
+    );
+  });
+
+  // Counter-direction: same primary-office mismatch but NO grant → rejected (400), no estimator change, no dsc.
+  it("rejects an estimator whose primary office differs and who has no grant to the active office", async () => {
+    const db = makeGrantTenantDb({ estimatorOfficeId: "o2", grantRows: [] });
+    await expect(setDealEstimator(db, "d", B, OWNER, "o1")).rejects.toMatchObject({ statusCode: 400 });
+    expect(db._state.accessQueried).toBe(true);
+    expect(db._state.updateCalls).toHaveLength(0);
+    expect(commissions.mintEstimatorCommissionForDeal).not.toHaveBeenCalled();
   });
 
   // FINDING 2
