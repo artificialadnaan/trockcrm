@@ -113,9 +113,14 @@ export function planSessionInvalidation(input: {
   const reactivating = input.nextIsActive === true && input.currentIsActive === false;
   const roleChanged = input.nextRole !== undefined && input.nextRole !== input.currentRole;
   return {
-    bumpEpoch: deactivating || roleChanged,
+    // Reactivate MUST bump too: a user deactivated before this column existed (or otherwise) has a
+    // null epoch, so without a bump their still-unexpired pre-deactivation token (field: 30d) would
+    // pass the not-stale-on-null check and revive on reactivation. Bumping forces a fresh login.
+    bumpEpoch: deactivating || reactivating || roleChanged,
     revokeLocalAuth: deactivating,
     clearLocalAuthRevocation: reactivating,
-    closeStreams: deactivating,
+    // Role change also tears down the open notifications stream so a demoted/promoted user's stream
+    // doesn't keep pushing until it reconnects.
+    closeStreams: deactivating || roleChanged,
   };
 }

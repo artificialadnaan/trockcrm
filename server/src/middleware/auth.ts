@@ -85,6 +85,9 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
       email: user.email,
       displayName: user.displayName,
       role: effectiveRole,
+      // The HOME role straight from users.role, never the office override — global-admin gating reads
+      // this so an office-scoped admin override can't reach global-admin endpoints (#740 escalation).
+      baseRole: user.role,
       officeId: user.officeId,
       activeOfficeId,
       mustChangePassword: localAuthGate.mustChangePassword,

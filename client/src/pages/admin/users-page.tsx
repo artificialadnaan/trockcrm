@@ -27,6 +27,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { useAdminUsers } from "@/hooks/use-admin-users";
+import { useAdminOffices } from "@/hooks/use-admin-offices";
 import {
   buildUsersSummary,
   filterUsers,
@@ -74,6 +75,7 @@ export function UsersPage() {
     revokeInvite,
     getLocalAuthEvents,
   } = useAdminUsers();
+  const { offices } = useAdminOffices();
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [bulkUpdating, setBulkUpdating] = useState(false);
@@ -98,16 +100,12 @@ export function UsersPage() {
     procore: "Procore",
   };
   const managerOptions = users.filter((candidate) => candidate.isActive);
-  const officeOptions = Array.from(
-    new Map(
-      users
-        .filter((candidate) => candidate.officeId)
-        .map((candidate) => [
-          candidate.officeId,
-          { id: candidate.officeId, name: candidate.officeName ?? candidate.officeId },
-        ]),
-    ).values(),
-  );
+  // Office options come from the authoritative office list (active only), NOT derived from existing
+  // users — otherwise a brand-new active office with zero users would be missing from the Add-User
+  // dropdown, making it impossible to create that office's first user (the whole point).
+  const officeOptions = offices
+    .filter((office) => office.isActive)
+    .map((office) => ({ id: office.id, name: office.name }));
 
   const localAuthLabel = {
     not_invited: "Not invited",
@@ -314,6 +312,11 @@ export function UsersPage() {
     successMessage: string,
   ) => {
     if (selectedUserIds.length === 0) return;
+    // Bulk deactivation signs every selected user out of all sessions immediately — same confirm as the
+    // per-row deactivate, so an accidental bulk click can't silently kill multiple users' sessions.
+    if (input.isActive === false && !window.confirm(`Deactivate ${selectedUserIds.length} selected user(s)? This signs them out of all sessions immediately.`)) {
+      return;
+    }
 
     setBulkUpdating(true);
     try {

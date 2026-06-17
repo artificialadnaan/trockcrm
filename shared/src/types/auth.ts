@@ -18,6 +18,13 @@ export interface AuthenticatedUser {
   email: string;
   displayName: string;
   role: UserRole;
+  /**
+   * The user's HOME role from users.role — NEVER elevated by a per-office role_override. `role` above
+   * is the EFFECTIVE role (override-aware) used for office-scoped work; `baseRole` is the global-trust
+   * role that global-admin gating (requireGlobalAdmin) MUST use, so an office-scoped admin override can
+   * never reach global-admin endpoints (e.g. user provisioning, which creates GLOBAL accounts).
+   */
+  baseRole?: UserRole;
   officeId: string;
   activeOfficeId: string; // May differ from officeId if user switched offices
   mustChangePassword?: boolean;

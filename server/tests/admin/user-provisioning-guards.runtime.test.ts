@@ -142,20 +142,20 @@ describe("planSessionInvalidation (effects wiring)", () => {
       closeStreams: true,
     });
   });
-  it("reactivate -> clear revocation only", () => {
+  it("reactivate -> clear revocation AND bump epoch (kills any lingering pre-deactivation token, incl. legacy null-epoch users)", () => {
     expect(planSessionInvalidation({ currentIsActive: false, currentRole: "rep", nextIsActive: true })).toEqual({
-      bumpEpoch: false,
+      bumpEpoch: true,
       revokeLocalAuth: false,
       clearLocalAuthRevocation: true,
       closeStreams: false,
     });
   });
-  it("role change (active user) -> bump epoch only", () => {
+  it("role change (active user) -> bump epoch AND close streams", () => {
     expect(planSessionInvalidation({ currentIsActive: true, currentRole: "rep", nextRole: "director" })).toEqual({
       bumpEpoch: true,
       revokeLocalAuth: false,
       clearLocalAuthRevocation: false,
-      closeStreams: false,
+      closeStreams: true,
     });
   });
   it("no-op edit (display name only) -> no session effects", () => {

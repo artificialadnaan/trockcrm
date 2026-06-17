@@ -5,7 +5,7 @@ import * as schema from "@trock-crm/shared/schema";
 import { authMiddleware } from "../../middleware/auth.js";
 import { requireCrmUser } from "../../middleware/field-auth.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { requireAdmin, requireDirector } from "../../middleware/rbac.js";
+import { requireAdmin, requireDirector, requireGlobalAdmin } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { pool } from "../../db.js";
 import { getAccessibleOffices } from "../auth/service.js";
@@ -164,7 +164,7 @@ router.post("/admin/users/import-external", requireAdmin, async (_req: Request, 
   }
 });
 
-router.post("/admin/users", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+router.post("/admin/users", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await createCrmUser(req.body, req.user!.id);
     let invite: { sent: boolean; error?: string } = { sent: false };
@@ -192,7 +192,7 @@ router.get("/admin/users/:id", requireAdmin, async (req: Request, res: Response,
   }
 });
 
-router.patch("/admin/users/:id", requireAdmin, async (req: Request, res: Response) => {
+router.patch("/admin/users/:id", requireGlobalAdmin, async (req: Request, res: Response) => {
   try {
     const user = await updateUser(req.params.id as string, req.body, req.user!.id);
     return res.json({ user });
