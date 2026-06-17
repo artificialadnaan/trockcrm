@@ -3464,7 +3464,11 @@ export async function setDealEstimator(
     const [existing] = await tx
       .select()
       .from(deals)
-      .where(eq(deals.id, dealId))
+      // FINDING 2 (Codex): require is_active=true. Without it, a soft-deleted (is_active=false) deal id
+      // supplied directly to PATCH /deals/:id/estimator would let an admin mutate a deal the detail/edit
+      // flows hide. Filtering here makes a soft-deleted deal return null so the route 404s BEFORE any
+      // estimator change — mirrors getDealById's default-active behavior. The FOR UPDATE lock is kept.
+      .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
       .limit(1)
       .for("update");
     if (!existing) return null;
@@ -3491,10 +3495,20 @@ export async function setDealEstimator(
 
     // A NEW estimator is validated exactly like a reassignment assignee (exists, active, same office).
     if (newEstimator != null) {
+      // FINDING 1 (Codex): validate the new estimator against the ACTIVE TENANT office (x-office-id, which
+      // the route threads in as officeId), NOT the deal's cosmetic project-number PREFIX. The deal form lets
+      // a deal's officeCode prefix differ from its tenant; inside the shared validateDealReassignmentAssignee
+      // a NON-null dealOfficeCode (the prefix) TAKES PRECEDENCE and only falls back to the passed office when
+      // the prefix is null — so passing existing.officeCode would wrongly reject a valid SAME-TENANT estimator
+      // with DEAL_REASSIGNMENT_OFFICE_MISMATCH. Pass null for the prefix so it can't take precedence, and the
+      // active tenant officeId as the fallback.
+      // NOTE: WHITE's PR #748 owns validateDealReassignmentAssignee (a SEPARATE multi-office
+      // user_office_access bug) — do NOT edit that shared function; this is a CALL-SITE-only fix that keeps
+      // validating against the active tenant office and stays correct after #748 merges.
       await validateDealReassignmentAssignee(
         tx,
         newEstimator,
-        existing.officeCode,
+        null,
         owner,
         officeId ?? undefined
       );
