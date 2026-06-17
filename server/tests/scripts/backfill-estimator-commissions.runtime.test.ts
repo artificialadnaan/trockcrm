@@ -453,6 +453,93 @@ describe("estimator backfill — owner-role-row gate (Finding 2) + full revalida
   });
 });
 
+// Isolated fixture (own PGlite) for the P1 owner-row-invariant finding on the CANDIDATE estimator-row gate.
+// The candidate predicate's old `estimator_user_id <> assigned_rep_id` was a MUTABLE-assignee proxy for the
+// double-pay guard. After a reassignment where the estimator equals the CURRENT assignee but holds NO booked
+// dsc row (a DIFFERENT, original rep holds the attribution_role='owner' row), that proxy WRONGLY DROPPED a
+// genuinely-unpaid historical estimator. The fix keys the gate on the BOOKED row instead: NOT EXISTS any dsc
+// row for the estimator on the deal (any role). So the deal IS selected and the estimator row IS minted.
+describe("estimator backfill — estimator-row gate replaces the assigned_rep_id proxy (Finding P1)", () => {
+  let pgP: PGlite;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let tdbP: any;
+  const queryP = (sql: string, params?: unknown[]) =>
+    pgP.query(sql, params as never[]) as Promise<{ rows: Record<string, unknown>[] }>;
+  const rowsForRep = async (dealId: string, rep: string) =>
+    (await pgP.query(`SELECT 1 FROM public.deal_signed_commissions WHERE deal_id='${dealId}' AND rep_user_id='${rep}'`)).rows.length;
+
+  const PCUR = U("0c01"); // CURRENT assignee AND the estimator (post-reassignment), rate 0.02
+  const PORIG = U("0c02"); // ORIGINAL owner — holds the booked attribution_role='owner' row, rate 0.03
+  const PACTOR = U("0cac");
+  const PWON = U("0c50");
+  const POFFICE = U("0cf1");
+
+  // estimator_user_id == assigned_rep_id == PCUR; owner row booked on PORIG; PCUR holds NO dsc row.
+  const DP_EST_IS_CUR = U("0cd1");
+
+  beforeAll(async () => {
+    pgP = new PGlite();
+    await pgP.exec(
+      tenantSchemaSql("public", [users, pipelineStageConfig, deals, userCommissionSettings, dealSignedCommissions, auditLog])
+    );
+    await pgP.exec(
+      `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`
+    );
+    tdbP = drizzle(pgP);
+    await pgP.exec(
+      `INSERT INTO public.users (id, display_name, email, role, office_id) VALUES
+         ('${PCUR}','P Current/Estimator','pc@x.com','rep','${POFFICE}'),
+         ('${PORIG}','P Original Owner','po@x.com','rep','${POFFICE}')`
+    );
+    await pgP.exec(`INSERT INTO public.pipeline_stage_config (id, name, slug, display_order) VALUES ('${PWON}','Won','won',9)`);
+    await pgP.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES
+      ('${PCUR}', 0.020000, true), ('${PORIG}', 0.030000, true)`);
+    // CURRENT assignee = estimator = PCUR (post-reassignment); the booked OWNER row (below) sits on the
+    // ORIGINAL owner PORIG — NOT the current assignee. This is exactly the shape the old
+    // `estimator_user_id <> assigned_rep_id` candidate clause wrongly dropped.
+    await pgP.exec(
+      `INSERT INTO public.deals (id, deal_number, name, stage_id, assigned_rep_id, estimator_user_id, awarded_amount, contract_signed_date, contract_signed_at, is_change_order)
+       VALUES ('${DP_EST_IS_CUR}','${DP_EST_IS_CUR.slice(-4)}','Deal','${PWON}','${PCUR}','${PCUR}', 100000, '2026-05-01', NULL, false)`
+    );
+    await pgP.exec(
+      `INSERT INTO public.deal_signed_commissions (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing) VALUES
+         ('${DP_EST_IS_CUR}','${PORIG}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-05-01')`
+    );
+  }, 30_000);
+
+  afterAll(async () => {
+    await pgP?.close();
+  });
+
+  it("Finding P1: estimator == current assignee but holds NO booked row (a different rep holds the owner row) is STILL selected and mints the estimator row; the OLD `estimator <> assigned_rep_id` clause returned 0 rows", async () => {
+    // INLINE PROOF — the OLD candidate clause `estimator_user_id <> assigned_rep_id` returns 0 rows for this
+    // deal (estimator == the current assignee), so the pre-fix backfill would have DROPPED a genuinely-unpaid
+    // historical estimator. (NULL-safe: both ids are non-null here, so the comparison is a plain false.)
+    const oldClause = await pgP.query(
+      `SELECT 1 FROM public.deals d WHERE d.id='${DP_EST_IS_CUR}' AND d.estimator_user_id <> d.assigned_rep_id`
+    );
+    expect(oldClause.rows.length).toBe(0); // pre-fix assigned_rep_id proxy would have excluded the deal
+
+    // Fixture sanity: the estimator (PCUR) books NO dsc row; only the ORIGINAL owner (PORIG) holds one.
+    expect(await rowsForRep(DP_EST_IS_CUR, PCUR)).toBe(0);
+
+    // The NEW booked-row gate selects it: an owner-role row EXISTS (on PORIG) AND the estimator (PCUR) books
+    // no row of ANY role.
+    const candidate = (await findEstimatorBackfillCandidates(queryP)).find((c) => c.dealId === DP_EST_IS_CUR);
+    expect(candidate?.estimatorId).toBe(PCUR);
+
+    const result = await runOne(tdbP, candidate!, PACTOR, true);
+    expect(result.status).toBe("created");
+    expect(Number(result.amount)).toBe(2000); // 100000 × 0.02 (PCUR's own estimator rate)
+    expect(await rowsForRep(DP_EST_IS_CUR, PCUR)).toBe(1); // estimator row minted for the current-assignee estimator
+    expect(await rowsForRep(DP_EST_IS_CUR, PORIG)).toBe(1); // the ORIGINAL owner's booked owner row untouched
+
+    // Idempotent: once PCUR books the estimator row, the any-role NOT EXISTS drops the deal on re-run.
+    const reselect = (await findEstimatorBackfillCandidates(queryP)).find((c) => c.dealId === DP_EST_IS_CUR);
+    expect(reselect).toBeUndefined();
+  });
+});
+
 describe("estimator backfill parseArgs (execution-safety controls)", () => {
   it("rejects the space-separated --tenant form (would silently widen to ALL tenants)", () => {
     expect(() => parseArgs(["--tenant", "office_dallas"])).toThrow(/with '='/);
