@@ -9,7 +9,7 @@
  * estimator commission row yet.
  *
  * RELATIONSHIP TO THE OWNER BACKFILL (backfill-missing-commissions.ts / PR #736): that one mints the OWNER
- * row (deal_signed_commissions.rep_user_id = assigned_rep_id) and skips any deal that already has ANY row.
+ * row (deal_signed_commissions row for the deal's current owner) and skips any deal that already has ANY row.
  * This one mints the ESTIMATOR row (rep_user_id = estimator_user_id), which is ADDITIVE — it sits ON TOP of
  * the owner row, never a split. So its NOT EXISTS is scoped to the ESTIMATOR's own row, not "any row": a
  * deal will already carry an owner row (from sign time or the owner backfill) yet still need its estimator
@@ -38,8 +38,8 @@
  *   • estimator-already-booked is excluded in the query too (NOT EXISTS any dsc row for the estimator on the
  *     deal, regardless of role): if the estimator IS the deal's booked owner they already hold the owner row
  *     (their full cut), so a second estimator row would double-pay them. Keyed on the BOOKED row, NOT the
- *     mutable assigned_rep_id — so an estimator who equals the CURRENT assignee after a reassignment but holds
- *     no booked row is still (correctly) backfilled.
+ *     deal's mutable current owner — so an estimator who equals the CURRENT assignee after a reassignment but
+ *     holds no booked row is still (correctly) backfilled.
  *   • Per-office — fans out over every office_* schema (or a single --tenant=office_x).
  *   • The commission EARNER (deal_signed_commissions.rep_user_id) is the deal's estimator. The backfill
  *     OPERATOR (--actor) is stamped as created_by + audit changed_by, so the trail truthfully records who
@@ -128,30 +128,32 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *   • not a change order  — COALESCE(is_change_order,false)=false: a CO is base-deal-only and never earns its
  *                           own estimator cut. Excluded IN THE QUERY, not merely by the mint guard.
  *   • OWNER ROW EXISTS    — an attribution_role='owner' dsc row is already booked on the deal. Keyed on the
- *                           ROLE, NOT rep_user_id = assigned_rep_id: after an owner reassignment the booked
- *                           owner row stays on the ORIGINAL rep while assigned_rep_id moves, so an
- *                           assigned_rep_id proxy would wrongly drop a deal that has a valid owner row but a
+ *                           ROLE, NOT on the deal's current owner: after an owner reassignment the booked
+ *                           owner row stays on the ORIGINAL rep while the deal's current owner moves, so a
+ *                           current-owner proxy would wrongly drop a deal that has a valid owner row but a
  *                           changed current-owner (and the #736 owner backfill won't re-mint it either). The
  *                           additive estimator row must sit ON TOP of an owner row, never be the FIRST dsc row
  *                           on a deal (else the owner backfill, which skips any deal with ANY row, would never
  *                           mint the owner row). This both prevents that and enforces ordering: owner backfill
  *                           first, then this one. (Owner-row invariant — same fix as PR #742.)
  *   • estimator books NO  — NOT EXISTS any dsc row for this estimator on the deal, REGARDLESS of role
- *     row on the deal       (x.rep_user_id = d.estimator_user_id). This ONE term replaces BOTH the old
- *                           estimator_user_id <> assigned_rep_id proxy AND the former role-scoped
- *                           (attribution_role='estimator') NOT EXISTS, and carries no assigned_rep_id at all:
+ *     row on the deal       (x.rep_user_id = d.estimator_user_id). This ONE term replaces BOTH the former
+ *                           current-assignee comparison AND the former role-scoped
+ *                           (attribution_role='estimator') NOT EXISTS, and references the deal's current
+ *                           owner nowhere:
  *                             – double-pay guard: if the estimator IS the deal's booked owner they already
  *                               hold the OWNER row (their full cut), so the any-role NOT EXISTS is false ⇒
- *                               excluded. This subsumes "estimator <> owner" WITHOUT the mutable
- *                               assigned_rep_id proxy — after a reassignment where the estimator equals the
- *                               CURRENT assignee but holds NO booked row, that proxy wrongly dropped a
- *                               genuinely-unpaid historical estimator; keying on the BOOKED row keeps them.
+ *                               excluded. This subsumes the estimator-is-not-the-owner intent WITHOUT the
+ *                               mutable current-assignee proxy — after a reassignment where the estimator
+ *                               equals the CURRENT assignee but holds NO booked row, that proxy wrongly
+ *                               dropped a genuinely-unpaid historical estimator; keying on the BOOKED row
+ *                               keeps them.
  *                             – idempotency: once this backfill mints the estimator row the deal drops out on
  *                               re-run (any row for the estimator — owner OR estimator — now excludes it).
  *
- * NOTE: the candidate predicate no longer references assigned_rep_id at all. Both gates key on the BOOKED
+ * NOTE: the candidate predicate references the deal's current owner nowhere. Both gates key on the BOOKED
  * deal_signed_commissions rows (owner gate → attribution_role='owner'; estimator gate → rep_user_id =
- * estimator_user_id), never on the mutable assigned_rep_id column.
+ * estimator_user_id), never on the deal's mutable current-owner column.
  */
 const CANDIDATE_ELIGIBILITY_SQL = `
   (d.contract_signed_at IS NOT NULL OR d.contract_signed_date IS NOT NULL)
