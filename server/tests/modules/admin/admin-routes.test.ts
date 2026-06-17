@@ -35,6 +35,13 @@ const mocks = vi.hoisted(() => ({
     }
     res.status(403).json({ error: { message: "Admin access required" } });
   }),
+  requireGlobalAdmin: vi.fn((req: any, res: any, next: any) => {
+    if ((req.user?.baseRole ?? req.user?.role) === "admin") {
+      next();
+      return;
+    }
+    res.status(403).json({ error: { message: "Global admin required" } });
+  }),
   tenantMiddleware: vi.fn((req: any, _res: any, next: any) => {
     req.tenantDb = {};
     req.tenantClient = mocks.tenantClient;
@@ -77,6 +84,7 @@ vi.mock("../../../src/middleware/auth.js", () => ({
 vi.mock("../../../src/middleware/rbac.js", () => ({
   requireAdmin: mocks.requireAdmin,
   requireDirector: mocks.requireDirector,
+  requireGlobalAdmin: mocks.requireGlobalAdmin,
 }));
 
 vi.mock("../../../src/middleware/tenant.js", () => ({

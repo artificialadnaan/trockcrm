@@ -227,6 +227,7 @@ router.post("/dev/login", authLimiter, async (req, res, next) => {
       email: resolvedUser.email,
       officeId: resolvedUser.officeId,
       role: resolvedUser.role,
+      tokenVersion: resolvedUser.tokenVersion,
       authMethod: "dev",
     });
 
@@ -258,13 +259,14 @@ router.post("/local/login", authLimiter, async (req, res, next) => {
       throw new AppError(400, "Email and password are required");
     }
 
-    const { user } = await loginWithLocalPassword({ email, password });
+    const { user, tokenVersion } = await loginWithLocalPassword({ email, password });
 
     const token = signJwt({
       userId: user.id,
       email: user.email,
       officeId: user.officeId,
       role: user.role,
+      tokenVersion,
       authMethod: "local",
     });
 

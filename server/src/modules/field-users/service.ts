@@ -415,9 +415,12 @@ export async function listFieldUsers(input: {
 }
 
 export async function setFieldUserActive(input: { userId: string; tenantId: string; active: boolean }) {
+  // Bump token_version on every toggle so the 30-day field JWT is invalidated by version, not just by
+  // the is_active recheck: without this, a pre-deactivation field token (version unchanged) would
+  // revive on reactivation (is_active true again). Mirrors the CRM reactivation fix (incrementTokenVersion).
   const result = await db.execute(sql`
     UPDATE users
-    SET is_active = ${input.active}, updated_at = now()
+    SET is_active = ${input.active}, token_version = token_version + 1, updated_at = now()
     WHERE id = ${input.userId}::uuid
       AND office_id = ${input.tenantId}::uuid
       AND role = 'field_contractor'
@@ -503,6 +506,7 @@ export async function acceptFieldInvite(input: { token: string; password: string
     email: user.email,
     officeId: user.office_id,
     role: "field_contractor",
+    tokenVersion: 0, // brand-new user row — token_version defaults to 0
     authMethod: "local",
     surface: "field",
   }, { expiresIn: FIELD_JWT_EXPIRES_IN });
@@ -594,6 +598,7 @@ export async function loginFieldUser(input: { email: string; password: string })
       u.role,
       u.office_id,
       u.is_active,
+      u.token_version,
       ula.password_hash,
       ula.is_enabled,
       ula.failed_login_attempts,
@@ -659,6 +664,7 @@ export async function loginFieldUser(input: { email: string; password: string })
     email: user.email,
     officeId: user.office_id,
     role: user.role as UserRole,
+    tokenVersion: Number(user.token_version ?? 0),
     authMethod: "local",
     surface: "field",
   }, { expiresIn: FIELD_JWT_EXPIRES_IN });

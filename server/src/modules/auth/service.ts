@@ -25,8 +25,8 @@ export function signJwt(claims: JwtClaims, options?: { expiresIn?: SignOptions["
   return jwt.sign(claims, getJwtSecret(), { expiresIn: options?.expiresIn ?? JWT_EXPIRES_IN });
 }
 
-export function verifyJwt(token: string): JwtClaims {
-  return jwt.verify(token, getJwtSecret()) as JwtClaims;
+export function verifyJwt(token: string): JwtClaims & { iat?: number; exp?: number } {
+  return jwt.verify(token, getJwtSecret()) as JwtClaims & { iat?: number; exp?: number };
 }
 
 export async function getUserById(userId: string) {

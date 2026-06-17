@@ -276,13 +276,15 @@ describe("email service inbound association", () => {
       })
     ).toBe(false);
 
+    // Outbound (Outlook-sent) mail captured by the Sent-folder sync IS an assignment-queue candidate
+    // when it's unassigned-but-ambiguous — that's how a rep's sent email becomes assignable to a deal.
     expect(
       isEmailAssignmentQueueCandidate({
         direction: "outbound",
         assignmentAmbiguityReason: "multiple_deal_candidates",
         assignmentStatus: "unassigned",
       })
-    ).toBe(false);
+    ).toBe(true);
 
     expect(
       isEmailAssignmentQueueCandidate({

@@ -181,10 +181,18 @@ describe("Bid Board sync service", () => {
     expect(newerParams[14]).toBe("2026-05-06T16:45:00.000Z");
   });
 
-  it("writes the (resolved + validated) estimator_user_id at $16, or null, into the deal update", () => {
+  it("fills estimator_user_id empties-only at $16 so a manual correction survives sync", () => {
     const sql = buildBidBoardDealUpdateSql("office_dallas").toLowerCase();
-    expect(sql).toContain("estimator_user_id = $16");
-    expect(sql).toContain("estimator_user_id is distinct from $16");
+
+    // SET is COALESCE: a non-null (manually-set) estimator is preserved; sync only
+    // supplies $16 when the column is currently NULL.
+    expect(sql).toContain("estimator_user_id = coalesce(estimator_user_id, $16)");
+    expect(sql).not.toContain("estimator_user_id = $16,");
+
+    // Change-detection: the row only updates for the estimator when it is currently
+    // NULL and a new id exists — it no longer fires on a non-null (manual) value.
+    expect(sql).toContain("(estimator_user_id is null and $16 is not null)");
+    expect(sql).not.toContain("estimator_user_id is distinct from $16");
 
     const row = normalizeBidBoardRow({
       Name: "Palm Villas",

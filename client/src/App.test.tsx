@@ -14,7 +14,7 @@ describe("App route guards", () => {
   });
 
   it("wraps admin-only routes with the RequireRole guard", () => {
-    expect(source).toContain('path="/admin/users" element={( <RequireRole allowedRoles={["admin"]}> <UsersPage />');
+    expect(source).toContain('path="/admin/users" element={( <RequireGlobalAdmin> <UsersPage />');
     expect(source).toContain('path="/admin/offices" element={( <RequireRole allowedRoles={["admin"]}> <OfficesPage />');
     expect(source).toContain('path="/help/admin-guide" element={( <RequireRole allowedRoles={["admin"]}> <AdminGuidePage />');
   });

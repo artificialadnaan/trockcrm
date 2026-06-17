@@ -24,12 +24,17 @@
     "./lib/rfpReviewerEmails": {
       "types": "./dist/lib/rfpReviewerEmails.d.ts",
       "default": "./dist/lib/rfpReviewerEmails.js"
+    },
+    "./lib/userProvisioningGuards": {
+      "types": "./dist/lib/userProvisioningGuards.d.ts",
+      "default": "./dist/lib/userProvisioningGuards.js"
     }
   },
   "scripts": {
     "build": "tsc -b tsconfig.build.json --clean && tsc -b tsconfig.build.json --force",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc -p tsconfig.json --noEmit",
+    "test:ci": "vitest run --config vitest.ci.config.ts",
     "dev": "tsc --watch"
   },
   "dependencies": {

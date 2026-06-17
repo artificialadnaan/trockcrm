@@ -7,6 +7,7 @@ import {
   boolean,
   jsonb,
   timestamp,
+  integer,
 } from "drizzle-orm/pg-core";
 import { offices } from "./offices.js";
 import { USER_ROLES } from "../../types/enums.js";
@@ -32,8 +33,13 @@ export const users = pgTable("users", {
   // total -- Won filters test DEALS (deals.is_test_data), not users.
   isTestData: boolean("is_test_data").default(false).notNull(),
   notificationPrefs: jsonb("notification_prefs").default({}).notNull(),
+  // Per-user CRM email signature (sanitized HTML; a logo is an <img> pointing at the public
+  // signature-logo asset route). Appended to user-composed outbound mail in sendEmail; null/empty
+  // = no signature. NOT applied to system/Resend mail. (migration 0161)
+  emailSignature: text("email_signature"),
   reportsTo: uuid("reports_to"),
   createdByUserId: uuid("created_by_user_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  tokenVersion: integer("token_version").notNull().default(0),
 });

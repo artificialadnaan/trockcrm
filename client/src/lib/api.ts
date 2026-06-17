@@ -36,6 +36,13 @@ let csrfTokenOverride: string | undefined;
 
 interface ApiOptions extends RequestInit {
   json?: Record<string, any>;
+  /**
+   * Skip auto-injecting the x-office-id header for this request, so the server evaluates it on the
+   * user's HOME office (effective role == base role). Used for global resources fetched from a
+   * global-admin page while a per-office override is selected (e.g. the office list on the Users tab),
+   * where the office-scoped effective role would otherwise 403.
+   */
+  suppressOfficeHeader?: boolean;
 }
 
 interface ApiErrorPayload {
@@ -103,13 +110,13 @@ export function isApiError(error: unknown): error is ApiError {
 }
 
 export async function api<T = unknown>(path: string, options: ApiOptions = {}): Promise<T> {
-  const { json, ...fetchOptions } = options;
+  const { json, suppressOfficeHeader, ...fetchOptions } = options;
 
   const headers: Record<string, string> = {
     ...(fetchOptions.headers as Record<string, string>),
   };
   const officeId = readOfficeIdFromLocation();
-  if (officeId && !hasOfficeHeader(headers)) {
+  if (officeId && !suppressOfficeHeader && !hasOfficeHeader(headers)) {
     headers["x-office-id"] = officeId;
   }
 

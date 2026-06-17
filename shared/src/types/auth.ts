@@ -5,6 +5,13 @@ export interface JwtClaims {
   email: string;
   officeId: string;
   role: UserRole;
+  /**
+   * The users.token_version current when this token was minted. Middleware rejects the token once the
+   * user's version moves ahead (any deactivate/reactivate/role-change increments it). Absent on
+   * pre-feature tokens → treated as 0 (the column default), so old sessions survive deploy but are
+   * invalidated the first time that user is acted on.
+   */
+  tokenVersion?: number;
   authMethod?: "local" | "dev";
   // Token audience/surface. Tokens minted for the FIELD app (T-Rock Cam / client-field) carry
   // surface:"field"; CRM/admin tokens leave it unset. CRM auth (authMiddleware) REJECTS any token with
@@ -18,6 +25,13 @@ export interface AuthenticatedUser {
   email: string;
   displayName: string;
   role: UserRole;
+  /**
+   * The user's HOME role from users.role — NEVER elevated by a per-office role_override. `role` above
+   * is the EFFECTIVE role (override-aware) used for office-scoped work; `baseRole` is the global-trust
+   * role that global-admin gating (requireGlobalAdmin) MUST use, so an office-scoped admin override can
+   * never reach global-admin endpoints (e.g. user provisioning, which creates GLOBAL accounts).
+   */
+  baseRole?: UserRole;
   officeId: string;
   activeOfficeId: string; // May differ from officeId if user switched offices
   mustChangePassword?: boolean;

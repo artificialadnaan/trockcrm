@@ -2,11 +2,20 @@ import { createContext, useContext, useState, useEffect, useCallback } from "rea
 import type { ReactNode } from "react";
 import { api, clearCsrfTokenOverride } from "./api";
 
+type Role = "admin" | "director" | "sales_manager" | "rep" | "construction";
+
 interface User {
   id: string;
   email: string;
   displayName: string;
-  role: "admin" | "director" | "sales_manager" | "rep" | "construction";
+  /** Effective role for the active office (may be elevated by a per-office role_override). */
+  role: Role;
+  /**
+   * HOME role from users.role — NOT office-override-elevated. Source of truth for GLOBAL-admin gating
+   * (the server gates user-provisioning on the base role). From /api/auth/me; absent right after login
+   * (when effective role == base anyway), so consumers fall back to `role` via isGlobalAdmin().
+   */
+  baseRole?: Role;
   officeId: string;
   activeOfficeId?: string;
   mustChangePassword?: boolean;

@@ -10,6 +10,18 @@ import {
 } from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { isAssignableCrmRole, type CrmAssignableRole, type UserRole } from "@trock-crm/shared/types";
+import {
+  stripsAdminPrivilege,
+  evaluateUpdateUserGuards,
+  planSessionInvalidation,
+} from "@trock-crm/shared/lib/userProvisioningGuards";
+import {
+  incrementTokenVersion,
+  revokeLocalAuthOnDeactivate,
+  clearLocalAuthRevocation,
+  closeUserSseConnections,
+} from "../auth/session-invalidation.js";
 import {
   getLocalAuthStatus,
   type LocalAuthStatus,
@@ -131,11 +143,84 @@ export async function getUserById(id: string) {
   return { ...userRows[0], officeAccess: accessRows };
 }
 
+export interface CreateCrmUserInput {
+  email: string;
+  displayName: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  role: string;
+  officeId: string;
+  reportsTo?: string | null;
+}
+
+// Pure, throwing validation — the create-flow's gate of record. The role decision is the gate-proven
+// isAssignableCrmRole; the rest are simple presence checks.
+// A pragmatic single-@ email shape — the create dialog isn't a <form>, so the field's type="email" is
+// NOT a backstop; this is the server-side gate of record before the insert.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input is CreateCrmUserInput & { role: CrmAssignableRole } {
+  if (!input.email?.trim()) throw new AppError(400, "Email is required");
+  if (!EMAIL_RE.test(input.email.trim())) throw new AppError(400, "Enter a valid email address");
+  if (!input.displayName?.trim()) throw new AppError(400, "Display name is required");
+  if (!input.officeId?.trim()) throw new AppError(400, "Office is required");
+  // Validate the relationship ids are well-formed UUIDs before they reach the DB — a malformed value
+  // otherwise hits Postgres and surfaces as a 500 (uuid 22P02) instead of a clean 400.
+  if (!UUID_RE.test(input.officeId.trim())) throw new AppError(400, "Office is invalid");
+  // Blank/whitespace reportsTo == "no manager" (normalized to null at insert); only a non-blank,
+  // non-UUID value is an error.
+  const reportsTo = input.reportsTo?.trim();
+  if (reportsTo && !UUID_RE.test(reportsTo)) {
+    throw new AppError(400, "Manager is invalid");
+  }
+  if (input.role === "field_contractor") throw new AppError(400, "Field contractors are created in the field-user flow");
+  if (!isAssignableCrmRole(input.role)) throw new AppError(400, `Invalid role: ${input.role}`);
+}
+
+export async function createCrmUser(input: CreateCrmUserInput, actorUserId: string) {
+  assertCreatableCrmUser(input);
+  const email = input.email.trim().toLowerCase();
+
+  const office = await db.select({ id: offices.id, isActive: offices.isActive }).from(offices).where(eq(offices.id, input.officeId)).limit(1);
+  if (!office[0]) throw new AppError(400, "Office not found");
+  if (!office[0].isActive) throw new AppError(400, "Office is not active");
+
+  // Pre-check is case-insensitive (the stored constraint is case-sensitive, but emails are normalized
+  // to lowercase on insert, so this catches mixed-case existing rows too).
+  const existing = await db.select({ id: users.id }).from(users).where(sql`lower(${users.email}) = ${email}`).limit(1);
+  if (existing[0]) throw new AppError(409, "A user with this email already exists");
+
+  try {
+    const [created] = await db
+      .insert(users)
+      .values({
+        email,
+        displayName: input.displayName.trim(),
+        firstName: input.firstName?.trim() || null,
+        lastName: input.lastName?.trim() || null,
+        role: input.role,
+        officeId: input.officeId,
+        reportsTo: input.reportsTo?.trim() || null,
+        isActive: true,
+        createdByUserId: actorUserId,
+      })
+      .returning();
+    return created;
+  } catch (e: unknown) {
+    // Lost the race to a concurrent insert with the same email -> the unique constraint fires (23505).
+    if (e && typeof e === "object" && (e as { code?: string }).code === "23505") {
+      throw new AppError(409, "A user with this email already exists");
+    }
+    throw e;
+  }
+}
+
 export async function updateUser(
   id: string,
   input: Partial<{
     displayName: string;
-    role: "admin" | "director" | "rep";
+    role: "admin" | "director" | "rep" | "construction";
     officeId: string;
     reportsTo: string | null;
     isActive: boolean;
@@ -148,9 +233,10 @@ export async function updateUser(
     newCustomerShareFloor: number;
     newCustomerWindowMonths: number;
     commissionConfigActive: boolean;
-  }>
+  }>,
+  actorUserId: string
 ) {
-  return db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const existing = await tx
       .select()
       .from(users)
@@ -159,6 +245,31 @@ export async function updateUser(
 
     const existingUser = existing[0];
     if (!existingUser) throw new AppError(404, "User not found");
+
+    const nextRole = input.role as UserRole | undefined;
+
+    // --- Guards (decision + enforcement composition are gate-proven pure functions) ---
+    // Only count active admins when admin privilege is actually being stripped, and lock the FULL
+    // active-admin set FOR UPDATE so two concurrent admin-strips serialize (no last-admin TOCTOU:
+    // the second tx blocks, then re-reads the first's committed deactivation and sees count 0).
+    let otherActiveAdminCount = Number.MAX_SAFE_INTEGER;
+    if (stripsAdminPrivilege(existingUser.role, nextRole, input.isActive)) {
+      const activeAdmins = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.role, "admin"), eq(users.isActive, true)))
+        .for("update");
+      otherActiveAdminCount = activeAdmins.filter((row) => row.id !== id).length;
+    }
+    const violation = evaluateUpdateUserGuards({
+      actorId: actorUserId,
+      targetId: id,
+      currentRole: existingUser.role,
+      nextRole,
+      nextIsActive: input.isActive,
+      otherActiveAdminCount,
+    });
+    if (violation) throw new AppError(violation.status, violation.message);
 
     const updates: Record<string, unknown> = {};
     if (input.displayName !== undefined) updates.displayName = input.displayName;
@@ -182,6 +293,18 @@ export async function updateUser(
             .returning()
         )[0]
       : existingUser;
+
+    // --- Session-kill wiring (epoch + revocation; SSE teardown happens post-commit) ---
+    const now = new Date();
+    const plan = planSessionInvalidation({
+      currentIsActive: existingUser.isActive,
+      currentRole: existingUser.role,
+      nextIsActive: input.isActive,
+      nextRole,
+    });
+    if (plan.bumpVersion) await incrementTokenVersion(tx, id);
+    if (plan.revokeLocalAuth) await revokeLocalAuthOnDeactivate(tx, id, actorUserId, now);
+    if (plan.clearLocalAuthRevocation) await clearLocalAuthRevocation(tx, id, now);
 
     const hasCommissionPatch =
       input.commissionRate !== undefined ||
@@ -247,8 +370,13 @@ export async function updateUser(
         });
     }
 
-    return updated;
+    return { updated, closeStreams: plan.closeStreams };
   });
+
+  // Best-effort, post-commit: drop the deactivated user's live SSE streams immediately. The
+  // authoritative gate remains the per-request is_active + token-version re-check.
+  if (result.closeStreams) closeUserSseConnections(id);
+  return result.updated;
 }
 
 export async function grantOfficeAccess(

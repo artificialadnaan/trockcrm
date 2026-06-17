@@ -318,7 +318,7 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
            bid_board_customer_name = $12,
            bid_board_customer_contact_raw = $13,
            bid_board_project_number = $14,
-           estimator_user_id = $16,
+           estimator_user_id = COALESCE(estimator_user_id, $16),
            -- Bid Board exports do not include a per-row updated-at, so this stores the sync cycle timestamp.
            bid_board_last_updated_at = $15::timestamptz,
            updated_at = NOW()
@@ -338,9 +338,9 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
             bid_board_customer_contact_raw IS DISTINCT FROM $13 OR
             bid_board_project_number IS DISTINCT FROM $14 OR
             bid_board_last_updated_at IS DISTINCT FROM $15::timestamptz OR
-            estimator_user_id IS DISTINCT FROM $16
+            (estimator_user_id IS NULL AND $16 IS NOT NULL)
        )
-     RETURNING id, name, deal_number, project_number
+     RETURNING id, name, deal_number, project_number, estimator_user_id
   `;
 }
 
@@ -1067,6 +1067,10 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       // estimator_user_id so a deploy gap can't wipe backfilled ids. When configured, resolve
       // the current estimator name and only write an EXISTING active user id (a bad/inactive
       // map id -> null + warning, never an FK-abort).
+      // Snapshot the deal's pre-update estimator. Used to route the empties-only warning below and as
+      // the audit mirror's `from`; the value actually WRITTEN comes from the UPDATE's RETURNING clause
+      // (the live row), never from this snapshot (Codex #741 follow-up).
+      const existingEstimatorUserId = matches[0].estimator_user_id ?? null;
       let estimatorUserId: string | null;
       if (!isEstimatorMapConfigured()) {
         estimatorUserId = matches[0].estimator_user_id ?? null;
@@ -1077,10 +1081,25 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
             ? resolvedEstimatorUserId
             : null;
         if (resolvedEstimatorUserId && !estimatorUserId) {
+          // The map resolved to an inactive user, so the incoming id will not be written. Whether the
+          // field ends up null depends on the empties-only COALESCE: when the deal already has an
+          // estimator it is PRESERVED (report the incoming id as ignored), otherwise the write lands
+          // null (report it as left null). The prior single "left null" message lied for every
+          // manually-set deal (Codex #741).
           warnings.push(
-            `Bid Board estimator "${normalized.bidBoardEstimator}" maps to ${resolvedEstimatorUserId}, which is not an active CRM user — estimator_user_id left null (check BID_BOARD_ESTIMATOR_USER_MAP)`
+            existingEstimatorUserId
+              ? `Bid Board estimator "${normalized.bidBoardEstimator}" maps to ${resolvedEstimatorUserId}, which is not an active CRM user — incoming id ignored (empties-only; existing estimator ${existingEstimatorUserId} preserved) (check BID_BOARD_ESTIMATOR_USER_MAP)`
+              : `Bid Board estimator "${normalized.bidBoardEstimator}" maps to ${resolvedEstimatorUserId}, which is not an active CRM user — estimator_user_id left null (check BID_BOARD_ESTIMATOR_USER_MAP)`
           );
         }
+      }
+      // Empties-only guard (SET estimator_user_id = COALESCE(estimator_user_id, $16) above): when the
+      // deal already has an estimator, the DB keeps it and this resolved value is dropped on the floor.
+      // Log the preserved vs ignored ids so the decision is observable (Codex #741 P2).
+      if (existingEstimatorUserId && estimatorUserId !== existingEstimatorUserId) {
+        console.warn(
+          `[BidBoardSync] Preserved existing estimator_user_id ${existingEstimatorUserId} for deal ${matches[0].id}; ignored incoming ${estimatorUserId ?? "null"} (empties-only sync)`
+        );
       }
       let updateResult;
       await client.query(`SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
@@ -1105,11 +1124,16 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       if ((updateResult.rowCount ?? 0) > 0) {
         metrics.updated++;
         const updateDeal = updateResult.rows?.[0] ?? matches[0];
+        // Audit the estimator the UPDATE actually wrote (RETURNING estimator_user_id), not the
+        // pre-update snapshot. The COALESCE evaluates against the LIVE row, so a director editing the
+        // estimator between findDealMatches and this UPDATE would make a snapshot-derived value wrong;
+        // the RETURNING value is the source of truth for the mirror's `to` (Codex #741 TOCTOU).
+        const writtenEstimatorUserId = (updateDeal.estimator_user_id ?? null) as string | null;
         await logBidBoardActivity(
           client,
           schemaName,
           updateDeal,
-          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt, estimatorUserId),
+          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt, writtenEstimatorUserId),
           { source: "bid_board_mirror", runId }
         );
       }

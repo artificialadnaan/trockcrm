@@ -3,6 +3,7 @@ import type { UserRole } from "@trock-crm/shared/types";
 import { getOfficeAccess, getUserById, verifyJwt } from "../modules/auth/service.js";
 import { getUserLocalAuthGate } from "../modules/auth/local-auth-service.js";
 import { AppError } from "./error-handler.js";
+import { isTokenVersionStale } from "@trock-crm/shared/lib/userProvisioningGuards";
 
 type FieldUserRequest = {
   id: string;
@@ -62,6 +63,10 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
     }
     if (!user.isActive) {
       throw new AppError(401, "Field user is inactive");
+    }
+
+    if (isTokenVersionStale(claims.tokenVersion, user.tokenVersion)) {
+      throw new AppError(401, "Session expired, please sign in again");
     }
 
     const authMethod = claims.authMethod;

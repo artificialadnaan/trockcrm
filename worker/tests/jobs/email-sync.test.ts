@@ -70,7 +70,7 @@ function createQueryMock(options: {
       return { rows: [{ set_config: params?.[0] ?? null }] };
     }
 
-    if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("slug = 'estimating'")) {
+    if (sql.includes("FROM public.pipeline_stage_config") && sql.includes("MIN(display_order)")) {
       return { rows: [{ display_order: 2 }] };
     }
 
@@ -123,6 +123,22 @@ function createQueryMock(options: {
     }
 
     if (sql.startsWith("UPDATE office_beta.emails")) {
+      return { rows: [] };
+    }
+
+    // Deal-parent fetch (company/property/source-lead) for the activity link columns + parent-company stat.
+    if (sql.includes("SELECT company_id, property_id, source_lead_id FROM") && sql.includes(".deals")) {
+      return { rows: [{ company_id: null, property_id: null, source_lead_id: null }] };
+    }
+
+    // Email-stat refresh (email_count / last_email_at) for any resolved target.
+    if (
+      (sql.includes("UPDATE office_beta.deals") ||
+        sql.includes("UPDATE office_beta.companies") ||
+        sql.includes("UPDATE office_beta.leads") ||
+        sql.includes("UPDATE office_beta.contacts")) &&
+      sql.includes("email_count")
+    ) {
       return { rows: [] };
     }
 
@@ -347,7 +363,7 @@ describe("email sync inbound message routing", () => {
           typeof sql === "string" &&
           sql.includes("INSERT INTO office_beta.emails") &&
           Array.isArray(params) &&
-          params[10] === "deal-1"
+          params[12] === "deal-1" // dealId moved 10→12 after internet_message_id + direction params were added
       )
     ).toBe(true);
     expect(
@@ -425,7 +441,7 @@ describe("email sync inbound message routing", () => {
           typeof sql === "string" &&
           sql.includes("INSERT INTO office_beta.emails") &&
           Array.isArray(params) &&
-          params[10] === "deal-1"
+          params[12] === "deal-1" // dealId moved 10→12 after internet_message_id + direction params were added
       )
     ).toBe(true);
     expect(

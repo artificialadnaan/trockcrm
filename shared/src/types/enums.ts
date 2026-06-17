@@ -1,6 +1,14 @@
 export const USER_ROLES = ["admin", "director", "rep", "construction", "field_contractor"] as const;
 export type UserRole = (typeof USER_ROLES)[number];
 
+// Roles an admin may assign to a CRM user from the Users tab. Excludes field_contractor,
+// which has its own create+invite lifecycle (server/src/modules/field-users).
+export const CRM_ASSIGNABLE_ROLES = ["admin", "director", "rep", "construction"] as const;
+export type CrmAssignableRole = (typeof CRM_ASSIGNABLE_ROLES)[number];
+export function isAssignableCrmRole(role: string): role is CrmAssignableRole {
+  return (CRM_ASSIGNABLE_ROLES as readonly string[]).includes(role);
+}
+
 export const DEAL_STAGES = [
   "dd",
   "opportunity",

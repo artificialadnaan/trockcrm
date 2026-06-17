@@ -3,7 +3,7 @@ import { Suspense, lazy, useEffect, type ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
 import { ForcePasswordChangeScreen } from "@/components/auth/force-password-change-screen";
-import { RequireRole } from "@/components/auth/require-role";
+import { RequireRole, RequireGlobalAdmin } from "@/components/auth/require-role";
 import { AppShell } from "@/components/layout/app-shell";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { RfpReviewPage } from "@/pages/rfp-review/rfp-review-page";
@@ -406,9 +406,9 @@ export function App() {
               <Route
                 path="/admin/users"
                 element={(
-                  <RequireRole allowedRoles={["admin"]}>
+                  <RequireGlobalAdmin>
                     <UsersPage />
-                  </RequireRole>
+                  </RequireGlobalAdmin>
                 )}
               />
               <Route

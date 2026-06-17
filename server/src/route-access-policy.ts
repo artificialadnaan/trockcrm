@@ -36,6 +36,7 @@ export const PUBLIC_ROUTE_MOUNTS = [
   "/api/bid-board-sync",
   "/api/public/photo-viewer",
   "/api/public/daily-summary",
+  "/api/public/signature-logo",
   "/api/integrations/synchub",
   // Internal RFP relay routes are public at the tenant middleware layer but
   // authenticate each request with HMAC using SYNCHUB_SHARED_SECRET and the

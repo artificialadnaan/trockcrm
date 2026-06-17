@@ -438,6 +438,7 @@ export async function loginWithLocalPassword(input: {
       role: users.role,
       officeId: users.officeId,
       isActive: users.isActive,
+      tokenVersion: users.tokenVersion,
       passwordHash: userLocalAuth.passwordHash,
       mustChangePassword: userLocalAuth.mustChangePassword,
       isEnabled: userLocalAuth.isEnabled,
@@ -525,6 +526,9 @@ export async function loginWithLocalPassword(input: {
       ...buildUserPayload({ ...row, role: localAuthUserRole }),
       mustChangePassword: row.mustChangePassword,
     },
+    // The mint-time token version, returned separately so it's stamped into the JWT without leaking
+    // into the client user payload.
+    tokenVersion: row.tokenVersion,
   };
 }
 

@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   }),
   requireAdmin: vi.fn((_req: any, _res: any, next: any) => next()),
   requireDirector: vi.fn((_req: any, _res: any, next: any) => next()),
+  requireGlobalAdmin: vi.fn((_req: any, _res: any, next: any) => next()),
   runOwnershipSync: vi.fn(),
   getAccessibleOffices: vi.fn(),
   getMyCleanupQueue: vi.fn(),
@@ -40,6 +41,7 @@ vi.mock("../../../../server/src/middleware/auth.js", () => ({
 vi.mock("../../../../server/src/middleware/rbac.js", () => ({
   requireAdmin: mocks.requireAdmin,
   requireDirector: mocks.requireDirector,
+  requireGlobalAdmin: mocks.requireGlobalAdmin,
 }));
 
 vi.mock("../../../../server/src/modules/auth/service.js", () => ({
