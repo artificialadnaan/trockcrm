@@ -158,6 +158,9 @@ export async function backfillTenantCommissions(
     skipped_no_rep: 0,
     skipped_no_value: 0,
     skipped_no_rate: 0,
+    // calculateCommissionForDeal (the backfill path) never returns this — change orders are excluded
+    // upstream — but the shared status union now carries it (estimator-mint only), so the counter must too.
+    skipped_change_order: 0,
   };
   let totalCommissionCreated = 0;
   const rows: BackfillSummary["rows"] = [];
