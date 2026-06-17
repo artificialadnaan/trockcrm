@@ -68,6 +68,7 @@ import {
   useDealDetail,
   deleteDeal as apiDeleteDeal,
   updateDeal as apiUpdateDeal,
+  updateDealEstimator as apiUpdateDealEstimator,
   type DealDetail,
 } from "@/hooks/use-deals";
 import { useLeadDetail } from "@/hooks/use-leads";
@@ -1062,6 +1063,40 @@ function DealRightRail({
       setReassigning(false);
     }
   }
+
+  // Estimator editing is leadership-only (matches the dedicated PATCH /deals/:id/estimator RBAC).
+  // The picker reuses the already-loaded sales-rep list (that endpoint returns all active CRM users
+  // incl. estimators); when editing is allowed (admin/director) salesReps is guaranteed loaded
+  // because canReassignDeal is a superset of canEditEstimator.
+  const canEditEstimator = currentUser?.role === "admin" || currentUser?.role === "director";
+  const [savingEstimator, setSavingEstimator] = useState(false);
+  const [estimatorError, setEstimatorError] = useState<string | null>(null);
+  const estimatorName = formatNullable(deal.estimatorUserName ?? deal.estimatorUserId);
+  const estimatorOptions = [...salesReps];
+  if (deal.estimatorUserId && !estimatorOptions.some((rep) => rep.id === deal.estimatorUserId)) {
+    estimatorOptions.unshift({
+      id: deal.estimatorUserId,
+      displayName: deal.estimatorUserName ?? "Current estimator",
+    });
+  }
+
+  async function handleEstimatorChange(nextIdRaw: string) {
+    const nextId = nextIdRaw || null;
+    if (nextId === (deal.estimatorUserId ?? null) || savingEstimator) return;
+    setSavingEstimator(true);
+    setEstimatorError(null);
+    try {
+      await apiUpdateDealEstimator(deal.id, nextId);
+      toast.success(nextId ? "Estimator updated" : "Estimator cleared");
+      await onReassigned();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to update estimator";
+      setEstimatorError(message);
+      toast.error(message);
+    } finally {
+      setSavingEstimator(false);
+    }
+  }
   const headerDisplayNumber = formatDealDisplayNumber(deal);
   const dealWithOptionalContact = deal as DealDetail & {
     primaryContactName?: string | null;
@@ -1123,6 +1158,41 @@ function DealRightRail({
                   </div>
                 ) : null}
               </div>
+            }
+          />
+          <DetailRailItem
+            label="Estimator"
+            value={
+              canEditEstimator ? (
+                <div className="space-y-1">
+                  <select
+                    aria-label="Edit estimator"
+                    className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900"
+                    disabled={salesRepsLoading || savingEstimator}
+                    value={deal.estimatorUserId ?? ""}
+                    onChange={(event) => {
+                      void handleEstimatorChange(event.currentTarget.value);
+                    }}
+                  >
+                    <option value="">— None —</option>
+                    {estimatorOptions.map((rep) => (
+                      <option key={rep.id} value={rep.id}>
+                        {rep.displayName}
+                      </option>
+                    ))}
+                  </select>
+                  {estimatorError ? (
+                    <p className="text-xs font-medium text-red-600">{estimatorError}</p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <span>{estimatorName}</span>
+                  <p className="text-xs italic text-slate-500">
+                    Only admins and directors can edit the estimator.
+                  </p>
+                </div>
+              )
             }
           />
         </DetailRailSection>

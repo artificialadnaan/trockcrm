@@ -33,6 +33,7 @@ import {
   listDealStagePage,
   getDealSources,
   setDealContractSignedDate,
+  setDealEstimator,
 } from "./service.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
@@ -1973,6 +1974,46 @@ router.patch(
       const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
       res.json({ deal: redactDealResponse(deal, { includeHubspotId }) });
     } catch (err) { next(err); }
+  }
+);
+
+// PATCH /api/deals/:id/estimator — set or clear the deal's estimator.
+// Admin/director ONLY, and on a DEDICATED route on purpose: estimator is deliberately OUT of
+// updateDeal's allowlist so it can NEVER be set through the generic PATCH /:id (which the assigned
+// rep can reach) — editing the estimator re-attributes the additive estimator commission row and
+// must stay leadership-gated. setDealEstimator rejects change-order children (409
+// CHANGE_ORDER_FIELD_LOCKED, mapped through here automatically by the AppError error handler).
+router.patch(
+  "/:id/estimator",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const raw = req.body?.estimatorUserId;
+      let estimatorUserId: string | null;
+      if (raw == null || raw === "") {
+        estimatorUserId = null;
+      } else if (
+        typeof raw === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.trim())
+      ) {
+        estimatorUserId = raw.trim();
+      } else {
+        throw new AppError(422, "estimatorUserId must be a valid UUID or null");
+      }
+      const deal = await setDealEstimator(
+        req.tenantDb!,
+        req.params.id as string,
+        estimatorUserId,
+        req.user!.id,
+        req.user!.activeOfficeId ?? req.user!.officeId
+      );
+      if (!deal) throw new AppError(404, "Deal not found");
+      await req.commitTransaction!();
+      const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+      res.json({ deal: redactDealResponse(deal, { includeHubspotId }) });
+    } catch (err) {
+      next(err);
+    }
   }
 );
 

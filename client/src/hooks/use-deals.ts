@@ -120,6 +120,11 @@ export interface Deal {
   changeOrderTotal: string | null;
   description: string | null;
   estimator?: string | null;
+  // The CRM estimator (a real user, distinct from the free-text `estimator` above). Set only via the
+  // dedicated admin/director PATCH /deals/:id/estimator route; the display name is surfaced by
+  // getDealById/getDealDetail's estimator-user join for the read-only/edit picker.
+  estimatorUserId?: string | null;
+  estimatorUserName?: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
   propertyState: string | null;
@@ -662,6 +667,16 @@ export type UpdateDealPayload = Partial<Deal> & {
 
 export async function updateDeal(dealId: string, input: UpdateDealPayload) {
   return api<{ deal: Deal }>(`/deals/${dealId}`, { method: "PATCH", json: input });
+}
+
+// Dedicated estimator mutation — hits PATCH /deals/:id/estimator (admin/director only), NOT the
+// generic updateDeal: estimator is intentionally out of updateDeal's allowlist, so the generic path
+// can never change it (which would leak edit access to the assigned rep). Pass null to clear.
+export async function updateDealEstimator(dealId: string, estimatorUserId: string | null) {
+  return api<{ deal: Deal }>(`/deals/${dealId}/estimator`, {
+    method: "PATCH",
+    json: { estimatorUserId },
+  });
 }
 
 export interface ChangeOrderInput {
