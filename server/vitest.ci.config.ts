@@ -32,10 +32,6 @@ const QUARANTINE = [
   "tests/modules/properties/properties-linked-value-consistency.test.ts",
   "tests/modules/sales-review/service.test.ts",
   "tests/scripts/project-number-notification-skip.test.ts",
-  // --- Colocated server/src/** suites, now visible after adding src/** to `include` (#747). ---
-  // stale source-text assertion: greps the lead service source for 'nextAssignedRepId: input.assignedRepId',
-  // which the code no longer contains. Fix: assert behavior, not source text.
-  "src/modules/leads/assignment-task-source.test.ts",
 ];
 
 export default mergeConfig(
