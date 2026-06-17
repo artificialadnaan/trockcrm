@@ -54,6 +54,34 @@ describe("public signature-logo route", () => {
     expect(mockGet).not.toHaveBeenCalled();
   });
 
+  it("does NOT fully stream an object that passes HEAD but is oversized at GET (overwrite race)", async () => {
+    mockHead.mockResolvedValue({ contentLength: 100 }); // small at HEAD → passes the gate
+    const chunk = new Uint8Array(600_000); // two of these = 1.2 MB at GET, over the 1 MB cap
+    async function* body() {
+      yield chunk;
+      yield chunk;
+    }
+    mockGet.mockResolvedValue({ stream: body() });
+
+    let received = -1;
+    try {
+      const res = await request(makeApp())
+        .get(`/api/public/signature-logo/${USER}/${ASSET}`)
+        .buffer(true)
+        .parse((r, cb) => {
+          const parts: Buffer[] = [];
+          r.on("data", (c: Buffer) => parts.push(c));
+          r.on("end", () => cb(null, Buffer.concat(parts)));
+        });
+      received = (res.body as Buffer).length;
+    } catch {
+      received = -1; // aborted mid-stream also counts as "not fully streamed"
+    }
+    // The full 1.2 MB is NEVER relayed — the stream is hard-capped at 1 MB regardless of the object.
+    expect(received).toBeLessThan(1_200_000);
+    if (received >= 0) expect(received).toBeLessThanOrEqual(SIGNATURE_LOGO_MAX_BYTES);
+  });
+
   it("404s a missing object without streaming", async () => {
     mockHead.mockResolvedValue(null);
     const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${ASSET}`);

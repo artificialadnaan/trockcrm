@@ -60,20 +60,29 @@ router.get("/:userId/:asset", async (req: Request, res: Response, next: NextFunc
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-    if (object.contentLength != null) res.setHeader("Content-Length", String(object.contentLength));
+    // No Content-Length: we hard-cap the relayed bytes below, so a declared length could mismatch.
 
-    const stream = object.stream as AsyncIterable<Uint8Array> & { pipe?: (dest: Response) => void; on?: Function };
-    if (typeof stream.pipe === "function") {
-      stream.on?.("error", () => {
-        // Pre-headers: send a 404. Post-headers (mid-stream error): end the response so the
-        // connection closes instead of hanging until the client times out.
-        if (!res.headersSent) res.status(404).end();
-        else res.end();
-      });
-      stream.pipe(res);
-    } else {
-      for await (const chunk of object.stream) res.write(chunk);
+    // THE guarantee: bound the stream itself. headObject is check-then-act — the object can be
+    // overwritten via the still-valid presigned PUT between HEAD and GET — so we never relay more than
+    // the cap regardless of the object's real size: stop + end the moment the next chunk would cross
+    // it. (Codex #737, follow-up.) Relaying past the cap is impossible no matter what R2 returns.
+    let relayed = 0;
+    try {
+      for await (const chunk of object.stream as AsyncIterable<Uint8Array>) {
+        if (relayed + chunk.length > SIGNATURE_LOGO_MAX_BYTES) {
+          res.end(); // truncate — never serve past the cap
+          return;
+        }
+        relayed += chunk.length;
+        if (!res.write(chunk)) {
+          await new Promise<void>((resolve) => res.once("drain", resolve));
+        }
+      }
       res.end();
+    } catch {
+      // Mid-stream R2 error: 404 if nothing sent yet, else end the (partial) response so it doesn't hang.
+      if (!res.headersSent) res.status(404).end();
+      else res.end();
     }
   } catch (err) {
     next(err);
