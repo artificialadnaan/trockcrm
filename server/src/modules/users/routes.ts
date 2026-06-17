@@ -73,11 +73,11 @@ router.get("/sales-reps", async (req, res, next) => {
             ? isCrmUserRole(user.role)
             : true
         )
-        .filter((user) =>
-          isDealReassignmentPicker && officeId
-            ? user.officeId === officeId
-            : true
-        )
+        // Do NOT re-filter to `user.officeId === officeId`. listUsers(officeId) already scopes the rows to
+        // the active office via "office_id = officeId OR has a user_office_access grant to it", so a
+        // primary-office-only filter STRIPS grant-holders — exactly the multi-office users the deal
+        // reassignment (#748) and estimator (validateAssignee) backends ACCEPT, leaving valid candidates
+        // un-pickable in the UI. The office scope is enforced in the SQL + the accessibleOffices check above.
         .map((user) => ({ id: user.id, displayName: user.displayName, email: user.email })),
     });
   } catch (err) {
