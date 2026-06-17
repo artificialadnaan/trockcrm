@@ -67,8 +67,16 @@ beforeAll(async () => {
   // reason and no concrete assignment → both belong in the assignment queue.
   await insEmail({ graphId: "in-1", direction: "inbound", ambiguity: "multiple_deal_candidates" });
   await insEmail({ graphId: "out-1", direction: "outbound", ambiguity: "multiple_deal_candidates" });
-  // Non-qualifying: an assigned outbound (no ambiguity, has a deal) must NOT appear or be counted.
-  await insEmail({ graphId: "out-assigned", direction: "outbound", ambiguity: null, dealId: U("0d01") });
+  // Non-qualifying: an ASSIGNED outbound email. It carries an ambiguity reason (so it would qualify on
+  // direction+ambiguity) but status='assigned' — so it must be excluded by the STATUS branch specifically,
+  // not merely by a null ambiguity. This exercises the assigned-status exclusion the queue relies on.
+  await insEmail({
+    graphId: "out-assigned",
+    direction: "outbound",
+    ambiguity: "multiple_deal_candidates",
+    status: "assigned",
+    dealId: U("0d01"),
+  });
 }, 30_000);
 
 afterAll(async () => {

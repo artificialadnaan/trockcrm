@@ -13,6 +13,11 @@
 --
 -- The DO block updates EXISTING office schemas; the TENANT_SCHEMA block is replayed by the office
 -- provisioner (server/src/modules/office/service.ts) so FUTURE offices get the column + indexes too.
+--
+-- Indexes are built NON-concurrently (plain CREATE INDEX) on purpose: internet_message_id is a brand-new
+-- column, so every existing row is NULL and both indexes are partial on `internet_message_id IS NOT NULL`
+-- — there are zero rows to index at creation, making the build instant with no meaningful lock window.
+-- CREATE INDEX CONCURRENTLY also cannot run inside the transactional DO/tenant-loop the runner uses.
 
 DO $tenant$
 DECLARE
