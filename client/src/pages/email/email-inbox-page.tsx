@@ -25,6 +25,7 @@ import { Card } from "@/components/ui/card";
 import { GraphAuthBanner } from "@/components/email/graph-auth-banner";
 import { EmailAssignmentQueuePanel, useEmailAssignmentQueue } from "@/components/email/email-assignment-queue";
 import { EmailComposeDialog } from "@/components/email/email-compose-dialog";
+import { SignatureSettings } from "@/components/email/signature-settings";
 import { EmailManualAssignmentDialog } from "@/components/email/email-manual-assignment-dialog";
 import { EmailThreadView } from "@/components/email/email-thread-view";
 import { useGraphAuth } from "@/hooks/use-graph-auth";
@@ -626,6 +627,8 @@ export function EmailInboxPage() {
       {oauthError ? <OAuthErrorAlert error={oauthError} /> : null}
 
       <GraphAuthBanner auth={graphAuth} />
+
+      <SignatureSettings />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <EmailMetricCard
