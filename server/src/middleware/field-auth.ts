@@ -62,11 +62,11 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
       throw new AppError(401, "Field app access required");
     }
     if (!user.isActive) {
-      throw new AppError(401, "Field user is inactive");
+      throw new AppError(401, "Field user is inactive", "SESSION_INVALIDATED");
     }
 
     if (isTokenVersionStale(claims.tokenVersion, user.tokenVersion)) {
-      throw new AppError(401, "Session expired, please sign in again");
+      throw new AppError(401, "Session expired, please sign in again", "SESSION_INVALIDATED");
     }
 
     const authMethod = claims.authMethod;
@@ -79,7 +79,7 @@ export async function requireFieldContractor(req: Request, _res: Response, next:
       authMethod === "local"
       && (!localAuthGate.isEnabled || localAuthGate.revokedAt)
     ) {
-      throw new AppError(401, "Local login is no longer enabled for this user");
+      throw new AppError(401, "Local login is no longer enabled for this user", "SESSION_INVALIDATED");
     }
     // Account-state gate -> 401 (treated as an invalid session) for consistency with the identity checks
     // above. NOTE: loginFieldUser does NOT block must-change-password, so on a client without a

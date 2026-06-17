@@ -83,6 +83,22 @@ function hasOfficeHeader(headers: Record<string, string>) {
   return Object.keys(headers).some((key) => key.toLowerCase() === "x-office-id");
 }
 
+/** Marker the auth middleware stamps on session-KILL 401s (deactivate / role-change / token-version). */
+export const SESSION_INVALIDATED_CODE = "SESSION_INVALIDATED";
+
+/**
+ * The reliable, SSE-independent backstop for proactive logout: bounce to login ONLY on the specific
+ * session-invalidation 401 — distinguished by the SESSION_INVALIDATED error code from the per-request
+ * token_version + is_active recheck. NOT on permission 403s, ordinary/refreshable auth-token-expiry, or
+ * any other 401 (those must not eject the user); and never while already on /login (no loop). Pure so
+ * the over-redirect guard is unit-tested.
+ */
+export function shouldRedirectToLoginOnUnauthorized(args: { status: number; code: string | undefined; pathname: string }): boolean {
+  if (args.status !== 401) return false;
+  if (args.code !== SESSION_INVALIDATED_CODE) return false;
+  return !args.pathname.startsWith("/login");
+}
+
 function isUnsafeMethod(method: string | undefined): boolean {
   return ["POST", "PUT", "PATCH", "DELETE"].includes((method ?? "GET").toUpperCase());
 }
@@ -173,6 +189,16 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
 
   if (!res.ok) {
     const error = await parseJsonResponse().catch(() => ({ error: { message: "Request failed" } }));
+    if (
+      typeof window !== "undefined" &&
+      shouldRedirectToLoginOnUnauthorized({
+        status: res.status,
+        code: (error as { error?: { code?: string } })?.error?.code,
+        pathname: window.location.pathname,
+      })
+    ) {
+      window.location.assign("/login?reason=session-invalidated");
+    }
     throw new ApiError(res.status, error.error);
   }
 
