@@ -51,6 +51,11 @@ beforeAll(async () => {
   // Real schema generated from the Drizzle table objects (enums in public, NOT NULL + numeric precision
   // verbatim) — not hand-rolled DDL that could drift from prod.
   await pg.exec(tenantSchemaSql("public", [deals, userCommissionSettings, dealSignedCommissions, auditLog]));
+  // tenantSchemaSql omits indexes/constraints; the tx-safe insert now uses ON CONFLICT on the
+  // (deal_id, rep_user_id) UNIQUE, so recreate it for the fresh-calc path inside recalculateCommissionForDeal.
+  await pg.exec(
+    `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`,
+  );
   tdb = drizzle(pg);
   // A signed-able deal owned by REP with a $100,000 awarded amount, and REP on a 2% active rate.
   await pg.exec(

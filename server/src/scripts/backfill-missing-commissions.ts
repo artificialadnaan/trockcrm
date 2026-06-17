@@ -62,7 +62,19 @@ export interface BackfillSummary {
   candidates: number;
   byStatus: Record<CalculateCommissionStatus, number>;
   totalCommissionCreated: number;
-  rows: Array<BackfillCandidate & { status: CalculateCommissionStatus; amount: string | null }>;
+  // The ADDITIVE estimator rows minted as a side effect of calculateCommissionForDeal (a rated, distinct,
+  // non-CO estimator). Tracked separately so the owner-only `byStatus`/`totalCommissionCreated` keep their
+  // historical meaning while the estimator rows this backfill also writes are not silently undercounted.
+  estimatorByStatus: Record<CalculateCommissionStatus, number>;
+  totalEstimatorCommissionCreated: number;
+  rows: Array<
+    BackfillCandidate & {
+      status: CalculateCommissionStatus;
+      amount: string | null;
+      estimatorStatus: CalculateCommissionStatus | null;
+      estimatorAmount: string | null;
+    }
+  >;
 }
 
 // The CANONICAL lost-stage set (includes deal_canceled) — sourced from the shared constant so the backfill
@@ -158,8 +170,28 @@ export async function backfillTenantCommissions(
     skipped_no_rep: 0,
     skipped_no_value: 0,
     skipped_no_rate: 0,
+    // calculateCommissionForDeal (the backfill path) never returns this — change orders are excluded
+    // upstream — but the shared status union now carries it (estimator-mint only), so the counter must too.
+    skipped_change_order: 0,
+    // Owner-row-gate status — owner-side rows never carry it (the owner row IS the gate), but the shared
+    // status union now includes it (estimator-mint only), so the counter must enumerate it too.
+    skipped_no_owner_row: 0,
+  };
+  // Separate tally for the additive estimator rows minted as a side effect (calculateCommissionForDeal
+  // now reports its estimator outcome under `.estimator`). Same status union as the owner tally.
+  const estimatorByStatus: Record<CalculateCommissionStatus, number> = {
+    created: 0,
+    skipped_existing: 0,
+    skipped_no_rep: 0,
+    skipped_no_value: 0,
+    skipped_no_rate: 0,
+    skipped_change_order: 0,
+    // The estimator side CAN return this: a candidate whose owner has no active rate mints no owner row, so
+    // the gated estimator mint is skipped_no_owner_row and the deal stays at ZERO rows (still backfillable).
+    skipped_no_owner_row: 0,
   };
   let totalCommissionCreated = 0;
+  let totalEstimatorCommissionCreated = 0;
   const rows: BackfillSummary["rows"] = [];
 
   for (const candidate of candidates) {
@@ -168,7 +200,21 @@ export async function backfillTenantCommissions(
     if (result.status === "created" && result.amount) {
       totalCommissionCreated += Number(result.amount);
     }
-    rows.push({ ...candidate, status: result.status, amount: result.amount ?? null });
+    // Account for the additive estimator row (if calculateCommissionForDeal minted/skipped one).
+    const estimator = result.estimator;
+    if (estimator) {
+      estimatorByStatus[estimator.status] += 1;
+      if (estimator.status === "created" && estimator.amount) {
+        totalEstimatorCommissionCreated += Number(estimator.amount);
+      }
+    }
+    rows.push({
+      ...candidate,
+      status: result.status,
+      amount: result.amount ?? null,
+      estimatorStatus: estimator?.status ?? null,
+      estimatorAmount: estimator?.amount ?? null,
+    });
   }
 
   return {
@@ -177,6 +223,8 @@ export async function backfillTenantCommissions(
     candidates: candidates.length,
     byStatus,
     totalCommissionCreated: Number(totalCommissionCreated.toFixed(2)),
+    estimatorByStatus,
+    totalEstimatorCommissionCreated: Number(totalEstimatorCommissionCreated.toFixed(2)),
     rows,
   };
 }
@@ -228,12 +276,24 @@ function printSummary(s: BackfillSummary): void {
   console.log(`\n[${s.schema}] ${mode} — ${s.candidates} candidate(s)`);
   for (const row of s.rows) {
     const tag = row.status === "created" ? `$${Number(row.amount ?? 0).toLocaleString()}` : row.status;
-    console.log(`  ${(row.dealNumber ?? "(none)").padEnd(16)} ${(row.repName ?? row.repId).padEnd(20)} ${row.signedDate}  -> ${tag}`);
+    // Append the additive estimator outcome only when one applied for this deal.
+    const estTag = row.estimatorStatus
+      ? row.estimatorStatus === "created"
+        ? `  +est $${Number(row.estimatorAmount ?? 0).toLocaleString()}`
+        : `  +est ${row.estimatorStatus}`
+      : "";
+    console.log(`  ${(row.dealNumber ?? "(none)").padEnd(16)} ${(row.repName ?? row.repId).padEnd(20)} ${row.signedDate}  -> ${tag}${estTag}`);
   }
   console.log(
     `  totals: created=${s.byStatus.created} ($${s.totalCommissionCreated.toLocaleString()}), ` +
       `skipped_existing=${s.byStatus.skipped_existing}, no_rate=${s.byStatus.skipped_no_rate}, ` +
       `no_value=${s.byStatus.skipped_no_value}, no_rep=${s.byStatus.skipped_no_rep}`
+  );
+  console.log(
+    `  estimator (additive side effect): created=${s.estimatorByStatus.created} ` +
+      `($${s.totalEstimatorCommissionCreated.toLocaleString()}), ` +
+      `skipped_existing=${s.estimatorByStatus.skipped_existing}, no_rate=${s.estimatorByStatus.skipped_no_rate}, ` +
+      `no_value=${s.estimatorByStatus.skipped_no_value}`
   );
 }
 
@@ -253,6 +313,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     console.log(`${execute ? "WRITE" : "DRY-RUN (no writes)"} — tenants: ${tenants.join(", ")}`);
     let grandCreated = 0;
     let grandAmount = 0;
+    let grandEstimatorCreated = 0;
+    let grandEstimatorAmount = 0;
     for (const t of tenants) {
       await client.query(`SET search_path TO ${t}, public`);
       const tenantDb = drizzle(client, { schema });
@@ -264,9 +326,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       printSummary(summary);
       grandCreated += summary.byStatus.created;
       grandAmount += summary.totalCommissionCreated;
+      grandEstimatorCreated += summary.estimatorByStatus.created;
+      grandEstimatorAmount += summary.totalEstimatorCommissionCreated;
     }
     console.log(
-      `\n=== GRAND TOTAL ${execute ? "WRITTEN" : "(dry-run) WOULD WRITE"}: ${grandCreated} commission rows, $${grandAmount.toLocaleString()} ===`
+      `\n=== GRAND TOTAL ${execute ? "WRITTEN" : "(dry-run) WOULD WRITE"}: ${grandCreated} owner row(s), ` +
+        `$${grandAmount.toLocaleString()} + ${grandEstimatorCreated} estimator row(s), ` +
+        `$${grandEstimatorAmount.toLocaleString()} ===`
     );
     console.log("(No contract dates were read-modified: this script only inserts commission rows.)");
   } finally {

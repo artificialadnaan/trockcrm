@@ -39,8 +39,10 @@ import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import {
   calculateCommissionForDeal,
+  mintEstimatorCommissionForDeal,
   recalculateCommissionForDeal,
   removeCommissionForDeal,
+  removeEstimatorCommissionForDeal,
 } from "../commissions/service.js";
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
@@ -1810,13 +1812,17 @@ export async function getDealById(
   // restore/admin view; no production caller passes true today.
   includeInactive: boolean = false
 ) {
+  // estimatorUserId already comes through getTableColumns(deals); join users to surface the estimator's
+  // display name for the PR3 estimator picker (mirrors the assignedRep name join in getDealDetail).
   const result = await tenantDb
     .select({
       ...getTableColumns(deals),
       stageSlug: pipelineStageConfig.slug,
+      estimatorUserName: users.displayName,
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+    .leftJoin(users, eq(users.id, deals.estimatorUserId))
     .where(includeInactive ? eq(deals.id, dealId) : and(eq(deals.id, dealId), eq(deals.isActive, true)))
     .limit(1);
 
@@ -1844,10 +1850,13 @@ export async function getDealDetail(
   const deal = await getDealById(tenantDb, dealId, userRole, userId, atRiskViewerRole);
   if (!deal) return null;
 
+  // Second users alias so the estimator name can be joined alongside the assigned-rep name.
+  const estimatorUser = alias(users, "estimator_user");
   const [detailDeal] = await tenantDb
     .select({
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
+      estimatorUserName: estimatorUser.displayName,
       companyName: companies.name,
       companyOwnerUserId: companies.ownerId,
       companyOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${companies.ownerId})`,
@@ -1859,6 +1868,7 @@ export async function getDealDetail(
     })
     .from(deals)
     .leftJoin(users, eq(users.id, deals.assignedRepId))
+    .leftJoin(estimatorUser, eq(estimatorUser.id, deals.estimatorUserId))
     .leftJoin(companies, eq(companies.id, deals.companyId))
     .leftJoin(contacts, eq(contacts.id, deals.primaryContactId))
     .leftJoin(projectTypeConfig, eq(projectTypeConfig.id, deals.projectTypeId))
@@ -3443,6 +3453,128 @@ export async function setDealContractSignedDate(
         officeId,
         status: "pending",
         runAfter: now,
+      });
+    }
+
+    return updated;
+  });
+}
+
+/**
+ * Set (or clear) a deal's estimator and re-attribute the ADDITIVE estimator commission in the same
+ * transaction. The estimator earns an EXTRA deal_signed_commissions row at the estimator's OWN rate, on
+ * top of the owner's full cut — so this only ever adds/removes the estimator's row, NEVER the owner's.
+ *
+ * Transitions (oldEstimator → newEstimator), all atomic with the deal write:
+ *   • unchanged → no-op short-circuit (PRESERVES the existing row even if the rate later vanished)
+ *   • null → B  → mint B only
+ *   • A → B     → scoped-remove A, mint B (if B is rateless: A removed, nothing minted → net $0)
+ *   • B → null  → scoped-remove B only
+ *   • estimator == owner → mint is skipped_existing (owner row covers it); a clear is hard-guarded to 0
+ *
+ * A change order is base-deal-only (its estimator is inherited from the parent) → 409. NEVER calls
+ * removeCommissionForDeal (that deletes the owner's row too) — only the (deal_id, estimator) scoped helper.
+ *
+ * NOTE: this is intentionally NOT wired to a route in this PR (the estimator picker + route land in PR3);
+ * it is the tested service spine for that follow-up.
+ */
+export async function setDealEstimator(
+  tenantDb: TenantDb,
+  dealId: string,
+  newEstimatorUserId: string | null,
+  userId: string,
+  officeId: string | null = null
+): Promise<typeof deals.$inferSelect | null> {
+  return tenantDb.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(deals)
+      .where(eq(deals.id, dealId))
+      .limit(1)
+      .for("update");
+    if (!existing) return null;
+
+    // A change order inherits its estimator from the parent deal; editing it here would mint/strip an
+    // estimator commission row on a CRM-only child.
+    if (existing.isChangeOrder === true) {
+      throw new AppError(
+        409,
+        "A change order's estimator is inherited from the parent deal, not editable here.",
+        "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
+
+    const oldEstimator = existing.estimatorUserId ?? null;
+    const newEstimator = newEstimatorUserId ?? null;
+    const owner = existing.assignedRepId ?? null;
+
+    // No-op short-circuit — the load-bearing PRESERVE: an unchanged estimator's commission row is never
+    // re-evaluated, so it stands even if that estimator's rate was later deactivated.
+    if (oldEstimator === newEstimator) {
+      return existing;
+    }
+
+    // A NEW estimator is validated exactly like a reassignment assignee (exists, active, same office).
+    if (newEstimator != null) {
+      await validateDealReassignmentAssignee(
+        tx,
+        newEstimator,
+        existing.officeCode,
+        owner,
+        officeId ?? undefined
+      );
+    }
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(deals)
+      .set({ estimatorUserId: newEstimator, updatedAt: now })
+      .where(eq(deals.id, dealId))
+      .returning();
+    if (!updated) return null;
+
+    await writeAuditLog(tx, {
+      tableName: "deals",
+      recordId: dealId,
+      action: "update",
+      changedBy: userId,
+      changes: {
+        estimatorUserId: { from: oldEstimator, to: newEstimator },
+      },
+    });
+
+    // A change order's estimator is INHERITED from its parent (it is base-deal-only for commission), so
+    // propagate the new estimator to every ACTIVE change-order child in the same transaction. This is
+    // MONEY-NEUTRAL: CO children never mint or remove an estimator commission row (only the base deal
+    // does) — we only keep the inherited estimator_user_id in sync for display/attribution.
+    await tx
+      .update(deals)
+      .set({ estimatorUserId: newEstimator, updatedAt: now })
+      .where(
+        and(
+          eq(deals.parentDealId, dealId),
+          eq(deals.isChangeOrder, true),
+          eq(deals.isActive, true)
+        )
+      );
+
+    // Re-attribute the additive estimator commission on the BASE deal. A departing estimator has their
+    // scoped, role-filtered row removed (removeEstimatorCommissionForDeal can NEVER touch the owner row —
+    // it deletes only attribution_role='estimator'), so it is safe to call whenever the estimator changes
+    // away; the oldEstimator===newEstimator no-op short-circuit above already excludes the unchanged case.
+    if (oldEstimator != null) {
+      await removeEstimatorCommissionForDeal(tx, {
+        dealId,
+        estimatorUserId: oldEstimator,
+        ownerUserId: owner,
+        triggeredByUserId: userId,
+      });
+    }
+    if (newEstimator != null) {
+      await mintEstimatorCommissionForDeal(tx, {
+        dealId,
+        estimatorUserId: newEstimator,
+        triggeredByUserId: userId,
       });
     }
 

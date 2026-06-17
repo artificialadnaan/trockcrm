@@ -18,6 +18,11 @@ export const dealSignedCommissions = pgTable(
       .references(() => deals.id, { onDelete: "cascade" })
       .notNull(),
     repUserId: uuid("rep_user_id").notNull(),
+    // Distinguishes the deal OWNER's full-cut row from an ESTIMATOR's additive row. Load-bearing for the
+    // estimator-removal path: after an owner reassignment rep_user_id alone can no longer tell the two
+    // apart, so the estimator delete scopes to attribution_role = 'estimator' to never wipe an owner row.
+    // NOT part of the (deal_id, rep_user_id) unique key. Backfilled to 'owner' (migration 0162).
+    attributionRole: text("attribution_role").notNull().default("owner"),
     sourceValueKind: text("source_value_kind").notNull(),
     sourceValueAmount: numeric("source_value_amount", { precision: 14, scale: 2 }).notNull(),
     appliedRate: numeric("applied_rate", { precision: 7, scale: 6 }).notNull(),

@@ -80,7 +80,7 @@ beforeAll(async () => {
     );
     CREATE TABLE deal_signed_commissions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL REFERENCES deals(id) ON DELETE CASCADE,
-      rep_user_id uuid NOT NULL, source_value_kind text NOT NULL,
+      rep_user_id uuid NOT NULL, attribution_role text NOT NULL DEFAULT 'owner', source_value_kind text NOT NULL,
       source_value_amount numeric(14,2) NOT NULL, applied_rate numeric(7,6) NOT NULL, amount numeric(14,2) NOT NULL,
       contract_signed_date_at_signing date NOT NULL, calculated_at timestamptz NOT NULL DEFAULT now(),
       created_by uuid, created_at timestamptz NOT NULL DEFAULT now(),
