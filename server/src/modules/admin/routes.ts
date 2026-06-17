@@ -5,7 +5,7 @@ import * as schema from "@trock-crm/shared/schema";
 import { authMiddleware } from "../../middleware/auth.js";
 import { requireCrmUser } from "../../middleware/field-auth.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { requireAdmin, requireDirector } from "../../middleware/rbac.js";
+import { requireAdmin, requireDirector, requireGlobalAdmin } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { pool } from "../../db.js";
 import { getAccessibleOffices } from "../auth/service.js";
@@ -13,7 +13,7 @@ import {
   listOffices, getOfficeById, createOffice, updateOffice,
 } from "./offices-service.js";
 import {
-  getUsersWithStats, getUserById, getUserLocalAuthEvents, updateUser, grantOfficeAccess, revokeOfficeAccess,
+  getUsersWithStats, getUserById, getUserLocalAuthEvents, updateUser, grantOfficeAccess, revokeOfficeAccess, createCrmUser,
 } from "./users-service.js";
 import { importExternalUsers } from "./user-import-service.js";
 import { previewUserInvite, revokeUserInvite, sendUserInvite } from "../auth/local-auth-service.js";
@@ -146,7 +146,7 @@ router.patch("/admin/offices/:id", requireAdmin, async (req: Request, res: Respo
 // Users (admin only)
 // ---------------------------------------------------------------------------
 
-router.get("/admin/users", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+router.get("/admin/users", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userList = await getUsersWithStats();
     return res.json({ users: userList });
@@ -155,7 +155,7 @@ router.get("/admin/users", requireAdmin, async (req: Request, res: Response, nex
   }
 });
 
-router.post("/admin/users/import-external", requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
+router.post("/admin/users/import-external", requireGlobalAdmin, async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const summary = await importExternalUsers();
     return res.json(summary);
@@ -164,7 +164,28 @@ router.post("/admin/users/import-external", requireAdmin, async (_req: Request, 
   }
 });
 
-router.get("/admin/users/:id", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+router.post("/admin/users", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const user = await createCrmUser(req.body, req.user!.id);
+    let invite: { sent: boolean; error?: string } = { sent: false };
+    if (req.body?.sendInvite !== false) {
+      try {
+        await sendUserInvite({ userId: user.id, sentByUserId: req.user!.id });
+        invite = { sent: true };
+      } catch (e) {
+        // The user is created regardless; log the real cause server-side but return a generic message
+        // so internals aren't exposed to the client.
+        console.error("[admin] send-invite after createCrmUser failed", e);
+        invite = { sent: false, error: "Invite failed" };
+      }
+    }
+    return res.status(201).json({ user, invite });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/admin/users/:id", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await getUserById(req.params.id as string);
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -174,16 +195,18 @@ router.get("/admin/users/:id", requireAdmin, async (req: Request, res: Response,
   }
 });
 
-router.patch("/admin/users/:id", requireAdmin, async (req: Request, res: Response) => {
+router.patch("/admin/users/:id", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const user = await updateUser(req.params.id as string, req.body);
+    const user = await updateUser(req.params.id as string, req.body, req.user!.id);
     return res.json({ user });
-  } catch (err: any) {
-    return res.status(err.statusCode ?? 500).json({ error: err.message ?? String(err) });
+  } catch (err) {
+    // Route through the global error handler so guard rejections return the canonical
+    // { error: { message, code } } shape the client parses (not { error: string }).
+    return next(err);
   }
 });
 
-router.post("/admin/users/:id/send-invite", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+router.post("/admin/users/:id/send-invite", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const result = await sendUserInvite({
       userId: req.params.id as string,
@@ -195,7 +218,7 @@ router.post("/admin/users/:id/send-invite", requireAdmin, async (req: Request, r
   }
 });
 
-router.post("/admin/users/:id/preview-invite", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+router.post("/admin/users/:id/preview-invite", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const preview = await previewUserInvite({
       userId: req.params.id as string,
@@ -207,7 +230,7 @@ router.post("/admin/users/:id/preview-invite", requireAdmin, async (req: Request
   }
 });
 
-router.post("/admin/users/:id/revoke-invite", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+router.post("/admin/users/:id/revoke-invite", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     await revokeUserInvite({
       userId: req.params.id as string,
@@ -219,7 +242,7 @@ router.post("/admin/users/:id/revoke-invite", requireAdmin, async (req: Request,
   }
 });
 
-router.get("/admin/users/:id/local-auth-events", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+router.get("/admin/users/:id/local-auth-events", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const events = await getUserLocalAuthEvents(req.params.id as string);
     return res.json({ events });
@@ -230,7 +253,7 @@ router.get("/admin/users/:id/local-auth-events", requireAdmin, async (req: Reque
 
 router.use("/admin/field-users", fieldUserAdminRouter);
 
-router.post("/admin/users/:id/office-access", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+router.post("/admin/users/:id/office-access", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { officeId, roleOverride } = req.body as {
       officeId: string;
@@ -246,7 +269,7 @@ router.post("/admin/users/:id/office-access", requireAdmin, async (req: Request,
 
 router.delete(
   "/admin/users/:id/office-access/:officeId",
-  requireAdmin,
+  requireGlobalAdmin,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       await revokeOfficeAccess(req.params.id as string, req.params.officeId as string);

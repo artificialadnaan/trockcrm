@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
+import { isGlobalAdmin } from "@/lib/roles";
 import {
   LayoutDashboard,
   Kanban,
@@ -42,6 +43,12 @@ export type NavItem = {
   icon: LucideIcon;
   label: string;
   roles: Role[];
+  /**
+   * Gate on GLOBAL admin (home/base role) rather than the office-effective role — for items whose
+   * server route is requireGlobalAdmin (user provisioning). Without this a global admin viewing an
+   * office where they hold a non-admin override would lose the nav item the server still authorizes.
+   */
+  global?: boolean;
   external?: boolean;
   ariaLabel?: string;
 };
@@ -113,7 +120,7 @@ const adminGroups: AdminGroup[] = [
     defaultExpanded: false,
     items: [
       { to: "/admin/offices", icon: Building2, label: "Offices", roles: ["admin"] },
-      { to: "/admin/users", icon: Users, label: "Users", roles: ["admin"] },
+      { to: "/admin/users", icon: Users, label: "Users", roles: ["admin"], global: true },
       { to: "/admin/field-users", icon: Users, label: "Field Users", roles: ["admin"] },
       { to: "/admin/pipeline", icon: Settings, label: "Pipeline Config", roles: ["admin"] },
       { to: "/admin/commissions", icon: DollarSign, label: "Global Commissions", roles: ["admin"] },
@@ -139,9 +146,13 @@ const helpItems: NavItem[] = [
   { to: "/help/admin-guide", icon: HelpCircle, label: "Admin Guide", roles: ["admin"] },
 ];
 
-function filterByRole(items: NavItem[], role: Role | undefined) {
-  if (!role) return [];
-  return items.filter((item) => item.roles.includes(role));
+// `isGlobalAdmin` defaults to (role === "admin") so existing callers/tests keep their behavior; the
+// sidebar passes the real base-role-derived value so `global` items follow the global-admin gate.
+function filterByRole(items: NavItem[], role: Role | undefined, isGlobalAdmin: boolean = role === "admin") {
+  return items.filter((item) => {
+    if (item.global) return isGlobalAdmin;
+    return role ? item.roles.includes(role) : false;
+  });
 }
 
 export function getVisibleDirectorItems(role: Role | undefined) {
@@ -152,11 +163,11 @@ function getNavItemKey(item: NavItem) {
   return `${item.to}:${item.label}`;
 }
 
-export function getVisibleAdminGroups(role: Role | undefined) {
+export function getVisibleAdminGroups(role: Role | undefined, isGlobalAdmin: boolean = role === "admin") {
   return adminGroups
     .map((group) => ({
       ...group,
-      items: filterByRole(group.items, role),
+      items: filterByRole(group.items, role, isGlobalAdmin),
     }))
     .filter((group) => group.items.length > 0);
 }
@@ -202,12 +213,13 @@ export function Sidebar() {
   const { user, logout } = useAuth();
   const { pathname } = useLocation();
   const role = user?.role;
+  const globalAdmin = isGlobalAdmin(user);
   const visibleNavItems = useMemo(() => filterByRole(navItems, role), [role]);
   const visibleDirectorItems = useMemo(() => getVisibleDirectorItems(role), [role]);
-  const visibleAdminGroups = useMemo(() => getVisibleAdminGroups(role), [role]);
+  const visibleAdminGroups = useMemo(() => getVisibleAdminGroups(role, globalAdmin), [role, globalAdmin]);
   const visibleHelpItems = useMemo(() => filterByRole(helpItems, role), [role]);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(() =>
-    getNextExpandedGroups({}, getVisibleAdminGroups(role), pathname),
+    getNextExpandedGroups({}, getVisibleAdminGroups(role, globalAdmin), pathname),
   );
 
   useEffect(() => {

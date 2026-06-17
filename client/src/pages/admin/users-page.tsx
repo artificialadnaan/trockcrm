@@ -10,6 +10,7 @@ import {
   Shield,
   UserCheck,
   UserCog,
+  UserPlus,
   UsersRound,
   X,
 } from "lucide-react";
@@ -26,6 +27,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { useAdminUsers } from "@/hooks/use-admin-users";
+import { useAdminOffices } from "@/hooks/use-admin-offices";
 import {
   buildUsersSummary,
   filterUsers,
@@ -37,6 +39,13 @@ import {
 } from "./users-page.helpers";
 import { UserInvitePreviewDialog } from "./user-invite-preview-dialog";
 import { UserLocalAuthEventsDialog } from "./user-local-auth-events-dialog";
+import { AddUserDialog } from "./add-user-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 function formatDate(value: string | null) {
   if (!value) return null;
@@ -57,6 +66,7 @@ export function UsersPage() {
     loading,
     error,
     refetch,
+    createUser,
     updateUser,
     updateUsersBulk,
     importExternalUsers,
@@ -65,6 +75,7 @@ export function UsersPage() {
     revokeInvite,
     getLocalAuthEvents,
   } = useAdminUsers();
+  const { offices } = useAdminOffices();
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [bulkUpdating, setBulkUpdating] = useState(false);
@@ -74,6 +85,7 @@ export function UsersPage() {
   const [activityFilter, setActivityFilter] = useState<UserActivityFilter>("all");
   const [sourceFilter, setSourceFilter] = useState<UserSourceFilter>("all");
   const [authFilter, setAuthFilter] = useState<UserAuthFilter>("all");
+  const [showAddUser, setShowAddUser] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewUserEmail, setPreviewUserEmail] = useState<string | null>(null);
@@ -88,6 +100,12 @@ export function UsersPage() {
     procore: "Procore",
   };
   const managerOptions = users.filter((candidate) => candidate.isActive);
+  // Office options come from the authoritative office list (active only), NOT derived from existing
+  // users — otherwise a brand-new active office with zero users would be missing from the Add-User
+  // dropdown, making it impossible to create that office's first user (the whole point).
+  const officeOptions = offices
+    .filter((office) => office.isActive)
+    .map((office) => ({ id: office.id, name: office.name }));
 
   const localAuthLabel = {
     not_invited: "Not invited",
@@ -121,19 +139,28 @@ export function UsersPage() {
     });
   }, [query, roleFilter, activityFilter, sourceFilter, authFilter, visibleSelectionKey]);
 
-  const handleRoleChange = async (userId: string, role: "admin" | "director" | "rep") => {
+  const handleRoleChange = async (userId: string, role: "admin" | "director" | "rep" | "construction") => {
     setUpdatingId(userId);
     try {
       await updateUser(userId, { role });
+    } catch (err) {
+      // Surface guard rejections (last-active-admin 409, field_contractor transition 403, etc.).
+      toast.error(err instanceof Error ? err.message : "Failed to change role");
     } finally {
       setUpdatingId(null);
     }
   };
 
   const handleToggleActive = async (userId: string, isActive: boolean) => {
+    if (isActive && !window.confirm("Deactivate this user? This signs them out of all sessions immediately.")) {
+      return;
+    }
     setUpdatingId(userId);
     try {
       await updateUser(userId, { isActive: !isActive });
+    } catch (err) {
+      // Surface guard rejections (e.g. last-active-admin 409, self-deactivate 403) like the other paths.
+      toast.error(err instanceof Error ? err.message : "Failed to update user");
     } finally {
       setUpdatingId(null);
     }
@@ -287,10 +314,17 @@ export function UsersPage() {
   const clearSelection = () => setSelectedUserIds([]);
 
   const handleBulkUpdate = async (
+    // The bulk role controls expose only rep/director/admin; bulk-assigning "construction" is
+    // intentionally unreachable (use the per-row role select for that). Type matches the UI.
     input: Partial<{ role: "admin" | "director" | "rep"; isActive: boolean }>,
     successMessage: string,
   ) => {
     if (selectedUserIds.length === 0) return;
+    // Bulk deactivation signs every selected user out of all sessions immediately — same confirm as the
+    // per-row deactivate, so an accidental bulk click can't silently kill multiple users' sessions.
+    if (input.isActive === false && !window.confirm(`Deactivate ${selectedUserIds.length} selected user(s)? This signs them out of all sessions immediately.`)) {
+      return;
+    }
 
     setBulkUpdating(true);
     try {
@@ -311,10 +345,16 @@ export function UsersPage() {
         meta={`${summary.active} active · ${summary.inactive} inactive`}
         actions={{
           primary: (
-            <Button variant="outline" size="sm" onClick={handleImport} disabled={importing || loading}>
-              <Download className={`mr-1 h-4 w-4 ${importing ? "animate-pulse" : ""}`} />
-              {importing ? "Importing..." : "Import Procore + HubSpot"}
-            </Button>
+            <>
+              <Button variant="default" size="sm" onClick={() => setShowAddUser(true)} disabled={loading}>
+                <UserPlus className="mr-1 h-4 w-4" />
+                Add User
+              </Button>
+              <Button variant="outline" size="sm" onClick={handleImport} disabled={importing || loading}>
+                <Download className={`mr-1 h-4 w-4 ${importing ? "animate-pulse" : ""}`} />
+                {importing ? "Importing..." : "Import Procore + HubSpot"}
+              </Button>
+            </>
           ),
           secondaryAction: (
             <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
@@ -577,7 +617,7 @@ export function UsersPage() {
                 <TableCell>
                   <Select
                     value={user.role}
-                    onValueChange={(value) => handleRoleChange(user.id, value as "admin" | "director" | "rep")}
+                    onValueChange={(value) => handleRoleChange(user.id, value as "admin" | "director" | "rep" | "construction")}
                     disabled={updatingId === user.id || bulkUpdating}
                   >
                     <SelectTrigger className="h-8 w-28 text-xs">
@@ -587,6 +627,7 @@ export function UsersPage() {
                       <SelectItem value="admin">Admin</SelectItem>
                       <SelectItem value="director">Director</SelectItem>
                       <SelectItem value="rep">Rep</SelectItem>
+                      <SelectItem value="construction">Construction</SelectItem>
                     </SelectContent>
                   </Select>
                 </TableCell>
@@ -773,6 +814,46 @@ export function UsersPage() {
         Send invites only when you are ready to hand out temporary local-password access. Existing
         role and office assignments are preserved for CRM users that already exist.
       </div>
+
+      {showAddUser && (
+        <Dialog open={showAddUser} onOpenChange={(open) => { if (!open) setShowAddUser(false); }}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Add User</DialogTitle>
+            </DialogHeader>
+            <AddUserDialog
+              offices={officeOptions}
+              onCreate={async (input) => {
+                let created;
+                try {
+                  created = await createUser(input);
+                } catch (err) {
+                  // CREATE failure only — surface the API message (dup email, invalid office, not-global-admin)
+                  // and re-throw so the dialog stays open with the user's input.
+                  toast.error(err instanceof Error ? err.message : "Failed to create user");
+                  throw err;
+                }
+                // Create succeeded — report it accurately, distinguishing no-invite-requested from invite-failed.
+                toast.success(
+                  input.sendInvite === false
+                    ? "User created (no invite sent)"
+                    : created.invite.sent
+                      ? "User created and invited"
+                      : "User created — invite failed; resend from the row",
+                );
+                // Refetch is best-effort and runs OUTSIDE the create try — a refetch failure must never
+                // masquerade as a create failure (which would prompt a duplicate-create retry).
+                try {
+                  await refetch();
+                } catch {
+                  toast.error("User created, but the list didn't refresh — reload to see it.");
+                }
+              }}
+              onClose={() => setShowAddUser(false)}
+            />
+          </DialogContent>
+        </Dialog>
+      )}
 
       <UserInvitePreviewDialog
         open={previewOpen}

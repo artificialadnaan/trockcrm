@@ -6,6 +6,7 @@ import {
 } from "../modules/auth/service.js";
 import { getUserLocalAuthGate } from "../modules/auth/local-auth-service.js";
 import { AppError } from "./error-handler.js";
+import { isTokenVersionStale } from "@trock-crm/shared/lib/userProvisioningGuards";
 import type { AuthenticatedUser } from "@trock-crm/shared/types";
 
 // Extend Express Request
@@ -45,6 +46,10 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
       throw new AppError(401, "User not found or inactive");
     }
 
+    if (isTokenVersionStale(claims.tokenVersion, user.tokenVersion)) {
+      throw new AppError(401, "Session expired, please sign in again");
+    }
+
     const localAuthGate = await getUserLocalAuthGate(user.id);
     const authMethod = claims.authMethod;
 
@@ -80,6 +85,9 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
       email: user.email,
       displayName: user.displayName,
       role: effectiveRole,
+      // The HOME role straight from users.role, never the office override — global-admin gating reads
+      // this so an office-scoped admin override can't reach global-admin endpoints (#740 escalation).
+      baseRole: user.role,
       officeId: user.officeId,
       activeOfficeId,
       mustChangePassword: localAuthGate.mustChangePassword,
