@@ -1069,6 +1069,13 @@ function DealRightRail({
   // incl. estimators); when editing is allowed (admin/director) salesReps is guaranteed loaded
   // because canReassignDeal is a superset of canEditEstimator.
   const canEditEstimator = currentUser?.role === "admin" || currentUser?.role === "director";
+  // P1: the estimator is READ-ONLY on a Bid Board-owned deal. The server is authoritative — it 409s
+  // (BID_BOARD_OWNED_ESTIMATOR_LOCKED) because the next Bid Board mirror overwrites estimator_user_id
+  // directly with no commission re-attribution, so a manual pick here would desync the dsc row. Mirror the
+  // page's ownership notion (the is_bid_board_owned column OR inferred ownership) used to hide every other
+  // edit control, so the estimator picker is hidden on the SAME deals and never renders an editable control
+  // the sync would clobber. Client is at worst slightly more conservative than the column-only server gate.
+  const estimatorBidBoardOwned = Boolean(deal.isBidBoardOwned || deal.bidBoardOwnership?.isOwned);
   const [savingEstimator, setSavingEstimator] = useState(false);
   const [estimatorError, setEstimatorError] = useState<string | null>(null);
   const estimatorName = formatNullable(deal.estimatorUserName ?? deal.estimatorUserId);
@@ -1181,6 +1188,16 @@ function DealRightRail({
                   <span>{estimatorName}</span>
                   <p className="text-xs italic text-slate-500">
                     Inherited from the parent deal.
+                  </p>
+                </div>
+              ) : estimatorBidBoardOwned ? (
+                // P1: a Bid Board-owned deal's estimator comes from the Procore/Bid Board mirror and the
+                // server 409s (BID_BOARD_OWNED_ESTIMATOR_LOCKED) on any edit, so show it READ-ONLY with a
+                // managed-by-sync note instead of an editable picker — even for a director.
+                <div className="space-y-1">
+                  <span>{estimatorName}</span>
+                  <p className="text-xs italic text-slate-500">
+                    Managed by the Bid Board sync.
                   </p>
                 </div>
               ) : canEditEstimator ? (

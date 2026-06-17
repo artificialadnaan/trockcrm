@@ -509,6 +509,41 @@ describe("DealDetailPage estimator picker", () => {
     expect(html).not.toContain("— None —");
   });
 
+  // P1: a Bid Board-owned deal's estimator comes from the Procore/Bid Board mirror and the server 409s
+  // (BID_BOARD_OWNED_ESTIMATOR_LOCKED) on any edit, so even a director must see it READ-ONLY with the
+  // managed-by-sync note — never an editable control.
+  it("renders the estimator read-only with a managed-by-sync note on a Bid Board-owned deal (even for directors)", () => {
+    mocks.useAuthMock.mockReturnValueOnce({ user: { id: "director-1", role: "director", activeOfficeId: "office-1" } });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ isBidBoardOwned: true, estimatorUserId: "est-1", estimatorUserName: "Casey Estimator" }),
+    });
+
+    const html = renderPage();
+    expect(html).toContain("Casey Estimator");
+    expect(html).toContain("Managed by the Bid Board sync.");
+    expect(html).not.toContain('aria-label="Edit estimator"');
+    expect(html).not.toContain("— None —");
+  });
+
+  // P1 regression: a plain (non-Bid-Board, non-CO) deal still shows the editable picker for a director.
+  it("still shows the editable estimator <select> to a director on a plain deal (regression)", () => {
+    mocks.useAuthMock.mockReturnValueOnce({ user: { id: "director-1", role: "director", activeOfficeId: "office-1" } });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ isBidBoardOwned: false, isChangeOrder: false }),
+    });
+
+    const html = renderPage();
+    expect(html).toContain('aria-label="Edit estimator"');
+    expect(html).toContain("— None —");
+    expect(html).not.toContain("Managed by the Bid Board sync.");
+  });
+
   // FINDING 3 (Codex): a post-save refetch failure must NOT look like a save failure. The estimator PATCH
   // succeeds; the refetch (onReassigned) rejects. The save outcome is success (toast.success, no
   // toast.error); the refetch failure is isolated to a soft info toast.

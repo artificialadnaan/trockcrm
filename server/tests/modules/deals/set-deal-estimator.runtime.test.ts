@@ -48,13 +48,20 @@ interface FakeDeal {
   assignedRepId: string | null;
   isActive?: boolean;
   isChangeOrder?: boolean;
+  isBidBoardOwned?: boolean;
   officeCode?: string | null;
   [k: string]: unknown;
 }
 
 function makeTenantDb(initial: FakeDeal) {
   const state = {
-    deal: { isChangeOrder: false, officeCode: null as string | null, isActive: true, ...initial } as FakeDeal,
+    deal: {
+      isChangeOrder: false,
+      isBidBoardOwned: false,
+      officeCode: null as string | null,
+      isActive: true,
+      ...initial,
+    } as FakeDeal,
     updateCalls: [] as Array<Record<string, unknown>>,
     auditInserts: [] as Array<Record<string, unknown>>,
     lockedSelects: 0,
@@ -310,5 +317,50 @@ describe("setDealEstimator — Codex findings (runtime)", () => {
     // The production deal-load WHERE actually carries the is_active filter (not just the fake simulating it).
     const dealWhereSql = db._state.dealSelectWheres.map(extractSqlText).join("\n");
     expect(dealWhereSql).toContain("is_active");
+  });
+
+  // P1 — Bid-Board-owned reject
+  it("rejects a Bid-Board-owned deal with 409 BID_BOARD_OWNED_ESTIMATOR_LOCKED — no estimator change, no dsc mutation", async () => {
+    // A Bid-Board-owned deal sources its estimator from the Procore/Bid Board mirror, which overwrites
+    // estimator_user_id directly with NO commission re-attribution. A manual pick here would mint/strip a
+    // dsc row that the next sync silently reverts, leaving the dsc row attributed to the wrong estimator —
+    // so setDealEstimator must reject the edit at the authoritative (service) layer, not just the UI.
+    const db = makeTenantDb({
+      id: "d",
+      estimatorUserId: "est-existing",
+      assignedRepId: OWNER,
+      isBidBoardOwned: true,
+    });
+    await expect(setDealEstimator(db, "d", B, OWNER, "o1")).rejects.toMatchObject({
+      statusCode: 409,
+      code: "BID_BOARD_OWNED_ESTIMATOR_LOCKED",
+    });
+    // The FOR UPDATE lock was taken before the guard fired.
+    expect(db._state.lockedSelects).toBe(1);
+    // estimator_user_id is untouched and NO dsc mutation fired.
+    expect(db._state.updateCalls).toHaveLength(0);
+    expect(db._state.deal.estimatorUserId).toBe("est-existing");
+    expect(db._state.auditInserts).toHaveLength(0);
+    expect(commissions.mintEstimatorCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeEstimatorCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
+  });
+
+  // P1 — regression: a NON-Bid-Board deal still accepts the estimator edit (the guard is scoped).
+  it("still accepts the estimator edit on a non-Bid-Board deal (regression)", async () => {
+    const db = makeTenantDb({
+      id: "d",
+      estimatorUserId: null,
+      assignedRepId: OWNER,
+      isBidBoardOwned: false,
+    });
+    const result = await setDealEstimator(db, "d", B, OWNER, "o1");
+    expect(result).toBeTruthy();
+    expect((result as { estimatorUserId?: string | null }).estimatorUserId).toBe(B);
+    expect(db._state.updateCalls[0]?.estimatorUserId).toBe(B);
+    expect(commissions.mintEstimatorCommissionForDeal).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ dealId: "d", estimatorUserId: B }),
+    );
   });
 });

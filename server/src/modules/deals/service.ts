@@ -3483,6 +3483,21 @@ export async function setDealEstimator(
       );
     }
 
+    // P1: a Bid-Board-owned deal sources its estimator from the Procore/Bid Board mirror. The next sync
+    // (buildBidBoardMirrorFieldChanges) overwrites estimator_user_id DIRECTLY with NO commission
+    // re-attribution, so a manual pick here would mint/strip a deal_signed_commissions row and then be
+    // silently reverted — leaving the dsc row attributed to the manually-picked estimator while the deal
+    // points at the Bid Board one. Block the manual edit at the authoritative layer (a direct API call,
+    // not just the UI). is_bid_board_owned is the canonical ownership column the mirror itself stamps
+    // (bid-board-sync sets it true on every mirrored deal); BB deals get their estimator from the sync.
+    if (existing.isBidBoardOwned === true) {
+      throw new AppError(
+        409,
+        "Estimator on a Bid Board-owned deal is managed by the Bid Board sync and can't be edited here.",
+        "BID_BOARD_OWNED_ESTIMATOR_LOCKED"
+      );
+    }
+
     const oldEstimator = existing.estimatorUserId ?? null;
     const newEstimator = newEstimatorUserId ?? null;
     const owner = existing.assignedRepId ?? null;
