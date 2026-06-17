@@ -367,9 +367,7 @@ async function syncUserMailbox(client: any, tokenRow: any): Promise<void> {
     } catch (err: any) {
       await client.query("ROLLBACK").catch(() => {});
       console.error(`[Worker:email-sync] ${f.folder} sync failed for user ${user_id}:`, err.message);
-      // A 401 means the token is dead for ALL folders → mark reauth and stop. Any other folder error
-      // (e.g. a transient Graph error on Sent) is ISOLATED here: the already-committed Inbox sync is
-      // untouched, so the live inbound pipeline keeps working.
+      // A 401 means the token is dead for ALL folders → mark reauth and stop.
       if (err.message?.includes("401") || err.message?.includes("InvalidAuthenticationToken")) {
         await client
           .query(
@@ -380,6 +378,15 @@ async function syncUserMailbox(client: any, tokenRow: any): Promise<void> {
           )
           .catch(() => {});
         break;
+      }
+      // INBOX failures must NOT be isolated: Inbox runs first, so swallowing a non-401 inbox error and
+      // letting a successful Sent sync advance last_sync_at would make the worker LOOK healthy while
+      // inbound silently stops (the inbox cursor never advanced). Re-throw so this user's sync aborts the
+      // round (last_sync_at not bumped) and retries next run. Only SENT failures are isolated — Inbox has
+      // already committed + advanced its own cursor by the time Sent runs, so the live inbound pipeline is
+      // safe and a transient Sent error shouldn't abort it.
+      if (f.folder === "inbox") {
+        throw err;
       }
     }
   }
@@ -697,7 +704,28 @@ export async function processMailMessage(
        RETURNING id`,
       [mailboxAccountId, conversationId, assignment.assignedDealId, userId]
     );
-    bindingId = seeded.rows[0]?.id ?? bindingId;
+    if (seeded.rows.length > 0) {
+      bindingId = seeded.rows[0].id;
+    } else {
+      // Another path won the binding for this conversation between the earlier getActiveThreadBindingRaw
+      // lookup and this insert. ON CONFLICT DO NOTHING returned no row, so adopt the EXISTING binding —
+      // use its id AND follow its deal, so this message and the thread don't diverge onto different deals.
+      const existing = await client.query(
+        `SELECT id, deal_id FROM ${schemaName}.email_thread_bindings
+          WHERE mailbox_account_id = $1 AND provider = 'microsoft_graph' AND provider_conversation_id = $2
+            AND detached_at IS NULL
+          LIMIT 1`,
+        [mailboxAccountId, conversationId]
+      );
+      if (existing.rows.length > 0) {
+        bindingId = existing.rows[0].id;
+        if (existing.rows[0].deal_id) {
+          assignment.assignedDealId = existing.rows[0].deal_id;
+          assignment.assignedEntityType = "deal";
+          assignment.assignedEntityId = existing.rows[0].deal_id;
+        }
+      }
+    }
   }
 
   // Persist assignment_status from the RESOLVED assignment rather than letting it default to 'unassigned'.
