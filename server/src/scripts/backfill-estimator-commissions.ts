@@ -19,9 +19,14 @@
  *   • Only writes deal_signed_commissions rows — it NEVER writes or modifies the estimator_user_id COLUMN
  *     (that column is owned by the empties-only sync + the manual estimator picker) nor any contract date.
  *     mintEstimatorCommissionForDeal only inserts a commission row; no deals UPDATE.
- *   • Idempotent — mintEstimatorCommissionForDeal does a SELECT-before-INSERT on (deal_id, estimator_user_id)
- *     and the query's NOT EXISTS already drops a deal once its estimator row exists, so re-running writes
- *     nothing new. Safe to run again after configuring missing estimator rates.
+ *   • Idempotent — insertCommissionRowForRep does ON CONFLICT (deal_id, rep_user_id) DO NOTHING, and the
+ *     query's role-scoped NOT EXISTS already drops a deal once its estimator-role row exists, so re-running
+ *     writes nothing new. Safe to run again after configuring missing estimator rates.
+ *   • Owner-row-first — a deal is only a candidate once its OWNER row exists (EXISTS rep = assigned_rep_id):
+ *     the estimator row is ADDITIVE and must never be the first row on a deal (else the owner backfill #736,
+ *     which skips any deal carrying a row, would never mint the owner row). Run AFTER #736.
+ *   • Estimator-stable — runOne re-reads the deal FOR UPDATE and skips (skipped_estimator_changed) if the
+ *     estimator changed/cleared, or the deal became a CO / lost its signed date, after candidate selection.
  *   • Change-order children are excluded IN THE QUERY (is_change_order = false), not merely by the mint
  *     guard — a CO is base-deal-only and never earns its own estimator cut. (Defence in depth: the mint also
  *     returns skipped_change_order.)
@@ -49,11 +54,11 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { eq } from "drizzle-orm";
 import * as schema from "@trock-crm/shared/schema";
 import { LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
   mintEstimatorCommissionForDeal,
-  type CalculateCommissionResult,
   type CalculateCommissionStatus,
 } from "../modules/commissions/service.js";
 
@@ -61,6 +66,14 @@ type TenantDb = NodePgDatabase<typeof schema>;
 type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
 
 const DRY_RUN_ROLLBACK = Symbol("dry-run-rollback");
+
+// The backfill carries ONE status the shared commission union doesn't: a TOCTOU guard outcome. The candidate
+// set is read WITHOUT a row lock, so between selection and the per-candidate transaction an admin can
+// change/clear a deal's estimator. runOne re-reads the deal FOR UPDATE and, if the estimator moved (or the
+// deal became a change order / lost its signed date), skips it as `skipped_estimator_changed` instead of
+// minting a row for a PREVIOUS estimator. It's a backfill-local concurrency outcome, not a commission-calc
+// result, so it's modeled here rather than in CalculateCommissionStatus.
+export type EstimatorBackfillStatus = CalculateCommissionStatus | "skipped_estimator_changed";
 
 export interface EstimatorBackfillCandidate {
   dealId: string;
@@ -74,9 +87,9 @@ export interface EstimatorBackfillSummary {
   schema: string;
   executed: boolean;
   candidates: number;
-  byStatus: Record<CalculateCommissionStatus, number>;
+  byStatus: Record<EstimatorBackfillStatus, number>;
   totalCommissionCreated: number;
-  rows: Array<EstimatorBackfillCandidate & { status: CalculateCommissionStatus; amount: string | null }>;
+  rows: Array<EstimatorBackfillCandidate & { status: EstimatorBackfillStatus; amount: string | null }>;
 }
 
 // The CANONICAL lost-stage set (includes deal_canceled) — sourced from the shared constant so the backfill
@@ -91,14 +104,23 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /**
  * Active, non-lost (canonical slugs, incl. deal_canceled), non-test, non-change-order signed deals whose
- * estimator is set, DISTINCT from the owner, and has NO estimator commission row yet.
+ * estimator is set, DISTINCT from the owner, the OWNER row already exists, and there is NO estimator
+ * commission row yet.
  *
  * Notes on the predicate:
  *   • estimator_user_id <> assigned_rep_id uses SQL three-valued logic: a NULL assigned_rep_id makes the
  *     comparison NULL ⇒ the row is excluded. That is intentional — a deal with no owner has no owner row,
  *     so it should not get a standalone estimator row either.
- *   • NOT EXISTS is scoped to the ESTIMATOR's own row (rep_user_id = estimator_user_id), NOT "any row":
- *     the deal already carries an owner row, and the additive estimator row is what's missing.
+ *   • OWNER-ROW-REQUIRED (EXISTS rep_user_id = assigned_rep_id): the additive estimator row must sit ON TOP
+ *     of an existing owner row, never be the FIRST row on a deal. The owner backfill (#736) treats ANY
+ *     existing dsc row as "deal handled" and skips it; if THIS backfill minted the first (estimator) row on
+ *     an owner-less deal, that owner backfill would then skip the deal forever and never mint the owner row.
+ *     Requiring the owner row both prevents that and enforces the run ordering: owner backfill first, then
+ *     this one.
+ *   • NO-ESTIMATOR-ROW (NOT EXISTS) is scoped to the estimator's ROLE — rep_user_id = estimator_user_id AND
+ *     attribution_role = 'estimator' — not merely "a row for that user": a user who was formerly the owner
+ *     (and carries an attribution_role = 'owner' row) must NOT falsely block their own missing estimator
+ *     row. Consistent with PR1's attribution_role discriminator.
  */
 export async function findEstimatorBackfillCandidates(query: QueryFn): Promise<EstimatorBackfillCandidate[]> {
   const { rows } = await query(`
@@ -119,11 +141,21 @@ export async function findEstimatorBackfillCandidates(query: QueryFn): Promise<E
       -- Change-order children are base-deal-only — they never earn a standalone estimator cut. Excluded in
       -- the QUERY (not merely by the mint's skipped_change_order guard) so a CO can never be a candidate.
       AND COALESCE(d.is_change_order, false) = false
-      -- No estimator row yet. Scoped to the estimator (rep_user_id = estimator_user_id) — the deal already
-      -- has the owner row; only the additive estimator row is missing.
+      -- OWNER ROW MUST ALREADY EXIST. The additive estimator row sits ON TOP of the owner row; it must never
+      -- be the FIRST dsc row on a deal. The owner backfill (#736) skips any deal that already has ANY dsc
+      -- row, so minting an estimator-only row first would make it skip the deal forever and never mint the
+      -- owner row. Requiring the owner row also enforces the ordering: owner backfill first, then this one.
+      AND EXISTS (
+        SELECT 1 FROM deal_signed_commissions o
+        WHERE o.deal_id = d.id AND o.rep_user_id = d.assigned_rep_id
+      )
+      -- No estimator row yet. Scoped to the estimator's ROLE (rep_user_id = estimator_user_id AND
+      -- attribution_role = 'estimator') — an OWNER-role row for that same user must not falsely block the
+      -- missing additive estimator row.
       AND NOT EXISTS (
         SELECT 1 FROM deal_signed_commissions dsc
         WHERE dsc.deal_id = d.id AND dsc.rep_user_id = d.estimator_user_id
+          AND dsc.attribution_role = 'estimator'
       )
     ORDER BY d.deal_number
   `);
@@ -136,13 +168,20 @@ export async function findEstimatorBackfillCandidates(query: QueryFn): Promise<E
   }));
 }
 
-/** Run (dry-run rolls back; execute commits) mintEstimatorCommissionForDeal for one candidate. */
-async function runOne(
+/**
+ * Run (dry-run rolls back; execute commits) mintEstimatorCommissionForDeal for one candidate, with a TOCTOU
+ * guard: the candidate set was read WITHOUT a row lock, so before minting we re-read the deal FOR UPDATE and
+ * bail unless the estimator is STILL the candidate's estimator AND the deal is still a non-change-order AND
+ * still signed. Without this, an admin who changes/clears the estimator after selection could have --commit
+ * insert a commission for the PREVIOUS estimator. The re-read + mint share ONE transaction so the lock is
+ * held across the check-and-insert (no window for a concurrent change to slip between).
+ */
+export async function runOne(
   tenantDb: TenantDb,
   candidate: EstimatorBackfillCandidate,
   actorUserId: string | null,
   execute: boolean
-): Promise<CalculateCommissionResult> {
+): Promise<{ status: EstimatorBackfillStatus; amount: string | null }> {
   const input = {
     dealId: candidate.dealId,
     estimatorUserId: candidate.estimatorId,
@@ -153,14 +192,50 @@ async function runOne(
     // estimator, who is a real user — so the throwaway INSERT doesn't trip the created_by FK.
     triggeredByUserId: actorUserId ?? candidate.estimatorId,
   };
+
+  // Re-validate under lock, then mint — all inside ONE transaction.
+  const revalidateThenMint = async (
+    tx: TenantDb
+  ): Promise<{ status: EstimatorBackfillStatus; amount: string | null }> => {
+    const [locked] = await tx
+      .select({
+        estimatorUserId: schema.deals.estimatorUserId,
+        assignedRepId: schema.deals.assignedRepId,
+        isChangeOrder: schema.deals.isChangeOrder,
+        contractSignedAt: schema.deals.contractSignedAt,
+        contractSignedDate: schema.deals.contractSignedDate,
+      })
+      .from(schema.deals)
+      .where(eq(schema.deals.id, candidate.dealId))
+      .limit(1)
+      .for("update");
+    // Bail unless the deal still exists, still carries the SAME estimator the candidate was selected for, is
+    // still a non-change-order, and is still signed. (assigned_rep_id is read under the same lock; the
+    // estimator==owner double-pay case is handled by mintEstimatorCommissionForDeal, which re-reads the deal
+    // in THIS transaction and returns skipped_existing — so it isn't re-gated here.)
+    const stillValid =
+      locked != null &&
+      locked.estimatorUserId === candidate.estimatorId &&
+      !locked.isChangeOrder &&
+      (locked.contractSignedAt != null || locked.contractSignedDate != null);
+    if (!stillValid) {
+      return { status: "skipped_estimator_changed", amount: null };
+    }
+    const result = await mintEstimatorCommissionForDeal(tx, input);
+    return { status: result.status, amount: result.amount ?? null };
+  };
+
   if (execute) {
-    return tenantDb.transaction((tx) => mintEstimatorCommissionForDeal(tx, input));
+    return tenantDb.transaction((tx) => revalidateThenMint(tx));
   }
-  // Faithful dry-run: run the real mint, capture the would-be result, then roll back.
-  let captured: CalculateCommissionResult = { status: "skipped_no_value" };
+  // Faithful dry-run: run the real revalidate + mint, capture the would-be result, then roll back.
+  let captured: { status: EstimatorBackfillStatus; amount: string | null } = {
+    status: "skipped_no_value",
+    amount: null,
+  };
   try {
     await tenantDb.transaction(async (tx) => {
-      captured = await mintEstimatorCommissionForDeal(tx, input);
+      captured = await revalidateThenMint(tx);
       throw DRY_RUN_ROLLBACK;
     });
   } catch (err) {
@@ -175,7 +250,7 @@ export async function backfillTenantEstimatorCommissions(
   opts: { schema: string; execute: boolean; actorUserId: string | null }
 ): Promise<EstimatorBackfillSummary> {
   const candidates = await findEstimatorBackfillCandidates(query);
-  const byStatus: Record<CalculateCommissionStatus, number> = {
+  const byStatus: Record<EstimatorBackfillStatus, number> = {
     created: 0,
     skipped_existing: 0,
     skipped_no_rep: 0,
@@ -184,6 +259,9 @@ export async function backfillTenantEstimatorCommissions(
     // The query already excludes change orders, so the mint should never return this on a candidate — but
     // the shared status union carries it, so the counter must too (defence in depth).
     skipped_change_order: 0,
+    // TOCTOU: the deal's estimator changed/cleared (or it became a CO / lost its signed date) between the
+    // unlocked candidate selection and the locked per-candidate re-read — no row minted (see runOne).
+    skipped_estimator_changed: 0,
   };
   let totalCommissionCreated = 0;
   const rows: EstimatorBackfillSummary["rows"] = [];
@@ -194,7 +272,7 @@ export async function backfillTenantEstimatorCommissions(
     if (result.status === "created" && result.amount) {
       totalCommissionCreated += Number(result.amount);
     }
-    rows.push({ ...candidate, status: result.status, amount: result.amount ?? null });
+    rows.push({ ...candidate, status: result.status, amount: result.amount });
   }
 
   return {
@@ -260,7 +338,8 @@ function printSummary(s: EstimatorBackfillSummary): void {
   console.log(
     `  totals: created=${s.byStatus.created} ($${s.totalCommissionCreated.toLocaleString()}), ` +
       `skipped_existing=${s.byStatus.skipped_existing}, no_rate=${s.byStatus.skipped_no_rate}, ` +
-      `no_value=${s.byStatus.skipped_no_value}, change_order=${s.byStatus.skipped_change_order}`
+      `no_value=${s.byStatus.skipped_no_value}, change_order=${s.byStatus.skipped_change_order}, ` +
+      `estimator_changed=${s.byStatus.skipped_estimator_changed}`
   );
 }
 

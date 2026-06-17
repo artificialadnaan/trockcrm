@@ -17,6 +17,7 @@ import {
   backfillTenantEstimatorCommissions,
   findEstimatorBackfillCandidates,
   parseArgs,
+  runOne,
 } from "../../src/scripts/backfill-estimator-commissions.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -36,6 +37,7 @@ const D_LOST = U("0de5"); // signed but lost stage → not a candidate
 const D_HAS_ESTIM_ROW = U("0de6"); // already has the estimator row → not a candidate (idempotency at query level)
 const D_ESTIM_IS_OWNER = U("0de7"); // estimator == owner (E1) → not a candidate (would double-pay)
 const D_CO_CHILD = U("0de8"); // is_change_order=true with an estimator → not a candidate (no retro CO estimator cut)
+const D_NO_OWNER = U("0de9"); // estimator E3 set but NO owner row yet → not a candidate (FIX G: owner row required first)
 
 let pg: PGlite;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -53,6 +55,11 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(
     tenantSchemaSql("public", [users, pipelineStageConfig, deals, userCommissionSettings, dealSignedCommissions, auditLog])
+  );
+  // tenantSchemaSql intentionally omits indexes/constraints, but the tx-safe insert now relies on the
+  // (deal_id, rep_user_id) UNIQUE for ON CONFLICT DO NOTHING — recreate it so the conflict path is exercised.
+  await pg.exec(
+    `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`
   );
   tdb = drizzle(pg);
 
@@ -90,18 +97,21 @@ beforeAll(async () => {
   await pg.exec(ins(D_HAS_ESTIM_ROW, WON, O1, E1, "2026-01-10", null, 80000));
   await pg.exec(ins(D_ESTIM_IS_OWNER, WON, E1, E1, "2026-01-18", null, 90000)); // owner == estimator == E1
   await pg.exec(ins(D_CO_CHILD, WON, O1, E1, "2026-01-25", null, 30000, true)); // change order child
+  await pg.exec(ins(D_NO_OWNER, WON, O1, E3, "2026-01-22", null, 60000)); // signed + estimator E3, but NO owner row seeded below
 
   // Owner rows already exist on the candidate + idempotency deals (sign time / owner backfill). The estimator
-  // backfill must ADD the estimator row WITHOUT touching these. D_HAS_ESTIM_ROW additionally already carries
-  // its estimator (E1) row, and D_ESTIM_IS_OWNER's single row credits E1 as the owner.
+  // backfill must ADD the estimator row WITHOUT touching these. attribution_role makes the role explicit:
+  // owner-credit rows carry 'owner'; D_HAS_ESTIM_ROW additionally already carries its estimator (E1) row with
+  // 'estimator' (so the role-scoped NOT EXISTS drops it as already-done); D_ESTIM_IS_OWNER's single row
+  // credits E1 as the 'owner'. D_NO_OWNER deliberately has NO row here (tests FIX G owner-row-required).
   await pg.exec(
-    `INSERT INTO public.deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing) VALUES
-       ('${D_ESTIM}','${O1}','awarded_amount', 100000, 0.030000, 3000, '2026-01-15'),
-       ('${D_AT_ONLY}','${O1}','awarded_amount', 200000, 0.030000, 6000, '2026-02-01'),
-       ('${D_NO_RATE}','${O1}','awarded_amount', 50000, 0.030000, 1500, '2026-01-20'),
-       ('${D_HAS_ESTIM_ROW}','${O1}','awarded_amount', 80000, 0.030000, 2400, '2026-01-10'),
-       ('${D_HAS_ESTIM_ROW}','${E1}','awarded_amount', 80000, 0.020000, 1600, '2026-01-10'),
-       ('${D_ESTIM_IS_OWNER}','${E1}','awarded_amount', 90000, 0.020000, 1800, '2026-01-18')`
+    `INSERT INTO public.deal_signed_commissions (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing) VALUES
+       ('${D_ESTIM}','${O1}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-01-15'),
+       ('${D_AT_ONLY}','${O1}','owner','awarded_amount', 200000, 0.030000, 6000, '2026-02-01'),
+       ('${D_NO_RATE}','${O1}','owner','awarded_amount', 50000, 0.030000, 1500, '2026-01-20'),
+       ('${D_HAS_ESTIM_ROW}','${O1}','owner','awarded_amount', 80000, 0.030000, 2400, '2026-01-10'),
+       ('${D_HAS_ESTIM_ROW}','${E1}','estimator','awarded_amount', 80000, 0.020000, 1600, '2026-01-10'),
+       ('${D_ESTIM_IS_OWNER}','${E1}','owner','awarded_amount', 90000, 0.020000, 1800, '2026-01-18')`
   );
 }, 30_000);
 
@@ -114,13 +124,15 @@ describe("estimator commission backfill", () => {
     const candidates = await findEstimatorBackfillCandidates(query);
     const ids = candidates.map((c) => c.dealId).sort();
     expect(ids).toEqual([D_ESTIM, D_AT_ONLY, D_NO_RATE].sort());
-    // Excludes: no-date, lost, the deal that already has its estimator row, estimator==owner (double-pay
-    // guard), and a change-order child (no retroactive estimator cut).
+    // Excludes: no-date, lost, the deal that already has its estimator-role row, estimator==owner (double-pay
+    // guard), a change-order child (no retroactive estimator cut), and a deal with NO owner row yet (FIX G:
+    // the additive estimator row must never be the first row on a deal).
     expect(ids).not.toContain(D_NO_DATE);
     expect(ids).not.toContain(D_LOST);
     expect(ids).not.toContain(D_HAS_ESTIM_ROW);
     expect(ids).not.toContain(D_ESTIM_IS_OWNER);
     expect(ids).not.toContain(D_CO_CHILD);
+    expect(ids).not.toContain(D_NO_OWNER);
     // The _at-only deal's signed date comes from contract_signed_at::date.
     expect(candidates.find((c) => c.dealId === D_AT_ONLY)?.signedDate).toBe("2026-02-01");
     // The candidate carries the ESTIMATOR, not the owner.
@@ -203,6 +215,119 @@ describe("estimator commission backfill", () => {
       `SELECT amount FROM public.deal_signed_commissions WHERE deal_id='${D_NO_RATE}' AND rep_user_id='${E2}'`
     )).rows[0].amount)).toBe(500); // 50000 × 0.01
   }, 30_000);
+});
+
+// Isolated fixture (its own PGlite) for the two review fixes, so its mutating "flip the deal" steps don't
+// perturb the shared-state counts the suite above asserts.
+//   FIX G — the additive estimator row may only be minted ON TOP of an existing OWNER row (never the first
+//           dsc row on a deal), else the owner backfill (#736, "skip any deal with ANY row") would skip the
+//           deal forever and never mint the owner row.
+//   FIX H — between the UNLOCKED candidate selection and the per-candidate transaction an admin can
+//           change/clear the estimator; runOne re-reads the deal FOR UPDATE and skips a moved estimator so
+//           --commit can never pay a PREVIOUS estimator.
+describe("estimator backfill owner-row gate (FIX G) + TOCTOU revalidation under lock (FIX H)", () => {
+  let pgG: PGlite;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let tdbG: any;
+  const queryG = (sql: string, params?: unknown[]) =>
+    pgG.query(sql, params as never[]) as Promise<{ rows: Record<string, unknown>[] }>;
+  const rowsForRep = async (dealId: string, rep: string) =>
+    (await pgG.query(`SELECT 1 FROM public.deal_signed_commissions WHERE deal_id='${dealId}' AND rep_user_id='${rep}'`)).rows.length;
+
+  const GO = U("0a01"); // owner, rate 0.03
+  const GE1 = U("0a02"); // the candidate's estimator, rate 0.02
+  const GE2 = U("0a03"); // a DIFFERENT estimator an admin switches to mid-run, rate 0.04
+  const GACTOR = U("0aac");
+  const GWON = U("0a50");
+  const GOFFICE = U("0af1");
+
+  const DG_NOOWNER = U("0ad1"); // estimator set, NO owner row → excluded by FIX G until an owner row appears
+  const DG_OWNED = U("0ad2"); // owner row present, estimator unchanged → mints (FIX H positive control)
+  const DG_CHANGED = U("0ad3"); // owner row present; estimator switched after selection → skipped (FIX H)
+
+  beforeAll(async () => {
+    pgG = new PGlite();
+    await pgG.exec(
+      tenantSchemaSql("public", [users, pipelineStageConfig, deals, userCommissionSettings, dealSignedCommissions, auditLog])
+    );
+    // ON CONFLICT (deal_id, rep_user_id) DO NOTHING needs the UNIQUE that tenantSchemaSql omits — recreate it.
+    await pgG.exec(
+      `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`
+    );
+    tdbG = drizzle(pgG);
+    await pgG.exec(
+      `INSERT INTO public.users (id, display_name, email, role, office_id) VALUES
+         ('${GO}','G Owner','go@x.com','rep','${GOFFICE}'),
+         ('${GE1}','G Estimator One','ge1@x.com','rep','${GOFFICE}'),
+         ('${GE2}','G Estimator Two','ge2@x.com','rep','${GOFFICE}')`
+    );
+    await pgG.exec(`INSERT INTO public.pipeline_stage_config (id, name, slug, display_order) VALUES ('${GWON}','Won','won',9)`);
+    await pgG.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES
+      ('${GO}', 0.030000, true), ('${GE1}', 0.020000, true), ('${GE2}', 0.040000, true)`);
+    const insG = (id: string, owner: string, estimator: string, awarded: number) =>
+      `INSERT INTO public.deals (id, deal_number, name, stage_id, assigned_rep_id, estimator_user_id, awarded_amount, contract_signed_date, contract_signed_at, is_change_order)
+       VALUES ('${id}','${id.slice(-4)}','Deal','${GWON}','${owner}','${estimator}', ${awarded}, '2026-03-01', NULL, false)`;
+    await pgG.exec(insG(DG_NOOWNER, GO, GE1, 100000));
+    await pgG.exec(insG(DG_OWNED, GO, GE1, 100000));
+    await pgG.exec(insG(DG_CHANGED, GO, GE1, 100000));
+    // OWNER rows for the two candidates; DG_NOOWNER deliberately gets none (FIX G fixture).
+    await pgG.exec(
+      `INSERT INTO public.deal_signed_commissions (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing) VALUES
+         ('${DG_OWNED}','${GO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-03-01'),
+         ('${DG_CHANGED}','${GO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-03-01')`
+    );
+  }, 30_000);
+
+  afterAll(async () => {
+    await pgG?.close();
+  });
+
+  it("FIX G: a deal with no owner row is NOT a candidate; minting the owner row flips it to one", async () => {
+    let ids = (await findEstimatorBackfillCandidates(queryG)).map((c) => c.dealId);
+    expect(ids).toContain(DG_OWNED);
+    expect(ids).toContain(DG_CHANGED);
+    expect(ids).not.toContain(DG_NOOWNER); // no owner row yet ⇒ excluded
+
+    // Once the owner backfill (#736) has minted the owner row, the deal becomes eligible for the estimator row.
+    await pgG.exec(
+      `INSERT INTO public.deal_signed_commissions (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing) VALUES
+         ('${DG_NOOWNER}','${GO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-03-01')`
+    );
+    ids = (await findEstimatorBackfillCandidates(queryG)).map((c) => c.dealId);
+    expect(ids).toContain(DG_NOOWNER);
+  });
+
+  it("FIX H: an estimator changed after selection is skipped under lock; no row minted for the PREVIOUS estimator", async () => {
+    const stale = (await findEstimatorBackfillCandidates(queryG)).find((c) => c.dealId === DG_CHANGED);
+    expect(stale?.estimatorId).toBe(GE1); // selected for the ORIGINAL estimator
+
+    // An admin reassigns the estimator AFTER selection, BEFORE the per-candidate run.
+    await pgG.exec(`UPDATE public.deals SET estimator_user_id='${GE2}' WHERE id='${DG_CHANGED}'`);
+
+    const result = await runOne(tdbG, stale!, GACTOR, true);
+    expect(result.status).toBe("skipped_estimator_changed");
+    expect(await rowsForRep(DG_CHANGED, GE1)).toBe(0); // PREVIOUS estimator never paid
+    expect(await rowsForRep(DG_CHANGED, GE2)).toBe(0); // nor the new one (we never targeted it)
+    expect(await rowsForRep(DG_CHANGED, GO)).toBe(1); // owner row untouched
+  });
+
+  it("FIX H: an unchanged estimator still mints (positive control)", async () => {
+    const candidate = (await findEstimatorBackfillCandidates(queryG)).find((c) => c.dealId === DG_OWNED);
+    const result = await runOne(tdbG, candidate!, GACTOR, true);
+    expect(result.status).toBe("created");
+    expect(Number(result.amount)).toBe(2000); // 100000 × 0.02 (estimator GE1 rate)
+    expect(await rowsForRep(DG_OWNED, GE1)).toBe(1);
+    expect(await rowsForRep(DG_OWNED, GO)).toBe(1); // owner row still intact
+  });
+
+  it("FIX H: a faithful dry-run still revalidates but writes nothing", async () => {
+    // DG_NOOWNER now has an owner row (from the FIX G test) + a current rated estimator → it WOULD mint, but
+    // a dry-run must persist nothing.
+    const candidate = (await findEstimatorBackfillCandidates(queryG)).find((c) => c.dealId === DG_NOOWNER);
+    const result = await runOne(tdbG, candidate!, GACTOR, false);
+    expect(result.status).toBe("created"); // faithful: reports the would-be outcome
+    expect(await rowsForRep(DG_NOOWNER, GE1)).toBe(0); // but nothing written
+  });
 });
 
 describe("estimator backfill parseArgs (execution-safety controls)", () => {
