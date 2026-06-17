@@ -2,12 +2,14 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
 
-vi.mock("../../../src/lib/r2-client.js", () => ({ getObjectStream: vi.fn() }));
+vi.mock("../../../src/lib/r2-client.js", () => ({ getObjectStream: vi.fn(), headObject: vi.fn() }));
 
-import { getObjectStream } from "../../../src/lib/r2-client.js";
+import { getObjectStream, headObject } from "../../../src/lib/r2-client.js";
+import { SIGNATURE_LOGO_MAX_BYTES } from "../../../src/modules/users/signature-logo.js";
 const { signatureLogoPublicRoutes } = await import("../../../src/modules/users/signature-logo-routes.js");
 
 const mockGet = vi.mocked(getObjectStream);
+const mockHead = vi.mocked(headObject);
 
 function makeApp() {
   const app = express();
@@ -23,9 +25,13 @@ const USER = "11111111-1111-4111-8111-111111111111";
 const ASSET = "22222222-2222-4222-8222-222222222222.png";
 
 describe("public signature-logo route", () => {
-  beforeEach(() => mockGet.mockReset());
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockHead.mockReset();
+  });
 
-  it("serves a valid logo from signature-logos/<userId>/<asset> with hardened headers", async () => {
+  it("serves a within-cap logo from signature-logos/<userId>/<asset> with hardened headers", async () => {
+    mockHead.mockResolvedValue({ contentLength: 4 });
     async function* body() {
       yield new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
     }
@@ -38,13 +44,27 @@ describe("public signature-logo route", () => {
     expect(res.headers["cache-control"]).toContain("immutable");
     expect(res.headers["x-content-type-options"]).toBe("nosniff");
     expect(res.headers["cross-origin-resource-policy"]).toBe("cross-origin");
-    // Key is built ONLY from validated params — always under signature-logos/.
     expect(mockGet).toHaveBeenCalledWith(`signature-logos/${USER}/${ASSET}`);
+  });
+
+  it("404s an OVERSIZED object at serve time and never streams it (TOCTOU/overwrite guard)", async () => {
+    mockHead.mockResolvedValue({ contentLength: SIGNATURE_LOGO_MAX_BYTES + 1 });
+    const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${ASSET}`);
+    expect(res.status).toBe(404);
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it("404s a missing object without streaming", async () => {
+    mockHead.mockResolvedValue(null);
+    const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${ASSET}`);
+    expect(res.status).toBe(404);
+    expect(mockGet).not.toHaveBeenCalled();
   });
 
   it("rejects a non-uuid userId without touching R2 (404)", async () => {
     const res = await request(makeApp()).get(`/api/public/signature-logo/not-a-uuid/${ASSET}`);
     expect(res.status).toBe(404);
+    expect(mockHead).not.toHaveBeenCalled();
     expect(mockGet).not.toHaveBeenCalled();
   });
 
@@ -53,11 +73,15 @@ describe("public signature-logo route", () => {
       const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${bad}`);
       expect(res.status).toBe(404);
     }
+    expect(mockHead).not.toHaveBeenCalled();
     expect(mockGet).not.toHaveBeenCalled();
   });
 
-  it("404s when the object is missing (R2 rejects)", async () => {
-    mockGet.mockRejectedValueOnce(new Error("NoSuchKey"));
+  it("404s when the stream fetch rejects after the size check passes", async () => {
+    mockHead.mockResolvedValue({ contentLength: 4 });
+    mockGet.mockImplementation(async () => {
+      throw new Error("NoSuchKey");
+    });
     const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${ASSET}`);
     expect(res.status).toBe(404);
   });

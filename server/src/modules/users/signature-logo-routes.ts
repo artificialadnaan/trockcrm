@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
-import { getObjectStream } from "../../lib/r2-client.js";
+import { getObjectStream, headObject } from "../../lib/r2-client.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { SIGNATURE_LOGO_MAX_BYTES } from "./signature-logo.js";
 
 const router = Router();
 
@@ -38,6 +39,16 @@ router.get("/:userId/:asset", async (req: Request, res: Response, next: NextFunc
     if (!contentType) throw new AppError(404, "Not found");
 
     const r2Key = `signature-logos/${userId}/${asset}`;
+
+    // Serve-time size enforcement — the authoritative guard. The /confirm size-check is point-in-time:
+    // a presigned PUT can overwrite the object afterward, and the key is predictable + confirm is
+    // skippable, so the serve path itself must refuse anything over the cap (or missing). Never trust
+    // that the object was confirmed or is still within size. (Codex #737.)
+    const head = await headObject(r2Key);
+    if (!head || (head.contentLength ?? 0) > SIGNATURE_LOGO_MAX_BYTES) {
+      throw new AppError(404, "Not found");
+    }
+
     let object: Awaited<ReturnType<typeof getObjectStream>>;
     try {
       object = await getObjectStream(r2Key);
