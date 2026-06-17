@@ -678,7 +678,27 @@ export async function processMailMessage(
     provisionalThreadBinding && conversationId
       ? await promoteProvisionalBindingRaw(client, schemaName, provisionalThreadBinding.id, conversationId)
       : null;
-  const bindingId = promotedBinding?.id ?? activeThreadBinding?.id ?? provisionalThreadBinding?.id ?? null;
+  let bindingId = promotedBinding?.id ?? activeThreadBinding?.id ?? provisionalThreadBinding?.id ?? null;
+
+  // Seed a thread binding when an ASSIGNED outbound send is the first CRM-seen message in its conversation.
+  // The CRM sendEmail path seeds one (seedOutboundThreadBinding); the Sent-folder sync must too — otherwise
+  // a later Inbox reply on this conversationId finds no binding and falls back to ambiguous/no assignment.
+  // We have the real conversationId here, so seed a CONCRETE (non-provisional) binding keyed on it; the
+  // partial-unique ON CONFLICT absorbs a race with the CRM seed.
+  if (isOutbound && assignment.assignedDealId && conversationId && !bindingId) {
+    const seeded = await client.query(
+      `INSERT INTO ${schemaName}.email_thread_bindings
+         (mailbox_account_id, provider, provider_conversation_id, deal_id, binding_source, confidence,
+          assignment_reason, created_by, updated_by)
+       VALUES ($1, 'microsoft_graph', $2, $3, 'outbound_sync_seed', 'high', 'outbound_sent_sync', $4, $4)
+       ON CONFLICT (mailbox_account_id, provider, provider_conversation_id)
+         WHERE detached_at IS NULL AND provider_conversation_id IS NOT NULL
+         DO NOTHING
+       RETURNING id`,
+      [mailboxAccountId, conversationId, assignment.assignedDealId, userId]
+    );
+    bindingId = seeded.rows[0]?.id ?? bindingId;
+  }
 
   // Persist assignment_status from the RESOLVED assignment rather than letting it default to 'unassigned'.
   // The reused insert would otherwise leave an auto-assigned email (deal/entity resolved) looking

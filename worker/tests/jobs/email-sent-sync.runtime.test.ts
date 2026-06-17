@@ -110,8 +110,13 @@ async function setupSchema(pg: PGlite) {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       mailbox_account_id uuid, provider varchar(50), provider_conversation_id varchar(500),
       normalized_subject varchar(500), participant_fingerprint varchar(500),
-      deal_id uuid, detached_at timestamptz, provisional_until timestamptz
+      deal_id uuid, binding_source varchar(32), confidence varchar(16), assignment_reason varchar(255),
+      created_by uuid, updated_by uuid, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now(),
+      detached_at timestamptz, provisional_until timestamptz
     );
+    CREATE UNIQUE INDEX uq_etb_active_conversation
+      ON ${SCHEMA}.email_thread_bindings (mailbox_account_id, provider, provider_conversation_id)
+      WHERE detached_at IS NULL AND provider_conversation_id IS NOT NULL;
     CREATE TABLE ${SCHEMA}.activities (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       type text, responsible_user_id uuid, performed_by_user_id uuid,
@@ -407,5 +412,52 @@ describe("Sent reply on a bound thread", () => {
       `SELECT deal_id FROM ${SCHEMA}.emails WHERE graph_message_id = 'graph-reply'`
     );
     expect(row.rows[0].deal_id).toBe(DEAL);
+  });
+});
+
+describe("Sent-folder seeds a thread binding for assigned outbound", () => {
+  it("seeds a concrete binding on an assigned outbound send so a later inbound reply inherits the deal", async () => {
+    const CONTACT = "00000000-0000-4000-8000-0000000000cb";
+    const DEAL = "00000000-0000-4000-8000-0000000000d3";
+    await db.query(`INSERT INTO ${SCHEMA}.contacts (id, email, is_active) VALUES ('${CONTACT}', 'lead@gamma.com', true)`);
+    await db.query(
+      `INSERT INTO ${SCHEMA}.deals (id, deal_number, name, stage_id, is_active)
+       VALUES ('${DEAL}', 'DFW-2026-0003', 'Gamma', (SELECT id FROM public.pipeline_stage_config LIMIT 1), true)`
+    );
+    await db.query(`INSERT INTO ${SCHEMA}.contact_deal_associations (contact_id, deal_id) VALUES ('${CONTACT}', '${DEAL}')`);
+    nextAssignment = { ...UNASSIGNED, assignedEntityType: "deal", assignedEntityId: DEAL, assignedDealId: DEAL, confidence: "high" };
+
+    // Outbound send opens conversation conv-gamma, assignment resolves to the deal — no binding existed yet.
+    await processMailMessage(
+      db, SCHEMA, USER_ID, OFFICE_ID,
+      { id: "graph-out-seed", internetMessageId: "<seed@x>", conversationId: "conv-gamma",
+        from: { emailAddress: { address: "rep@trockgc.com" } },
+        toRecipients: [{ emailAddress: { address: "lead@gamma.com" } }], subject: "Intro",
+        body: { content: "x" }, sentDateTime: new Date().toISOString() },
+      "outbound"
+    );
+
+    const binding = await db.query<{ deal_id: string; binding_source: string }>(
+      `SELECT deal_id, binding_source FROM ${SCHEMA}.email_thread_bindings WHERE provider_conversation_id = 'conv-gamma'`
+    );
+    expect(binding.rows[0].deal_id).toBe(DEAL);
+    expect(binding.rows[0].binding_source).toBe("outbound_sync_seed");
+
+    // A later INBOUND reply on the same conversation inherits the deal via that binding — even though the
+    // assignment engine would otherwise return UNASSIGNED for it.
+    nextAssignment = { ...UNASSIGNED };
+    const stored = await processMailMessage(
+      db, SCHEMA, USER_ID, OFFICE_ID,
+      { id: "graph-in-reply", conversationId: "conv-gamma",
+        from: { emailAddress: { address: "lead@gamma.com" } },
+        toRecipients: [{ emailAddress: { address: "rep@trockgc.com" } }], subject: "Re: Intro",
+        body: { content: "reply" }, receivedDateTime: new Date().toISOString() },
+      "inbound"
+    );
+    expect(stored).toBe(true);
+    const reply = await db.query<{ deal_id: string }>(
+      `SELECT deal_id FROM ${SCHEMA}.emails WHERE graph_message_id = 'graph-in-reply'`
+    );
+    expect(reply.rows[0].deal_id).toBe(DEAL); // inherited from the seeded binding
   });
 });
