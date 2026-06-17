@@ -10,6 +10,7 @@ import {
   Shield,
   UserCheck,
   UserCog,
+  UserPlus,
   UsersRound,
   X,
 } from "lucide-react";
@@ -37,6 +38,13 @@ import {
 } from "./users-page.helpers";
 import { UserInvitePreviewDialog } from "./user-invite-preview-dialog";
 import { UserLocalAuthEventsDialog } from "./user-local-auth-events-dialog";
+import { AddUserDialog } from "./add-user-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 function formatDate(value: string | null) {
   if (!value) return null;
@@ -57,6 +65,7 @@ export function UsersPage() {
     loading,
     error,
     refetch,
+    createUser,
     updateUser,
     updateUsersBulk,
     importExternalUsers,
@@ -74,6 +83,7 @@ export function UsersPage() {
   const [activityFilter, setActivityFilter] = useState<UserActivityFilter>("all");
   const [sourceFilter, setSourceFilter] = useState<UserSourceFilter>("all");
   const [authFilter, setAuthFilter] = useState<UserAuthFilter>("all");
+  const [showAddUser, setShowAddUser] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewUserEmail, setPreviewUserEmail] = useState<string | null>(null);
@@ -88,6 +98,16 @@ export function UsersPage() {
     procore: "Procore",
   };
   const managerOptions = users.filter((candidate) => candidate.isActive);
+  const officeOptions = Array.from(
+    new Map(
+      users
+        .filter((candidate) => candidate.officeId)
+        .map((candidate) => [
+          candidate.officeId,
+          { id: candidate.officeId, name: candidate.officeName ?? candidate.officeId },
+        ]),
+    ).values(),
+  );
 
   const localAuthLabel = {
     not_invited: "Not invited",
@@ -121,16 +141,19 @@ export function UsersPage() {
     });
   }, [query, roleFilter, activityFilter, sourceFilter, authFilter, visibleSelectionKey]);
 
-  const handleRoleChange = async (userId: string, role: "admin" | "director" | "rep") => {
+  const handleRoleChange = async (userId: string, role: "admin" | "director" | "rep" | "construction") => {
     setUpdatingId(userId);
     try {
-      await updateUser(userId, { role });
+      await updateUser(userId, { role } as Parameters<typeof updateUser>[1]);
     } finally {
       setUpdatingId(null);
     }
   };
 
   const handleToggleActive = async (userId: string, isActive: boolean) => {
+    if (isActive && !window.confirm("Deactivate this user? This signs them out of all sessions immediately.")) {
+      return;
+    }
     setUpdatingId(userId);
     try {
       await updateUser(userId, { isActive: !isActive });
@@ -287,14 +310,14 @@ export function UsersPage() {
   const clearSelection = () => setSelectedUserIds([]);
 
   const handleBulkUpdate = async (
-    input: Partial<{ role: "admin" | "director" | "rep"; isActive: boolean }>,
+    input: Partial<{ role: "admin" | "director" | "rep" | "construction"; isActive: boolean }>,
     successMessage: string,
   ) => {
     if (selectedUserIds.length === 0) return;
 
     setBulkUpdating(true);
     try {
-      await updateUsersBulk(selectedUserIds, input);
+      await updateUsersBulk(selectedUserIds, input as Parameters<typeof updateUsersBulk>[1]);
       toast.success(successMessage);
       setSelectedUserIds([]);
     } catch (err) {
@@ -311,10 +334,16 @@ export function UsersPage() {
         meta={`${summary.active} active · ${summary.inactive} inactive`}
         actions={{
           primary: (
-            <Button variant="outline" size="sm" onClick={handleImport} disabled={importing || loading}>
-              <Download className={`mr-1 h-4 w-4 ${importing ? "animate-pulse" : ""}`} />
-              {importing ? "Importing..." : "Import Procore + HubSpot"}
-            </Button>
+            <>
+              <Button variant="default" size="sm" onClick={() => setShowAddUser(true)} disabled={loading}>
+                <UserPlus className="mr-1 h-4 w-4" />
+                Add User
+              </Button>
+              <Button variant="outline" size="sm" onClick={handleImport} disabled={importing || loading}>
+                <Download className={`mr-1 h-4 w-4 ${importing ? "animate-pulse" : ""}`} />
+                {importing ? "Importing..." : "Import Procore + HubSpot"}
+              </Button>
+            </>
           ),
           secondaryAction: (
             <Button variant="outline" size="sm" onClick={refetch} disabled={loading}>
@@ -577,7 +606,7 @@ export function UsersPage() {
                 <TableCell>
                   <Select
                     value={user.role}
-                    onValueChange={(value) => handleRoleChange(user.id, value as "admin" | "director" | "rep")}
+                    onValueChange={(value) => handleRoleChange(user.id, value as "admin" | "director" | "rep" | "construction")}
                     disabled={updatingId === user.id || bulkUpdating}
                   >
                     <SelectTrigger className="h-8 w-28 text-xs">
@@ -587,6 +616,7 @@ export function UsersPage() {
                       <SelectItem value="admin">Admin</SelectItem>
                       <SelectItem value="director">Director</SelectItem>
                       <SelectItem value="rep">Rep</SelectItem>
+                      <SelectItem value="construction">Construction</SelectItem>
                     </SelectContent>
                   </Select>
                 </TableCell>
@@ -773,6 +803,25 @@ export function UsersPage() {
         Send invites only when you are ready to hand out temporary local-password access. Existing
         role and office assignments are preserved for CRM users that already exist.
       </div>
+
+      {showAddUser && (
+        <Dialog open={showAddUser} onOpenChange={(open) => { if (!open) setShowAddUser(false); }}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Add User</DialogTitle>
+            </DialogHeader>
+            <AddUserDialog
+              offices={officeOptions}
+              onCreate={async (input) => {
+                const r = await createUser(input);
+                toast.success(r.invite.sent ? "User created and invited" : "User created — invite failed; resend from the row");
+                await refetch();
+              }}
+              onClose={() => setShowAddUser(false)}
+            />
+          </DialogContent>
+        </Dialog>
+      )}
 
       <UserInvitePreviewDialog
         open={previewOpen}
