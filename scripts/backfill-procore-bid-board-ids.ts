@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
@@ -483,8 +484,10 @@ function backupPayload(planRows: BackfillPlanRow[]) {
 }
 
 function writeBackupSnapshot(planRows: BackfillPlanRow[], mode: BackfillMode): string {
+  // Use the OS temp dir (cross-platform). A hardcoded "/private/tmp" exists on macOS but not on
+  // Linux (CI / Railway), where fs.writeFileSync would throw ENOENT on the missing directory.
   const backupPath = path.join(
-    "/private/tmp",
+    os.tmpdir(),
     `trockcrm-procore-id-backfill-${mode}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`
   );
   fs.writeFileSync(backupPath, `${JSON.stringify(backupPayload(planRows), null, 2)}\n`, "utf8");

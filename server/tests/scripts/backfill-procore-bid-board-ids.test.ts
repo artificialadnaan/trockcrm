@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import os from "node:os";
 import { describe, expect, it } from "vitest";
 
 const {
@@ -192,5 +194,13 @@ describe("Procore Bid Board ID backfill", () => {
     expect(report.verifiedRows).toBe(1);
     expect(commitIndex).toBeGreaterThan(-1);
     expect(verificationIndexes.some((index) => index > commitIndex)).toBe(true);
+
+    // Regression (#746): the backup snapshot must be written under the OS temp dir (cross-platform),
+    // never a hardcoded "/private/tmp" — that exists on macOS but not on Linux CI/Railway, where
+    // fs.writeFileSync threw ENOENT. Assert the real path the run produced, then clean it up.
+    expect(report.backupPath).toBeTruthy();
+    expect(report.backupPath?.startsWith(os.tmpdir())).toBe(true);
+    expect(fs.existsSync(report.backupPath as string)).toBe(true);
+    fs.rmSync(report.backupPath as string, { force: true });
   });
 });
