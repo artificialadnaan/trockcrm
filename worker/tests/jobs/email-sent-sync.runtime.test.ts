@@ -86,7 +86,7 @@ async function setupSchema(pg: PGlite) {
       sent_at timestamptz NOT NULL,
       synced_at timestamptz NOT NULL DEFAULT now()
     );
-    -- Mirrors migration 0161: DB-level dedup for the CRM-send-vs-worker race (outbound only, per mailbox).
+    -- Mirrors migration 0162: DB-level dedup for the CRM-send-vs-worker race (outbound only, per mailbox).
     CREATE UNIQUE INDEX emails_outbound_internet_message_id_uq
       ON ${SCHEMA}.emails (user_id, internet_message_id)
       WHERE internet_message_id IS NOT NULL AND direction = 'outbound';

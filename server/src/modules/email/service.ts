@@ -1165,7 +1165,7 @@ export async function sendEmail(
 
   // Store the email record. onConflictDoNothing closes the CRM-send-vs-worker race: if the Sent-folder
   // sync already stored this message's copy (same user + internet_message_id, enforced by the partial
-  // unique index from migration 0161), this insert no-ops and we adopt the existing row below — the DB
+  // unique index from migration 0162), this insert no-ops and we adopt the existing row below — the DB
   // enforces the dedup instead of relying on insert ordering.
   let [emailRecord] = await tenantDb
     .insert(emails)
