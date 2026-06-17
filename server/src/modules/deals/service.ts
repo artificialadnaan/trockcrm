@@ -3495,21 +3495,27 @@ export async function setDealEstimator(
 
     // A NEW estimator is validated exactly like a reassignment assignee (exists, active, same office).
     if (newEstimator != null) {
-      // FINDING 1 (Codex): validate the new estimator against the ACTIVE TENANT office (x-office-id, which
-      // the route threads in as officeId), NOT the deal's cosmetic project-number PREFIX. The deal form lets
-      // a deal's officeCode prefix differ from its tenant; inside the shared validateDealReassignmentAssignee
-      // a NON-null dealOfficeCode (the prefix) TAKES PRECEDENCE and only falls back to the passed office when
-      // the prefix is null — so passing existing.officeCode would wrongly reject a valid SAME-TENANT estimator
-      // with DEAL_REASSIGNMENT_OFFICE_MISMATCH. Pass null for the prefix so it can't take precedence, and the
-      // active tenant officeId as the fallback.
+      // FINDING 1 (Codex): validate the new estimator against the ACTIVE SELECTED office (x-office-id, which
+      // the route threads in as officeId), NOT the deal's cosmetic project-number PREFIX and NOT the current
+      // owner's office. Inside the shared validateDealReassignmentAssignee, two inputs can override the
+      // active-office fallback:
+      //   1. dealOfficeCode (the prefix): a NON-null value TAKES PRECEDENCE over the passed office, so passing
+      //      existing.officeCode would wrongly reject a valid SAME-TENANT estimator with
+      //      DEAL_REASSIGNMENT_OFFICE_MISMATCH — pass null so the prefix can't take precedence.
+      //   2. currentAssignedRepId (the owner): a non-null value OVERRIDES the active-office fallback with the
+      //      CURRENT OWNER's office (else-branch: `if (currentAssignedRepId) dealOfficeId = currentOwner.officeId`),
+      //      which would validate the estimator against the owner's office instead of the active selected office.
+      // Pass NO current owner (null) so the active office isn't overridden, and pass the active officeId as the
+      // fallback. This validates the estimator against the ACTIVE office, matching WHITE #748's honor-the-active-
+      // office pattern.
       // NOTE: WHITE's PR #748 owns validateDealReassignmentAssignee (a SEPARATE multi-office
       // user_office_access bug) — do NOT edit that shared function; this is a CALL-SITE-only fix that keeps
-      // validating against the active tenant office and stays correct after #748 merges.
+      // validating against the active selected office and stays correct after #748 merges.
       await validateDealReassignmentAssignee(
         tx,
         newEstimator,
         null,
-        owner,
+        null,
         officeId ?? undefined
       );
     }

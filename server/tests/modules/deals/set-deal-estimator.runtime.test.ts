@@ -134,6 +134,89 @@ function makeTenantDb(initial: FakeDeal) {
   return tenantDb;
 }
 
+// Office-AWARE fake: unlike makeTenantDb (which returns one canned user for every lookup), this resolves
+// each `users`/`offices` row by the id embedded in the query's WHERE so the CURRENT OWNER can sit in a
+// DIFFERENT office than the new estimator. It records which user ids the validation actually queried, which
+// is the load-bearing proof for FINDING 1: the active-office path must NEVER consult the current owner.
+function makeOfficeAwareTenantDb(opts: {
+  deal: FakeDeal;
+  usersById: Record<string, { id: string; isActive: boolean; officeId: string; displayName?: string }>;
+  officesById: Record<string, { id: string; slug: string; name: string }>;
+}) {
+  const state = {
+    deal: { isChangeOrder: false, officeCode: null as string | null, isActive: true, ...opts.deal } as FakeDeal,
+    updateCalls: [] as Array<Record<string, unknown>>,
+    userIdsQueried: [] as string[],
+  };
+  const tenantDb: any = {
+    _state: state,
+    select() {
+      return {
+        from(table: any) {
+          const name = getTableName(table);
+          return {
+            where(condition: unknown) {
+              const text = extractSqlText(condition);
+              let rows: unknown[] = [];
+              if (name === "deals") {
+                rows = state.deal.isActive === false ? [] : [{ ...state.deal }];
+              } else if (name === "users") {
+                const match = Object.values(opts.usersById).find((u) => text.includes(u.id));
+                if (match) state.userIdsQueried.push(match.id);
+                rows = match ? [{ ...match }] : [];
+              } else if (name === "offices") {
+                const match = Object.values(opts.officesById).find((o) => text.includes(o.id));
+                rows = match ? [{ ...match }] : [];
+              }
+              return {
+                limit() {
+                  const p = Promise.resolve(rows);
+                  return {
+                    for() {
+                      return p;
+                    },
+                    then(onf: (v: unknown[]) => unknown) {
+                      return p.then(onf);
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+    update() {
+      return {
+        set(values: Record<string, unknown>) {
+          state.updateCalls.push(values);
+          return {
+            where() {
+              Object.assign(state.deal, values);
+              return {
+                returning() {
+                  return Promise.resolve([{ ...state.deal }]);
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+    insert() {
+      return {
+        values() {
+          return Promise.resolve();
+        },
+      };
+    },
+    transaction(cb: (tx: unknown) => unknown) {
+      return cb(tenantDb);
+    },
+  };
+  return tenantDb;
+}
+
 const OWNER = "owner-1";
 const B = "est-b";
 
@@ -165,6 +248,44 @@ describe("setDealEstimator — Codex findings (runtime)", () => {
       db,
       expect.objectContaining({ dealId: "d", estimatorUserId: B }),
     );
+  });
+
+  // FINDING 1 (active office vs current owner's office)
+  it("validates the estimator against the ACTIVE selected office, NOT the current owner's office", async () => {
+    // The deal's CURRENT OWNER is in office o2 (ATL). The active selected office (x-office-id, threaded as
+    // officeId) is o1 (DFW). The new estimator B is in o1. Passing NO current owner means
+    // validateDealReassignmentAssignee validates B against the ACTIVE office (o1) and ACCEPTS it.
+    //
+    // This FAILS under the old `validateDealReassignmentAssignee(tx, newEstimator, null, owner, officeId)`
+    // call: with the owner passed, the helper looks up the OWNER row, OVERRIDES dealOfficeId with the owner's
+    // office (o2), and rejects B (in o1) with DEAL_REASSIGNMENT_OFFICE_MISMATCH — so both the acceptance
+    // assertion and the "owner never queried" assertion below regress if the owner arg is reintroduced.
+    const db = makeOfficeAwareTenantDb({
+      deal: { id: "d", estimatorUserId: null, assignedRepId: OWNER, officeCode: null },
+      usersById: {
+        [OWNER]: { id: OWNER, isActive: true, officeId: "o2" }, // current owner — DIFFERENT office
+        [B]: { id: B, isActive: true, officeId: "o1" }, // new estimator — in the ACTIVE office
+      },
+      officesById: {
+        o1: { id: "o1", slug: "dfw", name: "Dallas" },
+        o2: { id: "o2", slug: "atl", name: "Atlanta" },
+      },
+    });
+
+    const result = await setDealEstimator(db, "d", B, OWNER, "o1");
+
+    expect(result).toBeTruthy();
+    expect((result as { estimatorUserId?: string | null }).estimatorUserId).toBe(B);
+    expect(db._state.updateCalls[0]?.estimatorUserId).toBe(B);
+    expect(commissions.mintEstimatorCommissionForDeal).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ dealId: "d", estimatorUserId: B }),
+    );
+    // PROOF the ACTIVE office (not the owner's) drove validation: only the estimator row was looked up; the
+    // current OWNER row was NEVER queried. The old (…, owner, …) call would have queried the owner for its
+    // office, so this assertion is the regression guard for the call-site fix.
+    expect(db._state.userIdsQueried).toContain(B);
+    expect(db._state.userIdsQueried).not.toContain(OWNER);
   });
 
   // FINDING 2

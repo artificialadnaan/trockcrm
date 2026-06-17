@@ -312,6 +312,7 @@ function makeDealDetail(overrides: Record<string, unknown> = {}) {
     estimatingSubstage: "building_estimate",
     isBidBoardOwned: false,
     bidBoardOwnership: null,
+    isChangeOrder: false,
     stageHistory: [],
     approvals: [],
     changeOrders: [],
@@ -487,5 +488,60 @@ describe("DealDetailPage estimator picker", () => {
     expect(html).toContain("Casey Estimator");
     expect(html).toContain("Only admins and directors can edit the estimator.");
     expect(html).not.toContain('aria-label="Edit estimator"');
+  });
+
+  // FINDING 2 (Codex): a change order's estimator is inherited from the parent and the server 409s on
+  // any edit, so even a director (who would normally get the picker) must see it READ-ONLY with the
+  // inherited note — never an editable control.
+  it("renders the estimator read-only with an inherited note on a change-order deal (even for directors)", () => {
+    mocks.useAuthMock.mockReturnValueOnce({ user: { id: "director-1", role: "director", activeOfficeId: "office-1" } });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ isChangeOrder: true, estimatorUserId: "est-1", estimatorUserName: "Casey Estimator" }),
+    });
+
+    const html = renderPage();
+    expect(html).toContain("Casey Estimator");
+    expect(html).toContain("Inherited from the parent deal.");
+    expect(html).not.toContain('aria-label="Edit estimator"');
+    expect(html).not.toContain("— None —");
+  });
+
+  // FINDING 3 (Codex): a post-save refetch failure must NOT look like a save failure. The estimator PATCH
+  // succeeds; the refetch (onReassigned) rejects. The save outcome is success (toast.success, no
+  // toast.error); the refetch failure is isolated to a soft info toast.
+  it("shows save SUCCESS when the PATCH succeeds but the post-save refetch rejects", async () => {
+    const refetch = vi.fn().mockRejectedValue(new Error("network blip"));
+    mocks.useAuthMock.mockReturnValueOnce({ user: { id: "director-1", role: "director", activeOfficeId: "office-1" } });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch,
+      deal: makeDealDetail({ estimatorUserId: "est-1", estimatorUserName: "Casey Estimator" }),
+    });
+    // The PATCH itself resolves — only the refetch fails.
+    mocks.updateDealEstimatorMock.mockResolvedValueOnce({ deal: makeDealDetail({ estimatorUserId: "est-2" }) });
+
+    mounted = mountPage();
+
+    const select = mounted.container.querySelector('select[aria-label="Edit estimator"]') as HTMLSelectElement | null;
+    expect(select).toBeTruthy();
+
+    await act(async () => {
+      select!.value = "est-2";
+      select!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    // The save fired and the mutation result drives the outcome: SUCCESS, never an error.
+    expect(mocks.updateDealEstimatorMock).toHaveBeenCalledWith("deal-1", "est-2", { officeId: null });
+    expect(mocks.toastSuccessMock).toHaveBeenCalledWith("Estimator updated");
+    expect(mocks.toastErrorMock).not.toHaveBeenCalled();
+    // The refetch failure is isolated to a soft info toast, not the save's error channel.
+    expect(refetch).toHaveBeenCalled();
+    expect(mocks.toastInfoMock).toHaveBeenCalled();
+    // No inline save-error text is rendered.
+    expect(mounted.container.textContent).not.toContain("Failed to update estimator");
   });
 });

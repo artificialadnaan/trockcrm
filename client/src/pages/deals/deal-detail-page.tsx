@@ -1090,7 +1090,14 @@ function DealRightRail({
       // estimator edit must target the office the deal was read from, not the viewer's active office.
       await apiUpdateDealEstimator(deal.id, nextId, { officeId });
       toast.success(nextId ? "Estimator updated" : "Estimator cleared");
-      await onReassigned();
+      // FINDING 3 (Codex): the post-save refetch is isolated in its OWN try/catch (mirrors handleHoldToggle)
+      // so a refetch failure can NEVER surface as a save error — the estimator PATCH already succeeded. The
+      // outer catch reflects ONLY the PATCH result; a failed refetch just soft-warns the user to reload.
+      try {
+        await onReassigned();
+      } catch {
+        toast.info("Estimator updated. Refresh the page to see the latest detail state.");
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to update estimator";
       setEstimatorError(message);
@@ -1165,7 +1172,18 @@ function DealRightRail({
           <DetailRailItem
             label="Estimator"
             value={
-              canEditEstimator ? (
+              // FINDING 2 (Codex): a change order's estimator is INHERITED from the parent deal and the server
+              // 409s (CHANGE_ORDER_FIELD_LOCKED) on any edit, so never render an editable picker on a CO —
+              // show the resolved estimator read-only with an inherited note. The editable picker stays gated
+              // on (canEditEstimator && !deal.isChangeOrder) via this short-circuit.
+              deal.isChangeOrder ? (
+                <div className="space-y-1">
+                  <span>{estimatorName}</span>
+                  <p className="text-xs italic text-slate-500">
+                    Inherited from the parent deal.
+                  </p>
+                </div>
+              ) : canEditEstimator ? (
                 <div className="space-y-1">
                   <select
                     aria-label="Edit estimator"
