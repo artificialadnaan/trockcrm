@@ -1165,7 +1165,7 @@ export async function sendEmail(
 
   // Store the email record. onConflictDoNothing closes the CRM-send-vs-worker race: if the Sent-folder
   // sync already stored this message's copy (same user + internet_message_id, enforced by the partial
-  // unique index from migration 0162), this insert no-ops and we adopt the existing row below — the DB
+  // unique index from migration 0163), this insert no-ops and we adopt the existing row below — the DB
   // enforces the dedup instead of relying on insert ordering.
   let [emailRecord] = await tenantDb
     .insert(emails)
@@ -1190,6 +1190,9 @@ export async function sendEmail(
     .returning();
 
   let adopted = false;
+  // The worker's row BEFORE reconcile — its (guessed) assignment targets need re-stat'ing afterward, since
+  // this email no longer counts toward them once it's reattributed to the explicit CRM association.
+  let adoptedPriorEmail: typeof emails.$inferSelect | null = null;
   if (!emailRecord) {
     // Lost the race — the worker already stored the Sent-folder copy. Adopt it (key on the stable
     // internet_message_id when we have it; otherwise on the graph message id).
@@ -1207,6 +1210,7 @@ export async function sendEmail(
       )
       .limit(1);
     emailRecord = existing;
+    adoptedPriorEmail = existing ?? null;
     adopted = true;
   }
   if (!emailRecord) {
@@ -1250,28 +1254,35 @@ export async function sendEmail(
     emailRecord.threadBindingId = binding.id;
   }
 
-  // Create activity record for the unified feed — but ONLY when this call actually inserted the email.
-  // For an adopted row the worker already wrote the activity + refreshed stats; repeating them here would
-  // double-create the activity and redundantly re-stat.
-  if (!adopted) {
-    await tenantDb.insert(activities).values({
-      type: "email",
-      responsibleUserId: userId,
-      performedByUserId: userId,
-      sourceEntityType: outboundAssociation.links.sourceEntityType,
-      sourceEntityId: outboundAssociation.links.sourceEntityId,
-      companyId: outboundAssociation.links.companyId,
-      propertyId: outboundAssociation.links.propertyId,
-      leadId: outboundAssociation.links.leadId,
-      dealId: outboundAssociation.links.dealId,
-      contactId: outboundAssociation.links.contactId,
-      emailId: emailRecord.id,
-      subject: input.subject,
-      body: stripHtml(input.bodyHtml).substring(0, 1000),
-      occurredAt: new Date(),
-    });
+  // Activity for the unified feed. For an ADOPTED row the worker already wrote an activity (with its
+  // guessed target) — RECONCILE rather than blanket-skip: drop the worker's activity and write one carrying
+  // the EXPLICIT CRM association, so the feed points at the deal/company the sender actually chose. (Without
+  // this, a divergent worker guess leaves the activity + counters on the wrong target.)
+  if (adopted) {
+    await tenantDb.delete(activities).where(eq(activities.emailId, emailRecord.id));
+  }
+  await tenantDb.insert(activities).values({
+    type: "email",
+    responsibleUserId: userId,
+    performedByUserId: userId,
+    sourceEntityType: outboundAssociation.links.sourceEntityType,
+    sourceEntityId: outboundAssociation.links.sourceEntityId,
+    companyId: outboundAssociation.links.companyId,
+    propertyId: outboundAssociation.links.propertyId,
+    leadId: outboundAssociation.links.leadId,
+    dealId: outboundAssociation.links.dealId,
+    contactId: outboundAssociation.links.contactId,
+    emailId: emailRecord.id,
+    subject: input.subject,
+    body: stripHtml(input.bodyHtml).substring(0, 1000),
+    occurredAt: new Date(),
+  });
 
-    await refreshEmailStatsForEmailRecord(tenantDb, emailRecord);
+  // Refresh the EXPLICIT targets; for an adopted row also re-stat the worker's PRIOR targets (this email
+  // no longer counts toward them after the reattribution), so neither side's counters go stale.
+  await refreshEmailStatsForEmailRecord(tenantDb, emailRecord);
+  if (adopted && adoptedPriorEmail) {
+    await refreshEmailStatsForEmailRecord(tenantDb, adoptedPriorEmail);
   }
 
   return emailRecord;

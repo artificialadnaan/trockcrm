@@ -625,7 +625,10 @@ export async function processMailMessage(
           -- case-insensitive recipient overlap (worker lowercases to/cc; sendEmail stores as-composed)
           AND EXISTS (SELECT 1 FROM unnest(to_addresses) addr WHERE lower(addr) = ANY($4::text[]))
           AND sent_at BETWEEN ($5::timestamptz - interval '1 day') AND ($5::timestamptz + interval '1 day')
-        ORDER BY sent_at DESC LIMIT 1`,
+        -- Pick the row CLOSEST to this Sent copy's timestamp, not merely the newest: with multiple
+        -- pre-feature CRM sends in the window, ORDER BY newest could stamp THIS message's Message-ID onto
+        -- a different (newer) row, dropping the real one and breaking later dedup.
+        ORDER BY ABS(EXTRACT(EPOCH FROM (sent_at - $5::timestamptz))) ASC LIMIT 1`,
       [userId, conversationId, subject, toAddresses, sentAt]
     );
     if (legacy.rows.length > 0) {
@@ -795,34 +798,53 @@ export async function processMailMessage(
     activeDealNames: contactContext.dealCandidates.map((d) => `${d.dealNumber} ${d.name}`.trim()),
   };
 
-  // Create activity record AFTER deal association so deal_id is included in the INSERT
-  // (no separate UPDATE needed)
-  const activitySourceEntityType =
-    association.dealId
-      ? "deal"
-      : assignment.assignedEntityType === "company" && assignment.assignedEntityId
-        ? "company"
-        : contactMatch?.id
-          ? "contact"
-          : null;
-  const activitySourceEntityId =
-    association.dealId
-      ?? assignment.assignedEntityId
-      ?? contactMatch?.id
-      ?? null;
+  // For a deal-assigned email, the activity's parent link columns + the parent-company stat target come
+  // FROM THE DEAL (company/property/lead), exactly like CRM sendEmail's resolveOutboundAssociation.
+  let dealParents: { company_id: string | null; property_id: string | null; source_lead_id: string | null } | null =
+    null;
+  if (association.dealId) {
+    const dp = await client.query(
+      `SELECT company_id, property_id, source_lead_id FROM ${schemaName}.deals WHERE id = $1 LIMIT 1`,
+      [association.dealId]
+    );
+    dealParents = dp.rows[0] ?? null;
+  }
+
+  // Derive source_entity_type + ALL link columns so they agree (a lead/property assignment must NOT fall
+  // back to source_entity_type='contact' while lead_id/property_id are set) and mirror the CRM path.
+  let activitySourceEntityType: string | null = null;
+  let activitySourceEntityId: string | null = null;
+  let activityCompanyId: string | null = null;
+  let activityLeadId: string | null = null;
+  let activityPropertyId: string | null = null;
+  if (association.dealId) {
+    activitySourceEntityType = "deal";
+    activitySourceEntityId = association.dealId;
+    activityCompanyId = dealParents?.company_id ?? null;
+    activityPropertyId = dealParents?.property_id ?? null;
+    activityLeadId = dealParents?.source_lead_id ?? null;
+  } else if (assignment.assignedEntityType === "company" && assignment.assignedEntityId) {
+    activitySourceEntityType = "company";
+    activitySourceEntityId = assignment.assignedEntityId;
+    activityCompanyId = assignment.assignedEntityId;
+  } else if (assignment.assignedEntityType === "lead" && assignment.assignedEntityId) {
+    activitySourceEntityType = "lead";
+    activitySourceEntityId = assignment.assignedEntityId;
+    activityLeadId = assignment.assignedEntityId;
+  } else if (assignment.assignedEntityType === "property" && assignment.assignedEntityId) {
+    activitySourceEntityType = "property";
+    activitySourceEntityId = assignment.assignedEntityId;
+    activityPropertyId = assignment.assignedEntityId;
+  } else if (contactMatch?.id) {
+    activitySourceEntityType = "contact";
+    activitySourceEntityId = contactMatch.id;
+  }
+
   const responsibleUserId = userId;
   // Outbound = the rep performed the send → set performed_by_user_id so the deal shows in their "mine"
   // (mine-visibility filters on performed_by_user_id = userId, like CRM sendEmail). Inbound was received,
   // not performed, so it stays NULL.
   const performedByUserId = isOutbound ? userId : null;
-  // Populate ALL entity link columns the activity supports (like the CRM sendEmail path), so the email
-  // activity actually shows on a company/lead/property it was assigned to — not just deal/contact.
-  const activityCompanyId =
-    assignment.assignedEntityType === "company" ? assignment.assignedEntityId ?? null : null;
-  const activityLeadId =
-    assignment.assignedEntityType === "lead" ? assignment.assignedEntityId ?? null : null;
-  const activityPropertyId =
-    assignment.assignedEntityType === "property" ? assignment.assignedEntityId ?? null : null;
   if (activitySourceEntityType && activitySourceEntityId) {
     await client.query(
       `INSERT INTO ${schemaName}.activities
@@ -847,26 +869,25 @@ export async function processMailMessage(
     );
   }
 
-  // Refresh email counters (email_count / last_email_at) for EVERY stat target the email resolved to, not
-  // just the deal — the CRM sendEmail + manual-association paths refresh all targets, and a company/lead-
-  // assigned email would otherwise show stale counters. Mirrors deriveEmailStatTargetsFromEmail (company /
-  // deal / lead; contact has no server stat branch) + the server's per-type branches.
+  // Refresh email counters for EVERY stat target the email resolved to (mirrors the CRM path's
+  // collectEmailStatTargetsForEmail + the deal→parent-company cascade + the server's contact branch).
+  // Deduped so a company reached via both an assignment and a deal isn't refreshed twice.
+  const statTargets = new Map<string, "deal" | "company" | "lead" | "contact">();
   if (association.dealId) {
-    await refreshEntityEmailStatsRaw(client, schemaName, "deal", association.dealId);
+    statTargets.set(`deal:${association.dealId}`, "deal");
+    if (dealParents?.company_id) statTargets.set(`company:${dealParents.company_id}`, "company");
   }
   if (
     assignment.assignedEntityId &&
-    assignment.assignedEntityId !== association.dealId &&
     (assignment.assignedEntityType === "company" ||
       assignment.assignedEntityType === "lead" ||
       assignment.assignedEntityType === "deal")
   ) {
-    await refreshEntityEmailStatsRaw(
-      client,
-      schemaName,
-      assignment.assignedEntityType,
-      assignment.assignedEntityId
-    );
+    statTargets.set(`${assignment.assignedEntityType}:${assignment.assignedEntityId}`, assignment.assignedEntityType);
+  }
+  if (contactMatch?.id) statTargets.set(`contact:${contactMatch.id}`, "contact");
+  for (const [key, type] of statTargets) {
+    await refreshEntityEmailStatsRaw(client, schemaName, type, key.slice(key.indexOf(":") + 1));
   }
 
   // createClassificationTaskRaw hardcodes an INBOUND-flavored task (type='inbound_email',
@@ -955,7 +976,7 @@ export async function processMailMessage(
 async function refreshEntityEmailStatsRaw(
   client: any,
   schemaName: string,
-  entityType: "deal" | "company" | "lead",
+  entityType: "deal" | "company" | "lead" | "contact",
   entityId: string
 ): Promise<void> {
   if (entityType === "deal") {
@@ -977,6 +998,16 @@ async function refreshEntityEmailStatsRaw(
           SET email_count = (SELECT COUNT(*)::int FROM ${schemaName}.emails e WHERE ${match}),
               last_email_at = (SELECT MAX(e.sent_at) FROM ${schemaName}.emails e WHERE ${match})
         WHERE l.id = $1`,
+      [entityId]
+    );
+  } else if (entityType === "contact") {
+    // contact: mirrors the server's contact branch (assigned-to-contact OR contact_id).
+    const match = `e.assignment_status <> 'ignored' AND ((e.assigned_entity_type = 'contact' AND e.assigned_entity_id = $1) OR e.contact_id = $1)`;
+    await client.query(
+      `UPDATE ${schemaName}.contacts AS c
+          SET email_count = (SELECT COUNT(*)::int FROM ${schemaName}.emails e WHERE ${match}),
+              last_email_at = (SELECT MAX(e.sent_at) FROM ${schemaName}.emails e WHERE ${match})
+        WHERE c.id = $1`,
       [entityId]
     );
   } else {

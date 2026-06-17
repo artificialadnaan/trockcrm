@@ -86,7 +86,7 @@ async function setupSchema(pg: PGlite) {
       sent_at timestamptz NOT NULL,
       synced_at timestamptz NOT NULL DEFAULT now()
     );
-    -- Mirrors migration 0162: DB-level dedup for the CRM-send-vs-worker race (outbound only, per mailbox).
+    -- Mirrors migration 0163: DB-level dedup for the CRM-send-vs-worker race (outbound only, per mailbox).
     CREATE UNIQUE INDEX emails_outbound_internet_message_id_uq
       ON ${SCHEMA}.emails (user_id, internet_message_id)
       WHERE internet_message_id IS NOT NULL AND direction = 'outbound';
@@ -94,12 +94,14 @@ async function setupSchema(pg: PGlite) {
     CREATE TABLE ${SCHEMA}.contacts (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       first_name text, last_name text, company_id uuid, company_name text,
-      email text, is_active boolean DEFAULT true
+      email text, is_active boolean DEFAULT true,
+      email_count int DEFAULT 0, last_email_at timestamptz
     );
     CREATE TABLE ${SCHEMA}.deals (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       deal_number text, name text, company_id uuid, stage_id uuid,
       property_address text, property_city text, property_state text, property_zip text,
+      property_id uuid,
       is_active boolean DEFAULT true,
       source_lead_id uuid,
       email_count int DEFAULT 0,

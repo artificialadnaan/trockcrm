@@ -126,8 +126,19 @@ function createQueryMock(options: {
       return { rows: [] };
     }
 
-    // Deal email-stat refresh (email_count / last_email_at) after an email is associated to a deal.
-    if (sql.includes("UPDATE office_beta.deals") && sql.includes("email_count")) {
+    // Deal-parent fetch (company/property/source-lead) for the activity link columns + parent-company stat.
+    if (sql.includes("SELECT company_id, property_id, source_lead_id FROM") && sql.includes(".deals")) {
+      return { rows: [{ company_id: null, property_id: null, source_lead_id: null }] };
+    }
+
+    // Email-stat refresh (email_count / last_email_at) for any resolved target.
+    if (
+      (sql.includes("UPDATE office_beta.deals") ||
+        sql.includes("UPDATE office_beta.companies") ||
+        sql.includes("UPDATE office_beta.leads") ||
+        sql.includes("UPDATE office_beta.contacts")) &&
+      sql.includes("email_count")
+    ) {
       return { rows: [] };
     }
 
