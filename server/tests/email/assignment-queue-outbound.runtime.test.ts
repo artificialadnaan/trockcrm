@@ -94,12 +94,21 @@ describe("isEmailAssignmentQueueCandidate (JS site)", () => {
     ).toBe(true);
   });
 
-  it("excludes an assigned (no-ambiguity) outbound email", () => {
+  it("excludes an outbound email that isn't a queue candidate — no ambiguity reason, or already assigned", () => {
+    // No ambiguity reason → not a candidate (nothing to resolve).
     expect(
       isEmailAssignmentQueueCandidate({
         direction: "outbound",
         assignmentAmbiguityReason: null,
         assignmentStatus: "unassigned",
+      })
+    ).toBe(false);
+    // Already assigned (status) → not a candidate, even with an ambiguity reason.
+    expect(
+      isEmailAssignmentQueueCandidate({
+        direction: "outbound",
+        assignmentAmbiguityReason: "multiple_deal_candidates",
+        assignmentStatus: "assigned",
       })
     ).toBe(false);
   });

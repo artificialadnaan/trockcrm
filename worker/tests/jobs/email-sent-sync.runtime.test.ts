@@ -3,7 +3,7 @@
 // Sent-folder copy is later synced carrying a DIFFERENT graph_message_id but the SAME internet_message_id.
 // Plus: outbound matches the RECIPIENT (not sender), selective-store keeps noise out, and a sent reply on
 // a bound thread inherits the inbound side's deal.
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
 // The worker module imports a real pg pool at load time — stub it; tests pass an explicit PGlite client.
@@ -156,7 +156,9 @@ beforeEach(async () => {
   nextAssignment = { ...UNASSIGNED };
 });
 
-afterAll(async () => {
+// beforeEach creates a fresh instance per test, so close each one here — closing only at afterAll would
+// leak every prior test's PGlite instance.
+afterEach(async () => {
   await db?.close();
 });
 
