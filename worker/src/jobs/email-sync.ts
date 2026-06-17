@@ -226,20 +226,34 @@ export async function runEmailSync(): Promise<void> {
     console.log(`[Worker:email-sync] Processing ${tokenRows.rows.length} users`);
 
     for (const tokenRow of tokenRows.rows) {
-      try {
-        // Skip if last sync was less than 60 seconds ago (prevents overlap with slow syncs)
-        if (
-          tokenRow.last_sync_at &&
-          Date.now() - new Date(tokenRow.last_sync_at).getTime() < 60_000
-        ) {
-          continue;
-        }
+      // Skip if last sync was less than 60 seconds ago (before taking the lock).
+      if (
+        tokenRow.last_sync_at &&
+        Date.now() - new Date(tokenRow.last_sync_at).getTime() < 60_000
+      ) {
+        continue;
+      }
 
-        // Refresh token if within 5 min of expiry (single-statement UPDATE — autocommit, no wrapping txn).
+      // SESSION-level advisory lock for the WHOLE user (token refresh + both folders). Serializes
+      // overlapping cron runs so two can't refresh the same user's cached MSAL token concurrently — the
+      // loser of that race rotates/invalidates the refresh token and wrongly marks the mailbox
+      // reauth_needed (the dark-mailbox failure mode). A SESSION lock (not xact) spans the independent
+      // per-folder transactions without holding one open; released in finally (and auto-released if the
+      // connection drops).
+      const lock = await client.query(
+        "SELECT pg_try_advisory_lock(hashtext($1)) AS acquired",
+        [tokenRow.user_id]
+      );
+      if (!lock.rows[0]?.acquired) {
+        console.log(`[Worker:email-sync] Skipping user ${tokenRow.user_id} — another run holds the lock`);
+        continue;
+      }
+      try {
+        // Refresh token if within 5 min of expiry — UNDER the lock, so concurrent runs can't race the cache.
         const expiresAt = new Date(tokenRow.token_expires_at);
         if (expiresAt.getTime() - Date.now() < 5 * 60 * 1000) {
           const refreshedToken = await refreshTokenForWorker(client, tokenRow);
-          if (!refreshedToken) continue; // reauth marked inside refreshTokenForWorker
+          if (!refreshedToken) continue; // reauth marked inside; finally still unlocks
           tokenRow.access_token = refreshedToken;
         }
 
@@ -264,6 +278,10 @@ export async function runEmailSync(): Promise<void> {
             [`Sync failed: ${err.message}`, tokenRow.user_id]
           ).catch(() => {});
         }
+      } finally {
+        await client
+          .query("SELECT pg_advisory_unlock(hashtext($1))", [tokenRow.user_id])
+          .catch(() => {});
       }
     }
 
@@ -351,17 +369,10 @@ async function syncUserMailbox(client: any, tokenRow: any): Promise<void> {
 
   for (const f of buildMailFolders(tokenRow)) {
     try {
+      // The caller (runEmailSync) holds a SESSION-level advisory lock for this user across refresh + both
+      // folders, so concurrent same-user syncs are already excluded — each folder just needs its own
+      // transaction for failure isolation.
       await client.query("BEGIN");
-      // Per-user advisory lock prevents concurrent syncs of the same user; held for this folder's txn.
-      const lockResult = await client.query(
-        "SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired",
-        [user_id]
-      );
-      if (!lockResult.rows[0]?.acquired) {
-        await client.query("COMMIT");
-        console.log(`[Worker:email-sync] Skipping user ${user_id} — sync already in progress`);
-        break;
-      }
       await syncUserMailFolder(client, currentAccessToken, user_id, office_id, schemaName, f);
       await client.query("COMMIT");
     } catch (err: any) {
@@ -729,11 +740,15 @@ export async function processMailMessage(
   }
 
   // Persist assignment_status from the RESOLVED assignment rather than letting it default to 'unassigned'.
-  // The reused insert would otherwise leave an auto-assigned email (deal/entity resolved) looking
-  // unassigned in status views — undercutting the auto-assign the sync just did. (deriveAssignmentStatus
-  // parity: assigned when a deal or entity is attached.)
+  // Mark 'assigned' ONLY for a confident assignment — a deal/entity attached AND no ambiguity. An
+  // AMBIGUOUS resolution (e.g. company-fallback with an ambiguity_reason / requiresClassificationTask)
+  // must stay 'unassigned' so it remains visible in the assignment queue (which filters status=unassigned
+  // AND ambiguity_reason IS NOT NULL); marking it 'assigned' would hide it from the rep who needs to
+  // resolve it. (deriveAssignmentStatus parity, plus the ambiguity guard.)
+  const isAmbiguous =
+    assignment.requiresClassificationTask === true || assignment.ambiguityReason != null;
   const assignmentStatus =
-    assignment.assignedDealId || assignment.assignedEntityId ? "assigned" : "unassigned";
+    (assignment.assignedDealId || assignment.assignedEntityId) && !isAmbiguous ? "assigned" : "unassigned";
 
   const [insertResult] = [await client.query(
     `INSERT INTO ${schemaName}.emails
@@ -800,12 +815,20 @@ export async function processMailMessage(
   // (mine-visibility filters on performed_by_user_id = userId, like CRM sendEmail). Inbound was received,
   // not performed, so it stays NULL.
   const performedByUserId = isOutbound ? userId : null;
+  // Populate ALL entity link columns the activity supports (like the CRM sendEmail path), so the email
+  // activity actually shows on a company/lead/property it was assigned to — not just deal/contact.
+  const activityCompanyId =
+    assignment.assignedEntityType === "company" ? assignment.assignedEntityId ?? null : null;
+  const activityLeadId =
+    assignment.assignedEntityType === "lead" ? assignment.assignedEntityId ?? null : null;
+  const activityPropertyId =
+    assignment.assignedEntityType === "property" ? assignment.assignedEntityId ?? null : null;
   if (activitySourceEntityType && activitySourceEntityId) {
     await client.query(
       `INSERT INTO ${schemaName}.activities
        (type, responsible_user_id, performed_by_user_id, source_entity_type, source_entity_id,
-        deal_id, contact_id, email_id, subject, body, occurred_at)
-       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        deal_id, contact_id, company_id, lead_id, property_id, email_id, subject, body, occurred_at)
+       VALUES ('email', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         responsibleUserId,
         performedByUserId,
@@ -813,6 +836,9 @@ export async function processMailMessage(
         activitySourceEntityId,
         association.dealId, // may be null if 0 or multiple deals
         contactMatch?.id ?? null,
+        activityCompanyId,
+        activityLeadId,
+        activityPropertyId,
         emailId,
         subject,
         bodyPreview.substring(0, 1000),
@@ -821,13 +847,26 @@ export async function processMailMessage(
     );
   }
 
-  // Refresh the auto-associated deal's email counters (email_count / last_email_at) so they're not stale —
-  // the CRM sendEmail + manual-association paths do this; the sync must too. Mirrors the deal branch of
-  // server stats-service.refreshEntityEmailStats, qualified to the office schema (the worker runs outside a
-  // search_path). Deal is the stat target a sent/received email auto-associates to; company/lead cascades
-  // stay with the server's full refresh on the CRM paths.
+  // Refresh email counters (email_count / last_email_at) for EVERY stat target the email resolved to, not
+  // just the deal — the CRM sendEmail + manual-association paths refresh all targets, and a company/lead-
+  // assigned email would otherwise show stale counters. Mirrors deriveEmailStatTargetsFromEmail (company /
+  // deal / lead; contact has no server stat branch) + the server's per-type branches.
   if (association.dealId) {
-    await refreshDealEmailStatsRaw(client, schemaName, association.dealId);
+    await refreshEntityEmailStatsRaw(client, schemaName, "deal", association.dealId);
+  }
+  if (
+    assignment.assignedEntityId &&
+    assignment.assignedEntityId !== association.dealId &&
+    (assignment.assignedEntityType === "company" ||
+      assignment.assignedEntityType === "lead" ||
+      assignment.assignedEntityType === "deal")
+  ) {
+    await refreshEntityEmailStatsRaw(
+      client,
+      schemaName,
+      assignment.assignedEntityType,
+      assignment.assignedEntityId
+    );
   }
 
   // createClassificationTaskRaw hardcodes an INBOUND-flavored task (type='inbound_email',
@@ -907,35 +946,57 @@ export async function processMailMessage(
 }
 
 /**
- * Refresh a deal's email_count / last_email_at after an email is stored against it (worker context).
- * Qualified to the office schema; mirrors the deal branch of server stats-service.refreshEntityEmailStats
- * (same `assignment_status <> 'ignored'` filter and deal/lead source-lead matching) so the worker-synced
- * counters agree with the CRM-composed and manual-association paths.
+ * Refresh email_count / last_email_at for a deal/company/lead an email resolved to (worker context).
+ * Qualified to the office schema; mirrors the deal/company/lead branches of server
+ * stats-service.refreshEntityEmailStats (same `assignment_status <> 'ignored'` filter and per-type
+ * matching) so the worker-synced counters agree with the CRM-composed and manual-association paths.
+ * (Contact has no server stat branch, so it is intentionally not refreshed.)
  */
-async function refreshDealEmailStatsRaw(
+async function refreshEntityEmailStatsRaw(
   client: any,
   schemaName: string,
-  dealId: string
+  entityType: "deal" | "company" | "lead",
+  entityId: string
 ): Promise<void> {
-  await client.query(
-    `UPDATE ${schemaName}.deals AS d
-        SET email_count = (
-              SELECT COUNT(e.id)::int FROM ${schemaName}.emails e
-               WHERE e.assignment_status <> 'ignored'
-                 AND ((e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
-                   OR e.deal_id = d.id
-                   OR (d.source_lead_id IS NOT NULL AND e.assigned_entity_type = 'lead' AND e.assigned_entity_id = d.source_lead_id))
-            ),
-            last_email_at = (
-              SELECT MAX(e.sent_at) FROM ${schemaName}.emails e
-               WHERE e.assignment_status <> 'ignored'
-                 AND ((e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
-                   OR e.deal_id = d.id
-                   OR (d.source_lead_id IS NOT NULL AND e.assigned_entity_type = 'lead' AND e.assigned_entity_id = d.source_lead_id))
-            )
-      WHERE d.id = $1`,
-    [dealId]
-  );
+  if (entityType === "deal") {
+    const match = `e.assignment_status <> 'ignored'
+       AND ((e.assigned_entity_type = 'deal' AND e.assigned_entity_id = d.id)
+         OR e.deal_id = d.id
+         OR (d.source_lead_id IS NOT NULL AND e.assigned_entity_type = 'lead' AND e.assigned_entity_id = d.source_lead_id))`;
+    await client.query(
+      `UPDATE ${schemaName}.deals AS d
+          SET email_count = (SELECT COUNT(e.id)::int FROM ${schemaName}.emails e WHERE ${match}),
+              last_email_at = (SELECT MAX(e.sent_at) FROM ${schemaName}.emails e WHERE ${match})
+        WHERE d.id = $1`,
+      [entityId]
+    );
+  } else if (entityType === "lead") {
+    const match = `e.assignment_status <> 'ignored' AND e.assigned_entity_type = 'lead' AND e.assigned_entity_id = $1`;
+    await client.query(
+      `UPDATE ${schemaName}.leads AS l
+          SET email_count = (SELECT COUNT(*)::int FROM ${schemaName}.emails e WHERE ${match}),
+              last_email_at = (SELECT MAX(e.sent_at) FROM ${schemaName}.emails e WHERE ${match})
+        WHERE l.id = $1`,
+      [entityId]
+    );
+  } else {
+    // company: counts emails directly on the company, on any of its deals/contacts, or assigned to its
+    // leads/deals/contacts — mirrors the server's company branch exactly.
+    const match = `e.assignment_status <> 'ignored' AND (
+        (e.assigned_entity_type = 'company' AND e.assigned_entity_id = $1)
+        OR e.deal_id IN (SELECT id FROM ${schemaName}.deals WHERE company_id = $1)
+        OR e.contact_id IN (SELECT id FROM ${schemaName}.contacts WHERE company_id = $1)
+        OR (e.assigned_entity_type = 'lead' AND e.assigned_entity_id IN (SELECT id FROM ${schemaName}.leads WHERE company_id = $1))
+        OR (e.assigned_entity_type = 'deal' AND e.assigned_entity_id IN (SELECT id FROM ${schemaName}.deals WHERE company_id = $1))
+        OR (e.assigned_entity_type = 'contact' AND e.assigned_entity_id IN (SELECT id FROM ${schemaName}.contacts WHERE company_id = $1)))`;
+    await client.query(
+      `UPDATE ${schemaName}.companies AS c
+          SET email_count = (SELECT COUNT(*)::int FROM ${schemaName}.emails e WHERE ${match}),
+              last_email_at = (SELECT MAX(e.sent_at) FROM ${schemaName}.emails e WHERE ${match})
+        WHERE c.id = $1`,
+      [entityId]
+    );
+  }
 }
 
 /**

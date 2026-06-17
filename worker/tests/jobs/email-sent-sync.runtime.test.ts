@@ -106,6 +106,8 @@ async function setupSchema(pg: PGlite) {
       last_email_at timestamptz
     );
     CREATE TABLE ${SCHEMA}.contact_deal_associations (contact_id uuid, deal_id uuid);
+    CREATE TABLE ${SCHEMA}.leads (id uuid PRIMARY KEY, company_id uuid, email_count int DEFAULT 0, last_email_at timestamptz);
+    CREATE TABLE ${SCHEMA}.companies (id uuid PRIMARY KEY, email_count int DEFAULT 0, last_email_at timestamptz);
     CREATE TABLE ${SCHEMA}.email_thread_bindings (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       mailbox_account_id uuid, provider varchar(50), provider_conversation_id varchar(500),
@@ -121,6 +123,7 @@ async function setupSchema(pg: PGlite) {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       type text, responsible_user_id uuid, performed_by_user_id uuid,
       source_entity_type text, source_entity_id uuid, deal_id uuid, contact_id uuid,
+      company_id uuid, lead_id uuid, property_id uuid,
       email_id uuid, subject text, body text, occurred_at timestamptz
     );
 
@@ -459,5 +462,62 @@ describe("Sent-folder seeds a thread binding for assigned outbound", () => {
       `SELECT deal_id FROM ${SCHEMA}.emails WHERE graph_message_id = 'graph-in-reply'`
     );
     expect(reply.rows[0].deal_id).toBe(DEAL); // inherited from the seeded binding
+  });
+});
+
+describe("Outbound assignment_status, link columns, and stat targets", () => {
+  it("keeps an AMBIGUOUS sent email unassigned (queue-visible) even though an entity is attached", async () => {
+    const CONTACT = "00000000-0000-4000-8000-0000000000c4";
+    const DEAL = "00000000-0000-4000-8000-0000000000d4";
+    await db.query(`INSERT INTO ${SCHEMA}.contacts (id, email, is_active) VALUES ('${CONTACT}', 'amb@delta.com', true)`);
+    await db.query(
+      `INSERT INTO ${SCHEMA}.deals (id, deal_number, name, stage_id, is_active)
+       VALUES ('${DEAL}', 'DFW-2026-0004', 'Delta', (SELECT id FROM public.pipeline_stage_config LIMIT 1), true)`
+    );
+    await db.query(`INSERT INTO ${SCHEMA}.contact_deal_associations (contact_id, deal_id) VALUES ('${CONTACT}', '${DEAL}')`);
+    // Resolved to a deal BUT ambiguous (multiple candidates) → must NOT be marked assigned.
+    nextAssignment = {
+      ...UNASSIGNED, assignedEntityType: "deal", assignedEntityId: DEAL, assignedDealId: DEAL,
+      ambiguityReason: "multiple_deal_candidates", requiresClassificationTask: true,
+    };
+    await processMailMessage(
+      db, SCHEMA, USER_ID, OFFICE_ID,
+      { id: "graph-amb", internetMessageId: "<amb@x>", from: { emailAddress: { address: "rep@trockgc.com" } },
+        toRecipients: [{ emailAddress: { address: "amb@delta.com" } }], subject: "Q",
+        body: { content: "x" }, sentDateTime: new Date().toISOString() },
+      "outbound"
+    );
+    const row = await db.query<{ assignment_status: string; assignment_ambiguity_reason: string }>(
+      `SELECT assignment_status, assignment_ambiguity_reason FROM ${SCHEMA}.emails WHERE graph_message_id = 'graph-amb'`
+    );
+    expect(row.rows[0].assignment_status).toBe("unassigned"); // queue-visible, not hidden as 'assigned'
+    expect(row.rows[0].assignment_ambiguity_reason).toBe("multiple_deal_candidates");
+  });
+
+  it("populates the lead link column and refreshes the lead's email stats for a lead-assigned outbound", async () => {
+    const CONTACT = "00000000-0000-4000-8000-0000000000c5";
+    const LEAD = "00000000-0000-4000-8000-0000000000e2";
+    await db.query(`INSERT INTO ${SCHEMA}.contacts (id, email, is_active) VALUES ('${CONTACT}', 'lead@epsilon.com', true)`);
+    await db.query(`INSERT INTO ${SCHEMA}.leads (id) VALUES ('${LEAD}')`);
+    // Confident lead assignment (no ambiguity).
+    nextAssignment = { ...UNASSIGNED, assignedEntityType: "lead", assignedEntityId: LEAD, assignedDealId: null, confidence: "high" };
+    await processMailMessage(
+      db, SCHEMA, USER_ID, OFFICE_ID,
+      { id: "graph-lead", internetMessageId: "<lead@x>", from: { emailAddress: { address: "rep@trockgc.com" } },
+        toRecipients: [{ emailAddress: { address: "lead@epsilon.com" } }], subject: "Lead intro",
+        body: { content: "x" }, sentDateTime: new Date().toISOString() },
+      "outbound"
+    );
+    // #4: the activity carries the lead link column.
+    const act = await db.query<{ lead_id: string }>(
+      `SELECT lead_id FROM ${SCHEMA}.activities WHERE lead_id = '${LEAD}' LIMIT 1`
+    );
+    expect(act.rows[0].lead_id).toBe(LEAD);
+    // #3: the lead's email counters are refreshed (not just the deal's).
+    const lead = await db.query<{ email_count: number; last_email_at: string | null }>(
+      `SELECT email_count, last_email_at FROM ${SCHEMA}.leads WHERE id = '${LEAD}'`
+    );
+    expect(lead.rows[0].email_count).toBe(1);
+    expect(lead.rows[0].last_email_at).not.toBeNull();
   });
 });
