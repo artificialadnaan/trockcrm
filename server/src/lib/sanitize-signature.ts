@@ -104,5 +104,11 @@ function truncateToUtf8Bytes(str: string, maxBytes: number): string {
 export function sanitizeSignatureHtml(input: string | null | undefined): string {
   if (!input) return "";
   const bounded = truncateToUtf8Bytes(input, MAX_SIGNATURE_HTML_BYTES);
-  return sanitizeHtml(bounded, OPTIONS).trim();
+  const clean = sanitizeHtml(bounded, OPTIONS).trim();
+  // Visually-empty markup (only <br>/<div></div>/&nbsp; left after clearing text) → treat as no
+  // signature, so we store null + never append an empty wrapper. A logo-only signature (an <img>,
+  // no text) still counts as present.
+  const hasText = clean.replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").trim().length > 0;
+  const hasImg = /<img\b/i.test(clean);
+  return hasText || hasImg ? clean : "";
 }

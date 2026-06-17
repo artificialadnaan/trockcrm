@@ -42,6 +42,13 @@ describe("enforceSignatureLogoSize (server-side size guard)", () => {
     });
     expect(deleteObject).not.toHaveBeenCalled();
   });
+
+  it("DELETES and rejects (400) a zero-byte (empty) upload", async () => {
+    headObject.mockResolvedValue({ contentLength: 0 });
+    const key = `signature-logos/${USER}/empty.png`;
+    await expect(enforceSignatureLogoSize(key)).rejects.toMatchObject({ statusCode: 400 });
+    expect(deleteObject).toHaveBeenCalledWith(key);
+  });
 });
 
 describe("assertOwnedSignatureLogoKey (confirm only touches the caller's own key)", () => {

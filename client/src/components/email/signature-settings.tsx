@@ -43,7 +43,9 @@ export function SignatureSettings() {
     };
   }, [reloadKey]);
 
-  const editorDisabled = loading || loadError;
+  // Disable editing while saving too — onSave captured the innerHTML and re-sets it to the sanitized
+  // result on success, so live edits/uploads during a slow save would be lost or desync the UI.
+  const editorDisabled = loading || loadError || saving;
   const saveDisabled = saving || loading || loadError || uploading;
 
   function exec(command: "bold" | "italic") {

@@ -45,7 +45,9 @@ router.get("/:userId/:asset", async (req: Request, res: Response, next: NextFunc
     // skippable, so the serve path itself must refuse anything over the cap (or missing). Never trust
     // that the object was confirmed or is still within size. (Codex #737.)
     const head = await headObject(r2Key);
-    if (!head || (head.contentLength ?? 0) > SIGNATURE_LOGO_MAX_BYTES) {
+    const headLen = head?.contentLength ?? 0;
+    // Reject missing, EMPTY (zero-byte), and oversized here — never cache a broken/empty logo.
+    if (!head || headLen <= 0 || headLen > SIGNATURE_LOGO_MAX_BYTES) {
       throw new AppError(404, "Not found");
     }
 
@@ -73,6 +75,9 @@ router.get("/:userId/:asset", async (req: Request, res: Response, next: NextFunc
     } catch (err) {
       throw err instanceof AppError ? err : new AppError(404, "Not found");
     }
+
+    // Authoritative empty-reject (covers a HEAD-said-nonzero-but-GET-empty race): never cache a 0-byte logo.
+    if (size === 0) throw new AppError(404, "Not found");
 
     const body = Buffer.concat(parts);
     res.setHeader("Content-Type", contentType);

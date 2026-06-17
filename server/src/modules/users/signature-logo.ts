@@ -41,7 +41,12 @@ export function assertOwnedSignatureLogoKey(r2Key: string, userId: string): void
 export async function enforceSignatureLogoSize(r2Key: string): Promise<void> {
   const head = await headObject(r2Key);
   if (!head) throw new AppError(400, "Logo upload not found.");
-  if ((head.contentLength ?? 0) > SIGNATURE_LOGO_MAX_BYTES) {
+  const len = head.contentLength ?? 0;
+  if (len <= 0) {
+    await deleteObject(r2Key); // empty (zero-byte) upload — don't let it become a servable broken logo
+    throw new AppError(400, "Logo upload is empty.");
+  }
+  if (len > SIGNATURE_LOGO_MAX_BYTES) {
     await deleteObject(r2Key);
     throw new AppError(413, "Logo must be under 1 MB.");
   }

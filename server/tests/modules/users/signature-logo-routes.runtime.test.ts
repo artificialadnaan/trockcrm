@@ -83,6 +83,25 @@ describe("public signature-logo route", () => {
     expect(res.headers["cache-control"]).toBeUndefined();
   });
 
+  it("404s a zero-byte (empty) object at HEAD — never cached as a broken logo", async () => {
+    mockHead.mockResolvedValue({ contentLength: 0 });
+    const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${ASSET}`);
+    expect(res.status).toBe(404);
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(res.headers["cache-control"]).toBeUndefined();
+  });
+
+  it("404s when HEAD reports nonzero but the stream is empty (race) — no cache headers", async () => {
+    mockHead.mockResolvedValue({ contentLength: 50 });
+    async function* body() {
+      /* yields nothing — empty stream */
+    }
+    mockGet.mockResolvedValue({ stream: body() });
+    const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${ASSET}`);
+    expect(res.status).toBe(404);
+    expect(res.headers["cache-control"]).toBeUndefined();
+  });
+
   it("404s a missing object without streaming", async () => {
     mockHead.mockResolvedValue(null);
     const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${ASSET}`);

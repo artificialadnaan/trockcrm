@@ -51,4 +51,15 @@ describe("sanitizeSignatureHtml", () => {
     const out = sanitizeSignatureHtml("<p>" + "€".repeat(30_000) + "</p>");
     expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(50_010);
   });
+
+  it("treats visually-empty markup as no signature (so it's stored null + never appended)", () => {
+    expect(sanitizeSignatureHtml("<br>")).toBe("");
+    expect(sanitizeSignatureHtml("<div><br></div>")).toBe("");
+    expect(sanitizeSignatureHtml("<p>&nbsp;</p>")).toBe("");
+    expect(sanitizeSignatureHtml("<p>   </p>")).toBe("");
+  });
+
+  it("keeps a logo-only signature (an <img> with no text counts as present)", () => {
+    expect(sanitizeSignatureHtml('<img src="https://cdn/logo.png" alt="logo">')).toContain("https://cdn/logo.png");
+  });
 });
