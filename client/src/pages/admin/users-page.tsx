@@ -158,6 +158,9 @@ export function UsersPage() {
     setUpdatingId(userId);
     try {
       await updateUser(userId, { isActive: !isActive });
+    } catch (err) {
+      // Surface guard rejections (e.g. last-active-admin 409, self-deactivate 403) like the other paths.
+      toast.error(err instanceof Error ? err.message : "Failed to update user");
     } finally {
       setUpdatingId(null);
     }
@@ -311,7 +314,9 @@ export function UsersPage() {
   const clearSelection = () => setSelectedUserIds([]);
 
   const handleBulkUpdate = async (
-    input: Partial<{ role: "admin" | "director" | "rep" | "construction"; isActive: boolean }>,
+    // The bulk role controls expose only rep/director/admin; bulk-assigning "construction" is
+    // intentionally unreachable (use the per-row role select for that). Type matches the UI.
+    input: Partial<{ role: "admin" | "director" | "rep"; isActive: boolean }>,
     successMessage: string,
   ) => {
     if (selectedUserIds.length === 0) return;
@@ -819,15 +824,29 @@ export function UsersPage() {
             <AddUserDialog
               offices={officeOptions}
               onCreate={async (input) => {
+                let created;
                 try {
-                  const r = await createUser(input);
-                  toast.success(r.invite.sent ? "User created and invited" : "User created — invite failed; resend from the row");
-                  await refetch();
+                  created = await createUser(input);
                 } catch (err) {
-                  // Surface the API message (dup email, inactive office, not-global-admin) and re-throw so
-                  // the dialog stays open with the user's input instead of silently closing.
+                  // CREATE failure only — surface the API message (dup email, invalid office, not-global-admin)
+                  // and re-throw so the dialog stays open with the user's input.
                   toast.error(err instanceof Error ? err.message : "Failed to create user");
                   throw err;
+                }
+                // Create succeeded — report it accurately, distinguishing no-invite-requested from invite-failed.
+                toast.success(
+                  input.sendInvite === false
+                    ? "User created (no invite sent)"
+                    : created.invite.sent
+                      ? "User created and invited"
+                      : "User created — invite failed; resend from the row",
+                );
+                // Refetch is best-effort and runs OUTSIDE the create try — a refetch failure must never
+                // masquerade as a create failure (which would prompt a duplicate-create retry).
+                try {
+                  await refetch();
+                } catch {
+                  toast.error("User created, but the list didn't refresh — reload to see it.");
                 }
               }}
               onClose={() => setShowAddUser(false)}

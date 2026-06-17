@@ -158,12 +158,19 @@ export interface CreateCrmUserInput {
 // A pragmatic single-@ email shape — the create dialog isn't a <form>, so the field's type="email" is
 // NOT a backstop; this is the server-side gate of record before the insert.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input is CreateCrmUserInput & { role: CrmAssignableRole } {
   if (!input.email?.trim()) throw new AppError(400, "Email is required");
   if (!EMAIL_RE.test(input.email.trim())) throw new AppError(400, "Enter a valid email address");
   if (!input.displayName?.trim()) throw new AppError(400, "Display name is required");
   if (!input.officeId?.trim()) throw new AppError(400, "Office is required");
+  // Validate the relationship ids are well-formed UUIDs before they reach the DB — a malformed value
+  // otherwise hits Postgres and surfaces as a 500 (uuid 22P02) instead of a clean 400.
+  if (!UUID_RE.test(input.officeId.trim())) throw new AppError(400, "Office is invalid");
+  if (input.reportsTo != null && input.reportsTo !== "" && !UUID_RE.test(input.reportsTo.trim())) {
+    throw new AppError(400, "Manager is invalid");
+  }
   if (input.role === "field_contractor") throw new AppError(400, "Field contractors are created in the field-user flow");
   if (!isAssignableCrmRole(input.role)) throw new AppError(400, `Invalid role: ${input.role}`);
 }

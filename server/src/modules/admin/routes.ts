@@ -172,8 +172,11 @@ router.post("/admin/users", requireGlobalAdmin, async (req: Request, res: Respon
       try {
         await sendUserInvite({ userId: user.id, sentByUserId: req.user!.id });
         invite = { sent: true };
-      } catch (e: any) {
-        invite = { sent: false, error: e?.message ?? "Invite failed" };
+      } catch (e) {
+        // The user is created regardless; log the real cause server-side but return a generic message
+        // so internals aren't exposed to the client.
+        console.error("[admin] send-invite after createCrmUser failed", e);
+        invite = { sent: false, error: "Invite failed" };
       }
     }
     return res.status(201).json({ user, invite });
