@@ -34,6 +34,7 @@
     "build": "tsc -b tsconfig.build.json --clean && tsc -b tsconfig.build.json --force",
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc -p tsconfig.json --noEmit",
+    "test:ci": "vitest run --config vitest.ci.config.ts",
     "dev": "tsc --watch"
   },
   "dependencies": {

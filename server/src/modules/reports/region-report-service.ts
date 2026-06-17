@@ -152,8 +152,14 @@ const COMMON_JOINS = sql`
 // parameterized, but never call this with user input.
 const slugList = (slugs: readonly string[]) => sql.join(slugs.map((s) => sql`${s}`), sql`, `);
 const TERMINAL_SLUGS = [...WON_STAGE_SLUGS, ...LOST_STAGE_SLUGS];
+// `d.is_active = true` matches the canonical Won card (getWonCloseSummary) and the Won evidence drawer
+// (buildWonEvidenceSql, which carries the same guard as of PR #733) — so the region Won CARD reconciles to
+// the click-to-records DRAWER. Per PR #699 winning never sets is_active=false; the only is_active=false Won
+// deals are soft-deletes, so this is a no-op in prod today (0 soft-deleted Won) but keeps card == drawer
+// forever (a half-applied guard — drawer-only — would show a soft-deleted Won in the card but not its
+// records, breaking the reconciliation guarantee we protect).
 const wonInWindow = (from: string, to: string): SQL =>
-  sql`psc.slug IN (${slugList(WON_STAGE_SLUGS)}) AND ${aliasedHasUsableWonDateSql("d")} AND ${wonDate} >= ${from}::date AND ${wonDate} <= ${to}::date`;
+  sql`psc.slug IN (${slugList(WON_STAGE_SLUGS)}) AND d.is_active = true AND ${aliasedHasUsableWonDateSql("d")} AND ${wonDate} >= ${from}::date AND ${wonDate} <= ${to}::date`;
 const lostInWindow = (from: string, to: string): SQL =>
   sql`psc.slug IN (${slugList(LOST_STAGE_SLUGS)}) AND ${lostBusinessDate} >= ${from}::date AND ${lostBusinessDate} <= ${to}::date`;
 const OPEN_PREDICATE = sql`d.is_active = true AND psc.is_terminal = false`;
@@ -271,8 +277,7 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
     await tenantDb.execute(sql`
       SELECT ${REGION_NAME} AS region, ${weekBucket} AS wk, COALESCE(SUM(${wonVal}),0) AS val
       ${COMMON_JOINS}
-      WHERE ${reportable} AND psc.slug IN (${slugList(WON_STAGE_SLUGS)}) AND ${aliasedHasUsableWonDateSql("d")}
-        AND ${wonDate} >= ${sparkFrom}::date AND ${wonDate} <= ${sparkTo}::date
+      WHERE ${reportable} AND ${wonInWindow(sparkFrom, sparkTo)}
       GROUP BY 1, 2`)
   );
 

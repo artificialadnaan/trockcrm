@@ -1,9 +1,115 @@
+import { useMemo, type ReactNode } from "react";
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Card, CardContent } from "@/components/ui/card";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
-import { useCustomerConcentrationReport } from "@/hooks/use-reports";
+import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
+import { useCustomerConcentrationReport, type CustomerConcentrationReport } from "@/hooks/use-reports";
 import { sheetsFromReport } from "@/lib/excel-export";
 import { EmptyState, formatCurrency, formatDate, formatNumber, formatPercent, KpiCard, ReportPageShell } from "./analytics-page-shared";
+
+type TopCustomerRow = CustomerConcentrationReport["topCustomers"][number];
+type StaleCustomerRow = CustomerConcentrationReport["staleCustomers"][number];
+
+type CcColumn<Row> = SortColumn<Row> & { header: string; numeric: boolean; cell: (row: Row) => ReactNode };
+
+const CC_HEADER_CLASS = "text-[11px] font-black uppercase tracking-[0.14em] text-slate-500";
+
+const TOP_CUSTOMER_COLUMNS: ReadonlyArray<CcColumn<TopCustomerRow>> = [
+  { key: "companyName", type: "text", accessor: (r) => r.companyName, header: "Company Name", numeric: false, cell: (r) => <span className="font-semibold text-slate-900">{r.companyName}</span> },
+  { key: "activeDeals", type: "number", accessor: (r) => r.activeDeals, header: "Active Deals", numeric: true, cell: (r) => formatNumber(r.activeDeals) },
+  { key: "totalOpenValue", type: "number", accessor: (r) => r.totalOpenValue, header: "Total Open Value", numeric: true, cell: (r) => formatCurrency(r.totalOpenValue) },
+  { key: "totalWonLifetime", type: "number", accessor: (r) => r.totalWonLifetime, header: "Total Won", numeric: true, cell: (r) => formatCurrency(r.totalWonLifetime) },
+  { key: "lastActivityAt", type: "date", accessor: (r) => r.lastActivityAt, header: "Last Activity", numeric: false, cell: (r) => formatDate(r.lastActivityAt) },
+  { key: "accountOwners", type: "text", accessor: (r) => r.accountOwners, header: "Owners", numeric: false, cell: (r) => r.accountOwners },
+];
+
+const STALE_CUSTOMER_COLUMNS: ReadonlyArray<CcColumn<StaleCustomerRow>> = [
+  { key: "companyName", type: "text", accessor: (r) => r.companyName, header: "Company", numeric: false, cell: (r) => <span className="font-semibold text-slate-900">{r.companyName}</span> },
+  { key: "ownerName", type: "text", accessor: (r) => r.ownerName, header: "Owner", numeric: false, cell: (r) => r.ownerName },
+  { key: "openDeals", type: "number", accessor: (r) => r.openDeals, header: "Open Deals", numeric: true, cell: (r) => formatNumber(r.openDeals) },
+  { key: "openValue", type: "number", accessor: (r) => r.openValue, header: "Open Value", numeric: true, cell: (r) => formatCurrency(r.openValue) },
+  { key: "daysStale", type: "number", accessor: (r) => r.daysStale, header: "Days Stale", numeric: true, cell: (r) => formatNumber(r.daysStale) },
+];
+
+function CcSortHead<Row>({
+  columns,
+  toggle,
+  getHeaderProps,
+}: {
+  columns: ReadonlyArray<CcColumn<Row>>;
+  toggle: (key: string) => void;
+  getHeaderProps: (key: string) => { active: boolean; dir: "asc" | "desc" | null };
+}) {
+  return (
+    <thead className={`text-left ${CC_HEADER_CLASS}`}>
+      <tr>
+        {columns.map((col) => {
+          const hp = getHeaderProps(col.key);
+          return (
+            <th
+              key={col.key}
+              className={col.numeric ? "py-2 text-right" : "py-2"}
+              aria-sort={hp.active ? (hp.dir === "asc" ? "ascending" : "descending") : "none"}
+            >
+              <SortHeaderButton
+                label={col.header}
+                numeric={col.numeric}
+                active={hp.active}
+                dir={hp.dir}
+                onClick={() => toggle(col.key)}
+                className={CC_HEADER_CLASS}
+              />
+            </th>
+          );
+        })}
+      </tr>
+    </thead>
+  );
+}
+
+function TopCustomersTable({ rows }: { rows: TopCustomerRow[] }) {
+  // Pin the concentration flag to the DATA: the first three companies in the server-ranked array
+  // are the most-concentrated. Membership-by-id, so the red flag marks the same three accounts no
+  // matter how the user re-sorts the table.
+  const concentratedIds = useMemo(() => new Set(rows.slice(0, 3).map((r) => r.companyId)), [rows]);
+  const { sortedRows, toggle, getHeaderProps } = useTableSort(rows, TOP_CUSTOMER_COLUMNS);
+  return (
+    <table className="mt-4 w-full min-w-[860px] text-sm">
+      <CcSortHead columns={TOP_CUSTOMER_COLUMNS} toggle={toggle} getHeaderProps={getHeaderProps} />
+      <tbody className="divide-y divide-slate-100">
+        {sortedRows.map((row) => (
+          <tr key={row.companyId} className={concentratedIds.has(row.companyId) ? "bg-red-50/60" : undefined}>
+            {TOP_CUSTOMER_COLUMNS.map((col) => (
+              <td key={col.key} className={col.numeric ? "py-3 text-right tabular-nums" : "py-3"}>
+                {col.cell(row)}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function StaleCustomersTable({ rows }: { rows: StaleCustomerRow[] }) {
+  const { sortedRows, toggle, getHeaderProps } = useTableSort(rows, STALE_CUSTOMER_COLUMNS);
+  return (
+    <table className="mt-4 w-full min-w-[720px] text-sm">
+      <CcSortHead columns={STALE_CUSTOMER_COLUMNS} toggle={toggle} getHeaderProps={getHeaderProps} />
+      <tbody className="divide-y divide-slate-100">
+        {sortedRows.map((row) => (
+          <tr key={`${row.companyName}-${row.ownerName}`}>
+            {STALE_CUSTOMER_COLUMNS.map((col) => (
+              <td key={col.key} className={col.numeric ? "py-3 text-right tabular-nums" : "py-3"}>
+                {col.cell(row)}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
 
 export function CustomerConcentrationPage() {
   const { query } = useReportFilters({ defaultRange: "12m" });
@@ -33,30 +139,7 @@ export function CustomerConcentrationPage() {
           <Card>
             <CardContent className="overflow-x-auto p-5">
               <h2 className="text-sm font-black uppercase tracking-[0.16em] text-slate-900">Top 20 Customers</h2>
-              <table className="mt-4 w-full min-w-[860px] text-sm">
-                <thead className="text-left text-[11px] font-black uppercase tracking-[0.14em] text-slate-500">
-                  <tr>
-                    <th className="py-2">Company Name</th>
-                    <th className="py-2 text-right">Active Deals</th>
-                    <th className="py-2 text-right">Total Open Value</th>
-                    <th className="py-2 text-right">Total Won</th>
-                    <th className="py-2">Last Activity</th>
-                    <th className="py-2">Owners</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {report.topCustomers.map((row, index) => (
-                    <tr key={row.companyId} className={index < 3 ? "bg-red-50/60" : undefined}>
-                      <td className="py-3 font-semibold text-slate-900">{row.companyName}</td>
-                      <td className="py-3 text-right">{formatNumber(row.activeDeals)}</td>
-                      <td className="py-3 text-right">{formatCurrency(row.totalOpenValue)}</td>
-                      <td className="py-3 text-right">{formatCurrency(row.totalWonLifetime)}</td>
-                      <td className="py-3">{formatDate(row.lastActivityAt)}</td>
-                      <td className="py-3">{row.accountOwners}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <TopCustomersTable rows={report.topCustomers} />
               {report.topCustomers.length === 0 ? <EmptyState label="No active customer exposure for this range." /> : null}
             </CardContent>
           </Card>
@@ -103,28 +186,7 @@ export function CustomerConcentrationPage() {
           <Card>
             <CardContent className="overflow-x-auto p-5">
               <h2 className="text-sm font-black uppercase tracking-[0.16em] text-slate-900">Stale Customers</h2>
-              <table className="mt-4 w-full min-w-[720px] text-sm">
-                <thead className="text-left text-[11px] font-black uppercase tracking-[0.14em] text-slate-500">
-                  <tr>
-                    <th className="py-2">Company</th>
-                    <th className="py-2">Owner</th>
-                    <th className="py-2 text-right">Open Deals</th>
-                    <th className="py-2 text-right">Open Value</th>
-                    <th className="py-2 text-right">Days Stale</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {report.staleCustomers.map((row) => (
-                    <tr key={`${row.companyName}-${row.ownerName}`}>
-                      <td className="py-3 font-semibold text-slate-900">{row.companyName}</td>
-                      <td className="py-3">{row.ownerName}</td>
-                      <td className="py-3 text-right">{formatNumber(row.openDeals)}</td>
-                      <td className="py-3 text-right">{formatCurrency(row.openValue)}</td>
-                      <td className="py-3 text-right">{formatNumber(row.daysStale)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <StaleCustomersTable rows={report.staleCustomers} />
             </CardContent>
           </Card>
         </div>

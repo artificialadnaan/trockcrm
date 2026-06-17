@@ -87,6 +87,25 @@ describe("evidence drawer Win % column", () => {
     const text = document.body.textContent ?? "";
     expect(text).not.toContain("Win %");
   });
+
+  it("still shows the Win % column header (and all headers) for an EMPTY cohort", () => {
+    // An empty projection band (e.g. an empty 0–30d forecast-ladder cell) must keep its column
+    // headers — including Win % — so it reads consistently with the non-empty bands. Regression:
+    // the drawer used to swap the whole table for a bare message, dropping every header.
+    mount("projection", []);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Win %");
+    // The empty-state copy is preserved — just moved inside the table body.
+    expect(text).toContain("No supporting records for this number in this period.");
+    // Header row still renders all the metric's columns.
+    const heads = Array.from(document.querySelectorAll("thead th"));
+    const headText = heads.map((h) => h.textContent ?? "");
+    for (const label of ["Deal", "Company", "Owner", "Value", "Win %", "Region", "Type", "Stage", "Age"]) {
+      expect(headText.some((t) => t.includes(label))).toBe(true);
+    }
+    // No data rows, but the empty-state row is present.
+    expect(document.querySelectorAll("tbody tr").length).toBe(1);
+  });
 });
 
 describe("evidence drawer column alignment", () => {

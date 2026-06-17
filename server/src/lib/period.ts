@@ -11,7 +11,7 @@ import { sql, type SQL } from "drizzle-orm";
 
 export const BUSINESS_TIMEZONE = "America/Chicago";
 
-export type WeekMode = "to_date" | "completed";
+export type WeekMode = "to_date" | "completed" | "mtd" | "ytd";
 
 // Today's date (YYYY-MM-DD) in the business tz -- DST-aware via Intl, matching the dashboard's
 // `new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" })` pattern.
@@ -32,15 +32,42 @@ function dayOfWeek(isoDate: string): number {
 }
 
 /**
+ * The most-recent Sunday on/before `isoDate` (the canonical week-start), business-tz-safe and date-only.
+ * This is the SAME "snap back to Sunday" getWtdPeriod uses for its weekly anchor; exported so trend
+ * surfaces can derive a Sunday anchor from an arbitrary date (e.g. the MTD/YTD period END) instead of
+ * reusing a non-Sunday window start. Returns YYYY-MM-DD.
+ */
+export function sundayWeekStart(isoDate: string): string {
+  return shiftDays(isoDate, -dayOfWeek(isoDate));
+}
+
+/**
  * The canonical Sunday-Saturday week period, business-tz anchored.
  * - "to_date":   from = most-recent Sunday, to = today  (the LIVE dashboard "week-to-date").
  * - "completed": the full PRIOR Sun-Sat box -- from = prior Sunday, to = prior Saturday  (the
  *   Monday-meeting REPORTS week).
+ * - "mtd":       from = first-of-month, to = today  (the showcase month-to-date toggle).
+ * - "ytd":       from = Jan-1, to = today  (the showcase year-to-date toggle).
+ * The "mtd"/"ytd" branches are BYTE-IDENTICAL to the client resolveDatePreset
+ * (client/src/lib/pipeline-terminal-filters.ts) so the showcase B2 Won numbers reconcile to the Deals
+ * Dashboard for the same preset -- do NOT write a parallel definition (F1 reconcile-drift warning).
  * Returns date-only strings (YYYY-MM-DD), ready to feed getWonCloseSummary({from,to}) and date filters.
  */
 export function getWtdPeriod(mode: WeekMode, now: Date = new Date()): { from: string; to: string } {
   const today = businessDate(now);
-  const thisSunday = shiftDays(today, -dayOfWeek(today));
+  if (mode === "mtd" || mode === "ytd") {
+    // Mirror resolveDatePreset exactly: parse today at UTC noon, then build the from bound from its CT
+    // year/month. (mtd: ymdToParam(year, month, 1); ytd: `${year}-01-01`.)
+    const anchor = new Date(`${today}T12:00:00Z`);
+    if (mode === "mtd") {
+      const from = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), 1, 12))
+        .toISOString()
+        .slice(0, 10);
+      return { from, to: today };
+    }
+    return { from: `${anchor.getUTCFullYear()}-01-01`, to: today };
+  }
+  const thisSunday = sundayWeekStart(today);
   if (mode === "to_date") {
     return { from: thisSunday, to: today };
   }

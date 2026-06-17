@@ -9,24 +9,18 @@ import {
 } from "./monday-showcase/types";
 import { DrillProvider } from "./monday-showcase/drill";
 import { EvidenceDrawer } from "./monday-showcase/evidence-drawer";
-import { DEFAULT_WEEK_MODE, type WeekMode } from "./week-mode";
+import { DEFAULT_WEEK_MODE, WEEK_MODE_LABELS, type WeekMode } from "./week-mode";
 import {
-  VariantA1Funnel,
-  VariantA2Scoreboard,
   VariantA3Lanes,
   VariantExecHero,
-  VariantB1Scorecards,
   VariantB2Leaderboard,
   VariantB3LoadLane,
   VariantB4ForecastLadder,
 } from "./monday-showcase/variants";
 
 const VARIANT_COMPONENT: Record<ShowcaseVariantKey, ComponentType<{ data: MondayShowcaseData }>> = {
-  A1: VariantA1Funnel,
-  A2: VariantA2Scoreboard,
-  A3: VariantA3Lanes,
   HERO: VariantExecHero,
-  B1: VariantB1Scorecards,
+  A3: VariantA3Lanes,
   B2: VariantB2Leaderboard,
   B3: VariantB3LoadLane,
   B4: VariantB4ForecastLadder,
@@ -74,13 +68,13 @@ export function MondayShowcasePage() {
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="inline-flex overflow-hidden rounded-lg border">
-              {(["to_date", "completed"] as const).map((m) => (
+              {(["to_date", "completed", "mtd", "ytd"] as const).map((m) => (
                 <button
                   key={m}
                   onClick={() => setMode(m)}
                   className={`px-3 py-1.5 text-sm ${mode === m ? "bg-foreground text-background" : "bg-white text-muted-foreground"}`}
                 >
-                  {m === "to_date" ? "Week-to-date" : "Last full week"}
+                  {WEEK_MODE_LABELS[m]}
                 </button>
               ))}
             </div>

@@ -37,7 +37,13 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
-import { calculateCommissionForDeal, removeCommissionForDeal } from "../commissions/service.js";
+import {
+  calculateCommissionForDeal,
+  mintEstimatorCommissionForDeal,
+  recalculateCommissionForDeal,
+  removeCommissionForDeal,
+  removeEstimatorCommissionForDeal,
+} from "../commissions/service.js";
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
@@ -947,11 +953,26 @@ async function validateDealReassignmentAssignee(
       .limit(1);
     const normalizedTargetOfficeCode = resolveOfficeCodeFromOffice(targetOffice ?? null);
     if (normalizedTargetOfficeCode !== normalizedDealOfficeCode) {
-      throw new AppError(
-        400,
-        "Deals can only be reassigned to users in the same office",
-        "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
+      // The rep's PRIMARY office differs from the deal's office, but a multi-office
+      // rep may still hold an explicit additional-office grant (user_office_access)
+      // covering it. Honor that grant — but only one the rep already holds; this
+      // does not widen access. Match by office CODE (dfw/atl) because several
+      // office records can fold to the same code (e.g. "Dallas Office"/"DFW Office").
+      const accessibleOffices = await tenantDb
+        .select({ slug: offices.slug, name: offices.name })
+        .from(userOfficeAccess)
+        .innerJoin(offices, eq(offices.id, userOfficeAccess.officeId))
+        .where(eq(userOfficeAccess.userId, assigneeId));
+      const hasAdditionalOfficeGrant = accessibleOffices.some(
+        (office) => resolveOfficeCodeFromOffice(office) === normalizedDealOfficeCode
       );
+      if (!hasAdditionalOfficeGrant) {
+        throw new AppError(
+          400,
+          "Deals can only be reassigned to users in the same office",
+          "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
+        );
+      }
     }
     return;
   }
@@ -967,11 +988,21 @@ async function validateDealReassignmentAssignee(
   }
 
   if (dealOfficeId && targetUser.officeId !== dealOfficeId) {
-    throw new AppError(
-      400,
-      "Deals can only be reassigned to users in the same office",
-      "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
-    );
+    // Same fallback as the officeCode branch and validateAssignee: a rep whose
+    // primary office differs may still hold an explicit additional-office grant
+    // (user_office_access) to the deal's office. Honor an already-held grant.
+    const [access] = await tenantDb
+      .select()
+      .from(userOfficeAccess)
+      .where(and(eq(userOfficeAccess.userId, assigneeId), eq(userOfficeAccess.officeId, dealOfficeId)))
+      .limit(1);
+    if (!access) {
+      throw new AppError(
+        400,
+        "Deals can only be reassigned to users in the same office",
+        "DEAL_REASSIGNMENT_OFFICE_MISMATCH"
+      );
+    }
   }
 }
 
@@ -1781,13 +1812,17 @@ export async function getDealById(
   // restore/admin view; no production caller passes true today.
   includeInactive: boolean = false
 ) {
+  // estimatorUserId already comes through getTableColumns(deals); join users to surface the estimator's
+  // display name for the PR3 estimator picker (mirrors the assignedRep name join in getDealDetail).
   const result = await tenantDb
     .select({
       ...getTableColumns(deals),
       stageSlug: pipelineStageConfig.slug,
+      estimatorUserName: users.displayName,
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
+    .leftJoin(users, eq(users.id, deals.estimatorUserId))
     .where(includeInactive ? eq(deals.id, dealId) : and(eq(deals.id, dealId), eq(deals.isActive, true)))
     .limit(1);
 
@@ -1815,10 +1850,13 @@ export async function getDealDetail(
   const deal = await getDealById(tenantDb, dealId, userRole, userId, atRiskViewerRole);
   if (!deal) return null;
 
+  // Second users alias so the estimator name can be joined alongside the assigned-rep name.
+  const estimatorUser = alias(users, "estimator_user");
   const [detailDeal] = await tenantDb
     .select({
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
+      estimatorUserName: estimatorUser.displayName,
       companyName: companies.name,
       companyOwnerUserId: companies.ownerId,
       companyOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${companies.ownerId})`,
@@ -1830,6 +1868,7 @@ export async function getDealDetail(
     })
     .from(deals)
     .leftJoin(users, eq(users.id, deals.assignedRepId))
+    .leftJoin(estimatorUser, eq(estimatorUser.id, deals.estimatorUserId))
     .leftJoin(companies, eq(companies.id, deals.companyId))
     .leftJoin(contacts, eq(contacts.id, deals.primaryContactId))
     .leftJoin(projectTypeConfig, eq(projectTypeConfig.id, deals.projectTypeId))
@@ -3329,13 +3368,55 @@ export async function setDealContractSignedDate(
       });
     }
 
-    // Commission fires only on null → date. Edits and clears do not
-    // recalculate (per Decision 5; recalc-on-edit is a TODO follow-up).
-    const isInitialSign = oldValue == null && newValue != null;
-    if (isInitialSign) {
+    // Commission re-fires on every contract-date TRANSITION (recalc-on-edit), all inside this
+    // transaction so the stored commission can never disagree with the stored signed date:
+    //   null → date   : initial sign → calculate
+    //   date → date'  : correction   → recalculate (remove the stale row, recompute from the deal's
+    //                                  CURRENT source value/rate, re-stamp contract_signed_date_at_signing)
+    //   date → null   : clear        → remove (no signed date ⇒ no commission; a lingering row is a
+    //                                  PHANTOM payout — worse than a missing one)
+    // The transition is keyed on the EFFECTIVE signed date — contract_signed_at::date FIRST, then
+    // contract_signed_date (canonical precedence, below). The reseed/import path can populate
+    // contract_signed_at WITHOUT contract_signed_date, and the app treats _at as the canonical signed-date
+    // source; keying off contract_signed_date alone would (a) miss the clear on an _at-only row (commission
+    // left orphaned) and (b) misroute a correction on an _at-only row as an initial calc that skips the row.
+    // A same-value re-save already short-circuited above UNLESS it reached here only to reconcile a stale
+    // won_closed_date (same effective date) — then the date is unchanged, so commission must NOT be churned.
+    // CANONICAL precedence: contract_signed_at::date FIRST, then contract_signed_date — matching this
+    // service's read/reporting paths (contractSignedDateForReporting = COALESCE(contract_signed_at::date,
+    // contract_signed_date)). So on a row where the two diverge, normalizing contract_signed_date to the
+    // existing _at value leaves the canonical effective date unchanged and does NOT churn the commission.
+    const oldEffectiveSignedDate = dateStringFromTimestamp(oldContractSignedAt) ?? oldValue;
+    const newEffectiveSignedDate = dateStringFromTimestamp(newContractSignedAt) ?? newValue;
+    if (oldEffectiveSignedDate !== newEffectiveSignedDate) {
+      if (oldEffectiveSignedDate == null) {
+        // null → signed: initial commission calc.
+        await calculateCommissionForDeal(tx, {
+          dealId,
+          contractSignedDate: newEffectiveSignedDate as string,
+          triggeredByUserId: userId,
+        });
+      } else if (newEffectiveSignedDate == null) {
+        // signed → cleared: remove the row (no signed date ⇒ no commission; a lingering row is a phantom payout).
+        await removeCommissionForDeal(tx, dealId, userId);
+      } else {
+        // corrected: recompute IN PLACE — attribution-preserving + all-or-nothing (never deletes to $0).
+        await recalculateCommissionForDeal(tx, {
+          dealId,
+          contractSignedDate: newEffectiveSignedDate,
+          triggeredByUserId: userId,
+        });
+      }
+    } else if (newEffectiveSignedDate != null && oldValue == null && newValue != null) {
+      // The effective date is UNCHANGED, but the contract_signed_date COLUMN was just normalized from null
+      // to its existing contract_signed_at value (an imported/reseeded _at-only row). Such a deal may have
+      // been signed but never calculated (no commission row), and the pre-effective-date logic created it
+      // on this null→date column transition — preserve that: ensure the commission exists.
+      // calculateCommissionForDeal is idempotent (skips when a row already exists), so a never-calculated
+      // import deal finally gets its commission while an already-paid one is untouched.
       await calculateCommissionForDeal(tx, {
         dealId,
-        contractSignedDate: newValue,
+        contractSignedDate: newEffectiveSignedDate,
         triggeredByUserId: userId,
       });
     }
@@ -3379,6 +3460,128 @@ export async function setDealContractSignedDate(
   });
 }
 
+/**
+ * Set (or clear) a deal's estimator and re-attribute the ADDITIVE estimator commission in the same
+ * transaction. The estimator earns an EXTRA deal_signed_commissions row at the estimator's OWN rate, on
+ * top of the owner's full cut — so this only ever adds/removes the estimator's row, NEVER the owner's.
+ *
+ * Transitions (oldEstimator → newEstimator), all atomic with the deal write:
+ *   • unchanged → no-op short-circuit (PRESERVES the existing row even if the rate later vanished)
+ *   • null → B  → mint B only
+ *   • A → B     → scoped-remove A, mint B (if B is rateless: A removed, nothing minted → net $0)
+ *   • B → null  → scoped-remove B only
+ *   • estimator == owner → mint is skipped_existing (owner row covers it); a clear is hard-guarded to 0
+ *
+ * A change order is base-deal-only (its estimator is inherited from the parent) → 409. NEVER calls
+ * removeCommissionForDeal (that deletes the owner's row too) — only the (deal_id, estimator) scoped helper.
+ *
+ * NOTE: this is intentionally NOT wired to a route in this PR (the estimator picker + route land in PR3);
+ * it is the tested service spine for that follow-up.
+ */
+export async function setDealEstimator(
+  tenantDb: TenantDb,
+  dealId: string,
+  newEstimatorUserId: string | null,
+  userId: string,
+  officeId: string | null = null
+): Promise<typeof deals.$inferSelect | null> {
+  return tenantDb.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(deals)
+      .where(eq(deals.id, dealId))
+      .limit(1)
+      .for("update");
+    if (!existing) return null;
+
+    // A change order inherits its estimator from the parent deal; editing it here would mint/strip an
+    // estimator commission row on a CRM-only child.
+    if (existing.isChangeOrder === true) {
+      throw new AppError(
+        409,
+        "A change order's estimator is inherited from the parent deal, not editable here.",
+        "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
+
+    const oldEstimator = existing.estimatorUserId ?? null;
+    const newEstimator = newEstimatorUserId ?? null;
+    const owner = existing.assignedRepId ?? null;
+
+    // No-op short-circuit — the load-bearing PRESERVE: an unchanged estimator's commission row is never
+    // re-evaluated, so it stands even if that estimator's rate was later deactivated.
+    if (oldEstimator === newEstimator) {
+      return existing;
+    }
+
+    // A NEW estimator is validated exactly like a reassignment assignee (exists, active, same office).
+    if (newEstimator != null) {
+      await validateDealReassignmentAssignee(
+        tx,
+        newEstimator,
+        existing.officeCode,
+        owner,
+        officeId ?? undefined
+      );
+    }
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(deals)
+      .set({ estimatorUserId: newEstimator, updatedAt: now })
+      .where(eq(deals.id, dealId))
+      .returning();
+    if (!updated) return null;
+
+    await writeAuditLog(tx, {
+      tableName: "deals",
+      recordId: dealId,
+      action: "update",
+      changedBy: userId,
+      changes: {
+        estimatorUserId: { from: oldEstimator, to: newEstimator },
+      },
+    });
+
+    // A change order's estimator is INHERITED from its parent (it is base-deal-only for commission), so
+    // propagate the new estimator to every ACTIVE change-order child in the same transaction. This is
+    // MONEY-NEUTRAL: CO children never mint or remove an estimator commission row (only the base deal
+    // does) — we only keep the inherited estimator_user_id in sync for display/attribution.
+    await tx
+      .update(deals)
+      .set({ estimatorUserId: newEstimator, updatedAt: now })
+      .where(
+        and(
+          eq(deals.parentDealId, dealId),
+          eq(deals.isChangeOrder, true),
+          eq(deals.isActive, true)
+        )
+      );
+
+    // Re-attribute the additive estimator commission on the BASE deal. A departing estimator has their
+    // scoped, role-filtered row removed (removeEstimatorCommissionForDeal can NEVER touch the owner row —
+    // it deletes only attribution_role='estimator'), so it is safe to call whenever the estimator changes
+    // away; the oldEstimator===newEstimator no-op short-circuit above already excludes the unchanged case.
+    if (oldEstimator != null) {
+      await removeEstimatorCommissionForDeal(tx, {
+        dealId,
+        estimatorUserId: oldEstimator,
+        ownerUserId: owner,
+        triggeredByUserId: userId,
+      });
+    }
+    if (newEstimator != null) {
+      await mintEstimatorCommissionForDeal(tx, {
+        dealId,
+        estimatorUserId: newEstimator,
+        triggeredByUserId: userId,
+      });
+    }
+
+    return updated;
+  });
+}
+
 function contractSignedAtFromDate(value: string | null): Date | null {
   return value ? new Date(`${value}T00:00:00.000Z`) : null;
 }
@@ -3390,4 +3593,11 @@ function normalizeContractSignedAt(value: Date | string | null | undefined): Dat
 
 function timestampKey(value: Date | null): string | null {
   return value ? value.toISOString() : null;
+}
+
+// The date-only (YYYY-MM-DD, UTC) of a contract_signed_at timestamp — the fallback signed-date source
+// when contract_signed_date is null (reseed/import _at-only rows). contractSignedAtFromDate stores _at at
+// UTC midnight of the date, so this round-trips cleanly for app-set rows.
+function dateStringFromTimestamp(value: Date | null): string | null {
+  return value ? value.toISOString().slice(0, 10) : null;
 }

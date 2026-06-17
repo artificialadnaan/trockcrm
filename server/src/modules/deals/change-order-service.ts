@@ -607,9 +607,10 @@ export async function updateDealChangeOrder(
     .returning(childChangeOrderColumns)) as ChildCoRow[];
   if (child) {
     // A change order earns commission, so commission must track the CURRENT CO value. When the amount or
-    // signed date changes, recompute the child's commission (delete + re-create atomically) so the payout
-    // reflects the edit — never a stale amount, never a duplicate row. child.signedDate is the child's
-    // won_closed_date, which we keep equal to contract_signed_date, so it is the correct signing date.
+    // signed date changes, recompute the child's commission (in-place, attribution-preserving + all-or-
+    // nothing) so the payout reflects the edit — never a stale amount, never a duplicate row, and never a
+    // delete that loses the row if it can't be recomputed. child.signedDate is the child's won_closed_date,
+    // which we keep equal to contract_signed_date, so it is the correct signing date.
     // Resilient: a commission-config gap must not block the edit (mirrors addDealChangeOrder).
     if ((input.amount !== undefined || input.signedDate !== undefined) && input.updatedBy && child.signedDate) {
       try {

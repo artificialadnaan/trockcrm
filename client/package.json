@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:ci": "vitest run --config vitest.ci.config.ts",
     "test:runtime": "vitest run runtime.test --passWithNoTests=false",
     "test:e2e": "playwright test -c ../playwright.config.ts"
   },

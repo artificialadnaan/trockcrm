@@ -4,7 +4,17 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
   getStageById: vi.fn(),
 }));
 
+// Mock the commission helpers so these tests assert ROUTING (which helper fires per contract-date
+// transition) — the money correctness of each helper (attribution-preserving + all-or-nothing recompute)
+// is proven against the real schema in commissions/commission-recalc-on-edit.runtime.test.ts.
+vi.mock("../../../src/modules/commissions/service.js", () => ({
+  calculateCommissionForDeal: vi.fn().mockResolvedValue({ status: "created" }),
+  recalculateCommissionForDeal: vi.fn().mockResolvedValue({ status: "created" }),
+  removeCommissionForDeal: vi.fn().mockResolvedValue(1),
+}));
+
 const pipelineService = await import("../../../src/modules/pipeline/service.js");
+const commissions = await import("../../../src/modules/commissions/service.js");
 import { setDealContractSignedDate } from "../../../src/modules/deals/service.js";
 
 interface FakeDealRow {
@@ -137,6 +147,9 @@ function makeTenantDb(initial: FakeDealRow | null) {
 describe("setDealContractSignedDate", () => {
   beforeEach(() => {
     delete process.env.ENABLE_CONTRACT_SIGNED_HANDOFF;
+    vi.mocked(commissions.calculateCommissionForDeal).mockClear();
+    vi.mocked(commissions.recalculateCommissionForDeal).mockClear();
+    vi.mocked(commissions.removeCommissionForDeal).mockClear();
     vi.mocked(pipelineService.getStageById).mockReset();
     vi.mocked(pipelineService.getStageById).mockResolvedValue({
       id: "stage-contract",
@@ -256,35 +269,115 @@ describe("setDealContractSignedDate", () => {
     expect(tenantDb._state.auditInserts).toHaveLength(0);
   });
 
-  it("hook fires commission calculation on null → date transition", async () => {
+  it("routes null → date to calculate (initial sign)", async () => {
     const tenantDb = makeTenantDb({ id: "deal-1", contractSignedDate: null });
     await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-09-15", "admin-1", "office-1");
-    // Calls: 1 deal-load + (commission path: deal again, settings, dedup)
-    // The exact count depends on the commission service's internal queries.
-    // We assert >1 to prove the commission path was entered (would be
-    // exactly 1 if the hook failed to fire).
-    expect(tenantDb._state.selectCalls).toBeGreaterThan(1);
+
+    expect(commissions.calculateCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.calculateCommissionForDeal).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({ dealId: "deal-1", contractSignedDate: "2026-09-15", triggeredByUserId: "admin-1" })
+    );
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
   });
 
-  it("hook does NOT fire commission calculation on date → null (clear)", async () => {
+  it("routes date → null (clear) to REMOVE — no signed date ⇒ no phantom payout", async () => {
     const tenantDb = makeTenantDb({
       id: "deal-1",
       contractSignedDate: "2026-09-15",
       contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
     });
     await setDealContractSignedDate(tenantDb as never, "deal-1", null, "admin-1", "office-1");
-    // Only the initial deal-load should have happened. No commission path.
-    expect(tenantDb._state.selectCalls).toBe(1);
+
+    expect(commissions.removeCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.removeCommissionForDeal).toHaveBeenCalledWith(tenantDb, "deal-1", "admin-1");
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
   });
 
-  it("hook does NOT fire commission calculation on date → different date (edit)", async () => {
+  it("routes date → different date (correction) to RECALCULATE (attribution-preserving, all-or-nothing)", async () => {
     const tenantDb = makeTenantDb({
       id: "deal-1",
       contractSignedDate: "2026-09-15",
       contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
     });
     await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-12-01", "admin-1", "office-1");
-    expect(tenantDb._state.selectCalls).toBe(1);
+
+    expect(commissions.recalculateCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.recalculateCommissionForDeal).toHaveBeenCalledWith(
+      tenantDb,
+      expect.objectContaining({ dealId: "deal-1", contractSignedDate: "2026-12-01", triggeredByUserId: "admin-1" })
+    );
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+  });
+
+  // Bug 3 (CodeRabbit): an _at-only signed row (contract_signed_at set, contract_signed_date null — the
+  // reseed/import shape) must transition off the EFFECTIVE signed date, not contract_signed_date alone.
+  it("CLEAR on an _at-only signed row (date null, _at set) still routes to REMOVE", async () => {
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      contractSignedDate: null, // date column never populated
+      contractSignedAt: new Date("2026-09-15T00:00:00.000Z"), // but _at IS set (reseed shape)
+    });
+    // Clearing sets both to null. Keyed on the effective date, this is signed → cleared.
+    await setDealContractSignedDate(tenantDb as never, "deal-1", null, "admin-1", "office-1");
+
+    expect(commissions.removeCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
+  });
+
+  it("CORRECTION on an _at-only signed row routes to RECALCULATE (not a misrouted initial calc)", async () => {
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      contractSignedDate: null,
+      contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
+    });
+    await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-12-01", "admin-1", "office-1");
+
+    // Effective old = 2026-09-15 (from _at), new = 2026-12-01 → correction → recalc, NOT initial calc.
+    expect(commissions.recalculateCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
+  });
+
+  // Codex P2: NORMALIZING an _at-only row — setting the date COLUMN to MATCH the existing _at date — has
+  // an unchanged effective date, but a signed-but-never-calculated import deal must still get its
+  // commission (the pre-effective-date null→date path created it). calculateCommissionForDeal is
+  // idempotent, so an already-paid deal is untouched.
+  it("NORMALIZING an _at-only row (date column null→its _at date) still runs calculate (idempotent)", async () => {
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      contractSignedDate: null,
+      contractSignedAt: new Date("2026-09-15T00:00:00.000Z"),
+    });
+    await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-09-15", "admin-1", "office-1");
+
+    // Effective date unchanged (2026-09-15 == 2026-09-15) but the date column went null→value → calculate
+    // (creates the missing commission for a never-calculated import; skips if one already exists).
+    expect(commissions.calculateCommissionForDeal).toHaveBeenCalledTimes(1);
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
+  });
+
+  // Codex follow-up: canonical precedence is _at-first. On a row where contract_signed_date and
+  // contract_signed_at DIVERGE, normalizing the date column to the existing _at value leaves the canonical
+  // effective date unchanged → the commission must NOT be churned (no recalc that could change amount/rate).
+  it("normalizing a DIVERGENT date column to the existing _at value does NOT churn commission (_at-first)", async () => {
+    const tenantDb = makeTenantDb({
+      id: "deal-1",
+      contractSignedDate: "2026-03-01", // date column disagrees with _at
+      contractSignedAt: new Date("2026-01-15T00:00:00.000Z"), // canonical signed date = 2026-01-15
+    });
+    // Admin sets the date column to match the canonical _at date.
+    await setDealContractSignedDate(tenantDb as never, "deal-1", "2026-01-15", "admin-1", "office-1");
+
+    // Canonical effective date (2026-01-15) is unchanged → no commission helper fires.
+    expect(commissions.calculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.recalculateCommissionForDeal).not.toHaveBeenCalled();
+    expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
   });
 
   it("emits deal.contract.signed once on contract_signed_at null → value when flag is on and deal is in Contract", async () => {

@@ -94,6 +94,9 @@ beforeAll(async () => {
     );
     CREATE TABLE tasks (id uuid PRIMARY KEY, deal_id uuid, status text, is_overdue boolean);
     CREATE TABLE projects (id uuid PRIMARY KEY, source_deal_id uuid, is_active boolean NOT NULL DEFAULT true, updated_at timestamptz);
+    -- getDealById now left-joins users (estimatorUserName for the PR3 estimator picker); the join needs
+    -- the table to exist even when estimator_user_id is null (no rows required here).
+    CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
 
     INSERT INTO pipeline_stage_config (id, name, slug, is_terminal) VALUES
       ('${ST.won}','Won','won',true),

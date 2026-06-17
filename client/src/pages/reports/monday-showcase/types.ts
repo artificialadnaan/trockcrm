@@ -2,6 +2,8 @@
 // monday-showcase-service.ts). The 8 variants all render slices of ONE instance of this, so they
 // reconcile by construction -- keep this in lockstep with the server contract.
 
+import type { WeekMode } from "../week-mode";
+
 export type DepartmentKey = "estimating" | "sent" | "won" | "collected";
 export type ProjectionBand = "0_30" | "31_60" | "61_90" | "beyond_90";
 
@@ -68,7 +70,7 @@ export interface ShowcaseWeek {
 export interface ShowcasePeriod {
   from: string;
   to: string;
-  mode: "to_date" | "completed";
+  mode: WeekMode;
   label: string;
 }
 
@@ -157,11 +159,14 @@ export const PROJECTION_BAND_LABEL: Record<ProjectionBand, string> = {
 };
 
 export const SHOWCASE_VARIANTS = [
-  { key: "A1", group: "Report A", label: "A1 · Throughput Funnel" },
-  { key: "A2", group: "Report A", label: "A2 · Department Scoreboard" },
+  // Exec is the consolidated survivor of the old A1 (Throughput Funnel) + A2 (Department Scoreboard) +
+  // Hero (One-Glance): Hero's big-tile presentation carrying A2's data richness (all 4 departments incl.
+  // Collected). The 3 non-deferred departments each carry a WoW delta chip + 8-week sparkline; Collected
+  // is a deferred placeholder (no chip/sparkline) until a finance source is wired. A3 stays as a distinct
+  // momentum view.
+  { key: "HERO", group: "Exec", label: "Exec · One Glance" },
   { key: "A3", group: "Report A", label: "A3 · Momentum Lanes" },
-  { key: "HERO", group: "Exec", label: "Exec · One-Glance Hero" },
-  { key: "B1", group: "Report B", label: "B1 · Roll-Call Scorecards" },
+  // B1 (Roll-Call Scorecards) was removed; its per-rep Sent + lead-status content lives on in B2/B3.
   { key: "B2", group: "Report B", label: "B2 · Leaderboard" },
   { key: "B3", group: "Report B", label: "B3 · Rep Load Lane" },
   { key: "B4", group: "Report B", label: "B4 · Forecast Ladder" },
