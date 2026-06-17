@@ -491,4 +491,110 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     expect(rowFor(parentRows, ESTB)?.attribution_role).toBe("estimator");
     expect(rowFor(parentRows, ESTA)).toBeUndefined();
   });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────────────
+  // OWNER-ROW INVARIANT (Codex): the mint helper's "already covered" gate keys on the ACTUAL booked
+  // deal_signed_commissions row (rep presence), NEVER the mutable deal.assigned_rep_id. After an owner
+  // reassignment the booked owner row stays on the ORIGINAL rep while assigned_rep_id moves — so an
+  // assigned_rep_id proxy is wrong in BOTH directions. Tests 16–18 lock the invariant's guarantees; test
+  // 18 (regression) preserves the sign-time estimator==owner behavior.
+  // ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+  // 16. BOOKED-OWNER GATE (no double-pay): signed owner=O, then the owner is REASSIGNED O→X (the booked
+  // owner row stays rep=O role=owner), then estimator is set back to O. O must NOT get a 2nd row — the
+  // gate is the booked owner ROW (rep=O present), not the assignedRepId proxy (which now points at X).
+  it("reassign owner O→X then set estimator=O mints NO second row for O (booked-owner ROW gate)", async () => {
+    const D = U("0d16");
+    await seedDeal(D, { estimator: null }); // owner=OWNER(O), no estimator
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
+    let rows = await dscRows(D);
+    expect(rows).toHaveLength(1);
+    const ownerBefore = rowFor(rows, OWNER)!;
+    expect(ownerBefore.attribution_role).toBe("owner");
+
+    // Reassign the OWNER O→X (X = ESTA). The booked owner row stays on O — reassignment never moves it.
+    await pg.exec(`UPDATE public.deals SET assigned_rep_id='${ESTA}' WHERE id='${D}'`);
+
+    // Set estimator = O. O already books the owner row, so the row-based gate skips — no 2nd cut for O.
+    // Direct-helper proof: the assignedRepId proxy (O===X? false) would NOT short-circuit here; only the
+    // (deal_id, rep_user_id) backstop would catch it. The row gate makes the skip authoritative.
+    const mint = await mintEstimatorCommissionForDeal(tdb, {
+      dealId: D,
+      estimatorUserId: OWNER,
+      triggeredByUserId: OWNER,
+    });
+    expect(mint.status).toBe("skipped_existing");
+
+    rows = await dscRows(D);
+    expect(rows).toHaveLength(1); // O keeps EXACTLY the owner row — no double-pay
+    expect(rowFor(rows, OWNER)).toEqual(ownerBefore); // byte-identical owner row
+  });
+
+  // 17. PROXY FALSE-POSITIVE (the test that strictly REQUIRES the row gate): signed owner=O, reassign
+  // O→X, then set estimator=X (the NEW assignee, who books NO row yet). The assignedRepId proxy
+  // (estimator===assignedRepId → X===X) would WRONGLY skip and deny X the estimator cut they are owed;
+  // the row-based gate mints X's estimator row because X has no booked row. (FAILS on the old proxy.)
+  it("reassign owner O→X then set estimator=X mints X's estimator row (proxy would wrongly skip)", async () => {
+    const D = U("0d17");
+    await seedDeal(D, { estimator: null }); // owner=OWNER(O), no estimator
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
+    const ownerBefore = rowFor(await dscRows(D), OWNER)!;
+
+    // Reassign the OWNER O→X (X = ESTA). assigned_rep_id is now ESTA; the owner row stays booked to O.
+    await pg.exec(`UPDATE public.deals SET assigned_rep_id='${ESTA}' WHERE id='${D}'`);
+
+    // Set estimator = X (= ESTA = the current assignee). The OLD proxy (ESTA===assignedRepId ESTA) would
+    // short-circuit to skipped_existing and mint NOTHING; the row gate sees ESTA books no row → mints it.
+    await setDealEstimator(tdb, D, ESTA, OWNER);
+
+    const rows = await dscRows(D);
+    expect(rows).toHaveLength(2);
+    const est = rowFor(rows, ESTA)!;
+    expect(est).toBeDefined(); // X's estimator row WAS minted — proxy would have denied it
+    expect(est.attribution_role).toBe("estimator");
+    expect(Number(est.amount)).toBe(5000); // 100000 × 0.05 (X's OWN rate, additive)
+    expect(rowFor(rows, OWNER)).toEqual(ownerBefore); // the original owner's full-cut row is byte-identical
+  });
+
+  // 18. ESTIMATOR DISTINCT FROM BOTH (Y ≠ O, Y ≠ X): signed owner=O, reassign O→X, set estimator=Y.
+  // Y's estimator row is minted at Y's own rate; the booked owner row (still O) is byte-identical.
+  it("reassign owner O→X then set estimator=Y (distinct) mints Y's row; O's owner row byte-identical", async () => {
+    const D = U("0d18");
+    await seedDeal(D, { estimator: null }); // owner=OWNER(O)
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
+    const ownerBefore = rowFor(await dscRows(D), OWNER)!;
+
+    // Reassign O→X (X = ESTA), then name a DISTINCT estimator Y (= ESTB).
+    await pg.exec(`UPDATE public.deals SET assigned_rep_id='${ESTA}' WHERE id='${D}'`);
+    await setDealEstimator(tdb, D, ESTB, OWNER);
+
+    const rows = await dscRows(D);
+    expect(rows).toHaveLength(2);
+    const est = rowFor(rows, ESTB)!;
+    expect(est.attribution_role).toBe("estimator");
+    expect(Number(est.amount)).toBe(3000); // 100000 × 0.03 (Y's own rate)
+    expect(rowFor(rows, ESTA)).toBeUndefined(); // X (current assignee, not the estimator) books no row
+    expect(rowFor(rows, OWNER)).toEqual(ownerBefore); // booked owner stays O, byte-identical
+  });
+
+  // 19. REGRESSION (estimator==owner at SIGN time): the sign-time path still mints ONLY the owner row.
+  // The calc pre-check (estimator!==assignedRepId) is a cheap optimization; even if removed, the row gate
+  // / onConflict backstop would keep this to one row. Asserted here so the existing behavior is preserved.
+  it("regression: estimator==owner at SIGN time mints only the owner row (no estimator row)", async () => {
+    const D = U("0d19");
+    await seedDeal(D, { estimator: OWNER }); // estimator === owner at sign
+    const res = await calculateCommissionForDeal(tdb, {
+      dealId: D,
+      contractSignedDate: "2026-01-01",
+      triggeredByUserId: OWNER,
+    });
+    expect(res.status).toBe("created");
+    expect(res.estimator).toBeUndefined(); // no additive estimator side-effect when estimator IS the owner
+
+    const rows = await dscRows(D);
+    expect(rows).toHaveLength(1);
+    const owner = rowFor(rows, OWNER)!;
+    expect(owner.attribution_role).toBe("owner");
+    expect(Number(owner.amount)).toBe(2000); // 100000 × 0.02 (owner full cut only)
+  });
 });

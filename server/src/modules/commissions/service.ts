@@ -225,6 +225,12 @@ export async function calculateCommissionForDeal(
   // base-deal-only — it never mints an estimator row. The rate check lives inside insertCommissionRowForRep
   // (a rateless estimator simply yields skipped_no_rate and no row). Minting at sign time here is also what
   // closes the contract-date clear→resign gap: a clear removes ALL rows, and re-signing re-mints BOTH.
+  // The `estimatorUserId !== assignedRepId` term here is a CHEAP OPTIMIZATION, not the load-bearing guard:
+  // at SIGN time assigned_rep_id IS the owner row just minted above, so estimator===assignedRepId means the
+  // owner row already covers them and we can skip the redundant insert. Correctness does NOT rely on this
+  // proxy — if estimator did equal the owner, the estimator insert would conflict on (deal_id, rep_user_id)
+  // and onConflictDoNothing would skip it anyway (the OWNER-ROW INVARIANT backstop). Reassignment can't
+  // break this branch because it only runs at sign time, before any reassignment.
   let estimatorResult: CalculateCommissionResult | undefined;
   if (
     !deal.isChangeOrder &&
@@ -420,11 +426,20 @@ function effectiveSignedDateOf(deal: {
  * Mint the ADDITIVE estimator commission row for a deal (the estimator's own-rate cut, on top of the
  * owner's). The estimator-scoped counterpart to calculateCommissionForDeal's owner mint, for the manual
  * estimator-edit path. Skips (never throws) when:
- *   • the deal is a change order            → skipped_change_order (base-deal-only)
- *   • the estimator IS the owner            → skipped_existing (the owner row already covers them)
- *   • the deal has no effective signed date → skipped_no_value (an unsigned deal earns nothing)
+ *   • the deal is a change order              → skipped_change_order (base-deal-only)
+ *   • the estimator already BOOKS a dsc row   → skipped_existing (never a 2nd cut for the same person)
+ *   • the deal has no effective signed date   → skipped_no_value (an unsigned deal earns nothing)
  * Otherwise delegates to the shared insert primitive (rateless estimator ⇒ skipped_no_rate / no row;
  * already-minted ⇒ skipped_existing). MUST run inside the caller's transaction.
+ *
+ * OWNER-ROW INVARIANT: the "already covered" gate is the ACTUAL booked deal_signed_commissions row for
+ * this estimator (rep presence on the deal), NEVER the MUTABLE deal.assigned_rep_id. After an owner
+ * reassignment the booked owner row stays on the ORIGINAL rep while assigned_rep_id moves, so an
+ * assigned_rep_id proxy is wrong in BOTH directions: it would fail to skip the original (still-booked)
+ * owner if they are later named estimator, AND — worse — it would WRONGLY skip the new assignee when they
+ * are named estimator, denying them a commission they are owed (they book no row yet). Keying on the row
+ * is reassignment-safe. (onConflictDoNothing + UNIQUE(deal_id, rep_user_id) remain the backstop; this
+ * EXISTS check is the load-bearing guard.)
  */
 export async function mintEstimatorCommissionForDeal(
   tx: TenantDb,
@@ -455,8 +470,22 @@ export async function mintEstimatorCommissionForDeal(
   if (deal.isChangeOrder) {
     return { status: "skipped_change_order" };
   }
-  if (input.estimatorUserId === deal.assignedRepId) {
-    // The owner row already credits this user their full cut; an estimator row would be a duplicate.
+
+  // OWNER-ROW INVARIANT (the authoritative skip): does this estimator ALREADY book a row on this deal —
+  // as the owner's full-cut row OR an already-minted estimator row? Gate on the ACTUAL row (rep presence),
+  // NOT deal.assignedRepId (mutable — a reassignment leaves the owner row on the original rep). If they
+  // already earn on the deal, never mint a 2nd cut for them.
+  const [existingForEstimator] = await tx
+    .select({ id: dealSignedCommissions.id })
+    .from(dealSignedCommissions)
+    .where(
+      and(
+        eq(dealSignedCommissions.dealId, deal.id),
+        eq(dealSignedCommissions.repUserId, input.estimatorUserId)
+      )
+    )
+    .limit(1);
+  if (existingForEstimator) {
     return { status: "skipped_existing" };
   }
 
