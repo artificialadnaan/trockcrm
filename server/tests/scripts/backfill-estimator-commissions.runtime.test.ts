@@ -305,7 +305,7 @@ describe("estimator backfill owner-row gate (FIX G) + TOCTOU revalidation under 
     await pgG.exec(`UPDATE public.deals SET estimator_user_id='${GE2}' WHERE id='${DG_CHANGED}'`);
 
     const result = await runOne(tdbG, stale!, GACTOR, true);
-    expect(result.status).toBe("skipped_estimator_changed");
+    expect(result.status).toBe("skipped_no_longer_eligible"); // full re-validation under lock catches the moved estimator
     expect(await rowsForRep(DG_CHANGED, GE1)).toBe(0); // PREVIOUS estimator never paid
     expect(await rowsForRep(DG_CHANGED, GE2)).toBe(0); // nor the new one (we never targeted it)
     expect(await rowsForRep(DG_CHANGED, GO)).toBe(1); // owner row untouched
@@ -327,6 +327,129 @@ describe("estimator backfill owner-row gate (FIX G) + TOCTOU revalidation under 
     const result = await runOne(tdbG, candidate!, GACTOR, false);
     expect(result.status).toBe("created"); // faithful: reports the would-be outcome
     expect(await rowsForRep(DG_NOOWNER, GE1)).toBe(0); // but nothing written
+  });
+});
+
+// Isolated fixture (own PGlite) for the two Codex findings on the backfill:
+//   FINDING 2 (owner-row invariant — same as PR #742): the candidate OWNER-ROW gate keys on the booked
+//     attribution_role='owner' ROW, NOT rep_user_id = assigned_rep_id. After an owner reassignment the booked
+//     owner row stays on the ORIGINAL rep while assigned_rep_id moves; a valid deal must STILL be selected
+//     (and the #736 owner backfill won't re-mint it). The old assigned_rep_id proxy would wrongly drop it.
+//   FINDING 1 (revalidate the FULL excluded set under lock): runOne re-runs the ENTIRE candidate predicate
+//     FOR UPDATE, so a deal that goes lost / is_active=false / is_test_data=true between the unlocked bulk
+//     SELECT and the per-candidate run is skipped_no_longer_eligible and never minted — the old re-read only
+//     rechecked estimator/CO/signed-date and would have minted these.
+describe("estimator backfill — owner-role-row gate (Finding 2) + full revalidation under lock (Finding 1)", () => {
+  let pgF: PGlite;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let tdbF: any;
+  const queryF = (sql: string, params?: unknown[]) =>
+    pgF.query(sql, params as never[]) as Promise<{ rows: Record<string, unknown>[] }>;
+  const rowsForRep = async (dealId: string, rep: string) =>
+    (await pgF.query(`SELECT 1 FROM public.deal_signed_commissions WHERE deal_id='${dealId}' AND rep_user_id='${rep}'`)).rows.length;
+
+  const FO = U("0b01"); // ORIGINAL owner (booked on the owner row), rate 0.03
+  const FNEW = U("0b02"); // the NEW current assignee after an owner reassignment, rate 0.03
+  const FEST = U("0b03"); // estimator, rate 0.02
+  const FACTOR = U("0bac");
+  const FWON = U("0b50");
+  const FLOST = U("0b51");
+  const FOFFICE = U("0bf1");
+
+  const DF_REASSIGNED = U("0bd1"); // owner row booked on FO; assigned_rep_id since changed to FNEW (Finding 2)
+  const DF_GO_LOST = U("0bd2"); // candidate, then stage→lost before runOne (Finding 1)
+  const DF_GO_INACTIVE = U("0bd3"); // candidate, then is_active=false before runOne (Finding 1)
+  const DF_GO_TEST = U("0bd4"); // candidate, then is_test_data=true before runOne (Finding 1)
+
+  beforeAll(async () => {
+    pgF = new PGlite();
+    await pgF.exec(
+      tenantSchemaSql("public", [users, pipelineStageConfig, deals, userCommissionSettings, dealSignedCommissions, auditLog])
+    );
+    await pgF.exec(
+      `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`
+    );
+    tdbF = drizzle(pgF);
+    await pgF.exec(
+      `INSERT INTO public.users (id, display_name, email, role, office_id) VALUES
+         ('${FO}','F Owner','fo@x.com','rep','${FOFFICE}'),
+         ('${FNEW}','F New Owner','fn@x.com','rep','${FOFFICE}'),
+         ('${FEST}','F Estimator','fe@x.com','rep','${FOFFICE}')`
+    );
+    await pgF.exec(`INSERT INTO public.pipeline_stage_config (id, name, slug, display_order) VALUES
+      ('${FWON}','Won','won',9), ('${FLOST}','Lost','lost',10)`);
+    await pgF.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES
+      ('${FO}', 0.030000, true), ('${FNEW}', 0.030000, true), ('${FEST}', 0.020000, true)`);
+    const insF = (id: string, owner: string, estimator: string, awarded: number) =>
+      `INSERT INTO public.deals (id, deal_number, name, stage_id, assigned_rep_id, estimator_user_id, awarded_amount, contract_signed_date, contract_signed_at, is_change_order)
+       VALUES ('${id}','${id.slice(-4)}','Deal','${FWON}','${owner}','${estimator}', ${awarded}, '2026-04-01', NULL, false)`;
+    // DF_REASSIGNED: CURRENT assignee is FNEW, but the booked owner row (below) stays on the ORIGINAL owner FO.
+    await pgF.exec(insF(DF_REASSIGNED, FNEW, FEST, 100000));
+    await pgF.exec(insF(DF_GO_LOST, FO, FEST, 100000));
+    await pgF.exec(insF(DF_GO_INACTIVE, FO, FEST, 100000));
+    await pgF.exec(insF(DF_GO_TEST, FO, FEST, 100000));
+    // Owner-role rows. DF_REASSIGNED's owner row is on FO (the ORIGINAL owner), NOT the current assignee FNEW —
+    // exactly the post-reassignment shape the old rep_user_id = assigned_rep_id gate would wrongly exclude.
+    await pgF.exec(
+      `INSERT INTO public.deal_signed_commissions (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing) VALUES
+         ('${DF_REASSIGNED}','${FO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-04-01'),
+         ('${DF_GO_LOST}','${FO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-04-01'),
+         ('${DF_GO_INACTIVE}','${FO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-04-01'),
+         ('${DF_GO_TEST}','${FO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-04-01')`
+    );
+  }, 30_000);
+
+  afterAll(async () => {
+    await pgF?.close();
+  });
+
+  it("Finding 2: a deal whose owner row is booked on the ORIGINAL rep (assigned_rep_id since reassigned) is STILL selected and mints the estimator row", async () => {
+    // The OLD gate (EXISTS owner row WHERE rep_user_id = d.assigned_rep_id) would EXCLUDE this deal: the
+    // booked owner row sits on FO but the current assigned_rep_id is FNEW. Prove the old proxy drops it...
+    const oldStyle = await pgF.query(
+      `SELECT 1 FROM public.deals d WHERE d.id='${DF_REASSIGNED}' AND EXISTS (
+         SELECT 1 FROM public.deal_signed_commissions o WHERE o.deal_id=d.id AND o.rep_user_id=d.assigned_rep_id)`
+    );
+    expect(oldStyle.rows.length).toBe(0); // old assigned_rep_id gate would NOT have selected it
+
+    // ...but the new role-keyed gate (EXISTS attribution_role='owner') DOES select it.
+    const candidate = (await findEstimatorBackfillCandidates(queryF)).find((c) => c.dealId === DF_REASSIGNED);
+    expect(candidate?.estimatorId).toBe(FEST);
+
+    const result = await runOne(tdbF, candidate!, FACTOR, true);
+    expect(result.status).toBe("created");
+    expect(Number(result.amount)).toBe(2000); // 100000 × 0.02 (estimator FEST's own rate)
+    expect(await rowsForRep(DF_REASSIGNED, FEST)).toBe(1); // estimator row minted
+    expect(await rowsForRep(DF_REASSIGNED, FO)).toBe(1); // ORIGINAL owner row untouched
+    expect(await rowsForRep(DF_REASSIGNED, FNEW)).toBe(0); // current assignee books no row (it's not the estimator)
+  });
+
+  it("Finding 1: a candidate that goes LOST between selection and the locked run is skipped_no_longer_eligible (no row minted)", async () => {
+    const candidate = (await findEstimatorBackfillCandidates(queryF)).find((c) => c.dealId === DF_GO_LOST);
+    expect(candidate).toBeTruthy(); // eligible at selection time
+    await pgF.exec(`UPDATE public.deals SET stage_id='${FLOST}' WHERE id='${DF_GO_LOST}'`); // moved to lost AFTER selection
+    const result = await runOne(tdbF, candidate!, FACTOR, true);
+    expect(result.status).toBe("skipped_no_longer_eligible");
+    expect(await rowsForRep(DF_GO_LOST, FEST)).toBe(0); // nothing minted
+    expect(await rowsForRep(DF_GO_LOST, FO)).toBe(1); // owner row untouched
+  });
+
+  it("Finding 1: a candidate that goes is_active=false between selection and the locked run is skipped (no row minted)", async () => {
+    const candidate = (await findEstimatorBackfillCandidates(queryF)).find((c) => c.dealId === DF_GO_INACTIVE);
+    expect(candidate).toBeTruthy();
+    await pgF.exec(`UPDATE public.deals SET is_active=false WHERE id='${DF_GO_INACTIVE}'`); // archived AFTER selection
+    const result = await runOne(tdbF, candidate!, FACTOR, true);
+    expect(result.status).toBe("skipped_no_longer_eligible");
+    expect(await rowsForRep(DF_GO_INACTIVE, FEST)).toBe(0);
+  });
+
+  it("Finding 1: a candidate that becomes is_test_data=true between selection and the locked run is skipped (no row minted)", async () => {
+    const candidate = (await findEstimatorBackfillCandidates(queryF)).find((c) => c.dealId === DF_GO_TEST);
+    expect(candidate).toBeTruthy();
+    await pgF.exec(`UPDATE public.deals SET is_test_data=true WHERE id='${DF_GO_TEST}'`); // flagged test AFTER selection
+    const result = await runOne(tdbF, candidate!, FACTOR, true);
+    expect(result.status).toBe("skipped_no_longer_eligible");
+    expect(await rowsForRep(DF_GO_TEST, FEST)).toBe(0);
   });
 });
 
