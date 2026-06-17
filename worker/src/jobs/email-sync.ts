@@ -2,6 +2,14 @@ import { pool } from "../db.js";
 import crypto from "crypto";
 
 const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
+
+// RED email-signature coordination — body-on-dedup-collision policy.
+// Default OFF = OPTION (a): when a Sent-folder copy collides with an existing row on internet_message_id,
+// trust the CRM compose-time body and skip cleanly. Flip to true ONLY if signatures are appended
+// SERVER-SIDE (Exchange transport rule / Outlook client signature), where the CRM never sees the final
+// as-sent body — then OPTION (b) lets the Sent-folder copy win the body field so the stored copy matches
+// what the client actually received. See .audit/outlook-graph-sync-discovery.md.
+const SENT_COPY_WINS_BODY_ON_COLLISION = false;
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
 const SERVER_EMAIL_ASSIGNMENT_MODULE = `${SERVER_MODULE_ROOT}/email/assignment-service.js` as string;
@@ -203,6 +211,7 @@ export async function runEmailSync(): Promise<void> {
     const tokenRows = await client.query(
       `SELECT ugt.user_id, ugt.access_token, ugt.refresh_token,
               ugt.home_account_id, ugt.token_expires_at, ugt.last_delta_link,
+              ugt.last_inbox_delta_link, ugt.last_sent_delta_link,
               ugt.last_sync_at, u.office_id, u.email AS user_email
        FROM public.user_graph_tokens ugt
        JOIN public.users u ON u.id = ugt.user_id
@@ -284,22 +293,23 @@ export async function runEmailSync(): Promise<void> {
   }
 }
 
+// One mailbox folder to delta-sync. Inbox carries inbound mail; Sent Items carries the rep's own
+// outbound mail — including emails composed directly in Outlook, which never enter the CRM otherwise.
+interface MailFolderSync {
+  folder: "inbox" | "sentitems";
+  direction: "inbound" | "outbound";
+  cursorColumn: "last_inbox_delta_link" | "last_sent_delta_link";
+  syncAtColumn: "last_inbox_sync_at" | "last_sent_sync_at";
+  dateField: "receivedDateTime" | "sentDateTime";
+  // Where this run's delta resumes from (null → fresh 7-day query).
+  initialCursor: string | null;
+}
+
 async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
-  const { user_id, access_token, last_delta_link, office_id } = tokenRow;
+  const { user_id, access_token, office_id } = tokenRow;
 
   // Decrypt access token (stored encrypted at rest)
   const currentAccessToken = decrypt(access_token);
-
-  // Determine delta URL
-  // First sync: use messages endpoint with select fields (last 7 days)
-  // Subsequent syncs: use the stored delta link
-  let deltaUrl: string;
-  if (last_delta_link) {
-    deltaUrl = last_delta_link;
-  } else {
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    deltaUrl = `/me/mailFolders/inbox/messages/delta?$select=id,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,body,hasAttachments,receivedDateTime&$filter=receivedDateTime ge ${sevenDaysAgo}`;
-  }
 
   // Resolve the office schema for this user
   const officeResult = await poolClient.query(
@@ -316,13 +326,58 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
   }
   const schemaName = `office_${officeSlug}`;
 
+  const folders: MailFolderSync[] = [
+    {
+      folder: "inbox",
+      direction: "inbound",
+      cursorColumn: "last_inbox_delta_link",
+      syncAtColumn: "last_inbox_sync_at",
+      dateField: "receivedDateTime",
+      // Back-compat: the first run after the cursor split reuses the legacy single cursor so we don't
+      // re-pull 7 days of inbox. After this run the inbox advances on last_inbox_delta_link and the legacy
+      // last_delta_link is left frozen (read-only fallback).
+      initialCursor: tokenRow.last_inbox_delta_link ?? tokenRow.last_delta_link ?? null,
+    },
+    {
+      folder: "sentitems",
+      direction: "outbound",
+      cursorColumn: "last_sent_delta_link",
+      syncAtColumn: "last_sent_sync_at",
+      dateField: "sentDateTime",
+      initialCursor: tokenRow.last_sent_delta_link ?? null,
+    },
+  ];
+
+  for (const f of folders) {
+    await syncUserMailFolder(poolClient, currentAccessToken, user_id, office_id, schemaName, f);
+  }
+}
+
+async function syncUserMailFolder(
+  poolClient: any,
+  accessToken: string,
+  userId: string,
+  officeId: string,
+  schemaName: string,
+  f: MailFolderSync
+): Promise<void> {
+  // First sync for this folder: messages endpoint with select fields (last 7 days).
+  // Subsequent syncs: the stored delta link (which encodes the original $select).
+  let deltaUrl: string;
+  if (f.initialCursor) {
+    deltaUrl = f.initialCursor;
+  } else {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    deltaUrl = `/me/mailFolders/${f.folder}/messages/delta?$select=id,internetMessageId,conversationId,from,toRecipients,ccRecipients,subject,bodyPreview,body,hasAttachments,${f.dateField}&$filter=${f.dateField} ge ${sevenDaysAgo}`;
+  }
+
   // Fetch messages page by page via delta
   let nextLink: string | null = deltaUrl;
   let newDeltaLink: string | null = null;
   let totalProcessed = 0;
 
   while (nextLink) {
-    const result: GraphFetchResult<any> = await graphFetch(currentAccessToken, nextLink);
+    const result: GraphFetchResult<any> = await graphFetch(accessToken, nextLink);
 
     if (!result.ok) {
       if (result.status === 401) {
@@ -339,12 +394,13 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
       // Skip deleted/removed messages from delta (they have @removed)
       if (msg["@removed"]) continue;
 
-      const processed = await processInboundMessage(
+      const processed = await processMailMessage(
         poolClient,
         schemaName,
-        user_id,
-        office_id,
-        msg
+        userId,
+        officeId,
+        msg,
+        f.direction
       );
       if (processed) totalProcessed++;
     }
@@ -357,31 +413,34 @@ async function syncUserEmails(poolClient: any, tokenRow: any): Promise<void> {
     }
   }
 
-  // Update the delta link and last sync time
+  // Persist the folder's own cursor + per-folder sync time + the overall heartbeat. The split cursor
+  // columns (last_inbox_delta_link / last_sent_delta_link) are hardcoded literals from MailFolderSync,
+  // never user input — safe to interpolate.
   if (newDeltaLink) {
     await poolClient.query(
       `UPDATE public.user_graph_tokens
-       SET last_delta_link = $1, last_sync_at = NOW(), updated_at = NOW()
+       SET ${f.cursorColumn} = $1, ${f.syncAtColumn} = NOW(), last_sync_at = NOW(), updated_at = NOW()
        WHERE user_id = $2`,
-      [newDeltaLink, user_id]
+      [newDeltaLink, userId]
     );
   } else {
     await poolClient.query(
-      `UPDATE public.user_graph_tokens SET last_sync_at = NOW(), updated_at = NOW() WHERE user_id = $1`,
-      [user_id]
+      `UPDATE public.user_graph_tokens
+       SET ${f.syncAtColumn} = NOW(), last_sync_at = NOW(), updated_at = NOW()
+       WHERE user_id = $1`,
+      [userId]
     );
   }
 
   if (totalProcessed > 0) {
     console.log(
-      `[Worker:email-sync] User ${user_id}: synced ${totalProcessed} new emails`
+      `[Worker:email-sync] User ${userId}: synced ${totalProcessed} new ${f.direction} emails from ${f.folder}`
     );
   }
 }
 
 /**
- * Process a single inbound message from Graph delta.
- * Returns true if the email was stored (matched a contact), false if skipped.
+ * Process a single inbound (Inbox) message from Graph delta. Thin wrapper — see processMailMessage.
  */
 export async function processInboundMessage(
   client: any,
@@ -390,15 +449,77 @@ export async function processInboundMessage(
   officeId: string,
   msg: any
 ): Promise<boolean> {
+  return processMailMessage(client, schemaName, userId, officeId, msg, "inbound");
+}
+
+/**
+ * Process a single outbound (Sent Items) message from Graph delta. Thin wrapper — see processMailMessage.
+ */
+export async function processSentMessage(
+  client: any,
+  schemaName: string,
+  userId: string,
+  officeId: string,
+  msg: any
+): Promise<boolean> {
+  return processMailMessage(client, schemaName, userId, officeId, msg, "outbound");
+}
+
+/**
+ * Process a single message from a Graph delta page.
+ *
+ * Inbound (Inbox): matches the SENDER against CRM contacts; stores every message; fires inbound side
+ * effects (email.received event, reply-task evaluation).
+ *
+ * Outbound (Sent Items): matches the RECIPIENTS (rep → client); SELECTIVE — stores only when a recipient
+ * is a known contact or the thread is already bound, so sent-to-noise stays out of the assignment queue;
+ * dedups on internet_message_id so a CRM-composed email isn't double-stored when its Sent-folder copy
+ * (different graph id, same Message-ID) is synced; skips the inbound-only side effects.
+ *
+ * Returns true if the email was stored, false if skipped (dedup / not selective / conflict).
+ */
+export async function processMailMessage(
+  client: any,
+  schemaName: string,
+  userId: string,
+  officeId: string,
+  msg: any,
+  direction: "inbound" | "outbound"
+): Promise<boolean> {
+  const isOutbound = direction === "outbound";
   const graphMessageId = msg.id;
   if (!graphMessageId) return false;
+  const internetMessageId: string | null = msg.internetMessageId ?? null;
 
-  // Dedup check: graph_message_id is UNIQUE
+  // Dedup 1 (both directions): graph_message_id is UNIQUE.
   const existing = await client.query(
     `SELECT id FROM ${schemaName}.emails WHERE graph_message_id = $1 LIMIT 1`,
     [graphMessageId]
   );
   if (existing.rows.length > 0) return false;
+
+  // Dedup 2 (outbound only): the Sent-folder copy of a message the CRM already stored (a CRM-composed
+  // send, or an earlier sync) carries a DIFFERENT graph id but the SAME internet_message_id. Skip it so
+  // the outbound email is stored exactly once.
+  if (isOutbound && internetMessageId) {
+    const existingByMid = await client.query(
+      `SELECT id FROM ${schemaName}.emails WHERE internet_message_id = $1 LIMIT 1`,
+      [internetMessageId]
+    );
+    if (existingByMid.rows.length > 0) {
+      // OPTION (b) fallback (default OFF): let the Sent-folder copy win the body field — only relevant
+      // when a signature is appended server-side and the CRM's stored body predates it.
+      if (SENT_COPY_WINS_BODY_ON_COLLISION) {
+        await client.query(
+          `UPDATE ${schemaName}.emails
+              SET body_html = $1, body_preview = $2
+            WHERE internet_message_id = $3`,
+          [msg.body?.content ?? "", (msg.bodyPreview ?? "").substring(0, 500), internetMessageId]
+        );
+      }
+      return false;
+    }
+  }
 
   // Extract addresses
   const fromAddress =
@@ -414,16 +535,21 @@ export async function processInboundMessage(
   const bodyPreview = (msg.bodyPreview ?? "").substring(0, 500);
   const bodyHtml = msg.body?.content ?? "";
   const hasAttachments = msg.hasAttachments ?? false;
-  const sentAt = msg.receivedDateTime
-    ? new Date(msg.receivedDateTime)
-    : new Date();
+  // Inbound is timestamped by receipt; outbound by send time.
+  const messageDate = isOutbound ? msg.sentDateTime : msg.receivedDateTime;
+  const sentAt = messageDate ? new Date(messageDate) : new Date();
   const mailboxAccountId = await resolveMailboxAccountIdForSyncedUser(client, userId);
   const normalizedSubject = normalizeEmailSubject(subject);
   const participantFingerprint = buildParticipantFingerprint(toAddresses, ccAddresses);
 
-  // Selective sync: for inbound emails, match ONLY the sender (from_address)
-  // against CRM contacts — not to/cc which are internal mailbox addresses.
-  const matchAddresses = fromAddress ? [fromAddress] : [];
+  // Participant match differs by direction:
+  //   inbound  — the SENDER is the external party → match from_address against contacts.
+  //   outbound — the rep is the sender → match the RECIPIENTS (to/cc) against contacts.
+  const matchAddresses = isOutbound
+    ? [...toAddresses, ...ccAddresses]
+    : fromAddress
+      ? [fromAddress]
+      : [];
   const [contactMatch, activeThreadBinding, provisionalThreadBinding, assignmentModule] = await Promise.all([
     findContactByEmailRaw(client, schemaName, matchAddresses),
     getActiveThreadBindingRaw(client, schemaName, mailboxAccountId, conversationId),
@@ -440,6 +566,14 @@ export async function processInboundMessage(
         leadCandidates: [],
       };
   const authoritativeBinding = activeThreadBinding ?? provisionalThreadBinding;
+
+  // SELECTIVE SENT-SYNC: inbound stores every Inbox message, but a rep's Sent Items also holds mail to
+  // no-reply/newsletter/internal addresses. Store an outbound email only when it ties to a known CRM
+  // record — a matched recipient contact OR an already-bound thread — so the shared assignment queue
+  // surfaces real sent-to-contact mail, not noise. (Inbound is unaffected.)
+  if (isOutbound && !contactMatch && !authoritativeBinding) {
+    return false;
+  }
 
   const assignment = authoritativeBinding
     ? {
@@ -471,16 +605,18 @@ export async function processInboundMessage(
 
   const [insertResult] = [await client.query(
     `INSERT INTO ${schemaName}.emails
-     (graph_message_id, graph_conversation_id, direction, from_address, to_addresses, cc_addresses,
+     (graph_message_id, internet_message_id, graph_conversation_id, direction, from_address, to_addresses, cc_addresses,
       subject, body_preview, body_html, has_attachments, contact_id, deal_id,
       assigned_entity_type, assigned_entity_id, assignment_confidence, assignment_ambiguity_reason,
       thread_binding_id, user_id, sent_at)
-     VALUES ($1, $2, 'inbound', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
      ON CONFLICT (graph_message_id) DO NOTHING
      RETURNING id`,
     [
       graphMessageId,
+      internetMessageId,
       conversationId,
+      direction,
       fromAddress,
       toAddresses,
       ccAddresses,
@@ -559,7 +695,8 @@ export async function processInboundMessage(
       ambiguityReason: assignment.ambiguityReason ?? "assignment_review",
       candidateDealNames: association.activeDealNames,
     });
-  } else if (association.dealId) {
+  } else if (!isOutbound && association.dealId) {
+    // Reply-task evaluation ("a client replied → maybe a follow-up task") is an INBOUND concern only.
     await evaluateInboundEmailTasks(
       client,
       schemaName,
@@ -583,23 +720,25 @@ export async function processInboundMessage(
     );
   }
 
-  // Emit email.received event via job_queue
-  await client.query(
-    `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-     VALUES ('domain_event', $1, $2, 'pending', NOW())`,
-    [
-      JSON.stringify({
-        eventName: "email.received",
-        emailId,
-        contactId: contactMatch?.id ?? null,
-        contactName: contactMatch ? `${contactMatch.first_name} ${contactMatch.last_name}` : fromAddress,
-        fromAddress,
-        subject,
-        userId,
-      }),
-      officeId, // pass actual office so notification handler resolves correct tenant
-    ]
-  );
+  // Emit email.received event via job_queue — INBOUND only; a sent email is not a "received" event.
+  if (!isOutbound) {
+    await client.query(
+      `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+       VALUES ('domain_event', $1, $2, 'pending', NOW())`,
+      [
+        JSON.stringify({
+          eventName: "email.received",
+          emailId,
+          contactId: contactMatch?.id ?? null,
+          contactName: contactMatch ? `${contactMatch.first_name} ${contactMatch.last_name}` : fromAddress,
+          fromAddress,
+          subject,
+          userId,
+        }),
+        officeId, // pass actual office so notification handler resolves correct tenant
+      ]
+    );
+  }
 
   await client.query(
     `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)

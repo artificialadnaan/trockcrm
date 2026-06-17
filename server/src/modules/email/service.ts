@@ -97,13 +97,21 @@ export interface EmailAssignmentQueueItem {
   suggestedAssignment: EmailAssignmentResult;
 }
 
+// Directions that can sit in the unassigned/assignment queue. Sent emails captured from Outlook (not
+// composed in the CRM) can land here too — a rep's sent-to-a-known-contact email whose recipient maps to
+// 0 or multiple deals needs manual assignment, same as an inbound one. This constant is the SINGLE source
+// of truth so every assignable-direction site (the SQL queue predicate, the JS candidate check, the
+// unassigned-count condition) agrees — a sent email counted by the queue must also survive the JS filter,
+// or count and items diverge.
+const ASSIGNABLE_DIRECTIONS = ["inbound", "outbound"] as const;
+
 export function isEmailAssignmentQueueCandidate(emailRow: {
   direction: "inbound" | "outbound";
   assignmentAmbiguityReason: string | null;
   assignmentStatus?: string | null;
 }) {
   return (
-    emailRow.direction === "inbound" &&
+    (ASSIGNABLE_DIRECTIONS as readonly string[]).includes(emailRow.direction) &&
     emailRow.assignmentAmbiguityReason != null &&
     (emailRow.assignmentStatus ?? "unassigned") === "unassigned"
   );
@@ -111,7 +119,7 @@ export function isEmailAssignmentQueueCandidate(emailRow: {
 
 function emailIsUnassignedCondition() {
   return and(
-    eq(emails.direction, "inbound"),
+    inArray(emails.direction, ASSIGNABLE_DIRECTIONS),
     eq(emails.assignmentStatus, "unassigned"),
     isNull(emails.assignedEntityId),
     isNull(emails.dealId),
@@ -956,7 +964,7 @@ export async function getEmailAssignmentQueue(
   const offset = (page - 1) * limit;
 
   const conditions: any[] = [
-    eq(emails.direction, "inbound"),
+    inArray(emails.direction, ASSIGNABLE_DIRECTIONS),
     eq(emails.assignmentStatus, filters.status ?? "unassigned"),
   ];
 
@@ -1126,6 +1134,10 @@ export async function sendEmail(
   const graphMessageId = draft.id ?? `sent-${crypto.randomUUID()}`;
   const graphConversationId: string | null = draft.conversationId ?? null;
   const fromAddress: string = draft.from?.emailAddress?.address ?? "";
+  // Capture the stable RFC822 Message-ID now, at draft creation, while the message id still resolves.
+  // The Sent-folder sync later reads this same message back (with a DIFFERENT graph id) and dedups on
+  // this value — without it, every CRM-composed email double-stores when its Sent copy is synced.
+  const internetMessageId: string | null = draft.internetMessageId ?? null;
 
   // Step 2: Send the draft
   const sendResult = await graphRequest({
@@ -1147,6 +1159,7 @@ export async function sendEmail(
     .insert(emails)
     .values({
       graphMessageId,
+      internetMessageId,
       graphConversationId,
       direction: "outbound",
       fromAddress,
@@ -1215,6 +1228,8 @@ async function createMockSentEmail(
   input: SendEmailInput
 ): Promise<any> {
   const graphMessageId = `dev-sent-${crypto.randomUUID()}`;
+  // Mirror the live path: a deterministic Message-ID so a same-message Sent-folder copy dedups in dev too.
+  const internetMessageId = `<dev-${graphMessageId}@trockconstruction.com>`;
   const outboundAssociation = await resolveOutboundAssociation(tenantDb, input);
   if (!outboundAssociation) {
     throw new AppError(400, "Outbound email must be associated to a deal, company, or contact.");
@@ -1225,6 +1240,7 @@ async function createMockSentEmail(
     .insert(emails)
     .values({
       graphMessageId,
+      internetMessageId,
       direction: "outbound",
       fromAddress: "dev-user@trockconstruction.com",
       toAddresses: input.to,

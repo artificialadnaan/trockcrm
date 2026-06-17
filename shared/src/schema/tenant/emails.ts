@@ -15,6 +15,9 @@ export const emailDirectionEnum = pgEnum("email_direction", EMAIL_DIRECTIONS);
 export const emails = pgTable("emails", {
   id: uuid("id").primaryKey().defaultRandom(),
   graphMessageId: varchar("graph_message_id", { length: 500 }).unique().notNull(),
+  // Stable RFC822 Message-ID — identical across a message's Draft/Sent/recipient copies, so it dedups a
+  // CRM-composed outbound row against its Sent-folder copy (which carries a different graph_message_id).
+  internetMessageId: varchar("internet_message_id", { length: 1000 }),
   graphConversationId: varchar("graph_conversation_id", { length: 500 }),
   direction: emailDirectionEnum("direction").notNull(),
   fromAddress: varchar("from_address", { length: 255 }).notNull(),
