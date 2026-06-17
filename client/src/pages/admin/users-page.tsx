@@ -816,9 +816,16 @@ export function UsersPage() {
             <AddUserDialog
               offices={officeOptions}
               onCreate={async (input) => {
-                const r = await createUser(input);
-                toast.success(r.invite.sent ? "User created and invited" : "User created — invite failed; resend from the row");
-                await refetch();
+                try {
+                  const r = await createUser(input);
+                  toast.success(r.invite.sent ? "User created and invited" : "User created — invite failed; resend from the row");
+                  await refetch();
+                } catch (err) {
+                  // Surface the API message (dup email, inactive office, not-global-admin) and re-throw so
+                  // the dialog stays open with the user's input instead of silently closing.
+                  toast.error(err instanceof Error ? err.message : "Failed to create user");
+                  throw err;
+                }
               }}
               onClose={() => setShowAddUser(false)}
             />

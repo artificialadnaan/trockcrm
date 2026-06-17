@@ -14,15 +14,20 @@ describe("isTokenStaleByEpoch", () => {
   it("null epoch is never stale", () => {
     expect(isTokenStaleByEpoch(1000, null)).toBe(false);
   });
-  it("token issued strictly before the epoch is stale", () => {
-    expect(isTokenStaleByEpoch(1000, 1000 * 1000 + 1)).toBe(true);
-  });
-  it("token issued at/after the epoch is valid", () => {
-    expect(isTokenStaleByEpoch(1000, 1000 * 1000)).toBe(false);
-    expect(isTokenStaleByEpoch(2000, 1000 * 1000)).toBe(false);
-  });
   it("undefined iat is not stale (cannot prove staleness)", () => {
     expect(isTokenStaleByEpoch(undefined, 1000 * 1000)).toBe(false);
+  });
+  it("a token from an EARLIER second is stale", () => {
+    expect(isTokenStaleByEpoch(999, 1000 * 1000)).toBe(true);
+  });
+  it("a token from a LATER second is not stale", () => {
+    expect(isTokenStaleByEpoch(2000, 1000 * 1000)).toBe(false);
+  });
+  it("a fresh token in the SAME second as a mid-second epoch bump is NOT stale (no self-lockout)", () => {
+    // Regression: epoch bumped at 1000.500s; a fresh JWT minted at 1000.800s floors to iat=1000.
+    // A ms-precision compare (1000*1000 < 1000*1000+500) wrongly rejected it; whole-second compare passes.
+    expect(isTokenStaleByEpoch(1000, 1000 * 1000 + 500)).toBe(false);
+    expect(isTokenStaleByEpoch(1000, 1000 * 1000)).toBe(false);
   });
 });
 

@@ -59,7 +59,17 @@ export function AddUserDialog({
         <button
           type="button"
           disabled={busy || !value.email.trim() || !value.displayName.trim() || !value.officeId}
-          onClick={async () => { setBusy(true); try { await onCreate(value); onClose(); } finally { setBusy(false); } }}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await onCreate(value);
+              onClose(); // only on success — onCreate rejects on API failure (already surfaced there)
+            } catch {
+              // error surfaced by onCreate's toast; keep the dialog open with the entered values
+            } finally {
+              setBusy(false);
+            }
+          }}
           className="rounded bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white disabled:opacity-50"
         >
           Create user

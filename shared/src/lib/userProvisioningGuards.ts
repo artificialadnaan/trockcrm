@@ -4,7 +4,14 @@ import type { UserRole } from "../types/enums.js";
 // minted at the same second as the epoch survives. null epoch or unknown iat => not stale.
 export function isTokenStaleByEpoch(iatSeconds: number | undefined, tokensValidAfterMs: number | null): boolean {
   if (tokensValidAfterMs == null || iatSeconds == null) return false;
-  return iatSeconds * 1000 < tokensValidAfterMs;
+  // JWT `iat` is whole seconds (floored), so compare at the same granularity: floor the epoch to its
+  // second. A ms-precision compare wrongly rejected a freshly-minted token whose iat-second equals the
+  // epoch's second when the epoch was bumped mid-second (e.g. epoch 12:00:00.500, fresh token iat
+  // 12:00:00) — bouncing a user out of the session they just created. With strict `<` on whole seconds,
+  // a token from an EARLIER second is stale; same-second-or-later passes. The only tokens that survive
+  // within the epoch's own second are sub-second old ones, which the live per-request is_active/role
+  // re-check still covers (and for reactivation, no token can exist in that second — login was blocked).
+  return iatSeconds < Math.floor(tokensValidAfterMs / 1000);
 }
 
 // An admin may not deactivate themselves or change their own role (anti-lockout / anti-footgun).
