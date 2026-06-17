@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { api } from "@/lib/api";
+import type { CrmAssignableRole } from "@trock-crm/shared/types";
 
 export interface AdminUser {
   id: string;
@@ -96,7 +97,7 @@ export function useAdminUsers() {
     displayName: string;
     firstName?: string;
     lastName?: string;
-    role: "admin" | "director" | "rep" | "construction";
+    role: CrmAssignableRole;
     officeId: string;
     sendInvite?: boolean;
   }) => {

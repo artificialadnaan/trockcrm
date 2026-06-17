@@ -443,6 +443,7 @@ export function UsersPage() {
                   <SelectItem value="rep">Rep</SelectItem>
                   <SelectItem value="director">Director</SelectItem>
                   <SelectItem value="admin">Admin</SelectItem>
+                  <SelectItem value="construction">Construction</SelectItem>
                 </SelectContent>
               </Select>
             </div>

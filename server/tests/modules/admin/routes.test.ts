@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
       email: "admin@trock.dev",
       displayName: "Admin User",
       role: "admin",
+      baseRole: "admin",
       officeId: "office-1",
       activeOfficeId: "office-1",
     };
@@ -16,7 +17,12 @@ const mocks = vi.hoisted(() => ({
   }),
   requireAdmin: vi.fn((_req: any, _res: any, next: any) => next()),
   requireDirector: vi.fn((_req: any, _res: any, next: any) => next()),
-  requireGlobalAdmin: vi.fn((_req: any, _res: any, next: any) => next()),
+  requireGlobalAdmin: vi.fn((req: any, res: any, next: any) => {
+    // Mirror production (base role only) rather than an always-pass passthrough, so the guard isn't
+    // silently disabled in this suite.
+    if (req.user?.baseRole === "admin") return next();
+    return res.status(403).json({ error: { message: "Global admin required" } });
+  }),
   runOwnershipSync: vi.fn(),
   getAccessibleOffices: vi.fn(),
   getMyCleanupQueue: vi.fn(),

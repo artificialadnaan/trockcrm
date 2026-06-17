@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CRM_ASSIGNABLE_ROLES, type CrmAssignableRole } from "@trock-crm/shared/types";
 
 export interface AddUserOffice { id: string; name: string }
@@ -51,6 +51,13 @@ export function AddUserDialog({
 }) {
   const [value, setValue] = useState({ email: "", displayName: "", role: "rep" as CrmAssignableRole, officeId: offices[0]?.id ?? "", sendInvite: true });
   const [busy, setBusy] = useState(false);
+  // If the dialog mounted before useAdminOffices finished, officeId is "" — adopt the first office
+  // once options arrive so the Create button isn't stuck disabled.
+  useEffect(() => {
+    if (!value.officeId && offices.length > 0) {
+      setValue((cur) => (cur.officeId ? cur : { ...cur, officeId: offices[0].id }));
+    }
+  }, [offices, value.officeId]);
   return (
     <div className="space-y-4">
       <AddUserDialogBody offices={offices} value={value} onChange={(p) => setValue((cur) => ({ ...cur, ...p }))} />

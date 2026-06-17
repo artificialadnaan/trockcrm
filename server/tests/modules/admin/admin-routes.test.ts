@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
       email: "admin@trock.dev",
       displayName: "Admin User",
       role: mocks.userRole,
+      baseRole: mocks.userRole,
       officeId: "office-1",
       activeOfficeId: "office-1",
     };
@@ -36,7 +37,9 @@ const mocks = vi.hoisted(() => ({
     res.status(403).json({ error: { message: "Admin access required" } });
   }),
   requireGlobalAdmin: vi.fn((req: any, res: any, next: any) => {
-    if ((req.user?.baseRole ?? req.user?.role) === "admin") {
+    // Mirror production exactly: base role ONLY (no effective-role fallback), so the mock can't mask
+    // an office-override escalation.
+    if (req.user?.baseRole === "admin") {
       next();
       return;
     }
