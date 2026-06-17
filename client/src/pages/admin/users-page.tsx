@@ -144,7 +144,7 @@ export function UsersPage() {
   const handleRoleChange = async (userId: string, role: "admin" | "director" | "rep" | "construction") => {
     setUpdatingId(userId);
     try {
-      await updateUser(userId, { role } as Parameters<typeof updateUser>[1]);
+      await updateUser(userId, { role });
     } finally {
       setUpdatingId(null);
     }
@@ -317,7 +317,7 @@ export function UsersPage() {
 
     setBulkUpdating(true);
     try {
-      await updateUsersBulk(selectedUserIds, input as Parameters<typeof updateUsersBulk>[1]);
+      await updateUsersBulk(selectedUserIds, input);
       toast.success(successMessage);
       setSelectedUserIds([]);
     } catch (err) {

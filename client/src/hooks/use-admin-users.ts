@@ -5,7 +5,7 @@ export interface AdminUser {
   id: string;
   email: string;
   displayName: string;
-  role: "admin" | "director" | "rep";
+  role: "admin" | "director" | "rep" | "construction";
   officeId: string;
   reportsTo?: string | null;
   officeName: string | null;
