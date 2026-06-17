@@ -1082,6 +1082,16 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           );
         }
       }
+      // Empties-only guard (SET estimator_user_id = COALESCE(estimator_user_id, $16) above): when the
+      // deal already has an estimator, the DB keeps it and this resolved value is dropped on the floor.
+      // Log the preserved vs ignored ids so the decision is observable — the audit mirror below still
+      // reports the resolved value, so without this the silently-ignored id would be invisible (Codex #741 P2).
+      const existingEstimatorUserId = matches[0].estimator_user_id ?? null;
+      if (existingEstimatorUserId && estimatorUserId !== existingEstimatorUserId) {
+        console.warn(
+          `[BidBoardSync] Preserved existing estimator_user_id ${existingEstimatorUserId} for deal ${matches[0].id}; ignored incoming ${estimatorUserId ?? "null"} (empties-only sync)`
+        );
+      }
       let updateResult;
       await client.query(`SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
       try {
