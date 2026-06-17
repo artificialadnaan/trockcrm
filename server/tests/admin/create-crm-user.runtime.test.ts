@@ -33,6 +33,7 @@ describe("assertCreatableCrmUser (create-flow validation)", () => {
     expect(() => assertCreatableCrmUser({ ...ok, reportsTo: "nope" })).toThrowError(/manager is invalid/i);
     expect(() => assertCreatableCrmUser({ ...ok, reportsTo: null })).not.toThrow();
     expect(() => assertCreatableCrmUser({ ...ok, reportsTo: "" })).not.toThrow();
+    expect(() => assertCreatableCrmUser({ ...ok, reportsTo: "   " })).not.toThrow(); // whitespace == no manager
     expect(() => assertCreatableCrmUser({ ...ok, reportsTo: "00000000-0000-0000-0000-000000000002" })).not.toThrow();
   });
 });

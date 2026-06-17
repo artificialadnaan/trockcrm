@@ -415,9 +415,12 @@ export async function listFieldUsers(input: {
 }
 
 export async function setFieldUserActive(input: { userId: string; tenantId: string; active: boolean }) {
+  // Bump token_version on every toggle so the 30-day field JWT is invalidated by version, not just by
+  // the is_active recheck: without this, a pre-deactivation field token (version unchanged) would
+  // revive on reactivation (is_active true again). Mirrors the CRM reactivation fix (incrementTokenVersion).
   const result = await db.execute(sql`
     UPDATE users
-    SET is_active = ${input.active}, updated_at = now()
+    SET is_active = ${input.active}, token_version = token_version + 1, updated_at = now()
     WHERE id = ${input.userId}::uuid
       AND office_id = ${input.tenantId}::uuid
       AND role = 'field_contractor'

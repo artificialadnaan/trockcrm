@@ -168,7 +168,10 @@ export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input
   // Validate the relationship ids are well-formed UUIDs before they reach the DB — a malformed value
   // otherwise hits Postgres and surfaces as a 500 (uuid 22P02) instead of a clean 400.
   if (!UUID_RE.test(input.officeId.trim())) throw new AppError(400, "Office is invalid");
-  if (input.reportsTo != null && input.reportsTo !== "" && !UUID_RE.test(input.reportsTo.trim())) {
+  // Blank/whitespace reportsTo == "no manager" (normalized to null at insert); only a non-blank,
+  // non-UUID value is an error.
+  const reportsTo = input.reportsTo?.trim();
+  if (reportsTo && !UUID_RE.test(reportsTo)) {
     throw new AppError(400, "Manager is invalid");
   }
   if (input.role === "field_contractor") throw new AppError(400, "Field contractors are created in the field-user flow");
@@ -198,7 +201,7 @@ export async function createCrmUser(input: CreateCrmUserInput, actorUserId: stri
         lastName: input.lastName?.trim() || null,
         role: input.role,
         officeId: input.officeId,
-        reportsTo: input.reportsTo ?? null,
+        reportsTo: input.reportsTo?.trim() || null,
         isActive: true,
         createdByUserId: actorUserId,
       })
