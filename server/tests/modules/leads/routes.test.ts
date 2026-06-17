@@ -455,6 +455,33 @@ describe("lead stage transition route", () => {
     );
   });
 
+  it("threads the authenticated request user through as the lead-creation actor", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    serviceMocks.createLead.mockResolvedValueOnce({
+      id: "lead-created",
+      verificationStatus: "not_required",
+    });
+
+    const { req, res } = await invokeLeadCreateRoute(
+      {
+        companyId: "company-1",
+        propertyId: "property-1",
+        name: "Actor Threaded Lead",
+      },
+      leadRoutes
+    );
+
+    // The route must pass req.user.id as actorUserId so the assignment task + audit attribute to the
+    // acting user. Behavioral replacement for the deleted brittle source-text grep
+    // (src/modules/leads/assignment-task-source.test.ts); the service-side wiring of that actor into
+    // createAssignmentTaskIfNeeded is covered by tests/modules/leads/service.test.ts.
+    expect(res.statusCode).toBe(201);
+    expect(serviceMocks.createLead).toHaveBeenCalledWith(
+      req.tenantDb,
+      expect.objectContaining({ actorUserId: "rep-1" })
+    );
+  });
+
   it("rejects whitespace-only lead names on create", async () => {
     const leadRoutes = await loadLeadRoutes();
 
