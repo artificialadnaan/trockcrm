@@ -501,10 +501,16 @@ export async function processMailMessage(
   // Dedup 2 (outbound only): the Sent-folder copy of a message the CRM already stored (a CRM-composed
   // send, or an earlier sync) carries a DIFFERENT graph id but the SAME internet_message_id. Skip it so
   // the outbound email is stored exactly once.
+  //
+  // Scope the match to THIS mailbox's own outbound rows (user_id + direction='outbound'). The RFC822
+  // Message-ID is identical across a message's copies in DIFFERENT mailboxes — for an internal A→B email,
+  // A's Sent copy and B's Inbox copy share it. A tenant-wide match would let B's inbound row swallow A's
+  // outbound copy (data loss). The only collision we dedup is A's own CRM-composed row vs A's Sent copy.
   if (isOutbound && internetMessageId) {
     const existingByMid = await client.query(
-      `SELECT id FROM ${schemaName}.emails WHERE internet_message_id = $1 LIMIT 1`,
-      [internetMessageId]
+      `SELECT id FROM ${schemaName}.emails
+        WHERE internet_message_id = $1 AND user_id = $2 AND direction = 'outbound' LIMIT 1`,
+      [internetMessageId, userId]
     );
     if (existingByMid.rows.length > 0) {
       // OPTION (b) fallback (default OFF): let the Sent-folder copy win the body field — only relevant
@@ -513,8 +519,8 @@ export async function processMailMessage(
         await client.query(
           `UPDATE ${schemaName}.emails
               SET body_html = $1, body_preview = $2
-            WHERE internet_message_id = $3`,
-          [msg.body?.content ?? "", (msg.bodyPreview ?? "").substring(0, 500), internetMessageId]
+            WHERE internet_message_id = $3 AND user_id = $4 AND direction = 'outbound'`,
+          [msg.body?.content ?? "", (msg.bodyPreview ?? "").substring(0, 500), internetMessageId, userId]
         );
       }
       return false;
@@ -683,7 +689,11 @@ export async function processMailMessage(
     );
   }
 
-  if (assignment.requiresClassificationTask) {
+  // createClassificationTaskRaw hardcodes an INBOUND-flavored task (type='inbound_email',
+  // source_event='email.received'), so it must not fire for outbound. The outbound email still surfaces
+  // in the assignment queue via its assignment_ambiguity_reason on the row (set in the INSERT above) —
+  // the task is a separate, inbound-only nudge.
+  if (!isOutbound && assignment.requiresClassificationTask) {
     await createClassificationTaskRaw(client, schemaName, {
       officeId,
       emailId,
@@ -765,13 +775,18 @@ async function findContactByEmailRaw(
 ): Promise<{ id: string; first_name: string; last_name: string; company_id: string | null } | null> {
   if (emailAddresses.length === 0) return null;
 
-  // Build parameterized IN clause
-  const placeholders = emailAddresses.map((_, i) => `$${i + 1}`).join(", ");
+  // Build parameterized IN clause. Deterministic pick: outbound passes multiple recipients (To then Cc),
+  // so order the match by the address's position in the input list — the first/highest-priority recipient
+  // wins instead of an arbitrary LIMIT 1. (Inbound passes a single address, so this is a no-op there.)
+  const lowered = emailAddresses.map((e) => e.toLowerCase());
+  const placeholders = lowered.map((_, i) => `$${i + 1}`).join(", ");
+  const orderParam = `$${lowered.length + 1}`;
   const result = await client.query(
     `SELECT id, first_name, last_name, company_id FROM ${schemaName}.contacts
      WHERE LOWER(email) IN (${placeholders}) AND is_active = true
+     ORDER BY array_position(${orderParam}::text[], LOWER(email))
      LIMIT 1`,
-    emailAddresses.map((e) => e.toLowerCase())
+    [...lowered, lowered]
   );
 
   return result.rows[0] ?? null;

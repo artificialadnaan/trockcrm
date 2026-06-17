@@ -982,7 +982,11 @@ export async function getEmailAssignmentQueue(
       or(
         sql`${emails.subject} ILIKE ${term}`,
         sql`${emails.bodyPreview} ILIKE ${term}`,
-        sql`${emails.fromAddress} ILIKE ${term}`
+        sql`${emails.fromAddress} ILIKE ${term}`,
+        // Outbound queue items have the rep as fromAddress — match on the recipient too so a sent email
+        // is searchable by the customer's address.
+        sql`array_to_string(${emails.toAddresses}, ',') ILIKE ${term}`,
+        sql`array_to_string(${emails.ccAddresses}, ',') ILIKE ${term}`
       )
     );
   }

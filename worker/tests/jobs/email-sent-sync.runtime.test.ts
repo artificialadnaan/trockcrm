@@ -68,7 +68,11 @@ async function setupSchema(pg: PGlite) {
       subject varchar(1000),
       body_preview varchar(500),
       body_html text,
-      has_attachments boolean DEFAULT false,
+      has_attachments boolean NOT NULL DEFAULT false,
+      is_starred boolean NOT NULL DEFAULT false,
+      ai_suggestions jsonb NOT NULL DEFAULT '[]'::jsonb,
+      archived_at timestamptz,
+      deleted_at timestamptz,
       contact_id uuid,
       deal_id uuid,
       assigned_entity_type varchar(20),
@@ -163,6 +167,33 @@ describe("Sent-folder dedup (load-bearing)", () => {
 
     expect(stored).toBe(false);
     expect(await emailCount()).toBe(1); // still exactly one row — no duplicate
+  });
+
+  it("a DIFFERENT user's inbound copy with the same Message-ID does NOT block the outbound store (internal A→B)", async () => {
+    const OTHER_USER = "00000000-0000-4000-8000-0000000000cc";
+    const CONTACT = "00000000-0000-4000-8000-0000000000c9";
+    // B's Inbox already synced this internal email (inbound, user B) — SAME RFC822 Message-ID as A's copy.
+    await db.query(
+      `INSERT INTO ${SCHEMA}.emails
+         (graph_message_id, internet_message_id, direction, from_address, to_addresses, user_id, sent_at)
+       VALUES ('graph-inbound-B', '<M-internal@trock>', 'inbound', 'rep-a@trockgc.com',
+               ARRAY['rep-b@trockgc.com'], '${OTHER_USER}', now())`
+    );
+    // The recipient is a known contact so A's outbound copy is selective-stored.
+    await db.query(`INSERT INTO ${SCHEMA}.contacts (id, email, is_active) VALUES ('${CONTACT}', 'rep-b@trockgc.com', true)`);
+
+    // A's Sent sync sees A's OWN outbound copy: same Message-ID, different graph id, A's user_id.
+    const stored = await processMailMessage(
+      db, SCHEMA, USER_ID, OFFICE_ID,
+      { id: "graph-outbound-A", internetMessageId: "<M-internal@trock>",
+        from: { emailAddress: { address: "rep-a@trockgc.com" } },
+        toRecipients: [{ emailAddress: { address: "rep-b@trockgc.com" } }], subject: "internal",
+        body: { content: "x" }, sentDateTime: new Date().toISOString() },
+      "outbound"
+    );
+
+    expect(stored).toBe(true); // NOT swallowed by B's inbound copy — dedup is scoped to A's own outbound
+    expect(await emailCount("outbound")).toBe(1);
   });
 
   it("OPTION (a) default: the collision does NOT overwrite the CRM-stored body", async () => {
