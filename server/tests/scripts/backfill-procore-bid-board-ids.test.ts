@@ -201,6 +201,9 @@ describe("Procore Bid Board ID backfill", () => {
     expect(report.backupPath).toBeTruthy();
     expect(report.backupPath?.startsWith(os.tmpdir())).toBe(true);
     expect(fs.existsSync(report.backupPath as string)).toBe(true);
+    // Hardened to owner-only (#746 review): no group/other access on the on-disk snapshot, which
+    // holds CRM deal/Procore data. umask-robust (umask only clears bits, never adds them).
+    expect(fs.statSync(report.backupPath as string).mode & 0o077).toBe(0);
     fs.rmSync(report.backupPath as string, { force: true });
   });
 });

@@ -490,7 +490,12 @@ function writeBackupSnapshot(planRows: BackfillPlanRow[], mode: BackfillMode): s
     os.tmpdir(),
     `trockcrm-procore-id-backfill-${mode}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`
   );
-  fs.writeFileSync(backupPath, `${JSON.stringify(backupPayload(planRows), null, 2)}\n`, "utf8");
+  // Owner-only (0o600): the snapshot contains CRM deal/Procore data; relying on the default umask
+  // could leave it readable by other users on a shared host.
+  fs.writeFileSync(backupPath, `${JSON.stringify(backupPayload(planRows), null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   return backupPath;
 }
 
