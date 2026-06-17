@@ -26,18 +26,21 @@ describe("AddUserDialog office default", () => {
     const root = createRoot(container);
     const props = { onCreate: async () => {}, onClose: () => {} };
 
-    // Mount with NO offices loaded yet (officeId starts ""), then rerender with options.
-    await act(async () => {
-      root.render(createElement(AddUserDialog, { ...props, offices: [] }));
-    });
-    await act(async () => {
-      root.render(createElement(AddUserDialog, { ...props, offices: [{ id: "o9", name: "Atlanta" }] }));
-    });
+    try {
+      // Mount with NO offices loaded yet (officeId starts ""), then rerender with options.
+      await act(async () => {
+        root.render(createElement(AddUserDialog, { ...props, offices: [] }));
+      });
+      await act(async () => {
+        root.render(createElement(AddUserDialog, { ...props, offices: [{ id: "o9", name: "Atlanta" }] }));
+      });
 
-    const officeSelect = container.querySelectorAll("select")[1] as HTMLSelectElement; // [0]=role, [1]=office
-    expect(officeSelect.value).toBe("o9");
-    // Create is no longer stuck-disabled for want of an office (email/name still required separately).
-    await act(async () => { root.unmount(); });
-    container.remove();
+      const officeSelect = container.querySelectorAll("select")[1] as HTMLSelectElement; // [0]=role, [1]=office
+      expect(officeSelect.value).toBe("o9");
+      // Create is no longer stuck-disabled for want of an office (email/name still required separately).
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
   });
 });

@@ -271,20 +271,30 @@ describe("useNotificationStream", () => {
 });
 
 describe("useNotificationStream session invalidation", () => {
-  it("closes the stream and redirects to login on a session_invalidated event", async () => {
+  beforeEach(() => {
+    // The static registry persists across tests; reset so each test sees only its own connection.
     FakeEventSource.instances.length = 0;
-    await renderHook(true);
-    const instances = FakeEventSource.instances;
-    const es = instances[instances.length - 1];
-    expect(es).toBeTruthy();
+  });
 
-    await act(async () => {
-      es.emit("session_invalidated", "{}");
-      await flushEffects();
-    });
+  it("closes the stream and redirects to login on a session_invalidated event", async () => {
+    const root = await renderHook(true);
+    try {
+      const instances = FakeEventSource.instances;
+      const es = instances[instances.length - 1];
+      expect(es).toBeTruthy();
 
-    expect(es.readyState).toBe(FakeEventSource.CLOSED);
-    const stubbedWindow = globalThis.window as unknown as { location: { assign: ReturnType<typeof vi.fn> } };
-    expect(stubbedWindow.location.assign).toHaveBeenCalledWith("/login?reason=session-invalidated");
+      await act(async () => {
+        es.emit("session_invalidated", "{}");
+        await flushEffects();
+      });
+
+      expect(es.readyState).toBe(FakeEventSource.CLOSED);
+      const stubbedWindow = globalThis.window as unknown as { location: { assign: ReturnType<typeof vi.fn> } };
+      expect(stubbedWindow.location.assign).toHaveBeenCalledWith("/login?reason=session-invalidated");
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
   });
 });
