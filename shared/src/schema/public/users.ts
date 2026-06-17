@@ -7,6 +7,7 @@ import {
   boolean,
   jsonb,
   timestamp,
+  integer,
 } from "drizzle-orm/pg-core";
 import { offices } from "./offices.js";
 import { USER_ROLES } from "../../types/enums.js";
@@ -36,5 +37,5 @@ export const users = pgTable("users", {
   createdByUserId: uuid("created_by_user_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-  tokensValidAfter: timestamp("tokens_valid_after", { withTimezone: true }),
+  tokenVersion: integer("token_version").notNull().default(0),
 });

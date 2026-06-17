@@ -1,13 +1,14 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { users, userLocalAuth } from "@trock-crm/shared/schema";
 import { closeUserSseConnections } from "../notifications/sse-manager.js";
 
 // A Drizzle transaction or the base db — both expose .update.
 type Db = { update: (t: typeof users | typeof userLocalAuth) => any };
 
-// Durable "invalidate every session issued before `at`". Read per-request in middleware.
-export async function bumpTokensValidAfter(db: Db, userId: string, at: Date): Promise<void> {
-  await db.update(users).set({ tokensValidAfter: at }).where(eq(users.id, userId));
+// Monotonically bump the user's token version — every JWT minted before this point is now stale (its
+// version is behind). The durable "invalidate all sessions" primitive, read per-request in middleware.
+export async function incrementTokenVersion(db: Db, userId: string): Promise<void> {
+  await db.update(users).set({ tokenVersion: sql`${users.tokenVersion} + 1` }).where(eq(users.id, userId));
 }
 
 // Block re-login after deactivate (middleware already rejects revokedAt). The revoked_at /
@@ -20,8 +21,8 @@ export async function revokeLocalAuthOnDeactivate(db: Db, userId: string, actorU
     .where(eq(userLocalAuth.userId, userId));
 }
 
-// Reactivate: let the user log in again. Their old tokens stay dead (tokens_valid_after unchanged);
-// a fresh login mints a token with iat > the epoch.
+// Reactivate: let the user log in again. Their old tokens stay dead (the version was bumped on
+// reactivation); a fresh login mints a token carrying the new version.
 export async function clearLocalAuthRevocation(db: Db, userId: string, at: Date): Promise<void> {
   await db
     .update(userLocalAuth)

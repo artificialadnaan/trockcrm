@@ -17,7 +17,7 @@ import {
   planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
 import {
-  bumpTokensValidAfter,
+  incrementTokenVersion,
   revokeLocalAuthOnDeactivate,
   clearLocalAuthRevocation,
   closeUserSseConnections,
@@ -155,8 +155,13 @@ export interface CreateCrmUserInput {
 
 // Pure, throwing validation — the create-flow's gate of record. The role decision is the gate-proven
 // isAssignableCrmRole; the rest are simple presence checks.
+// A pragmatic single-@ email shape — the create dialog isn't a <form>, so the field's type="email" is
+// NOT a backstop; this is the server-side gate of record before the insert.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input is CreateCrmUserInput & { role: CrmAssignableRole } {
   if (!input.email?.trim()) throw new AppError(400, "Email is required");
+  if (!EMAIL_RE.test(input.email.trim())) throw new AppError(400, "Enter a valid email address");
   if (!input.displayName?.trim()) throw new AppError(400, "Display name is required");
   if (!input.officeId?.trim()) throw new AppError(400, "Office is required");
   if (input.role === "field_contractor") throw new AppError(400, "Field contractors are created in the field-user flow");
@@ -287,7 +292,7 @@ export async function updateUser(
       nextIsActive: input.isActive,
       nextRole,
     });
-    if (plan.bumpEpoch) await bumpTokensValidAfter(tx, id, now);
+    if (plan.bumpVersion) await incrementTokenVersion(tx, id);
     if (plan.revokeLocalAuth) await revokeLocalAuthOnDeactivate(tx, id, actorUserId, now);
     if (plan.clearLocalAuthRevocation) await clearLocalAuthRevocation(tx, id, now);
 
@@ -359,7 +364,7 @@ export async function updateUser(
   });
 
   // Best-effort, post-commit: drop the deactivated user's live SSE streams immediately. The
-  // authoritative gate remains the per-request is_active + tokens_valid_after re-check.
+  // authoritative gate remains the per-request is_active + token-version re-check.
   if (result.closeStreams) closeUserSseConnections(id);
   return result.updated;
 }

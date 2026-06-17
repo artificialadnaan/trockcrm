@@ -143,6 +143,9 @@ export function UsersPage() {
     setUpdatingId(userId);
     try {
       await updateUser(userId, { role });
+    } catch (err) {
+      // Surface guard rejections (last-active-admin 409, field_contractor transition 403, etc.).
+      toast.error(err instanceof Error ? err.message : "Failed to change role");
     } finally {
       setUpdatingId(null);
     }

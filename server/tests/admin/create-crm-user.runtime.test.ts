@@ -15,6 +15,11 @@ describe("assertCreatableCrmUser (create-flow validation)", () => {
   it("rejects a blank email", () => {
     expect(() => assertCreatableCrmUser({ ...ok, email: "  " })).toThrow();
   });
+  it("rejects a malformed email server-side (the dialog isn't a <form>, so type=email isn't a backstop)", () => {
+    expect(() => assertCreatableCrmUser({ ...ok, email: "not-an-email" })).toThrowError(/valid email/i);
+    expect(() => assertCreatableCrmUser({ ...ok, email: "a@b" })).toThrow();
+    expect(() => assertCreatableCrmUser({ ...ok, email: "a b@x.com" })).toThrow();
+  });
   it("rejects a blank display name", () => {
     expect(() => assertCreatableCrmUser({ ...ok, displayName: "" })).toThrow();
   });

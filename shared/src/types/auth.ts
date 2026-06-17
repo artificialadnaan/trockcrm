@@ -5,6 +5,13 @@ export interface JwtClaims {
   email: string;
   officeId: string;
   role: UserRole;
+  /**
+   * The users.token_version current when this token was minted. Middleware rejects the token once the
+   * user's version moves ahead (any deactivate/reactivate/role-change increments it). Absent on
+   * pre-feature tokens → treated as 0 (the column default), so old sessions survive deploy but are
+   * invalidated the first time that user is acted on.
+   */
+  tokenVersion?: number;
   authMethod?: "local" | "dev";
   // Token audience/surface. Tokens minted for the FIELD app (T-Rock Cam / client-field) carry
   // surface:"field"; CRM/admin tokens leave it unset. CRM auth (authMiddleware) REJECTS any token with

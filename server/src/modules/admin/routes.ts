@@ -192,12 +192,14 @@ router.get("/admin/users/:id", requireGlobalAdmin, async (req: Request, res: Res
   }
 });
 
-router.patch("/admin/users/:id", requireGlobalAdmin, async (req: Request, res: Response) => {
+router.patch("/admin/users/:id", requireGlobalAdmin, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await updateUser(req.params.id as string, req.body, req.user!.id);
     return res.json({ user });
-  } catch (err: any) {
-    return res.status(err.statusCode ?? 500).json({ error: err.message ?? String(err) });
+  } catch (err) {
+    // Route through the global error handler so guard rejections return the canonical
+    // { error: { message, code } } shape the client parses (not { error: string }).
+    return next(err);
   }
 });
 

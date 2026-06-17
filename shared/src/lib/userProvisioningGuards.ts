@@ -2,16 +2,14 @@ import type { UserRole } from "../types/enums.js";
 
 // True when a JWT (issued-at, seconds) predates the user's session epoch (ms). Strict <, so a token
 // minted at the same second as the epoch survives. null epoch or unknown iat => not stale.
-export function isTokenStaleByEpoch(iatSeconds: number | undefined, tokensValidAfterMs: number | null): boolean {
-  if (tokensValidAfterMs == null || iatSeconds == null) return false;
-  // JWT `iat` is whole seconds (floored), so compare at the same granularity: floor the epoch to its
-  // second. A ms-precision compare wrongly rejected a freshly-minted token whose iat-second equals the
-  // epoch's second when the epoch was bumped mid-second (e.g. epoch 12:00:00.500, fresh token iat
-  // 12:00:00) — bouncing a user out of the session they just created. With strict `<` on whole seconds,
-  // a token from an EARLIER second is stale; same-second-or-later passes. The only tokens that survive
-  // within the epoch's own second are sub-second old ones, which the live per-request is_active/role
-  // re-check still covers (and for reactivation, no token can exist in that second — login was blocked).
-  return iatSeconds < Math.floor(tokensValidAfterMs / 1000);
+// Monotonic token-version invalidation. Every session-killing change increments users.token_version;
+// each minted JWT carries the version current at mint time. A token is stale iff its version is behind
+// the user's. This is EXACT (no time granularity), so it resolves both edges a time-epoch cannot: a
+// freshly-minted token is never wrongly rejected, and a token issued in the same second as an
+// invalidation is still caught. A missing claim version is treated as 0 (the column default), so
+// pre-feature tokens survive deploy yet are invalidated the first time that user is acted on.
+export function isTokenVersionStale(claimVersion: number | undefined, currentVersion: number): boolean {
+  return (claimVersion ?? 0) < currentVersion;
 }
 
 // An admin may not deactivate themselves or change their own role (anti-lockout / anti-footgun).
@@ -102,7 +100,7 @@ export function evaluateUpdateUserGuards(input: {
 }
 
 export interface SessionInvalidationPlan {
-  bumpEpoch: boolean;
+  bumpVersion: boolean;
   revokeLocalAuth: boolean;
   clearLocalAuthRevocation: boolean;
   closeStreams: boolean;
@@ -120,10 +118,10 @@ export function planSessionInvalidation(input: {
   const reactivating = input.nextIsActive === true && input.currentIsActive === false;
   const roleChanged = input.nextRole !== undefined && input.nextRole !== input.currentRole;
   return {
-    // Reactivate MUST bump too: a user deactivated before this column existed (or otherwise) has a
-    // null epoch, so without a bump their still-unexpired pre-deactivation token (field: 30d) would
-    // pass the not-stale-on-null check and revive on reactivation. Bumping forces a fresh login.
-    bumpEpoch: deactivating || reactivating || roleChanged,
+    // Reactivate MUST bump too: otherwise a still-unexpired pre-deactivation token (field: 30d) would
+    // revive on reactivation (is_active is true again, so only the version distinguishes it from a
+    // fresh login). Bumping the version forces a fresh login.
+    bumpVersion: deactivating || reactivating || roleChanged,
     revokeLocalAuth: deactivating,
     clearLocalAuthRevocation: reactivating,
     // Role change also tears down the open notifications stream so a demoted/promoted user's stream

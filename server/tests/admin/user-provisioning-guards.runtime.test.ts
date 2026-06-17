@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isAssignableCrmRole } from "@trock-crm/shared/types";
 import {
-  isTokenStaleByEpoch,
+  isTokenVersionStale,
   isProhibitedSelfChange,
   isFieldContractorTransition,
   wouldRemoveLastActiveAdmin,
@@ -10,24 +10,25 @@ import {
   planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
 
-describe("isTokenStaleByEpoch", () => {
-  it("null epoch is never stale", () => {
-    expect(isTokenStaleByEpoch(1000, null)).toBe(false);
+describe("isTokenVersionStale", () => {
+  it("a token whose version is BEHIND the user's is stale", () => {
+    expect(isTokenVersionStale(0, 1)).toBe(true);
+    expect(isTokenVersionStale(2, 5)).toBe(true);
   });
-  it("undefined iat is not stale (cannot prove staleness)", () => {
-    expect(isTokenStaleByEpoch(undefined, 1000 * 1000)).toBe(false);
+  it("a token at the current version is NOT stale (fresh post-invalidation login passes)", () => {
+    expect(isTokenVersionStale(1, 1)).toBe(false);
+    expect(isTokenVersionStale(7, 7)).toBe(false);
   });
-  it("a token from an EARLIER second is stale", () => {
-    expect(isTokenStaleByEpoch(999, 1000 * 1000)).toBe(true);
+  it("a missing claim version is treated as 0 — survives deploy until the user is invalidated", () => {
+    expect(isTokenVersionStale(undefined, 0)).toBe(false); // never-invalidated user: pre-feature token stays valid
+    expect(isTokenVersionStale(undefined, 1)).toBe(true); // once invalidated: pre-feature token is killed
   });
-  it("a token from a LATER second is not stale", () => {
-    expect(isTokenStaleByEpoch(2000, 1000 * 1000)).toBe(false);
-  });
-  it("a fresh token in the SAME second as a mid-second epoch bump is NOT stale (no self-lockout)", () => {
-    // Regression: epoch bumped at 1000.500s; a fresh JWT minted at 1000.800s floors to iat=1000.
-    // A ms-precision compare (1000*1000 < 1000*1000+500) wrongly rejected it; whole-second compare passes.
-    expect(isTokenStaleByEpoch(1000, 1000 * 1000 + 500)).toBe(false);
-    expect(isTokenStaleByEpoch(1000, 1000 * 1000)).toBe(false);
+  it("resolves the same-instant edge a time-epoch could not", () => {
+    // deactivate(v0->1) then reactivate(v1->2) within one second: the pre-deactivation token (v0 or v1)
+    // is behind v2 -> stale; a fresh login after reactivation mints v2 -> valid. No time ambiguity.
+    expect(isTokenVersionStale(0, 2)).toBe(true);
+    expect(isTokenVersionStale(1, 2)).toBe(true);
+    expect(isTokenVersionStale(2, 2)).toBe(false);
   });
 });
 
@@ -141,7 +142,7 @@ describe("evaluateUpdateUserGuards (enforcement wiring: guard -> HTTP status)", 
 describe("planSessionInvalidation (effects wiring)", () => {
   it("deactivate -> bump epoch + revoke + close streams (no clear)", () => {
     expect(planSessionInvalidation({ currentIsActive: true, currentRole: "rep", nextIsActive: false })).toEqual({
-      bumpEpoch: true,
+      bumpVersion: true,
       revokeLocalAuth: true,
       clearLocalAuthRevocation: false,
       closeStreams: true,
@@ -149,7 +150,7 @@ describe("planSessionInvalidation (effects wiring)", () => {
   });
   it("reactivate -> clear revocation AND bump epoch (kills any lingering pre-deactivation token, incl. legacy null-epoch users)", () => {
     expect(planSessionInvalidation({ currentIsActive: false, currentRole: "rep", nextIsActive: true })).toEqual({
-      bumpEpoch: true,
+      bumpVersion: true,
       revokeLocalAuth: false,
       clearLocalAuthRevocation: true,
       closeStreams: false,
@@ -157,7 +158,7 @@ describe("planSessionInvalidation (effects wiring)", () => {
   });
   it("role change (active user) -> bump epoch AND close streams", () => {
     expect(planSessionInvalidation({ currentIsActive: true, currentRole: "rep", nextRole: "director" })).toEqual({
-      bumpEpoch: true,
+      bumpVersion: true,
       revokeLocalAuth: false,
       clearLocalAuthRevocation: false,
       closeStreams: true,
@@ -165,7 +166,7 @@ describe("planSessionInvalidation (effects wiring)", () => {
   });
   it("no-op edit (display name only) -> no session effects", () => {
     expect(planSessionInvalidation({ currentIsActive: true, currentRole: "rep" })).toEqual({
-      bumpEpoch: false,
+      bumpVersion: false,
       revokeLocalAuth: false,
       clearLocalAuthRevocation: false,
       closeStreams: false,
@@ -173,7 +174,7 @@ describe("planSessionInvalidation (effects wiring)", () => {
   });
   it("deactivate AND role change still bumps once (boolean OR)", () => {
     const plan = planSessionInvalidation({ currentIsActive: true, currentRole: "rep", nextIsActive: false, nextRole: "director" });
-    expect(plan.bumpEpoch).toBe(true);
+    expect(plan.bumpVersion).toBe(true);
     expect(plan.revokeLocalAuth).toBe(true);
     expect(plan.closeStreams).toBe(true);
   });

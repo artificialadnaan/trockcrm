@@ -96,7 +96,7 @@ export function pushToUser(userId: string, event: string, data: unknown): void {
 
 /**
  * Force-close every SSE stream for a user (best-effort fast-path cleanup on deactivate). NOT the
- * security boundary — the per-request is_active + tokens_valid_after re-check is. Returns the count
+ * security boundary — the per-request is_active + token-version re-check is. Returns the count
  * closed. In-memory + per-instance by design (matches the in-process eventBus).
  */
 export function closeUserSseConnections(userId: string): number {

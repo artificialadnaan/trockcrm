@@ -503,6 +503,7 @@ export async function acceptFieldInvite(input: { token: string; password: string
     email: user.email,
     officeId: user.office_id,
     role: "field_contractor",
+    tokenVersion: 0, // brand-new user row — token_version defaults to 0
     authMethod: "local",
     surface: "field",
   }, { expiresIn: FIELD_JWT_EXPIRES_IN });
@@ -594,6 +595,7 @@ export async function loginFieldUser(input: { email: string; password: string })
       u.role,
       u.office_id,
       u.is_active,
+      u.token_version,
       ula.password_hash,
       ula.is_enabled,
       ula.failed_login_attempts,
@@ -659,6 +661,7 @@ export async function loginFieldUser(input: { email: string; password: string })
     email: user.email,
     officeId: user.office_id,
     role: user.role as UserRole,
+    tokenVersion: Number(user.token_version ?? 0),
     authMethod: "local",
     surface: "field",
   }, { expiresIn: FIELD_JWT_EXPIRES_IN });
