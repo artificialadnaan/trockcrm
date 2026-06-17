@@ -54,7 +54,7 @@ describe("public signature-logo route", () => {
     expect(mockGet).not.toHaveBeenCalled();
   });
 
-  it("does NOT fully stream an object that passes HEAD but is oversized at GET (overwrite race)", async () => {
+  it("404s (no immutable cache) an object that passes HEAD but is oversized at GET (overwrite race)", async () => {
     mockHead.mockResolvedValue({ contentLength: 100 }); // small at HEAD → passes the gate
     const chunk = new Uint8Array(600_000); // two of these = 1.2 MB at GET, over the 1 MB cap
     async function* body() {
@@ -63,23 +63,24 @@ describe("public signature-logo route", () => {
     }
     mockGet.mockResolvedValue({ stream: body() });
 
-    let received = -1;
-    try {
-      const res = await request(makeApp())
-        .get(`/api/public/signature-logo/${USER}/${ASSET}`)
-        .buffer(true)
-        .parse((r, cb) => {
-          const parts: Buffer[] = [];
-          r.on("data", (c: Buffer) => parts.push(c));
-          r.on("end", () => cb(null, Buffer.concat(parts)));
-        });
-      received = (res.body as Buffer).length;
-    } catch {
-      received = -1; // aborted mid-stream also counts as "not fully streamed"
+    const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${ASSET}`);
+
+    // Over-cap at GET: never relayed as a 200, and crucially NOT cached (no immutable header on the 404).
+    expect(res.status).toBe(404);
+    expect(res.headers["cache-control"]).toBeUndefined();
+  });
+
+  it("404s (no immutable cache) when the stream errors mid-read", async () => {
+    mockHead.mockResolvedValue({ contentLength: 100 });
+    async function* body() {
+      yield new Uint8Array([1, 2, 3]);
+      throw new Error("R2 stream error");
     }
-    // The full 1.2 MB is NEVER relayed — the stream is hard-capped at 1 MB regardless of the object.
-    expect(received).toBeLessThan(1_200_000);
-    if (received >= 0) expect(received).toBeLessThanOrEqual(SIGNATURE_LOGO_MAX_BYTES);
+    mockGet.mockResolvedValue({ stream: body() });
+
+    const res = await request(makeApp()).get(`/api/public/signature-logo/${USER}/${ASSET}`);
+    expect(res.status).toBe(404);
+    expect(res.headers["cache-control"]).toBeUndefined();
   });
 
   it("404s a missing object without streaming", async () => {

@@ -16,16 +16,24 @@ export function SignatureSettings() {
   const editorRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(true);
+  // If the initial load fails we must NOT enable the editor — saving then would persist empty content
+  // and wipe a previously stored signature. Keep it disabled + show a retry until a load succeeds.
+  const [loadError, setLoadError] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [status, setStatus] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setLoadError(false);
     getSignature()
       .then((html) => {
-        if (!active) return;
-        if (editorRef.current) editorRef.current.innerHTML = html;
+        if (active && editorRef.current) editorRef.current.innerHTML = html;
+      })
+      .catch(() => {
+        if (active) setLoadError(true);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -33,7 +41,10 @@ export function SignatureSettings() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [reloadKey]);
+
+  const editorDisabled = loading || loadError;
+  const saveDisabled = saving || loading || loadError || uploading;
 
   function exec(command: "bold" | "italic") {
     editorRef.current?.focus();
@@ -93,11 +104,19 @@ export function SignatureSettings() {
           Added below your message on emails you send from the CRM. Add a logo and basic formatting; leave it empty
           for no signature.
         </p>
+        {loadError ? (
+          <div className="flex items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            <span>Couldn't load your signature. Editing is disabled so you don't overwrite it.</span>
+            <Button type="button" variant="outline" size="sm" onClick={() => setReloadKey((k) => k + 1)} disabled={loading}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
         <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={() => exec("bold")} aria-label="Bold" disabled={loading}>
+          <Button type="button" variant="outline" size="sm" onClick={() => exec("bold")} aria-label="Bold" disabled={editorDisabled}>
             <Bold className="h-4 w-4" />
           </Button>
-          <Button type="button" variant="outline" size="sm" onClick={() => exec("italic")} aria-label="Italic" disabled={loading}>
+          <Button type="button" variant="outline" size="sm" onClick={() => exec("italic")} aria-label="Italic" disabled={editorDisabled}>
             <Italic className="h-4 w-4" />
           </Button>
           <Button
@@ -105,7 +124,7 @@ export function SignatureSettings() {
             variant="outline"
             size="sm"
             onClick={() => fileRef.current?.click()}
-            disabled={loading || uploading}
+            disabled={editorDisabled || uploading}
           >
             {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImagePlus className="h-4 w-4" />}
             <span className="ml-1">Logo</span>
@@ -114,7 +133,7 @@ export function SignatureSettings() {
         </div>
         <div
           ref={editorRef}
-          contentEditable={!loading}
+          contentEditable={!editorDisabled}
           role="textbox"
           aria-multiline="true"
           aria-label="Email signature editor"
@@ -122,7 +141,7 @@ export function SignatureSettings() {
           className="min-h-[120px] rounded-md border border-slate-200 bg-white p-3 text-sm focus:outline-none focus:ring-2 focus:ring-slate-300"
         />
         <div className="flex items-center gap-3">
-          <Button type="button" onClick={onSave} disabled={saving || loading}>
+          <Button type="button" onClick={onSave} disabled={saveDisabled}>
             {saving ? "Saving…" : "Save signature"}
           </Button>
           {status ? (
