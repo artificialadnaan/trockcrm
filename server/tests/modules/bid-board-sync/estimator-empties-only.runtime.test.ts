@@ -117,4 +117,121 @@ describe("Bid Board sync — empties-only estimator preservation (Codex #741 P2)
       warnSpy.mockRestore();
     }
   });
+
+  // The audit mirror must reflect the EFFECTIVE post-COALESCE estimator value, not the ignored
+  // incoming one. Without the fix the mirror logged {from: A, to: B} for a value that was preserved,
+  // i.e. it falsely claimed the manual estimator A was overwritten by B (Codex #741 audit corruption).
+  it("does NOT record an estimator overwrite in the audit field-changes when an existing estimator is preserved", async () => {
+    const OLD_ID = "11111111-1111-4111-8111-111111111111"; // manual estimator already on the deal
+    const NEW_ID = "22222222-2222-4222-8222-222222222222"; // Bid Board mapping that is resolved-but-dropped
+    process.env.BID_BOARD_ESTIMATOR_USER_MAP = JSON.stringify({ "Alex Koch": NEW_ID });
+
+    const auditMirrorChanges: Array<Record<string, { from: unknown; to: unknown }>> = [];
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const s = sql.toLowerCase();
+      if (s === "begin" || s === "commit" || s === "rollback" || s.startsWith("savepoint") || s.startsWith("release") || s.startsWith("rollback to")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (s.includes("app.skip_stage_history_trigger")) return { rows: [] };
+      if (s.includes("insert into office_dallas.bid_board_sync_runs")) return { rows: [{ id: "run-1" }], rowCount: 1 };
+      if (s.includes("update office_dallas.bid_board_sync_runs")) return { rows: [], rowCount: 1 };
+      if (s.includes("from public.users") && s.includes("public.offices")) return { rows: [{ id: "sys" }], rowCount: 1 };
+      if (s.includes("from public.users")) return { rows: [{ id: NEW_ID }], rowCount: 1 };
+      if (s.includes("from office_dallas.deals")) {
+        return {
+          rows: [
+            {
+              id: "deal-9",
+              name: "Palm Villas (old name)", // differs from incoming -> the deal UPDATE fires
+              estimator_user_id: OLD_ID,
+              bid_board_estimator: "Someone Else",
+              workflow_route: null,
+              stage_slug: "estimating",
+              stage_is_terminal: false,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      // Deal mirror UPDATE: report a real change so the audit mirror runs.
+      if (s.includes("update office_dallas.deals")) {
+        return { rows: [{ id: "deal-9", name: "Palm Villas", deal_number: "D-1", project_number: null }], rowCount: 1 };
+      }
+      // Capture the mirror audit field-changes ($12 = filtered field changes, $14 = metadata).
+      if (s.includes("insert into") && s.includes("audit_log")) {
+        const changes = params?.[11] ? JSON.parse(String(params[11])) : null;
+        const meta = params?.[13] ? JSON.parse(String(params[13])) : null;
+        if (changes && meta?.source === "bid_board_mirror") auditMirrorChanges.push(changes);
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    await ingestBidBoardRows({
+      office_slug: "dallas",
+      rows: [{ Name: "Palm Villas", Status: "Estimate in Progress", "Project #": "DFW-4-11826-ab", Estimator: "Alex Koch" }],
+    });
+
+    // A mirror audit row was written (the name changed), but it must NOT claim an estimator overwrite.
+    expect(auditMirrorChanges.length).toBeGreaterThan(0);
+    for (const changes of auditMirrorChanges) {
+      // No {from: OLD, to: NEW} overwrite, and the preserved field collapses to from==to so it is
+      // filtered out of the audit entirely.
+      expect(changes.estimatorUserId).toBeUndefined();
+    }
+  });
+
+  it("DOES record the estimator fill in the audit field-changes when the existing estimator was null", async () => {
+    const NEW_ID = "22222222-2222-4222-8222-222222222222";
+    process.env.BID_BOARD_ESTIMATOR_USER_MAP = JSON.stringify({ "Alex Koch": NEW_ID });
+
+    const auditMirrorChanges: Array<Record<string, { from: unknown; to: unknown }>> = [];
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const s = sql.toLowerCase();
+      if (s === "begin" || s === "commit" || s === "rollback" || s.startsWith("savepoint") || s.startsWith("release") || s.startsWith("rollback to")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (s.includes("app.skip_stage_history_trigger")) return { rows: [] };
+      if (s.includes("insert into office_dallas.bid_board_sync_runs")) return { rows: [{ id: "run-1" }], rowCount: 1 };
+      if (s.includes("update office_dallas.bid_board_sync_runs")) return { rows: [], rowCount: 1 };
+      if (s.includes("from public.users") && s.includes("public.offices")) return { rows: [{ id: "sys" }], rowCount: 1 };
+      if (s.includes("from public.users")) return { rows: [{ id: NEW_ID }], rowCount: 1 };
+      if (s.includes("from office_dallas.deals")) {
+        return {
+          rows: [
+            {
+              id: "deal-9",
+              name: "Palm Villas (old name)",
+              estimator_user_id: null, // empty -> sync fills it; the audit must record the fill
+              bid_board_estimator: null,
+              workflow_route: null,
+              stage_slug: "estimating",
+              stage_is_terminal: false,
+            },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (s.includes("update office_dallas.deals")) {
+        return { rows: [{ id: "deal-9", name: "Palm Villas", deal_number: "D-1", project_number: null }], rowCount: 1 };
+      }
+      if (s.includes("insert into") && s.includes("audit_log")) {
+        const changes = params?.[11] ? JSON.parse(String(params[11])) : null;
+        const meta = params?.[13] ? JSON.parse(String(params[13])) : null;
+        if (changes && meta?.source === "bid_board_mirror") auditMirrorChanges.push(changes);
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    await ingestBidBoardRows({
+      office_slug: "dallas",
+      rows: [{ Name: "Palm Villas", Status: "Estimate in Progress", "Project #": "DFW-4-11826-ab", Estimator: "Alex Koch" }],
+    });
+
+    const estimatorChange = auditMirrorChanges
+      .map((c) => c.estimatorUserId)
+      .find((c) => c !== undefined);
+    expect(estimatorChange).toEqual({ from: null, to: NEW_ID });
+  });
 });

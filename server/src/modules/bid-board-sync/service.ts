@@ -1084,14 +1084,20 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       }
       // Empties-only guard (SET estimator_user_id = COALESCE(estimator_user_id, $16) above): when the
       // deal already has an estimator, the DB keeps it and this resolved value is dropped on the floor.
-      // Log the preserved vs ignored ids so the decision is observable — the audit mirror below still
-      // reports the resolved value, so without this the silently-ignored id would be invisible (Codex #741 P2).
+      // Log the preserved vs ignored ids so the decision is observable (Codex #741 P2).
       const existingEstimatorUserId = matches[0].estimator_user_id ?? null;
       if (existingEstimatorUserId && estimatorUserId !== existingEstimatorUserId) {
         console.warn(
           `[BidBoardSync] Preserved existing estimator_user_id ${existingEstimatorUserId} for deal ${matches[0].id}; ignored incoming ${estimatorUserId ?? "null"} (empties-only sync)`
         );
       }
+      // The DB write is COALESCE(estimator_user_id, $16), so the value that actually lands is the
+      // existing id when present, otherwise the resolved incoming id. The audit mirror must record
+      // THIS effective value — passing the raw incoming id would falsely log a {from: A, to: B}
+      // overwrite for an estimator that was in fact preserved (Codex #741 audit-corruption follow-up).
+      // When existing is non-null the from/to collapse to A==A and filterNoopFieldChanges drops the
+      // estimator field entirely; when existing is null it records the real {from: null, to: resolved} fill.
+      const effectiveEstimatorUserId = existingEstimatorUserId ?? estimatorUserId;
       let updateResult;
       await client.query(`SAVEPOINT ${BID_BOARD_MIRROR_UPDATE_SAVEPOINT}`);
       try {
@@ -1119,7 +1125,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           client,
           schemaName,
           updateDeal,
-          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt, estimatorUserId),
+          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt, effectiveEstimatorUserId),
           { source: "bid_board_mirror", runId }
         );
       }
