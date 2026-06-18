@@ -64,7 +64,9 @@ export interface Pagination {
   limit: number;
   total: number;
   totalPages: number;
-  // Full-filtered-set counts for the drillable summary cards (server aggregates, NOT page-only).
+  // Stable summary-card counts over the base (non-card) filters — server aggregates, NOT page-only and
+  // NOT narrowed by the active card drill. baseTotal = "Total contacts" card.
+  baseTotal?: number;
   primaryCount?: number;
   untouchedCount?: number;
 }

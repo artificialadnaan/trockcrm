@@ -403,39 +403,38 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     conditions.push(eq(contacts.firstOutreachCompleted, true));
   }
 
-  // Summary-card drill filters. Same predicates feed the aggregate counts below, so the card number
-  // a user clicks equals the count of the list these narrow to (reconcile by construction).
-  if (filters.isPrimary === true) {
-    conditions.push(buildContactIsPrimarySql());
-  }
-  if (filters.untouched === true) {
-    conditions.push(buildContactUntouchedSql());
-  }
-
   // Substring search across name, email, company, phone/mobile, job title, city, and owner —
   // the shared unified field set (single source of truth in modules/search/unified-search).
   if (filters.search && filters.search.trim().length >= 2) {
     conditions.push(buildContactSearchCondition(filters.search));
   }
 
-  const where = conditions.length > 0 ? and(...conditions) : undefined;
+  // BASE where = the non-card filters (search/role/owner/…). The card drill is layered on top only for
+  // the LIST + pager; the summary-card aggregates are computed over the BASE set. Cards therefore stay
+  // stable across drills, and each card's number === the count of the list ITS OWN drill opens — even
+  // when switching directly between cards (the ?card= links REPLACE, not compose). (Codex P2.)
+  const baseWhere = conditions.length > 0 ? and(...conditions) : undefined;
+  const listConditions = [...conditions];
+  if (filters.isPrimary === true) listConditions.push(buildContactIsPrimarySql());
+  if (filters.untouched === true) listConditions.push(buildContactUntouchedSql());
+  const where = listConditions.length > 0 ? and(...listConditions) : undefined;
 
   // Sort
   const sortOrder = buildContactSortOrder(filters.sortBy, filters.sortDir);
 
-  // count(*) plus full-filtered-set aggregates for the two drillable summary cards, over the SAME
-  // `where` as the rows (so when a card drill is active its own aggregate just equals the total —
-  // redundant but harmless). The FILTER predicates are the SAME helpers as the ?card= drill filters
-  // above, so the number a user sees on a card (computed with no drill active) equals the total of the
-  // list that card drills to — reconcile by construction. NOT page-limited.
-  const countResult = await tenantDb
+  // Stable summary-card aggregates over baseWhere (NOT page-limited, NOT card-drilled). baseTotal feeds
+  // the "Total contacts" card; primary/untouched the other two. The FILTER predicates are the SAME
+  // helpers as the drill filters above, so card number === count of the list its drill opens.
+  const cardCounts = await tenantDb
     .select({
-      count: sql<number>`count(*)`,
+      baseTotal: sql<number>`count(*)`,
       primaryCount: sql<number>`count(*) FILTER (WHERE ${buildContactIsPrimarySql()})`,
       untouchedCount: sql<number>`count(*) FILTER (WHERE ${buildContactUntouchedSql()})`,
     })
     .from(contacts)
-    .where(where);
+    .where(baseWhere);
+  // Pager total over the drilled list.
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(contacts).where(where);
   const contactRows = await tenantDb
     .select({
       id: contacts.id,
@@ -488,9 +487,11 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
       limit,
       total,
       totalPages: Math.ceil(total / limit),
-      // Full-filtered-set counts for the Primary / Untouched summary cards (NOT page-only).
-      primaryCount: Number(countResult[0]?.primaryCount ?? 0),
-      untouchedCount: Number(countResult[0]?.untouchedCount ?? 0),
+      // Stable, full-set summary-card counts over the base (non-card) filters. baseTotal = the "Total
+      // contacts" card; primary/untouched the other two. NOT page-only, NOT narrowed by the active card.
+      baseTotal: Number(cardCounts[0]?.baseTotal ?? 0),
+      primaryCount: Number(cardCounts[0]?.primaryCount ?? 0),
+      untouchedCount: Number(cardCounts[0]?.untouchedCount ?? 0),
     },
   };
 }

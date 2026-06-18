@@ -95,4 +95,22 @@ describe("companies drilldown — card === drilled-list (reconcile by constructi
     expect(page.pipelineTotal).toBe(80000); // NOT just the one visible company's pipeline
     expect(page.staleCount).toBe(2);
   });
+
+  it("card aggregates stay STABLE across drills (over the base filters, not the active card)", async () => {
+    // ?card= REPLACES the active card, so each card must summarize the BASE cohort or switching cards
+    // would mismatch. With Stale active the list narrows to 2, but every card still reflects the base.
+    const staleActive = await listCompanies(tdb, { stale: true });
+    expect(staleActive.total).toBe(2); // drilled list (co2, co3)
+    expect(staleActive.baseTotal).toBe(4);
+    expect(staleActive.staleCount).toBe(2);
+    // Active-pipeline $ stays the BASE total (80k), not stale-companies' pipeline — clicking it opens all
+    // pipeline companies, which sum to exactly 80k.
+    expect(staleActive.pipelineTotal).toBe(80000);
+
+    const pipelineActive = await listCompanies(tdb, { hasActivePipeline: true });
+    expect(pipelineActive.total).toBe(2); // drilled list (co1, co2)
+    expect(pipelineActive.baseTotal).toBe(4);
+    expect(pipelineActive.pipelineTotal).toBe(80000);
+    expect(pipelineActive.staleCount).toBe(2); // stable, not stale-among-pipeline (1)
+  });
 });

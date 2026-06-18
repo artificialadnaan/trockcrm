@@ -223,7 +223,7 @@ export function CompanyListPage() {
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard
           eyebrow="Total accounts"
-          value={String(pagination.total)}
+          value={String(pagination.baseTotal ?? pagination.total)}
           badge={`${companies.length} shown`}
           caption="Directory"
           tone="green"

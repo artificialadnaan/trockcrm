@@ -74,15 +74,19 @@ export async function listCompanies(
   if (options.ownerUserId) {
     conditions.push(eq(companies.ownerId, options.ownerUserId));
   }
-  // Summary-card drill filters — same predicates as the aggregates below.
+  // BASE where = the non-card filters. The card drill is layered on only for the LIST + pager; the
+  // summary-card aggregates are computed over the BASE set so cards stay stable across drills and each
+  // card === the count/sum of the list its OWN drill opens, even when switching cards (?card= REPLACES,
+  // not composes). (Codex P2.)
+  const baseWhere = and(...conditions);
+  const listConditions = [...conditions];
   if (options.hasActivePipeline) {
-    conditions.push(sql`${companyPipelineSql} > 0`);
+    listConditions.push(sql`${companyPipelineSql} > 0`);
   }
   if (options.stale) {
-    conditions.push(companyStaleSql);
+    listConditions.push(companyStaleSql);
   }
-
-  const where = and(...conditions);
+  const where = and(...listConditions);
 
   const rows = await tenantDb
     .select({
@@ -101,15 +105,17 @@ export async function listCompanies(
     .from(companies)
     .where(where);
 
-  // Full-filtered-set aggregates for the two drillable summary cards (NOT the visible page). The
-  // predicates are the SAME helpers used by the drill filters above, so card === drilled list.
+  // Stable summary-card aggregates over baseWhere (NOT the visible page, NOT card-drilled). baseTotal
+  // feeds the "Total accounts" card; pipelineTotal/staleCount the other two. Same predicates as the
+  // drill filters, so card === the count/sum of the list its drill opens.
   const aggregateResult = await tenantDb
     .select({
+      baseTotal: sql<number>`count(*)`,
       pipelineTotal: sql<string>`COALESCE(SUM(${companyPipelineSql}), 0)::text`,
       staleCount: sql<number>`COUNT(*) FILTER (WHERE ${companyStaleSql})`,
     })
     .from(companies)
-    .where(where);
+    .where(baseWhere);
 
   // Batch-fetch contact and deal counts for the page of companies
   const companyIds = rows.map((r) => r.id);
@@ -165,7 +171,9 @@ export async function listCompanies(
     total: totalResult[0]?.count ?? 0,
     page,
     limit,
-    // Active-Pipeline ($ sum) and Untouched (count) over the full filtered set.
+    // Stable summary-card values over the base (non-card) filters: baseTotal = "Total accounts",
+    // pipelineTotal = "Active pipeline" ($ sum), staleCount = "Untouched". NOT page-only, NOT card-drilled.
+    baseTotal: Number(aggregateResult[0]?.baseTotal ?? 0),
     pipelineTotal: Number(aggregateResult[0]?.pipelineTotal ?? 0),
     staleCount: Number(aggregateResult[0]?.staleCount ?? 0),
   };

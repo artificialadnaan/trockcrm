@@ -56,7 +56,9 @@ export interface Pagination {
   limit: number;
   total: number;
   totalPages: number;
-  // Full-filtered-set aggregates for the drillable summary cards (server-computed, NOT page-only).
+  // Stable summary-card values over the base (non-card) filters — server-computed, NOT page-only and
+  // NOT narrowed by the active card drill. baseTotal = "Total accounts" card.
+  baseTotal?: number;
   pipelineTotal?: number;
   staleCount?: number;
 }
@@ -92,7 +94,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
       if (filters.limit) params.set("limit", String(filters.limit));
 
       const qs = params.toString();
-      const data = await api<{ companies: Company[]; total: number; page: number; limit: number; pipelineTotal?: number; staleCount?: number }>(
+      const data = await api<{ companies: Company[]; total: number; page: number; limit: number; baseTotal?: number; pipelineTotal?: number; staleCount?: number }>(
         `/companies${qs ? `?${qs}` : ""}`
       );
       if (requestId !== requestIdRef.current) return; // a newer request superseded this one
@@ -105,6 +107,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
         limit,
         total,
         totalPages: Math.ceil(total / limit),
+        baseTotal: data.baseTotal,
         pipelineTotal: data.pipelineTotal,
         staleCount: data.staleCount,
       });

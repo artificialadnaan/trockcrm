@@ -97,4 +97,22 @@ describe("contacts drilldown — card count === drilled-list count (reconcile by
     const both = await getContacts(tdb, { isPrimary: true, untouched: true });
     expect(both.pagination.total).toBe(1); // only c2 is primary AND untouched
   });
+
+  it("card aggregates stay STABLE across drills (computed over the base filters, not the active card)", async () => {
+    // The ?card= links REPLACE the active card rather than compose, so each card must summarize the BASE
+    // cohort — otherwise the count shown while one card is active wouldn't match the list a different card
+    // opens. With Primary active: the list narrows to 2, but every card still reflects the base cohort.
+    const primaryActive = await getContacts(tdb, { isPrimary: true });
+    expect(primaryActive.pagination.total).toBe(2); // drilled list (c1, c2)
+    expect(primaryActive.pagination.baseTotal).toBe(4); // Total card = full base cohort, not the drill
+    expect(primaryActive.pagination.primaryCount).toBe(2);
+    // Untouched stays 2 (c2 + c3 over base), NOT 1 (untouched-among-primaries) — so clicking Untouched
+    // (which replaces the drill) opens exactly the 2 it advertises.
+    expect(primaryActive.pagination.untouchedCount).toBe(2);
+
+    const untouchedActive = await getContacts(tdb, { untouched: true });
+    expect(untouchedActive.pagination.total).toBe(2); // drilled list (c2, c3)
+    expect(untouchedActive.pagination.baseTotal).toBe(4);
+    expect(untouchedActive.pagination.primaryCount).toBe(2); // stable, not primary-among-untouched (1)
+  });
 });

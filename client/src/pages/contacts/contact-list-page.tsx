@@ -226,7 +226,7 @@ export function ContactListPage() {
       <div className="grid gap-4 md:grid-cols-3">
         <MetricCard
           eyebrow="Total contacts"
-          value={String(pagination.total)}
+          value={String(pagination.baseTotal ?? pagination.total)}
           badge={`${contacts.length} shown`}
           caption="Directory"
           tone="green"
