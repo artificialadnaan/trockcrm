@@ -22,6 +22,8 @@ type DealValueLike = {
   bidBoardTotalSales?: string | number | null;
   bidEstimate?: string | number | null;
   ddEstimate?: string | number | null;
+  // Accepted for caller convenience but IGNORED by getRawDealValue (the unified awarded-first chain is
+  // stage-agnostic since 2026-06-18 — no stage-dependent branch).
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;

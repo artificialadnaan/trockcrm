@@ -118,6 +118,8 @@ export function resolveBestEstimate(deal: {
   bidBoardTotalSales?: string | null;
   bidEstimate?: string | null;
   ddEstimate?: string | null;
+  // Accepted for caller convenience but IGNORED by value resolution (the unified awarded-first chain is
+  // stage-agnostic since 2026-06-18). Other helpers (resolveDealValueKind/isLostBidDeal) still use these.
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;

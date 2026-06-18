@@ -635,7 +635,7 @@ describe("DealForm direct-create context", () => {
     const ddInput = container.querySelector<HTMLInputElement>("#ddEstimate");
     const bidInput = container.querySelector<HTMLInputElement>("#bidEstimate");
     expect(ddInput).not.toBeNull();
-    // DD is editable even on a bid-board-owned deal: the sync never writes dd_estimate.
+    // DD is editable even on a bid-board-owned deal; a manual edit is kept by dd_estimate_overridden (0164).
     expect(ddInput?.disabled).toBe(false);
     // Bid Estimate stays Procore-owned / locked.
     expect(bidInput?.disabled).toBe(true);

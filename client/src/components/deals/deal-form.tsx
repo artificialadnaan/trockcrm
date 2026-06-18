@@ -270,8 +270,9 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         payload.propertyId = formData.propertyId;
       }
 
-      // DD estimate is editable on EVERY deal (incl. bid-board-owned): the Bid Board sync never writes
-      // dd_estimate, so a manual DD edit can't desync from the mirror — always send it.
+      // DD estimate is editable on EVERY deal (incl. bid-board-owned) — always send it. A manual edit is
+      // protected server-side by dd_estimate_overridden (migration 0164): the Bid Board sync seeds/mirrors
+      // dd_estimate, but once a human edits it the mirror skips it, so the correction sticks.
       payload.ddEstimate = formData.ddEstimate || null;
       if (!isBidBoardOwned) {
         payload.bidEstimate = formData.bidEstimate || null;

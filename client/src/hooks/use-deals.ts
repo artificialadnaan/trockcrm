@@ -114,6 +114,7 @@ export interface Deal {
   primaryContactOwnerUserId?: string | null;
   primaryContactOwnerUserName?: string | null;
   ddEstimate: string | null;
+  ddEstimateOverridden?: boolean | null;
   bidEstimate: string | null;
   awardedAmount: string | null;
   awardedAmountOverridden?: boolean | null;

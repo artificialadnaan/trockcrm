@@ -9,7 +9,7 @@ import type { Deal, DealChangeOrder } from "@/hooks/use-deals";
 // for the component's `deal: Deal` prop.
 type EstimatesDeal = Pick<
   Deal,
-  "id" | "name" | "ddEstimate" | "bidEstimate" | "awardedAmount" | "awardedAmountOverridden" | "changeOrderTotal"
+  "id" | "name" | "ddEstimate" | "ddEstimateOverridden" | "bidEstimate" | "awardedAmount" | "awardedAmountOverridden" | "changeOrderTotal"
 >;
 
 function makeDeal(overrides: Partial<EstimatesDeal> = {}): Deal {
@@ -83,5 +83,22 @@ describe("DealEstimatesCard — manual-override indicator", () => {
 
     expect(htmlFalse).not.toContain("Manually set");
     expect(htmlAbsent).not.toContain("Manually set");
+  });
+
+  it("shows the 'manually set — not synced from Procore' indicator when dd_estimate is overridden", () => {
+    const html = renderToStaticMarkup(
+      <DealEstimatesCard deal={makeDeal({ ddEstimate: "125000", ddEstimateOverridden: true })} changeOrders={[]} />
+    );
+
+    expect(html).toContain("Manually set");
+    expect(html).toContain("not synced from Procore");
+  });
+
+  it("does NOT show the DD indicator when dd_estimate is not overridden", () => {
+    const html = renderToStaticMarkup(
+      <DealEstimatesCard deal={makeDeal({ ddEstimate: "125000", ddEstimateOverridden: false })} changeOrders={[]} />
+    );
+
+    expect(html).not.toContain("Manually set");
   });
 });

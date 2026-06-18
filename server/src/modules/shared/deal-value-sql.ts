@@ -25,9 +25,11 @@ type DealValueColumn =
 //
 // CONVENTION SHIFT (2026-06-18, "editable DD + awarded-highest" decision): the open/estimating basis was
 // formerly bid-first with awarded LAST (and distinct from the Won basis). It was flipped to awarded-first
-// after verifying the change is INERT on prod reportable totals ($0 delta — only 2 open deals carry an
-// awarded amount and both already equal their bid). dealBestEstimateSql and dealAwardedFirstWithFallbackSql
-// are retained as separate names (many call sites) but now both resolve through this one chain.
+// after verifying the change is INERT on prod REPORTABLE totals ($0 delta — only 2 open deals carry an
+// awarded amount and both already equal their bid). The flip also makes lost/terminal deals awarded-first;
+// that touches only 13 non-reportable lost/inactive CARD displays (never summed in any bucket total).
+// dealBestEstimateSql and dealAwardedFirstWithFallbackSql are retained as separate names (many call sites)
+// but now both resolve through this one chain.
 const DEAL_VALUE_PRIORITY_CHAIN = [
   "awarded_amount",
   "bid_board_total_sales",
