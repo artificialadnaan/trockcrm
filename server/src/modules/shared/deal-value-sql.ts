@@ -17,11 +17,11 @@ type DealValueColumn =
   | "dd_estimate"
   | "awarded_amount";
 
-// SINGLE deal-value priority chain (awarded-first). Open/estimating AND Won deals now resolve value
-// IDENTICALLY — awarded_amount > bid_board_total_sales > bid_estimate > dd_estimate — so one priority
-// drives every bucket total and card with no parallel open-vs-won logic. Each candidate is gated `> 0`
-// (positiveDealValueCandidateSql), so BOTH 0 and NULL fall through to the next candidate; the chain's
-// final fallback is 0.
+// DEFAULT deal-value priority chain (awarded-first): awarded_amount > bid_board_total_sales > bid_estimate
+// > dd_estimate. Used by every stage EXCEPT the single 'estimating' stage, which overrides DD ABOVE bid
+// (ESTIMATING_VALUE_CHAIN below; 2026-06-18). Won and every other open stage share THIS one chain (no
+// parallel won-vs-open logic). Each candidate is gated `> 0` (positiveDealValueCandidateSql), so BOTH 0
+// and NULL fall through to the next candidate; the chain's final fallback is 0.
 //
 // CONVENTION SHIFT (2026-06-18, "editable DD + awarded-highest" decision): the open/estimating basis was
 // formerly bid-first with awarded LAST (and distinct from the Won basis). It was flipped to awarded-first
