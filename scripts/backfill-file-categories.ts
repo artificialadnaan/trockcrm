@@ -187,11 +187,15 @@ export async function runBackfillForSchema(
     await client.query("BEGIN");
     try {
       for (const change of plan.willUpdate) {
-        // `AND category = 'other'` makes the write idempotent and guarantees we never overwrite a
-        // category that has since been set to something other than 'other'. Only rows actually changed
+        // `AND category = 'other'` makes the write idempotent and never overwrites a category that has
+        // since changed. The scoping-intake exclusion is repeated here (not just in the SELECT) so a row
+        // that becomes a verified stage-gate document DURING the run — the scoping link sets intake_*
+        // while leaving category='other' — is still protected at write time. Only rows actually changed
         // (rowCount > 0) are recorded as applied, so the audit snapshot matches what was committed.
         const res = await client.query(
-          "UPDATE files SET category = $1::file_category, folder_path = $2, updated_at = now() WHERE id = $3 AND category = 'other'",
+          `UPDATE files SET category = $1::file_category, folder_path = $2, updated_at = now()
+            WHERE id = $3 AND category = 'other'
+              AND NOT (intake_source = 'scoping_intake' AND coalesce(intake_requirement_key, '') <> '')`,
           [change.to, change.newFolderPath, change.id]
         );
         if ((res.rowCount ?? 0) > 0) appliedChanges.push(change);

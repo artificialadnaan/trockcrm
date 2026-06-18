@@ -115,6 +115,8 @@ describe("backfill-file-categories", () => {
     expect(updates[0].text).toContain("category = 'other'");
     // Also moves the file into the folder matching its new category (id is the final param).
     expect(updates[0].text).toContain("folder_path = $2");
+    // Write-guard also re-checks the scoping-intake exclusion (protects rows linked mid-run).
+    expect(updates[0].text).toContain("scoping_intake");
     expect(updates[0].params).toEqual(["contract", "Contracts", "a"]);
     // Transactional
     expect(queries.some((q) => q.text.trim() === "BEGIN")).toBe(true);
