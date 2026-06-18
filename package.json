@@ -22,6 +22,7 @@
     "start:field": "npm run start --workspace=client-field",
     "usage:rollup": "node server/dist/scripts/usage-rollup.js",
     "usage:daily-summary": "node server/dist/scripts/daily-summary-email.js",
+    "bidboard:heartbeat": "node server/dist/scripts/bid-board-sync-heartbeat.js",
     "typecheck": "npm run build --workspace=shared && npm run typecheck --workspaces",
     "typecheck:tests:all": "npm run typecheck:tests --workspaces --if-present",
     "check:premerge": "npm run build && npm run typecheck:tests:all && npm run test:ci",
