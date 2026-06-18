@@ -474,7 +474,9 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     .from(contacts)
     .leftJoin(users, eq(users.id, contacts.ownerId))
     .where(where)
-    .orderBy(sortOrder)
+    // Stable secondary key so OFFSET pagination is deterministic when the primary sort ties
+    // (e.g. equal last_touch_at / company / role) — without it, rows can repeat or vanish across pages.
+    .orderBy(sortOrder, asc(contacts.id))
     .limit(limit)
     .offset(offset);
 

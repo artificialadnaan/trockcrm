@@ -24,8 +24,29 @@ export interface UseSortStateResult {
   getHeaderProps: (key: string) => { active: boolean; dir: SortDirection | null };
 }
 
-function defaultDir(type: ColumnType): SortDirection {
+export function defaultDir(type: ColumnType): SortDirection {
   return type === "text" ? "asc" : "desc";
+}
+
+/**
+ * The pure toggle rule (no React): clicking the active key flips its direction; clicking any other key
+ * switches to it at the column type's default direction. Shared by useSortState AND by server-side list
+ * pages whose sort lives in EXTERNAL state (a persisted filter object) — so the rule never diverges between
+ * client-side and server-side sorting.
+ */
+export function nextSortState(current: SortState | null, key: string, type: ColumnType): SortState {
+  return current && current.key === key
+    ? { key, dir: current.dir === "asc" ? "desc" : "asc" }
+    : { key, dir: defaultDir(type) };
+}
+
+/** Pure header render props for a column given the active sort state. */
+export function sortHeaderProps(
+  sortState: SortState | null,
+  key: string,
+): { active: boolean; dir: SortDirection | null } {
+  const active = sortState?.key === key;
+  return { active, dir: active ? sortState!.dir : null };
 }
 
 /**
@@ -51,16 +72,11 @@ export function useSortState(
   function toggle(key: string) {
     const type = typeByKey.get(key);
     if (!type) return; // unknown key → no-op
-    setSortState((cur) =>
-      cur && cur.key === key
-        ? { key, dir: cur.dir === "asc" ? "desc" : "asc" }
-        : { key, dir: defaultDir(type) },
-    );
+    setSortState((cur) => nextSortState(cur, key, type));
   }
 
   function getHeaderProps(key: string): { active: boolean; dir: SortDirection | null } {
-    const active = sortState?.key === key;
-    return { active, dir: active ? sortState!.dir : null };
+    return sortHeaderProps(sortState, key);
   }
 
   return { sortState, toggle, getHeaderProps };

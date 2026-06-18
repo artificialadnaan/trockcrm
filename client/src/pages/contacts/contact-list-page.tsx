@@ -11,6 +11,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { SearchInput } from "@/components/ui/search-input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/shared/sortable-table-head";
+import {
+  nextSortState,
+  sortHeaderProps,
+  type ColumnType,
+  type SortState,
+} from "@/components/reports/sortable";
 import { useOwnerAssignees } from "@/hooks/use-owner-assignees";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { assignContactOwnerToMe, reassignContactOwner, useContacts, type Contact } from "@/hooks/use-contacts";
@@ -149,6 +156,19 @@ export function ContactCard({
   );
 }
 
+// Shared header typography for the contacts table.
+const HEAD_CLASS = "text-[11px] font-black uppercase tracking-[0.16em] text-slate-500";
+
+// Sortable columns map to the contacts list API's sortBy values (server-side sort over the FULL filtered
+// set, not the visible page). Role / Quick actions / Linked-deals have no server sort field today and stay
+// non-sortable. The default server sort is updated_at (not a visible column), so no header is active until
+// the user clicks one.
+const CONTACT_SORT_TYPES: Record<string, ColumnType> = {
+  name: "text",
+  company_name: "text",
+  last_touch_at: "date",
+};
+
 export function ContactListPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -157,7 +177,7 @@ export function ContactListPage() {
   const { filters, setFilters, resetFilters } = useContactFilters();
   // Summary-card drill state lives in the URL (?card=) so it is shareable + back-button-safe, while the
   // persistent prefs (search/role/owner/sort) stay in localStorage. The card filter is merged into the
-  // server query, so the card count a user clicks === the count of the list it drills to.
+  // server query (which also carries sortBy/sortDir from `filters`), so card-drill and column sort compose.
   const [searchParams, setSearchParams] = useSearchParams();
   const activeCard = searchParams.get("card");
   const { contacts: rawContacts, pagination, loading, error, refetch } = useContacts({
@@ -189,6 +209,18 @@ export function ContactListPage() {
       next.delete("card");
       return next;
     });
+  };
+
+  // The persisted filter (sortBy/sortDir) is the single source of truth; the headers reuse the shared sort
+  // RULE (nextSortState / sortHeaderProps) over it, and a sort change goes back through setFilters → API +
+  // page reset + persistence. No second sort store, so nothing can drift.
+  const sortState: SortState | null =
+    filters.sortBy && filters.sortBy in CONTACT_SORT_TYPES
+      ? { key: filters.sortBy, dir: filters.sortDir ?? "desc" }
+      : null;
+  const handleSort = (key: string) => {
+    const next = nextSortState(sortState, key, CONTACT_SORT_TYPES[key]);
+    setFilters({ sortBy: next.key, sortDir: next.dir });
   };
   // No-blank: keep the prior page of contacts visible during a search/filter/page refetch; gate
   // the skeleton to the FIRST load only and show an "Updating..." hint on a refresh.
@@ -306,14 +338,8 @@ export function ContactListPage() {
               {isRefreshing ? (
                 <span className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-400">Updating...</span>
               ) : null}
-              <Button
-                variant="outline"
-                size="sm"
-                className="min-h-[44px] md:min-h-0"
-                onClick={() => setFilters({ sortBy: "last_touch_at", sortDir: "desc" })}
-              >
-                Last touch
-              </Button>
+              {/* The one-shot "Last touch" sort button is replaced by the sortable "Last touch" column header
+                  (desktop table). The mobile card list keeps the default order. */}
               <Button variant="ghost" size="sm" className="min-h-[44px] md:min-h-0" onClick={() => { resetFilters(); clearCard(); }}>
                 Clear
               </Button>
@@ -342,12 +368,27 @@ export function ContactListPage() {
             <div className="hidden md:block"><Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Contact</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Company</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Role</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Quick actions</TableHead>
-                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Linked deals</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Last touch</TableHead>
+                  <SortableTableHead
+                    label="Contact"
+                    buttonClassName={HEAD_CLASS}
+                    {...sortHeaderProps(sortState, "name")}
+                    onSort={() => handleSort("name")}
+                  />
+                  <SortableTableHead
+                    label="Company"
+                    buttonClassName={HEAD_CLASS}
+                    {...sortHeaderProps(sortState, "company_name")}
+                    onSort={() => handleSort("company_name")}
+                  />
+                  <TableHead className={HEAD_CLASS}>Role</TableHead>
+                  <TableHead className={HEAD_CLASS}>Quick actions</TableHead>
+                  <TableHead className={cn("text-right", HEAD_CLASS)}>Linked deals</TableHead>
+                  <SortableTableHead
+                    label="Last touch"
+                    buttonClassName={HEAD_CLASS}
+                    {...sortHeaderProps(sortState, "last_touch_at")}
+                    onSort={() => handleSort("last_touch_at")}
+                  />
                   <TableHead className="w-10" />
                 </TableRow>
               </TableHeader>
