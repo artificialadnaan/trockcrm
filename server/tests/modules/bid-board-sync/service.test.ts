@@ -185,13 +185,17 @@ describe("Bid Board sync service", () => {
     const sql = buildBidBoardDealUpdateSql("office_dallas").toLowerCase();
 
     // SET is COALESCE: a non-null (manually-set) estimator is preserved; sync only
-    // supplies $16 when the column is currently NULL.
-    expect(sql).toContain("estimator_user_id = coalesce(estimator_user_id, $16)");
+    // supplies $16 when the column is currently NULL. $16 MUST carry an explicit ::uuid
+    // cast — the bare `$16 IS NOT NULL` below gives Postgres no type to infer, which made
+    // Parse fail with "could not determine data type of parameter $16" (42P18) and aborted
+    // the whole ingest → CRM 500 on every Bid Board push (P0, 2026-06-18). See the runtime
+    // PGlite proof in estimator-param-type-cast.runtime.test.ts.
+    expect(sql).toContain("estimator_user_id = coalesce(estimator_user_id, $16::uuid)");
     expect(sql).not.toContain("estimator_user_id = $16,");
 
     // Change-detection: the row only updates for the estimator when it is currently
     // NULL and a new id exists — it no longer fires on a non-null (manual) value.
-    expect(sql).toContain("(estimator_user_id is null and $16 is not null)");
+    expect(sql).toContain("(estimator_user_id is null and $16::uuid is not null)");
     expect(sql).not.toContain("estimator_user_id is distinct from $16");
 
     const row = normalizeBidBoardRow({
