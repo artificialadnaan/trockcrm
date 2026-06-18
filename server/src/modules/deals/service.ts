@@ -3489,7 +3489,11 @@ export async function setDealEstimator(
     const [existing] = await tx
       .select()
       .from(deals)
-      .where(eq(deals.id, dealId))
+      // FINDING 2 (Codex): require is_active=true. Without it, a soft-deleted (is_active=false) deal id
+      // supplied directly to PATCH /deals/:id/estimator would let an admin mutate a deal the detail/edit
+      // flows hide. Filtering here makes a soft-deleted deal return null so the route 404s BEFORE any
+      // estimator change — mirrors getDealById's default-active behavior. The FOR UPDATE lock is kept.
+      .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
       .limit(1)
       .for("update");
     if (!existing) return null;
@@ -3514,15 +3518,34 @@ export async function setDealEstimator(
       return existing;
     }
 
-    // A NEW estimator is validated exactly like a reassignment assignee (exists, active, same office).
-    if (newEstimator != null) {
-      await validateDealReassignmentAssignee(
-        tx,
-        newEstimator,
-        existing.officeCode,
-        owner,
-        officeId ?? undefined
+    // P1 — Bid-Board-owned estimator policy, NARROWED to FIRST-FILL only (money-attribution decision).
+    // The Bid Board sync OWNS the INITIAL estimator on a BB-owned deal: it stamps estimator_user_id from
+    // the Procore/Bid Board mirror. #741 made that sync EMPTIES-ONLY, so it NEVER clobbers a non-null
+    // estimator_user_id — which means a human CORRECTION sticks and the dsc row stays consistent (the old
+    // desync risk only existed when the sync could overwrite a manual value, which it no longer can).
+    // So a blanket lock is now both REDUNDANT (the sync can't revert a non-null correction) and HARMFUL
+    // (it would also forbid the human from ever fixing a wrong estimator). Block ONLY the first fill:
+    // sync owns the initial value, humans own corrections. We're past the no-op short-circuit here, so
+    // oldEstimator === null guarantees this is a null -> non-null first fill (a null -> null no-op already
+    // returned above; an existing non-null estimator — a correction or a clear — is allowed through).
+    if (existing.isBidBoardOwned === true && oldEstimator === null) {
+      throw new AppError(
+        409,
+        "The first estimator on a Bid Board-owned deal is set by the Bid Board sync; you can correct it once it's set, but not assign the initial value here.",
+        "BID_BOARD_OWNED_ESTIMATOR_LOCKED"
       );
+    }
+
+    // A NEW estimator must be an active user with access to the ACTIVE SELECTED office (x-office-id, which
+    // the route threads in as officeId) — NOT the deal's cosmetic project-number PREFIX and NOT the current
+    // owner's office. validateAssignee is the right helper here: it checks the assignee against the active
+    // office AND honors `user_office_access` grants (a multi-office user whose PRIMARY users.officeId differs
+    // but who holds a grant to the active office is accepted), so a Dallas+Atlanta estimator can be picked on
+    // either office's deals. We deliberately do NOT use validateDealReassignmentAssignee: its fallback path
+    // compares only the target's primary officeId and would wrongly reject a grant-only estimator — and it's
+    // self-contained here, not dependent on which office-validation refactor (#748) is present in the tree.
+    if (newEstimator != null) {
+      await validateAssignee(tx, newEstimator, officeId ?? undefined);
     }
 
     const now = new Date();

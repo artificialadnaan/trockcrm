@@ -133,7 +133,13 @@ describe("user routes", () => {
     ]);
   });
 
-  it("lists active same-office reassignment candidates when explicitly requested", async () => {
+  // CONVENTION SHIFT (was "lists active same-office reassignment candidates"): the picker now INCLUDES
+  // multi-office grant-holders. listUsers(officeId) already returns "office_id = officeId OR has a
+  // user_office_access grant to it", and the reassignment (#748) + estimator (validateAssignee) backends
+  // ACCEPT grant-holders — so the route must NOT re-filter them out by primary officeId, or a valid
+  // candidate (here `rep-access-only`, primary office-b, granted office-a) is un-pickable in the UI even
+  // though the PATCH would accept the id. Inactive rows are still dropped.
+  it("lists active office-accessible reassignment candidates incl. multi-office grant-holders", async () => {
     listUsersMock.mockResolvedValue([
       {
         id: "rep-1",
@@ -152,6 +158,8 @@ describe("user routes", () => {
         isActive: true,
       },
       {
+        // Primary office-b, but listUsers returned this row for the office-a query → holds a grant to
+        // office-a. Must now appear in the picker (the backend accepts grant-holders as assignees/estimators).
         id: "rep-access-only",
         displayName: "Access Only Rep",
         email: "access-only@example.com",
@@ -201,6 +209,7 @@ describe("user routes", () => {
     expect((body as any).users).toEqual([
       { id: "rep-1", displayName: "Current Rep", email: "current@example.com" },
       { id: "rep-2", displayName: "Next Rep", email: "next@example.com" },
+      { id: "rep-access-only", displayName: "Access Only Rep", email: "access-only@example.com" },
     ]);
   });
 });

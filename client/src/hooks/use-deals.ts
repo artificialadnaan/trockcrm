@@ -120,6 +120,11 @@ export interface Deal {
   changeOrderTotal: string | null;
   description: string | null;
   estimator?: string | null;
+  // The CRM estimator (a real user, distinct from the free-text `estimator` above). Set only via the
+  // dedicated admin/director PATCH /deals/:id/estimator route; the display name is surfaced by
+  // getDealById/getDealDetail's estimator-user join for the read-only/edit picker.
+  estimatorUserId?: string | null;
+  estimatorUserName?: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
   propertyState: string | null;
@@ -622,7 +627,16 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
   return { deal, loading, error, refetch: fetchDeal };
 }
 
-export async function createDeal(input: Partial<Deal> & { name: string; stageId: string }, options: OfficeRequestOptions = {}) {
+// estimatorUserId/estimatorUserName are READ-ONLY/display-only on the wire: they live on the read
+// Deal shape (so the picker can render `deal.estimatorUserName`) but must NEVER be writable through a
+// generic create or update payload — both POST /deals and PATCH /deals/:id are reachable by the
+// assigned rep, so allowing estimator on either would let a rep set/re-attribute the commission-bearing
+// estimator field. It changes ONLY through the dedicated, leadership-gated estimator route
+// (PATCH /deals/:id/estimator). The server already excludes estimator from both the create insert/forward
+// and updateDeal's allowlist; this shared Omit closes the client-type hole on BOTH paths (defense in depth).
+export type WritableDealFields = Omit<Deal, "estimatorUserId" | "estimatorUserName">;
+
+export async function createDeal(input: Partial<WritableDealFields> & { name: string; stageId: string }, options: OfficeRequestOptions = {}) {
   return api<{ deal: Deal }>("/deals", {
     method: "POST",
     json: input,
@@ -656,12 +670,35 @@ export async function createServiceOpportunity(
   });
 }
 
-export type UpdateDealPayload = Partial<Deal> & {
+// Generic update payload: the same writable surface as create (estimator excluded — see
+// WritableDealFields above) plus the migration toggle. The generic updateDeal (PATCH /deals/:id) is
+// rep-reachable, so the Omit is what keeps a rep from re-attributing the commission-bearing estimator
+// field through it; estimator changes ONLY via the dedicated updateDealEstimator (PATCH /deals/:id/estimator).
+export type UpdateDealPayload = Partial<WritableDealFields> & {
   migrationMode?: boolean;
 };
 
 export async function updateDeal(dealId: string, input: UpdateDealPayload) {
   return api<{ deal: Deal }>(`/deals/${dealId}`, { method: "PATCH", json: input });
+}
+
+// Dedicated estimator mutation — hits PATCH /deals/:id/estimator (admin/director only), NOT the
+// generic updateDeal: estimator is intentionally out of updateDeal's allowlist, so the generic path
+// can never change it (which would leak edit access to the assigned rep). Pass null to clear.
+// The office option mirrors the deal record load (useDealDetail) so a cross-office edit targets the
+// SAME tenant the deal was read from; without it the PATCH would hit the default/active office.
+// The estimatorUserId key is ALWAYS sent (even when null) so the server can distinguish an explicit
+// clear from an omitted field.
+export async function updateDealEstimator(
+  dealId: string,
+  estimatorUserId: string | null,
+  options: OfficeRequestOptions = {}
+) {
+  return api<{ deal: Deal }>(`/deals/${dealId}/estimator`, {
+    method: "PATCH",
+    json: { estimatorUserId },
+    ...getOfficeRequestOptions(options.officeId),
+  });
 }
 
 export interface ChangeOrderInput {
