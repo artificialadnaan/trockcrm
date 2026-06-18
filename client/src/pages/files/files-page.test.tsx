@@ -618,18 +618,18 @@ describe("FilesPage", () => {
 
     // Default sort is created_at desc; click File (text) → display_name asc; Size (number) → desc.
     act(() => header("File").dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    let lastArgs = mocks.useFilesMock.mock.calls.at(-1)![0] as { sortBy: string; sortDir: string };
+    let lastArgs = mocks.useFilesMock.mock.calls[mocks.useFilesMock.mock.calls.length - 1][0] as { sortBy: string; sortDir: string };
     expect(lastArgs.sortBy).toBe("display_name");
     expect(lastArgs.sortDir).toBe("asc");
 
     act(() => header("Size").dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    lastArgs = mocks.useFilesMock.mock.calls.at(-1)![0] as { sortBy: string; sortDir: string };
+    lastArgs = mocks.useFilesMock.mock.calls[mocks.useFilesMock.mock.calls.length - 1][0] as { sortBy: string; sortDir: string };
     expect(lastArgs.sortBy).toBe("file_size_bytes");
     expect(lastArgs.sortDir).toBe("desc");
 
     // Re-clicking the active column flips direction.
     act(() => header("Size").dispatchEvent(new MouseEvent("click", { bubbles: true })));
-    lastArgs = mocks.useFilesMock.mock.calls.at(-1)![0] as { sortBy: string; sortDir: string };
+    lastArgs = mocks.useFilesMock.mock.calls[mocks.useFilesMock.mock.calls.length - 1][0] as { sortBy: string; sortDir: string };
     expect(lastArgs.sortBy).toBe("file_size_bytes");
     expect(lastArgs.sortDir).toBe("asc");
   });
