@@ -607,9 +607,11 @@ export function DirectorRepDetail() {
       </div>
 
       <RepCommissionDrilldown
+        key={repId}
         repId={repId ?? ""}
         repName={data.winLoss.repName || "Rep"}
         periodLabel={periodLabel}
+        isFlatListWindow={preset === "ytd"}
         dateRange={dateRange}
         commissionSummary={data.commissionSummary}
         commissionDeals={data.commissionDeals}

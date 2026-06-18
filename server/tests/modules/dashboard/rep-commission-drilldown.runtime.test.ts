@@ -28,6 +28,7 @@ const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const REP_MIX = U("c01"); // owns one deal (owner cut) AND estimates another (estimator cut). rate .10, floor 0.
 const REP_OTHER = U("c02"); // owns the deal REP_MIX estimated.
 const REP_WL = U("c03"); // worklist rep: Won-family deals, some missing a contract date.
+const REP_NEG = U("c04"); // owns a +5000 deal AND a -1000 adjustment row -> direct 4000 (negative-row reconcile).
 const DIRECTOR = U("c0d"); // a director — used to prove repId drill-down works for non-rep callers.
 
 const ST_OPEN = U("58001"); // 'opportunity' (signed earned rows)
@@ -43,6 +44,8 @@ const D = {
   wlSigned: U("e06"), // REP_WL Won, HAS contract date -> excluded
   wlLost: U("e07"), // REP_WL Lost, no contract date -> excluded (not Won-family)
   wlTest: U("e08"), // REP_WL Won, no contract date, is_test_data -> excluded
+  negOwn: U("e09"), // REP_NEG owner dsc +5000
+  negAdj: U("e10"), // REP_NEG owner dsc -1000 (a clawback/adjustment)
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -94,12 +97,14 @@ beforeAll(async () => {
       ('${REP_MIX}', 'Mix', 'rep'),
       ('${REP_OTHER}', 'Other', 'rep'),
       ('${REP_WL}', 'Worklist', 'rep'),
+      ('${REP_NEG}', 'Neg', 'rep'),
       ('${DIRECTOR}', 'Director', 'director');
 
     INSERT INTO user_commission_settings (user_id, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP_MIX}', 0.10, 0, 0),
       ('${REP_OTHER}', 0.10, 0, 0),
-      ('${REP_WL}', 0.10, 0, 0);
+      ('${REP_WL}', 0.10, 0, 0),
+      ('${REP_NEG}', 0.10, 0, 0);
 
     -- REP_MIX owns mixOwn (owner cut 5000). signed in window.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
@@ -121,6 +126,15 @@ beforeAll(async () => {
       ('${D.wlSigned}', 'WL-3', 'WL signed', '${REP_WL}', '${ST_WON}', false, '2026-04-03T00:00:00Z', NULL, '2026-04-03', 90000, '2026-02-03T00:00:00Z'),
       ('${D.wlLost}', 'WL-4', 'WL lost', '${REP_WL}', '${ST_LOST}', false, NULL, NULL, NULL, 90000, '2026-02-04T00:00:00Z'),
       ('${D.wlTest}', 'WL-5', 'WL test', '${REP_WL}', '${ST_WON}', true, NULL, NULL, '2026-04-05', 90000, '2026-02-05T00:00:00Z');
+
+    -- REP_NEG: owner +5000 and a -1000 adjustment (clawback) -> direct = 4000. Proves the breakdown sum
+    -- reconciles with directEarnedCommission even with a NEGATIVE row (which a >0 filter would drop).
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.negOwn}', 'NEG-1', 'Neg owned', '${REP_NEG}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 50000, '2026-01-10T00:00:00Z'),
+      ('${D.negAdj}', 'NEG-2', 'Neg adjustment', '${REP_NEG}', '${ST_OPEN}', '2026-03-16T00:00:00Z', 10000, '2026-01-11T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.negOwn}', '${REP_NEG}', 50000, 0.10, 5000, 'owner', '2026-03-15'),
+      ('${D.negAdj}', '${REP_NEG}', 10000, -0.10, -1000, 'owner', '2026-03-16');
   `);
   tdb = drizzle(pg);
 });
@@ -146,6 +160,15 @@ describe("owner/estimator split reconciles to directEarnedCommission (Engine B)"
     // The load-bearing reconciliation: owner + estimator == direct (no row dropped/double-counted).
     expect(ownerSum + estimatorSum).toBeCloseTo(summary.directEarnedCommission, 2);
     expect(summary.directEarnedCommission).toBeCloseTo(6000, 2);
+  });
+
+  it("includes a NEGATIVE adjustment row so the breakdown sum still equals directEarnedCommission", async () => {
+    const { summary, deals } = await getRepCommissionSummary(tdb, REP_NEG, RANGE.from, RANGE.to);
+    // Both rows present (the -1000 is NOT dropped by a >0 filter).
+    expect(deals).toHaveLength(2);
+    const sum = deals.reduce((s, d) => s + d.earnedCommission, 0);
+    expect(sum).toBeCloseTo(summary.directEarnedCommission, 2);
+    expect(summary.directEarnedCommission).toBeCloseTo(4000, 2); // 5000 - 1000
   });
 
   it("floor progress: qualifyingRevenue is the OWNED book (excludes the estimated deal), floor met at 0", async () => {

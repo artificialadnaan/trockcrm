@@ -88,6 +88,7 @@ function renderDrilldown(props: {
           repId="rep-1"
           repName="Kevin Scott"
           periodLabel="YTD"
+          isFlatListWindow
           dateRange={{ from: "2026-01-01", to: "2026-12-31" }}
           commissionSummary={props.commissionSummary ?? summary()}
           commissionDeals={props.commissionDeals ?? SPLIT_DEALS}
@@ -165,6 +166,63 @@ describe("RepCommissionDrilldown — split + floor", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("Uncommissioned");
     cleanup();
+  });
+
+  it("non-flat-list window: caption does not over-claim a Team Commissions match", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root!: Root;
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter>
+          <RepCommissionDrilldown
+            repId="rep-1"
+            repName="Kevin Scott"
+            periodLabel="MTD"
+            isFlatListWindow={false}
+            dateRange={{ from: "2026-06-01", to: "2026-06-30" }}
+            commissionSummary={summary()}
+            commissionDeals={SPLIT_DEALS}
+            wonMissingContractDate={[]}
+            onDataChanged={() => {}}
+          />
+        </MemoryRouter>
+      );
+    });
+    const text = container.textContent ?? "";
+    expect(text).toContain("Team Commissions shows YTD");
+    expect(text).not.toContain("Matches this rep's row");
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("partial payload (undefined arrays) does not crash the card", () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root!: Root;
+    act(() => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter>
+          <RepCommissionDrilldown
+            repId="rep-1"
+            repName="Kevin Scott"
+            periodLabel="YTD"
+            isFlatListWindow
+            dateRange={{ from: "2026-01-01", to: "2026-12-31" }}
+            commissionSummary={summary({ directEarnedCommission: 0, totalEarnedCommission: 0 })}
+            commissionDeals={undefined as unknown as Deals}
+            wonMissingContractDate={undefined as unknown as Worklist}
+            onDataChanged={() => {}}
+          />
+        </MemoryRouter>
+      );
+    });
+    // No throw; renders the empty-breakdown copy rather than crashing on .filter/.map.
+    expect(container.textContent ?? "").toContain("No contributing deals");
+    act(() => root.unmount());
+    container.remove();
   });
 });
 

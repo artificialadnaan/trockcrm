@@ -1172,8 +1172,13 @@ function allocateDealCommissions(
   directEarnedCommission: number,
   gateMet: boolean
 ): RepCommissionDealEarning[] {
-  // The breakdown lists every deal that carries intrinsic earned commission.
-  const earningRows = rollups.filter((rollup) => rollup.earnedCommission > 0);
+  // The breakdown lists every deal that carries intrinsic earned commission. We include every NON-ZERO
+  // row (not just positive ones) so the breakdown sum reconciles with directEarnedCommission BY
+  // CONSTRUCTION for any sign — directEarnedCommission is the unfiltered SUM(dsc.amount) over the same
+  // predicate (getDirectCommissionMetrics), so dropping a negative adjustment row here would silently
+  // break Σ(deals) === directEarnedCommission. (In practice dsc.amount = source × rate ≥ 0, so this is a
+  // no-op on real data; it makes the owner+estimator split provably reconcile, which the drill-down asserts.)
+  const earningRows = rollups.filter((rollup) => rollup.earnedCommission !== 0);
   if (!gateMet) {
     // Below floor: keep the SAME rows visible but zero each per-deal earned commission. The breakdown
     // must never vanish just because the rep is under their floor.

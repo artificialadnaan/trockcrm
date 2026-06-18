@@ -37,6 +37,11 @@ interface Props {
   repId: string;
   repName: string;
   periodLabel: string;
+  /**
+   * True when the page's selected window is the SAME one the flat Team-Commissions list uses (YTD). Only
+   * then does the breakdown total provably equal this rep's flat-list row, so we only claim the match here.
+   */
+  isFlatListWindow: boolean;
   dateRange: { from: string; to: string };
   commissionSummary: RepDetailData["commissionSummary"];
   commissionDeals: RepDetailData["commissionDeals"];
@@ -64,10 +69,11 @@ export function RepCommissionDrilldown({
   repId,
   repName,
   periodLabel,
+  isFlatListWindow,
   dateRange,
   commissionSummary: cs,
-  commissionDeals,
-  wonMissingContractDate,
+  commissionDeals = [],
+  wonMissingContractDate = [],
   onDataChanged,
 }: Props) {
   const ownerCuts = commissionDeals.filter((d) => d.attributionRole === "owner");
@@ -170,7 +176,10 @@ export function RepCommissionDrilldown({
             </div>
             <p className="text-xs text-slate-400">
               Owner + estimator = {formatCurrency(cs.directEarnedCommission)} direct; + override ={" "}
-              {formatCurrency(cs.totalEarnedCommission)} total. Matches this rep's row on Team Commissions.
+              {formatCurrency(cs.totalEarnedCommission)} total for {periodLabel}.
+              {isFlatListWindow
+                ? " Matches this rep's row on Team Commissions."
+                : " (Team Commissions shows YTD.)"}
             </p>
 
             {/* Per-deal contributing rows. Below floor: rows stay visible with held ($0) earnings. */}
@@ -187,9 +196,9 @@ export function RepCommissionDrilldown({
                     </tr>
                   </thead>
                   <tbody>
-                    {commissionDeals.map((deal) => (
+                    {commissionDeals.map((deal, i) => (
                       <tr
-                        key={`${deal.dealId}-${deal.attributionRole}`}
+                        key={`${deal.dealId}-${deal.attributionRole}-${i}`}
                         className="border-b border-slate-100"
                       >
                         <td className="px-3 py-2">
