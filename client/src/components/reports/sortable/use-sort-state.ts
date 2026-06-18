@@ -49,6 +49,12 @@ export function sortHeaderProps(
   return { active, dir: active ? sortState!.dir : null };
 }
 
+/** The ARIA `aria-sort` value for a header cell — shared so a <th> and a shadcn <TableHead> can't drift. */
+export function ariaSort(active: boolean, dir: SortDirection | null): "ascending" | "descending" | "none" {
+  if (!active || (dir !== "asc" && dir !== "desc")) return "none";
+  return dir === "asc" ? "ascending" : "descending";
+}
+
 /**
  * The headless sort STATE machine — one active `{key, dir}` (or null), a toggle that flips direction on
  * the active key and otherwise switches to a column at its type's default direction (text → asc,

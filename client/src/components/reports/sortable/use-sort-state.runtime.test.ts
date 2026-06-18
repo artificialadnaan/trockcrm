@@ -4,6 +4,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import {
   useSortState,
+  ariaSort,
   type SortStateColumn,
   type UseSortStateOptions,
   type UseSortStateResult,
@@ -76,5 +77,14 @@ describe("useSortState", () => {
     const h = await renderHook({ initialSort: { key: "value", dir: "desc" } });
     expect(h.current.getHeaderProps("value")).toEqual({ active: true, dir: "desc" });
     expect(h.current.getHeaderProps("name")).toEqual({ active: false, dir: null });
+  });
+});
+
+describe("ariaSort", () => {
+  it("maps active+dir to the aria-sort token; inactive/null → none", () => {
+    expect(ariaSort(true, "asc")).toBe("ascending");
+    expect(ariaSort(true, "desc")).toBe("descending");
+    expect(ariaSort(false, "asc")).toBe("none");
+    expect(ariaSort(true, null)).toBe("none");
   });
 });

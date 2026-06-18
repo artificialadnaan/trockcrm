@@ -7,7 +7,7 @@ export type {
   UseTableSortOptions,
   UseTableSortResult,
 } from "./use-table-sort";
-export { useSortState, nextSortState, sortHeaderProps, defaultDir } from "./use-sort-state";
+export { useSortState, nextSortState, sortHeaderProps, ariaSort, defaultDir } from "./use-sort-state";
 export type {
   SortStateColumn,
   UseSortStateOptions,

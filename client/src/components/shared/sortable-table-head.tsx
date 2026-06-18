@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { TableHead } from "@/components/ui/table";
-import { SortHeaderButton, type SortDirection } from "@/components/reports/sortable";
+import { SortHeaderButton, ariaSort, type SortDirection } from "@/components/reports/sortable";
 
 interface SortableTableHeadProps {
   label: ReactNode;
@@ -31,10 +31,7 @@ export function SortableTableHead({
   buttonClassName,
 }: SortableTableHeadProps) {
   return (
-    <TableHead
-      aria-sort={active ? (dir === "asc" ? "ascending" : "descending") : "none"}
-      className={className}
-    >
+    <TableHead aria-sort={ariaSort(active, dir)} className={className}>
       <SortHeaderButton
         label={label}
         active={active}

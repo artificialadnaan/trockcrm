@@ -221,6 +221,10 @@ export function PropertyListPage() {
     });
   };
 
+  // NOTE: these summary metrics reduce over the LOADED window (server-sorted, capped at limit 250). For a
+  // tenant with ≤250 active properties this is the full set regardless of sort. For >250, the loaded 250 is
+  // now the top-250 of the ACTIVE sort, so the metrics follow the sort — a known limitation of the existing
+  // 250-cap, to be removed when Properties moves to full server pagination + server-computed summary totals.
   const totals = useMemo(() => {
     const activeOpportunities = properties.reduce(
       (sum, property) => sum + property.leadCount + (property.activeDealsCount ?? property.dealCount),

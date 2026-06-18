@@ -67,7 +67,10 @@ router.get("/", async (req, res, next) => {
       isPrimary: req.query.isPrimary === "true" ? true : undefined,
       untouched: req.query.untouched === "true" ? true : undefined,
       sortBy: req.query.sortBy as any,
-      sortDir: req.query.sortDir as "asc" | "desc" | undefined,
+      sortDir: (req.query.sortDir === "asc" || req.query.sortDir === "desc" ? req.query.sortDir : undefined) as
+        | "asc"
+        | "desc"
+        | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
     };

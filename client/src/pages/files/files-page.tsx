@@ -35,6 +35,7 @@ import {
 import { FileUploadZone } from "@/components/files/file-upload-zone";
 import {
   SortHeaderButton,
+  ariaSort,
   nextSortState,
   sortHeaderProps,
   type ColumnType,
@@ -517,10 +518,7 @@ function SortableFileTh({
 }) {
   const hp = sortHeaderProps(sortState, sortKey);
   return (
-    <th
-      className={className}
-      aria-sort={hp.active ? (hp.dir === "asc" ? "ascending" : "descending") : "none"}
-    >
+    <th className={className} aria-sort={ariaSort(hp.active, hp.dir)}>
       <SortHeaderButton label={label} numeric={numeric} active={hp.active} dir={hp.dir} onClick={() => onSort(sortKey)} />
     </th>
   );
