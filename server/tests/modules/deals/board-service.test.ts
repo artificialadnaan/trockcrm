@@ -397,6 +397,10 @@ describe("getDealsForPipeline", () => {
     expect(result.pipelineColumns[0]?.count).toBe(100);
     expect(result.pipelineColumns[0]?.totalCount).toBe(110);
     expect(result.pipelineColumns[0]?.deals).toHaveLength(110);
+    // Reconciliation guard (2026-06-18): board cards carry the column's canonical stage slug so the client
+    // value resolvers apply the stage-aware chain (estimating DD-over-bid) and each card's value matches the
+    // server-computed stage-aware column total. Board rows omit stage_slug, so this stamp is load-bearing.
+    expect(result.pipelineColumns[0]?.deals.every((d) => d.stageSlug === "estimating")).toBe(true);
     expect(cardsChain?.limit).toHaveBeenCalledWith(1000);
     const cardsWhere = extractSqlText(cardsChain?.where.mock.calls[0][0]).toLowerCase();
     const summaryWhere = extractSqlText(summaryChain?.where.mock.calls[0][0]).toLowerCase();

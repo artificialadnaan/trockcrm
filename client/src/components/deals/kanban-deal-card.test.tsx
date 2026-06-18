@@ -182,6 +182,35 @@ describe("KanbanDealCard", () => {
     expect(html).toMatch(/\$25\d/);
   });
 
+  // Reconciliation: an estimating card values DD over bid (2026-06-18 rule), matching the server's
+  // stage-aware estimating column total. Board rows carry stageSlug (stamped by getDealsForPipeline).
+  it("estimating card shows the DD value (DD outranks bid), reconciling with the estimating column total", () => {
+    const html = render(
+      makeDeal({
+        stageSlug: "estimating",
+        awardedAmount: null,
+        bidBoardTotalSales: "950000",
+        bidEstimate: "920000",
+        ddEstimate: "800000",
+      })
+    );
+    expect(html).toMatch(/\$80\d/); // DD ($800K)
+    expect(html).not.toMatch(/\$9[25]\d/); // NOT bid ($950K / $920K)
+  });
+
+  it("non-estimating card is unchanged: bid outranks DD", () => {
+    const html = render(
+      makeDeal({
+        stageSlug: "opportunity",
+        awardedAmount: null,
+        bidBoardTotalSales: "950000",
+        bidEstimate: "920000",
+        ddEstimate: "800000",
+      })
+    );
+    expect(html).toMatch(/\$95\d/); // bid_board ($950K), not DD
+  });
+
   it("renders the shared at-risk badge when the pipeline card receives it", () => {
     const html = render(makeDeal({ atRisk: makeAtRiskResult() }));
 

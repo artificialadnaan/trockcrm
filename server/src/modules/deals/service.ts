@@ -3000,9 +3000,15 @@ export async function getDealsForPipeline(
   // Build response: active pipeline stages + date-filtered terminal stages.
   const pipelineColumns = responseStages.map((stage) => ({
     stage,
-    deals: (dealsByStage.get(stage.id) ?? []).map((deal) =>
-      attachAtRiskResult(deal, atRiskViewerRole, stage.slug)
-    ),
+    deals: (dealsByStage.get(stage.id) ?? []).map((deal) => ({
+      ...attachAtRiskResult(deal, atRiskViewerRole, stage.slug),
+      // Stamp the column's canonical stage slug onto each board card. Board rows are `...getTableColumns(deals)`
+      // with NO pipeline_stage_config join, so they omit stageSlug; without it the client value resolvers
+      // (bestEstimate / getEffectiveDealValue) fall to the default chain and an estimating card would show
+      // bid-first while the server-computed stage-aware column total shows DD-first — breaking the
+      // bucket==sum-of-cards invariant. The card is IN this stage's column, so stage.slug is authoritative.
+      stageSlug: stage.slug,
+    })),
     totalValue: valueByStage.get(stage.id) ?? 0,
     count: activeCountByStage.get(stage.id) ?? 0,
     activeCount: activeCountByStage.get(stage.id) ?? 0,
