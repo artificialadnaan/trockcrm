@@ -19,8 +19,7 @@ const dismissResolvedFirstOutreachTasks = (mod as any).dismissResolvedFirstOutre
   client: any,
   schemaName: string,
   officeId: string,
-  resolvedAt?: Date,
-  windowDays?: number
+  resolvedAt?: Date
 ) => Promise<number>;
 const FIRST_OUTREACH_WINDOW_DAYS = (mod as any).FIRST_OUTREACH_WINDOW_DAYS as number;
 
@@ -33,6 +32,9 @@ const C_RESOLVED = U("c001"); // active, first_outreach_completed=true (outreach
 const C_INACTIVE = U("c002"); // is_active=false, flag=false -> dismiss (resolved: no longer active)
 const C_EXPIRED = U("c003"); // active, flag=false, created 40d ago -> dismiss (expired)
 const C_NEEDED = U("c004"); // active, flag=false, created 10d ago -> KEEP (still needs, in window)
+const C_BOUND_IN = U("c005"); // active, flag=false, created EXACTLY 30d ago -> KEEP (window inclusive of day 30)
+const C_BOUND_OUT = U("c006"); // active, flag=false, created EXACTLY 31d ago -> dismiss (expired)
+const C_WAITING = U("c007"); // active, flag=true, a task in 'waiting_on' status -> dismiss (resolved) + clear
 
 const T_RESOLVED = U("a001");
 const T_INACTIVE = U("a002");
@@ -41,6 +43,9 @@ const T_NEEDED = U("a004");
 const T_ORPHAN = U("a005"); // first-outreach task whose contact_id has no contact row -> dismiss (resolved)
 const T_OTHER_RULE = U("a006"); // a stale_lead task on the resolved contact -> MUST NOT be touched
 const T_COMPLETED = U("a007"); // a first-outreach task already 'completed' -> MUST NOT be touched
+const T_BOUND_IN = U("a008");
+const T_BOUND_OUT = U("a009");
+const T_WAITING = U("a010"); // status='waiting_on' (a non-pending ACTIVE status) with waiting_on/blocked_by set
 
 let db: PGlite;
 
@@ -85,19 +90,25 @@ async function setup(pg: PGlite) {
     );
 
     INSERT INTO ${SCHEMA}.contacts (id, is_active, first_outreach_completed, created_at) VALUES
-      ('${C_RESOLVED}', true,  true,  now() - interval '10 days'),
-      ('${C_INACTIVE}', false, false, now() - interval '10 days'),
-      ('${C_EXPIRED}',  true,  false, now() - interval '40 days'),
-      ('${C_NEEDED}',   true,  false, now() - interval '10 days');
+      ('${C_RESOLVED}',  true,  true,  now() - interval '10 days'),
+      ('${C_INACTIVE}',  false, false, now() - interval '10 days'),
+      ('${C_EXPIRED}',   true,  false, now() - interval '40 days'),
+      ('${C_NEEDED}',    true,  false, now() - interval '10 days'),
+      ('${C_BOUND_IN}',  true,  false, CURRENT_DATE - 30),
+      ('${C_BOUND_OUT}', true,  false, CURRENT_DATE - 31),
+      ('${C_WAITING}',   true,  true,  now() - interval '10 days');
 
-    INSERT INTO ${SCHEMA}.tasks (id, origin_rule, dedupe_key, type, status, contact_id, due_date, is_overdue) VALUES
-      ('${T_RESOLVED}', 'daily_first_outreach_touchpoint', 'contact:${C_RESOLVED}:daily_first_outreach_touchpoint', 'touchpoint', 'pending', '${C_RESOLVED}', CURRENT_DATE - 5, true),
-      ('${T_INACTIVE}', 'daily_first_outreach_touchpoint', 'contact:${C_INACTIVE}:daily_first_outreach_touchpoint', 'touchpoint', 'pending', '${C_INACTIVE}', CURRENT_DATE - 5, true),
-      ('${T_EXPIRED}',  'daily_first_outreach_touchpoint', 'contact:${C_EXPIRED}:daily_first_outreach_touchpoint',  'touchpoint', 'pending', '${C_EXPIRED}',  CURRENT_DATE - 35, true),
-      ('${T_NEEDED}',   'daily_first_outreach_touchpoint', 'contact:${C_NEEDED}:daily_first_outreach_touchpoint',   'touchpoint', 'pending', '${C_NEEDED}',   CURRENT_DATE - 5, true),
-      ('${T_ORPHAN}',   'daily_first_outreach_touchpoint', 'contact:${U("dead")}:daily_first_outreach_touchpoint',  'touchpoint', 'pending', '${U("dead")}',  CURRENT_DATE - 5, true),
-      ('${T_OTHER_RULE}', 'stale_lead', 'lead:x:stale_lead', 'follow_up', 'pending', '${C_RESOLVED}', CURRENT_DATE - 5, true),
-      ('${T_COMPLETED}', 'daily_first_outreach_touchpoint', 'contact:${C_RESOLVED}:daily_first_outreach_touchpoint:done', 'touchpoint', 'completed', '${C_RESOLVED}', CURRENT_DATE - 5, false);
+    INSERT INTO ${SCHEMA}.tasks (id, origin_rule, dedupe_key, type, status, contact_id, due_date, is_overdue, waiting_on, blocked_by) VALUES
+      ('${T_RESOLVED}', 'daily_first_outreach_touchpoint', 'contact:${C_RESOLVED}:daily_first_outreach_touchpoint', 'touchpoint', 'pending', '${C_RESOLVED}', CURRENT_DATE - 5, true, NULL, NULL),
+      ('${T_INACTIVE}', 'daily_first_outreach_touchpoint', 'contact:${C_INACTIVE}:daily_first_outreach_touchpoint', 'touchpoint', 'pending', '${C_INACTIVE}', CURRENT_DATE - 5, true, NULL, NULL),
+      ('${T_EXPIRED}',  'daily_first_outreach_touchpoint', 'contact:${C_EXPIRED}:daily_first_outreach_touchpoint',  'touchpoint', 'pending', '${C_EXPIRED}',  CURRENT_DATE - 35, true, NULL, NULL),
+      ('${T_NEEDED}',   'daily_first_outreach_touchpoint', 'contact:${C_NEEDED}:daily_first_outreach_touchpoint',   'touchpoint', 'pending', '${C_NEEDED}',   CURRENT_DATE - 5, true, NULL, NULL),
+      ('${T_BOUND_IN}', 'daily_first_outreach_touchpoint', 'contact:${C_BOUND_IN}:daily_first_outreach_touchpoint', 'touchpoint', 'pending', '${C_BOUND_IN}', CURRENT_DATE - 5, true, NULL, NULL),
+      ('${T_BOUND_OUT}','daily_first_outreach_touchpoint', 'contact:${C_BOUND_OUT}:daily_first_outreach_touchpoint','touchpoint', 'pending', '${C_BOUND_OUT}',CURRENT_DATE - 5, true, NULL, NULL),
+      ('${T_WAITING}',  'daily_first_outreach_touchpoint', 'contact:${C_WAITING}:daily_first_outreach_touchpoint',  'touchpoint', 'waiting_on', '${C_WAITING}', CURRENT_DATE - 5, true, '${U("ffff")}', '${U("eeee")}'),
+      ('${T_ORPHAN}',   'daily_first_outreach_touchpoint', 'contact:${U("dead")}:daily_first_outreach_touchpoint',  'touchpoint', 'pending', '${U("dead")}',  CURRENT_DATE - 5, true, NULL, NULL),
+      ('${T_OTHER_RULE}', 'stale_lead', 'lead:x:stale_lead', 'follow_up', 'pending', '${C_RESOLVED}', CURRENT_DATE - 5, true, NULL, NULL),
+      ('${T_COMPLETED}', 'daily_first_outreach_touchpoint', 'contact:${C_RESOLVED}:daily_first_outreach_touchpoint:done', 'touchpoint', 'completed', '${C_RESOLVED}', CURRENT_DATE - 5, false, NULL, NULL);
   `);
 }
 
@@ -115,29 +126,40 @@ afterEach(async () => {
 });
 
 describe("dismissResolvedFirstOutreachTasks", () => {
-  it("dismisses resolved (outreach done), inactive, expired, and orphaned tasks; keeps still-needed ones", async () => {
+  it("dismisses resolved/inactive/expired/orphan + a waiting_on task; keeps still-needed and in-window", async () => {
     const count = await dismissResolvedFirstOutreachTasks(db, SCHEMA, OFFICE_ID);
 
-    // 4 dismissed: resolved + inactive + expired + orphan. NOT: the still-needed one, the other-rule one,
-    // the already-completed one.
-    expect(count).toBe(4);
+    // 6 dismissed: resolved + inactive + expired(40d) + boundary-out(31d) + waiting_on + orphan.
+    expect(count).toBe(6);
     expect(await status(T_RESOLVED)).toBe("dismissed");
     expect(await status(T_INACTIVE)).toBe("dismissed");
     expect(await status(T_EXPIRED)).toBe("dismissed");
+    expect(await status(T_BOUND_OUT)).toBe("dismissed"); // exactly 31d old -> expired
+    expect(await status(T_WAITING)).toBe("dismissed"); // a non-pending ACTIVE status is still dismissed
     expect(await status(T_ORPHAN)).toBe("dismissed");
-    expect(await status(T_NEEDED)).toBe("pending"); // active, flag=false, in-window -> still a live reminder
+    // Kept:
+    expect(await status(T_NEEDED)).toBe("pending"); // active, flag=false, in-window -> live reminder
+    expect(await status(T_BOUND_IN)).toBe("pending"); // exactly 30d old -> window inclusive of day 30
     expect(await status(T_OTHER_RULE)).toBe("pending"); // different origin_rule untouched
     expect(await status(T_COMPLETED)).toBe("completed"); // non-active status untouched
   });
 
-  it("clears overdue + waiting/blocked and stamps completed_at on dismissal", async () => {
+  it("at the window boundary: exactly 30 days is kept, exactly 31 days expires (pins the < vs >= edge)", async () => {
     await dismissResolvedFirstOutreachTasks(db, SCHEMA, OFFICE_ID);
-    const r = await db.query<{ is_overdue: boolean; completed_at: string | null }>(
-      `SELECT is_overdue, completed_at FROM ${SCHEMA}.tasks WHERE id = $1`,
-      [T_RESOLVED]
+    expect(await status(T_BOUND_IN)).toBe("pending"); // created_at = CURRENT_DATE - 30 -> NOT < CURRENT_DATE - 30
+    expect(await status(T_BOUND_OUT)).toBe("dismissed"); // created_at = CURRENT_DATE - 31 -> < CURRENT_DATE - 30
+  });
+
+  it("clears overdue + waiting_on + blocked_by and stamps completed_at on dismissal", async () => {
+    await dismissResolvedFirstOutreachTasks(db, SCHEMA, OFFICE_ID);
+    const r = await db.query<{ is_overdue: boolean; completed_at: string | null; waiting_on: string | null; blocked_by: string | null }>(
+      `SELECT is_overdue, completed_at, waiting_on, blocked_by FROM ${SCHEMA}.tasks WHERE id = $1`,
+      [T_WAITING] // a task that HAD waiting_on + blocked_by set
     );
     expect(r.rows[0]!.is_overdue).toBe(false);
     expect(r.rows[0]!.completed_at).not.toBeNull();
+    expect(r.rows[0]!.waiting_on).toBeNull();
+    expect(r.rows[0]!.blocked_by).toBeNull();
   });
 
   it("records task_resolution_state with the right reason per task (resolved vs expired)", async () => {
@@ -169,12 +191,14 @@ describe("dismissResolvedFirstOutreachTasks", () => {
     expect(ids).not.toContain(C_EXPIRED); // 40d old -> outside the window
     expect(ids).not.toContain(C_INACTIVE); // inactive -> filtered
     expect(ids).toContain(C_NEEDED); // still genuinely needs first outreach
+    expect(ids).toContain(C_BOUND_IN); // exactly 30d -> still mintable (window inclusive), and NOT dismissed
+    expect(ids).not.toContain(C_BOUND_OUT); // 31d -> outside the create window (complements the dismiss)
   });
 
-  it("respects a custom window (expiry boundary moves with windowDays)", async () => {
-    // With a 5-day window, the 10-day-old still-needed contact is now EXPIRED too.
-    const count = await dismissResolvedFirstOutreachTasks(db, SCHEMA, OFFICE_ID, new Date(), 5);
-    expect(count).toBe(5); // the 4 above + T_NEEDED (now expired at 5-day window)
-    expect(await status(T_NEEDED)).toBe("dismissed");
+  it("re-running is idempotent — already-dismissed tasks are not re-touched", async () => {
+    const first = await dismissResolvedFirstOutreachTasks(db, SCHEMA, OFFICE_ID);
+    const second = await dismissResolvedFirstOutreachTasks(db, SCHEMA, OFFICE_ID);
+    expect(first).toBe(6);
+    expect(second).toBe(0); // dismissed tasks left the active-status set
   });
 });

@@ -230,6 +230,17 @@ describe("daily task generation worker", () => {
     expect(needsOutreachCall![0]).toContain("created_at < CURRENT_DATE - INTERVAL '3 days'"); // lower bound
     expect(needsOutreachCall![0]).toContain("* INTERVAL '1 day')"); // the 30-day upper bound
 
+    // ...and the dismiss runs BEFORE the create loop (mirrors the stale-lead dismiss ordering), so resolved
+    // contacts are cleared before re-evaluating who still needs a task.
+    const dismissIdx = queryMock.mock.calls.findIndex(
+      ([sql]) => typeof sql === "string" && sql.includes("UPDATE office_beta.tasks") && sql.includes("daily_first_outreach_touchpoint")
+    );
+    const createIdx = queryMock.mock.calls.findIndex(
+      ([sql]) => typeof sql === "string" && sql.includes("SELECT c.id AS contact_id, c.first_name, c.last_name")
+    );
+    expect(dismissIdx).toBeGreaterThanOrEqual(0);
+    expect(dismissIdx).toBeLessThan(createIdx);
+
     expect(consoleErrorSpy).not.toHaveBeenCalled();
 
     vi.useRealTimers();

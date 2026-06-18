@@ -147,18 +147,18 @@ export async function dismissResolvedStaleLeadTasks(
  *   - RESOLVED: its contact no longer needs first outreach — first_outreach_completed flipped true (the PG
  *     touchpoint_trigger sets this on any call/email/meeting), or the contact went inactive / was deleted.
  *     This is the core fix: outreach logged as an ACTIVITY flips the flag but never closed the open task.
- *   - EXPIRED: the contact has aged past the first-outreach window (created_at < now - windowDays). Ongoing
+ *   - EXPIRED: the contact has aged past the first-outreach window (created_at < now - WINDOW). Ongoing
  *     contact is governed by the touchpoint-cadence rule, so a months-old "first outreach" reminder is debris.
  * Re-mint is prevented structurally, NOT by suppression (the rule has suppressionWindowDays:0): a RESOLVED
  * contact fails the create query's first_outreach_completed=false filter; an EXPIRED contact fails its
- * created_at >= now-windowDays bound. Both are exact complements of the create predicate on the same axis.
+ * created_at >= now-WINDOW bound. Both reference the SAME FIRST_OUTREACH_WINDOW_DAYS constant the create
+ * query uses, so they are exact complements on contacts.created_at and a dismissed task can never re-mint.
  */
 export async function dismissResolvedFirstOutreachTasks(
   client: Queryable,
   schemaName: string,
   officeId: string,
-  resolvedAt: Date = new Date(),
-  windowDays: number = FIRST_OUTREACH_WINDOW_DAYS
+  resolvedAt: Date = new Date()
 ): Promise<number> {
   const activeTaskStatusesSql = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"]
     .map((status) => `'${status}'`)
@@ -192,13 +192,13 @@ export async function dismissResolvedFirstOutreachTasks(
          OR EXISTS (
            SELECT 1 FROM ${schemaName}.contacts c
            WHERE c.id = t.contact_id
-             AND c.created_at < CURRENT_DATE - ($2::int * INTERVAL '1 day')
+             AND c.created_at < CURRENT_DATE - (${FIRST_OUTREACH_WINDOW_DAYS} * INTERVAL '1 day')
          )
        )
      RETURNING id, origin_rule, dedupe_key, reason_code, entity_snapshot,
        CASE WHEN NOT ${stillNeedsOutreachSql}
             THEN 'first_outreach_resolved' ELSE 'first_outreach_expired' END AS resolution_reason`,
-    [resolvedAt, windowDays]
+    [resolvedAt]
   );
 
   if ((dismissedTasks.rows?.length ?? 0) === 0) {
@@ -249,6 +249,7 @@ export async function runDailyTaskGeneration(): Promise<void> {
       try {
         let officeTasksCreated = 0;
         let officeOverdueMarked = 0;
+        let officeFirstOutreachDismissed = 0;
 
         await client.query("BEGIN");
         await client.query(`SELECT pg_advisory_xact_lock(hashtext('daily_task_generation_' || $1))`, [office.id]);
@@ -333,8 +334,9 @@ export async function runDailyTaskGeneration(): Promise<void> {
         // touchpoint trigger), gone inactive, or aged out of the window — BEFORE re-evaluating who still
         // needs one (mirrors the stale-lead dismiss ordering). This also drains the historical backlog on
         // the first run after deploy.
-        const firstOutreachDismissed = await dismissResolvedFirstOutreachTasks(client, schemaName, office.id);
-        totalFirstOutreachDismissed += firstOutreachDismissed;
+        // Folded into the running total only AFTER COMMIT (like officeTasksCreated/officeOverdueMarked), so
+        // a later-step failure that rolls back this office doesn't over-report dismissals in the summary log.
+        officeFirstOutreachDismissed = await dismissResolvedFirstOutreachTasks(client, schemaName, office.id);
 
         const needsOutreach = await client.query(
           `SELECT c.id AS contact_id, c.first_name, c.last_name
@@ -522,6 +524,7 @@ export async function runDailyTaskGeneration(): Promise<void> {
         await client.query("COMMIT");
         totalOverdueMarked += officeOverdueMarked;
         totalTasksCreated += officeTasksCreated;
+        totalFirstOutreachDismissed += officeFirstOutreachDismissed;
       } catch (officeErr) {
         await client.query("ROLLBACK").catch(() => {});
         console.error(`[Worker:daily-tasks] Office ${office.id} failed:`, officeErr);
