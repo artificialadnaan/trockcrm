@@ -192,13 +192,13 @@ export function buildStatusPredicate(input: DealFilterBarInput): SQL | undefined
 
 /**
  * Stage-aware effective deal value, mirroring getEffectiveDealValue
- * (shared/src/types/deal-hold.ts): Won deals report awarded-first, open deals
- * report best-estimate-first, both on-hold-zeroed. This is the value the list
- * DISPLAYS, so the value filter and the value sort use it too (sort == filter ==
- * display, D-1; Codex #546). Falls back to the open chain when no Won stage ids
- * are resolved (e.g. value filter without classification) — graceful, never
- * broken SQL. Won classification is by stage id so no pipeline_stage_config join
- * is needed (the deals row carries stage_id).
+ * (shared/src/types/deal-hold.ts). As of the 2026-06-18 awarded-first unification both the
+ * Won and open chains resolve through the SAME DEAL_VALUE_PRIORITY_CHAIN
+ * (awarded > bid_board > bid > dd), so the stage_id CASE branches below are byte-identical —
+ * the split is retained only as a future-divergence hook (and is harmless). Both are
+ * on-hold-zeroed. This is the value the list DISPLAYS, so the value filter and the value sort
+ * use it too (sort == filter == display, D-1; Codex #546). Won classification is by stage id
+ * so no pipeline_stage_config join is needed (the deals row carries stage_id).
  */
 export function aliasedStageAwareEffectiveDealValueSql(alias: string, wonStageIds: string[]): SQL {
   const openValue = aliasedEffectiveDealValueSql(alias);

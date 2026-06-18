@@ -119,6 +119,7 @@ type MirrorableDeal = {
   bidEstimate?: string | null;
   awardedAmount?: string | null;
   awardedAmountOverridden?: boolean | null;
+  ddEstimateOverridden?: boolean | null;
 };
 
 type MirrorableStage = {
@@ -410,7 +411,12 @@ export function buildBidBoardMirrorUpdate(input: {
     Object.assign(updates, getHoldStateAtStageEntry(input.deal, stageEnteredAt));
   }
 
-  if (input.payload.ddEstimate !== undefined) {
+  // dd_estimate is permanently human-owned once a manual edit overrides it: the mirror must never write
+  // it again, regardless of payload (mirrors the awarded_amount lock below / migration 0164). When locked,
+  // skip the payload write here; the persist COALESCE(updates.ddEstimate, dd_estimate) then preserves the
+  // existing (human-set) value. The Bid Board sync still owns the INITIAL dd_estimate (override=false).
+  const ddLocked = input.deal.ddEstimateOverridden === true;
+  if (!ddLocked && input.payload.ddEstimate !== undefined) {
     updates.ddEstimate = input.payload.ddEstimate;
   }
   if (input.payload.bidEstimate !== undefined) {

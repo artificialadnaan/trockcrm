@@ -291,8 +291,8 @@ export interface DealFilters {
    * Opt-in: also compute pagination.valueTotal — the SUM of the stage-aware effective value over the
    * full filtered set (the running-total card, #4). Off by default so the extra aggregate runs ONLY
    * for the surfaces that show the card, not every /deals call. When set, the Won stage-id set is
-   * resolved (see needsStageClassification) so the SUM is always awarded-first for Won rows and can
-   * never disagree with the list.
+   * resolved (see needsStageClassification) so the SUM uses the same stage-aware value expression as
+   * the list and can never disagree with it (post-2026-06-18 open and Won share one awarded-first chain).
    */
   includeValueTotal?: boolean;
 }
@@ -852,9 +852,9 @@ function buildDealListColumnOrder(
     case "created_at":
       return buildSortWithIdTieBreaker(deals.createdAt, filters.sortDir === "asc" ? "asc" : "desc");
     case "awarded_amount":
-      // Stage-aware effective value (awarded-first for Won stage ids,
-      // best-estimate otherwise) — the SAME expression the value FILTER and the
-      // list DISPLAY use, so sort == filter == display (D-1; Codex #546). Raw
+      // Stage-aware effective value (unified awarded-first for all stages, 2026-06-18) —
+      // the SAME expression the value FILTER and the list DISPLAY use, so sort == filter ==
+      // display (D-1; Codex #546). Raw
       // awarded_amount is null for most open deals and would mis-sort them.
       return buildSortWithIdTieBreaker(
         aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds),
@@ -1648,9 +1648,9 @@ export async function getDeals(
     valueFilterRequested ||
     filters.sortBy === "awarded_amount" ||
     filters.sortBy === "display_date" ||
-    // The running-total SUM (#4) is stage-aware (awarded-first for Won stages), so it needs the Won
-    // set resolved even when no date/value/sort dimension is active — otherwise a Won row would be
-    // summed by the best-estimate chain and diverge from the awarded-first value the list displays.
+    // The running-total SUM (#4) uses the stage-aware value expression. Post-2026-06-18 open and Won
+    // resolve through the same awarded-first chain (the stage_id CASE branches are identical), but the
+    // Won set is still resolved here so the SUM expression stays byte-identical to the list's display value.
     Boolean(filters.includeValueTotal);
   if (needsStageClassification) {
     const stages = await listDealStages();
@@ -1946,6 +1946,9 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   // value exists on create, so any non-blank awarded amount requires the elevated role.
   const setsAwarded =
     input.awardedAmount != null && String(input.awardedAmount).trim() !== "";
+  // A non-blank dd_estimate set at creation is a manual override — protects it if this deal is later
+  // bid-board-matched and synced (mirrors awarded below / migration 0164). DD is NOT role-gated.
+  const setsDd = input.ddEstimate != null && String(input.ddEstimate).trim() !== "";
   if (setsAwarded && !(input.actorRole === "admin" || input.actorRole === "director")) {
     throw new AppError(
       403,
@@ -1990,6 +1993,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       // A non-blank awarded set at creation by an admin/director (reps are rejected by the guard above)
       // is a manual override — protects it if this deal is later bid-board-matched and synced.
       awardedAmountOverridden: setsAwarded,
+      ddEstimateOverridden: setsDd,
       // deals.bid_due_date is timestamptz, but the business field is date-only.
       // Persist UTC midnight so every environment resolves the same calendar day.
       bidDueDate: normalizedBidDueDate,
@@ -2206,7 +2210,15 @@ export async function updateDeal(
     }
   }
   if (input.primaryContactId !== undefined) updates.primaryContactId = input.primaryContactId;
+  // A genuine manual change to dd_estimate is a permanent override: mark it so the Procore mirror never
+  // overwrites it (mirrors awarded_amount_overridden / migration 0164). Change-detected so a no-op re-save
+  // of the same value does NOT freeze sync; the mirror seeds/updates DD until a human edits it. Unlike
+  // awarded_amount, DD is NOT role-gated — any deal-editor may set it, including on bid-board-owned deals.
+  const touchesDd =
+    input.ddEstimate !== undefined &&
+    normalizeMoneyForCompare(input.ddEstimate) !== normalizeMoneyForCompare(existing.ddEstimate);
   if (input.ddEstimate !== undefined) updates.ddEstimate = input.ddEstimate;
+  if (touchesDd) updates.ddEstimateOverridden = true;
   if (input.bidEstimate !== undefined) updates.bidEstimate = input.bidEstimate;
   // Only admins and directors may edit the awarded amount. Change-detecting so a rep re-submitting the
   // deal form with awarded_amount UNCHANGED (the partial-save flow) is not falsely blocked — only an

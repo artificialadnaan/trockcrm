@@ -80,6 +80,10 @@ export const deals = pgTable(
     // input) — NOT by the #688 won-transition seed. When true the Procore mirror never overwrites
     // awarded_amount (see buildBidBoardMirrorUpdate). Migration 0159.
     awardedAmountOverridden: boolean("awarded_amount_overridden").notNull().default(false),
+    // Set only by a genuine manual edit of dd_estimate (createDeal/updateDeal user input). When true the
+    // Procore mirror never overwrites dd_estimate (see buildBidBoardMirrorUpdate). DD is editable on every
+    // deal incl. bid-board-owned; unlike awarded_amount it is NOT role-gated. Migration 0164.
+    ddEstimateOverridden: boolean("dd_estimate_overridden").notNull().default(false),
     changeOrderTotal: numeric("change_order_total", { precision: 14, scale: 2 }).default("0"),
     description: text("description"),
     estimator: text("estimator"),

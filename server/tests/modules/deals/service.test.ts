@@ -1308,10 +1308,11 @@ describe("Deal Service", () => {
       });
     });
 
-    it("allows DD estimate edits after Bid Board handoff (sync never writes dd_estimate)", async () => {
-      // Convention shift 2026-06-18: dd_estimate is no longer in BID_BOARD_OWNED_UPDATE_FIELD_LABELS, because
-      // the Bid Board sync never writes dd_estimate. A director may correct DD on a bid-board-owned deal; the
-      // edit persists and cannot desync from the mirror. (bid_estimate stays locked — see the test above.)
+    it("allows DD estimate edits after Bid Board handoff and marks dd_estimate_overridden", async () => {
+      // dd_estimate is no longer in BID_BOARD_OWNED_UPDATE_FIELD_LABELS (unlocked 2026-06-18). The Procore
+      // mirror DOES write dd_estimate, so a change-detected manual edit sets dd_estimate_overridden = true
+      // (migration 0164, mirroring awarded_amount_overridden) — the mirror then skips dd_estimate and the
+      // human correction sticks. (bid_estimate stays locked — see the test above.)
       const updated = await updateDeal(
         createMutableOwnedDealTenantDb() as never,
         "deal-1",
@@ -1321,6 +1322,7 @@ describe("Deal Service", () => {
       );
 
       expect(updated.ddEstimate).toBe("125000.00");
+      expect(updated.ddEstimateOverridden).toBe(true);
     });
 
     it("allows metadata edits after Bid Board handoff", async () => {
