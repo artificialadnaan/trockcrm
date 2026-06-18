@@ -24,6 +24,12 @@ describe("shared formatters — compact Intl output (version-agnostic)", () => {
     expect(USD_COMPACT(1_600_000)).toBe("$1.6M");
   });
 
+  it("USD_COMPACT coerces non-finite input to $0 (never renders $NaN on a KPI card)", () => {
+    expect(USD_COMPACT(Number.NaN)).toMatch(/^\$0(\.0)?$/);
+    expect(USD_COMPACT(Number.POSITIVE_INFINITY)).toMatch(/^\$0(\.0)?$/);
+    expect(USD_COMPACT(Number.NEGATIVE_INFINITY)).toMatch(/^\$0(\.0)?$/);
+  });
+
   it("USD (non-compact) renders whole-dollar currency", () => {
     expect(USD(180_000)).toBe("$180,000");
     expect(USD(0)).toBe("$0");

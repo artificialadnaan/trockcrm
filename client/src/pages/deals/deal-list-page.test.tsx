@@ -899,13 +899,16 @@ describe("DealListPage", () => {
     await view.cleanup();
   });
 
-  it("requests an expanded preview window for the SLA drill-down board", () => {
+  it("requests an expanded preview window for the SLA drill-down board with NO board period (current-state)", () => {
     renderPage("/deals?scope=all&filter=at_risk&period=week", "director");
 
+    // Deals-at-Risk is current-state: the board-wide period (arg 5) is null even with ?period=week, so the
+    // server does not window the OPEN columns by stage_entered_at and drops no at-risk deals at the source.
+    // (The Won/Lost terminal presets in arg 3 are moot here — terminal columns aren't shown on this view.)
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
-      lost: { preset: "wtd" }, // ?period=week now windows the Lost column too (Codex #600 P2)
-    }, 1000, { from: "2026-05-03", to: "2026-05-08" }, undefined);
+      lost: { preset: "wtd" },
+    }, 1000, null, undefined);
   });
 
   it("passes the selected page period to the board request so won aggregates match the drilldown window", () => {
@@ -2032,7 +2035,10 @@ describe("DealListPage", () => {
     );
   });
 
-  it("filters stale kanban drill-down cards to the selected dashboard period", () => {
+  // CONVENTION SHIFT: "Stale"/"Deals At Risk" are CURRENT-STATE views — ?period is a deliberate no-op
+  // (period-windowing by updated_at would hide the stalest, most at-risk deals). So even with ?period=qtd,
+  // ALL at-risk deals show regardless of updated_at; only the non-at-risk deal is excluded (by predicate).
+  it("shows ALL at-risk stale deals regardless of ?period (current-state view); excludes non-at-risk", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -2094,11 +2100,18 @@ describe("DealListPage", () => {
 
     const html = renderPage("/deals?scope=all&filter=stale&period=qtd", "director");
 
+    // Even with ?period=qtd, the board fetch must carry NO period on the at-risk/stale drill-down — else
+    // the server windows the OPEN columns by stage_entered_at (won_period) and drops at-risk deals at the
+    // SOURCE. The 5th arg (period range) must be null for current-state.
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, expect.any(Object), 1000, null, undefined);
+
     expect(html).toContain("QTD Stale Deal");
     expect(html).toContain("Second QTD Stale Deal");
-    expect(html).not.toContain("Old Quarter Stale Deal");
+    // The out-of-quarter stale deal is the MOST at-risk (oldest) — current-state view keeps it.
+    expect(html).toContain("Old Quarter Stale Deal");
+    // The non-at-risk deal is still excluded by the engine predicate, not by period.
     expect(html).not.toContain("Fresh QTD Deal");
-    expect(html).toMatch(/Filtered results.*>2</);
+    expect(html).toMatch(/Filtered results.*>3</);
   });
 
   it("uses engine at-risk results for the KPI count and drilldown population", () => {
@@ -2340,12 +2353,13 @@ describe("DealListPage", () => {
   it("keeps the embedded list visible for stale drill-down views", () => {
     const html = renderPage("/deals?scope=all&filter=stale&period=qtd", "director");
 
+    // Current-state: the board carries NO period on the stale drill-down (arg 5 = null), even with ?period=qtd.
     expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
       "all",
       true,
       expect.any(Object),
       1000,
-      { from: "2026-04-01", to: "2026-05-08" },
+      null,
       undefined
     );
     expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();

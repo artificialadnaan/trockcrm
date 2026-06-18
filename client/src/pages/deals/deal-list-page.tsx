@@ -405,21 +405,16 @@ export function getDashboardDealListView(input: {
       filter,
       eyebrow: "Dashboard drill-down",
       title: filter === "stale" ? "Stale Deals" : "Deals At Risk",
+      // "Stale"/"Deals At Risk" are CURRENT-STATE views — ?period is a deliberate no-op here. Period-
+      // windowing by updated_at would hide the stalest (least-recently-touched, i.e. MOST at-risk) deals,
+      // which is backwards for an SLA surface. So the subtitle never claims a period, and listBaseFilters
+      // carries no updated-at window — the card, kanban, list, and link all show the full current cohort.
       subtitle:
         filter === "stale"
-          ? period
-            ? `Open-stage deals past their stage SLA for ${periodLabel}.`
-            : "Open-stage deals past their stage SLA."
-          : period
-            ? `Open-stage deals over SLA and needing attention for ${periodLabel}.`
-            : "Open-stage deals over SLA and needing attention.",
+          ? "Open-stage deals past their stage SLA."
+          : "Open-stage deals over SLA and needing attention.",
       boardMode: "at_risk",
-      listBaseFilters: periodRange
-        ? {
-            updatedFrom: periodRange.from,
-            updatedTo: periodRange.to,
-          }
-        : {},
+      listBaseFilters: {},
       listInitialSort: { key: "stage_entered_at", dir: "asc" },
       showEmbeddedList: true,
       initialStageSlugs: [],
@@ -508,11 +503,12 @@ export function buildDealsPageKpiDrilldownPath(
       if (
         key === "assignedRepId" ||
         // Keep the header period scope through outcome-aware drill-downs (active pipeline / Won), but NOT
-        // the SLA drill-downs: getDashboardDealListView turns ?period into updatedFrom/updatedTo, which the
-        // at-risk/stale lists filter via matchesUpdatedRange — a different axis than the SLA card's count, so
-        // carrying period there drops at-risk deals the card counted but that weren't updated in the window
-        // (cohort mismatch, Codex #600 P2). Option A: won_*/lost_* are NOT forwarded — the Won drill-down
-        // inherits the single shared ?period (already set above), not a collapsed per-column override.
+        // the SLA drill-downs (at_risk / stale): those are CURRENT-STATE views where ?period is a deliberate
+        // no-op (getDashboardDealListView gives them no updated-at window — period-filtering an SLA surface
+        // by updated_at would hide the stalest, most at-risk deals). So the link must NOT carry a period
+        // either — omitting it keeps the destination on the full current at-risk cohort, matching the card.
+        // won_*/lost_* are NOT forwarded — the Won drill-down inherits the single shared ?period (already
+        // set above), not a collapsed per-column override.
         (key === "period" && filter !== "at_risk" && filter !== "stale")
       ) {
         params.set(key, value);
@@ -532,8 +528,76 @@ export function sumNonOnHoldDealValues(deals: Deal[]) {
     .reduce((sum, deal) => sum + moneyValue(deal), 0);
 }
 
-function isEngineAtRiskDeal(deal: Deal) {
+export function isEngineAtRiskDeal(deal: Deal) {
   return deal.atRisk?.isAtRisk === true && deal.atRisk.status === "at_risk";
+}
+
+/**
+ * Rebuild a board column's aggregates from a filtered subset of its cards: `count` excludes on-hold,
+ * `totalCount` is every card, `totalValue` is the non-on-hold $. The ONE recount used by the search
+ * filter, the at-risk filter, and the summary — so every surface aggregates a card set identically.
+ */
+export function recountColumnFromCards(column: DealBoardColumn, cards: Deal[]): DealBoardColumn {
+  return {
+    ...column,
+    totalCount: cards.length,
+    count: cards.filter((deal) => !deal.onHold).length,
+    cards,
+    totalValue: sumNonOnHoldDealValues(cards),
+  };
+}
+
+/**
+ * The at-risk drill-down's SINGLE source of truth: non-terminal columns with their cards narrowed to
+ * the engine at-risk predicate. The Active Pipeline card, the At-Risk card, and the kanban all derive
+ * from THIS set (the kanban additionally applies the text search), so the three reconcile by
+ * construction — no parallel whole-pipeline query.
+ *
+ * "Deals at Risk" is a CURRENT-STATE view: it deliberately does NOT period-filter by updated_at. A deal
+ * is at risk because it's over-SLA / needs touch — period-windowing on updated_at would hide the STALEST
+ * deals (the least-recently-touched, i.e. the most at-risk), which is backwards for this surface. So
+ * ?period is a no-op here, and the card/kanban/list/link all show the same full current at-risk cohort.
+ *
+ * The at-risk count/value are derived from the column's CARDS (there is no server-side at-risk
+ * aggregate — the board only ships a full-column aggregate + a preview card slice). That is shared by
+ * all three at-risk surfaces, so they stay reconciled; it also means the totals are bounded by the
+ * board's per-stage preview cap (SLA_DRILLDOWN_PREVIEW_LIMIT, 1000), far above the real at-risk volume.
+ * A stage with >1000 at-risk deals would under-count uniformly across all three — if that ever becomes
+ * reachable, the fix is a server at-risk aggregate feeding all three, not a per-card divergence here.
+ */
+export function getAtRiskBoardColumns(boardColumns: DealBoardColumn[]): DealBoardColumn[] {
+  return boardColumns
+    .filter((column) => !isTerminalStage(column.stage.slug))
+    .map((column) =>
+      recountColumnFromCards(
+        column,
+        column.cards.filter((deal) => isEngineAtRiskDeal(deal))
+      )
+    );
+}
+
+/**
+ * NaN-safe roll-up for the Active Pipeline KPI card: active (non-on-hold) `count`, `visibleCount`
+ * (incl. on-hold), and non-on-hold `value` — each coerced finite so a stray non-numeric column total
+ * can never render `$NaN`.
+ */
+export function getActivePipelineSummary(columns: DealBoardColumn[]) {
+  const finite = (n: number) => (Number.isFinite(n) ? n : 0);
+  return {
+    count: columns.reduce((sum, column) => sum + finite(column.count), 0),
+    visibleCount: columns.reduce((sum, column) => sum + finite(column.totalCount ?? column.count), 0),
+    value: columns.reduce((sum, column) => sum + finite(column.totalValue), 0),
+  };
+}
+
+/**
+ * The Active Pipeline KPI card drills into the cohort it DISPLAYS: the at-risk set on the at-risk
+ * drill-down (so the click-through matches the number on the card), the full active pipeline otherwise.
+ */
+export function activePipelineDrilldownFilter(
+  boardMode: "all" | "active" | "won" | "at_risk"
+): "at_risk" | "active_pipeline" {
+  return boardMode === "at_risk" ? "at_risk" : "active_pipeline";
 }
 
 function stageAgeDaysLabel(deal: Deal) {
@@ -819,7 +883,12 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     true,
     terminalDateFilters,
     isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : BOARD_CARDS_PER_STAGE_LIMIT,
-    selectedPeriodRange,
+    // Deals-at-Risk is a CURRENT-STATE view: ?period is a no-op. The board period serializes as
+    // won_period_from/to, which the server applies to OPEN columns as a stage-entry-date window
+    // (getDealsForPipeline) — so sending it here would still drop at-risk deals outside the window at the
+    // SOURCE, even though the client no longer filters by it. Send no board period on this drill-down so
+    // the at-risk cohort (card/kanban/list) is the full current set. (Won columns are hidden here anyway.)
+    isAtRiskDrilldown ? null : selectedPeriodRange,
     selectedRepFilter
   );
 
@@ -925,7 +994,6 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   const columns = useMemo(
     () => {
       const searchTerm = search.trim().toLowerCase();
-      const { updatedFrom, updatedTo } = dashboardView.listBaseFilters;
       const sourceColumns =
         dashboardView.boardStageSlugs.length > 0
           ? boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug))
@@ -934,20 +1002,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
           : dashboardView.boardMode === "won"
             ? boardColumns.filter((column) => column.stage.slug === "won")
             : dashboardView.boardMode === "at_risk"
-              ? boardColumns
-                  .filter((column) => !isTerminalStage(column.stage.slug))
-                  .map((column) => {
-                    const cards = column.cards.filter((deal) => {
-                      return isEngineAtRiskDeal(deal) && matchesUpdatedRange(deal, updatedFrom, updatedTo);
-                    });
-                    return {
-                      ...column,
-                      totalCount: cards.length,
-                      count: cards.filter((deal) => !deal.onHold).length,
-                      cards,
-                      totalValue: sumNonOnHoldDealValues(cards),
-                    };
-                  })
+              ? getAtRiskBoardColumns(boardColumns)
           : boardColumns;
       return sourceColumns
         .map((column) => {
@@ -967,19 +1022,12 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               .toLowerCase();
             return haystack.includes(searchTerm);
           });
-          return {
-            ...column,
-            totalCount: cards.length,
-            count: cards.filter((deal) => !deal.onHold).length,
-            cards,
-            totalValue: sumNonOnHoldDealValues(cards),
-          };
+          return recountColumnFromCards(column, cards);
         });
     },
-    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, dashboardView.listBaseFilters, search]
+    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, search]
   );
   const unsearchedColumns = useMemo(() => {
-    const { updatedFrom, updatedTo } = dashboardView.listBaseFilters;
     if (dashboardView.boardStageSlugs.length > 0) {
       return boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug));
     }
@@ -990,24 +1038,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       return boardColumns.filter((column) => column.stage.slug === "won");
     }
     if (dashboardView.boardMode === "at_risk") {
-      return boardColumns
-        .filter((column) => !isTerminalStage(column.stage.slug))
-        .map((column) => {
-          const cards = column.cards.filter((deal) => {
-            return isEngineAtRiskDeal(deal) && matchesUpdatedRange(deal, updatedFrom, updatedTo);
-          });
-          return {
-            ...column,
-            totalCount: cards.length,
-            count: cards.filter((deal) => !deal.onHold).length,
-            cards,
-            totalValue: sumNonOnHoldDealValues(cards),
-          };
-        });
+      return getAtRiskBoardColumns(boardColumns);
     }
     return boardColumns;
-  }, [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, dashboardView.listBaseFilters]);
-  const activePipelineColumns = getActivePipelineColumns(boardColumns);
+  }, [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs]);
+  // On the at-risk drill-down the Active Pipeline KPI card aggregates the SAME at-risk-filtered set that
+  // feeds the At-Risk card and the kanban (unsearchedColumns), so the three reconcile by construction —
+  // not the whole open board. Everywhere else it stays the full active (non-terminal) pipeline.
+  const activePipelineColumns =
+    dashboardView.boardMode === "at_risk" ? unsearchedColumns : getActivePipelineColumns(boardColumns);
   const drilldownVisibleStages = useMemo(
     () =>
       dashboardView.boardStageSlugs.length > 0
@@ -1046,9 +1085,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     () => intersectDateRanges(selectedPeriodRange, getTerminalDateRange(terminalDateFilters.won)),
     [selectedPeriodRange, terminalDateFilters.won]
   );
-  const totalCount = activePipelineColumns.reduce((sum, column) => sum + column.count, 0);
-  const totalVisibleCount = activePipelineColumns.reduce((sum, column) => sum + (column.totalCount ?? column.count), 0);
-  const totalValue = activePipelineColumns.reduce((sum, column) => sum + column.totalValue, 0);
+  const { count: totalCount, visibleCount: totalVisibleCount, value: totalValue } =
+    getActivePipelineSummary(activePipelineColumns);
   const wonMetric = getCanonicalTerminalMetric(boardColumns, "won");
   const wonValue = wonMetric.totalValue;
   const unsearchedOverSlaCount = unsearchedColumns.reduce(
@@ -1059,9 +1097,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
         : column.cards.filter(isEngineAtRiskDeal).length),
     0
   );
-  const activePipelineDestination = buildDealsPageKpiDrilldownPath("active_pipeline", scope, undefined, {
-    queryParams: searchParams,
-  });
+  // On the at-risk drill-down the Active Pipeline card DISPLAYS the at-risk cohort, so its click-through
+  // must land on that same cohort — not the full active pipeline (which would show a larger, different set
+  // than the number on the card). Everywhere else it drills into the full active pipeline.
+  const activePipelineDestination = buildDealsPageKpiDrilldownPath(
+    activePipelineDrilldownFilter(dashboardView.boardMode),
+    scope,
+    undefined,
+    { queryParams: searchParams }
+  );
   const wonDestination = buildDealsPageKpiDrilldownPath("won", scope, selectedPeriod, {
     queryParams: searchParams,
   });
