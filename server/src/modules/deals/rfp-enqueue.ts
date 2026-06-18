@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { and, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, files, jobQueue } from "@trock-crm/shared/schema";
+import { deals, files, jobQueue, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import {
@@ -44,7 +44,54 @@ export interface InsertOpportunityRfpJobInput {
   eventId: string;
 }
 
+/**
+ * Resolves the deal's owner — the "Requested by" person shown on the SyncHub RFP email.
+ * Priority: assigned rep (deal owner) → synced HubSpot owner email → deal creator.
+ * Returns null fields when nothing resolves (SyncHub then renders "—").
+ */
+export async function resolveDealOwner(
+  tenantDb: TenantDb,
+  deal: typeof deals.$inferSelect
+): Promise<{ ownerName: string | null; ownerEmail: string | null }> {
+  const lookupUser = async (
+    userId: string | null | undefined
+  ): Promise<{ ownerName: string | null; ownerEmail: string | null } | null> => {
+    if (!userId) return null;
+    const [u] = await tenantDb
+      .select({
+        email: users.email,
+        displayName: users.displayName,
+        firstName: users.firstName,
+        lastName: users.lastName,
+      })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    if (!u) return null;
+    const name =
+      u.displayName?.trim() ||
+      [u.firstName, u.lastName].filter(Boolean).join(" ").trim() ||
+      null;
+    return { ownerName: name, ownerEmail: u.email ?? null };
+  };
+
+  // 1) Assigned rep — the deal's owner; the canonical requester.
+  const rep = await lookupUser(deal.assignedRepId);
+  if (rep?.ownerEmail) return rep;
+
+  // 2) Fallback: the synced HubSpot owner email (display name unknown).
+  const hubspotOwnerEmail = deal.hubspotOwnerEmail?.trim();
+  if (hubspotOwnerEmail) return { ownerName: rep?.ownerName ?? null, ownerEmail: hubspotOwnerEmail };
+
+  // 3) Fallback: whoever created the deal.
+  const creator = await lookupUser(deal.createdByUserId);
+  if (creator?.ownerEmail) return creator;
+
+  return { ownerName: rep?.ownerName ?? null, ownerEmail: null };
+}
+
 async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals.$inferSelect) {
+  const owner = await resolveDealOwner(tenantDb, fallbackDeal);
   const result = await tenantDb.execute(sql`
     SELECT d.*,
            c.name AS "companyName",
@@ -61,7 +108,7 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals
   `);
   const rows = Array.isArray(result) ? result : result.rows ?? [];
   const row = rows[0] as Record<string, any> | undefined;
-  if (!row) return fallbackDeal;
+  if (!row) return { ...fallbackDeal, ...owner };
 
   return {
     ...fallbackDeal,
@@ -70,6 +117,8 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals
     clientEmail: row.clientEmail ?? null,
     clientPhone: row.clientPhone ?? null,
     bidDueDate: fallbackDeal.bidDueDate ?? row.sourceLeadBidDueDate ?? null,
+    ownerName: owner.ownerName,
+    ownerEmail: owner.ownerEmail,
   };
 }
 
