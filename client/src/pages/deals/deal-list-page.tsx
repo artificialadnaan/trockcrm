@@ -532,8 +532,60 @@ export function sumNonOnHoldDealValues(deals: Deal[]) {
     .reduce((sum, deal) => sum + moneyValue(deal), 0);
 }
 
-function isEngineAtRiskDeal(deal: Deal) {
+export function isEngineAtRiskDeal(deal: Deal) {
   return deal.atRisk?.isAtRisk === true && deal.atRisk.status === "at_risk";
+}
+
+/**
+ * Rebuild a board column's aggregates from a filtered subset of its cards: `count` excludes on-hold,
+ * `totalCount` is every card, `totalValue` is the non-on-hold $. The ONE recount used by the search
+ * filter, the at-risk filter, and the summary — so every surface aggregates a card set identically.
+ */
+export function recountColumnFromCards(column: DealBoardColumn, cards: Deal[]): DealBoardColumn {
+  return {
+    ...column,
+    totalCount: cards.length,
+    count: cards.filter((deal) => !deal.onHold).length,
+    cards,
+    totalValue: sumNonOnHoldDealValues(cards),
+  };
+}
+
+/**
+ * The at-risk drill-down's SINGLE source of truth: non-terminal columns with their cards narrowed to
+ * the engine at-risk predicate within the updated-at window. The Active Pipeline card, the At-Risk
+ * card, and the kanban all derive from THIS set (the kanban additionally applies the text search), so
+ * the three reconcile by construction — no parallel whole-pipeline query.
+ */
+export function getAtRiskBoardColumns(
+  boardColumns: DealBoardColumn[],
+  updatedFrom?: string,
+  updatedTo?: string
+): DealBoardColumn[] {
+  return boardColumns
+    .filter((column) => !isTerminalStage(column.stage.slug))
+    .map((column) =>
+      recountColumnFromCards(
+        column,
+        column.cards.filter(
+          (deal) => isEngineAtRiskDeal(deal) && matchesUpdatedRange(deal, updatedFrom, updatedTo)
+        )
+      )
+    );
+}
+
+/**
+ * NaN-safe roll-up for the Active Pipeline KPI card: active (non-on-hold) `count`, `visibleCount`
+ * (incl. on-hold), and non-on-hold `value` — each coerced finite so a stray non-numeric column total
+ * can never render `$NaN`.
+ */
+export function getActivePipelineSummary(columns: DealBoardColumn[]) {
+  const finite = (n: number) => (Number.isFinite(n) ? n : 0);
+  return {
+    count: columns.reduce((sum, column) => sum + finite(column.count), 0),
+    visibleCount: columns.reduce((sum, column) => sum + finite(column.totalCount ?? column.count), 0),
+    value: columns.reduce((sum, column) => sum + finite(column.totalValue), 0),
+  };
 }
 
 function stageAgeDaysLabel(deal: Deal) {
@@ -934,20 +986,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
           : dashboardView.boardMode === "won"
             ? boardColumns.filter((column) => column.stage.slug === "won")
             : dashboardView.boardMode === "at_risk"
-              ? boardColumns
-                  .filter((column) => !isTerminalStage(column.stage.slug))
-                  .map((column) => {
-                    const cards = column.cards.filter((deal) => {
-                      return isEngineAtRiskDeal(deal) && matchesUpdatedRange(deal, updatedFrom, updatedTo);
-                    });
-                    return {
-                      ...column,
-                      totalCount: cards.length,
-                      count: cards.filter((deal) => !deal.onHold).length,
-                      cards,
-                      totalValue: sumNonOnHoldDealValues(cards),
-                    };
-                  })
+              ? getAtRiskBoardColumns(boardColumns, updatedFrom, updatedTo)
           : boardColumns;
       return sourceColumns
         .map((column) => {
@@ -967,13 +1006,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
               .toLowerCase();
             return haystack.includes(searchTerm);
           });
-          return {
-            ...column,
-            totalCount: cards.length,
-            count: cards.filter((deal) => !deal.onHold).length,
-            cards,
-            totalValue: sumNonOnHoldDealValues(cards),
-          };
+          return recountColumnFromCards(column, cards);
         });
     },
     [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, dashboardView.listBaseFilters, search]
@@ -990,24 +1023,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
       return boardColumns.filter((column) => column.stage.slug === "won");
     }
     if (dashboardView.boardMode === "at_risk") {
-      return boardColumns
-        .filter((column) => !isTerminalStage(column.stage.slug))
-        .map((column) => {
-          const cards = column.cards.filter((deal) => {
-            return isEngineAtRiskDeal(deal) && matchesUpdatedRange(deal, updatedFrom, updatedTo);
-          });
-          return {
-            ...column,
-            totalCount: cards.length,
-            count: cards.filter((deal) => !deal.onHold).length,
-            cards,
-            totalValue: sumNonOnHoldDealValues(cards),
-          };
-        });
+      return getAtRiskBoardColumns(boardColumns, updatedFrom, updatedTo);
     }
     return boardColumns;
   }, [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, dashboardView.listBaseFilters]);
-  const activePipelineColumns = getActivePipelineColumns(boardColumns);
+  // On the at-risk drill-down the Active Pipeline KPI card aggregates the SAME at-risk-filtered set that
+  // feeds the At-Risk card and the kanban (unsearchedColumns), so the three reconcile by construction —
+  // not the whole open board. Everywhere else it stays the full active (non-terminal) pipeline.
+  const activePipelineColumns =
+    dashboardView.boardMode === "at_risk" ? unsearchedColumns : getActivePipelineColumns(boardColumns);
   const drilldownVisibleStages = useMemo(
     () =>
       dashboardView.boardStageSlugs.length > 0
@@ -1046,9 +1070,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     () => intersectDateRanges(selectedPeriodRange, getTerminalDateRange(terminalDateFilters.won)),
     [selectedPeriodRange, terminalDateFilters.won]
   );
-  const totalCount = activePipelineColumns.reduce((sum, column) => sum + column.count, 0);
-  const totalVisibleCount = activePipelineColumns.reduce((sum, column) => sum + (column.totalCount ?? column.count), 0);
-  const totalValue = activePipelineColumns.reduce((sum, column) => sum + column.totalValue, 0);
+  const { count: totalCount, visibleCount: totalVisibleCount, value: totalValue } =
+    getActivePipelineSummary(activePipelineColumns);
   const wonMetric = getCanonicalTerminalMetric(boardColumns, "won");
   const wonValue = wonMetric.totalValue;
   const unsearchedOverSlaCount = unsearchedColumns.reduce(
