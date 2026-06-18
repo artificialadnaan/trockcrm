@@ -4,7 +4,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { readFileSync } from "fs";
-import { join } from "path";
+import { resolve } from "path";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import {
@@ -375,7 +375,7 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
   });
 
   it("offers Scheduled, Reviewing, Completed for the first two opportunity review dropdowns only", () => {
-    const source = readFileSync(join(process.cwd(), "client/src/components/deals/deal-scoping-workspace.tsx"), "utf8");
+    const source = readFileSync(resolve(import.meta.dirname, "./deal-scoping-workspace.tsx"), "utf8");
     const preBidBlock = source.slice(source.indexOf('id="preBidMeetingCompleted"'), source.indexOf('id="siteVisitDecision"'));
     const siteDecisionBlock = source.slice(source.indexOf('id="siteVisitDecision"'), source.indexOf('id="siteVisitCompleted"'));
     const siteCompletedBlock = source.slice(source.indexOf('id="siteVisitCompleted"'), source.indexOf('id="estimatorConsultationNotes"'));
@@ -1560,9 +1560,11 @@ describe("DealScopingWorkspace scoping UX", () => {
       });
 
       expect(mocks.patchDealScopingIntake).toHaveBeenCalled();
+      // Project type is now editable at the Opportunity stage, so the autosave legitimately carries
+      // the (unchanged) projectTypeId rather than omitting it as a locked field.
       expect(mocks.patchDealScopingIntake).toHaveBeenCalledWith(
         "deal-1",
-        expect.not.objectContaining({ projectTypeId: expect.anything() })
+        expect.objectContaining({ projectTypeId: "roofing" })
       );
       expect(mocks.patchDealScopingIntake).toHaveBeenCalledWith(
         "deal-1",

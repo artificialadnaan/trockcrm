@@ -50,6 +50,7 @@ describe("ProjectsPage", () => {
   afterEach(() => {
     act(() => root?.unmount());
     container.remove();
+    vi.useRealTimers();
   });
 
   it("renders every board stage and clean empty-column states", async () => {
@@ -89,6 +90,11 @@ describe("ProjectsPage", () => {
         },
       ]),
     );
+
+    // Pin the clock so the synced date (May 25) is <7 days old -> non-stale "As of" label, regardless
+    // of when CI runs. Fake only Date so vi.waitFor / async React render stay real.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-05-26T12:00:00.000Z"));
 
     await act(async () => {
       root.render(

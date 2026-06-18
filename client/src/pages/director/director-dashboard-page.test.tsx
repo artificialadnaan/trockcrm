@@ -486,6 +486,9 @@ describe("DirectorDashboardPage", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    // Restore spies (e.g. the document.createElement spy in the CSV-export tests) so they can't leak
+    // into later tests; beforeEach re-configures every hoisted mock, so this is safe.
+    vi.restoreAllMocks();
   });
 
   it("renders director hero with shell actions and QTD time-range active", () => {

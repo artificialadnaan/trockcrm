@@ -79,6 +79,8 @@ vi.mock("@/lib/pipeline-scope", () => ({
     needsRedirect: false,
     redirectTo: "/leads?scope=mine",
   }),
+  // Mirror the pure helper from src/lib/pipeline-scope.ts so the page (which now calls it) renders.
+  containNonDealsScope: (scope: string) => (scope === "team" || scope === "watched" ? "mine" : scope),
 }));
 
 vi.mock("@/lib/auth", () => ({

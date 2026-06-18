@@ -53,11 +53,17 @@ describe("ProjectDetailPage shell", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     mocks.api.mockReset();
+    // Pin the clock within 7 days of the seeded valueSyncedAt (May 25) so the fresh "As of" label
+    // renders regardless of when CI runs. Fake ONLY Date so setTimeout/microtasks stay real and the
+    // vi.waitFor in renderDetail still resolves (full fake timers would deadlock waitFor).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-05-26T00:00:00.000Z"));
   });
 
   afterEach(() => {
     act(() => root?.unmount());
     container.remove();
+    vi.useRealTimers();
   });
 
   async function renderDetail(project: Record<string, unknown> = baseProject) {

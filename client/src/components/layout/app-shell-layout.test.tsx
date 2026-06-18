@@ -56,6 +56,8 @@ const dashboardState = vi.hoisted(() => ({
 
 vi.mock("react-router-dom", () => ({
   useNavigate: () => vi.fn(),
+  // usePlatformUsageTracker reads location.pathname/search in an effect dep array during render.
+  useLocation: () => ({ pathname: "/", search: "" }),
   Link: ({ to, children, className }: { to: string; children?: ReactNode; className?: string }) => (
     <a href={to} className={className}>{children}</a>
   ),
