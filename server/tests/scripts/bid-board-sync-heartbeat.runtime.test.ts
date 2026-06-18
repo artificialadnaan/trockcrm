@@ -74,7 +74,8 @@ describe("getLastCommittedSuccessAt", () => {
 });
 
 describe("runHeartbeatForOffice — incident + throttle + recovery (persisted)", () => {
-  const opts = { office: "dallas", thresholdMinutes: 60, realertMinutes: 60 };
+  const okSender = async () => true; // a successful send
+  const opts = { office: "dallas", thresholdMinutes: 60, realertMinutes: 60, sendAlert: okSender };
 
   it("WOULD HAVE CAUGHT THE INCIDENT: only an old success, no failure row → stalled + alert + persisted", async () => {
     // The last good push was >24h ago; every push since 500'd and rolled back (no row at all).
@@ -135,5 +136,36 @@ describe("runHeartbeatForOffice — incident + throttle + recovery (persisted)",
     const r = await runHeartbeatForOffice(client, { ...opts, now: NOW });
     expect(r.decision.action).toBe("none");
     expect((await readAlertState(client, "dallas"))?.state).toBe("ok");
+  });
+
+  // Throttle must advance only on a SUCCESSFUL send: a failed first send re-alerts on the NEXT cycle,
+  // not after a full window — otherwise a transient transport blip silences the P0 alert for ~an hour.
+  it("a failed send does NOT advance the throttle; the next cycle re-alerts", async () => {
+    await seedRun("success", ago(25 * 60));
+    const failOnce = await runHeartbeatForOffice(client, { ...opts, now: NOW, sendAlert: async () => false });
+    expect(failOnce.decision.action).toBe("alert_stalled");
+    expect(failOnce.sent).toBe(false);
+    expect((await readAlertState(client, "dallas"))?.last_alerted_at).toBeNull(); // not advanced
+
+    const retry = await runHeartbeatForOffice(client, {
+      ...opts,
+      now: new Date(NOW.getTime() + 19 * MIN), // next cycle, well inside the 60-min window
+      sendAlert: okSender,
+    });
+    expect(retry.decision.action).toBe("alert_stalled"); // re-alerts because the first never sent
+    expect(retry.sent).toBe(true);
+  });
+
+  it("a thrown sender is swallowed (no crash) and counts as not-sent", async () => {
+    await seedRun("success", ago(25 * 60));
+    const r = await runHeartbeatForOffice(client, {
+      ...opts,
+      now: NOW,
+      sendAlert: async () => {
+        throw new Error("resend down");
+      },
+    });
+    expect(r.sent).toBe(false);
+    expect((await readAlertState(client, "dallas"))?.state).toBe("stalled");
   });
 });

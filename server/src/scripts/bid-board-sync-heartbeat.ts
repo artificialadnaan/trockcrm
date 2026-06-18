@@ -176,16 +176,30 @@ export interface OfficeHeartbeatResult {
   office: string;
   decision: HeartbeatDecision;
   lastSuccessAt: Date | null;
+  /** Whether an alert email was actually sent this run (false for action 'none' or a failed send). */
+  sent: boolean;
 }
 
+/** Sends the rendered alert; returns true on success. Injected so the path is unit-testable and so a
+ *  send failure can be observed (the throttle only advances on a successful send). */
+export type AlertSender = (subject: string, html: string) => Promise<boolean>;
+
 /**
- * Run the heartbeat for one office: read last-success + prior state, decide, persist the new state.
- * Does NOT send email (returns the decision so the caller — or a test — sends/asserts). Persistence
- * happens here so the throttle/recovery state is durable across cron invocations.
+ * Run the heartbeat for one office: read last-success + prior state, decide, send the alert (if any),
+ * then persist state. Persistence happens here so the throttle/recovery state is durable across cron
+ * invocations. The throttle anchor (last_alerted_at) advances ONLY when the stalled email actually
+ * sends — so a transient transport failure re-alerts on the next cycle instead of going quiet for a
+ * whole window. The sender is injected (tests pass a fake); a thrown sender never escapes this fn.
  */
 export async function runHeartbeatForOffice(
   client: Queryable,
-  opts: { office: string; now: Date; thresholdMinutes: number; realertMinutes: number }
+  opts: {
+    office: string;
+    now: Date;
+    thresholdMinutes: number;
+    realertMinutes: number;
+    sendAlert?: AlertSender;
+  }
 ): Promise<OfficeHeartbeatResult> {
   const lastSuccessAt = await getLastCommittedSuccessAt(client, opts.office);
   const prior = await readAlertState(client, opts.office);
@@ -199,11 +213,30 @@ export async function runHeartbeatForOffice(
     realertMinutes: opts.realertMinutes,
   });
 
-  // last_alerted_at advances only when we actually email a stalled alert; recovery clears it so the
-  // next stall starts a fresh throttle window.
+  let sent = false;
+  if (decision.action !== "none" && opts.sendAlert) {
+    const { subject, html } = renderHeartbeatEmail({
+      kind: decision.action === "alert_recovered" ? "recovered" : "stalled",
+      office: opts.office,
+      lastSuccessAt,
+      minutesSinceSuccess: decision.minutesSinceSuccess,
+      thresholdMinutes: opts.thresholdMinutes,
+    });
+    try {
+      sent = await opts.sendAlert(subject, html);
+    } catch (err) {
+      sent = false;
+      console.error(`[bid-board-heartbeat] office=${opts.office} email send threw:`, err);
+    }
+  }
+
+  // last_alerted_at advances only when the stalled email actually sent (so a failed send re-alerts next
+  // cycle, not after a full window); recovery clears it so the next stall starts a fresh window.
   const lastAlertedAt =
     decision.action === "alert_stalled"
-      ? opts.now
+      ? sent
+        ? opts.now
+        : (prior?.last_alerted_at ?? null)
       : decision.action === "alert_recovered"
         ? null
         : (prior?.last_alerted_at ?? null);
@@ -215,7 +248,7 @@ export async function runHeartbeatForOffice(
     now: opts.now,
   });
 
-  return { office: opts.office, decision, lastSuccessAt };
+  return { office: opts.office, decision, lastSuccessAt, sent };
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
@@ -258,36 +291,23 @@ export async function main(now: Date = new Date()): Promise<void> {
   await client.connect();
   try {
     const wrap: Queryable = { query: (text, params) => client.query(text, params as unknown[]) };
+    // The sender returns true only on a successful send; runHeartbeatForOffice uses that to gate the
+    // throttle anchor, and swallows a thrown transport so one office can't crash the loop.
+    const sendAlert: AlertSender = (subject, html) => sendSystemEmail(to, subject, html);
     for (const office of officeList) {
       // One office failing (missing schema, transient DB error) must not sink the others.
       try {
-        const { decision, lastSuccessAt } = await runHeartbeatForOffice(wrap, {
+        const { decision, lastSuccessAt, sent } = await runHeartbeatForOffice(wrap, {
           office,
           now,
           thresholdMinutes,
           realertMinutes,
+          sendAlert,
         });
         console.log(
           `[bid-board-heartbeat] office=${office} stalled=${decision.stalled} action=${decision.action} ` +
-            `lastSuccess=${lastSuccessAt ? lastSuccessAt.toISOString() : "never"}`
+            `sent=${sent} lastSuccess=${lastSuccessAt ? lastSuccessAt.toISOString() : "never"}`
         );
-        if (decision.action === "none") continue;
-
-        const { subject, html } = renderHeartbeatEmail({
-          kind: decision.action === "alert_recovered" ? "recovered" : "stalled",
-          office,
-          lastSuccessAt,
-          minutesSinceSuccess: decision.minutesSinceSuccess,
-          thresholdMinutes,
-        });
-        // Email-send failure must never crash the job (and must not leave the throttle state wrong —
-        // state was already persisted above; a missed email simply re-alerts next cycle).
-        try {
-          const ok = await sendSystemEmail(to, subject, html);
-          console.log(`[bid-board-heartbeat] office=${office} email sent=${ok} (${decision.action})`);
-        } catch (err) {
-          console.error(`[bid-board-heartbeat] office=${office} email send FAILED:`, err);
-        }
       } catch (err) {
         console.error(`[bid-board-heartbeat] office=${office} heartbeat check FAILED:`, err);
       }
