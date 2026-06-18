@@ -241,7 +241,7 @@ const STAGE_ORDER: RepCommissionDashboardDeal["stageKey"][] = [
 ];
 
 const STAGE_LABELS: Record<RepCommissionDashboardDeal["stageKey"], string> = {
-  won: "Earned",
+  won: "Won",
   contract: "Contract",
   estimate_sent: "Estimate Sent",
   estimating: "Estimating",

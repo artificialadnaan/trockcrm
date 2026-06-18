@@ -33,7 +33,7 @@ const dashboard = {
     openDealCount: 4,
   },
   stageTotals: [
-    { stageKey: "won", stageName: "Earned", commission: 1980, dealValue: 132000, dealCount: 2, percentOfTotal: 4.2 },
+    { stageKey: "won", stageName: "Won", commission: 1980, dealValue: 132000, dealCount: 2, percentOfTotal: 4.2 },
     { stageKey: "contract", stageName: "Contract", commission: 4575, dealValue: 305000, dealCount: 1, percentOfTotal: 9.8 },
     { stageKey: "estimate_sent", stageName: "Estimate Sent", commission: 16800, dealValue: 1120000, dealCount: 1, percentOfTotal: 35.9 },
     { stageKey: "estimating", stageName: "Estimating", commission: 16800, dealValue: 1120000, dealCount: 1, percentOfTotal: 35.9 },
@@ -48,7 +48,7 @@ const dashboard = {
       propertyName: "Stadium",
       propertyAddress: "1 Eagle Way",
       stageKey: "won",
-      stageName: "Earned",
+      stageName: "Won",
       stageSlug: "sent_to_production",
       dealValue: 100000,
       commissionRate: 0.015,
@@ -132,10 +132,10 @@ describe("RepCommissionsPage", () => {
     mocks.apiMock.mockResolvedValue({ data: dashboard });
   });
 
-  it("renders KPI strip with earned, in pipeline, total potential and red earned card", async () => {
+  it("renders KPI strip with won, in pipeline, total potential and red won card", async () => {
     const { container, root } = await renderPage();
 
-    expect(container.textContent).toContain("Earned");
+    expect(container.textContent).toContain("Won");
     expect(container.textContent).toContain("In pipeline");
     expect(container.textContent).toContain("Total potential");
     expect(container.textContent).toContain("$1,980.00");
@@ -176,7 +176,7 @@ describe("RepCommissionsPage", () => {
     const { container, root } = await renderPage();
     const text = container.textContent ?? "";
 
-    expect(text.indexOf("Earned")).toBeLessThan(text.indexOf("Contract"));
+    expect(text.indexOf("Won")).toBeLessThan(text.indexOf("Contract"));
     expect(text.indexOf("Contract")).toBeLessThan(text.indexOf("Estimating"));
     expect(text).toContain("Contract signed · locked in");
     expect(text).toContain("One signature away");
@@ -210,7 +210,7 @@ describe("RepCommissionsPage", () => {
     );
     const csv = String(mocks.downloadTextFile.mock.calls[0][0]);
     expect(csv).toContain("deal,company,property,stage,status,dealValue,rate,commission");
-    expect(csv).toContain("Allen Sports Complex,Allen ISD,Stadium,Earned,Earned,100000.00,1.50,1500.00");
+    expect(csv).toContain("Allen Sports Complex,Allen ISD,Stadium,Won,Won,100000.00,1.50,1500.00");
     expect(csv).toContain("Garland Warehouse 14,Garland Industrial,14 Warehouse Rd,Contract,Pipeline,305000.00,1.50,4575.00");
     await unmount(root);
   });

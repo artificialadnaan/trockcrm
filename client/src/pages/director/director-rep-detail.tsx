@@ -565,7 +565,7 @@ export function DirectorRepDetail() {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-6">
         <StatCard
-          title={`Earned Commission · ${periodLabel}`}
+          title={`Won Commission · ${periodLabel}`}
           value={formatCurrency(data.commissionSummary.totalEarnedCommission)}
           subtitle={
             data.commissionSummary.overrideEarnedCommission > 0

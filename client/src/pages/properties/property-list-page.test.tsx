@@ -102,6 +102,52 @@ describe("PropertyListPage", () => {
     expect(html).toContain("Won project");
   });
 
+  it("shows a 'sq ft' roof-area badge when roof data exists (default fixture has roofArea)", () => {
+    // beforeEach mock supplies one property with roofArea 125000.
+    const html = normalize(renderPage());
+    expect(html).toContain("sq ft");
+    expect(html).not.toContain("No data");
+  });
+
+  it("shows 'No data' for roof area when no property carries a known roofArea (never a misleading '0 sq ft')", () => {
+    // roof_area has no writers today (NULL by construction). The summed total is 0, which must surface
+    // as "No data", not "0 sq ft". "sq ft" only renders in this summary badge, so a global assertion is safe.
+    mocks.usePropertiesMock.mockReturnValue({
+      properties: [
+        {
+          id: "property-noroof",
+          companyId: "company-1",
+          companyName: "Alpha Roofing",
+          name: "No Roof Data",
+          address: "456 Main St",
+          city: "Dallas",
+          state: "TX",
+          zip: "75201",
+          notes: null,
+          type: "industrial",
+          roofArea: null,
+          linkedValue: "300000",
+          activePipelineValue: "300000",
+          engagementStatus: "active_deal",
+          photosCount: 0,
+          isActive: true,
+          createdAt: "2026-04-10T10:00:00.000Z",
+          updatedAt: "2026-04-11T10:00:00.000Z",
+          leadCount: 1,
+          dealCount: 1,
+          convertedDealCount: 0,
+          lastActivityAt: "2026-04-11T09:00:00.000Z",
+        },
+      ],
+      loading: false,
+      error: null,
+    });
+
+    const html = normalize(renderPage());
+    expect(html).toContain("No data");
+    expect(html).not.toContain("sq ft");
+  });
+
   it("stacks the table into a md:hidden property card list with a touch-sized type filter", async () => {
     const { container, cleanup } = await renderPageDom();
     try {

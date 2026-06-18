@@ -57,7 +57,7 @@ const stageMeta: Record<
     description: "One signature away",
   },
   won: {
-    label: "Earned",
+    label: "Won",
     pill: "bg-emerald-50 text-emerald-700 ring-emerald-200",
     barClass: "bg-emerald-500",
     legendDot: "bg-emerald-500",
@@ -303,7 +303,7 @@ function MyCommissions() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <MetricCard
-          eyebrow="Earned"
+          eyebrow="Won"
           value={USD(earned, true)}
           badge="contract signed"
           drenched
@@ -573,7 +573,7 @@ function TeamCommissions() {
               className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
             >
               <ArrowUpDown className="h-3.5 w-3.5" />
-              Sort: {sortBy === "earned" ? "Earned" : sortBy === "pipeline" ? "Pipeline" : "Goal %"}
+              Sort: {sortBy === "earned" ? "Won" : sortBy === "pipeline" ? "Pipeline" : "Goal %"}
             </button>
             <Button variant="outline" size="sm">
               <Download className="mr-1 h-4 w-4" />
@@ -587,7 +587,7 @@ function TeamCommissions() {
             <thead>
               <tr className="border-b border-slate-100 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">
                 <th className="px-5 py-3 text-left">Rep</th>
-                <th className="px-5 py-3 text-right">Earned</th>
+                <th className="px-5 py-3 text-right">Won</th>
                 <th className="px-5 py-3 text-right">Pipeline</th>
                 <th className="px-5 py-3 text-left">Stage breakdown</th>
                 <th className="px-5 py-3 text-right">Active</th>

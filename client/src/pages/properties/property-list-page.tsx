@@ -142,8 +142,12 @@ export function PropertyListPage() {
     );
     const linkedPipeline = properties.reduce((sum, property) => sum + numeric(property.linkedValue ?? property.activePipelineValue), 0);
     const roofArea = properties.reduce((sum, property) => sum + (property.roofArea ?? 0), 0);
+    // roof_area has no writers (NULL by construction today), so the summed value is always 0. Surface
+    // "No data" rather than a misleading "0 sq ft" when no property in view carries a known roof area —
+    // mirrors the per-property "No data" handling on the property detail page.
+    const hasRoofArea = properties.some((property) => property.roofArea != null);
     const stale = properties.filter((property) => isStale(property.lastActivityAt)).length;
-    return { activeOpportunities, linkedPipeline, roofArea, stale };
+    return { activeOpportunities, linkedPipeline, roofArea, hasRoofArea, stale };
   }, [properties]);
 
   return (
@@ -163,7 +167,7 @@ export function PropertyListPage() {
       />
 
       <div className="grid gap-4 md:grid-cols-3">
-        <MetricCard eyebrow="Active opportunities" value={String(totals.activeOpportunities)} badge={`${NUMBER_COMPACT(totals.roofArea)} sq ft`} caption="Roof area" tone="green" accent="red" />
+        <MetricCard eyebrow="Active opportunities" value={String(totals.activeOpportunities)} badge={totals.hasRoofArea ? `${NUMBER_COMPACT(totals.roofArea)} sq ft` : "No data"} caption="Roof area" tone="green" accent="red" />
         <MetricCard eyebrow="Linked pipeline" value={USD_COMPACT(totals.linkedPipeline)} badge={`${properties.length} sites`} caption="Active deals" tone="blue" accent="blue" />
         <MetricCard eyebrow="Untouched 30d+" value={String(totals.stale)} badge="Review" caption="Needs touch" tone="red" accent="red" />
       </div>

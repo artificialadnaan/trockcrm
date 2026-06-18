@@ -143,4 +143,13 @@ describe("AuthEntryScreen form behavior", () => {
 
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("Invalid email or password");
   });
+
+  it("renders the forgot-password admin contact as a real mailto link (no self-service reset exists)", () => {
+    renderAuthEntry();
+
+    const link = container.querySelector<HTMLAnchorElement>('a[href^="mailto:aiqbal@trockgc.com"]');
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toContain("Contact your administrator");
+    expect(container.textContent).toContain("Forgot password?");
+  });
 });
