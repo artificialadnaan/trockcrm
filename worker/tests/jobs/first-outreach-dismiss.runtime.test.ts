@@ -117,13 +117,16 @@ async function status(id: string): Promise<string> {
   return r.rows[0]!.status;
 }
 
+// Explicit hook timeout: spinning up PGlite + running the setup DDL can exceed Vitest's default 10s hook
+// timeout when this suite runs alongside the other *.runtime.test.ts suites under parallel workers (CPU
+// contention). Give it generous headroom so it can't flake out before any assertion runs.
 beforeEach(async () => {
   db = new PGlite();
   await setup(db);
-});
+}, 30_000);
 afterEach(async () => {
   await db.close();
-});
+}, 30_000);
 
 describe("dismissResolvedFirstOutreachTasks", () => {
   it("dismisses resolved/inactive/expired/orphan + a waiting_on task; keeps still-needed and in-window", async () => {
