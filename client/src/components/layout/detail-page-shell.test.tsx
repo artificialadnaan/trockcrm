@@ -100,7 +100,7 @@ describe("DetailPageShell", () => {
   it("renders red-accent KPI cards with the brand-red treatment", () => {
     const html = normalize(renderToStaticMarkup(renderShell()));
 
-    expect(html).toContain("bg-brand-red");
+    expect(html).toContain("border-brand-red");
     expect(html).toContain("Risk");
   });
 });

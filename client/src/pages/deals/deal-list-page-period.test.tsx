@@ -12,12 +12,13 @@ import { resolveDatePreset } from "@/lib/pipeline-terminal-filters";
 describe("getDashboardPeriodDateRange week (Sunday-anchored, D-7)", () => {
   it("anchors the week period to the most recent Sunday from a midweek reference", () => {
     // 2026-05-27 is a Wednesday; Sunday-anchored start is 2026-05-24 (Monday-anchored would be 2026-05-25).
-    const now = new Date(2026, 4, 27);
+    // Noon CT (17:00Z, DST-safe) so the business calendar day is 2026-05-27 in ANY runner timezone.
+    const now = new Date("2026-05-27T17:00:00Z");
     expect(getDashboardPeriodDateRange("week", now)).toEqual({ from: "2026-05-24", to: "2026-05-27" });
   });
 
   it("returns the same day when the reference is already a Sunday", () => {
-    const now = new Date(2026, 4, 24);
+    const now = new Date("2026-05-24T17:00:00Z"); // noon CT -> Central day 2026-05-24 (Sunday)
     expect(getDashboardPeriodDateRange("week", now)).toEqual({ from: "2026-05-24", to: "2026-05-24" });
   });
 });
@@ -26,7 +27,7 @@ describe("getDashboardPeriodDateRange week (Sunday-anchored, D-7)", () => {
 // terminal/estimate-sent range mappers must resolve it (not Number("wtd") -> NaN).
 describe("terminal date-range mappers handle the wtd preset (no NaN)", () => {
   it("getTerminalDateRange resolves wtd to the Sunday-anchored window", () => {
-    const now = new Date(2026, 4, 27); // Wednesday; most recent Sunday = 2026-05-24
+    const now = new Date("2026-05-27T17:00:00Z"); // Wed noon CT; most recent Sunday = 2026-05-24
     expect(getTerminalDateRange({ preset: "wtd" }, now)).toEqual({ from: "2026-05-24", to: "2026-05-27" });
   });
 });

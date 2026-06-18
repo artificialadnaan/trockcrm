@@ -86,7 +86,12 @@ describe("ActivityLogForm email logging", () => {
     expect(container.querySelector("input[name='emailFrom']")).toBeTruthy();
     expect(container.querySelector("input[name='emailTo']")).toBeTruthy();
     expect(container.querySelector("textarea[name='emailBody']")).toBeTruthy();
-    expect((container.querySelector("input[name='emailOccurredAt']") as HTMLInputElement).value).toBe("2026-05-18T10:30");
+    // Derive the expected datetime-local from the frozen system time using the same local getters as
+    // production's toDateTimeLocal, so it holds under any runner TZ (UTC on CI, Central locally).
+    const occurredNow = new Date("2026-05-18T15:30:00.000Z");
+    const pad = (v: number) => String(v).padStart(2, "0");
+    const expectedLocal = `${occurredNow.getFullYear()}-${pad(occurredNow.getMonth() + 1)}-${pad(occurredNow.getDate())}T${pad(occurredNow.getHours())}:${pad(occurredNow.getMinutes())}`;
+    expect((container.querySelector("input[name='emailOccurredAt']") as HTMLInputElement).value).toBe(expectedLocal);
 
     unmount();
   });

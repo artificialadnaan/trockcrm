@@ -177,7 +177,7 @@ describe("KanbanDealCard", () => {
   });
 
   it("renders deal name and currency value", () => {
-    const html = render(makeDeal({ name: "Palm Villas", awardedAmount: "250000" }));
+    const html = render(makeDeal({ name: "Palm Villas", awardedAmount: "250000", ddEstimate: null }));
     expect(html).toContain("Palm Villas");
     expect(html).toMatch(/\$25\d/);
   });
