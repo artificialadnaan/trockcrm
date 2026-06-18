@@ -27,6 +27,7 @@ import {
   getDrilldownFilterBarDimensions,
 } from "@/components/deals/deals-filterbar-adapter";
 import { PresetSelect } from "@/components/filters/preset-select";
+import { RepCommissionDrilldown } from "@/components/director/rep-commission-drilldown";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -420,7 +421,7 @@ export function DirectorRepDetail() {
     () => getRepDetailListDateRange(listRange, preset, dateRange),
     [dateRange, listRange, preset]
   );
-  const { data, loading, error } = useRepDetail(repId, dateRange);
+  const { data, loading, error, refetch } = useRepDetail(repId, dateRange);
   const periodLabel = PRESET_LABELS[preset];
   const activityPeriodLabel = PRESET_ACTIVITY_LABELS[preset];
 
@@ -564,7 +565,7 @@ export function DirectorRepDetail() {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-6">
         <StatCard
-          title="Earned Commission (Rolling 12M)"
+          title={`Earned Commission · ${periodLabel}`}
           value={formatCurrency(data.commissionSummary.totalEarnedCommission)}
           subtitle={
             data.commissionSummary.overrideEarnedCommission > 0
@@ -604,6 +605,19 @@ export function DirectorRepDetail() {
           icon={<Target className="h-5 w-5" />}
         />
       </div>
+
+      <RepCommissionDrilldown
+        key={repId}
+        repId={repId ?? ""}
+        repName={data.winLoss.repName || "Rep"}
+        periodLabel={periodLabel}
+        isFlatListWindow={preset === "ytd"}
+        dateRange={dateRange}
+        commissionSummary={data.commissionSummary}
+        commissionDeals={data.commissionDeals}
+        wonMissingContractDate={data.wonMissingContractDate}
+        onDataChanged={refetch}
+      />
 
       <Card id="rep-activity-summary" className="scroll-mt-24">
         <CardHeader>

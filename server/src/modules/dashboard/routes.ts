@@ -12,6 +12,10 @@ import {
   REP_PERFORMANCE_PERIOD_KINDS,
   type RepPerformancePeriodKind,
 } from "./service.js";
+import {
+  getRepCommissionDashboard,
+  normalizeCommissionPeriod,
+} from "../commissions/reporting-service.js";
 
 const router = Router();
 
@@ -132,6 +136,36 @@ router.get(
       const data = await getRepDetail(req.tenantDb!, req.params.repId as string, {
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
+      });
+      await req.commitTransaction!();
+      res.json({ data });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// GET /api/dashboard/director/rep/:repId/commission-view -- the rep's OWN commission dashboard
+// (Engine A, getRepCommissionDashboard) — literally what the rep sees on their own /commissions page,
+// for the director's "View as rep" panel. Admin/director only.
+//
+// RBAC (defense in depth): the route is role-gated AND getRepCommissionDashboard resolves the target rep
+// via effectiveRepForRepDashboard, which honors `repId` ONLY for non-rep callers (a rep is always pinned
+// to their own userId). So this can never leak one rep's data to another, and a rep can't reach it at all.
+router.get(
+  "/director/rep/:repId/commission-view",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const data = await getRepCommissionDashboard(req.tenantDb!, {
+        role: req.user!.role,
+        userId: req.user!.id,
+        repId: req.params.repId as string,
+        from: req.query.from as string | undefined,
+        to: req.query.to as string | undefined,
+        period: normalizeCommissionPeriod(req.query.period),
+        // Read-only preview: never mutate the target rep's commission snapshots / "since last update" deltas.
+        skipSnapshotRefresh: true,
       });
       await req.commitTransaction!();
       res.json({ data });
