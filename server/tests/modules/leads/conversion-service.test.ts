@@ -1070,6 +1070,11 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
       innerJoin() {
         return queryBuilder;
       },
+      leftJoin() {
+        // decorateLeads now .leftJoin(users, ...) for owner badges (PR #465); no-op here (owner cols
+        // resolve to undefined, which decorateLeads coalesces to null).
+        return queryBuilder;
+      },
       where(condition: unknown) {
         rows = applyWhere(sourceRows, condition);
         return queryBuilder;
@@ -3856,7 +3861,7 @@ describe("Deal Lineage Enforcement", () => {
     });
   });
 
-  it("rejects updating a legacy deal without source lead lineage unless migrationMode is explicit", async () => {
+  it("allows updating a legacy deal without source lead lineage (#315 revert — legacy deals are freely editable)", async () => {
     const tenantDb = createFakeTenantDb({
       deals: [
         {
@@ -3875,18 +3880,15 @@ describe("Deal Lineage Enforcement", () => {
       ],
     });
 
-    await expect(
-      updateDeal(
-        tenantDb as never,
-        "deal-legacy-1",
-        { name: "Legacy Deal Updated" },
-        "director",
-        "director-1"
-      )
-    ).rejects.toMatchObject<AppError>({
-      statusCode: 400,
-      message: "Legacy deals require migrationMode=true until source lead lineage is backfilled",
-    });
+    const updated = await updateDeal(
+      tenantDb as never,
+      "deal-legacy-1",
+      { name: "Legacy Deal Updated" },
+      "director",
+      "director-1"
+    );
+
+    expect(updated.name).toBe("Legacy Deal Updated");
   });
 
   it("allows updating a legacy deal when migrationMode is explicit", async () => {
@@ -3919,7 +3921,7 @@ describe("Deal Lineage Enforcement", () => {
     expect(updated.name).toBe("Legacy Deal Updated");
   });
 
-  it("rejects attaching a source lead that is already linked to another deal", async () => {
+  it("rejects changing sourceLeadId on an existing deal (immutable once established; duplicate-link 409 stays covered by the createDeal test)", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [
         {
@@ -3979,8 +3981,8 @@ describe("Deal Lineage Enforcement", () => {
         "director-1"
       )
     ).rejects.toMatchObject<AppError>({
-      statusCode: 409,
-      message: "A deal already exists for this source lead",
+      statusCode: 400,
+      message: "sourceLeadId is immutable once established",
     });
   });
 

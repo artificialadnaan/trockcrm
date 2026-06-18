@@ -356,7 +356,7 @@ describe("email routes", () => {
       },
     });
 
-    expect(dealServiceMocks.getDealById).toHaveBeenCalledWith(expect.any(Object), "deal-1", "director", "director-1");
+    expect(accessMocks.assertDealCollaboratorAccess).toHaveBeenCalledWith(expect.any(Object), "deal-1", expect.objectContaining({ id: "director-1" }));
     expect(emailServiceMocks.sendEmail).toHaveBeenCalledWith(
       expect.any(Object),
       "director-1",
@@ -450,7 +450,7 @@ describe("email routes", () => {
       },
     });
 
-    expect(leadServiceMocks.getLeadById).toHaveBeenCalledWith(expect.any(Object), "lead-1", "rep", "rep-1");
+    expect(accessMocks.assertLeadCollaboratorAccess).toHaveBeenCalledWith(expect.any(Object), "lead-1", expect.objectContaining({ id: "rep-1" }));
     expect(emailServiceMocks.sendEmail).toHaveBeenCalledWith(
       expect.any(Object),
       "rep-1",
@@ -833,7 +833,7 @@ describe("email routes", () => {
       user: makeRepUser(),
     });
 
-    expect(dealServiceMocks.getDealById).toHaveBeenCalledWith(expect.any(Object), "deal-1", "rep", "rep-1");
+    expect(accessMocks.assertDealCollaboratorAccess).toHaveBeenCalledWith(expect.any(Object), "deal-1", expect.objectContaining({ id: "rep-1" }));
     expect(res.body).toEqual({
       email: expect.objectContaining({ id: "email-1", assignedEntityType: "deal", assignedEntityId: "deal-1" }),
     });
@@ -891,7 +891,7 @@ describe("email routes", () => {
       assignedEntityType: "deal",
       assignedEntityId: "deal-1",
     });
-    dealServiceMocks.getDealById.mockResolvedValue(null);
+    accessMocks.assertDealCollaboratorAccess.mockRejectedValueOnce(Object.assign(new Error("Forbidden"), { statusCode: 403 }));
 
     await expect(
       invokeRoute({

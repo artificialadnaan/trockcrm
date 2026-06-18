@@ -6,11 +6,6 @@ const migrationSql = readFileSync(
   resolve(__dirname, "../../../../migrations/0139_hubspot_extra_properties_deals.sql"),
   "utf8"
 );
-const dealsServiceSql = readFileSync(
-  resolve(__dirname, "../../../src/modules/deals/service.ts"),
-  "utf8"
-);
-
 describe("0139 hubspot_extra_properties deals migration", () => {
   it("adds the JSONB column idempotently to every current tenant deals table", () => {
     expect(migrationSql).toContain("WHERE nspname LIKE 'office\\_%' ESCAPE '\\'");
@@ -28,9 +23,7 @@ describe("0139 hubspot_extra_properties deals migration", () => {
     expect(migrationSql.toLowerCase()).not.toContain("update ");
     expect(migrationSql.toLowerCase()).not.toContain("insert ");
   });
-
-  it("documents the DB-only raw-SQL schema decision at the helper call site", () => {
-    expect(dealsServiceSql).toContain("Migration 0139 is the schema source of truth");
-    expect(dealsServiceSql).toContain("intentionally NOT mapped");
-  });
+  // The 4th case ("documents the DB-only raw-SQL schema decision at the helper call site") was removed:
+  // the helper + its doc comment it asserted were intentionally deleted as dead code in PR #560 (005ecf43),
+  // so there is no call site to document. Tests 1-3 still validate the real migration SQL contract.
 });

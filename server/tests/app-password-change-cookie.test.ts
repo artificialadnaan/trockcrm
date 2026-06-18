@@ -58,7 +58,20 @@ const crmUser = {
 };
 
 function cookieHeaderFromSetCookie(setCookie: string[]) {
-  return setCookie.map((cookie) => cookie.split(";")[0]).join("; ");
+  // Model a browser cookie jar: apply each Set-Cookie in order; a later same-name entry overwrites, and
+  // an empty value (a Max-Age=0 clear) removes it. Production login now emits legacy token= clears before
+  // the real token=, so a naive flatten would keep the empty first duplicate (cookie-parser keeps first).
+  const jar = new Map<string, string>();
+  for (const entry of setCookie) {
+    const pair = entry.split(";")[0];
+    const eq = pair.indexOf("=");
+    if (eq === -1) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (value === "") jar.delete(name);
+    else jar.set(name, value);
+  }
+  return Array.from(jar, ([name, value]) => `${name}=${value}`).join("; ");
 }
 
 const ENV_KEYS = [
