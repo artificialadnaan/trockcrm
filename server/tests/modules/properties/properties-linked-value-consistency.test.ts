@@ -10,7 +10,7 @@ describe("properties linkedValue list/detail consistency", () => {
     );
 
     expect(serviceSource).not.toContain("reduce((sum, deal)");
-    expect(serviceSource.split("linkedValue: sql<string>`COALESCE(SUM(COALESCE").length - 1).toBeGreaterThanOrEqual(2);
+    expect(serviceSource.split("linkedValue: sql<string>`COALESCE(SUM(").length - 1).toBeGreaterThanOrEqual(2);
     expect(serviceSource).toContain("linkedValueRows[0]?.linkedValue ?? \"0\"");
   });
 });

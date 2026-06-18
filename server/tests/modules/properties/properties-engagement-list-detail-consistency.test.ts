@@ -51,9 +51,11 @@ describe("properties engagement list/detail consistency", () => {
       ],
     };
 
+    const activeDeals = fixture.deals.filter((deal) => deal.isActive);
     const listCounts = {
       leadCount: fixture.leads.filter((lead) => lead.isActive).length,
-      dealCount: fixture.deals.filter((deal) => deal.isActive).length,
+      dealCount: activeDeals.length,
+      activeDealsCount: activeDeals.length,
       convertedDealCount: fixture.deals.filter((deal) => Boolean(deal.sourceLeadId)).length,
     };
 

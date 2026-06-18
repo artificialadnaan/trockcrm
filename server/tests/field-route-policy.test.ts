@@ -29,6 +29,7 @@ describe("field contractor route policy", () => {
       "/properties",
       "/companycam",
       "/ai",
+      "/usage",
     ]);
     expect(FIELD_ACCESSIBLE_ROUTE_MOUNTS).toEqual(["/api/field"]);
     expect(PUBLIC_ROUTE_MOUNTS).toContain("/api/auth");

@@ -23,15 +23,19 @@ function createSelectQueueDb(queue: unknown[]) {
     return [];
   };
   const select = vi.fn(() => ({
-    from: vi.fn((table: any) => ({
-      where: vi.fn(() => {
+    from: vi.fn((table: any) => {
+      // decorateLeads now chains .leftJoin(users, ...) for owner badges (PR #465); support a chainable
+      // leftJoin that resolves identically to a bare .where() (row resolution stays keyed on `from`).
+      const where = vi.fn(() => {
         const next = tableRows(table);
         return {
           then: (resolve: (value: unknown) => unknown) => Promise.resolve(next).then(resolve),
           limit: vi.fn(async () => next),
         };
-      }),
-    })),
+      });
+      const builder: any = { where, leftJoin: vi.fn(() => builder) };
+      return builder;
+    }),
   }));
 
   const returning = vi.fn(async () => [

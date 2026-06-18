@@ -5,20 +5,10 @@ import base from "./vitest.config";
 // shrinking QUARANTINE of pre-existing failing suites. This broadens the gate from the old
 // runtime-only filter (~97 files) so the ~700 passing suites now run in CI and new breakage is caught.
 //
-// QUARANTINE (#743) — suites that already fail on main (stale SQL-string/mock/spy expectations from
-// code that evolved while these never ran in CI). Excluded so the broadened gate is green TODAY.
-// Burn-down tracked in #746: fix each (real fix, not a skip) and REMOVE it here. The gate gets
-// monotonically stricter. Do NOT add entries without a #746 checkbox.
-const QUARANTINE = [
-  "tests/app-password-change-cookie.test.ts",
-  "tests/field-route-policy.test.ts",
-  "tests/modules/email/routes.test.ts",
-  "tests/modules/leads/conversion-service.test.ts",
-  "tests/modules/leads/reassignment.test.ts",
-  "tests/modules/migration/hubspot-extra-properties-deals-migration.test.ts",
-  "tests/modules/properties/properties-engagement-list-detail-consistency.test.ts",
-  "tests/modules/properties/properties-linked-value-consistency.test.ts",
-];
+// QUARANTINE (#743/#746) — fully drained: every server suite is now fixed and runs in the gate.
+// Keep this array (empty) so re-quarantining a future regression is a one-line, documented change,
+// never a `.skip`. Do NOT add entries without a #746 (or successor) checkbox.
+const QUARANTINE: string[] = [];
 
 export default mergeConfig(
   base,
