@@ -35,11 +35,31 @@ async function uniqueSlug(tenantDb: TenantDb, base: string, excludeId?: string):
 
 export async function listCompanies(
   tenantDb: TenantDb,
-  options: { search?: string; category?: string; industry?: string; ownerUserId?: string; page?: number; limit?: number } = {}
+  options: {
+    search?: string;
+    category?: string;
+    industry?: string;
+    ownerUserId?: string;
+    // Summary-card drill-downs (?card=pipeline / ?card=stale on the companies page).
+    hasActivePipeline?: boolean; // company has > 0 active (non-held) pipeline value
+    stale?: boolean; // last activity is null or > 30 days ago
+    page?: number;
+    limit?: number;
+  } = {}
 ) {
   const page = options.page ?? 1;
   const limit = options.limit ?? 50;
   const offset = (page - 1) * limit;
+
+  // Per-company predicates reused for BOTH the summary-card aggregates and the ?card= drill filters,
+  // so each card's number === the count/sum of the list it drills to (reconcile by construction).
+  const companyPipelineSql = sql<string>`(
+    SELECT COALESCE(SUM(CASE WHEN COALESCE(deals.on_hold, false) THEN 0 ELSE ${aliasedDealBestEstimateWithForecastSql("deals")} END), 0)
+      FROM deals
+     WHERE deals.company_id = ${companies.id}
+       AND deals.is_active = true
+  )`;
+  const companyStaleSql = sql<boolean>`(${companies.lastActivityAt} IS NULL OR ${companies.lastActivityAt} < NOW() - interval '30 days')`;
 
   const conditions = [eq(companies.isActive, true)];
   if (options.search && options.search.trim().length >= 2) {
@@ -54,8 +74,19 @@ export async function listCompanies(
   if (options.ownerUserId) {
     conditions.push(eq(companies.ownerId, options.ownerUserId));
   }
-
-  const where = and(...conditions);
+  // BASE where = the non-card filters. The card drill is layered on only for the LIST + pager; the
+  // summary-card aggregates are computed over the BASE set so cards stay stable across drills and each
+  // card === the count/sum of the list its OWN drill opens, even when switching cards (?card= REPLACES,
+  // not composes). (Codex P2.)
+  const baseWhere = and(...conditions);
+  const listConditions = [...conditions];
+  if (options.hasActivePipeline) {
+    listConditions.push(sql`${companyPipelineSql} > 0`);
+  }
+  if (options.stale) {
+    listConditions.push(companyStaleSql);
+  }
+  const where = and(...listConditions);
 
   const rows = await tenantDb
     .select({
@@ -73,6 +104,18 @@ export async function listCompanies(
     .select({ count: count() })
     .from(companies)
     .where(where);
+
+  // Stable summary-card aggregates over baseWhere (NOT the visible page, NOT card-drilled). baseTotal
+  // feeds the "Total accounts" card; pipelineTotal/staleCount the other two. Same predicates as the
+  // drill filters, so card === the count/sum of the list its drill opens.
+  const aggregateResult = await tenantDb
+    .select({
+      baseTotal: sql<number>`count(*)`,
+      pipelineTotal: sql<string>`COALESCE(SUM(${companyPipelineSql}), 0)::text`,
+      staleCount: sql<number>`COUNT(*) FILTER (WHERE ${companyStaleSql})`,
+    })
+    .from(companies)
+    .where(baseWhere);
 
   // Batch-fetch contact and deal counts for the page of companies
   const companyIds = rows.map((r) => r.id);
@@ -123,7 +166,17 @@ export async function listCompanies(
     pipelineValue: countsMap.get(r.id)?.pipelineValue ?? "0",
   }));
 
-  return { companies: companiesWithCounts, total: totalResult[0]?.count ?? 0, page, limit };
+  return {
+    companies: companiesWithCounts,
+    total: totalResult[0]?.count ?? 0,
+    page,
+    limit,
+    // Stable summary-card values over the base (non-card) filters: baseTotal = "Total accounts",
+    // pipelineTotal = "Active pipeline" ($ sum), staleCount = "Untouched". NOT page-only, NOT card-drilled.
+    baseTotal: Number(aggregateResult[0]?.baseTotal ?? 0),
+    pipelineTotal: Number(aggregateResult[0]?.pipelineTotal ?? 0),
+    staleCount: Number(aggregateResult[0]?.staleCount ?? 0),
+  };
 }
 
 export async function getCompanyById(tenantDb: TenantDb, id: string) {

@@ -1,6 +1,6 @@
-import { useMemo, type ReactNode } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { ArrowUpRight, Briefcase, ChevronLeft, ChevronRight, Mail, Phone, Plus, Star, Users } from "lucide-react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowUpRight, Briefcase, ChevronLeft, ChevronRight, Mail, Phone, Plus, Star, Users, X } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
@@ -43,6 +43,14 @@ const OWNER_SCOPE_OPTIONS = [
   { value: "all", label: "All" },
   { value: "mine", label: "Mine" },
 ] as const;
+
+// Persistent highlight for the currently-drilled summary card (matches MetricCard's focus ring).
+const ACTIVE_CARD_CLASS = "ring-2 ring-brand-red";
+
+const CONTACT_CARD_LABELS: Record<string, string> = {
+  primary: "Primary contacts",
+  untouched: "Untouched 30d+",
+};
 
 function initials(contact: Contact) {
   return [contact.firstName?.[0], contact.lastName?.[0]].filter(Boolean).join("").toUpperCase() || "?";
@@ -147,7 +155,41 @@ export function ContactListPage() {
   const { assignees, loading: assigneesLoading } = useTaskAssignees();
   const { assignees: ownerAssignees, loading: ownerAssigneesLoading } = useOwnerAssignees();
   const { filters, setFilters, resetFilters } = useContactFilters();
-  const { contacts: rawContacts, pagination, loading, error, refetch } = useContacts(filters);
+  // Summary-card drill state lives in the URL (?card=) so it is shareable + back-button-safe, while the
+  // persistent prefs (search/role/owner/sort) stay in localStorage. The card filter is merged into the
+  // server query, so the card count a user clicks === the count of the list it drills to.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeCard = searchParams.get("card");
+  const { contacts: rawContacts, pagination, loading, error, refetch } = useContacts({
+    ...filters,
+    isPrimary: activeCard === "primary" ? true : undefined,
+    untouched: activeCard === "untouched" ? true : undefined,
+  });
+
+  // Reset to page 1 whenever the card drill CHANGES (not on mount), so drilling from a high page never
+  // lands on an out-of-range, empty page of the smaller filtered set.
+  const prevCardRef = useRef(activeCard);
+  useEffect(() => {
+    if (prevCardRef.current !== activeCard) {
+      prevCardRef.current = activeCard;
+      setFilters({ page: 1 });
+    }
+  }, [activeCard, setFilters]);
+
+  const buildCardTo = (card: "primary" | "untouched" | null) => {
+    const next = new URLSearchParams(searchParams);
+    if (card) next.set("card", card);
+    else next.delete("card");
+    const qs = next.toString();
+    return `/contacts${qs ? `?${qs}` : ""}`;
+  };
+  const clearCard = () => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete("card");
+      return next;
+    });
+  };
   // No-blank: keep the prior page of contacts visible during a search/filter/page refetch; gate
   // the skeleton to the FIRST load only and show an "Updating..." hint on a refresh.
   const { data: contacts, isInitialLoading, isRefreshing } = useKeepPreviousData(rawContacts, loading, error);
@@ -155,11 +197,15 @@ export function ContactListPage() {
   const activeRole = (filters.role ?? "all") as (typeof ROLE_OPTIONS)[number]["value"];
   const activeOwnerScope = (filters.ownerScope ?? "all") as (typeof OWNER_SCOPE_OPTIONS)[number]["value"];
   const totals = useMemo(() => {
-    const primary = contacts.filter((contact) => contact.isPrimary).length;
-    const untouched = contacts.filter((contact) => isUntouched(contact.lastTouchAt)).length;
+    // Primary + Untouched are now SERVER aggregates over the full filtered set (not the visible page),
+    // so the cards reconcile with the lists they drill to. linkedDeals stays a page-scoped badge hint.
     const linkedDeals = contacts.reduce((sum, contact) => sum + (contact.linkedDealsCount ?? 0), 0);
-    return { primary, untouched, linkedDeals };
-  }, [contacts]);
+    return {
+      primary: pagination.primaryCount ?? 0,
+      untouched: pagination.untouchedCount ?? 0,
+      linkedDeals,
+    };
+  }, [pagination.primaryCount, pagination.untouchedCount, contacts]);
 
   return (
     <div className="space-y-5">
@@ -178,10 +224,56 @@ export function ContactListPage() {
       />
 
       <div className="grid gap-4 md:grid-cols-3">
-        <MetricCard eyebrow="Total contacts" value={String(pagination.total)} badge={`${contacts.length} shown`} caption="Directory" tone="green" accent="red" />
-        <MetricCard eyebrow="Primary contacts" value={String(totals.primary)} badge={`${totals.linkedDeals} links`} caption="Deal coverage" tone="blue" accent="blue" />
-        <MetricCard eyebrow="Untouched 30d+" value={String(totals.untouched)} badge="Review" caption="Needs touch" tone="red" accent="red" />
+        <MetricCard
+          eyebrow="Total contacts"
+          value={String(pagination.baseTotal ?? pagination.total)}
+          badge={`${contacts.length} shown`}
+          caption="Directory"
+          tone="green"
+          accent="red"
+          to={buildCardTo(null)}
+          ariaLabel="Show all contacts in this view"
+          className={!activeCard ? ACTIVE_CARD_CLASS : undefined}
+        />
+        <MetricCard
+          eyebrow="Primary contacts"
+          value={String(totals.primary)}
+          badge={`${totals.linkedDeals} links`}
+          caption="Deal coverage"
+          tone="blue"
+          accent="blue"
+          to={buildCardTo("primary")}
+          ariaLabel="Filter to primary contacts"
+          className={activeCard === "primary" ? ACTIVE_CARD_CLASS : undefined}
+        />
+        <MetricCard
+          eyebrow="Untouched 30d+"
+          value={String(totals.untouched)}
+          badge="Review"
+          caption="Needs touch"
+          tone="red"
+          accent="red"
+          to={buildCardTo("untouched")}
+          ariaLabel="Filter to contacts untouched 30+ days"
+          className={activeCard === "untouched" ? ACTIVE_CARD_CLASS : undefined}
+        />
       </div>
+
+      {activeCard ? (
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-2 rounded-full bg-brand-red/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-brand-red ring-1 ring-brand-red/20">
+            Filtered: {CONTACT_CARD_LABELS[activeCard] ?? activeCard}
+            <button
+              type="button"
+              onClick={clearCard}
+              aria-label="Clear card filter"
+              className="-mr-1 inline-flex h-5 w-5 items-center justify-center rounded-full hover:bg-brand-red/20"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </span>
+        </div>
+      ) : null}
 
       <Card className="border-slate-200 bg-white shadow-none">
         <CardContent className="space-y-4 p-4">
@@ -222,7 +314,7 @@ export function ContactListPage() {
               >
                 Last touch
               </Button>
-              <Button variant="ghost" size="sm" className="min-h-[44px] md:min-h-0" onClick={resetFilters}>
+              <Button variant="ghost" size="sm" className="min-h-[44px] md:min-h-0" onClick={() => { resetFilters(); clearCard(); }}>
                 Clear
               </Button>
             </div>

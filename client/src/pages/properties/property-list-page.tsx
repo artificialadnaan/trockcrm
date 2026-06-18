@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { ArrowUpRight, Building2, Camera, ChevronLeft, ChevronRight, MapPin, Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowUpRight, Building2, Camera, ChevronLeft, ChevronRight, MapPin, Search, X } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
@@ -60,6 +60,34 @@ function isStale(value: string | null | undefined) {
   if (!value) return true;
   return Date.now() - new Date(value).getTime() > 30 * 24 * 60 * 60 * 1000;
 }
+
+// Summary-card drill predicates. Each is the EXACT membership test behind its card's number, reused to
+// filter the list below, so the card and the filtered list reconcile by construction (same in-memory
+// 250-property set, one predicate). Properties is client-paginated, so no server round-trip is needed.
+export function hasActiveOpportunities(property: PropertySurface): boolean {
+  return property.leadCount + (property.activeDealsCount ?? property.dealCount) > 0;
+}
+export function hasLinkedPipeline(property: PropertySurface): boolean {
+  return numeric(property.linkedValue ?? property.activePipelineValue) > 0;
+}
+export function isStaleProperty(property: PropertySurface): boolean {
+  return isStale(property.lastActivityAt);
+}
+
+export const PROPERTY_CARD_PREDICATES: Record<string, (property: PropertySurface) => boolean> = {
+  opportunities: hasActiveOpportunities,
+  pipeline: hasLinkedPipeline,
+  stale: isStaleProperty,
+};
+
+// Persistent highlight for the currently-drilled summary card (matches MetricCard's focus ring).
+const ACTIVE_CARD_CLASS = "ring-2 ring-brand-red";
+
+const PROPERTY_CARD_LABELS: Record<string, string> = {
+  opportunities: "Active opportunities",
+  pipeline: "Linked pipeline",
+  stale: "Untouched 30d+",
+};
 
 function propertyArea(property: PropertySurface) {
   return property.roofArea ?? property.unitCount ?? 0;
@@ -131,9 +159,43 @@ export function PropertyListPage() {
     limit: 250,
   });
 
-  const totalPages = Math.max(1, Math.ceil(properties.length / pageSize));
+  // Summary-card drill state lives in the URL (?card=) so it is shareable + back-button-safe. The cards
+  // keep showing the FULL-set aggregates (stable), and clicking one narrows the LIST to that card's
+  // predicate — so the list count/$ reconciles with the number on the card by construction.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeCard = searchParams.get("card");
+  const cardPredicate = activeCard ? PROPERTY_CARD_PREDICATES[activeCard] : undefined;
+  const filteredProperties = cardPredicate ? properties.filter(cardPredicate) : properties;
+
+  const totalPages = Math.max(1, Math.ceil(filteredProperties.length / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const pageItems = properties.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const pageItems = filteredProperties.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  // Reset to page 1 whenever the card drill CHANGES (not on mount), so drilling from a high page never
+  // lands past the end of the smaller filtered set.
+  const prevCardRef = useRef(activeCard);
+  useEffect(() => {
+    if (prevCardRef.current !== activeCard) {
+      prevCardRef.current = activeCard;
+      setPage(1);
+    }
+  }, [activeCard]);
+
+  // Toggle: clicking the already-active card clears the drill (there is no separate "all" card here).
+  const buildCardTo = (card: "opportunities" | "pipeline" | "stale") => {
+    const next = new URLSearchParams(searchParams);
+    if (activeCard === card) next.delete("card");
+    else next.set("card", card);
+    const qs = next.toString();
+    return `/properties${qs ? `?${qs}` : ""}`;
+  };
+  const clearCard = () => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete("card");
+      return next;
+    });
+  };
 
   const totals = useMemo(() => {
     const activeOpportunities = properties.reduce(
@@ -167,10 +229,56 @@ export function PropertyListPage() {
       />
 
       <div className="grid gap-4 md:grid-cols-3">
-        <MetricCard eyebrow="Active opportunities" value={String(totals.activeOpportunities)} badge={totals.hasRoofArea ? `${NUMBER_COMPACT(totals.roofArea)} sq ft` : "No data"} caption="Roof area" tone="green" accent="red" />
-        <MetricCard eyebrow="Linked pipeline" value={USD_COMPACT(totals.linkedPipeline)} badge={`${properties.length} sites`} caption="Active deals" tone="blue" accent="blue" />
-        <MetricCard eyebrow="Untouched 30d+" value={String(totals.stale)} badge="Review" caption="Needs touch" tone="red" accent="red" />
+        <MetricCard
+          eyebrow="Active opportunities"
+          value={String(totals.activeOpportunities)}
+          badge={totals.hasRoofArea ? `${NUMBER_COMPACT(totals.roofArea)} sq ft` : "No data"}
+          caption="Roof area"
+          tone="green"
+          accent="red"
+          to={buildCardTo("opportunities")}
+          ariaLabel="Filter to properties with active opportunities"
+          className={activeCard === "opportunities" ? ACTIVE_CARD_CLASS : undefined}
+        />
+        <MetricCard
+          eyebrow="Linked pipeline"
+          value={USD_COMPACT(totals.linkedPipeline)}
+          badge={`${properties.length} sites`}
+          caption="Active deals"
+          tone="blue"
+          accent="blue"
+          to={buildCardTo("pipeline")}
+          ariaLabel="Filter to properties with linked pipeline"
+          className={activeCard === "pipeline" ? ACTIVE_CARD_CLASS : undefined}
+        />
+        <MetricCard
+          eyebrow="Untouched 30d+"
+          value={String(totals.stale)}
+          badge="Review"
+          caption="Needs touch"
+          tone="red"
+          accent="red"
+          to={buildCardTo("stale")}
+          ariaLabel="Filter to properties untouched 30+ days"
+          className={activeCard === "stale" ? ACTIVE_CARD_CLASS : undefined}
+        />
       </div>
+
+      {activeCard ? (
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-2 rounded-full bg-brand-red/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-brand-red ring-1 ring-brand-red/20">
+            Filtered: {PROPERTY_CARD_LABELS[activeCard] ?? activeCard}
+            <button
+              type="button"
+              onClick={clearCard}
+              aria-label="Clear card filter"
+              className="-mr-1 inline-flex h-5 w-5 items-center justify-center rounded-full hover:bg-brand-red/20"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </span>
+        </div>
+      ) : null}
 
       <Card className="border-slate-200 bg-white shadow-none">
         <CardContent className="space-y-4 p-4">
@@ -200,7 +308,7 @@ export function PropertyListPage() {
               />
             </div>
             <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
-              {loading ? "Loading properties" : `${properties.length} results`}
+              {loading ? "Loading properties" : `${filteredProperties.length} results`}
             </p>
           </div>
 

@@ -1,6 +1,6 @@
-import { useMemo, useState, type ReactNode } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, Globe2, Plus, X } from "lucide-react";
 import { PageHeader } from "@/components/layout/page-header";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { MetricCard } from "@/components/shared/metric-card";
@@ -31,6 +31,14 @@ const OWNER_SCOPE_OPTIONS = [
   { value: "all", label: "All" },
   { value: "mine", label: "Mine" },
 ] as const;
+
+// Persistent highlight for the currently-drilled summary card (matches MetricCard's focus ring).
+const ACTIVE_CARD_CLASS = "ring-2 ring-brand-red";
+
+const COMPANY_CARD_LABELS: Record<string, string> = {
+  pipeline: "Active pipeline",
+  stale: "Untouched 30d+",
+};
 
 function numeric(value: string | number | null | undefined) {
   return Number(value ?? 0);
@@ -140,23 +148,61 @@ export function CompanyListPage() {
   const [ownerScope, setOwnerScope] = useState<(typeof OWNER_SCOPE_OPTIONS)[number]["value"]>("all");
   const [page, setPage] = useState(1);
 
+  // Summary-card drill state lives in the URL (?card=) so it is shareable + back-button-safe. The card
+  // filter is merged into the server query, so the card count a user clicks === the count of the list it
+  // drills to (the aggregates and the filters share one predicate server-side).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeCard = searchParams.get("card");
+
   const { companies: rawCompanies, pagination, loading, error, refetch } = useCompanies({
     search: search || undefined,
     industry: industry === "all" ? undefined : industry,
     ownerScope: ownerScope === "mine" ? "mine" : undefined,
+    hasActivePipeline: activeCard === "pipeline" ? true : undefined,
+    stale: activeCard === "stale" ? true : undefined,
     page,
     limit: 50,
   });
+
+  // Reset to page 1 whenever the card drill CHANGES (not on mount), so drilling from a high page never
+  // lands on an out-of-range, empty page of the smaller filtered set.
+  const prevCardRef = useRef(activeCard);
+  useEffect(() => {
+    if (prevCardRef.current !== activeCard) {
+      prevCardRef.current = activeCard;
+      setPage(1);
+    }
+  }, [activeCard]);
+
+  const buildCardTo = (card: "pipeline" | "stale" | null) => {
+    const next = new URLSearchParams(searchParams);
+    if (card) next.set("card", card);
+    else next.delete("card");
+    const qs = next.toString();
+    return `/companies${qs ? `?${qs}` : ""}`;
+  };
+  const clearCard = () => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete("card");
+      return next;
+    });
+  };
   // No-blank: keep the prior page of accounts visible during a search/filter/page refetch; gate
   // the skeleton to the FIRST load only and show an "Updating..." hint on a refresh.
   const { data: companies, isInitialLoading, isRefreshing } = useKeepPreviousData(rawCompanies, loading, error);
 
   const totals = useMemo(() => {
-    const pipeline = companies.reduce((sum, company) => sum + numeric(company.pipelineValue), 0);
-    const stale = companies.filter((company) => isStale(company.lastActivityAt)).length;
+    // Active pipeline ($ sum) and Untouched (count) are now SERVER aggregates over the full filtered set
+    // (not the visible page), so the cards reconcile with the lists they drill to. activeDeals stays a
+    // page-scoped badge hint.
     const activeDeals = companies.reduce((sum, company) => sum + (company.activeDealsCount ?? company.dealCount ?? 0), 0);
-    return { pipeline, stale, activeDeals };
-  }, [companies]);
+    return {
+      pipeline: pagination.pipelineTotal ?? 0,
+      stale: pagination.staleCount ?? 0,
+      activeDeals,
+    };
+  }, [pagination.pipelineTotal, pagination.staleCount, companies]);
 
   return (
     <div className="space-y-5">
@@ -175,10 +221,56 @@ export function CompanyListPage() {
       />
 
       <div className="grid gap-4 md:grid-cols-3">
-        <MetricCard eyebrow="Total accounts" value={String(pagination.total)} badge={`${companies.length} shown`} caption="Directory" tone="green" accent="red" />
-        <MetricCard eyebrow="Active pipeline" value={USD_COMPACT(totals.pipeline)} badge={`${totals.activeDeals} active deals`} caption="Open value" tone="blue" accent="blue" />
-        <MetricCard eyebrow="Untouched 30d+" value={String(totals.stale)} badge="Review" caption="Needs touch" tone="red" accent="red" />
+        <MetricCard
+          eyebrow="Total accounts"
+          value={String(pagination.baseTotal ?? pagination.total)}
+          badge={`${companies.length} shown`}
+          caption="Directory"
+          tone="green"
+          accent="red"
+          to={buildCardTo(null)}
+          ariaLabel="Show all accounts in this view"
+          className={!activeCard ? ACTIVE_CARD_CLASS : undefined}
+        />
+        <MetricCard
+          eyebrow="Active pipeline"
+          value={USD_COMPACT(totals.pipeline)}
+          badge={`${totals.activeDeals} active deals`}
+          caption="Open value"
+          tone="blue"
+          accent="blue"
+          to={buildCardTo("pipeline")}
+          ariaLabel="Filter to accounts with active pipeline"
+          className={activeCard === "pipeline" ? ACTIVE_CARD_CLASS : undefined}
+        />
+        <MetricCard
+          eyebrow="Untouched 30d+"
+          value={String(totals.stale)}
+          badge="Review"
+          caption="Needs touch"
+          tone="red"
+          accent="red"
+          to={buildCardTo("stale")}
+          ariaLabel="Filter to accounts untouched 30+ days"
+          className={activeCard === "stale" ? ACTIVE_CARD_CLASS : undefined}
+        />
       </div>
+
+      {activeCard ? (
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-2 rounded-full bg-brand-red/10 px-3 py-1 text-xs font-bold uppercase tracking-wide text-brand-red ring-1 ring-brand-red/20">
+            Filtered: {COMPANY_CARD_LABELS[activeCard] ?? activeCard}
+            <button
+              type="button"
+              onClick={clearCard}
+              aria-label="Clear card filter"
+              className="-mr-1 inline-flex h-5 w-5 items-center justify-center rounded-full hover:bg-brand-red/20"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </span>
+        </div>
+      ) : null}
 
       <Card className="border-slate-200 bg-white shadow-none">
         <CardContent className="space-y-4 p-4">
