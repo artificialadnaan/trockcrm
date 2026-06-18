@@ -883,7 +883,12 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
     true,
     terminalDateFilters,
     isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : BOARD_CARDS_PER_STAGE_LIMIT,
-    selectedPeriodRange,
+    // Deals-at-Risk is a CURRENT-STATE view: ?period is a no-op. The board period serializes as
+    // won_period_from/to, which the server applies to OPEN columns as a stage-entry-date window
+    // (getDealsForPipeline) — so sending it here would still drop at-risk deals outside the window at the
+    // SOURCE, even though the client no longer filters by it. Send no board period on this drill-down so
+    // the at-risk cohort (card/kanban/list) is the full current set. (Won columns are hidden here anyway.)
+    isAtRiskDrilldown ? null : selectedPeriodRange,
     selectedRepFilter
   );
 
