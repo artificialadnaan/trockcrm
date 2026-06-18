@@ -468,14 +468,16 @@ export async function requestUploadUrl(
 
   // Auto-infer the document type when the caller left it as the client default "other", so the Files
   // page type-filters populate (an explicit category is always respected). folderPath is derived from
-  // the category below, so it is NOT a signal here; filename + MIME + subcategory are. Versions inherit
-  // their parent's category upstream, so this only re-types a fresh upload whose category is "other".
+  // the category below, so it is NOT a signal here; filename + MIME + subcategory + the change-order FK
+  // are (the FK keeps upload-time parity with the backfill). Versions inherit their parent's category
+  // upstream, so this only re-types a fresh upload whose category is "other".
   const resolvedCategory: FileCategory =
     input.category === "other"
       ? inferFileCategory({
           filename: input.originalFilename,
           mimeType: input.mimeType,
           subcategory: input.subcategory,
+          changeOrderId: input.changeOrderId,
         })
       : input.category;
 

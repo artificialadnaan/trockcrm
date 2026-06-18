@@ -3,6 +3,7 @@ import {
   parseBackfillArgs,
   buildBackfillPlan,
   runBackfillForSchema,
+  discoverOfficeSchemas,
   type OtherFileRow,
   type QueryClient,
 } from "../../../scripts/backfill-file-categories.js";
@@ -78,7 +79,7 @@ describe("backfill-file-categories", () => {
     const result = await runBackfillForSchema(client, "office_dallas", "dry-run");
 
     expect(result.plan.willUpdate).toHaveLength(1);
-    expect(result.applied).toBe(0);
+    expect(result.appliedChanges).toHaveLength(0);
     expect(result.after).toBeUndefined();
     expect(queries.some((q) => q.text.trim().startsWith("UPDATE"))).toBe(false);
     expect(queries.some((q) => q.text.trim() === "BEGIN")).toBe(false);
@@ -95,7 +96,9 @@ describe("backfill-file-categories", () => {
     });
     const result = await runBackfillForSchema(client, "office_dallas", "commit");
 
-    expect(result.applied).toBe(1);
+    // Only the row the UPDATE actually changed (rowCount > 0) is recorded as applied — this is the
+    // basis for the audit snapshot, so it matches what was committed.
+    expect(result.appliedChanges).toEqual([{ id: "a", from: "other", to: "contract" }]);
     expect(result.after).toEqual({ other: 1, contract: 1 });
 
     const updates = queries.filter((q) => q.text.trim().startsWith("UPDATE files"));
@@ -111,9 +114,24 @@ describe("backfill-file-categories", () => {
   it("is a no-op when there are no category='other' rows (idempotent second run)", async () => {
     const { client, queries } = createFakeClient({ otherRows: [], before: { contract: 3 }, after: { contract: 3 } });
     const result = await runBackfillForSchema(client, "office_atlanta", "commit");
-    expect(result.applied).toBe(0);
+    expect(result.appliedChanges).toHaveLength(0);
     expect(result.plan.willUpdate).toHaveLength(0);
     expect(queries.some((q) => q.text.trim().startsWith("UPDATE"))).toBe(false);
     expect(queries.some((q) => q.text.trim() === "BEGIN")).toBe(false);
+  });
+
+  it("discovers office_* schemas at runtime and ignores non-office namespaces", async () => {
+    const client: QueryClient = {
+      async query(text: string) {
+        if (text.includes("pg_namespace")) {
+          return {
+            rows: [{ nspname: "office_atlanta" }, { nspname: "office_dallas" }, { nspname: "public" }],
+            rowCount: 3,
+          };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      },
+    };
+    expect(await discoverOfficeSchemas(client)).toEqual(["office_atlanta", "office_dallas"]);
   });
 });

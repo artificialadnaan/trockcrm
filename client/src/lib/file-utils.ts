@@ -136,7 +136,9 @@ const CATEGORY_LABELS: Record<FileCategory, string> = {
   insurance: "Insurance",
   warranty: "Warranty",
   closeout: "Closeout",
-  other: "Other",
+  // "Uncategorized" (not "Other") so the catch-all bucket reads consistently across the filter chip,
+  // the per-file badges, and the upload-category picker — it's the untyped fallback, surfaced visibly.
+  other: "Uncategorized",
 };
 
 const CATEGORY_COLORS: Record<FileCategory, string> = {

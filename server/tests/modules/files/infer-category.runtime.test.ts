@@ -42,6 +42,22 @@ describe("inferFileCategory", () => {
     expect(inferFileCategory({ filename: "request-for-proposal-response.pdf", mimeType: "application/pdf" })).toBe("rfp");
   });
 
+  it("matches underscore-delimited filenames (the system's own naming uses underscores)", () => {
+    const pdf = "application/pdf";
+    expect(inferFileCategory({ filename: "rfp_2026_014.pdf", mimeType: pdf })).toBe("rfp");
+    expect(inferFileCategory({ filename: "coi_acme.pdf", mimeType: pdf })).toBe("insurance");
+    expect(inferFileCategory({ filename: "msa_v2.pdf", mimeType: pdf })).toBe("contract");
+    expect(inferFileCategory({ filename: "deal_co_3.pdf", mimeType: pdf })).toBe("change_order");
+  });
+
+  it("covers the remaining keyword forms (SOW / scope of work / O&M / CO#)", () => {
+    const pdf = "application/pdf";
+    expect(inferFileCategory({ filename: "SOW.pdf", mimeType: pdf })).toBe("contract");
+    expect(inferFileCategory({ filename: "Scope of Work.pdf", mimeType: pdf })).toBe("contract");
+    expect(inferFileCategory({ filename: "O & M Manual.pdf", mimeType: pdf })).toBe("closeout");
+    expect(inferFileCategory({ filename: "CO#5.pdf", mimeType: pdf })).toBe("change_order");
+  });
+
   it("uses an explicit change-order FK as the strongest signal for non-images", () => {
     expect(inferFileCategory({ filename: "scan001.pdf", mimeType: "application/pdf", changeOrderId: "co-1" })).toBe(
       "change_order"
@@ -69,6 +85,8 @@ describe("inferFileCategory", () => {
     expect(inferFileCategory({ filename: "floorplan.dwg", mimeType: "application/acad" })).toBe("other");
     expect(inferFileCategory({ filename: "random.pdf", mimeType: pdf })).toBe("other");
     expect(inferFileCategory({ filename: "notes.txt", mimeType: "text/plain" })).toBe("other");
+    // double NON-image extension resolves on the final ext (pdf) and has no keyword -> other
+    expect(inferFileCategory({ filename: "report.final.pdf", mimeType: pdf })).toBe("other");
   });
 
   it("never throws and always returns a valid enum member on edge inputs", () => {

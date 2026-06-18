@@ -73,8 +73,12 @@ function extensionOf(filename: string): string {
 
 function matchKeyword(text: string): FileCategory | null {
   if (!text) return null;
+  // Treat "_" as a separator: it's a regex word char, so a leading/trailing \b won't fire next to it
+  // (e.g. /\brfps?\b/ would miss "rfp_2026"). The system's own auto-naming uses underscores, so
+  // normalize them to spaces before matching.
+  const normalized = text.replace(/_/g, " ");
   for (const rule of KEYWORD_RULES) {
-    if (rule.patterns.some((pattern) => pattern.test(text))) {
+    if (rule.patterns.some((pattern) => pattern.test(normalized))) {
       return rule.category;
     }
   }

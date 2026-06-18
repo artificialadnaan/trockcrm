@@ -14,20 +14,23 @@ import { inferFileCategory } from "../server/src/modules/files/infer-category.js
  * Safety invariants:
  *  - other-only: only rows with category='other' are ever considered, and the UPDATE re-checks
  *    `AND category='other'` so a concurrently/correctly-set category is never clobbered.
- *  - per-office: each tenant schema is processed independently via search_path.
+ *  - per-office: tenant schemas are discovered at runtime (pg_namespace LIKE 'office\_%') and each is
+ *    processed independently via search_path; a missing/broken office is skipped, not fatal.
  *  - dry-run by default: pass --commit to write. Dry-run prints the full plan + before census.
  *  - idempotent: a second run finds nothing to do (rows it already typed are no longer 'other'; rows
  *    that infer to 'other' are skipped).
- *  - auditable/reversible: every committed run writes a JSON snapshot (id, from, to) per office to the
- *    OS temp dir (owner-only) so changes can be reviewed or reverted.
+ *  - auditable/reversible: a committed run echoes every applied change to stdout AND writes a JSON
+ *    snapshot of the ACTUALLY-applied changes (id, from, to) per office to the OS temp dir (owner-only).
  *
  * Usage:
  *   npm run script scripts/backfill-file-categories.ts            # dry-run (default)
  *   npm run script scripts/backfill-file-categories.ts --commit   # apply
  */
 
-const TENANT_SCHEMAS = ["office_dallas", "office_atlanta", "office_pwauditoffice"] as const;
-type TenantSchema = (typeof TENANT_SCHEMAS)[number];
+// Office schemas are discovered at runtime (see discoverOfficeSchemas), never hardcoded, so the backfill
+// self-adapts to the real set of offices and never targets a nonexistent schema. This pattern also
+// guards identifier interpolation in setSchema.
+const OFFICE_SCHEMA_PATTERN = /^office_[a-z0-9_]+$/;
 
 const VALID_CATEGORIES = new Set<string>(FILE_CATEGORIES);
 
@@ -102,15 +105,24 @@ export interface QueryClient {
   query(text: string, params?: unknown[]): Promise<{ rows: any[]; rowCount: number | null }>;
 }
 
-async function setSchema(client: QueryClient, schema: TenantSchema): Promise<void> {
-  // schema is from a fixed allowlist (TENANT_SCHEMAS) — safe to interpolate as a quoted identifier.
+async function setSchema(client: QueryClient, schema: string): Promise<void> {
+  // schema originates from pg_namespace (LIKE 'office\_%'); validate before interpolating it as a
+  // quoted identifier (defense-in-depth, no user input).
+  if (!OFFICE_SCHEMA_PATTERN.test(schema)) {
+    throw new Error(`Unsafe schema name: ${schema}`);
+  }
   await client.query(`SET search_path TO "${schema}", public`);
 }
 
-export async function censusByCategory(
-  client: QueryClient,
-  schema: TenantSchema
-): Promise<Record<string, number>> {
+/** Discover tenant office schemas at runtime (mirrors the established per-office backfill pattern). */
+export async function discoverOfficeSchemas(client: QueryClient): Promise<string[]> {
+  const { rows } = await client.query(
+    "SELECT nspname FROM pg_namespace WHERE nspname LIKE 'office\\_%' ESCAPE '\\' ORDER BY nspname"
+  );
+  return rows.map((row) => String(row.nspname)).filter((name) => OFFICE_SCHEMA_PATTERN.test(name));
+}
+
+export async function censusByCategory(client: QueryClient, schema: string): Promise<Record<string, number>> {
   await setSchema(client, schema);
   const { rows } = await client.query(
     "SELECT category, count(*)::int AS count FROM files WHERE is_active = true GROUP BY category ORDER BY count DESC"
@@ -120,7 +132,7 @@ export async function censusByCategory(
   return census;
 }
 
-export async function fetchOtherFiles(client: QueryClient, schema: TenantSchema): Promise<OtherFileRow[]> {
+export async function fetchOtherFiles(client: QueryClient, schema: string): Promise<OtherFileRow[]> {
   await setSchema(client, schema);
   const { rows } = await client.query(
     `SELECT id,
@@ -136,34 +148,36 @@ export async function fetchOtherFiles(client: QueryClient, schema: TenantSchema)
 }
 
 export interface SchemaResult {
-  schema: TenantSchema;
+  schema: string;
   before: Record<string, number>;
   plan: BackfillPlan;
-  applied: number;
+  /** the changes the UPDATE actually applied (rowCount > 0) — basis for the audit snapshot */
+  appliedChanges: PlannedChange[];
   after?: Record<string, number>;
 }
 
 export async function runBackfillForSchema(
   client: QueryClient,
-  schema: TenantSchema,
+  schema: string,
   mode: BackfillMode
 ): Promise<SchemaResult> {
   const before = await censusByCategory(client, schema);
   const rows = await fetchOtherFiles(client, schema);
   const plan = buildBackfillPlan(rows);
 
-  let applied = 0;
+  const appliedChanges: PlannedChange[] = [];
   if (mode === "commit" && plan.willUpdate.length > 0) {
     await client.query("BEGIN");
     try {
       for (const change of plan.willUpdate) {
         // `AND category = 'other'` makes the write idempotent and guarantees we never overwrite a
-        // category that has since been set to something other than 'other'.
+        // category that has since been set to something other than 'other'. Only rows actually changed
+        // (rowCount > 0) are recorded as applied, so the audit snapshot matches what was committed.
         const res = await client.query(
           "UPDATE files SET category = $1::file_category, updated_at = now() WHERE id = $2 AND category = 'other'",
           [change.to, change.id]
         );
-        applied += res.rowCount ?? 0;
+        if ((res.rowCount ?? 0) > 0) appliedChanges.push(change);
       }
       await client.query("COMMIT");
     } catch (error) {
@@ -173,19 +187,19 @@ export async function runBackfillForSchema(
   }
 
   const after = mode === "commit" ? await censusByCategory(client, schema) : undefined;
-  return { schema, before, plan, applied, after };
+  return { schema, before, plan, appliedChanges, after };
 }
 
-/** Writes an owner-only JSON audit snapshot of the planned/applied changes for reversibility. */
+/** Writes an owner-only JSON audit snapshot of the ACTUALLY-applied changes, for reversibility. */
 export function writeBackupSnapshot(result: SchemaResult, mode: BackfillMode, stamp: string): string | null {
-  if (result.plan.willUpdate.length === 0) return null;
+  if (result.appliedChanges.length === 0) return null;
   const backupPath = path.join(
     os.tmpdir(),
     `trockcrm-file-category-backfill-${mode}-${result.schema}-${stamp}.json`
   );
   fs.writeFileSync(
     backupPath,
-    `${JSON.stringify({ schema: result.schema, mode, changes: result.plan.willUpdate }, null, 2)}\n`,
+    `${JSON.stringify({ schema: result.schema, mode, changes: result.appliedChanges }, null, 2)}\n`,
     { encoding: "utf8", mode: 0o600 }
   );
   return backupPath;
@@ -217,29 +231,42 @@ export async function main(argv = process.argv): Promise<void> {
   let totalPlanned = 0;
   let totalApplied = 0;
   try {
-    for (const schema of TENANT_SCHEMAS) {
-      const result = await runBackfillForSchema(client, schema, mode);
-      totalPlanned += result.plan.willUpdate.length;
-      totalApplied += result.applied;
+    const schemas = await discoverOfficeSchemas(client);
+    console.log(`[file-category-backfill] offices: ${schemas.join(", ") || "(none found)"}`);
 
-      console.log(`\n=== ${schema} ===`);
-      console.log("  before:", JSON.stringify(result.before));
-      console.log(
-        `  planned: ${result.plan.willUpdate.length} (skipped ${result.plan.skipped}) → ${JSON.stringify(result.plan.byTarget)}`
-      );
-      if (mode === "commit") {
-        const snapshot = writeBackupSnapshot(result, mode, stamp);
-        console.log(`  applied: ${result.applied}`);
-        console.log("  after:", JSON.stringify(result.after));
-        if (snapshot) console.log(`  audit snapshot: ${snapshot}`);
-      } else {
-        for (const change of result.plan.willUpdate) {
-          console.log(`    ${change.id}: other → ${change.to}`);
+    for (const schema of schemas) {
+      try {
+        const result = await runBackfillForSchema(client, schema, mode);
+        totalPlanned += result.plan.willUpdate.length;
+        totalApplied += result.appliedChanges.length;
+
+        console.log(`\n=== ${schema} ===`);
+        console.log("  before:", JSON.stringify(result.before));
+        console.log(
+          `  planned: ${result.plan.willUpdate.length} (skipped ${result.plan.skipped}) → ${JSON.stringify(result.plan.byTarget)}`
+        );
+        if (mode === "commit") {
+          // Echo applied changes to stdout FIRST (the durable record), then a best-effort audit file.
+          for (const change of result.appliedChanges) console.log(`    ${change.id}: other → ${change.to}`);
+          console.log(`  applied: ${result.appliedChanges.length}`);
+          console.log("  after:", JSON.stringify(result.after));
+          try {
+            const snapshot = writeBackupSnapshot(result, mode, stamp);
+            if (snapshot) console.log(`  audit snapshot: ${snapshot}`);
+          } catch (snapshotError) {
+            console.warn("  audit snapshot write failed (applied changes already printed above):", snapshotError);
+          }
+        } else {
+          for (const change of result.plan.willUpdate) console.log(`    ${change.id}: other → ${change.to}`);
         }
+      } catch (schemaError) {
+        // Per-office isolation: a missing/broken schema skips only that office, not the whole run.
+        console.error(`\n=== ${schema} === SKIPPED due to error:`, schemaError);
       }
     }
+
     console.log(
-      `\n[file-category-backfill] ${mode === "commit" ? "applied" : "would update"} ${mode === "commit" ? totalApplied : totalPlanned} file(s) across ${TENANT_SCHEMAS.length} office(s).`
+      `\n[file-category-backfill] ${mode === "commit" ? "applied" : "would update"} ${mode === "commit" ? totalApplied : totalPlanned} file(s) across ${schemas.length} office(s).`
     );
     if (mode !== "commit") {
       console.log("[file-category-backfill] dry-run only — re-run with --commit to apply.");
