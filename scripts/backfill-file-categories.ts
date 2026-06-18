@@ -64,6 +64,8 @@ export interface OtherFileRow {
 export interface PlannedChange {
   id: string;
   from: "other";
+  /** the row's folder_path before the change — captured so the audit snapshot can fully revert it */
+  fromFolderPath: string | null;
   to: string;
   /** new folder_path matching the inferred category, so the file leaves the catch-all folder */
   newFolderPath: string;
@@ -103,7 +105,7 @@ export function buildBackfillPlan(rows: OtherFileRow[]): BackfillPlan {
     // so the folder view and the type filter agree.
     const bucketDate = row.createdAt ? new Date(row.createdAt) : undefined;
     const newFolderPath = buildFolderPath(inferred, row.subcategory ?? undefined, bucketDate);
-    willUpdate.push({ id: row.id, from: "other", to: inferred, newFolderPath });
+    willUpdate.push({ id: row.id, from: "other", fromFolderPath: row.folderPath, to: inferred, newFolderPath });
     byTarget[inferred] = (byTarget[inferred] ?? 0) + 1;
   }
   return { willUpdate, skipped, byTarget };
@@ -152,7 +154,12 @@ export async function fetchOtherFiles(client: QueryClient, schema: string): Prom
             change_order_id  AS "changeOrderId",
             created_at       AS "createdAt"
        FROM files
-      WHERE category = 'other' AND is_active = true`
+      WHERE category = 'other'
+        AND is_active = true
+        -- Preserve stage-gate-linked docs: a verified scoping-intake document satisfies a stage's
+        -- required category via files.category (stage-gate isVerifiedLinkedStageDocument), so re-typing
+        -- it would break that gate. Skip those.
+        AND NOT (intake_source = 'scoping_intake' AND coalesce(intake_requirement_key, '') <> '')`
   );
   return rows as OtherFileRow[];
 }

@@ -71,6 +71,17 @@ describe("inferFileCategory", () => {
     ).toBe("permit");
   });
 
+  it("matches 'contract' as a whole word, not the 'contractor' prefix", () => {
+    const pdf = "application/pdf";
+    // 'contractor estimate' must resolve to estimate, not contract (the \bcontracts?\b rule no longer
+    // matches the 'contractor' prefix).
+    expect(inferFileCategory({ filename: "contractor estimate.pdf", mimeType: pdf })).toBe("estimate");
+    expect(inferFileCategory({ filename: "general contractor quote.pdf", mimeType: pdf })).toBe("estimate");
+    // real contracts still match
+    expect(inferFileCategory({ filename: "Master Contract.pdf", mimeType: pdf })).toBe("contract");
+    expect(inferFileCategory({ filename: "service contracts.pdf", mimeType: pdf })).toBe("contract");
+  });
+
   it("does not over-match the 'CO' abbreviation (co-op / company are not change orders)", () => {
     const pdf = "application/pdf";
     // 'co-op-agreement' matches 'agreement' → contract (NOT change_order); the change_order CO patterns

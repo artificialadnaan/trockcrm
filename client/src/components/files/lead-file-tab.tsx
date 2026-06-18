@@ -50,7 +50,7 @@ export function LeadFileTab({ leadId }: { leadId: string }) {
 
       {showUpload ? (
         <FileUploadZone
-          category="other"
+          category="auto"
           leadId={leadId}
           onUploadComplete={refetch}
         />

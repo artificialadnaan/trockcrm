@@ -59,7 +59,7 @@ const IMAGE_EXTENSIONS = new Set([
 const KEYWORD_RULES: ReadonlyArray<{ category: FileCategory; patterns: readonly RegExp[] }> = [
   { category: "change_order", patterns: [/change[\s_-]?order/, /\bchangeorder\b/, /\bco[\s_-]\d/, /\bco[\s_-]?#/] },
   { category: "rfp", patterns: [/\brfps?\b/, /request[\s_-]?for[\s_-]?proposal/] },
-  { category: "contract", patterns: [/\bcontract/, /\bagreement/, /\bmsa\b/, /\bsow\b/, /scope[\s_-]?of[\s_-]?work/] },
+  { category: "contract", patterns: [/\bcontracts?\b/, /\bagreement/, /\bmsa\b/, /\bsow\b/, /scope[\s_-]?of[\s_-]?work/] },
   { category: "estimate", patterns: [/\bestimate/, /\bquote/, /\bquotation/] },
   { category: "proposal", patterns: [/\bproposal/] },
   { category: "permit", patterns: [/\bpermit/] },

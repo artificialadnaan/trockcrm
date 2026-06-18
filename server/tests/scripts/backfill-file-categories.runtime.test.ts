@@ -60,15 +60,16 @@ describe("backfill-file-categories", () => {
 
   it("plans only rows that infer to a real (non-other) category; skips the rest", () => {
     const plan = buildBackfillPlan([
-      row({ id: "a", originalFilename: "Master Contract.pdf", mimeType: "application/pdf" }),
+      row({ id: "a", originalFilename: "Master Contract.pdf", mimeType: "application/pdf", folderPath: "Correspondence" }),
       row({ id: "b", originalFilename: "site.jpg", mimeType: "image/jpeg" }),
       row({ id: "c", originalFilename: "random.pdf", mimeType: "application/pdf" }),
       row({ id: "d", originalFilename: "scan.pdf", mimeType: "application/pdf", changeOrderId: "co-9" }),
     ]);
+    // Each change records the OLD folder_path (for revert) + the NEW one matching the inferred category.
     expect(plan.willUpdate).toEqual([
-      { id: "a", from: "other", to: "contract", newFolderPath: "Contracts" },
-      { id: "b", from: "other", to: "photo", newFolderPath: "Photos" },
-      { id: "d", from: "other", to: "change_order", newFolderPath: "Change Orders" },
+      { id: "a", from: "other", fromFolderPath: "Correspondence", to: "contract", newFolderPath: "Contracts" },
+      { id: "b", from: "other", fromFolderPath: null, to: "photo", newFolderPath: "Photos" },
+      { id: "d", from: "other", fromFolderPath: null, to: "change_order", newFolderPath: "Change Orders" },
     ]);
     expect(plan.skipped).toBe(1);
     expect(plan.byTarget).toEqual({ contract: 1, photo: 1, change_order: 1 });
@@ -84,6 +85,8 @@ describe("backfill-file-categories", () => {
     expect(result.plan.willUpdate).toHaveLength(1);
     expect(result.appliedChanges).toHaveLength(0);
     expect(result.after).toBeUndefined();
+    // The fetch excludes stage-gate-linked (scoping-intake) docs so the backfill can't break a gate.
+    expect(queries.find((q) => q.text.trim().startsWith("SELECT id"))?.text).toContain("scoping_intake");
     expect(queries.some((q) => q.text.trim().startsWith("UPDATE"))).toBe(false);
     expect(queries.some((q) => q.text.trim() === "BEGIN")).toBe(false);
   });
@@ -101,7 +104,9 @@ describe("backfill-file-categories", () => {
 
     // Only the row the UPDATE actually changed (rowCount > 0) is recorded as applied — this is the
     // basis for the audit snapshot, so it matches what was committed.
-    expect(result.appliedChanges).toEqual([{ id: "a", from: "other", to: "contract", newFolderPath: "Contracts" }]);
+    expect(result.appliedChanges).toEqual([
+      { id: "a", from: "other", fromFolderPath: null, to: "contract", newFolderPath: "Contracts" },
+    ]);
     expect(result.after).toEqual({ other: 1, contract: 1 });
 
     const updates = queries.filter((q) => q.text.trim().startsWith("UPDATE files"));
