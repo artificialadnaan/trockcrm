@@ -21,7 +21,9 @@ import {
   CATEGORY_TO_R2_SEGMENT,
   CATEGORY_TO_FOLDER,
   DEAL_FOLDER_TEMPLATE,
+  buildFolderPath,
 } from "./file-constants.js";
+import { inferFileCategory } from "./infer-category.js";
 import { resolvePhotoAddressMetadata } from "./photo-geocoding.js";
 import { buildDealPhotoTimelineConditions, type DealPhotoTimelineFilters } from "./photo-timeline-filters.js";
 import crypto from "node:crypto";
@@ -77,8 +79,13 @@ export interface RequestUploadInput {
   mimeType: string;
   /** File size in bytes */
   fileSizeBytes: number;
-  /** File category */
+  /** File category. When autoCategorize is true this is a placeholder ("other") and is replaced by
+   *  inference; otherwise it is the caller's explicit choice and is respected as-is. */
   category: FileCategory;
+  /** When true, the caller did not pick a category (client "Auto-detect"); infer the document type
+   *  from filename/MIME/subcategory/change-order. An explicit category (incl. "other"/Uncategorized)
+   *  leaves this false/undefined and is never overridden. */
+  autoCategorize?: boolean;
   /** Optional subcategory (e.g. "Site Visit", "Progress") */
   subcategory?: string;
   /** Target deal ID (at least one association required) */
@@ -413,31 +420,6 @@ function buildR2Key(
   return `office_${officeSlug}/unassociated/${segment}/${input.systemFilename}`;
 }
 
-/**
- * Build the virtual folder_path for a file.
- * For photo category files, appends a year-month date bucket (e.g. "2026-04")
- * derived from takenAt or createdAt so photos are organized chronologically:
- *   Photos/Site Visits/2026-04
- */
-function buildFolderPath(
-  category: FileCategory,
-  subcategory?: string,
-  dateForBucket?: Date
-): string {
-  const topFolder = CATEGORY_TO_FOLDER[category] || "Other";
-  let path = topFolder;
-  if (subcategory) {
-    path = `${topFolder}/${subcategory}`;
-  }
-
-  // For photo files, append the year-month bucket
-  if (category === "photo" && dateForBucket) {
-    const yearMonth = dateForBucket.toISOString().slice(0, 7); // "YYYY-MM"
-    path = `${path}/${yearMonth}`;
-  }
-
-  return path;
-}
 
 // ─── Service Functions ───────────────────────────────────────────────────────
 
@@ -464,7 +446,22 @@ export async function requestUploadUrl(
   validateMimeType(input.mimeType);
   const ext = validateExtension(input.originalFilename);
   validateMimeMatchesExtension(input.mimeType, ext); // Fix 3: MIME must match extension
-  validateCategoryMatchesMime(input.category, input.mimeType);
+
+  // Auto-infer the document type ONLY when the caller didn't pick one (client "Auto-detect" →
+  // autoCategorize), so the Files page type-filters populate. An explicit category — including
+  // "other"/Uncategorized — is always respected and never overridden. Inferred before folderPath/R2/
+  // validation so they use the resolved category. Versions inherit their parent's category upstream and
+  // never set autoCategorize, so this only types fresh auto-detect uploads.
+  const resolvedCategory: FileCategory = input.autoCategorize
+    ? inferFileCategory({
+        filename: input.originalFilename,
+        mimeType: input.mimeType,
+        subcategory: input.subcategory,
+        changeOrderId: input.changeOrderId,
+      })
+    : input.category;
+
+  validateCategoryMatchesMime(resolvedCategory, input.mimeType);
   validateFileSize(input.fileSizeBytes);
   validateAssociations(input);
 
@@ -474,7 +471,7 @@ export async function requestUploadUrl(
   const { systemFilename, displayName } = await generateSystemFilename(
     tenantDb,
     input.dealId,
-    input.category,
+    resolvedCategory,
     ext,
     now
   );
@@ -498,7 +495,7 @@ export async function requestUploadUrl(
     contactId: input.contactId,
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
-    category: input.category,
+    category: resolvedCategory,
     systemFilename,
   });
   // Insert a UUID before the filename in the key for collision safety
@@ -507,7 +504,7 @@ export async function requestUploadUrl(
   const r2Key = [...keyParts, `${crypto.randomUUID()}-${filename}`].join("/");
 
   // Build folder path (pass date for photo category date-bucketing)
-  const folderPath = buildFolderPath(input.category, input.subcategory, now);
+  const folderPath = buildFolderPath(resolvedCategory, input.subcategory, now);
 
   // Generate presigned URL (or mock in dev)
   let uploadResult: { uploadUrl: string; r2Key: string; expiresIn: number };
@@ -527,7 +524,7 @@ export async function requestUploadUrl(
     originalFilename: input.originalFilename,
     mimeType: input.mimeType,
     fileSizeBytes: input.fileSizeBytes,
-    category: input.category,
+    category: resolvedCategory,
     subcategory: input.subcategory,
     dealId: input.dealId,
     leadId: input.leadId,

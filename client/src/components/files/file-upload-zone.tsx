@@ -14,7 +14,8 @@ import type { FileCategory } from "@/lib/file-utils";
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"]);
 
 interface FileUploadZoneProps {
-  category: FileCategory;
+  /** A real category is sent as the user's explicit choice; "auto" lets the server infer the type. */
+  category: FileCategory | "auto";
   subcategory?: string;
   dealId?: string;
   leadId?: string;
@@ -75,7 +76,7 @@ export function FileUploadZone({
       const uploadStates: UploadState[] = newFiles.map((file) => ({
         id: crypto.randomUUID(),
         file,
-        previewName: generatePreviewName(file.name, category, dealNumber),
+        previewName: generatePreviewName(file.name, category === "auto" ? "other" : category, dealNumber),
         progress: 0,
         status: "pending" as const,
       }));

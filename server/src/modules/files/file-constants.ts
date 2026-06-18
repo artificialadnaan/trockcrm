@@ -123,6 +123,25 @@ export const CATEGORY_TO_FOLDER: Record<FileCategory, string> = {
 };
 
 /**
+ * Build the virtual folder path for a file from its category (+ optional subcategory + date). Shared by
+ * the upload path (requestUploadUrl) and the category backfill so a re-typed file lands in the folder
+ * matching its new category, consistent with new uploads.
+ */
+export function buildFolderPath(category: FileCategory, subcategory?: string, dateForBucket?: Date): string {
+  const topFolder = CATEGORY_TO_FOLDER[category] || "Other";
+  let path = topFolder;
+  if (subcategory) {
+    path = `${topFolder}/${subcategory}`;
+  }
+  // For photo files, append the year-month bucket.
+  if (category === "photo" && dateForBucket) {
+    const yearMonth = dateForBucket.toISOString().slice(0, 7); // "YYYY-MM"
+    path = `${path}/${yearMonth}`;
+  }
+  return path;
+}
+
+/**
  * Reverse mapping: MIME type -> allowed extensions for that MIME.
  * Used to validate that the declared MIME type matches the file extension.
  */

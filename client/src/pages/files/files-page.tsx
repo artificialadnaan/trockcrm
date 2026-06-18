@@ -63,6 +63,8 @@ const EYEBROW = "text-[11px] font-black uppercase tracking-[0.18em] text-slate-5
 
 const TYPE_FILTERS: Array<{ value: FileCategory | "all"; label: string }> = [
   { value: "all", label: "All Types" },
+  // getCategoryLabel maps the catch-all "other" → "Uncategorized" so untyped docs stay visible
+  // (filterable) and read consistently with their badges, rather than vanishing behind type filters.
   ...FILE_CATEGORIES.map((category) => ({ value: category, label: getCategoryLabel(category) })),
 ];
 
@@ -570,7 +572,7 @@ export function FilesPage() {
   const [sortBy, setSortBy] = useState<"created_at" | "display_name" | "file_size_bytes">("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [showUpload, setShowUpload] = useState(false);
-  const [uploadCategory, setUploadCategory] = useState<FileCategory>("other");
+  const [uploadCategory, setUploadCategory] = useState<FileCategory | "auto">("auto");
   const [uploadDealId, setUploadDealId] = useState("");
 
   const { deals } = useDeals({ limit: 200, sortBy: "updated_at", sortDir: "desc" });
@@ -702,11 +704,14 @@ export function FilesPage() {
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <div className="space-y-1.5">
                 <label className={EYEBROW}>Category</label>
-                <Select value={uploadCategory} onValueChange={(value) => setUploadCategory(value as FileCategory)}>
+                <Select value={uploadCategory} onValueChange={(value) => setUploadCategory(value as FileCategory | "auto")}>
                   <SelectTrigger className="h-9 w-full">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    {/* Default: let the server infer the document type from the filename. An explicit
+                        pick (including Uncategorized) is respected as-is. */}
+                    <SelectItem value="auto">Auto-detect</SelectItem>
                     {FILE_CATEGORIES.map((category) => (
                       <SelectItem key={category} value={category}>
                         {getCategoryLabel(category)}

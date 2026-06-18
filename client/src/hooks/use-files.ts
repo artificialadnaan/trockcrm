@@ -329,7 +329,8 @@ export function useTagSuggestions(dealId?: string) {
 
 export interface UploadFileInput {
   file: File;
-  category: FileCategory;
+  /** A real category is respected as-is; "auto" tells the server to infer the document type. */
+  category: FileCategory | "auto";
   subcategory?: string;
   dealId?: string;
   leadId?: string;
@@ -431,13 +432,19 @@ export async function uploadFile(input: UploadFileInput): Promise<FileRecord> {
   }
   const mimeType = declaredMimeTypeForUpload(file);
 
+  // "auto" = the user left the picker on Auto-detect; the server infers the type. An explicit pick
+  // (including "other"/Uncategorized) is sent as-is and respected.
+  const autoCategorize = category === "auto";
+  const resolvedCategory: FileCategory = category === "auto" ? "other" : category;
+
   const presign = await api<UploadUrlResponse>("/files/upload-url", {
     method: "POST",
     json: {
       originalFilename: file.name,
       mimeType,
       fileSizeBytes: file.size,
-      category,
+      category: resolvedCategory,
+      autoCategorize,
       subcategory,
       dealId,
       leadId,

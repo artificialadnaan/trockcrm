@@ -66,13 +66,14 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
     [refetchFiles, refetchFolders]
   );
 
-  // Determine the upload category from the selected folder
-  const uploadCategory: FileCategory = (() => {
-    if (!selectedFolder) return "other";
+  // Determine the upload category from the selected folder. With no folder (or an uncategorized folder)
+  // there's no explicit choice, so default to "auto" → the server infers the document type.
+  const uploadCategory: FileCategory | "auto" = (() => {
+    if (!selectedFolder) return "auto";
     const folder = folders.find(
       (f) => f.path === selectedFolder || f.subfolders.some((s) => s.path === selectedFolder)
     );
-    return (folder?.category as FileCategory) ?? "other";
+    return (folder?.category as FileCategory) ?? "auto";
   })();
 
   // Determine subcategory from subfolder selection
