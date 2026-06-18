@@ -1169,14 +1169,14 @@ async function getCommissionDealRollups(
 
 function allocateDealCommissions(
   rollups: CommissionDealRollup[],
-  directEarnedCommission: number,
   gateMet: boolean
 ): RepCommissionDealEarning[] {
   // The breakdown lists every deal that carries intrinsic earned commission. We include every NON-ZERO
   // row (not just positive ones) so the breakdown sum reconciles with directEarnedCommission BY
   // CONSTRUCTION for any sign — directEarnedCommission is the unfiltered SUM(dsc.amount) over the same
-  // predicate (getDirectCommissionMetrics), so dropping a negative adjustment row here would silently
-  // break Σ(deals) === directEarnedCommission. (In practice dsc.amount = source × rate ≥ 0, so this is a
+  // predicate (getDirectCommissionMetrics). Dropping a negative adjustment row — or early-returning [] when
+  // the NET is zero/negative — would silently break Σ(deals) === directEarnedCommission and hide the very
+  // adjustment rows that make the total negative. (In practice dsc.amount = source × rate ≥ 0, so this is a
   // no-op on real data; it makes the owner+estimator split provably reconcile, which the drill-down asserts.)
   const earningRows = rollups.filter((rollup) => rollup.earnedCommission !== 0);
   if (!gateMet) {
@@ -1184,7 +1184,6 @@ function allocateDealCommissions(
     // must never vanish just because the rep is under their floor.
     return earningRows.map((rollup) => ({ ...rollup, earnedCommission: 0 }));
   }
-  if (directEarnedCommission <= 0) return [];
   return earningRows;
 }
 
@@ -1320,7 +1319,7 @@ export async function getRepCommissionSummary(
   const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate);
   const totalEarnedCommission = Number((directEarnedCommission + overrideEarnedCommission).toFixed(2));
   // Breakdown stays visible regardless of the gate (rows listed, per-deal earned zeroed when below floor).
-  const deals = allocateDealCommissions(commissionRollups, directEarnedCommission, floorGate.met);
+  const deals = allocateDealCommissions(commissionRollups, floorGate.met);
   // floorRemaining now reports the gate hurdle: how much qualifying revenue is still needed to clear the
   // floor (0 once met).
   const floorRemaining = Number(Math.max(floorGate.floor - floorGate.qualifyingRevenue, 0).toFixed(2));
@@ -3044,6 +3043,9 @@ export async function getRepWonMissingContractDate(
       AND COALESCE(d.is_test_data, false) = false
       AND d.contract_signed_at IS NULL
       AND d.contract_signed_date IS NULL
+      -- Exclude change orders: setDealContractSignedDate rejects them (CHANGE_ORDER_FIELD_LOCKED), so they
+      -- can never be cleared from this worklist — listing them would just create unactionable stuck rows.
+      AND COALESCE(d.is_change_order, false) = false
       AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
     ORDER BY ${aliasedEffectiveWonDealValueSql("d")} DESC, d.name ASC
   `);

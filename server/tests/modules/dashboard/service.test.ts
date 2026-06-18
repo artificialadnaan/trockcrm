@@ -1552,7 +1552,13 @@ describe("Dashboard Service", () => {
       expect(followUpQueryText).toContain("2026-04-30");
     });
 
-    it("anchors earned commission to a rolling 12-month window ending at the selected preset end date", async () => {
+    // CONVENTION SHIFT (reconciliation): getRepDetail's commission window used to be a rolling
+    // 12-month window ending at the preset end date, which silently diverged from the flat
+    // Team-Commissions list (YTD / page window). It now uses the SELECTED page window so the rep-detail
+    // drill-down, the flat list, and the rep's own page all reconcile on one window. These two tests
+    // assert the new contract: the commission queries window to the page { from, to }, with NO rolling
+    // offset. (getRollingCommissionDateRange was removed.)
+    it("windows earned commission to the SELECTED page range (reconciles with the flat Team-Commissions list)", async () => {
       const { getRepDetail } = await import("../../../src/modules/dashboard/service.js");
       const tenantDb = createMockTenantDb([
         [{ count: "0" }],
@@ -1578,16 +1584,15 @@ describe("Dashboard Service", () => {
 
       expect(commissionQueryTexts.length).toBeGreaterThan(0);
       for (const text of commissionQueryTexts) {
-        expect(text).toContain("2025-05-01");
+        // Page window, NOT a rolling 12-month window: the old rolling start (2025-05-01) must be gone.
+        expect(text).toContain("2026-04-01");
         expect(text).toContain("2026-04-30");
-        expect(text).not.toContain("2026-04-01");
+        expect(text).not.toContain("2025-05-01");
       }
     });
 
-    it("clamps leap-day rolling commission windows to the previous year's last valid day before adding one day", async () => {
+    it("uses ONE window for commission and activity — no rolling offset, even across a leap-day range", async () => {
       const { getRepDetail } = await import("../../../src/modules/dashboard/service.js");
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date("2024-02-29T12:00:00.000Z"));
       const tenantDb = createMockTenantDb([
         [{ count: "0" }],
         [{ count: "0", total_value: "0" }],
@@ -1600,11 +1605,7 @@ describe("Dashboard Service", () => {
         [],
       ]);
 
-      try {
-        await getRepDetail(tenantDb, "rep-1", { from: "2024-02-01", to: "2024-02-29" });
-      } finally {
-        vi.useRealTimers();
-      }
+      await getRepDetail(tenantDb, "rep-1", { from: "2024-02-01", to: "2024-02-29" });
 
       const commissionQueryTexts = tenantDb.execute.mock.calls
         .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
@@ -1616,9 +1617,10 @@ describe("Dashboard Service", () => {
 
       expect(commissionQueryTexts.length).toBeGreaterThan(0);
       for (const text of commissionQueryTexts) {
-        expect(text).toContain("2023-03-01");
+        // Commission window === the page window; no rolling-12M start (2023-03-01) appears.
+        expect(text).toContain("2024-02-01");
         expect(text).toContain("2024-02-29");
-        expect(text).not.toContain("2023-03-02");
+        expect(text).not.toContain("2023-03-01");
       }
     });
   });

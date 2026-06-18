@@ -164,6 +164,8 @@ router.get(
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
         period: normalizeCommissionPeriod(req.query.period),
+        // Read-only preview: never mutate the target rep's commission snapshots / "since last update" deltas.
+        skipSnapshotRefresh: true,
       });
       await req.commitTransaction!();
       res.json({ data });

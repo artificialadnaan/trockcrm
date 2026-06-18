@@ -331,7 +331,7 @@ async function refreshCommissionSnapshots(
 
 export async function getRepCommissionDashboard(
   tenantDb: TenantDb,
-  filters: CommissionReportFilters & { period?: CommissionPeriod }
+  filters: CommissionReportFilters & { period?: CommissionPeriod; skipSnapshotRefresh?: boolean }
 ): Promise<RepCommissionDashboard> {
   const period = filters.period ?? "ytd";
   const periodRange = getCommissionPeriodDateRange(period);
@@ -443,7 +443,12 @@ export async function getRepCommissionDashboard(
   const rows: RepCommissionDashboardDeal[] = ((result as any).rows ?? result)
     .map(normalizeDashboardRow)
     .filter((row: RepCommissionDashboardDeal | null): row is RepCommissionDashboardDeal => row != null);
-  await refreshCommissionSnapshots(tenantDb, rows, repId);
+  // The snapshot write powers each deal's "since last update" delta — it belongs to the rep VIEWING their
+  // own page. A director's read-only "View as rep" must NOT mutate the rep's snapshots (it would reset the
+  // rep's deltas before they ever see them), so callers can opt out.
+  if (!filters.skipSnapshotRefresh) {
+    await refreshCommissionSnapshots(tenantDb, rows, repId);
+  }
 
   // Floor gate (single source of truth — the same helper Engine B and the manager-override roll-up use).
   // While the rep's qualifying revenue is below their floor, earned commission is $0 — both per-deal and

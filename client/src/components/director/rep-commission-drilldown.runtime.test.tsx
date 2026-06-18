@@ -226,6 +226,29 @@ describe("RepCommissionDrilldown — split + floor", () => {
   });
 });
 
+describe("RepCommissionDrilldown — floor bar", () => {
+  it("below floor: the progress bar never renders 100% even when rounding would (must match 'Below floor')", () => {
+    const { container, cleanup } = renderDrilldown({
+      commissionSummary: summary({
+        floorMet: false,
+        qualifyingRevenue: 99600,
+        rollingFloor: 100000,
+        directEarnedCommission: 0,
+        totalEarnedCommission: 0,
+      }),
+      commissionDeals: SPLIT_DEALS.map((d) => ({ ...d, earnedCommission: 0 })),
+    });
+    const text = container.textContent ?? "";
+    expect(text).toContain("Below floor");
+    // 99600/100000 = 99.6% — must floor/cap to 99%, never 100% while below floor.
+    const bar = Array.from(container.querySelectorAll("div")).find(
+      (d) => d.getAttribute("style")?.includes("width:")
+    );
+    expect(bar?.getAttribute("style") ?? "").toContain("width: 99%");
+    cleanup();
+  });
+});
+
 describe("RepCommissionDrilldown — view as rep", () => {
   it("lazy-loads the rep's own Engine A view from the director endpoint on expand", async () => {
     apiMock.mockResolvedValueOnce({
@@ -253,6 +276,62 @@ describe("RepCommissionDrilldown — view as rep", () => {
     expect(text).toContain("Read-only");
     expect(text).toContain("exactly what Kevin Scott sees");
     cleanup();
+  });
+
+  it("re-fetches the rep view when the period (dateRange) changes while the panel is open", async () => {
+    apiMock.mockResolvedValue({
+      data: {
+        period: "ytd",
+        summary: { earned: 6000, inPipeline: 0, totalPotential: 6000, openDealCount: 0 },
+        stageTotals: [],
+        deals: [],
+      },
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root!: Root;
+    const renderWith = (range: { from: string; to: string }) =>
+      act(() => {
+        root.render(
+          <MemoryRouter>
+            <RepCommissionDrilldown
+              repId="rep-1"
+              repName="Kevin Scott"
+              periodLabel="YTD"
+              isFlatListWindow
+              dateRange={range}
+              commissionSummary={summary()}
+              commissionDeals={SPLIT_DEALS}
+              wonMissingContractDate={[]}
+              onDataChanged={() => {}}
+            />
+          </MemoryRouter>
+        );
+      });
+    act(() => {
+      root = createRoot(container);
+    });
+    renderWith({ from: "2026-01-01", to: "2026-12-31" });
+
+    // Open the panel -> first fetch for the YTD window.
+    const viewBtn = Array.from(container.querySelectorAll("button")).find((b) =>
+      (b.textContent ?? "").includes("View as rep")
+    )!;
+    await act(async () => {
+      viewBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    expect(apiMock.mock.calls[0]![0]).toContain("from=2026-01-01");
+
+    // Director switches to MTD for the same rep -> the open panel must refetch the new window.
+    renderWith({ from: "2026-06-01", to: "2026-06-30" });
+    await flush();
+    expect(apiMock).toHaveBeenCalledTimes(2);
+    expect(apiMock.mock.calls[1]![0]).toContain("from=2026-06-01");
+
+    act(() => root.unmount());
+    container.remove();
   });
 });
 

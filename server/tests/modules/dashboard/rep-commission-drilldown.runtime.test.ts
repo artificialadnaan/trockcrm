@@ -29,6 +29,7 @@ const REP_MIX = U("c01"); // owns one deal (owner cut) AND estimates another (es
 const REP_OTHER = U("c02"); // owns the deal REP_MIX estimated.
 const REP_WL = U("c03"); // worklist rep: Won-family deals, some missing a contract date.
 const REP_NEG = U("c04"); // owns a +5000 deal AND a -1000 adjustment row -> direct 4000 (negative-row reconcile).
+const REP_NETNEG = U("c05"); // +1000 and -3000 -> net direct -2000 (rows must still show; snapshot-skip probe).
 const DIRECTOR = U("c0d"); // a director — used to prove repId drill-down works for non-rep callers.
 
 const ST_OPEN = U("58001"); // 'opportunity' (signed earned rows)
@@ -46,6 +47,9 @@ const D = {
   wlTest: U("e08"), // REP_WL Won, no contract date, is_test_data -> excluded
   negOwn: U("e09"), // REP_NEG owner dsc +5000
   negAdj: U("e10"), // REP_NEG owner dsc -1000 (a clawback/adjustment)
+  wlChangeOrder: U("e11"), // REP_WL Won change order, no contract date -> excluded (CHANGE_ORDER_FIELD_LOCKED)
+  netNegOwn: U("e12"), // REP_NETNEG owner dsc +1000
+  netNegAdj: U("e13"), // REP_NETNEG owner dsc -3000 -> net direct -2000
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -79,6 +83,7 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, deal_number text, name text, assigned_rep_id uuid, estimator_user_id uuid,
       company_id uuid, property_id uuid, property_address text, stage_id uuid NOT NULL,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
+      is_change_order boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
       won_closed_date date, expected_close_date date, stage_entered_at timestamptz, updated_at timestamptz,
       created_at timestamptz, awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric,
@@ -98,13 +103,15 @@ beforeAll(async () => {
       ('${REP_OTHER}', 'Other', 'rep'),
       ('${REP_WL}', 'Worklist', 'rep'),
       ('${REP_NEG}', 'Neg', 'rep'),
+      ('${REP_NETNEG}', 'NetNeg', 'rep'),
       ('${DIRECTOR}', 'Director', 'director');
 
     INSERT INTO user_commission_settings (user_id, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP_MIX}', 0.10, 0, 0),
       ('${REP_OTHER}', 0.10, 0, 0),
       ('${REP_WL}', 0.10, 0, 0),
-      ('${REP_NEG}', 0.10, 0, 0);
+      ('${REP_NEG}', 0.10, 0, 0),
+      ('${REP_NETNEG}', 0.10, 0, 0);
 
     -- REP_MIX owns mixOwn (owner cut 5000). signed in window.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
@@ -126,6 +133,10 @@ beforeAll(async () => {
       ('${D.wlSigned}', 'WL-3', 'WL signed', '${REP_WL}', '${ST_WON}', false, '2026-04-03T00:00:00Z', NULL, '2026-04-03', 90000, '2026-02-03T00:00:00Z'),
       ('${D.wlLost}', 'WL-4', 'WL lost', '${REP_WL}', '${ST_LOST}', false, NULL, NULL, NULL, 90000, '2026-02-04T00:00:00Z'),
       ('${D.wlTest}', 'WL-5', 'WL test', '${REP_WL}', '${ST_WON}', true, NULL, NULL, '2026-04-05', 90000, '2026-02-05T00:00:00Z');
+    -- REP_WL change order, Won-family, no contract date -> MUST be excluded (the contract-date PATCH rejects
+    -- change orders with CHANGE_ORDER_FIELD_LOCKED, so it would be an unactionable stuck row).
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_test_data, is_change_order, contract_signed_at, contract_signed_date, won_closed_date, awarded_amount, created_at) VALUES
+      ('${D.wlChangeOrder}', 'WL-6', 'WL change order', '${REP_WL}', '${ST_WON}', false, true, NULL, NULL, '2026-04-06', 25000, '2026-02-06T00:00:00Z');
 
     -- REP_NEG: owner +5000 and a -1000 adjustment (clawback) -> direct = 4000. Proves the breakdown sum
     -- reconciles with directEarnedCommission even with a NEGATIVE row (which a >0 filter would drop).
@@ -135,6 +146,15 @@ beforeAll(async () => {
     INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
       ('${D.negOwn}', '${REP_NEG}', 50000, 0.10, 5000, 'owner', '2026-03-15'),
       ('${D.negAdj}', '${REP_NEG}', 10000, -0.10, -1000, 'owner', '2026-03-16');
+
+    -- REP_NETNEG: +1000 and -3000 -> NET direct -2000. The breakdown must STILL show both rows (not [])
+    -- so Σ(rows) === directEarnedCommission == -2000 (the directEarnedCommission<=0 early-return is gone).
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.netNegOwn}', 'NN-1', 'NetNeg owned', '${REP_NETNEG}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 10000, '2026-01-10T00:00:00Z'),
+      ('${D.netNegAdj}', 'NN-2', 'NetNeg adjustment', '${REP_NETNEG}', '${ST_OPEN}', '2026-03-16T00:00:00Z', 30000, '2026-01-11T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.netNegOwn}', '${REP_NETNEG}', 10000, 0.10, 1000, 'owner', '2026-03-15'),
+      ('${D.netNegAdj}', '${REP_NETNEG}', 30000, -0.10, -3000, 'owner', '2026-03-16');
   `);
   tdb = drizzle(pg);
 });
@@ -169,6 +189,16 @@ describe("owner/estimator split reconciles to directEarnedCommission (Engine B)"
     const sum = deals.reduce((s, d) => s + d.earnedCommission, 0);
     expect(sum).toBeCloseTo(summary.directEarnedCommission, 2);
     expect(summary.directEarnedCommission).toBeCloseTo(4000, 2); // 5000 - 1000
+  });
+
+  it("NET-NEGATIVE direct: rows still render (no empty-on-<=0 early return), Σ === directEarnedCommission", async () => {
+    const { summary, deals } = await getRepCommissionSummary(tdb, REP_NETNEG, RANGE.from, RANGE.to);
+    // direct nets to -2000 (1000 - 3000); the breakdown must NOT collapse to [] — that would hide the
+    // adjustment rows while Team Commissions shows the negative total.
+    expect(deals).toHaveLength(2);
+    const sum = deals.reduce((s, d) => s + d.earnedCommission, 0);
+    expect(summary.directEarnedCommission).toBeCloseTo(-2000, 2);
+    expect(sum).toBeCloseTo(summary.directEarnedCommission, 2);
   });
 
   it("floor progress: qualifyingRevenue is the OWNED book (excludes the estimated deal), floor met at 0", async () => {
@@ -208,10 +238,13 @@ describe("View-as-rep: getRepCommissionDashboard is rep-injection-safe", () => {
 });
 
 describe("Won-but-missing-contract worklist", () => {
-  it("returns only Won-family owned deals with no contract date; excludes signed / lost / test", async () => {
+  it("returns only Won-family owned deals with no contract date; excludes signed / lost / test / change-order", async () => {
     const rows = await getRepWonMissingContractDate(tdb, REP_WL);
     const numbers = rows.map((r) => r.dealNumber).sort();
-    expect(numbers).toEqual(["WL-1", "WL-2"]); // signed (WL-3), lost (WL-4), test (WL-5) all excluded
+    // signed (WL-3), lost (WL-4), test (WL-5), AND the change order (WL-6) are all excluded. The change
+    // order matters: the contract-date PATCH rejects it (CHANGE_ORDER_FIELD_LOCKED) so it can never clear.
+    expect(numbers).toEqual(["WL-1", "WL-2"]);
+    expect(numbers).not.toContain("WL-6");
     // Highest value first (70000 before 40000), value resolved via the awarded-first chain.
     expect(rows[0]!.dealNumber).toBe("WL-1");
     expect(rows[0]!.value).toBeCloseTo(70000, 2);
@@ -221,5 +254,33 @@ describe("Won-but-missing-contract worklist", () => {
   it("a rep with no stuck Won deals returns an empty worklist", async () => {
     const rows = await getRepWonMissingContractDate(tdb, REP_MIX);
     expect(rows).toEqual([]);
+  });
+});
+
+describe("View-as-rep is read-only: skipSnapshotRefresh does not mutate the rep's snapshots", () => {
+  async function snapshotCount(repId: string): Promise<number> {
+    const res = await pg.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM commission_deal_snapshots WHERE rep_user_id = '${repId}'`
+    );
+    return Number(res.rows[0]?.n ?? 0);
+  }
+
+  it("skipSnapshotRefresh=true writes NO snapshot; the default path DOES (proves the opt-out works)", async () => {
+    // REP_NETNEG has only been read via Engine B so far (which never writes snapshots) -> starts at 0.
+    expect(await snapshotCount(REP_NETNEG)).toBe(0);
+
+    // Director read-only preview: must not touch the rep's snapshots.
+    await getRepCommissionDashboard(tdb, {
+      role: "director",
+      userId: DIRECTOR,
+      repId: REP_NETNEG,
+      skipSnapshotRefresh: true,
+      ...RANGE,
+    });
+    expect(await snapshotCount(REP_NETNEG)).toBe(0);
+
+    // The rep viewing their OWN page (default) still refreshes snapshots for the "since last update" delta.
+    await getRepCommissionDashboard(tdb, { role: "rep", userId: REP_NETNEG, ...RANGE });
+    expect(await snapshotCount(REP_NETNEG)).toBeGreaterThan(0);
   });
 });

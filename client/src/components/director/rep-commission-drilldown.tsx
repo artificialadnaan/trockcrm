@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, ChevronDown, ChevronRight, DollarSign, Eye, Lock } from "lucide-react";
 import { api } from "@/lib/api";
@@ -89,22 +89,29 @@ export function RepCommissionDrilldown({
 
   const floor = cs.rollingFloor;
   const hasFloor = floor > 0;
-  const floorPct = hasFloor ? Math.min(100, Math.round((cs.qualifyingRevenue / floor) * 100)) : 100;
+  // Never render a full bar while the floor is unmet: round DOWN and cap at 99% below floor, so the visual
+  // can't contradict the "Below floor" copy (e.g. $99,600 / $100,000 must not read as 100%).
+  const floorPct =
+    !hasFloor || cs.floorMet
+      ? 100
+      : Math.max(0, Math.min(99, Math.floor((cs.qualifyingRevenue / floor) * 100)));
   const floorShortfall = Math.max(floor - cs.qualifyingRevenue, 0);
 
-  // "View as rep" (Engine A) — lazy-loaded on first expand; state lifted here so the panel renders as a
-  // normal full-width block in the card body (no positioning hacks).
+  // "View as rep" (Engine A) — lazy-loaded on expand; state lifted here so the panel renders as a normal
+  // full-width block in the card body (no positioning hacks).
   const [viewOpen, setViewOpen] = useState(false);
   const [view, setView] = useState<RepCommissionView | null>(null);
   const [viewLoading, setViewLoading] = useState(false);
   const [viewError, setViewError] = useState<string | null>(null);
 
-  const toggleView = async () => {
-    const next = !viewOpen;
-    setViewOpen(next);
-    if (next && !view && !viewLoading) {
-      setViewLoading(true);
-      setViewError(null);
+  // Fetch (and RE-fetch) the rep's own commission view whenever the panel is open and the window changes —
+  // so switching the date preset for the same rep refreshes the panel instead of showing the prior period.
+  useEffect(() => {
+    if (!viewOpen) return;
+    let cancelled = false;
+    setViewLoading(true);
+    setViewError(null);
+    (async () => {
       try {
         const params = new URLSearchParams();
         if (dateRange.from) params.set("from", dateRange.from);
@@ -112,14 +119,19 @@ export function RepCommissionDrilldown({
         const res = await api<{ data: RepCommissionView }>(
           `/dashboard/director/rep/${repId}/commission-view?${params.toString()}`
         );
-        setView(res.data);
+        if (!cancelled) setView(res.data);
       } catch (err) {
-        setViewError(err instanceof Error ? err.message : "Failed to load rep view");
+        if (!cancelled) setViewError(err instanceof Error ? err.message : "Failed to load rep view");
       } finally {
-        setViewLoading(false);
+        if (!cancelled) setViewLoading(false);
       }
-    }
-  };
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [viewOpen, dateRange.from, dateRange.to, repId]);
+
+  const toggleView = () => setViewOpen((open) => !open);
 
   return (
     <Card>
