@@ -9,6 +9,15 @@ const SERVER_TASK_PERSISTENCE_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/persis
 const SERVER_STALE_LEAD_KEY_MODULE = `${SERVER_MODULE_ROOT}/tasks/rules/stale-lead-key.js` as string;
 
 /**
+ * First-outreach window. A `daily_first_outreach_touchpoint` task exists only for contacts 3..N days old:
+ * the create query mints for contacts older than 3 days but NOT older than this many days, and
+ * dismissResolvedFirstOutreachTasks expires any open task once its contact ages past this window. Using
+ * ONE constant on ONE axis (contacts.created_at) makes the create and dismiss conditions exact complements,
+ * so an expired/dismissed task can never be re-minted (the contact is out of the create window).
+ */
+export const FIRST_OUTREACH_WINDOW_DAYS = 30;
+
+/**
  * Daily task list generation job.
  *
  * Runs daily at 6:00 AM CT. For each active office:
@@ -131,6 +140,100 @@ export async function dismissResolvedStaleLeadTasks(
   return dismissedTasks.rowCount ?? dismissedTasks.rows.length;
 }
 
+/**
+ * Resolve the lifecycle gap for `daily_first_outreach_touchpoint` tasks. Mirrors
+ * dismissResolvedStaleLeadTasks: dismiss every OPEN first-outreach task whose reason to exist is gone, and
+ * record a task_resolution_state row so the dismissal is audited. A task is dismissed when EITHER:
+ *   - RESOLVED: its contact no longer needs first outreach — first_outreach_completed flipped true (the PG
+ *     touchpoint_trigger sets this on any call/email/meeting), or the contact went inactive / was deleted.
+ *     This is the core fix: outreach logged as an ACTIVITY flips the flag but never closed the open task.
+ *   - EXPIRED: the contact has aged past the first-outreach window (created_at < now - windowDays). Ongoing
+ *     contact is governed by the touchpoint-cadence rule, so a months-old "first outreach" reminder is debris.
+ * Re-mint is prevented structurally, NOT by suppression (the rule has suppressionWindowDays:0): a RESOLVED
+ * contact fails the create query's first_outreach_completed=false filter; an EXPIRED contact fails its
+ * created_at >= now-windowDays bound. Both are exact complements of the create predicate on the same axis.
+ */
+export async function dismissResolvedFirstOutreachTasks(
+  client: Queryable,
+  schemaName: string,
+  officeId: string,
+  resolvedAt: Date = new Date(),
+  windowDays: number = FIRST_OUTREACH_WINDOW_DAYS
+): Promise<number> {
+  const activeTaskStatusesSql = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"]
+    .map((status) => `'${status}'`)
+    .join(", ");
+
+  // A contact "still needs first outreach" iff it is active and not yet contacted. RESOLVED = NOT that.
+  const stillNeedsOutreachSql = `EXISTS (
+    SELECT 1 FROM ${schemaName}.contacts c
+    WHERE c.id = t.contact_id AND c.is_active = true AND c.first_outreach_completed = false
+  )`;
+
+  const dismissedTasks = await client.query<{
+    id: string;
+    origin_rule: string;
+    dedupe_key: string;
+    reason_code: string | null;
+    entity_snapshot: Record<string, unknown> | null;
+    resolution_reason: string;
+  }>(
+    `UPDATE ${schemaName}.tasks AS t
+     SET status = 'dismissed',
+         completed_at = $1,
+         is_overdue = false,
+         waiting_on = NULL,
+         blocked_by = NULL,
+         updated_at = NOW()
+     WHERE t.origin_rule = 'daily_first_outreach_touchpoint'
+       AND t.status IN (${activeTaskStatusesSql})
+       AND (
+         NOT ${stillNeedsOutreachSql}
+         OR EXISTS (
+           SELECT 1 FROM ${schemaName}.contacts c
+           WHERE c.id = t.contact_id
+             AND c.created_at < CURRENT_DATE - ($2::int * INTERVAL '1 day')
+         )
+       )
+     RETURNING id, origin_rule, dedupe_key, reason_code, entity_snapshot,
+       CASE WHEN NOT ${stillNeedsOutreachSql}
+            THEN 'first_outreach_resolved' ELSE 'first_outreach_expired' END AS resolution_reason`,
+    [resolvedAt, windowDays]
+  );
+
+  if ((dismissedTasks.rows?.length ?? 0) === 0) {
+    return dismissedTasks.rowCount ?? 0;
+  }
+
+  for (const task of dismissedTasks.rows) {
+    await client.query(
+      `INSERT INTO ${schemaName}.task_resolution_state
+         (office_id, task_id, origin_rule, dedupe_key, resolution_status, resolution_reason, resolved_at, suppressed_until, entity_snapshot)
+       VALUES ($1, $2, $3, $4, 'dismissed', $5, $6, NULL, $7)
+       ON CONFLICT (origin_rule, dedupe_key) DO UPDATE
+       SET office_id = EXCLUDED.office_id,
+           task_id = EXCLUDED.task_id,
+           resolution_status = EXCLUDED.resolution_status,
+           resolution_reason = EXCLUDED.resolution_reason,
+           resolved_at = EXCLUDED.resolved_at,
+           suppressed_until = EXCLUDED.suppressed_until,
+           entity_snapshot = EXCLUDED.entity_snapshot,
+           updated_at = NOW()`,
+      [
+        officeId,
+        task.id,
+        task.origin_rule,
+        task.dedupe_key,
+        task.resolution_reason,
+        resolvedAt,
+        task.entity_snapshot ?? null,
+      ]
+    );
+  }
+
+  return dismissedTasks.rowCount ?? dismissedTasks.rows.length;
+}
+
 export async function runDailyTaskGeneration(): Promise<void> {
   console.log("[Worker:daily-tasks] Starting daily task generation...");
 
@@ -140,6 +243,7 @@ export async function runDailyTaskGeneration(): Promise<void> {
 
     let totalTasksCreated = 0;
     let totalOverdueMarked = 0;
+    let totalFirstOutreachDismissed = 0;
 
     for (const office of offices.rows) {
       try {
@@ -225,12 +329,23 @@ export async function runDailyTaskGeneration(): Promise<void> {
           officeTasksCreated += countGeneratedTasks(outcomes);
         }
 
+        // Lifecycle: dismiss first-outreach tasks whose contact has been contacted (flag flipped via the
+        // touchpoint trigger), gone inactive, or aged out of the window — BEFORE re-evaluating who still
+        // needs one (mirrors the stale-lead dismiss ordering). This also drains the historical backlog on
+        // the first run after deploy.
+        const firstOutreachDismissed = await dismissResolvedFirstOutreachTasks(client, schemaName, office.id);
+        totalFirstOutreachDismissed += firstOutreachDismissed;
+
         const needsOutreach = await client.query(
           `SELECT c.id AS contact_id, c.first_name, c.last_name
            FROM ${schemaName}.contacts c
            WHERE c.is_active = true
              AND c.first_outreach_completed = false
              AND c.created_at < CURRENT_DATE - INTERVAL '3 days'
+             -- Upper bound: only NEW contacts get a first-outreach task. Past the window the moment has
+             -- passed (cadence rules govern ongoing contact), and bounding here is what makes an
+             -- expiry-dismissed task stay dismissed instead of re-minting next run.
+             AND c.created_at >= CURRENT_DATE - (${FIRST_OUTREACH_WINDOW_DAYS} * INTERVAL '1 day')
              AND NOT EXISTS (
                SELECT 1 FROM ${schemaName}.tasks t
                WHERE t.contact_id = c.id
@@ -413,7 +528,10 @@ export async function runDailyTaskGeneration(): Promise<void> {
       }
     }
 
-    console.log(`[Worker:daily-tasks] Complete. Marked ${totalOverdueMarked} overdue, created ${totalTasksCreated} new tasks`);
+    console.log(
+      `[Worker:daily-tasks] Complete. Marked ${totalOverdueMarked} overdue, created ${totalTasksCreated} new tasks, ` +
+        `dismissed ${totalFirstOutreachDismissed} resolved/expired first-outreach tasks`
+    );
   } catch (err) {
     console.error("[Worker:daily-tasks] Failed:", err);
     throw err;
