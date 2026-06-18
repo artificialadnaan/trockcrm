@@ -28,6 +28,12 @@ const serviceMocks = vi.hoisted(() => ({
 const accessMocks = vi.hoisted(() => ({
   getDealById: vi.fn(async () => ({ id: "deal-1" })),
   getLeadById: vi.fn(async () => ({ id: "lead-1" })),
+  // Deal/lead file-route access now runs through src/lib/collaboration-access (assertDealFileAccess ->
+  // assertDealCollaboratorAccess, PR #632). The routes only await the guards (return value unused), so
+  // bare vi.fn()s that resolve undefined grant access; without this mock the real guard runs a drizzle
+  // query against the {} tenantDb stub and throws.
+  assertDealCollaboratorAccess: vi.fn(),
+  assertLeadCollaboratorAccess: vi.fn(),
   getPhotoFeed: vi.fn(),
   getNewPhotoCount: vi.fn(),
   getProjectPhotoStats: vi.fn(),
@@ -47,6 +53,10 @@ const scopingMocks = vi.hoisted(() => ({
 vi.mock("../../../src/modules/files/service.js", () => serviceMocks);
 vi.mock("../../../src/modules/deals/service.js", () => ({ getDealById: accessMocks.getDealById }));
 vi.mock("../../../src/modules/leads/service.js", () => ({ getLeadById: accessMocks.getLeadById }));
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
+  assertLeadCollaboratorAccess: accessMocks.assertLeadCollaboratorAccess,
+}));
 vi.mock("../../../src/modules/files/feed-service.js", () => ({
   getPhotoFeed: accessMocks.getPhotoFeed,
   getNewPhotoCount: accessMocks.getNewPhotoCount,

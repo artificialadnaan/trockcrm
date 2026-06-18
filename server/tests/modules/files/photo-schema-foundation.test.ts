@@ -73,6 +73,7 @@ describe("photo schema foundation", () => {
       "category_changed",
       "address_changed",
       "caption_changed",
+      "voice_description_transcribed",
       "downloaded",
       "deleted",
       "restored",

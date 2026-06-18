@@ -351,7 +351,7 @@ describe("listDealStagePage", () => {
       .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
       .join("\n");
 
-    expect(executedSql).toContain("hs_closed_won_date");
+    expect(executedSql).toContain("won_closed_date");
     expect(executedSql).toContain("is not null");
     expect(executedSql).not.toContain("contract_signed_at");
     expect(executedSql).not.toContain("contract_signed_date");
@@ -387,7 +387,7 @@ describe("listDealStagePage", () => {
     const rowWhereSql = fromDealsWhereSql(extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase());
     for (const sqlText of [countWhereSql, rowWhereSql]) {
       expect(sqlText).toContain("coalesce(d.on_hold, false) = false");
-      expect(sqlText).toContain("hs_closed_won_date");
+      expect(sqlText).toContain("won_closed_date");
     }
   });
 
@@ -739,7 +739,7 @@ describe("listDealStagePage", () => {
 
     const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(countQueryText).not.toContain("d.is_active = true");
-    expect(countQueryText).toContain("hs_closed_won_date");
+    expect(countQueryText).toContain("won_closed_date");
     expect(countQueryText).toContain("is not null");
     expect(countQueryText).not.toContain("contract_signed_at");
     expect(countQueryText).not.toContain("contract_signed_date");
