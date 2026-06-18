@@ -42,6 +42,18 @@ const FORECAST_FIRST_VALUE_CHAIN = [
   ...DEAL_VALUE_PRIORITY_CHAIN,
 ] as const satisfies readonly DealValueColumn[];
 
+// STAGE-AWARE override for the single 'estimating' stage (2026-06-18, Adnaan): during estimating the
+// bid is in-progress/incomplete, so DD outranks bid — awarded > dd_estimate > bid_board_total_sales >
+// bid_estimate. Awarded still wins; bid is NOT skipped, just outranked when DD exists (a bid-only
+// estimating deal keeps its bid, never $0). Applies ONLY to the canonical 'estimating' slug, NOT
+// service_estimating. Same `> 0` gating + on-hold-zeroing as the default chain.
+const ESTIMATING_VALUE_CHAIN = [
+  "awarded_amount",
+  "dd_estimate",
+  "bid_board_total_sales",
+  "bid_estimate",
+] as const satisfies readonly DealValueColumn[];
+
 export function positiveDealValueCandidateSql(value: unknown): SQL {
   return sql`CASE WHEN ${value} > 0 THEN ${value} END`;
 }
@@ -84,6 +96,11 @@ export function dealBestEstimateSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
+// 'estimating' stage only: DD outranks bid (awarded > dd > bid_board > bid). See ESTIMATING_VALUE_CHAIN.
+export function dealEstimatingValueSql(table: DealValueTable): SQL {
+  return dealValueChainSql(table, ESTIMATING_VALUE_CHAIN);
+}
+
 export function dealAwardedAmountSql(table: DealValueTable): SQL {
   return sql`COALESCE(${positiveDealValueCandidateSql(table.awardedAmount)}, 0)`;
 }
@@ -111,8 +128,17 @@ export function effectiveWonDealValueSql(table: DealValueTable): SQL {
   return effectiveDealValueSql(table, dealAwardedFirstWithFallbackSql(table));
 }
 
+export function effectiveEstimatingDealValueSql(table: DealValueTable): SQL {
+  return effectiveDealValueSql(table, dealEstimatingValueSql(table));
+}
+
 export function aliasedDealBestEstimateSql(alias: string): SQL {
   return aliasedDealValueChainSql(alias, DEAL_VALUE_PRIORITY_CHAIN);
+}
+
+// 'estimating' stage only: DD outranks bid (awarded > dd > bid_board > bid). See ESTIMATING_VALUE_CHAIN.
+export function aliasedDealEstimatingValueSql(alias: string): SQL {
+  return aliasedDealValueChainSql(alias, ESTIMATING_VALUE_CHAIN);
 }
 
 export function aliasedDealAwardedAmountSql(alias: string): SQL {
@@ -151,6 +177,10 @@ export function aliasedEffectiveAwardedDealValueSql(
 
 export function aliasedEffectiveWonDealValueSql(alias: string): SQL {
   return aliasedEffectiveDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
+}
+
+export function aliasedEffectiveEstimatingDealValueSql(alias: string): SQL {
+  return aliasedEffectiveDealValueSql(alias, aliasedDealEstimatingValueSql(alias));
 }
 
 export function reportableDealFilterSql(identifierPath?: string): SQL {

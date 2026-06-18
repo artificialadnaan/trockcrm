@@ -10,14 +10,18 @@ import {
   aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
   aliasedDealBestEstimateWithForecastSql,
+  aliasedDealEstimatingValueSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveEstimatingDealValueSql,
   aliasedForecastFirstDealValueSql,
   aliasedOpenPipelineForecastFirstDealValueSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
   dealBestEstimateWithForecastSql,
+  dealEstimatingValueSql,
   effectiveAwardedDealValueSql,
   effectiveDealValueSql,
+  effectiveEstimatingDealValueSql,
   effectiveWonDealValueSql,
 } from "../../../src/modules/shared/deal-value-sql.js";
 
@@ -163,6 +167,28 @@ describe("deal-value-sql", () => {
       expect(normalized).toContain("CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END");
       expect(normalized).not.toContain("NULLIF");
     }
+  });
+
+  // 'estimating' stage rule (2026-06-18): DD outranks bid → awarded > dd > bid_board > bid.
+  it("uses the estimating chain (awarded > dd > bid_board > bid) for the estimating value consumers", () => {
+    for (const expression of [
+      aliasedDealEstimatingValueSql("d"),
+      aliasedEffectiveEstimatingDealValueSql("d"),
+      dealEstimatingValueSql(table),
+      effectiveEstimatingDealValueSql(table),
+    ]) {
+      const normalized = normalize(expression);
+      expectColumnOrder(normalized, [
+        "awarded_amount",
+        "dd_estimate",
+        "bid_board_total_sales",
+        "bid_estimate",
+      ]);
+      expect(normalized).not.toContain("NULLIF");
+    }
+    // on-hold-zeroed only on the effective variants.
+    expect(normalize(aliasedEffectiveEstimatingDealValueSql("d"))).toContain("d.on_hold");
+    expect(normalize(effectiveEstimatingDealValueSql(table))).toContain("d.on_hold");
   });
 
   it("wraps won fallback values in an on-hold zeroing case expression", () => {

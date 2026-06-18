@@ -22,6 +22,7 @@ import {
 } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
+  ESTIMATING_STAGE_SLUG,
   getDealAtRiskResult,
   isGenuineWonDealStageSlug,
   resolveEffectiveStageEnteredAt,
@@ -68,9 +69,11 @@ import {
   aliasedActiveNonZeroDealSortTierSql,
   aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
+  aliasedDealEstimatingValueSql,
   aliasedWonHsClosedWonDateSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
+  dealEstimatingValueSql,
 } from "../shared/deal-value-sql.js";
 import {
   aliasedDealDateScopeColumns,
@@ -819,7 +822,12 @@ function buildSortWithIdTieBreaker(column: SQLWrapper, dir: "asc" | "desc") {
 
 function buildDealListOrder(
   filters: DealFilters,
-  classification: { wonStageIds: string[]; lostStageIds: string[]; stageEntryDateEnabled: boolean }
+  classification: {
+    wonStageIds: string[];
+    estimatingStageIds: string[];
+    lostStageIds: string[];
+    stageEntryDateEnabled: boolean;
+  }
 ) {
   // Primary tier: active, non-zero deals on top; on-hold and $0-value deals sink to
   // the bottom of the list (sort-only — the WHERE set is unchanged, so they still
@@ -828,16 +836,21 @@ function buildDealListOrder(
   // filters on, so sort == filter == display (D-1).
   const tier = aliasedActiveNonZeroDealSortTierSql(
     "deals",
-    aliasedStageAwareEffectiveDealValueSql("deals", classification.wonStageIds)
+    aliasedStageAwareEffectiveDealValueSql("deals", classification.wonStageIds, classification.estimatingStageIds)
   );
   return [asc(tier), ...buildDealListColumnOrder(filters, classification)];
 }
 
 function buildDealListColumnOrder(
   filters: DealFilters,
-  classification: { wonStageIds: string[]; lostStageIds: string[]; stageEntryDateEnabled: boolean }
+  classification: {
+    wonStageIds: string[];
+    estimatingStageIds: string[];
+    lostStageIds: string[];
+    stageEntryDateEnabled: boolean;
+  }
 ) {
-  const { wonStageIds, lostStageIds, stageEntryDateEnabled } = classification;
+  const { wonStageIds, estimatingStageIds, lostStageIds, stageEntryDateEnabled } = classification;
   switch (filters.sortBy) {
     case "name":
       return buildSortWithIdTieBreaker(deals.name, filters.sortDir === "asc" ? "asc" : "desc");
@@ -858,7 +871,7 @@ function buildDealListColumnOrder(
       // display (D-1; Codex #546). Raw
       // awarded_amount is null for most open deals and would mis-sort them.
       return buildSortWithIdTieBreaker(
-        aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds),
+        aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds, estimatingStageIds),
         filters.sortDir === "asc" ? "asc" : "desc"
       );
     case "stage_entered_at":
@@ -1148,21 +1161,25 @@ function dealEstimateSentAtSql() {
   `;
 }
 
-type PipelineValueSource = "won" | "current";
+type PipelineValueSource = "won" | "estimating" | "current";
 
 function pipelineValueSourceForStageSlug(stageSlug: string): PipelineValueSource {
+  // 'estimating' stage only: DD outranks bid (awarded > dd > bid). Excludes service_estimating.
+  if (stageSlug === ESTIMATING_STAGE_SLUG) return "estimating";
   return WON_TERMINAL_STAGE_SLUGS.includes(stageSlug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
     ? "won"
     : "current";
 }
 
 function dealPipelineValueSql(valueSource: PipelineValueSource) {
+  if (valueSource === "estimating") return dealEstimatingValueSql(deals);
   return valueSource === "won"
     ? dealAwardedFirstWithFallbackSql(deals)
     : dealBestEstimateSql(deals);
 }
 
 function aliasedPipelineValueSql(alias: string, valueSource: PipelineValueSource) {
+  if (valueSource === "estimating") return aliasedDealEstimatingValueSql(alias);
   return valueSource === "won"
     ? aliasedDealAwardedFirstWithFallbackSql(alias)
     : aliasedDealBestEstimateSql(alias);
@@ -1638,11 +1655,11 @@ export async function getDeals(
   const stageEntryDateEnabled = isStageEntryDateFilterEnabled() || Boolean(filters.stageEntryDateWindow);
   let wonStageIds: string[] = [];
   let lostStageIds: string[] = [];
-  // Resolve Won/Lost stage-id sets once when any stage-classified dimension is in
-  // play: the outcome-aware date window (Won+Lost), and the stage-aware value
-  // filter/sort (Won — awarded-first for Won stages). Done here so those
-  // predicates classify rows without a pipeline_stage_config join (the count
-  // queries below select from `deals` alone).
+  let estimatingStageIds: string[] = [];
+  // Resolve Won/Lost/estimating stage-id sets once when any stage-classified dimension is in
+  // play: the outcome-aware date window (Won+Lost), and the stage-aware value filter/sort/total
+  // (Won → awarded-first; estimating → awarded>dd>bid). Done here so those predicates classify
+  // rows without a pipeline_stage_config join (the count queries below select from `deals` alone).
   const valueFilterRequested = Number.isFinite(filters.valueMin) || Number.isFinite(filters.valueMax);
   const needsStageClassification =
     Boolean(filters.dateFrom || filters.dateTo) ||
@@ -1659,9 +1676,17 @@ export async function getDeals(
     const lostSlugs = LOST_STAGE_SLUGS as readonly string[];
     wonStageIds = stages.filter((stage) => wonSlugs.includes(stage.slug)).map((stage) => stage.id);
     lostStageIds = stages.filter((stage) => lostSlugs.includes(stage.slug)).map((stage) => stage.id);
+    estimatingStageIds = stages
+      .filter((stage) => stage.slug === ESTIMATING_STAGE_SLUG)
+      .map((stage) => stage.id);
   }
   conditions.push(
-    ...buildDealFilterBarConditions(filters, { wonStageIds, lostStageIds, stageEntryDateEnabled })
+    ...buildDealFilterBarConditions(filters, {
+      wonStageIds,
+      estimatingStageIds,
+      lostStageIds,
+      stageEntryDateEnabled,
+    })
   );
 
   // Inclusive signed-contract range. Used by the rep dashboard YTD/MTD
@@ -1721,7 +1746,12 @@ export async function getDeals(
     : sql`coalesce(${deals.onHold}, false) = false`;
 
   // Sort
-  const sortOrder = buildDealListOrder(filters, { wonStageIds, lostStageIds, stageEntryDateEnabled });
+  const sortOrder = buildDealListOrder(filters, {
+    wonStageIds,
+    estimatingStageIds,
+    lostStageIds,
+    stageEntryDateEnabled,
+  });
 
   // Sequential tenant queries required: tenantDb is a single transaction client
   // in production, so parallel reads can fail with "client already executing".
@@ -1742,7 +1772,7 @@ export async function getDeals(
   const valueTotalResult = filters.includeValueTotal
     ? await tenantDb
         .select({
-          total: sql<number>`coalesce(sum(${aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds)}), 0)`,
+          total: sql<number>`coalesce(sum(${aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds, estimatingStageIds)}), 0)`,
         })
         .from(deals)
         .where(where)
@@ -3004,6 +3034,9 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   const isWonTerminalStage = WON_TERMINAL_STAGE_SLUGS.includes(
     stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]
   );
+  // 'estimating' stage drill: the value filter below must use the estimating chain (awarded>dd>bid) so it
+  // reconciles with the stage total/sort (which already route through pipelineValueSourceForStageSlug).
+  const isEstimatingStage = stage.slug === ESTIMATING_STAGE_SLUG;
   const stageSlugs = isWonTerminalStage
     ? WON_TERMINAL_STAGE_SLUGS
     : LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
@@ -3079,7 +3112,11 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (presentButMalformed(input.valueMin) || presentButMalformed(input.valueMax)) {
     conditions.push(sql`false`);
   } else if (input.valueMin !== undefined || input.valueMax !== undefined) {
-    const valueExpr = aliasedStageAwareEffectiveDealValueSql("d", isWonTerminalStage ? stageIds : []);
+    const valueExpr = aliasedStageAwareEffectiveDealValueSql(
+      "d",
+      isWonTerminalStage ? stageIds : [],
+      isEstimatingStage ? stageIds : []
+    );
     if (input.valueMin !== undefined && input.valueMax !== undefined) {
       conditions.push(sql`${valueExpr} between ${input.valueMin} and ${input.valueMax}`);
     } else if (input.valueMin !== undefined) {

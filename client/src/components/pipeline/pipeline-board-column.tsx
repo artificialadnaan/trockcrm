@@ -62,6 +62,13 @@ export function PipelineBoardColumn({
     },
   });
   const accent = resolveStageAccent(column.stage, entity);
+  // Stamp the column's canonical stage slug onto each card as a fallback so the per-card effective value
+  // matches the stage-aware column total (e.g. the 'estimating' DD-over-bid rule). The card's own
+  // stageSlug wins when present; the column slug is authoritative when a card row omits it (mirrors
+  // kanban-deal-card). Without this, an estimating card would value open-chain and drift from the total.
+  const cardsWithStage = column.cards.map((record) =>
+    record.stageSlug ? record : { ...record, stageSlug: column.stage.slug }
+  );
   const primaryMetric =
     entity === "deal" ? formatBoardCompactCurrency(column.totalValue ?? 0) : `${column.count} active`;
   const showTerminalFilter =
@@ -127,14 +134,14 @@ export function PipelineBoardColumn({
       {column.cards.length > VIRTUALIZE_CARD_THRESHOLD ? (
         <VirtualizedPipelineCards
           entity={entity}
-          cards={column.cards}
+          cards={cardsWithStage}
           onOpenRecord={onOpenRecord}
           activeRecordId={activeRecordId}
         />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto overscroll-contain bg-white/45 px-3 pb-3 pt-1">
-          {column.cards.length > 0 ? (
-            column.cards.map((record) => (
+          {cardsWithStage.length > 0 ? (
+            cardsWithStage.map((record) => (
               <PipelineRecordCard
                 key={record.id}
                 entity={entity}

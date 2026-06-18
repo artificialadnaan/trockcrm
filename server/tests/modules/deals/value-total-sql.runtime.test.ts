@@ -19,6 +19,7 @@ import { aliasedStageAwareEffectiveDealValueSql } from "../../../src/modules/dea
 
 const dialect = new PgDialect();
 const WON_STAGE_IDS = ["won"];
+const ESTIMATING_STAGE_IDS = ["estimating"];
 
 // stageSlug/workflowRoute drive the CLIENT's Won classification (isGenuineWonDealStageSlug);
 // stage_id IN WON_STAGE_IDS drives the SERVER's. They are aligned here (won rows: slug "won",
@@ -30,6 +31,10 @@ const ROWS = [
   { id: "open_awarded", stage_id: "opportunity", stageSlug: "opportunity", on_hold: false, bid_board_total_sales: 200000, bid_estimate: 100000, dd_estimate: 50000, awarded_amount: 400000, expected: 400000 },
   // open, falls through to dd_estimate
   { id: "open_dd", stage_id: "opportunity", stageSlug: "opportunity", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 80000, awarded_amount: 0, expected: 80000 },
+  // estimating, bid + DD set, no awarded -> DD OUTRANKS bid (awarded>dd>bid), so 200000 not 300000 (2026-06-18 rule)
+  { id: "est_dd", stage_id: "estimating", stageSlug: "estimating", on_hold: false, bid_board_total_sales: 300000, bid_estimate: 280000, dd_estimate: 200000, awarded_amount: 0, expected: 200000 },
+  // estimating, bid only (no DD) -> bid is the FALLBACK, not skipped: 150000 not $0
+  { id: "est_bid_only", stage_id: "estimating", stageSlug: "estimating", on_hold: false, bid_board_total_sales: 150000, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected: 150000 },
   // won, awarded-first picks awarded_amount even though bid_board is also set
   { id: "won_awarded", stage_id: "won", stageSlug: "won", on_hold: false, bid_board_total_sales: 250000, bid_estimate: 0, dd_estimate: 0, awarded_amount: 500000, expected: 500000 },
   // won, awarded missing -> falls back to bid_board within the awarded-first chain
@@ -40,7 +45,7 @@ const ROWS = [
   { id: "zero", stage_id: "opportunity", stageSlug: "opportunity", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected: 0 },
 ];
 
-const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 1,400,000
+const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 1,750,000
 
 let db: PGlite;
 
@@ -72,7 +77,7 @@ afterAll(async () => {
 
 describe("value-total SQL — running-total card reconciliation (#4)", () => {
   it("SUM(stage-aware effective value) over the set equals the hand-computed total", async () => {
-    const expr = dialect.sqlToQuery(aliasedStageAwareEffectiveDealValueSql("deals", WON_STAGE_IDS));
+    const expr = dialect.sqlToQuery(aliasedStageAwareEffectiveDealValueSql("deals", WON_STAGE_IDS, ESTIMATING_STAGE_IDS));
     const { rows } = await db.query<{ total: string }>(
       `SELECT coalesce(sum(${expr.sql}), 0) AS total FROM deals`,
       expr.params as unknown[]
@@ -81,7 +86,7 @@ describe("value-total SQL — running-total card reconciliation (#4)", () => {
   });
 
   it("each row's SQL effective value equals the client's getEffectiveDealValue (display == sum basis)", async () => {
-    const expr = dialect.sqlToQuery(aliasedStageAwareEffectiveDealValueSql("deals", WON_STAGE_IDS));
+    const expr = dialect.sqlToQuery(aliasedStageAwareEffectiveDealValueSql("deals", WON_STAGE_IDS, ESTIMATING_STAGE_IDS));
     const { rows } = await db.query<{ id: string; v: string }>(
       `SELECT id, (${expr.sql}) AS v FROM deals ORDER BY id`,
       expr.params as unknown[]

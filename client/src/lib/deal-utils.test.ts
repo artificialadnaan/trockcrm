@@ -214,6 +214,74 @@ describe("deal value precedence", () => {
   });
 });
 
+describe("estimating-stage value precedence — DD outranks bid (2026-06-18)", () => {
+  it("estimating + bid + DD (no awarded) → DD wins, source 'estimate'", () => {
+    const deal = {
+      stageSlug: "estimating",
+      awardedAmount: null,
+      bidBoardTotalSales: "900000",
+      bidEstimate: "880000",
+      ddEstimate: "800000",
+    };
+    expect(bestEstimate(deal)).toBe(800000);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 800000, source: "estimate" });
+  });
+
+  it("estimating + awarded → awarded still wins", () => {
+    expect(
+      resolveBestEstimate({
+        stageSlug: "estimating",
+        awardedAmount: "950000",
+        bidBoardTotalSales: "900000",
+        ddEstimate: "800000",
+      })
+    ).toEqual({ value: 950000, source: "awarded" });
+  });
+
+  it("estimating + DD only → DD", () => {
+    expect(resolveBestEstimate({ stageSlug: "estimating", ddEstimate: "800000" })).toEqual({
+      value: 800000,
+      source: "estimate",
+    });
+  });
+
+  it("estimating + bid only (no DD) → bid, NOT $0 (bid is the fallback, just outranked by DD)", () => {
+    expect(
+      resolveBestEstimate({
+        stageSlug: "estimating",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: null,
+      })
+    ).toEqual({ value: 900000, source: "bid_board" });
+  });
+
+  it("non-estimating (opportunity) UNCHANGED: bid outranks DD", () => {
+    expect(
+      resolveBestEstimate({
+        stageSlug: "opportunity",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toEqual({ value: 900000, source: "bid_board" });
+  });
+
+  it("service_estimating is EXCLUDED — bid still outranks DD", () => {
+    expect(
+      resolveBestEstimate({
+        stageSlug: "service_estimating",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toEqual({ value: 900000, source: "bid_board" });
+  });
+});
+
 describe("resolveDealValueKind / isLostBidDeal", () => {
   it("classifies a lost deal as 'lost' while preserving its bid value", () => {
     const lost = { bidEstimate: "65600", stageSlug: "lost", workflowRoute: "normal" };

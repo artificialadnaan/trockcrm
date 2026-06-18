@@ -353,3 +353,92 @@ describe("deal hold helpers", () => {
     });
   });
 });
+
+describe("estimating-stage value rule — DD outranks bid (2026-06-18)", () => {
+  it("estimating + bid + DD (no awarded) → DD wins, NOT bid", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "estimating",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toBe(800000);
+  });
+
+  it("estimating + awarded set → awarded still wins over DD and bid", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "estimating",
+        awardedAmount: "950000",
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toBe(950000);
+  });
+
+  it("estimating + DD only → DD", () => {
+    expect(
+      getEffectiveDealValue({ onHold: false, stageSlug: "estimating", ddEstimate: "800000" })
+    ).toBe(800000);
+  });
+
+  it("estimating + bid only (no DD) → bid, NOT $0 (bid is the fallback, just outranked when DD exists)", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "estimating",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: null,
+      })
+    ).toBe(900000);
+    // bid_estimate also still ranks above an absent DD.
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "estimating",
+        bidBoardTotalSales: null,
+        bidEstimate: "880000",
+        ddEstimate: null,
+      })
+    ).toBe(880000);
+  });
+
+  it("non-estimating (opportunity) is UNCHANGED: bid outranks DD (awarded > bid > dd)", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "opportunity",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toBe(900000);
+  });
+
+  it("service_estimating is EXCLUDED from the rule — bid still outranks DD", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "service_estimating",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toBe(900000);
+  });
+
+  it("estimating + on-hold → 0 regardless of DD", () => {
+    expect(
+      getEffectiveDealValue({ onHold: true, stageSlug: "estimating", ddEstimate: "800000" })
+    ).toBe(0);
+  });
+});
