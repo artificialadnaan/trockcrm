@@ -64,15 +64,20 @@ describe("inferFileCategory", () => {
     );
   });
 
-  it("weighs folder path / subcategory above the filename", () => {
-    // folder says contracts, filename is generic -> contract
-    expect(
-      inferFileCategory({ filename: "doc1.pdf", mimeType: "application/pdf", folderPath: "Contracts/2026" })
-    ).toBe("contract");
+  it("weighs the subcategory hint above the filename", () => {
     // subcategory hint wins over a generic filename
     expect(
       inferFileCategory({ filename: "final.pdf", mimeType: "application/pdf", subcategory: "Permit" })
     ).toBe("permit");
+  });
+
+  it("does not over-match the 'CO' abbreviation (co-op / company are not change orders)", () => {
+    const pdf = "application/pdf";
+    // 'co-op-agreement' matches 'agreement' → contract (NOT change_order); the change_order CO patterns
+    // require co+separator+digit or a literal '#'.
+    expect(inferFileCategory({ filename: "co-op-agreement.pdf", mimeType: pdf })).toBe("contract");
+    expect(inferFileCategory({ filename: "co-op.pdf", mimeType: pdf })).toBe("other");
+    expect(inferFileCategory({ filename: "company-profile.pdf", mimeType: pdf })).toBe("other");
   });
 
   it("falls back to other for unknown / unmapped types", () => {

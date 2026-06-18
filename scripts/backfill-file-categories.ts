@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
-import { FILE_CATEGORIES } from "@trock-crm/shared/types";
+import { FILE_CATEGORIES, type FileCategory } from "@trock-crm/shared/types";
 import { inferFileCategory } from "../server/src/modules/files/infer-category.js";
+import { buildFolderPath } from "../server/src/modules/files/file-constants.js";
 
 /**
  * One-off backfill: re-categorize existing files.category='other' rows using the same inferFileCategory
@@ -22,9 +23,9 @@ import { inferFileCategory } from "../server/src/modules/files/infer-category.js
  *  - auditable/reversible: a committed run echoes every applied change to stdout AND writes a JSON
  *    snapshot of the ACTUALLY-applied changes (id, from, to) per office to the OS temp dir (owner-only).
  *
- * Usage:
- *   npm run script scripts/backfill-file-categories.ts            # dry-run (default)
- *   npm run script scripts/backfill-file-categories.ts --commit   # apply
+ * Usage (this script is not registered in scripts/run-script.ts; invoke it directly with tsx):
+ *   node --import tsx scripts/backfill-file-categories.ts            # dry-run (default)
+ *   node --import tsx scripts/backfill-file-categories.ts --commit   # apply
  */
 
 // Office schemas are discovered at runtime (see discoverOfficeSchemas), never hardcoded, so the backfill
@@ -57,12 +58,15 @@ export interface OtherFileRow {
   subcategory: string | null;
   folderPath: string | null;
   changeOrderId: string | null;
+  createdAt: string | Date | null;
 }
 
 export interface PlannedChange {
   id: string;
   from: "other";
   to: string;
+  /** new folder_path matching the inferred category, so the file leaves the catch-all folder */
+  newFolderPath: string;
 }
 
 export interface BackfillPlan {
@@ -81,11 +85,12 @@ export function buildBackfillPlan(rows: OtherFileRow[]): BackfillPlan {
   const byTarget: Record<string, number> = {};
   let skipped = 0;
   for (const row of rows) {
+    // folderPath is intentionally omitted: for category='other' rows it is always the catch-all folder
+    // ("Correspondence"), which would poison every row to `correspondence`. subcategory is the real hint.
     const inferred = inferFileCategory({
       filename: row.originalFilename,
       mimeType: row.mimeType,
       subcategory: row.subcategory,
-      folderPath: row.folderPath,
       changeOrderId: row.changeOrderId,
     });
     // Skip when inference yields 'other' (no-op → idempotent) or — defensively — anything not a valid
@@ -94,7 +99,11 @@ export function buildBackfillPlan(rows: OtherFileRow[]): BackfillPlan {
       skipped += 1;
       continue;
     }
-    willUpdate.push({ id: row.id, from: "other", to: inferred });
+    // Move the file into the folder matching its new category (same buildFolderPath as the upload path)
+    // so the folder view and the type filter agree.
+    const bucketDate = row.createdAt ? new Date(row.createdAt) : undefined;
+    const newFolderPath = buildFolderPath(inferred, row.subcategory ?? undefined, bucketDate);
+    willUpdate.push({ id: row.id, from: "other", to: inferred, newFolderPath });
     byTarget[inferred] = (byTarget[inferred] ?? 0) + 1;
   }
   return { willUpdate, skipped, byTarget };
@@ -140,7 +149,8 @@ export async function fetchOtherFiles(client: QueryClient, schema: string): Prom
             mime_type        AS "mimeType",
             subcategory,
             folder_path      AS "folderPath",
-            change_order_id  AS "changeOrderId"
+            change_order_id  AS "changeOrderId",
+            created_at       AS "createdAt"
        FROM files
       WHERE category = 'other' AND is_active = true`
   );
@@ -174,8 +184,8 @@ export async function runBackfillForSchema(
         // category that has since been set to something other than 'other'. Only rows actually changed
         // (rowCount > 0) are recorded as applied, so the audit snapshot matches what was committed.
         const res = await client.query(
-          "UPDATE files SET category = $1::file_category, updated_at = now() WHERE id = $2 AND category = 'other'",
-          [change.to, change.id]
+          "UPDATE files SET category = $1::file_category, folder_path = $2, updated_at = now() WHERE id = $3 AND category = 'other'",
+          [change.to, change.newFolderPath, change.id]
         );
         if ((res.rowCount ?? 0) > 0) appliedChanges.push(change);
       }
@@ -205,6 +215,13 @@ export function writeBackupSnapshot(result: SchemaResult, mode: BackfillMode, st
   return backupPath;
 }
 
+function buildSslConfig(): false | { rejectUnauthorized: boolean } {
+  // Railway/managed Postgres serves certs that aren't in the default CA bundle, so verification is off
+  // by default (matching the other backfill scripts). Set DATABASE_SSL_VERIFY=true to enforce it where
+  // the CA is trusted.
+  return process.env.DATABASE_SSL_VERIFY === "true" ? { rejectUnauthorized: true } : { rejectUnauthorized: false };
+}
+
 function resolveDatabaseUrl(): string {
   const url =
     process.env.CRM_DATABASE_URL?.trim() ||
@@ -224,7 +241,7 @@ export async function main(argv = process.argv): Promise<void> {
 
   const client = new pg.Client({
     connectionString: resolveDatabaseUrl(),
-    ssl: { rejectUnauthorized: false },
+    ssl: buildSslConfig(),
   });
   await client.connect();
 

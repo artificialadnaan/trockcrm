@@ -15,6 +15,7 @@ function row(over: Partial<OtherFileRow> & { id: string }): OtherFileRow {
     subcategory: null,
     folderPath: null,
     changeOrderId: null,
+    createdAt: null,
     ...over,
   };
 }
@@ -23,6 +24,8 @@ interface FakeOpts {
   otherRows: OtherFileRow[];
   before: Record<string, number>;
   after?: Record<string, number>;
+  /** rowCount the guarded UPDATE returns (default 1; 0 simulates a concurrent modification). */
+  updateRowCount?: number;
 }
 
 function createFakeClient(opts: FakeOpts) {
@@ -40,7 +43,7 @@ function createFakeClient(opts: FakeOpts) {
         return { rows: Object.entries(src).map(([category, count]) => ({ category, count })), rowCount: null };
       }
       if (t.startsWith("SELECT id")) return { rows: opts.otherRows, rowCount: opts.otherRows.length };
-      if (t.startsWith("UPDATE files")) return { rows: [], rowCount: 1 };
+      if (t.startsWith("UPDATE files")) return { rows: [], rowCount: opts.updateRowCount ?? 1 };
       throw new Error(`Unexpected query: ${t}`);
     },
   };
@@ -63,9 +66,9 @@ describe("backfill-file-categories", () => {
       row({ id: "d", originalFilename: "scan.pdf", mimeType: "application/pdf", changeOrderId: "co-9" }),
     ]);
     expect(plan.willUpdate).toEqual([
-      { id: "a", from: "other", to: "contract" },
-      { id: "b", from: "other", to: "photo" },
-      { id: "d", from: "other", to: "change_order" },
+      { id: "a", from: "other", to: "contract", newFolderPath: "Contracts" },
+      { id: "b", from: "other", to: "photo", newFolderPath: "Photos" },
+      { id: "d", from: "other", to: "change_order", newFolderPath: "Change Orders" },
     ]);
     expect(plan.skipped).toBe(1);
     expect(plan.byTarget).toEqual({ contract: 1, photo: 1, change_order: 1 });
@@ -98,14 +101,16 @@ describe("backfill-file-categories", () => {
 
     // Only the row the UPDATE actually changed (rowCount > 0) is recorded as applied — this is the
     // basis for the audit snapshot, so it matches what was committed.
-    expect(result.appliedChanges).toEqual([{ id: "a", from: "other", to: "contract" }]);
+    expect(result.appliedChanges).toEqual([{ id: "a", from: "other", to: "contract", newFolderPath: "Contracts" }]);
     expect(result.after).toEqual({ other: 1, contract: 1 });
 
     const updates = queries.filter((q) => q.text.trim().startsWith("UPDATE files"));
     expect(updates).toHaveLength(1);
     // Data-integrity guard: the write is scoped to category='other' so it never clobbers a set category.
     expect(updates[0].text).toContain("category = 'other'");
-    expect(updates[0].params).toEqual(["contract", "a"]);
+    // Also moves the file into the folder matching its new category (id is the final param).
+    expect(updates[0].text).toContain("folder_path = $2");
+    expect(updates[0].params).toEqual(["contract", "Contracts", "a"]);
     // Transactional
     expect(queries.some((q) => q.text.trim() === "BEGIN")).toBe(true);
     expect(queries.some((q) => q.text.trim() === "COMMIT")).toBe(true);
@@ -118,6 +123,20 @@ describe("backfill-file-categories", () => {
     expect(result.plan.willUpdate).toHaveLength(0);
     expect(queries.some((q) => q.text.trim().startsWith("UPDATE"))).toBe(false);
     expect(queries.some((q) => q.text.trim() === "BEGIN")).toBe(false);
+  });
+
+  it("excludes rows the guarded UPDATE did not change (concurrent modification → rowCount 0)", async () => {
+    const { client } = createFakeClient({
+      otherRows: [row({ id: "a", originalFilename: "Master Contract.pdf", mimeType: "application/pdf" })],
+      before: { other: 1 },
+      after: { other: 1 },
+      updateRowCount: 0, // the row's category changed between SELECT and UPDATE → guard matches 0 rows
+    });
+    const result = await runBackfillForSchema(client, "office_dallas", "commit");
+    // Planned, but the guard prevented the write, so it's NOT recorded as applied (and the audit
+    // snapshot, built from appliedChanges, won't list it → a revert can't clobber the concurrent value).
+    expect(result.plan.willUpdate).toHaveLength(1);
+    expect(result.appliedChanges).toHaveLength(0);
   });
 
   it("discovers office_* schemas at runtime and ignores non-office namespaces", async () => {

@@ -144,6 +144,7 @@ router.post("/upload-url", async (req, res, next) => {
       mimeType,
       fileSizeBytes,
       category,
+      autoCategorize,
       subcategory,
       dealId,
       leadId,
@@ -154,11 +155,15 @@ router.post("/upload-url", async (req, res, next) => {
       tags,
     } = req.body;
 
-    if (!originalFilename || !mimeType || !fileSizeBytes || !category) {
+    // "Auto-detect": the client didn't choose a category, so the server infers it. Otherwise a category
+    // is required + validated and the explicit choice (incl. "other"/Uncategorized) is respected.
+    const autoDetect = autoCategorize === true;
+
+    if (!originalFilename || !mimeType || !fileSizeBytes || (!autoDetect && !category)) {
       throw new AppError(400, "originalFilename, mimeType, fileSizeBytes, and category are required.");
     }
 
-    if (!FILE_CATEGORIES.includes(category)) {
+    if (!autoDetect && !FILE_CATEGORIES.includes(category)) {
       throw new AppError(400, `Invalid category "${category}". Valid: ${FILE_CATEGORIES.join(", ")}`);
     }
 
@@ -178,7 +183,8 @@ router.post("/upload-url", async (req, res, next) => {
         originalFilename,
         mimeType,
         fileSizeBytes: Number(fileSizeBytes),
-        category: category as FileCategory,
+        category: (autoDetect ? "other" : category) as FileCategory,
+        autoCategorize: autoDetect,
         subcategory,
         dealId,
         leadId,
@@ -212,11 +218,14 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
     const tagsRaw = req.headers["x-file-tags"] as string | undefined;
     const tags = tagsRaw ? tagsRaw.split(",") : undefined;
 
-    if (!originalFilename || !category) {
+    // "Auto-detect" via header: infer when the client didn't pick a category; otherwise require + respect.
+    const autoDetect = (req.headers["x-auto-categorize"] as string) === "true";
+
+    if (!originalFilename || (!autoDetect && !category)) {
       throw new AppError(400, "x-original-filename and x-file-category headers are required.");
     }
 
-    if (!FILE_CATEGORIES.includes(category as any)) {
+    if (!autoDetect && !FILE_CATEGORIES.includes(category as any)) {
       throw new AppError(400, `Invalid category "${category}".`);
     }
 
@@ -242,7 +251,8 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
         originalFilename,
         mimeType,
         fileSizeBytes: body.length,
-        category: category as FileCategory,
+        category: (autoDetect ? "other" : category) as FileCategory,
+        autoCategorize: autoDetect,
         subcategory: subcategory || undefined,
         dealId,
         leadId,

@@ -282,7 +282,8 @@ describe("FilesPage", () => {
     });
 
     expect(mounted.container.textContent).toContain("Upload Dropzone");
-    expect(mocks.fileUploadZoneMock).toHaveBeenCalledWith(expect.objectContaining({ category: "other" }));
+    // The upload category now defaults to "auto" (Auto-detect → server infers the document type).
+    expect(mocks.fileUploadZoneMock).toHaveBeenCalledWith(expect.objectContaining({ category: "auto" }));
   });
 
   it("file card shows correct metadata", () => {

@@ -3,9 +3,9 @@ import type { FileCategory } from "@trock-crm/shared/types";
 /**
  * Pure document-type inference for `files.category`.
  *
- * Maps the available per-file signals (filename, MIME type, subcategory, folder path, change-order FK)
- * to a valid `FILE_CATEGORIES` enum member. It ALWAYS returns a valid member; `"other"` is the safe
- * fallback (it never throws on unknown/empty input).
+ * Maps the available per-file signals (filename, MIME type, subcategory, change-order FK) to a valid
+ * `FILE_CATEGORIES` enum member. It ALWAYS returns a valid member; `"other"` is the safe fallback (it
+ * never throws on unknown/empty input).
  *
  * Used by:
  *  - the manual-upload path (`requestUploadUrl`) — only when the caller's category is `"other"` (the
@@ -16,7 +16,8 @@ import type { FileCategory } from "@trock-crm/shared/types";
  * Design notes:
  *  - Images are photos: an image MIME (or image extension) ALWAYS wins as `"photo"` before any filename
  *    keyword, so a `contract.jpg` scan is treated as a photo, never mis-filed under a document filter.
- *  - Semantic location (folder path + subcategory) is a stronger signal than the filename.
+ *  - The user's subcategory hint is a stronger signal than the filename. (folderPath is intentionally
+ *    excluded — see the note on InferFileCategoryInput.)
  *  - There is no `drawing`/`plan` enum member (so `.dwg/.dxf` → `other`) and no `report` member (so
  *    generated "Photo Report" PDFs stay `other`).
  */
@@ -25,12 +26,15 @@ export interface InferFileCategoryInput {
   /** Original filename or display name. */
   filename?: string | null;
   mimeType?: string | null;
+  /** User-supplied subcategory hint (e.g. "Permit"). A real signal — unlike folderPath. */
   subcategory?: string | null;
-  /** Present on existing rows (backfill). Derived-from-category at upload, so usually absent there. */
-  folderPath?: string | null;
   /** Explicit change-order link — the strongest `change_order` signal. Present on existing rows. */
   changeOrderId?: string | null;
 }
+// NOTE: folderPath is deliberately NOT a signal. It is DERIVED from the category (CATEGORY_TO_FOLDER),
+// and for the only rows we ever infer (category='other') it is always the catch-all folder
+// "Correspondence" — which would poison every such file to `correspondence`. The user's subcategory
+// hint (carried separately) is the real folder-level signal.
 
 const IMAGE_EXTENSIONS = new Set([
   "jpg",
@@ -99,11 +103,10 @@ export function inferFileCategory(input: InferFileCategoryInput): FileCategory {
     return "change_order";
   }
 
-  // 3. Semantic location (folder path + subcategory) outranks the filename.
-  const semantic = [input.folderPath, input.subcategory].filter(Boolean).join(" ").toLowerCase();
-  const fromSemantic = matchKeyword(semantic);
-  if (fromSemantic) {
-    return fromSemantic;
+  // 3. The user's subcategory hint outranks the filename.
+  const fromSubcategory = matchKeyword((input.subcategory ?? "").toLowerCase());
+  if (fromSubcategory) {
+    return fromSubcategory;
   }
 
   const fromFilename = matchKeyword(filename.toLowerCase());
