@@ -14,7 +14,6 @@ const QUARANTINE = [
   "tests/field-route-policy.test.ts",
   "tests/modules/commissions/reporting.test.ts",
   "tests/modules/dashboard/at-risk-summary.test.ts",
-  "tests/modules/dashboard/routes.test.ts",
   "tests/modules/dashboard/won-close-hs-date.test.ts",
   "tests/modules/deals/board-service.test.ts",
   "tests/modules/deals/pipeline-team-scope.test.ts",
