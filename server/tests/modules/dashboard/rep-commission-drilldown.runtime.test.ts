@@ -267,7 +267,8 @@ describe("Won-but-missing-contract worklist", () => {
 describe("View-as-rep is read-only: skipSnapshotRefresh does not mutate the rep's snapshots", () => {
   async function snapshotCount(repId: string): Promise<number> {
     const res = await pg.query<{ n: number }>(
-      `SELECT count(*)::int AS n FROM commission_deal_snapshots WHERE rep_user_id = '${repId}'`
+      `SELECT count(*)::int AS n FROM commission_deal_snapshots WHERE rep_user_id = $1`,
+      [repId]
     );
     return Number(res.rows[0]?.n ?? 0);
   }
