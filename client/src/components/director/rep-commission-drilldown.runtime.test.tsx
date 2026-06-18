@@ -256,7 +256,7 @@ describe("RepCommissionDrilldown — view as rep", () => {
         period: "ytd",
         summary: { earned: 6000, inPipeline: 2000, totalPotential: 8000, openDealCount: 3 },
         stageTotals: [
-          { stageKey: "won", stageName: "Earned", commission: 6000, dealValue: 80000, dealCount: 2, percentOfTotal: 75 },
+          { stageKey: "won", stageName: "Won", commission: 6000, dealValue: 80000, dealCount: 2, percentOfTotal: 75 },
         ],
         deals: [
           { dealId: "d-1", dealName: "Riverside Reroof", dealNumber: "D-1", companyName: "Acme", commission: 6000, isEarned: true, stageName: "Won" },
@@ -281,6 +281,9 @@ describe("RepCommissionDrilldown — view as rep", () => {
     // The contributing-deals list renders (faithful mirror — earned + open pipeline), not just stage totals.
     expect(text).toContain("Riverside Reroof");
     expect(text).toContain("Open Pipeline Job");
+    // Relabel: the view-as-rep mirror shows "Won" (KPI label, stage row, earned-deal badge), never "Earned".
+    expect(text).toContain("Won");
+    expect(text).not.toContain("Earned");
     cleanup();
   });
 

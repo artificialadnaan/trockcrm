@@ -60,7 +60,16 @@ export function LoginPage() {
               {submitting ? "Signing in..." : "Sign In"}
             </Button>
           </form>
-          <p className="mt-5 text-center text-sm text-muted-foreground">Forgot password? Contact your administrator.</p>
+          <p className="mt-5 text-center text-sm text-muted-foreground">
+            Forgot password?{" "}
+            <a
+              className="font-medium text-foreground underline underline-offset-4 hover:opacity-80"
+              href="mailto:aiqbal@trockgc.com?subject=Password%20reset%20request"
+            >
+              Contact your administrator
+            </a>
+            .
+          </p>
         </div>
       </section>
     </main>

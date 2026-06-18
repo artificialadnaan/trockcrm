@@ -50,7 +50,7 @@ export function TeamCommissionsPage() {
               <thead>
                 <tr className="border-b border-slate-200 text-xs uppercase tracking-[0.14em] text-slate-500">
                   <th className="px-3 py-2 text-left">Rep</th>
-                  <th className="px-3 py-2 text-right">Earned</th>
+                  <th className="px-3 py-2 text-right">Won</th>
                   <th className="px-3 py-2 text-right">Potential</th>
                   <th className="px-3 py-2 text-right">Active Deals</th>
                   <th className="px-3 py-2 text-right">Pipeline</th>

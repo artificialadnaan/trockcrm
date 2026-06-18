@@ -218,7 +218,7 @@ export function RepCommissionDrilldown({
                     <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
                       <th className="px-3 py-2 text-left">Deal</th>
                       <th className="px-3 py-2 text-left">Cut</th>
-                      <th className="px-3 py-2 text-right">Earned</th>
+                      <th className="px-3 py-2 text-right">Won</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -459,7 +459,7 @@ function RepViewPanel({
       ) : view ? (
         <div className="space-y-4">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <SplitStat label="Earned" value={view.summary.earned} sub="locked in" strong />
+            <SplitStat label="Won" value={view.summary.earned} sub="locked in" strong />
             <SplitStat
               label="In pipeline"
               value={view.summary.inPipeline}
@@ -527,7 +527,7 @@ function RepViewPanel({
                               : "bg-slate-100 text-slate-600 ring-slate-200"
                           )}
                         >
-                          {deal.isEarned ? "Earned" : deal.stageName}
+                          {deal.isEarned ? "Won" : deal.stageName}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-right font-medium text-slate-900">

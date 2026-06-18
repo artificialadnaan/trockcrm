@@ -64,7 +64,7 @@ const STAGE_ORDER: CommissionStage[] = ["won", "contract", "estimate_sent", "est
 
 const STAGE_META: Record<CommissionStage, { label: string; description: string; dot: string; bar: string; pill: string }> = {
   won: {
-    label: "Earned",
+    label: "Won",
     description: "Contract signed · locked in",
     dot: "bg-emerald-500",
     bar: "bg-emerald-500",
@@ -159,7 +159,7 @@ function csvRows(deals: CommissionDeal[]) {
     company: deal.companyName ?? "",
     property: deal.propertyName ?? deal.propertyAddress ?? "",
     stage: STAGE_META[deal.stageKey].label,
-    status: deal.isEarned ? "Earned" : "Pipeline",
+    status: deal.isEarned ? "Won" : "Pipeline",
     dealValue: deal.dealValue.toFixed(2),
     rate: (deal.commissionRate * 100).toFixed(2),
     commission: deal.commission.toFixed(2),
@@ -365,7 +365,7 @@ export function RepCommissionsPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3" aria-label="Commission KPI cards">
         <MetricCard
-          eyebrow="Earned"
+          eyebrow="Won"
           value={loading ? "$0.00" : money(dashboard.summary.earned)}
           badge="Contract signed"
           caption="Locked in this period"

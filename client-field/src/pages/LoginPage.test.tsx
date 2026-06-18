@@ -68,4 +68,12 @@ describe("LoginPage", () => {
 
     await vi.waitFor(() => expect(node.textContent).toContain("Invalid email or password"));
   });
+
+  it("renders the forgot-password admin contact as a real mailto link (no self-service reset exists)", async () => {
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.querySelector('a[href^="mailto:aiqbal@trockgc.com"]')).not.toBeNull());
+    const link = node.querySelector<HTMLAnchorElement>('a[href^="mailto:aiqbal@trockgc.com"]');
+    expect(link?.textContent).toContain("Contact your administrator");
+    expect(node.textContent).toContain("Forgot password?");
+  });
 });

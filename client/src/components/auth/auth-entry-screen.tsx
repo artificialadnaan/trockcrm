@@ -135,6 +135,16 @@ export function AuthEntryScreen() {
               )}
             </Button>
           </form>
+          <p className="mt-5 text-center text-sm text-slate-500">
+            Forgot password?{" "}
+            <a
+              className="font-semibold text-brand-red underline underline-offset-4 hover:text-red-800"
+              href="mailto:aiqbal@trockgc.com?subject=Password%20reset%20request"
+            >
+              Contact your administrator
+            </a>
+            .
+          </p>
         </div>
       </section>
     </main>
