@@ -3508,21 +3508,6 @@ export async function setDealEstimator(
       );
     }
 
-    // P1: a Bid-Board-owned deal sources its estimator from the Procore/Bid Board mirror. The next sync
-    // (buildBidBoardMirrorFieldChanges) overwrites estimator_user_id DIRECTLY with NO commission
-    // re-attribution, so a manual pick here would mint/strip a deal_signed_commissions row and then be
-    // silently reverted — leaving the dsc row attributed to the manually-picked estimator while the deal
-    // points at the Bid Board one. Block the manual edit at the authoritative layer (a direct API call,
-    // not just the UI). is_bid_board_owned is the canonical ownership column the mirror itself stamps
-    // (bid-board-sync sets it true on every mirrored deal); BB deals get their estimator from the sync.
-    if (existing.isBidBoardOwned === true) {
-      throw new AppError(
-        409,
-        "Estimator on a Bid Board-owned deal is managed by the Bid Board sync and can't be edited here.",
-        "BID_BOARD_OWNED_ESTIMATOR_LOCKED"
-      );
-    }
-
     const oldEstimator = existing.estimatorUserId ?? null;
     const newEstimator = newEstimatorUserId ?? null;
     const owner = existing.assignedRepId ?? null;
@@ -3531,6 +3516,24 @@ export async function setDealEstimator(
     // re-evaluated, so it stands even if that estimator's rate was later deactivated.
     if (oldEstimator === newEstimator) {
       return existing;
+    }
+
+    // P1 — Bid-Board-owned estimator policy, NARROWED to FIRST-FILL only (money-attribution decision).
+    // The Bid Board sync OWNS the INITIAL estimator on a BB-owned deal: it stamps estimator_user_id from
+    // the Procore/Bid Board mirror. #741 made that sync EMPTIES-ONLY, so it NEVER clobbers a non-null
+    // estimator_user_id — which means a human CORRECTION sticks and the dsc row stays consistent (the old
+    // desync risk only existed when the sync could overwrite a manual value, which it no longer can).
+    // So a blanket lock is now both REDUNDANT (the sync can't revert a non-null correction) and HARMFUL
+    // (it would also forbid the human from ever fixing a wrong estimator). Block ONLY the first fill:
+    // sync owns the initial value, humans own corrections. We're past the no-op short-circuit here, so
+    // oldEstimator === null guarantees this is a null -> non-null first fill (a null -> null no-op already
+    // returned above; an existing non-null estimator — a correction or a clear — is allowed through).
+    if (existing.isBidBoardOwned === true && oldEstimator === null) {
+      throw new AppError(
+        409,
+        "The first estimator on a Bid Board-owned deal is set by the Bid Board sync; you can correct it once it's set, but not assign the initial value here.",
+        "BID_BOARD_OWNED_ESTIMATOR_LOCKED"
+      );
     }
 
     // A NEW estimator must be an active user with access to the ACTIVE SELECTED office (x-office-id, which

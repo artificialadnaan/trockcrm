@@ -509,10 +509,27 @@ describe("DealDetailPage estimator picker", () => {
     expect(html).not.toContain("— None —");
   });
 
-  // P1: a Bid Board-owned deal's estimator comes from the Procore/Bid Board mirror and the server 409s
-  // (BID_BOARD_OWNED_ESTIMATOR_LOCKED) on any edit, so even a director must see it READ-ONLY with the
-  // managed-by-sync note — never an editable control.
-  it("renders the estimator read-only with a managed-by-sync note on a Bid Board-owned deal (even for directors)", () => {
+  // P1 (narrowed): on a Bid Board-owned deal the sync owns the INITIAL estimator (server 409s only on the
+  // first fill). With NO estimator set yet, even a director sees it READ-ONLY with the sync note.
+  it("renders the estimator read-only with a sync note on a Bid Board-owned deal with NO estimator yet (first fill, even for directors)", () => {
+    mocks.useAuthMock.mockReturnValueOnce({ user: { id: "director-1", role: "director", activeOfficeId: "office-1" } });
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ isBidBoardOwned: true, estimatorUserId: null, estimatorUserName: null }),
+    });
+
+    const html = renderPage();
+    expect(html).toContain("The initial estimator is set by the Bid Board sync.");
+    expect(html).not.toContain('aria-label="Edit estimator"');
+    expect(html).not.toContain("— None —");
+  });
+
+  // P1 (narrowed): once the sync HAS set an estimator on a Bid Board-owned deal, a director may CORRECT it —
+  // the picker becomes editable (#741's empties-only sync keeps the correction stuck). The read-only sync
+  // note is gone and the editable <select> (incl. the — None — clear option) is rendered.
+  it("renders the EDITABLE estimator picker on a Bid Board-owned deal that already has an estimator (correction)", () => {
     mocks.useAuthMock.mockReturnValueOnce({ user: { id: "director-1", role: "director", activeOfficeId: "office-1" } });
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
@@ -522,10 +539,9 @@ describe("DealDetailPage estimator picker", () => {
     });
 
     const html = renderPage();
-    expect(html).toContain("Casey Estimator");
-    expect(html).toContain("Managed by the Bid Board sync.");
-    expect(html).not.toContain('aria-label="Edit estimator"');
-    expect(html).not.toContain("— None —");
+    expect(html).toContain('aria-label="Edit estimator"');
+    expect(html).toContain("— None —");
+    expect(html).not.toContain("The initial estimator is set by the Bid Board sync.");
   });
 
   // P1 regression: a plain (non-Bid-Board, non-CO) deal still shows the editable picker for a director.

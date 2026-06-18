@@ -437,15 +437,16 @@ describe("setDealEstimator — Codex findings (runtime)", () => {
     expect(dealWhereSql).toContain("is_active");
   });
 
-  // P1 — Bid-Board-owned reject
-  it("rejects a Bid-Board-owned deal with 409 BID_BOARD_OWNED_ESTIMATOR_LOCKED — no estimator change, no dsc mutation", async () => {
-    // A Bid-Board-owned deal sources its estimator from the Procore/Bid Board mirror, which overwrites
-    // estimator_user_id directly with NO commission re-attribution. A manual pick here would mint/strip a
-    // dsc row that the next sync silently reverts, leaving the dsc row attributed to the wrong estimator —
-    // so setDealEstimator must reject the edit at the authoritative (service) layer, not just the UI.
+  // P1 — Bid-Board-owned estimator policy, NARROWED to FIRST-FILL only.
+  // The Bid Board sync OWNS the initial estimator; #741 made that sync empties-only, so it can never
+  // clobber a human-set non-null value. So the lock blocks ONLY the first fill (existing estimator null),
+  // and humans may CORRECT or CLEAR an already-set estimator.
+
+  // Block: a FIRST-FILL on a BB-owned deal (no existing estimator) is reserved for the sync.
+  it("blocks the FIRST FILL on a Bid-Board-owned deal (null estimator) with 409 — no change, no dsc mutation", async () => {
     const db = makeTenantDb({
       id: "d",
-      estimatorUserId: "est-existing",
+      estimatorUserId: null, // no estimator yet → the sync owns this initial fill
       assignedRepId: OWNER,
       isBidBoardOwned: true,
     });
@@ -457,11 +458,54 @@ describe("setDealEstimator — Codex findings (runtime)", () => {
     expect(db._state.lockedSelects).toBe(1);
     // estimator_user_id is untouched and NO dsc mutation fired.
     expect(db._state.updateCalls).toHaveLength(0);
-    expect(db._state.deal.estimatorUserId).toBe("est-existing");
+    expect(db._state.deal.estimatorUserId).toBeNull();
     expect(db._state.auditInserts).toHaveLength(0);
     expect(commissions.mintEstimatorCommissionForDeal).not.toHaveBeenCalled();
     expect(commissions.removeEstimatorCommissionForDeal).not.toHaveBeenCalled();
     expect(commissions.removeCommissionForDeal).not.toHaveBeenCalled();
+  });
+
+  // Allow: a CORRECTION on a BB-owned deal (an estimator is already set) — the human-owned path. #741
+  // guarantees the empties-only sync won't revert the corrected non-null value, so the dsc row stays
+  // consistent. The dsc is re-attributed from the old estimator to the new one.
+  it("ALLOWS a correction on a Bid-Board-owned deal (existing non-null estimator) and re-attributes the dsc", async () => {
+    const db = makeTenantDb({
+      id: "d",
+      estimatorUserId: "est-existing", // already set → human may correct it
+      assignedRepId: OWNER,
+      isBidBoardOwned: true,
+    });
+    const result = await setDealEstimator(db, "d", B, OWNER, "o1");
+    expect((result as { estimatorUserId?: string | null }).estimatorUserId).toBe(B);
+    expect(db._state.updateCalls[0]?.estimatorUserId).toBe(B);
+    // Departing estimator's scoped row removed, new estimator minted.
+    expect(commissions.removeEstimatorCommissionForDeal).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ dealId: "d", estimatorUserId: "est-existing" }),
+    );
+    expect(commissions.mintEstimatorCommissionForDeal).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ dealId: "d", estimatorUserId: B }),
+    );
+  });
+
+  // Allow: CLEARING an already-set estimator on a BB-owned deal (non-null → null) — the existing value is
+  // non-null, so it's not a first fill. The departing estimator's dsc row is removed; nothing is minted.
+  it("ALLOWS clearing an existing estimator on a Bid-Board-owned deal (non-null → null)", async () => {
+    const db = makeTenantDb({
+      id: "d",
+      estimatorUserId: "est-existing",
+      assignedRepId: OWNER,
+      isBidBoardOwned: true,
+    });
+    const result = await setDealEstimator(db, "d", null, OWNER, "o1");
+    expect((result as { estimatorUserId?: string | null }).estimatorUserId).toBeNull();
+    expect(db._state.updateCalls[0]?.estimatorUserId).toBeNull();
+    expect(commissions.removeEstimatorCommissionForDeal).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ dealId: "d", estimatorUserId: "est-existing" }),
+    );
+    expect(commissions.mintEstimatorCommissionForDeal).not.toHaveBeenCalled();
   });
 
   // P1 — regression: a NON-Bid-Board deal still accepts the estimator edit (the guard is scoped).

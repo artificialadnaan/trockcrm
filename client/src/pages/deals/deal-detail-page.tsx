@@ -1190,14 +1190,15 @@ function DealRightRail({
                     Inherited from the parent deal.
                   </p>
                 </div>
-              ) : estimatorBidBoardOwned ? (
-                // P1: a Bid Board-owned deal's estimator comes from the Procore/Bid Board mirror and the
-                // server 409s (BID_BOARD_OWNED_ESTIMATOR_LOCKED) on any edit, so show it READ-ONLY with a
-                // managed-by-sync note instead of an editable picker — even for a director.
+              ) : estimatorBidBoardOwned && !deal.estimatorUserId ? (
+                // P1 (narrowed): on a Bid Board-owned deal the sync OWNS the INITIAL estimator — the server
+                // 409s (BID_BOARD_OWNED_ESTIMATOR_LOCKED) only on the FIRST fill. While none is set yet, show
+                // read-only with a managed-by-sync note. Once the sync has set one, the picker below becomes
+                // editable so a director can CORRECT it (#741's empties-only sync keeps the correction stuck).
                 <div className="space-y-1">
                   <span>{estimatorName}</span>
                   <p className="text-xs italic text-slate-500">
-                    Managed by the Bid Board sync.
+                    The initial estimator is set by the Bid Board sync.
                   </p>
                 </div>
               ) : canEditEstimator ? (
