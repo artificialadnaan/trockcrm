@@ -1025,7 +1025,7 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
           return recountColumnFromCards(column, cards);
         });
     },
-    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, dashboardView.listBaseFilters, search]
+    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, search]
   );
   const unsearchedColumns = useMemo(() => {
     if (dashboardView.boardStageSlugs.length > 0) {
