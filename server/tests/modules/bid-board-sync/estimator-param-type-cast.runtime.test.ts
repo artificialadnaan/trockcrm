@@ -101,7 +101,7 @@ beforeAll(async () => {
       updated_at timestamptz DEFAULT now()
     );
   `);
-});
+}, 30000); // PGlite cold-start can exceed the default 10s hook timeout when runtime suites start in parallel
 
 afterAll(async () => {
   await pg?.close?.();
