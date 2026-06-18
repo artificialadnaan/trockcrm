@@ -607,6 +607,40 @@ describe("DealForm direct-create context", () => {
     expect(payload).not.toHaveProperty("propertyId");
   });
 
+  it("keeps the DD Estimate input editable on a Bid Board-owned deal while Bid Estimate stays locked (2026-06-18)", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderEditForm({
+      id: "deal-bbo-dd",
+      dealNumber: "DFW-1-09997-aa",
+      name: "Bid Board DD Edit",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: null,
+      propertyId: null,
+      sourceLeadId: null,
+      isBidBoardOwned: true,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+
+    const ddInput = container.querySelector<HTMLInputElement>("#ddEstimate");
+    const bidInput = container.querySelector<HTMLInputElement>("#bidEstimate");
+    expect(ddInput).not.toBeNull();
+    // DD is editable even on a bid-board-owned deal; a manual edit is kept by dd_estimate_overridden (0164).
+    expect(ddInput?.disabled).toBe(false);
+    // Bid Estimate stays Procore-owned / locked.
+    expect(bidInput?.disabled).toBe(true);
+  });
+
   it("saves a company-only fill-in on an existing deal without requiring a property", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],

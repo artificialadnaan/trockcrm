@@ -100,11 +100,13 @@ function currentValueForRow(row: {
   awardedAmount?: string | number | null;
 }) {
   if (row.onHold) return 0;
+  // Unified awarded-first priority (mirrors deal-value-sql.ts DEAL_VALUE_PRIORITY_CHAIN):
+  // awarded > bid_board_total_sales > bid_estimate > dd_estimate, each gated > 0.
   const value = [
+    row.awardedAmount,
     row.bidBoardTotalSales,
     row.bidEstimate,
     row.ddEstimate,
-    row.awardedAmount,
   ]
     .map((candidate) => Number(candidate ?? 0))
     .find((candidate) => Number.isFinite(candidate) && candidate > 0);
@@ -685,14 +687,14 @@ describe("getDealsForPipeline", () => {
     expect(selectedSqlText(lostSummaryChain, "totalValue")).toContain("filter");
     expect(selectedSqlText(lostSummaryChain, "totalValue")).toContain("on_hold");
     expectSqlTermsInOrder(selectedSqlText(lostSummaryChain, "totalValue"), [
+      "awarded_amount",
       "bid_board_total_sales",
       "bid_estimate",
       "dd_estimate",
-      "awarded_amount",
     ]);
   });
 
-  it("uses active-pipeline current value source for lost terminal totals without changing the counted row set", async () => {
+  it("uses the unified awarded-first value chain for lost terminal totals without changing the counted row set", async () => {
     dbState.responses = [
       [
         {
@@ -741,7 +743,8 @@ describe("getDealsForPipeline", () => {
       },
     ];
     const activeLostCount = lostDeals.filter((deal) => !deal.onHold).length;
-    const currentValueTotal = 1000 + 2000 + 0;
+    // Unified awarded-first: deal1 awarded=100, deal2 awarded=200, deal3 all unset (0), deal4 on-hold (0).
+    const currentValueTotal = 100 + 200 + 0;
     const tenantChains: any[] = [];
     const tenantDb = {
       select: vi.fn((...selectArgs: unknown[]) => {
@@ -776,10 +779,10 @@ describe("getDealsForPipeline", () => {
     const lostSummaryChain = findStageSummaryChain(tenantChains, "stage-lost");
     const lostTotalValueSql = selectedSqlText(lostSummaryChain, "totalValue");
     expectSqlTermsInOrder(lostTotalValueSql, [
+      "awarded_amount",
       "bid_board_total_sales",
       "bid_estimate",
       "dd_estimate",
-      "awarded_amount",
     ]);
     expect(lostTotalValueSql).toContain("filter");
     expect(lostTotalValueSql).toContain("on_hold");
@@ -792,7 +795,7 @@ describe("getDealsForPipeline", () => {
     });
   });
 
-  it("keeps lost board and stage drill-down totals aligned on the current value source", async () => {
+  it("keeps lost board and stage drill-down totals aligned on the unified awarded-first value chain", async () => {
     const stageRows = [
       {
         id: "stage-lost",
@@ -945,19 +948,19 @@ describe("getDealsForPipeline", () => {
     const stageRowsSql = executedSql[1] ?? "";
     for (const sqlText of [boardTotalValueSql, stageCountSql]) {
       expectSqlTermsInOrder(sqlText, [
+        "awarded_amount",
         "bid_board_total_sales",
         "bid_estimate",
         "dd_estimate",
-        "awarded_amount",
       ]);
       expect(sqlText).toContain("on_hold");
     }
     const stageRowsOrderSql = orderBySql(stageRowsSql);
     expectSqlTermsInOrder(stageRowsOrderSql, [
+      "awarded_amount",
       "bid_board_total_sales",
       "bid_estimate",
       "dd_estimate",
-      "awarded_amount",
     ]);
     expect(stageRowsOrderSql).toContain("case when d.on_hold then 0");
     expect(stageRowsOrderSql).toContain("order by");

@@ -32,7 +32,7 @@ describe("deal hold helpers", () => {
     ).toBe(875000);
   });
 
-  it("prefers the synced Bid Board or bid value over awarded amount for generic open-deal value", () => {
+  it("prefers awarded amount over synced Bid Board/bid for generic deal value (unified awarded-first 2026-06-18)", () => {
     expect(
       getEffectiveDealValue({
         onHold: false,
@@ -41,7 +41,7 @@ describe("deal hold helpers", () => {
         awardedAmount: "2.97",
         ddEstimate: "3.00",
       })
-    ).toBe(16137.14);
+    ).toBe(2.97);
 
     expect(
       getEffectiveDealValue({
@@ -50,17 +50,17 @@ describe("deal hold helpers", () => {
         awardedAmount: "2.97",
         ddEstimate: "3.00",
       })
-    ).toBe(16137.14);
+    ).toBe(2.97);
   });
 
-  it("skips zero and negative current values before falling through", () => {
+  it("skips zero and negative values (incl. awarded) before falling through", () => {
     expect(
       getEffectiveDealValue({
         onHold: false,
+        awardedAmount: "0",
         bidBoardTotalSales: "-100",
         bidEstimate: "0",
         ddEstimate: "42000",
-        awardedAmount: "2.97",
       })
     ).toBe(42000);
   });
@@ -112,7 +112,7 @@ describe("deal hold helpers", () => {
     ).toBe(875000);
   });
 
-  it("does not use awarded-first precedence for pre-close won-mapped stages", () => {
+  it("uses awarded-first precedence for ALL stages, incl. pre-close won-mapped (unified 2026-06-18)", () => {
     expect(
       getEffectiveDealValue({
         onHold: false,
@@ -123,7 +123,7 @@ describe("deal hold helpers", () => {
         bidEstimate: "875000",
         ddEstimate: "800000",
       })
-    ).toBe(950000);
+    ).toBe(925000);
     expect(
       getEffectiveDealValue({
         onHold: false,
@@ -134,10 +134,10 @@ describe("deal hold helpers", () => {
         bidEstimate: "875000",
         ddEstimate: "800000",
       })
-    ).toBe(875000);
+    ).toBe(925000);
   });
 
-  it("uses current stage before a won-like Bid Board stage when choosing generic deal value", () => {
+  it("values generic deals awarded-first regardless of stage classification (unified 2026-06-18)", () => {
     expect(
       getEffectiveDealValue({
         onHold: false,
@@ -147,10 +147,10 @@ describe("deal hold helpers", () => {
         awardedAmount: "2.97",
         ddEstimate: "3.00",
       })
-    ).toBe(16137.14);
+    ).toBe(2.97);
   });
 
-  it("does not use a won-like Bid Board stage to force awarded value when current stage is unknown", () => {
+  it("values awarded-first even when the current stage is unknown (unified 2026-06-18)", () => {
     expect(
       getEffectiveDealValue({
         onHold: false,
@@ -159,7 +159,7 @@ describe("deal hold helpers", () => {
         awardedAmount: "2.97",
         ddEstimate: "3.00",
       })
-    ).toBe(16137.14);
+    ).toBe(2.97);
   });
 
   it("subtracts accumulated and currently open hold time from stage age", () => {

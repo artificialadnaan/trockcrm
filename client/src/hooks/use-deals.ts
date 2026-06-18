@@ -114,6 +114,7 @@ export interface Deal {
   primaryContactOwnerUserId?: string | null;
   primaryContactOwnerUserName?: string | null;
   ddEstimate: string | null;
+  ddEstimateOverridden?: boolean | null;
   bidEstimate: string | null;
   awardedAmount: string | null;
   awardedAmountOverridden?: boolean | null;
@@ -368,9 +369,9 @@ export interface Pagination {
   totalPages: number;
   /**
    * The summed effective deal value of the ENTIRE filtered set (all pages), computed server-side
-   * over the same WHERE as `total` (SUM of the stage-aware effective value — Won awarded-first,
-   * else best-estimate; on_hold ⇒ 0; test data excluded). Drives the running-total card (#4) so
-   * the total can never disagree with the list it totals. Absent on legacy/older responses.
+   * over the same WHERE as `total` (SUM of the stage-aware effective value — unified awarded-first
+   * for all stages as of 2026-06-18; on_hold ⇒ 0; test data excluded). Drives the running-total
+   * card (#4) so the total can never disagree with the list it totals. Absent on legacy/older responses.
    */
   valueTotal?: number;
 }

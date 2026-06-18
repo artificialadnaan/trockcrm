@@ -76,8 +76,8 @@ beforeAll(async () => {
     INSERT INTO deals (id, stage_id, assigned_rep_id, estimator_user_id, is_active, on_hold, dd_estimate) VALUES
       ('estimated_by_a', 'open', 'rep-b', 'rep-a', true, false, 50000);
     -- date-axis rows (outcome dates); is_active mirrors real terminal rows.
-    -- won_in: LOW open best-estimate (dd 10000) but HIGH awarded (500000) — so a value filter only
-    --   includes it if Won awarded-first classification is actually applied (Codex #567).
+    -- won_in: LOW dd (10000) but HIGH awarded (500000) — as of the 2026-06-18 awarded-first unification a
+    --   value filter includes it in EITHER context (awarded-first now applies regardless of classification).
     -- won_out: won OUT of window but CREATED IN window — proves won_closed_date governs, not
     --   created_at (would pass spuriously if created_at were left outside the window) — Codex #567.
     INSERT INTO deals (id, stage_id, won_closed_date, dd_estimate, awarded_amount, created_at) VALUES
@@ -183,13 +183,13 @@ describe("FilterBar backend dimensions — real SQL via the #546 predicate regis
   });
 
   describe("value range (stage-aware effective value, on-hold-zeroed)", () => {
-    it("Won deals are valued awarded-first, NOT the open best-estimate — classification actually matters (Codex #567)", async () => {
-      // won_in: open best-estimate = dd 10000, awarded = 500000. Only awarded-first puts it >= 100000.
+    it("all deals are valued awarded-first regardless of Won classification (unified 2026-06-18)", async () => {
+      // won_in: dd 10000 but awarded 500000. As of the awarded-first unification the open and Won value
+      // chains are identical, so awarded-first applies in BOTH contexts — a valueMin: 100000 filter includes
+      // won_in whether or not Won classification (wonStageIds) is supplied. (Was: without classification the
+      // open best-estimate valued it at dd 10000 and EXCLUDED it — Codex #567; superseded by the shift.)
       expect(await matched({ valueMin: 100000 }, WON_LOST_CTX)).toContain("won_in");
-      // Drop Won classification (no wonStageIds): the SAME row falls to the open best-estimate (10000)
-      // and is EXCLUDED — proving the inclusion above depends on awarded-first, not a coincidental
-      // awarded fallback shared by both chains.
-      expect(await matched({ valueMin: 100000 }, {})).not.toContain("won_in");
+      expect(await matched({ valueMin: 100000 }, {})).toContain("won_in");
     });
     it("open deals are valued on the best-estimate chain", async () => {
       const ids = await matched({ valueMin: 100000 }, WON_LOST_CTX);

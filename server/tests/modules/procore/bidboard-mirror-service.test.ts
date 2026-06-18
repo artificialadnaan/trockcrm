@@ -456,6 +456,25 @@ describe("bid board mirror service", () => {
     expect(result.updates.awardedAmount ?? null).toBeNull();
   });
 
+  // dd_estimate override-lock (migration 0164) — mirrors the awarded_amount lock above. A manual DD edit
+  // on a bid-board-owned deal must survive a subsequent sync; an un-overridden DD is still mirrored.
+  it("dd overridden: never writes dd_estimate even when the Procore payload sends a different value", () => {
+    const result = buildBidBoardMirrorUpdate({
+      ...wonDeal({ ddEstimateOverridden: true }),
+      payload: { stageSlug: "won", stageStatus: "signed", ddEstimate: "777", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+    // Locked → payload "777" is NOT staged; persist COALESCE(undefined→null, dd_estimate) keeps the human value.
+    expect(result.updates.ddEstimate ?? null).toBeNull();
+  });
+
+  it("dd NOT overridden: a payload dd_estimate value still applies (initial seed/update unchanged)", () => {
+    const result = buildBidBoardMirrorUpdate({
+      ...wonDeal({ ddEstimateOverridden: false }),
+      payload: { stageSlug: "won", stageStatus: "signed", ddEstimate: "777", stageEnteredAt: "2026-04-22T11:00:00.000Z" },
+    });
+    expect(result.updates.ddEstimate).toBe("777");
+  });
+
   it("does NOT seed awarded_amount on Won entry when both awarded and bid are blank", () => {
     const result = buildBidBoardMirrorUpdate({
       now: new Date("2026-04-23T18:00:00.000Z"),

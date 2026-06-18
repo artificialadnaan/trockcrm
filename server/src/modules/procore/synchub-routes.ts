@@ -135,6 +135,8 @@ function buildMirrorDealUpdateQuery(args: {
     `bid_board_loss_outcome = ${bind(args.updates.bidBoardLossOutcome)}`,
     `bid_board_mirror_source_entered_at = ${bind(args.updates.bidBoardMirrorSourceEnteredAt)}`,
     `bid_board_mirror_source_exited_at = ${bind(args.updates.bidBoardMirrorSourceExitedAt)}`,
+    // dd_estimate respects the human override: when dd_estimate_overridden is set, buildBidBoardMirrorUpdate
+    // leaves updates.ddEstimate undefined, so this COALESCE preserves the existing human value (migration 0164).
     `dd_estimate = COALESCE(${bind(args.updates.ddEstimate)}, dd_estimate)`,
     `bid_estimate = COALESCE(${bind(args.updates.bidEstimate)}, bid_estimate)`,
     `awarded_amount = COALESCE(${bind(args.updates.awardedAmount)}, awarded_amount)`,
@@ -364,7 +366,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
                 on_hold_accumulated_seconds, on_hold_accumulated_seconds_at_stage_entry,
                 workflow_route, is_bid_board_owned,
                 proposal_status, estimating_substage, actual_close_date, won_closed_date, contract_signed_date, contract_signed_at,
-                dd_estimate, bid_estimate, awarded_amount, awarded_amount_overridden, proposal_notes,
+                dd_estimate, dd_estimate_overridden, bid_estimate, awarded_amount, awarded_amount_overridden, proposal_notes,
                 bid_board_stage_slug, bid_board_stage_family, bid_board_stage_status,
                 lost_reason_id, lost_notes, lost_competitor, lost_at
            FROM ${schemaName}.deals
@@ -450,6 +452,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
           bidEstimate: currentDeal.bid_estimate,
           awardedAmount: currentDeal.awarded_amount,
           awardedAmountOverridden: currentDeal.awarded_amount_overridden,
+          ddEstimateOverridden: currentDeal.dd_estimate_overridden,
         },
         currentStage: currentStage
           ? {
@@ -699,6 +702,7 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
         bidEstimate: null,
         awardedAmount: null,
         awardedAmountOverridden: false,
+        ddEstimateOverridden: false,
       },
       targetStage: {
         id: targetStage.id,

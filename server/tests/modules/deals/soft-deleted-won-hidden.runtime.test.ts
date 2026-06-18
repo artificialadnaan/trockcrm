@@ -46,7 +46,7 @@ beforeAll(async () => {
       deal_number varchar(50), name varchar(500), stage_id uuid, assigned_rep_id uuid,
       primary_contact_id uuid, company_id uuid, property_id uuid, source_lead_id uuid,
       dd_estimate numeric(14, 2), bid_estimate numeric(14, 2), awarded_amount numeric(14, 2),
-      awarded_amount_overridden boolean, change_order_total numeric(14, 2), description text,
+      awarded_amount_overridden boolean, dd_estimate_overridden boolean, change_order_total numeric(14, 2), description text,
       estimator text, property_address text, property_city varchar(255), property_state varchar(2),
       property_zip varchar(10), property_country text, office_code text, project_type text,
       project_type_id uuid, region_id uuid, source varchar(100), win_probability integer,

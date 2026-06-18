@@ -270,13 +270,16 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         payload.propertyId = formData.propertyId;
       }
 
+      // DD estimate is editable on EVERY deal (incl. bid-board-owned) — always send it. A manual edit is
+      // protected server-side by dd_estimate_overridden (migration 0164): the Bid Board sync seeds/mirrors
+      // dd_estimate, but once a human edits it the mirror skips it, so the correction sticks.
+      payload.ddEstimate = formData.ddEstimate || null;
       if (!isBidBoardOwned) {
-        payload.ddEstimate = formData.ddEstimate || null;
         payload.bidEstimate = formData.bidEstimate || null;
       }
       // Awarded amount is editable by admin/director even on bid-board-owned deals (the server enforces
-      // the same RBAC gate and marks the value overridden so the Procore mirror stops syncing it). DD
-      // and bid estimates stay Procore-owned and are only sent for non-bid-board deals (above).
+      // the same RBAC gate and marks the value overridden so the Procore mirror stops syncing it). Bid
+      // estimate stays Procore-owned and is only sent for non-bid-board deals (above).
       if (canEditAwarded) {
         payload.awardedAmount = formData.awardedAmount || null;
       }
@@ -609,12 +612,10 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         <CardContent>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="space-y-2">
-              <FieldLockLabel
-                htmlFor="ddEstimate"
-                label="DD Estimate ($)"
-                locked={isBidBoardOwned}
-                message="DD estimate is mirrored from Bid Board after estimating handoff."
-              />
+              {/* DD Estimate is always editable (incl. bid-board-owned) — no lock affordance. */}
+              <Label htmlFor="ddEstimate" className="inline-flex items-center gap-1.5">
+                DD Estimate ($)
+              </Label>
               <Input
                 id="ddEstimate"
                 type="number"
@@ -622,7 +623,6 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 min="0"
                 placeholder="0.00"
                 value={formData.ddEstimate}
-                disabled={isBidBoardOwned}
                 onChange={(e) => handleChange("ddEstimate", e.target.value)}
               />
               {fieldErrors.ddEstimate && <p className="text-xs text-red-600">{fieldErrors.ddEstimate}</p>}

@@ -79,10 +79,14 @@ export function formatProjectionCoverageCaption({ n, m }: ProjectionCoverage): s
 }
 
 // ===================== F3: value-label discipline =====================
-// Two DISTINCT value bases. They DIFFER by design and are NEVER reconciled/summed across a funnel row
-// or scoreboard; each rendered $ must carry its basis label.
-//   won_awarded_first  -> aliasedEffectiveWonDealValueSql  (awarded_amount first, then bid_board/bid/dd)
-//   open_best_estimate -> aliasedDealBestEstimateSql       (bid_board/bid/dd first, awarded last)
+// Two value-basis LABELS for caption discipline. As of the 2026-06-18 "awarded-highest" convention shift
+// BOTH bases now resolve through the SAME awarded-first chain (deal-value-sql.ts DEAL_VALUE_PRIORITY_CHAIN:
+// awarded_amount > bid_board/bid/dd). The open basis was formerly bid-first/awarded-last and was unified to
+// awarded-first (verified inert on prod reportable totals at the time of the shift). The basis now drives
+// only the LABEL/context shown to the user (a Won column vs an open column), not the value computation; the
+// two are kept distinct so each rendered $ still carries the right caption.
+//   won_awarded_first  -> aliasedEffectiveWonDealValueSql  (awarded-first chain)
+//   open_best_estimate -> aliasedDealBestEstimateSql       (awarded-first chain — unified 2026-06-18)
 
 export type DealValueBasis = "won_awarded_first" | "open_best_estimate";
 
@@ -92,10 +96,10 @@ export const DEAL_VALUE_BASIS_LABEL: Record<DealValueBasis, string> = {
 };
 
 export function dealValueSqlForBasis(alias: string, basis: DealValueBasis): SQL {
-  // Both bases go through the EFFECTIVE wrapper (on-hold open value -> 0), so the basis only swaps the
-  // value CHAIN, never the hold treatment -- keeping these foundations consistent with every other
-  // reports/dashboard effective-value read. (aliasedEffectiveDealValueSql defaults to the best-estimate
-  // chain, so the open basis stays best-estimate, just on-hold-zeroed.)
+  // Both bases go through the EFFECTIVE wrapper (on-hold value -> 0). Post-2026-06-18 both the won and open
+  // helpers resolve through the same awarded-first chain (DEAL_VALUE_PRIORITY_CHAIN), so the returned SQL is
+  // now equivalent for either basis; the basis is retained as a labeling/context selector (and a hook for
+  // any future divergence), keeping these foundations consistent with every other effective-value read.
   return basis === "won_awarded_first"
     ? aliasedEffectiveWonDealValueSql(alias)
     : aliasedEffectiveDealValueSql(alias);

@@ -118,23 +118,21 @@ export function resolveBestEstimate(deal: {
   bidBoardTotalSales?: string | null;
   bidEstimate?: string | null;
   ddEstimate?: string | null;
+  // Accepted for caller convenience but IGNORED by value resolution (the unified awarded-first chain is
+  // stage-agnostic since 2026-06-18). Other helpers (resolveDealValueKind/isLostBidDeal) still use these.
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;
 }): { value: number; source: DealEstimateSource } {
-  const candidates: Array<[DealEstimateSource, string | null | undefined]> = shouldUseAwardedEstimate(deal)
-    ? [
-        ["awarded", deal.awardedAmount],
-        ["bid_board", deal.bidBoardTotalSales],
-        ["bid", deal.bidEstimate],
-        ["estimate", deal.ddEstimate],
-      ]
-    : [
-        ["bid_board", deal.bidBoardTotalSales],
-        ["bid", deal.bidEstimate],
-        ["estimate", deal.ddEstimate],
-        ["awarded", deal.awardedAmount],
-      ];
+  // SINGLE awarded-first value priority (mirrors server deal-value-sql.ts DEAL_VALUE_PRIORITY_CHAIN and
+  // shared getRawDealValue): awarded > bid_board_total > bid > dd, each gated > 0. Open/estimating and Won
+  // deals resolve IDENTICALLY now (convention shift 2026-06-18) — no stage-dependent branch.
+  const candidates: Array<[DealEstimateSource, string | null | undefined]> = [
+    ["awarded", deal.awardedAmount],
+    ["bid_board", deal.bidBoardTotalSales],
+    ["bid", deal.bidEstimate],
+    ["estimate", deal.ddEstimate],
+  ];
 
   for (const [source, rawValue] of candidates) {
     const value = parseFloat(rawValue ?? "0");
@@ -144,19 +142,9 @@ export function resolveBestEstimate(deal: {
   return { value: 0, source: "none" };
 }
 
-function shouldUseAwardedEstimate(deal: {
-  stageSlug?: string | null;
-  bidBoardStageSlug?: string | null;
-  workflowRoute?: string | null;
-}) {
-  const stageSlug = deal.stageSlug ?? null;
-  const workflowRoute =
-    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
-  return isGenuineWonDealStageSlug(stageSlug, workflowRoute);
-}
-
 /**
- * Get the generic/current deal value -- Bid Board total/bid > DD > awarded fallback.
+ * Get the deal's effective value — single awarded-first priority:
+ * awarded > Bid Board total/bid > DD (each gated > 0).
  */
 export function bestEstimate(deal: Parameters<typeof resolveBestEstimate>[0]): number {
   return resolveBestEstimate(deal).value;
