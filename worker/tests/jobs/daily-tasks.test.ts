@@ -210,6 +210,37 @@ describe("daily task generation worker", () => {
     expect(
       queryMock.mock.calls.some(([sql]) => typeof sql === "string" && sql.includes("INSERT INTO office_beta.tasks"))
     ).toBe(false);
+
+    // Lifecycle fix: the first-outreach dismiss UPDATE runs (origin_rule scoped, sets dismissed)...
+    const dismissCall = queryMock.mock.calls.find(
+      ([sql]) =>
+        typeof sql === "string" &&
+        sql.includes("UPDATE office_beta.tasks") &&
+        sql.includes("daily_first_outreach_touchpoint") &&
+        sql.includes("'dismissed'")
+    );
+    expect(dismissCall).toBeDefined();
+
+    // ...and the create query is now bounded to the first-outreach window (3..N days old), so ancient
+    // uncontacted contacts stop getting re-minted tasks.
+    const needsOutreachCall = queryMock.mock.calls.find(
+      ([sql]) => typeof sql === "string" && sql.includes("SELECT c.id AS contact_id, c.first_name, c.last_name")
+    );
+    expect(needsOutreachCall).toBeDefined();
+    expect(needsOutreachCall![0]).toContain("created_at < CURRENT_DATE - INTERVAL '3 days'"); // lower bound
+    expect(needsOutreachCall![0]).toContain("* INTERVAL '1 day')"); // the 30-day upper bound
+
+    // ...and the dismiss runs BEFORE the create loop (mirrors the stale-lead dismiss ordering), so resolved
+    // contacts are cleared before re-evaluating who still needs a task.
+    const dismissIdx = queryMock.mock.calls.findIndex(
+      ([sql]) => typeof sql === "string" && sql.includes("UPDATE office_beta.tasks") && sql.includes("daily_first_outreach_touchpoint")
+    );
+    const createIdx = queryMock.mock.calls.findIndex(
+      ([sql]) => typeof sql === "string" && sql.includes("SELECT c.id AS contact_id, c.first_name, c.last_name")
+    );
+    expect(dismissIdx).toBeGreaterThanOrEqual(0);
+    expect(dismissIdx).toBeLessThan(createIdx);
+
     expect(consoleErrorSpy).not.toHaveBeenCalled();
 
     vi.useRealTimers();
