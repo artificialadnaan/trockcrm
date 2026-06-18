@@ -25,7 +25,7 @@ describe("buildDealDetailSummary", () => {
     });
   });
 
-  it("does not let awarded_amount override the current bid value", () => {
+  it("uses awarded_amount before the current bid value (unified awarded-first 2026-06-18)", () => {
     expect(
       buildDealDetailSummary(
         {
@@ -39,7 +39,7 @@ describe("buildDealDetailSummary", () => {
         },
         new Date("2026-04-22T12:00:00.000Z")
       ).bestValue
-    ).toBe(16137.14);
+    ).toBe(2.97);
   });
 
   it("keeps awarded value for won-stage summaries", () => {

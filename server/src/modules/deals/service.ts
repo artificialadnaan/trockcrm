@@ -481,9 +481,12 @@ export const BID_BOARD_BOUNDARY_STAGE_MISSING_MESSAGE =
 // Fields that are Procore-managed and therefore read-only in CRM on bid-board-owned deals.
 // awarded_amount is intentionally NOT here: admin/director may manually override it (the edit is
 // gated to those roles by the AWARDED_AMOUNT_RESTRICTED check above, and a manual edit marks the deal
-// awarded_amount_overridden so the mirror stops syncing it). bid_estimate / dd_estimate stay locked.
+// awarded_amount_overridden so the mirror stops syncing it).
+// dd_estimate is intentionally NOT here either (unlocked 2026-06-18): the Bid Board sync NEVER writes
+// dd_estimate — it only mirrors bid_estimate from Procore "Total Sales" — so a manual DD edit cannot
+// desync from the mirror. DD is editable on EVERY deal, including bid-board-owned ones. bid_estimate
+// stays locked (Procore-owned).
 const BID_BOARD_OWNED_UPDATE_FIELD_LABELS: Partial<Record<keyof UpdateDealInput, string>> = {
-  ddEstimate: "DD estimate",
   bidEstimate: "Bid estimate",
   estimatingSubstage: "Estimating progress",
   proposalStatus: "Proposal status",

@@ -391,7 +391,7 @@ describe("listDealStagePage", () => {
     }
   });
 
-  it("uses active-pipeline current value source for lost terminal stage totals", async () => {
+  it("uses the unified awarded-first value chain for lost terminal stage totals", async () => {
     dbState.responses = [
       [{ id: "stage-lost", slug: "lost", name: "Lost", displayOrder: 8, isTerminal: true }],
     ];
@@ -422,10 +422,10 @@ describe("listDealStagePage", () => {
     const rowOrderSql = orderBySql(rowSql);
     for (const sqlText of [countSql, rowOrderSql]) {
       expectSqlTermsInOrder(sqlText, [
+        "awarded_amount",
         "bid_board_total_sales",
         "bid_estimate",
         "dd_estimate",
-        "awarded_amount",
       ]);
       expect(sqlText).toContain("case when d.on_hold then 0");
     }
@@ -433,7 +433,7 @@ describe("listDealStagePage", () => {
     expect(rowOrderSql).not.toContain("coalesce(d.awarded_amount, d.bid_estimate");
   });
 
-  it("sorts lost value_desc by the current-value contribution rather than awarded amount", async () => {
+  it("sorts lost value_desc by the unified awarded-first value contribution", async () => {
     dbState.responses = [
       [{ id: "stage-lost", slug: "lost", name: "Lost", displayOrder: 8, isTerminal: true }],
     ];
@@ -513,7 +513,7 @@ describe("listDealStagePage", () => {
               {
                 total_count: String(lostRows.length),
                 active_count: String(lostRows.length),
-                total_value: String(lostRows.reduce((sum, row) => sum + currentValueForRow(row), 0)),
+                total_value: String(lostRows.reduce((sum, row) => sum + awardedFirstValueForRow(row), 0)),
               },
             ],
           });
@@ -546,14 +546,14 @@ describe("listDealStagePage", () => {
     const rowSql = extractSqlText(tenantDb.execute.mock.calls[1]?.[0]).toLowerCase();
     const rowOrderSql = orderBySql(rowSql);
     expectSqlTermsInOrder(rowOrderSql, [
+      "awarded_amount",
       "bid_board_total_sales",
       "bid_estimate",
       "dd_estimate",
-      "awarded_amount",
     ]);
     expect(rowOrderSql).toContain("order by");
-    expect(result.rows.map((row: any) => row.id)).toEqual(expectedCurrentOrder);
-    expect(result.rows[0]?.id).toBe("deal-high-current");
+    expect(result.rows.map((row: any) => row.id)).toEqual(awardedOrder);
+    expect(result.rows[0]?.id).toBe("deal-high-awarded-low-current");
   });
 
   it("hydrates stage-page At Risk age from Bid Board stage-entered timestamp for Bid Board-owned rows", async () => {

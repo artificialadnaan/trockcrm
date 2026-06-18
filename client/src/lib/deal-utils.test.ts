@@ -109,7 +109,7 @@ describe("sanitizeHubspotDealIdentifiers", () => {
 });
 
 describe("deal value precedence", () => {
-  it("uses the synced Bid Board/bid amount instead of awarded_amount for generic open-deal value", () => {
+  it("uses awarded_amount before the synced Bid Board/bid for generic deal value (unified awarded-first 2026-06-18)", () => {
     const deal = {
       bidBoardTotalSales: "16137.14",
       bidEstimate: "16137.14",
@@ -117,9 +117,9 @@ describe("deal value precedence", () => {
       ddEstimate: "3.00",
     };
 
-    expect(bestEstimate(deal)).toBe(16137.14);
-    expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid_board" });
-    expect(bestEstimateCaptionLabel(resolveBestEstimate(deal).source)).toBe("Bid Board");
+    expect(bestEstimate(deal)).toBe(2.97);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 2.97, source: "awarded" });
+    expect(bestEstimateCaptionLabel(resolveBestEstimate(deal).source)).toBe("Awarded");
   });
 
   it("falls back to awarded_amount only after current estimate fields are missing", () => {
@@ -129,13 +129,13 @@ describe("deal value precedence", () => {
     );
   });
 
-  it("skips zero and negative current values before falling through", () => {
+  it("skips zero and negative values (incl. awarded) before falling through", () => {
     expect(
       resolveBestEstimate({
+        awardedAmount: "0",
         bidBoardTotalSales: "-100",
         bidEstimate: "0",
         ddEstimate: "42000",
-        awardedAmount: "2.97",
       })
     ).toEqual({ value: 42000, source: "estimate" });
   });
@@ -165,7 +165,7 @@ describe("deal value precedence", () => {
     expect(resolveBestEstimate(deal)).toEqual({ value: 875000, source: "bid" });
   });
 
-  it("does not use awarded-first precedence for pre-close won-mapped stages", () => {
+  it("uses awarded-first precedence for ALL stages, incl. pre-close won-mapped (unified 2026-06-18)", () => {
     expect(
       resolveBestEstimate({
         stageSlug: "in_production",
@@ -175,7 +175,7 @@ describe("deal value precedence", () => {
         bidEstimate: "875000",
         ddEstimate: "800000",
       })
-    ).toEqual({ value: 950000, source: "bid_board" });
+    ).toEqual({ value: 925000, source: "awarded" });
     expect(
       resolveBestEstimate({
         stageSlug: "close_out",
@@ -185,10 +185,10 @@ describe("deal value precedence", () => {
         bidEstimate: "875000",
         ddEstimate: "800000",
       })
-    ).toEqual({ value: 875000, source: "bid" });
+    ).toEqual({ value: 925000, source: "awarded" });
   });
 
-  it("uses current stage before a won-like Bid Board stage when choosing generic deal value", () => {
+  it("values generic deals awarded-first regardless of stage classification (unified 2026-06-18)", () => {
     const deal = {
       stageSlug: "opportunity",
       bidBoardStageSlug: "sent_to_production",
@@ -197,11 +197,11 @@ describe("deal value precedence", () => {
       ddEstimate: "3.00",
     };
 
-    expect(bestEstimate(deal)).toBe(16137.14);
-    expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid" });
+    expect(bestEstimate(deal)).toBe(2.97);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 2.97, source: "awarded" });
   });
 
-  it("does not use a won-like Bid Board stage to force awarded value when current stage is unknown", () => {
+  it("values awarded-first even when the current stage is unknown (unified 2026-06-18)", () => {
     const deal = {
       bidBoardStageSlug: "sent_to_production",
       bidEstimate: "16137.14",
@@ -209,8 +209,8 @@ describe("deal value precedence", () => {
       ddEstimate: "3.00",
     };
 
-    expect(bestEstimate(deal)).toBe(16137.14);
-    expect(resolveBestEstimate(deal)).toEqual({ value: 16137.14, source: "bid" });
+    expect(bestEstimate(deal)).toBe(2.97);
+    expect(resolveBestEstimate(deal)).toEqual({ value: 2.97, source: "awarded" });
   });
 });
 

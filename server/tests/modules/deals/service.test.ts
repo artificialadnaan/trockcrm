@@ -1308,6 +1308,21 @@ describe("Deal Service", () => {
       });
     });
 
+    it("allows DD estimate edits after Bid Board handoff (sync never writes dd_estimate)", async () => {
+      // Convention shift 2026-06-18: dd_estimate is no longer in BID_BOARD_OWNED_UPDATE_FIELD_LABELS, because
+      // the Bid Board sync never writes dd_estimate. A director may correct DD on a bid-board-owned deal; the
+      // edit persists and cannot desync from the mirror. (bid_estimate stays locked — see the test above.)
+      const updated = await updateDeal(
+        createMutableOwnedDealTenantDb() as never,
+        "deal-1",
+        { ddEstimate: "125000.00" },
+        "director",
+        "director-1"
+      );
+
+      expect(updated.ddEstimate).toBe("125000.00");
+    });
+
     it("allows metadata edits after Bid Board handoff", async () => {
       const updated = await updateDeal(
         createMutableOwnedDealTenantDb() as never,

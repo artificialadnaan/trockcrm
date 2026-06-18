@@ -9,8 +9,8 @@ import { aliasedStageAwareEffectiveDealValueSql } from "../../../src/modules/dea
  * aliasedStageAwareEffectiveDealValueSql over the list's WHERE. This proves — against real SQL —
  * that that SUM equals the sum of what each row DISPLAYS (the client's getEffectiveDealValue), so
  * the total and the list can NEVER disagree:
- *  - Won-stage rows use the awarded-first chain (awarded → bid_board → bid → dd);
- *  - every other row uses the best-estimate chain (bid_board → bid → dd → awarded);
+ *  - ALL rows (open AND Won) use the SAME unified awarded-first chain (awarded → bid_board → bid → dd)
+ *    as of the 2026-06-18 convention shift — open and Won no longer diverge by value;
  *  - on_hold rows are 0 (matching the list's $0 display, while still being counted/summed);
  *  - $0 / all-null rows contribute 0.
  * The per-row assertion (SQL value == getEffectiveDealValue) is the byte-for-byte guarantee;
@@ -24,8 +24,10 @@ const WON_STAGE_IDS = ["won"];
 // stage_id IN WON_STAGE_IDS drives the SERVER's. They are aligned here (won rows: slug "won",
 // id "won") exactly as production aligns wonStageIds (Won-family slugs -> ids) with the client.
 const ROWS = [
-  // open, best-estimate chain picks bid_board_total_sales first
+  // open, no awarded -> unified awarded-first chain falls through to bid_board_total_sales
   { id: "open_bb", stage_id: "opportunity", stageSlug: "opportunity", on_hold: false, bid_board_total_sales: 300000, bid_estimate: 200000, dd_estimate: 100000, awarded_amount: 0, expected: 300000 },
+  // open WITH awarded set -> unified awarded-first picks awarded over the higher bid_board (proves the 2026-06-18 shift)
+  { id: "open_awarded", stage_id: "opportunity", stageSlug: "opportunity", on_hold: false, bid_board_total_sales: 200000, bid_estimate: 100000, dd_estimate: 50000, awarded_amount: 400000, expected: 400000 },
   // open, falls through to dd_estimate
   { id: "open_dd", stage_id: "opportunity", stageSlug: "opportunity", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 80000, awarded_amount: 0, expected: 80000 },
   // won, awarded-first picks awarded_amount even though bid_board is also set
@@ -38,7 +40,7 @@ const ROWS = [
   { id: "zero", stage_id: "opportunity", stageSlug: "opportunity", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected: 0 },
 ];
 
-const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 1,000,000
+const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 1,400,000
 
 let db: PGlite;
 

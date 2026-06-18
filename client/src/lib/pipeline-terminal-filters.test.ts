@@ -85,9 +85,9 @@ describe("pipeline terminal filters", () => {
     expect(calculateActivePipelineTotal(deals)).toEqual({ amount: 180_000, count: 2 });
   });
 
-  it("uses the current bid value before awarded amount for active pipeline value", () => {
-    expect(activePipelineDealValue({ awardedAmount: 0, bidEstimate: 50_000, ddEstimate: 30_000 })).toBe(50_000);
-    expect(activePipelineDealValue({ awardedAmount: 2.97, bidEstimate: 16_137.14, ddEstimate: 3 })).toBe(16_137.14);
+  it("uses awarded amount before the current bid value for active pipeline value (unified awarded-first 2026-06-18)", () => {
+    expect(activePipelineDealValue({ awardedAmount: 0, bidEstimate: 50_000, ddEstimate: 30_000 })).toBe(50_000); // awarded 0 = unset
+    expect(activePipelineDealValue({ awardedAmount: 2.97, bidEstimate: 16_137.14, ddEstimate: 3 })).toBe(2.97); // awarded wins
     expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: 50_000, ddEstimate: 30_000 })).toBe(50_000);
     expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: null, ddEstimate: 30_000 })).toBe(30_000);
     expect(activePipelineDealValue({ awardedAmount: null, bidEstimate: null, ddEstimate: null })).toBe(0);

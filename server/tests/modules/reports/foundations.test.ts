@@ -76,16 +76,17 @@ describe("F2 projection", () => {
 
 // ---------------- F3: value-label discipline ----------------
 describe("F3 value basis", () => {
-  it("Won uses awarded-first; open (Sent/Estimated) uses best-estimate -- DISTINCT expressions", () => {
+  it("unifies both value bases to awarded-first (convention shift 2026-06-18)", () => {
     const won = extractSqlText(dealValueSqlForBasis("d", "won_awarded_first")).toLowerCase();
     const open = extractSqlText(dealValueSqlForBasis("d", "open_best_estimate")).toLowerCase();
-    // Won is awarded-FIRST: awarded_amount appears before bid_board_total_sales in the COALESCE chain.
+    // Both bases are now awarded-FIRST: awarded_amount precedes bid_board_total_sales in the COALESCE chain.
     expect(won.indexOf("awarded_amount")).toBeLessThan(won.indexOf("bid_board_total_sales"));
-    // Open best-estimate is awarded-LAST: bid_board_total_sales appears before awarded_amount.
-    expect(open.indexOf("bid_board_total_sales")).toBeLessThan(open.indexOf("awarded_amount"));
-    expect(won).not.toBe(open); // the two bases are never the same expression
-    // BOTH bases zero out on-hold open value -- the basis changes the value CHAIN, not hold treatment,
-    // so these foundations match the rest of the reports/dashboard effective-value helpers.
+    expect(open.indexOf("awarded_amount")).toBeLessThan(open.indexOf("bid_board_total_sales"));
+    // The open basis was formerly awarded-LAST; as of the awarded-highest decision both bases resolve
+    // through the SAME chain (DEAL_VALUE_PRIORITY_CHAIN), so they now produce an IDENTICAL expression. The
+    // basis is retained only as a labeling/context selector (a Won column vs an open column caption).
+    expect(won).toBe(open);
+    // BOTH bases still zero out on-hold value.
     expect(won).toContain("on_hold");
     expect(open).toContain("on_hold");
   });

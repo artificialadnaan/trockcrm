@@ -17,23 +17,27 @@ type DealValueColumn =
   | "dd_estimate"
   | "awarded_amount";
 
-const OPEN_CURRENT_VALUE_CHAIN = [
+// SINGLE deal-value priority chain (awarded-first). Open/estimating AND Won deals now resolve value
+// IDENTICALLY — awarded_amount > bid_board_total_sales > bid_estimate > dd_estimate — so one priority
+// drives every bucket total and card with no parallel open-vs-won logic. Each candidate is gated `> 0`
+// (positiveDealValueCandidateSql), so BOTH 0 and NULL fall through to the next candidate; the chain's
+// final fallback is 0.
+//
+// CONVENTION SHIFT (2026-06-18, "editable DD + awarded-highest" decision): the open/estimating basis was
+// formerly bid-first with awarded LAST (and distinct from the Won basis). It was flipped to awarded-first
+// after verifying the change is INERT on prod reportable totals ($0 delta — only 2 open deals carry an
+// awarded amount and both already equal their bid). dealBestEstimateSql and dealAwardedFirstWithFallbackSql
+// are retained as separate names (many call sites) but now both resolve through this one chain.
+const DEAL_VALUE_PRIORITY_CHAIN = [
+  "awarded_amount",
   "bid_board_total_sales",
   "bid_estimate",
   "dd_estimate",
-  "awarded_amount",
 ] as const satisfies readonly DealValueColumn[];
 
 const FORECAST_FIRST_VALUE_CHAIN = [
   "forecast_revenue",
-  ...OPEN_CURRENT_VALUE_CHAIN,
-] as const satisfies readonly DealValueColumn[];
-
-const AWARDED_FIRST_VALUE_CHAIN = [
-  "awarded_amount",
-  "bid_board_total_sales",
-  "bid_estimate",
-  "dd_estimate",
+  ...DEAL_VALUE_PRIORITY_CHAIN,
 ] as const satisfies readonly DealValueColumn[];
 
 export function positiveDealValueCandidateSql(value: unknown): SQL {
@@ -75,7 +79,7 @@ function aliasedDealValueChainSql(alias: string, columns: readonly DealValueColu
 }
 
 export function dealBestEstimateSql(table: DealValueTable): SQL {
-  return dealValueChainSql(table, OPEN_CURRENT_VALUE_CHAIN);
+  return dealValueChainSql(table, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
 export function dealAwardedAmountSql(table: DealValueTable): SQL {
@@ -83,7 +87,7 @@ export function dealAwardedAmountSql(table: DealValueTable): SQL {
 }
 
 export function dealAwardedFirstWithFallbackSql(table: DealValueTable): SQL {
-  return dealValueChainSql(table, AWARDED_FIRST_VALUE_CHAIN);
+  return dealValueChainSql(table, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
 export function dealBestEstimateWithForecastSql(table: DealValueTable): SQL {
@@ -106,7 +110,7 @@ export function effectiveWonDealValueSql(table: DealValueTable): SQL {
 }
 
 export function aliasedDealBestEstimateSql(alias: string): SQL {
-  return aliasedDealValueChainSql(alias, OPEN_CURRENT_VALUE_CHAIN);
+  return aliasedDealValueChainSql(alias, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
 export function aliasedDealAwardedAmountSql(alias: string): SQL {
@@ -114,7 +118,7 @@ export function aliasedDealAwardedAmountSql(alias: string): SQL {
 }
 
 export function aliasedDealAwardedFirstWithFallbackSql(alias: string): SQL {
-  return aliasedDealValueChainSql(alias, AWARDED_FIRST_VALUE_CHAIN);
+  return aliasedDealValueChainSql(alias, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
 export function aliasedDealBestEstimateWithForecastSql(alias: string): SQL {

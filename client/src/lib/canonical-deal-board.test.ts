@@ -73,7 +73,7 @@ describe("buildCanonicalDealStageIdFamilies (explicit stage pick → board colum
 });
 
 describe("buildCanonicalDealBoardColumns", () => {
-  it("uses current bid value instead of awarded_amount when deriving a missing backend aggregate", () => {
+  it("uses awarded_amount before the current bid value when deriving a missing backend aggregate (unified awarded-first 2026-06-18)", () => {
     const columns = buildCanonicalDealBoardColumns(
       [
         {
@@ -94,7 +94,7 @@ describe("buildCanonicalDealBoardColumns", () => {
       [{ id: "stage-opportunity", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
     );
 
-    expect(columns.find((column) => column.stage.slug === "opportunity")?.totalValue).toBe(16137.14);
+    expect(columns.find((column) => column.stage.slug === "opportunity")?.totalValue).toBe(2.97);
   });
 
   it("excludes on-hold deals when deriving a missing backend aggregate", () => {

@@ -68,14 +68,16 @@ describe("deal-value-sql", () => {
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.dd_estimate");
   });
 
-  it("uses the complete open current-value chain for raw-value consumers", () => {
+  // Convention shift 2026-06-18: the open/best-estimate chain is now AWARDED-FIRST (unified with the won
+  // chain) — awarded_amount leads, then bid_board_total_sales > bid_estimate > dd_estimate.
+  it("uses the unified awarded-first chain for open/best-estimate raw-value consumers", () => {
     for (const expression of [aliasedDealBestEstimateSql("d"), dealBestEstimateSql(table)]) {
       const normalized = normalize(expression);
       expectColumnOrder(normalized, [
+        "awarded_amount",
         "bid_board_total_sales",
         "bid_estimate",
         "dd_estimate",
-        "awarded_amount",
       ]);
       expect(normalized).toContain("CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END");
       expect(normalized).toContain("CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END");
@@ -106,10 +108,10 @@ describe("deal-value-sql", () => {
       const normalized = normalize(expression);
       expectColumnOrder(normalized, [
         "forecast_revenue",
+        "awarded_amount",
         "bid_board_total_sales",
         "bid_estimate",
         "dd_estimate",
-        "awarded_amount",
       ]);
       expect(normalized).toContain("CASE WHEN d.forecast_revenue > 0 THEN d.forecast_revenue END");
       expect(normalized).toContain("CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END");
@@ -172,18 +174,23 @@ describe("deal-value-sql", () => {
     expect(normalized).toContain("d.dd_estimate");
   });
 
-  it("wraps unaliased open current values in an on-hold zeroing case expression", () => {
+  it("wraps unaliased open current values in an on-hold zeroing case expression (awarded-first)", () => {
     const normalized = normalize(effectiveDealValueSql(table));
     expect(normalized).toContain("d.on_hold");
     expectColumnOrder(normalized, [
+      "awarded_amount",
       "bid_board_total_sales",
       "bid_estimate",
       "dd_estimate",
-      "awarded_amount",
     ]);
   });
 
-  it("keeps SQL chain order aligned with JS effective value semantics for open and won deals", () => {
+  it("keeps SQL chain order aligned with JS effective value semantics — unified awarded-first for ALL stages", () => {
+    // Convention shift 2026-06-18: open/estimating, won, AND lost deals all resolve value AWARDED-FIRST:
+    // awarded_amount > bid_board_total_sales > bid_estimate > dd_estimate, each gated > 0 (0 and NULL fall
+    // through), on-hold -> 0. Stage classification no longer changes the value chain.
+
+    // Open deal, everything set: awarded wins (was bid_board-first before the shift).
     expect(
       getEffectiveDealValue({
         stageSlug: "opportunity",
@@ -192,18 +199,31 @@ describe("deal-value-sql", () => {
         ddEstimate: "900",
         awardedAmount: "1000",
       })
-    ).toBe(700);
+    ).toBe(1000);
 
+    // Open deal, no awarded, bid_board 0 / bid negative: falls through to dd_estimate (0 and <0 are unset).
     expect(
       getEffectiveDealValue({
         stageSlug: "opportunity",
         bidBoardTotalSales: "0",
         bidEstimate: "-1",
         ddEstimate: "900",
-        awardedAmount: "1000",
+        awardedAmount: null,
       })
     ).toBe(900);
 
+    // Open deal, awarded 0 (unset): skips awarded, bid_board_total_sales wins.
+    expect(
+      getEffectiveDealValue({
+        stageSlug: "opportunity",
+        bidBoardTotalSales: "700",
+        bidEstimate: "800",
+        ddEstimate: "900",
+        awardedAmount: "0",
+      })
+    ).toBe(700);
+
+    // Lost deal, everything set: unified awarded-first -> awarded wins (was bid_board-first before the shift).
     expect(
       getEffectiveDealValue({
         stageSlug: "lost",
@@ -213,18 +233,9 @@ describe("deal-value-sql", () => {
         bidEstimate: "800",
         ddEstimate: "900",
       })
-    ).toBe(700);
-
-    expect(
-      getEffectiveDealValue({
-        stageSlug: "lost",
-        awardedAmount: "1000",
-        bidBoardTotalSales: "0",
-        bidEstimate: null,
-        ddEstimate: "0",
-      })
     ).toBe(1000);
 
+    // Lost deal, nothing positive: 0.
     expect(
       getEffectiveDealValue({
         stageSlug: "lost",
@@ -235,6 +246,7 @@ describe("deal-value-sql", () => {
       })
     ).toBe(0);
 
+    // On-hold -> 0 regardless of values.
     expect(
       getEffectiveDealValue({
         stageSlug: "lost",
@@ -246,6 +258,7 @@ describe("deal-value-sql", () => {
       })
     ).toBe(0);
 
+    // Won deal, awarded 0 (unset): falls through to bid_board_total_sales (unchanged by the shift).
     expect(
       getEffectiveDealValue({
         stageSlug: "won",
@@ -256,6 +269,7 @@ describe("deal-value-sql", () => {
       })
     ).toBe(700);
 
+    // Won deal, awarded set: awarded wins (unchanged by the shift).
     expect(
       getEffectiveDealValue({
         stageSlug: "won",

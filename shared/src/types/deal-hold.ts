@@ -1,5 +1,3 @@
-import { isGenuineWonDealStageSlug } from "./workflow.js";
-
 /*
 Hold-time invariants audited on 2026-05-21 across this file, the deal hold toggle
 path in server/src/modules/deals/service.ts, and the five stage-writer paths:
@@ -61,17 +59,12 @@ function toDate(value: string | Date | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function shouldUseAwardedDealValue(deal: DealValueLike): boolean {
-  const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
-  const workflowRoute =
-    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
-  return isGenuineWonDealStageSlug(stageSlug, workflowRoute);
-}
-
 function getRawDealValue(deal: DealValueLike): number {
-  const candidates = shouldUseAwardedDealValue(deal)
-    ? [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate]
-    : [deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate, deal.awardedAmount];
+  // SINGLE awarded-first value priority (mirrors server deal-value-sql.ts DEAL_VALUE_PRIORITY_CHAIN):
+  // awarded_amount > bid_board_total_sales > bid_estimate > dd_estimate, each gated > 0 (0 AND NULL both
+  // fall through to the next candidate). Open/estimating and Won deals resolve IDENTICALLY now — there is
+  // no stage-dependent branch (convention shift 2026-06-18; see deal-value-sql.ts for the rationale).
+  const candidates = [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate];
 
   for (const candidate of candidates) {
     const value = toNumber(candidate);
