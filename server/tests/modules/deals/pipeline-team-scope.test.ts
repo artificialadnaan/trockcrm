@@ -470,9 +470,9 @@ describe("getDealsForPipeline team scope", () => {
     expect(wonConditions.every((condition) => containsValue(condition, "2026-05-08"))).toBe(true);
     expect(wonConditions.every((condition) => containsValue(condition, "2026-04-01"))).toBe(true);
     expect(wonConditions.every((condition) => containsValue(condition, "2026-04-30"))).toBe(true);
-    // Won-period gates on the true HubSpot close-won date (§6.1) with a usable-date
-    // guard; contract_signed_* and the §6.8 bid_board_last_updated_at clause are gone.
-    expect(wonConditions.every((condition) => extractSqlText(condition).toLowerCase().includes("hs_closed_won_date"))).toBe(true);
+    // Won-period gates on the canonical app-owned deals.won_closed_date (§6.1, migration 0141) with a
+    // usable-date guard; contract_signed_* and the §6.8 bid_board_last_updated_at clause are gone.
+    expect(wonConditions.every((condition) => extractSqlText(condition).toLowerCase().includes("won_closed_date"))).toBe(true);
     expect(wonConditions.every((condition) => extractSqlText(condition).toLowerCase().includes("is not null"))).toBe(true);
     expect(wonConditions.some((condition) => extractSqlText(condition).toLowerCase().includes("contract_signed"))).toBe(false);
     expect(wonConditions.some((condition) => extractSqlText(condition).toLowerCase().includes("bid_board_last_updated_at"))).toBe(false);

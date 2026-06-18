@@ -21,6 +21,10 @@ const serviceMocks = vi.hoisted(() => ({
 const accessMocks = vi.hoisted(() => ({
   getDealById: vi.fn(async () => ({ id: "deal-1" })),
   getLeadById: vi.fn(async () => ({ id: "lead-1" })),
+  // Deal/lead file access now runs through src/lib/collaboration-access (assertDealFileAccess ->
+  // assertDealCollaboratorAccess(tenantDb, dealId, viewer), PR #632), not getDealById/getLeadById.
+  assertDealCollaboratorAccess: vi.fn(),
+  assertLeadCollaboratorAccess: vi.fn(),
   getPhotoFeed: vi.fn(),
   getNewPhotoCount: vi.fn(),
   getProjectPhotoStats: vi.fn(),
@@ -29,6 +33,10 @@ const accessMocks = vi.hoisted(() => ({
 vi.mock("../../../src/modules/files/service.js", () => serviceMocks);
 vi.mock("../../../src/modules/deals/service.js", () => ({ getDealById: accessMocks.getDealById }));
 vi.mock("../../../src/modules/leads/service.js", () => ({ getLeadById: accessMocks.getLeadById }));
+vi.mock("../../../src/lib/collaboration-access.js", () => ({
+  assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
+  assertLeadCollaboratorAccess: accessMocks.assertLeadCollaboratorAccess,
+}));
 vi.mock("../../../src/modules/files/feed-service.js", () => ({
   getPhotoFeed: accessMocks.getPhotoFeed,
   getNewPhotoCount: accessMocks.getNewPhotoCount,
@@ -102,7 +110,7 @@ describe("file address override route", () => {
     const { res, req, nextError } = await invokeAddressPatch();
 
     expect(nextError).toBeUndefined();
-    expect(accessMocks.getDealById).toHaveBeenCalledWith({}, "deal-1", "admin", "user-1");
+    expect(accessMocks.assertDealCollaboratorAccess).toHaveBeenCalledWith({}, "deal-1", req.user);
     expect(serviceMocks.updateFileAddress).toHaveBeenCalledWith({}, "file-1", {
       address: "123 Corrected St",
       latitude: 32.1,
@@ -120,7 +128,9 @@ describe("file address override route", () => {
   });
 
   it("enforces tenant-scoped deal access before updating", async () => {
-    accessMocks.getDealById.mockResolvedValueOnce(null);
+    accessMocks.assertDealCollaboratorAccess.mockRejectedValueOnce(
+      Object.assign(new Error("Access denied: deal is outside your office."), { statusCode: 403 })
+    );
 
     const { nextError } = await invokeAddressPatch({
       user: { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },

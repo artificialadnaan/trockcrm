@@ -300,10 +300,12 @@ describe("Deal Scoping Routes", () => {
   });
 
   it("checks deal access before scoping read/write routes call raw scoping services", async () => {
-    accessMocks.assertDealCollaboratorAccess
-      .mockRejectedValueOnce({ statusCode: 403 })
-      .mockRejectedValueOnce({ statusCode: 403 });
-    accessMocks.assertDealOwnerAccess.mockRejectedValueOnce({ statusCode: 403 });
+    // GET/PATCH /:id/scoping-intake use OWNER access, /:id/resolved-fields uses COLLABORATOR access
+    // (commit 1ac1774ee). Reject persistently on BOTH guards so every route invocation 403s regardless
+    // of which it uses, and so no leftover *Once queue pollutes later tests (beforeEach re-establishes
+    // the resolved default).
+    accessMocks.assertDealCollaboratorAccess.mockRejectedValue({ statusCode: 403 });
+    accessMocks.assertDealOwnerAccess.mockRejectedValue({ statusCode: 403 });
 
     await expect(
       invokeRoute("get", "/:id/scoping-intake", { params: { id: "deal-locked" } })
