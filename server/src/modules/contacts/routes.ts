@@ -63,6 +63,9 @@ router.get("/", async (req, res, next) => {
         : req.query.hasOutreach === "false"
           ? false
           : undefined,
+      // Summary-card drill-downs (?card=primary / ?card=untouched on the contacts page).
+      isPrimary: req.query.isPrimary === "true" ? true : undefined,
+      untouched: req.query.untouched === "true" ? true : undefined,
       sortBy: req.query.sortBy as any,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,

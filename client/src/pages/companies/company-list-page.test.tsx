@@ -79,6 +79,29 @@ async function renderPageDom() {
   };
 }
 
+async function renderDomAt(path: string) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root!: Root;
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <CompanyListPage />
+      </MemoryRouter>
+    );
+  });
+  return {
+    container,
+    cleanup: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
 describe("CompanyListPage", () => {
   beforeEach(() => {
     mocks.useCompaniesMock.mockReset();
@@ -156,6 +179,49 @@ describe("CompanyListPage", () => {
       error: null,
       refetch: vi.fn(),
     });
+  });
+
+  it("?card=pipeline wires the hasActivePipeline drill into the query and shows a clearable chip", async () => {
+    mocks.useCompaniesMock.mockReturnValue({
+      companies: [],
+      pagination: { page: 1, limit: 50, total: 2, totalPages: 1, pipelineTotal: 80000, staleCount: 2 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const { container, cleanup } = await renderDomAt("/companies?card=pipeline");
+    try {
+      const allCalls = mocks.useCompaniesMock.mock.calls;
+      const lastCall = allCalls[allCalls.length - 1]?.[0];
+      expect(lastCall?.hasActivePipeline).toBe(true);
+      expect(lastCall?.stale).toBeUndefined();
+      expect(container.textContent).toContain("Filtered: Active pipeline");
+      expect(container.querySelector('button[aria-label="Clear card filter"]')).not.toBeNull();
+      // Exactly the drilled card carries the active ring (bare "ring-brand-red" token).
+      expect(container.querySelectorAll(".ring-brand-red").length).toBe(1);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("?card=stale wires the stale drill (not pipeline) into the query", async () => {
+    mocks.useCompaniesMock.mockReturnValue({
+      companies: [],
+      pagination: { page: 1, limit: 50, total: 2, totalPages: 1, pipelineTotal: 80000, staleCount: 2 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const { container, cleanup } = await renderDomAt("/companies?card=stale");
+    try {
+      const allCalls = mocks.useCompaniesMock.mock.calls;
+      const lastCall = allCalls[allCalls.length - 1]?.[0];
+      expect(lastCall?.stale).toBe(true);
+      expect(lastCall?.hasActivePipeline).toBeUndefined();
+      expect(container.textContent).toContain("Filtered: Untouched 30d+");
+    } finally {
+      await cleanup();
+    }
   });
 
   it("renders A1 company columns and construction-specific industry labels", () => {

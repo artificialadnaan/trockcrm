@@ -35,11 +35,31 @@ async function uniqueSlug(tenantDb: TenantDb, base: string, excludeId?: string):
 
 export async function listCompanies(
   tenantDb: TenantDb,
-  options: { search?: string; category?: string; industry?: string; ownerUserId?: string; page?: number; limit?: number } = {}
+  options: {
+    search?: string;
+    category?: string;
+    industry?: string;
+    ownerUserId?: string;
+    // Summary-card drill-downs (?card=pipeline / ?card=stale on the companies page).
+    hasActivePipeline?: boolean; // company has > 0 active (non-held) pipeline value
+    stale?: boolean; // last activity is null or > 30 days ago
+    page?: number;
+    limit?: number;
+  } = {}
 ) {
   const page = options.page ?? 1;
   const limit = options.limit ?? 50;
   const offset = (page - 1) * limit;
+
+  // Per-company predicates reused for BOTH the summary-card aggregates and the ?card= drill filters,
+  // so each card's number === the count/sum of the list it drills to (reconcile by construction).
+  const companyPipelineSql = sql<string>`(
+    SELECT COALESCE(SUM(CASE WHEN COALESCE(deals.on_hold, false) THEN 0 ELSE ${aliasedDealBestEstimateWithForecastSql("deals")} END), 0)
+      FROM deals
+     WHERE deals.company_id = ${companies.id}
+       AND deals.is_active = true
+  )`;
+  const companyStaleSql = sql<boolean>`(${companies.lastActivityAt} IS NULL OR ${companies.lastActivityAt} < NOW() - interval '30 days')`;
 
   const conditions = [eq(companies.isActive, true)];
   if (options.search && options.search.trim().length >= 2) {
@@ -53,6 +73,13 @@ export async function listCompanies(
   }
   if (options.ownerUserId) {
     conditions.push(eq(companies.ownerId, options.ownerUserId));
+  }
+  // Summary-card drill filters — same predicates as the aggregates below.
+  if (options.hasActivePipeline) {
+    conditions.push(sql`${companyPipelineSql} > 0`);
+  }
+  if (options.stale) {
+    conditions.push(companyStaleSql);
   }
 
   const where = and(...conditions);
@@ -71,6 +98,16 @@ export async function listCompanies(
     .offset(offset);
   const totalResult = await tenantDb
     .select({ count: count() })
+    .from(companies)
+    .where(where);
+
+  // Full-filtered-set aggregates for the two drillable summary cards (NOT the visible page). The
+  // predicates are the SAME helpers used by the drill filters above, so card === drilled list.
+  const aggregateResult = await tenantDb
+    .select({
+      pipelineTotal: sql<string>`COALESCE(SUM(${companyPipelineSql}), 0)::text`,
+      staleCount: sql<number>`COUNT(*) FILTER (WHERE ${companyStaleSql})`,
+    })
     .from(companies)
     .where(where);
 
@@ -123,7 +160,15 @@ export async function listCompanies(
     pipelineValue: countsMap.get(r.id)?.pipelineValue ?? "0",
   }));
 
-  return { companies: companiesWithCounts, total: totalResult[0]?.count ?? 0, page, limit };
+  return {
+    companies: companiesWithCounts,
+    total: totalResult[0]?.count ?? 0,
+    page,
+    limit,
+    // Active-Pipeline ($ sum) and Untouched (count) over the full filtered set.
+    pipelineTotal: Number(aggregateResult[0]?.pipelineTotal ?? 0),
+    staleCount: Number(aggregateResult[0]?.staleCount ?? 0),
+  };
 }
 
 export async function getCompanyById(tenantDb: TenantDb, id: string) {

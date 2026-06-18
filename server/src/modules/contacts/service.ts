@@ -25,6 +25,10 @@ export interface ContactFilters {
   dealStageId?: string;
   isActive?: boolean;
   hasOutreach?: boolean; // filter by first_outreach_completed
+  // Summary-card drill-downs. Each predicate is shared with the matching aggregate count in
+  // getContacts so the card number and the filtered-list count reconcile by construction.
+  isPrimary?: boolean; // has a primary deal association
+  untouched?: boolean; // last touch is null or > 30 days ago
   ownerUserId?: string;
   sortBy?: "name" | "company_name" | "created_at" | "updated_at" | "last_contacted_at" | "touchpoint_count" | "last_touch_at";
   sortDir?: "asc" | "desc";
@@ -157,6 +161,14 @@ export function buildContactIsPrimarySql(): SQL<boolean> {
     WHERE cda.contact_id = ${contactIdSql}
       AND cda.is_primary = true
   )`;
+}
+
+export function buildContactUntouchedSql(): SQL<boolean> {
+  // Untouched 30d+: never touched (last touch NULL) OR last touch older than 30 days. Mirrors the
+  // client predicate in contact-list-page.tsx; reused for BOTH the "Untouched" aggregate count and the
+  // ?card=untouched drill filter so they reconcile.
+  const lastTouch = buildContactLastTouchAtSql();
+  return sql<boolean>`(${lastTouch} IS NULL OR ${lastTouch} < NOW() - interval '30 days')`;
 }
 
 export function buildContactLinkedDealsCountSql(): SQL<number> {
@@ -391,6 +403,15 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     conditions.push(eq(contacts.firstOutreachCompleted, true));
   }
 
+  // Summary-card drill filters. Same predicates feed the aggregate counts below, so the card number
+  // a user clicks equals the count of the list these narrow to (reconcile by construction).
+  if (filters.isPrimary === true) {
+    conditions.push(buildContactIsPrimarySql());
+  }
+  if (filters.untouched === true) {
+    conditions.push(buildContactUntouchedSql());
+  }
+
   // Substring search across name, email, company, phone/mobile, job title, city, and owner —
   // the shared unified field set (single source of truth in modules/search/unified-search).
   if (filters.search && filters.search.trim().length >= 2) {
@@ -402,7 +423,19 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
   // Sort
   const sortOrder = buildContactSortOrder(filters.sortBy, filters.sortDir);
 
-  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(contacts).where(where);
+  // count(*) plus full-filtered-set aggregates for the two drillable summary cards, over the SAME
+  // `where` as the rows (so when a card drill is active its own aggregate just equals the total —
+  // redundant but harmless). The FILTER predicates are the SAME helpers as the ?card= drill filters
+  // above, so the number a user sees on a card (computed with no drill active) equals the total of the
+  // list that card drills to — reconcile by construction. NOT page-limited.
+  const countResult = await tenantDb
+    .select({
+      count: sql<number>`count(*)`,
+      primaryCount: sql<number>`count(*) FILTER (WHERE ${buildContactIsPrimarySql()})`,
+      untouchedCount: sql<number>`count(*) FILTER (WHERE ${buildContactUntouchedSql()})`,
+    })
+    .from(contacts)
+    .where(where);
   const contactRows = await tenantDb
     .select({
       id: contacts.id,
@@ -455,6 +488,9 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
       limit,
       total,
       totalPages: Math.ceil(total / limit),
+      // Full-filtered-set counts for the Primary / Untouched summary cards (NOT page-only).
+      primaryCount: Number(countResult[0]?.primaryCount ?? 0),
+      untouchedCount: Number(countResult[0]?.untouchedCount ?? 0),
     },
   };
 }

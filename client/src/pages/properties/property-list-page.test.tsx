@@ -90,6 +90,75 @@ describe("PropertyListPage", () => {
     });
   });
 
+  async function renderDomAt(path: string) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    let root!: Root;
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <MemoryRouter initialEntries={[path]}>
+          <PropertyListPage />
+        </MemoryRouter>
+      );
+    });
+    return {
+      container,
+      cleanup: async () => {
+        await act(async () => {
+          root.unmount();
+        });
+        container.remove();
+      },
+    };
+  }
+
+  it("drills the list to the selected card's predicate (?card=stale) and shows a clearable filter chip", async () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const base = {
+      companyId: "company-1",
+      companyName: "Alpha Roofing",
+      address: "123 Main St",
+      city: "Dallas",
+      state: "TX",
+      zip: "75201",
+      notes: null,
+      type: "industrial",
+      roofArea: 1000,
+      linkedValue: "0",
+      activePipelineValue: "0",
+      engagementStatus: "no_engagement",
+      photosCount: 0,
+      isActive: true,
+      createdAt: "2026-04-10T10:00:00.000Z",
+      updatedAt: "2026-04-11T10:00:00.000Z",
+      leadCount: 0,
+      dealCount: 0,
+      activeDealsCount: 0,
+      convertedDealCount: 0,
+    };
+    mocks.usePropertiesMock.mockReturnValue({
+      properties: [
+        { ...base, id: "fresh", name: "Fresh Site", lastActivityAt: new Date(Date.now() - 5 * DAY).toISOString() },
+        { ...base, id: "stale", name: "Stale Site", lastActivityAt: new Date(Date.now() - 60 * DAY).toISOString() },
+      ],
+      loading: false,
+      error: null,
+    });
+
+    const { container, cleanup } = await renderDomAt("/properties?card=stale");
+    try {
+      // The active-filter chip names the drilled card and is clearable.
+      expect(container.textContent).toContain("Filtered: Untouched 30d+");
+      expect(container.querySelector('button[aria-label="Clear card filter"]')).not.toBeNull();
+      // Only the stale property is listed; the fresh one is filtered out.
+      expect(container.querySelector('a[href="/properties/stale"]')).not.toBeNull();
+      expect(container.querySelector('a[href="/properties/fresh"]')).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+
   it("renders first-class properties instead of grouped deals", () => {
     const html = normalize(renderPage());
 

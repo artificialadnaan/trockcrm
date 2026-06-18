@@ -50,6 +50,9 @@ export interface ContactFilters {
   isActive?: boolean;
   hasOutreach?: boolean;
   ownerScope?: "mine";
+  // Summary-card drill-downs (driven by the ?card= URL param on the contacts page).
+  isPrimary?: boolean;
+  untouched?: boolean;
   sortBy?: string;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -61,6 +64,9 @@ export interface Pagination {
   limit: number;
   total: number;
   totalPages: number;
+  // Full-filtered-set counts for the drillable summary cards (server aggregates, NOT page-only).
+  primaryCount?: number;
+  untouchedCount?: number;
 }
 
 export function useContacts(filters: ContactFilters = {}) {
@@ -93,6 +99,8 @@ export function useContacts(filters: ContactFilters = {}) {
       if (filters.isActive === false) params.set("isActive", "false");
       if (filters.hasOutreach === true) params.set("hasOutreach", "true");
       if (filters.hasOutreach === false) params.set("hasOutreach", "false");
+      if (filters.isPrimary) params.set("isPrimary", "true");
+      if (filters.untouched) params.set("untouched", "true");
       if (filters.sortBy) params.set("sortBy", filters.sortBy);
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
@@ -127,6 +135,8 @@ export function useContacts(filters: ContactFilters = {}) {
     filters.dealStageId,
     filters.isActive,
     filters.hasOutreach,
+    filters.isPrimary,
+    filters.untouched,
     filters.sortBy,
     filters.sortDir,
     filters.page,

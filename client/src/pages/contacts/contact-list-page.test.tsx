@@ -89,6 +89,29 @@ async function renderPageDom() {
   };
 }
 
+async function renderDomAt(path: string) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root!: Root;
+  await act(async () => {
+    root = createRoot(container);
+    root.render(
+      <MemoryRouter initialEntries={[path]}>
+        <ContactListPage />
+      </MemoryRouter>
+    );
+  });
+  return {
+    container,
+    cleanup: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
 describe("ContactListPage", () => {
   beforeEach(() => {
     mocks.useContactsMock.mockReset();
@@ -168,6 +191,52 @@ describe("ContactListPage", () => {
       error: null,
       refetch: vi.fn(),
     });
+  });
+
+  it("?card=primary wires the isPrimary drill into the query and shows a clearable chip", async () => {
+    mocks.useContactsMock.mockReturnValue({
+      contacts: [],
+      pagination: { page: 1, limit: 50, total: 7, totalPages: 1, primaryCount: 7, untouchedCount: 3 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const { container, cleanup } = await renderDomAt("/contacts?card=primary");
+    try {
+      // The drill param reaches the data hook, so the server filters to primary contacts.
+      const allCalls = mocks.useContactsMock.mock.calls;
+      const lastCall = allCalls[allCalls.length - 1]?.[0];
+      expect(lastCall?.isPrimary).toBe(true);
+      expect(lastCall?.untouched).toBeUndefined();
+      // Active-filter chip names the drilled card and is clearable.
+      expect(container.textContent).toContain("Filtered: Primary contacts");
+      expect(container.querySelector('button[aria-label="Clear card filter"]')).not.toBeNull();
+      // Exactly the drilled card carries the active ring (bare "ring-brand-red" token, not the
+      // "focus-visible:ring-brand-red" every clickable card has).
+      expect(container.querySelectorAll(".ring-brand-red").length).toBe(1);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("?card=untouched wires the untouched drill (not isPrimary) into the query", async () => {
+    mocks.useContactsMock.mockReturnValue({
+      contacts: [],
+      pagination: { page: 1, limit: 50, total: 3, totalPages: 1, primaryCount: 7, untouchedCount: 3 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const { container, cleanup } = await renderDomAt("/contacts?card=untouched");
+    try {
+      const allCalls = mocks.useContactsMock.mock.calls;
+      const lastCall = allCalls[allCalls.length - 1]?.[0];
+      expect(lastCall?.untouched).toBe(true);
+      expect(lastCall?.isPrimary).toBeUndefined();
+      expect(container.textContent).toContain("Filtered: Untouched 30d+");
+    } finally {
+      await cleanup();
+    }
   });
 
   it("renders A1 contact role, primary state, linked deals, and last touch", () => {

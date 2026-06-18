@@ -44,6 +44,9 @@ export interface CompanyFilters {
   category?: string;
   industry?: string;
   ownerScope?: "mine";
+  // Summary-card drill-downs (driven by the ?card= URL param on the companies page).
+  hasActivePipeline?: boolean;
+  stale?: boolean;
   page?: number;
   limit?: number;
 }
@@ -53,6 +56,9 @@ export interface Pagination {
   limit: number;
   total: number;
   totalPages: number;
+  // Full-filtered-set aggregates for the drillable summary cards (server-computed, NOT page-only).
+  pipelineTotal?: number;
+  staleCount?: number;
 }
 
 export function useCompanies(filters: CompanyFilters = {}) {
@@ -80,11 +86,13 @@ export function useCompanies(filters: CompanyFilters = {}) {
       if (filters.category) params.set("category", filters.category);
       if (filters.industry) params.set("industry", filters.industry);
       if (filters.ownerScope === "mine") params.set("ownerScope", "mine");
+      if (filters.hasActivePipeline) params.set("hasActivePipeline", "true");
+      if (filters.stale) params.set("stale", "true");
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
 
       const qs = params.toString();
-      const data = await api<{ companies: Company[]; total: number; page: number; limit: number }>(
+      const data = await api<{ companies: Company[]; total: number; page: number; limit: number; pipelineTotal?: number; staleCount?: number }>(
         `/companies${qs ? `?${qs}` : ""}`
       );
       if (requestId !== requestIdRef.current) return; // a newer request superseded this one
@@ -97,6 +105,8 @@ export function useCompanies(filters: CompanyFilters = {}) {
         limit,
         total,
         totalPages: Math.ceil(total / limit),
+        pipelineTotal: data.pipelineTotal,
+        staleCount: data.staleCount,
       });
     } catch (err: unknown) {
       if (requestId !== requestIdRef.current) return;
@@ -106,7 +116,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
         setLoading(false);
       }
     }
-  }, [filters.search, filters.category, filters.industry, filters.ownerScope, filters.page, filters.limit]);
+  }, [filters.search, filters.category, filters.industry, filters.ownerScope, filters.hasActivePipeline, filters.stale, filters.page, filters.limit]);
 
   useEffect(() => {
     fetchCompanies();
