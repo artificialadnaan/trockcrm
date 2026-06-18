@@ -63,7 +63,12 @@ const EYEBROW = "text-[11px] font-black uppercase tracking-[0.18em] text-slate-5
 
 const TYPE_FILTERS: Array<{ value: FileCategory | "all"; label: string }> = [
   { value: "all", label: "All Types" },
-  ...FILE_CATEGORIES.map((category) => ({ value: category, label: getCategoryLabel(category) })),
+  // Surface the catch-all "other" bucket as "Uncategorized" so genuinely-untyped docs are visible
+  // (filterable) rather than appearing to vanish behind the per-type filters.
+  ...FILE_CATEGORIES.map((category) => ({
+    value: category,
+    label: category === "other" ? "Uncategorized" : getCategoryLabel(category),
+  })),
 ];
 
 const PREVIEW_CACHE_MAX = 200;

@@ -1,0 +1,119 @@
+import { describe, expect, it } from "vitest";
+import {
+  parseBackfillArgs,
+  buildBackfillPlan,
+  runBackfillForSchema,
+  type OtherFileRow,
+  type QueryClient,
+} from "../../../scripts/backfill-file-categories.js";
+
+function row(over: Partial<OtherFileRow> & { id: string }): OtherFileRow {
+  return {
+    originalFilename: null,
+    mimeType: null,
+    subcategory: null,
+    folderPath: null,
+    changeOrderId: null,
+    ...over,
+  };
+}
+
+interface FakeOpts {
+  otherRows: OtherFileRow[];
+  before: Record<string, number>;
+  after?: Record<string, number>;
+}
+
+function createFakeClient(opts: FakeOpts) {
+  const queries: Array<{ text: string; params?: unknown[] }> = [];
+  let censusCalls = 0;
+  const client: QueryClient = {
+    async query(text: string, params?: unknown[]) {
+      queries.push({ text, params });
+      const t = text.trim();
+      if (t.startsWith("SET search_path")) return { rows: [], rowCount: null };
+      if (t === "BEGIN" || t === "COMMIT" || t === "ROLLBACK") return { rows: [], rowCount: null };
+      if (t.startsWith("SELECT category")) {
+        const src = censusCalls === 0 ? opts.before : opts.after ?? opts.before;
+        censusCalls += 1;
+        return { rows: Object.entries(src).map(([category, count]) => ({ category, count })), rowCount: null };
+      }
+      if (t.startsWith("SELECT id")) return { rows: opts.otherRows, rowCount: opts.otherRows.length };
+      if (t.startsWith("UPDATE files")) return { rows: [], rowCount: 1 };
+      throw new Error(`Unexpected query: ${t}`);
+    },
+  };
+  return { client, queries };
+}
+
+describe("backfill-file-categories", () => {
+  it("parseBackfillArgs defaults to dry-run and accepts exactly one mode", () => {
+    expect(parseBackfillArgs(["node", "s"])).toEqual({ mode: "dry-run" });
+    expect(parseBackfillArgs(["node", "s", "--dry-run"])).toEqual({ mode: "dry-run" });
+    expect(parseBackfillArgs(["node", "s", "--commit"])).toEqual({ mode: "commit" });
+    expect(() => parseBackfillArgs(["node", "s", "--commit", "--dry-run"])).toThrow("exactly one");
+  });
+
+  it("plans only rows that infer to a real (non-other) category; skips the rest", () => {
+    const plan = buildBackfillPlan([
+      row({ id: "a", originalFilename: "Master Contract.pdf", mimeType: "application/pdf" }),
+      row({ id: "b", originalFilename: "site.jpg", mimeType: "image/jpeg" }),
+      row({ id: "c", originalFilename: "random.pdf", mimeType: "application/pdf" }),
+      row({ id: "d", originalFilename: "scan.pdf", mimeType: "application/pdf", changeOrderId: "co-9" }),
+    ]);
+    expect(plan.willUpdate).toEqual([
+      { id: "a", from: "other", to: "contract" },
+      { id: "b", from: "other", to: "photo" },
+      { id: "d", from: "other", to: "change_order" },
+    ]);
+    expect(plan.skipped).toBe(1);
+    expect(plan.byTarget).toEqual({ contract: 1, photo: 1, change_order: 1 });
+  });
+
+  it("dry-run reads but never writes (no BEGIN/UPDATE/COMMIT, no after census)", async () => {
+    const { client, queries } = createFakeClient({
+      otherRows: [row({ id: "a", originalFilename: "contract.pdf", mimeType: "application/pdf" })],
+      before: { other: 10, photo: 5 },
+    });
+    const result = await runBackfillForSchema(client, "office_dallas", "dry-run");
+
+    expect(result.plan.willUpdate).toHaveLength(1);
+    expect(result.applied).toBe(0);
+    expect(result.after).toBeUndefined();
+    expect(queries.some((q) => q.text.trim().startsWith("UPDATE"))).toBe(false);
+    expect(queries.some((q) => q.text.trim() === "BEGIN")).toBe(false);
+  });
+
+  it("commit updates only category='other' rows, guarded + transactional + idempotent re-check", async () => {
+    const { client, queries } = createFakeClient({
+      otherRows: [
+        row({ id: "a", originalFilename: "Master Contract.pdf", mimeType: "application/pdf" }),
+        row({ id: "c", originalFilename: "random.pdf", mimeType: "application/pdf" }),
+      ],
+      before: { other: 2 },
+      after: { other: 1, contract: 1 },
+    });
+    const result = await runBackfillForSchema(client, "office_dallas", "commit");
+
+    expect(result.applied).toBe(1);
+    expect(result.after).toEqual({ other: 1, contract: 1 });
+
+    const updates = queries.filter((q) => q.text.trim().startsWith("UPDATE files"));
+    expect(updates).toHaveLength(1);
+    // Data-integrity guard: the write is scoped to category='other' so it never clobbers a set category.
+    expect(updates[0].text).toContain("category = 'other'");
+    expect(updates[0].params).toEqual(["contract", "a"]);
+    // Transactional
+    expect(queries.some((q) => q.text.trim() === "BEGIN")).toBe(true);
+    expect(queries.some((q) => q.text.trim() === "COMMIT")).toBe(true);
+  });
+
+  it("is a no-op when there are no category='other' rows (idempotent second run)", async () => {
+    const { client, queries } = createFakeClient({ otherRows: [], before: { contract: 3 }, after: { contract: 3 } });
+    const result = await runBackfillForSchema(client, "office_atlanta", "commit");
+    expect(result.applied).toBe(0);
+    expect(result.plan.willUpdate).toHaveLength(0);
+    expect(queries.some((q) => q.text.trim().startsWith("UPDATE"))).toBe(false);
+    expect(queries.some((q) => q.text.trim() === "BEGIN")).toBe(false);
+  });
+});

@@ -22,6 +22,7 @@ import {
   CATEGORY_TO_FOLDER,
   DEAL_FOLDER_TEMPLATE,
 } from "./file-constants.js";
+import { inferFileCategory } from "./infer-category.js";
 import { resolvePhotoAddressMetadata } from "./photo-geocoding.js";
 import { buildDealPhotoTimelineConditions, type DealPhotoTimelineFilters } from "./photo-timeline-filters.js";
 import crypto from "node:crypto";
@@ -464,7 +465,21 @@ export async function requestUploadUrl(
   validateMimeType(input.mimeType);
   const ext = validateExtension(input.originalFilename);
   validateMimeMatchesExtension(input.mimeType, ext); // Fix 3: MIME must match extension
-  validateCategoryMatchesMime(input.category, input.mimeType);
+
+  // Auto-infer the document type when the caller left it as the client default "other", so the Files
+  // page type-filters populate (an explicit category is always respected). folderPath is derived from
+  // the category below, so it is NOT a signal here; filename + MIME + subcategory are. Versions inherit
+  // their parent's category upstream, so this only re-types a fresh upload whose category is "other".
+  const resolvedCategory: FileCategory =
+    input.category === "other"
+      ? inferFileCategory({
+          filename: input.originalFilename,
+          mimeType: input.mimeType,
+          subcategory: input.subcategory,
+        })
+      : input.category;
+
+  validateCategoryMatchesMime(resolvedCategory, input.mimeType);
   validateFileSize(input.fileSizeBytes);
   validateAssociations(input);
 
@@ -474,7 +489,7 @@ export async function requestUploadUrl(
   const { systemFilename, displayName } = await generateSystemFilename(
     tenantDb,
     input.dealId,
-    input.category,
+    resolvedCategory,
     ext,
     now
   );
@@ -498,7 +513,7 @@ export async function requestUploadUrl(
     contactId: input.contactId,
     procoreProjectId: input.procoreProjectId,
     changeOrderId: input.changeOrderId,
-    category: input.category,
+    category: resolvedCategory,
     systemFilename,
   });
   // Insert a UUID before the filename in the key for collision safety
@@ -507,7 +522,7 @@ export async function requestUploadUrl(
   const r2Key = [...keyParts, `${crypto.randomUUID()}-${filename}`].join("/");
 
   // Build folder path (pass date for photo category date-bucketing)
-  const folderPath = buildFolderPath(input.category, input.subcategory, now);
+  const folderPath = buildFolderPath(resolvedCategory, input.subcategory, now);
 
   // Generate presigned URL (or mock in dev)
   let uploadResult: { uploadUrl: string; r2Key: string; expiresIn: number };
@@ -527,7 +542,7 @@ export async function requestUploadUrl(
     originalFilename: input.originalFilename,
     mimeType: input.mimeType,
     fileSizeBytes: input.fileSizeBytes,
-    category: input.category,
+    category: resolvedCategory,
     subcategory: input.subcategory,
     dealId: input.dealId,
     leadId: input.leadId,
