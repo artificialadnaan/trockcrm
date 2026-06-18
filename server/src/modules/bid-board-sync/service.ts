@@ -318,7 +318,7 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
            bid_board_customer_name = $12,
            bid_board_customer_contact_raw = $13,
            bid_board_project_number = $14,
-           estimator_user_id = COALESCE(estimator_user_id, $16),
+           estimator_user_id = COALESCE(estimator_user_id, $16::uuid),
            -- Bid Board exports do not include a per-row updated-at, so this stores the sync cycle timestamp.
            bid_board_last_updated_at = $15::timestamptz,
            updated_at = NOW()
@@ -338,7 +338,7 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
             bid_board_customer_contact_raw IS DISTINCT FROM $13 OR
             bid_board_project_number IS DISTINCT FROM $14 OR
             bid_board_last_updated_at IS DISTINCT FROM $15::timestamptz OR
-            (estimator_user_id IS NULL AND $16 IS NOT NULL)
+            (estimator_user_id IS NULL AND $16::uuid IS NOT NULL)
        )
      RETURNING id, name, deal_number, project_number, estimator_user_id
   `;
