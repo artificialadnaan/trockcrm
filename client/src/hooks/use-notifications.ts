@@ -163,6 +163,18 @@ export function useNotificationStream(enabled: boolean = true) {
       console.log("[SSE] Connected to notification stream");
     });
 
+    // The server emits this + closes the stream when the user is deactivated or role-changed
+    // (closeUserSseConnections). Stop reconnecting and send them to login proactively, rather than
+    // leaving a dead tab open until the next request 401s.
+    es.addEventListener("session_invalidated", () => {
+      isClosing = true;
+      es.close();
+      eventSourceRef.current = null;
+      if (typeof window !== "undefined") {
+        window.location.assign("/login?reason=session-invalidated");
+      }
+    });
+
     es.onerror = () => {
       // Ignore the expected browser-side disconnect during cleanup/navigation.
       if (isClosing || es.readyState === EventSource.CLOSED) {

@@ -13,7 +13,7 @@ describe("App route guards", () => {
     expect(source).toContain('path="/director/rep/:repId" element={( <RequireRole allowedRoles={["admin", "director"]}> <DirectorRepDetail />');
   });
 
-  it("wraps admin-only routes with the RequireRole guard", () => {
+  it("wraps admin-only routes with the appropriate admin guard (RequireGlobalAdmin for users, RequireRole for the rest)", () => {
     expect(source).toContain('path="/admin/users" element={( <RequireGlobalAdmin> <UsersPage />');
     expect(source).toContain('path="/admin/offices" element={( <RequireRole allowedRoles={["admin"]}> <OfficesPage />');
     expect(source).toContain('path="/help/admin-guide" element={( <RequireRole allowedRoles={["admin"]}> <AdminGuidePage />');

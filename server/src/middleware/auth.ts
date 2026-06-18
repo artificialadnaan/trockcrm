@@ -43,11 +43,12 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
     const user = await getUserById(claims.userId);
 
     if (!user || !user.isActive) {
-      throw new AppError(401, "User not found or inactive");
+      // Deactivated/removed = a deliberate session kill -> tag so the client proactively redirects to login.
+      throw new AppError(401, "User not found or inactive", "SESSION_INVALIDATED");
     }
 
     if (isTokenVersionStale(claims.tokenVersion, user.tokenVersion)) {
-      throw new AppError(401, "Session expired, please sign in again");
+      throw new AppError(401, "Session expired, please sign in again", "SESSION_INVALIDATED");
     }
 
     const localAuthGate = await getUserLocalAuthGate(user.id);
@@ -61,7 +62,7 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
       authMethod === "local"
       && (!localAuthGate.isEnabled || localAuthGate.revokedAt)
     ) {
-      throw new AppError(401, "Local login is no longer enabled for this user");
+      throw new AppError(401, "Local login is no longer enabled for this user", "SESSION_INVALIDATED");
     }
 
     // Determine active office (header override or default)

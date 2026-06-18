@@ -110,6 +110,7 @@ class FakeWindow {
   HTMLElement = FakeElement;
   HTMLIFrameElement = class FakeIFrameElement extends FakeElement {};
   SVGElement = FakeElement;
+  location = { assign: vi.fn() };
 
   constructor(public document: FakeDocument) {}
 }
@@ -118,16 +119,23 @@ class FakeEventSource {
   static CONNECTING = 0;
   static OPEN = 1;
   static CLOSED = 2;
+  static instances: FakeEventSource[] = [];
 
   readyState = FakeEventSource.OPEN;
   listeners = new Map<string, Set<(event: { data: string }) => void>>();
 
-  constructor(public url: string, public init?: { withCredentials?: boolean }) {}
+  constructor(public url: string, public init?: { withCredentials?: boolean }) {
+    FakeEventSource.instances.push(this);
+  }
 
   addEventListener(type: string, listener: (event: { data: string }) => void) {
     const listeners = this.listeners.get(type) ?? new Set<(event: { data: string }) => void>();
     listeners.add(listener);
     this.listeners.set(type, listeners);
+  }
+
+  emit(type: string, data = "") {
+    for (const listener of this.listeners.get(type) ?? []) listener({ data });
   }
 
   close() {
@@ -259,5 +267,38 @@ describe("useNotificationStream", () => {
     });
 
     eventSourceSpy.mockRestore();
+  });
+});
+
+describe("useNotificationStream session invalidation", () => {
+  beforeEach(() => {
+    // Reset the shared hoisted mocks (not just the static registry) so this test isn't order-coupled
+    // to prior tests' apiMock implementations. Bootstrap unread-count resolves cleanly.
+    apiMock.mockReset();
+    resolveApiBaseMock.mockClear();
+    apiMock.mockResolvedValue({ count: 0 });
+    FakeEventSource.instances.length = 0;
+  });
+
+  it("closes the stream and redirects to login on a session_invalidated event", async () => {
+    const root = await renderHook(true);
+    try {
+      const instances = FakeEventSource.instances;
+      const es = instances[instances.length - 1];
+      expect(es).toBeTruthy();
+
+      await act(async () => {
+        es.emit("session_invalidated", "{}");
+        await flushEffects();
+      });
+
+      expect(es.readyState).toBe(FakeEventSource.CLOSED);
+      const stubbedWindow = globalThis.window as unknown as { location: { assign: ReturnType<typeof vi.fn> } };
+      expect(stubbedWindow.location.assign).toHaveBeenCalledWith("/login?reason=session-invalidated");
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+    }
   });
 });
