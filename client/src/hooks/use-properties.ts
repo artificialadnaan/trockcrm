@@ -43,6 +43,8 @@ export interface PropertyListFilters {
   search?: string;
   companyId?: string;
   type?: string;
+  sortBy?: string;
+  sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
   isActive?: boolean;
@@ -149,6 +151,8 @@ export function useProperties(filters: PropertyListFilters = {}, options: Office
       if (filters.search) params.set("search", filters.search);
       if (filters.companyId) params.set("companyId", filters.companyId);
       if (filters.type) params.set("type", filters.type);
+      if (filters.sortBy) params.set("sortBy", filters.sortBy);
+      if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
       if (filters.isActive === false) params.set("isActive", "false");
@@ -168,7 +172,7 @@ export function useProperties(filters: PropertyListFilters = {}, options: Office
         setLoading(false);
       }
     }
-  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search, filters.type, isDisabled, options.officeId]);
+  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search, filters.type, filters.sortBy, filters.sortDir, isDisabled, options.officeId]);
 
   useEffect(() => {
     fetchProperties();

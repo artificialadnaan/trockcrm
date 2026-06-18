@@ -10,9 +10,24 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/shared/sortable-table-head";
+import { useSortState, type SortStateColumn } from "@/components/reports/sortable";
 import { PropertyCreateDialog } from "@/components/properties/property-create-dialog";
 import { formatPropertyLabel, useProperties, type PropertySurface } from "@/hooks/use-properties";
 import { cn } from "@/lib/utils";
+
+// Header typography for the property table.
+const PROPERTY_HEAD_CLASS = "text-[11px] font-black uppercase tracking-[0.16em] text-slate-500";
+
+// Sortable DIRECT columns (key == the properties list API sortBy value), ordered server-side over the
+// full filtered set. The aggregate columns (Engagement, Linked value, Last touch) are computed in
+// post-pagination sub-queries and are intentionally non-sortable for now.
+const PROPERTY_SORT_COLUMNS: ReadonlyArray<SortStateColumn> = [
+  { key: "name", type: "text" },
+  { key: "type", type: "text" },
+  { key: "company", type: "text" },
+  { key: "sqft", type: "number" },
+];
 
 const TYPE_LABELS: Record<string, string> = {
   office: "Office",
@@ -153,9 +168,18 @@ export function PropertyListPage() {
   const [type, setType] = useState<(typeof TYPE_OPTIONS)[number]["value"]>("all");
   const [page, setPage] = useState(1);
   const pageSize = 50;
+  // useSortState is the sort source of truth (key == API sortBy). The server applies the ORDER BY over the
+  // FULL filtered set and returns the top window (limit 250), which the page then paginates in memory — so
+  // the sort is global (not just the visible page). Default (no sort) keeps the server's natural order.
+  const { sortState, toggle, getHeaderProps } = useSortState(PROPERTY_SORT_COLUMNS);
+  useEffect(() => {
+    setPage(1);
+  }, [sortState]);
   const { properties, loading, error } = useProperties({
     search: search || undefined,
     type: type === "all" ? undefined : type,
+    sortBy: sortState?.key,
+    sortDir: sortState?.dir,
     limit: 250,
   });
 
@@ -334,13 +358,35 @@ export function PropertyListPage() {
             <div className="hidden md:block"><Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Property</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Type</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Owner company</TableHead>
-                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Sq ft</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Engagement</TableHead>
-                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Linked value</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Last touch</TableHead>
+                  <SortableTableHead
+                    label="Property"
+                    buttonClassName={PROPERTY_HEAD_CLASS}
+                    {...getHeaderProps("name")}
+                    onSort={() => toggle("name")}
+                  />
+                  <SortableTableHead
+                    label="Type"
+                    buttonClassName={PROPERTY_HEAD_CLASS}
+                    {...getHeaderProps("type")}
+                    onSort={() => toggle("type")}
+                  />
+                  <SortableTableHead
+                    label="Owner company"
+                    buttonClassName={PROPERTY_HEAD_CLASS}
+                    {...getHeaderProps("company")}
+                    onSort={() => toggle("company")}
+                  />
+                  <SortableTableHead
+                    label="Sq ft"
+                    numeric
+                    className="text-right"
+                    buttonClassName={PROPERTY_HEAD_CLASS}
+                    {...getHeaderProps("sqft")}
+                    onSort={() => toggle("sqft")}
+                  />
+                  <TableHead className={PROPERTY_HEAD_CLASS}>Engagement</TableHead>
+                  <TableHead className={cn("text-right", PROPERTY_HEAD_CLASS)}>Linked value</TableHead>
+                  <TableHead className={PROPERTY_HEAD_CLASS}>Last touch</TableHead>
                   <TableHead className="w-10" />
                 </TableRow>
               </TableHeader>

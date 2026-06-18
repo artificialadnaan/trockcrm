@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, ilike, inArray, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, ilike, inArray, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   companies,
@@ -17,8 +17,38 @@ export interface PropertyFilters {
   companyId?: string;
   type?: string;
   isActive?: boolean;
+  sortBy?: string;
+  sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
+}
+
+function propertyOrderExpr(col: unknown, dir: "asc" | "desc") {
+  // Blanks/nulls always sink to the bottom in both directions (matches the client comparators).
+  return dir === "asc" ? sql`${col} ASC NULLS LAST` : sql`${col} DESC NULLS LAST`;
+}
+
+/**
+ * ORDER BY for the properties directory, applied over the FULL filtered set before LIMIT/OFFSET so the
+ * sort is global, not just the visible page. Only directly-orderable columns are supported — Property
+ * name, Type, Owner company, and Sq ft (COALESCE(roof_area, unit_count)). The aggregate columns
+ * (Linked value, Engagement, Last touch) are computed in separate post-pagination sub-queries and are
+ * intentionally NOT sortable (a deferred follow-up). No sortBy keeps the directory's natural multi-key
+ * order (owner company → property name → address).
+ */
+export function buildPropertySortOrder(sortBy: string | undefined, sortDir: "asc" | "desc" = "asc"): SQL[] {
+  switch (sortBy) {
+    case "name":
+      return [propertyOrderExpr(properties.name, sortDir)];
+    case "type":
+      return [propertyOrderExpr(properties.type, sortDir)];
+    case "company":
+      return [propertyOrderExpr(companies.name, sortDir)];
+    case "sqft":
+      return [propertyOrderExpr(sql`COALESCE(${properties.roofArea}, ${properties.unitCount})`, sortDir)];
+    default:
+      return [asc(companies.name), asc(properties.name), asc(properties.address)];
+  }
 }
 
 export interface CreatePropertyInput {
@@ -317,7 +347,8 @@ export async function listProperties(
     .from(properties)
     .leftJoin(companies, eq(companies.id, properties.companyId))
     .where(where)
-    .orderBy(asc(companies.name), asc(properties.name), asc(properties.address))
+    // Server-side sort over the full filtered set; stable id tiebreak keeps OFFSET paging deterministic.
+    .orderBy(...buildPropertySortOrder(filters.sortBy, filters.sortDir), asc(properties.id))
     .limit(limit)
     .offset(offset);
   const totalResult = await tenantDb.select({ count: count() }).from(properties).where(where);
