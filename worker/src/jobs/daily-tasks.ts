@@ -68,6 +68,16 @@ type Queryable = {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
 };
 
+// Postgres schema names are interpolated into raw SQL (Postgres can't parameterize identifiers), so any
+// function that does so must validate the identifier itself rather than trust the caller. A tenant schema
+// is `office_<slug>` / `public` — a lowercase SQL identifier. Reject anything else before it reaches a query.
+const SAFE_SCHEMA_NAME = /^[a-z_][a-z0-9_]*$/;
+function assertSafeSchemaName(schemaName: string): void {
+  if (!SAFE_SCHEMA_NAME.test(schemaName)) {
+    throw new Error(`Unsafe schema name: ${JSON.stringify(schemaName)}`);
+  }
+}
+
 export async function dismissResolvedStaleLeadTasks(
   client: Queryable,
   schemaName: string,
@@ -160,6 +170,7 @@ export async function dismissResolvedFirstOutreachTasks(
   officeId: string,
   resolvedAt: Date = new Date()
 ): Promise<number> {
+  assertSafeSchemaName(schemaName);
   const activeTaskStatusesSql = ["pending", "scheduled", "in_progress", "waiting_on", "blocked"]
     .map((status) => `'${status}'`)
     .join(", ");

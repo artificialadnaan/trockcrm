@@ -16,9 +16,10 @@ import { dismissResolvedFirstOutreachTasks } from "../jobs/daily-tasks.js";
 
 const SLUG_REGEX = /^[a-z][a-z0-9_]*$/;
 
-export async function runDismissStaleFirstOutreach(apply: boolean): Promise<{ total: number }> {
+export async function runDismissStaleFirstOutreach(apply: boolean): Promise<{ total: number; failures: number }> {
   const client = await pool.connect();
   let total = 0;
+  let failures = 0;
   try {
     const offices = await client.query<{ id: string; slug: string }>(
       "SELECT id, slug FROM public.offices WHERE is_active = true"
@@ -27,6 +28,7 @@ export async function runDismissStaleFirstOutreach(apply: boolean): Promise<{ to
     for (const office of offices.rows) {
       if (!SLUG_REGEX.test(office.slug)) {
         console.warn(`[dismiss-first-outreach] Invalid office slug "${office.slug}" — skipping`);
+        failures += 1;
         continue;
       }
       const schemaName = `office_${office.slug}`;
@@ -43,7 +45,10 @@ export async function runDismissStaleFirstOutreach(apply: boolean): Promise<{ to
           `[dismiss-first-outreach] ${office.slug}: ${dismissed} task(s) ${apply ? "dismissed" : "would be dismissed (dry run)"}`
         );
       } catch (officeErr) {
+        // Keep processing the other offices, but record the failure so the process exits non-zero — a
+        // partial cleanup must be visible to schedulers/ops automation, not silently succeed.
         await client.query("ROLLBACK").catch(() => {});
+        failures += 1;
         console.error(`[dismiss-first-outreach] Office ${office.slug} failed:`, officeErr);
       }
     }
@@ -51,17 +56,17 @@ export async function runDismissStaleFirstOutreach(apply: boolean): Promise<{ to
     client.release();
   }
   console.log(
-    `[dismiss-first-outreach] ${apply ? "Applied" : "Dry run"} complete. ${total} task(s) ${apply ? "dismissed" : "would be dismissed"} across all offices.`
+    `[dismiss-first-outreach] ${apply ? "Applied" : "Dry run"} complete. ${total} task(s) ${apply ? "dismissed" : "would be dismissed"} across all offices` +
+      (failures > 0 ? `, ${failures} office(s) FAILED.` : ".")
   );
-  return { total };
+  return { total, failures };
 }
 
 const isMain = process.argv[1] != null && import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   const apply = process.argv.includes("--apply");
   runDismissStaleFirstOutreach(apply)
-    .then(() => pool.end())
-    .then(() => process.exit(0))
+    .then(({ failures }) => pool.end().then(() => process.exit(failures > 0 ? 1 : 0)))
     .catch((err) => {
       console.error("[dismiss-first-outreach] Failed:", err);
       pool.end().finally(() => process.exit(1));

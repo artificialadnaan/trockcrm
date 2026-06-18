@@ -201,4 +201,12 @@ describe("dismissResolvedFirstOutreachTasks", () => {
     expect(first).toBe(6);
     expect(second).toBe(0); // dismissed tasks left the active-status set
   });
+
+  it("rejects an unsafe schemaName before issuing any SQL (the schema is interpolated, not parameterized)", async () => {
+    await expect(
+      dismissResolvedFirstOutreachTasks(db, 'office_x"; DROP TABLE tasks; --', OFFICE_ID)
+    ).rejects.toThrow(/Unsafe schema name/);
+    // Nothing was dismissed — the guard threw before the UPDATE ran.
+    expect(await status(T_RESOLVED)).toBe("pending");
+  });
 });
