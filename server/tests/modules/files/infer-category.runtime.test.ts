@@ -69,6 +69,10 @@ describe("inferFileCategory", () => {
     expect(
       inferFileCategory({ filename: "final.pdf", mimeType: "application/pdf", subcategory: "Permit" })
     ).toBe("permit");
+    // surrounding whitespace on the subcategory hint is tolerated (trimmed, like the filename)
+    expect(
+      inferFileCategory({ filename: "final.pdf", mimeType: "application/pdf", subcategory: "  Permit  " })
+    ).toBe("permit");
   });
 
   it("matches 'contract' as a whole word, not the 'contractor' prefix", () => {
