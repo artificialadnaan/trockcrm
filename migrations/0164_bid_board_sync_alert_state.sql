@@ -10,7 +10,7 @@
 -- Public (not per-office) and keyed by office_slug so a single cron process covers every office.
 CREATE TABLE IF NOT EXISTS public.bid_board_sync_alert_state (
   office_slug      text PRIMARY KEY,
-  state            text NOT NULL DEFAULT 'ok',   -- 'ok' | 'stalled'
+  state            text NOT NULL DEFAULT 'ok' CHECK (state IN ('ok', 'stalled')),
   last_alerted_at  timestamptz,                  -- when we last emailed a stalled alert (throttle anchor)
   last_success_at  timestamptz,                  -- last committed-success seen at the time of the check
   updated_at       timestamptz NOT NULL DEFAULT now()

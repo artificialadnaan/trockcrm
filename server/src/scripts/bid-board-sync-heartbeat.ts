@@ -76,6 +76,10 @@ export interface HeartbeatEmail {
   thresholdMinutes: number;
 }
 
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] as string);
+}
+
 /** Pure email renderer — kept separate from sending so it is unit-testable without a transport. */
 export function renderHeartbeatEmail(e: HeartbeatEmail): { subject: string; html: string } {
   const lastSuccessText = e.lastSuccessAt
@@ -83,12 +87,13 @@ export function renderHeartbeatEmail(e: HeartbeatEmail): { subject: string; html
     : "never (no successful run has ever been recorded)";
   const gapText =
     e.minutesSinceSuccess === null ? "—" : `${e.minutesSinceSuccess} min (${(e.minutesSinceSuccess / 60).toFixed(1)} h)`;
+  const office = escapeHtml(e.office); // env-controlled, but escape defensively (consistency with the body fields)
 
   if (e.kind === "stalled") {
     const subject = `⚠️ Bid Board sync STALLED — office ${e.office} (no success in ${e.thresholdMinutes}m)`;
     const html = `
       <h2>Bid Board → CRM sync appears stalled</h2>
-      <p><strong>Office:</strong> ${e.office}</p>
+      <p><strong>Office:</strong> ${office}</p>
       <p><strong>Last successful sync:</strong> ${lastSuccessText}</p>
       <p><strong>Time since last success:</strong> ${gapText}</p>
       <p>No committed Bid Board sync has landed in the CRM within the last ${e.thresholdMinutes} minutes.
@@ -101,7 +106,7 @@ export function renderHeartbeatEmail(e: HeartbeatEmail): { subject: string; html
   const subject = `✅ Bid Board sync RECOVERED — office ${e.office}`;
   const html = `
     <h2>Bid Board → CRM sync has resumed</h2>
-    <p><strong>Office:</strong> ${e.office}</p>
+    <p><strong>Office:</strong> ${office}</p>
     <p><strong>Latest successful sync:</strong> ${lastSuccessText}</p>
     <p>A committed Bid Board sync has landed again; the prior stall has cleared.</p>
   `;
@@ -230,19 +235,28 @@ export async function runHeartbeatForOffice(
     }
   }
 
-  // last_alerted_at advances only when the stalled email actually sent (so a failed send re-alerts next
-  // cycle, not after a full window); recovery clears it so the next stall starts a fresh window.
-  const lastAlertedAt =
-    decision.action === "alert_stalled"
-      ? sent
-        ? opts.now
-        : (prior?.last_alerted_at ?? null)
-      : decision.action === "alert_recovered"
-        ? null
-        : (prior?.last_alerted_at ?? null);
+  // State + throttle anchor are gated on a SUCCESSFUL send so a transient transport failure re-alerts
+  // next cycle instead of being lost:
+  //  - stalled: advance last_alerted_at only when the email sent (else keep prior → re-alert next cycle)
+  //  - recovered: only flip to 'ok' (and clear the anchor) when the recovery email sent; if it failed,
+  //    stay 'stalled' so the recovery notice is retried next healthy cycle (Codex P3).
+  let persistedState: AlertState = decision.nextState;
+  let lastAlertedAt: Date | null;
+  if (decision.action === "alert_stalled") {
+    lastAlertedAt = sent ? opts.now : (prior?.last_alerted_at ?? null);
+  } else if (decision.action === "alert_recovered") {
+    if (sent) {
+      lastAlertedAt = null;
+    } else {
+      persistedState = "stalled";
+      lastAlertedAt = prior?.last_alerted_at ?? null;
+    }
+  } else {
+    lastAlertedAt = prior?.last_alerted_at ?? null;
+  }
 
   await upsertAlertState(client, opts.office, {
-    state: decision.nextState,
+    state: persistedState,
     lastAlertedAt,
     lastSuccessAt,
     now: opts.now,
@@ -273,12 +287,24 @@ function intEnv(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+// Stable 64-bit key for the whole-job advisory lock (any constant; namespaced so it can't collide).
+const HEARTBEAT_ADVISORY_LOCK_KEY = 0x6268_6274; // "bbht"
+
 export async function main(now: Date = new Date()): Promise<void> {
   // Empty recipients → full no-op: the job ships inert and only activates when configured.
   const to = recipients();
   if (to.length === 0) {
     console.warn("[bid-board-heartbeat] BID_BOARD_HEARTBEAT_RECIPIENTS is empty — no-op");
     return;
+  }
+  // This is a production alerting job: if recipients ARE configured but no real mail transport is, then
+  // sendSystemEmail silently takes its dev/log path and reports success — a false "delivered" that would
+  // advance the throttle while no email reached anyone. Fail loudly instead (Codex). Mirrors the
+  // RESEND_API_KEY gate in resend-client.ts.
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error(
+      "RESEND_API_KEY is required to send heartbeat alerts (recipients are configured but there is no mail transport)"
+    );
   }
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is required");
@@ -290,10 +316,20 @@ export async function main(now: Date = new Date()): Promise<void> {
   const client = new pg.Client({ connectionString });
   await client.connect();
   try {
+    // Single-writer: if a prior invocation is still running (slow cron / overlap), skip this one so two
+    // runs can't read the same prior state and double-alert (CodeRabbit). Session-scoped; released on
+    // disconnect in finally.
+    const lock = await client.query("SELECT pg_try_advisory_lock($1) AS got", [HEARTBEAT_ADVISORY_LOCK_KEY]);
+    if (!lock.rows[0]?.got) {
+      console.warn("[bid-board-heartbeat] another heartbeat run holds the advisory lock — skipping");
+      return;
+    }
+
     const wrap: Queryable = { query: (text, params) => client.query(text, params as unknown[]) };
     // The sender returns true only on a successful send; runHeartbeatForOffice uses that to gate the
     // throttle anchor, and swallows a thrown transport so one office can't crash the loop.
     const sendAlert: AlertSender = (subject, html) => sendSystemEmail(to, subject, html);
+    let completed = 0;
     for (const office of officeList) {
       // One office failing (missing schema, transient DB error) must not sink the others.
       try {
@@ -304,6 +340,7 @@ export async function main(now: Date = new Date()): Promise<void> {
           realertMinutes,
           sendAlert,
         });
+        completed++;
         console.log(
           `[bid-board-heartbeat] office=${office} stalled=${decision.stalled} action=${decision.action} ` +
             `sent=${sent} lastSuccess=${lastSuccessAt ? lastSuccessAt.toISOString() : "never"}`
@@ -311,6 +348,11 @@ export async function main(now: Date = new Date()): Promise<void> {
       } catch (err) {
         console.error(`[bid-board-heartbeat] office=${office} heartbeat check FAILED:`, err);
       }
+    }
+    // If EVERY office errored (state table missing, DB down, …) the monitor itself is dark — exit
+    // non-zero so the cron is visibly failing instead of silently reporting success (Codex).
+    if (officeList.length > 0 && completed === 0) {
+      throw new Error(`heartbeat check failed for ALL ${officeList.length} office(s) — see logs above`);
     }
   } finally {
     await client.end();

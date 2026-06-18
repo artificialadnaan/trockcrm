@@ -156,7 +156,7 @@ describe("runHeartbeatForOffice — incident + throttle + recovery (persisted)",
     expect(retry.sent).toBe(true);
   });
 
-  it("a thrown sender is swallowed (no crash) and counts as not-sent", async () => {
+  it("a thrown sender is swallowed (no crash), counts as not-sent, and does NOT advance the throttle", async () => {
     await seedRun("success", ago(25 * 60));
     const r = await runHeartbeatForOffice(client, {
       ...opts,
@@ -166,6 +166,29 @@ describe("runHeartbeatForOffice — incident + throttle + recovery (persisted)",
       },
     });
     expect(r.sent).toBe(false);
-    expect((await readAlertState(client, "dallas"))?.state).toBe("stalled");
+    const state = await readAlertState(client, "dallas");
+    expect(state?.state).toBe("stalled");
+    expect(state?.last_alerted_at).toBeNull(); // throttle not advanced — re-alerts next cycle
+  });
+
+  // Recovery email must be reliable too: if it fails, stay stalled and retry next healthy cycle, so a
+  // transient transport failure can't drop the "recovered" notice (Codex P3).
+  it("a failed recovery send keeps state 'stalled' and retries; a later successful recovery flips to ok", async () => {
+    await seedRun("success", ago(25 * 60));
+    await runHeartbeatForOffice(client, { ...opts, now: NOW }); // stalled (sent ok)
+
+    await seedRun("success", new Date(NOW.getTime() + 20 * MIN)); // a fresh success lands
+    const failedRecovery = await runHeartbeatForOffice(client, {
+      ...opts,
+      now: new Date(NOW.getTime() + 21 * MIN),
+      sendAlert: async () => false, // recovery email fails
+    });
+    expect(failedRecovery.decision.action).toBe("alert_recovered");
+    expect(failedRecovery.sent).toBe(false);
+    expect((await readAlertState(client, "dallas"))?.state).toBe("stalled"); // NOT flipped to ok
+
+    const retried = await runHeartbeatForOffice(client, { ...opts, now: new Date(NOW.getTime() + 41 * MIN) });
+    expect(retried.decision.action).toBe("alert_recovered"); // retried
+    expect((await readAlertState(client, "dallas"))?.state).toBe("ok");
   });
 });
