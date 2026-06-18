@@ -86,6 +86,7 @@ beforeAll(async () => {
     CREATE TABLE deal_signed_commissions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, rep_user_id uuid,
       source_value_kind text, source_value_amount numeric, applied_rate numeric, amount numeric,
+      attribution_role text NOT NULL DEFAULT 'owner',
       contract_signed_date_at_signing date
     );
 

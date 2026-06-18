@@ -507,6 +507,11 @@ export interface RepCommissionSummary {
   potentialRevenue: number;
   potentialMargin: number;
   potentialCommission: number;
+  // Floor-gate progress (from computeRepEarnedFloorGate): the rep's booked signed book that the
+  // floor gates against, and whether it cleared. Surfaced so the drill-down can show "$X of $Y floor"
+  // exactly (rather than deriving it from floorRemaining, which is 0 once met).
+  qualifyingRevenue: number;
+  floorMet: boolean;
 }
 
 export interface RepCommissionDealEarning {
@@ -520,6 +525,20 @@ export interface RepCommissionDealEarning {
   earnedCommission: number;
   paymentCount: number;
   lastPaidAt: string | null;
+  // Which cut this row represents for the rep on this deal — 'owner' (they own the deal) or
+  // 'estimator' (the additive estimator cut, #742). Lets the drill-down split owner vs estimator
+  // earnings. Purely descriptive: the sum across rows is unchanged (== directEarnedCommission).
+  attributionRole: "owner" | "estimator";
+}
+
+export interface RepWonMissingContractDeal {
+  dealId: string;
+  dealNumber: string | null;
+  dealName: string;
+  companyName: string | null;
+  propertyName: string | null;
+  value: number;
+  wonDate: string | null;
 }
 
 export interface DirectorRepCommissionRow {
@@ -1014,6 +1033,7 @@ type CommissionDealRollup = {
   earnedCommission: number;
   paymentCount: number;
   lastPaidAt: string | null;
+  attributionRole: "owner" | "estimator";
 };
 
 function dashboardEarnedSignedDateSql() {
@@ -1114,6 +1134,7 @@ async function getCommissionDealRollups(
       dsc.source_value_amount::numeric AS commissionable_margin,
       dsc.amount::numeric AS earned_commission,
       0::int AS payment_count,
+      COALESCE(dsc.attribution_role, 'owner') AS attribution_role,
       ${dashboardEarnedSignedDateSql()} AS last_paid_at
     FROM ${dealSignedCommissions} dsc
     JOIN ${deals} d ON d.id = dsc.deal_id
@@ -1141,6 +1162,7 @@ async function getCommissionDealRollups(
     commissionableMargin: Number(row.commissionable_margin ?? 0),
     earnedCommission: Number(row.earned_commission ?? 0),
     paymentCount: Number(row.payment_count ?? 0),
+    attributionRole: String(row.attribution_role) === "estimator" ? "estimator" : "owner",
     lastPaidAt: row.last_paid_at ? new Date(`${String(row.last_paid_at).slice(0, 10)}T00:00:00.000Z`).toISOString() : null,
   }));
 }
@@ -1318,6 +1340,8 @@ export async function getRepCommissionSummary(
       potentialRevenue,
       potentialMargin,
       potentialCommission,
+      qualifyingRevenue: floorGate.qualifyingRevenue,
+      floorMet: floorGate.met,
     },
     deals,
   };
@@ -2985,23 +3009,60 @@ function formatUtcDate(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
-function getRollingCommissionDateRange(anchorDate: string): { from: string; to: string } {
-  const [year, month, day] = anchorDate.split("-").map(Number);
-  const previousYearLastDayOfMonth = new Date(Date.UTC(year! - 1, month!, 0)).getUTCDate();
-  const previousYearSameOrClampedDay = new Date(
-    Date.UTC(year! - 1, month! - 1, Math.min(day!, previousYearLastDayOfMonth))
-  );
-  const rollingStart = new Date(previousYearSameOrClampedDay);
-  rollingStart.setUTCDate(rollingStart.getUTCDate() + 1);
-  return {
-    from: formatUtcDate(rollingStart),
-    to: anchorDate,
-  };
+/**
+ * Won-family deals the rep OWNS that are missing a contract-signed date — so no commission was ever
+ * minted (calculateCommissionForDeal runs on contract sign). This is a data-hygiene worklist: each row
+ * is a stuck commission the director can release by setting the contract date (PATCH
+ * /deals/:id/contract-signed-date → recalc). NOT date-windowed — the whole point is to surface every
+ * stuck deal regardless of the page's commission window. Owner-only (assigned_rep_id), mirroring the
+ * floor gate's qualifyingRevenue book; an estimator's missing-contract deals surface on the owner's row.
+ */
+export async function getRepWonMissingContractDate(
+  tenantDb: TenantDb,
+  repId: string
+): Promise<RepWonMissingContractDeal[]> {
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.id AS deal_id,
+      d.deal_number AS deal_number,
+      d.name AS deal_name,
+      c.name AS company_name,
+      p.name AS property_name,
+      ${aliasedEffectiveWonDealValueSql("d")} AS value,
+      ${aliasedWonHsClosedWonDateSql("d")} AS won_date
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${companies} c ON c.id = d.company_id
+    LEFT JOIN ${properties} p ON p.id = d.property_id
+    WHERE d.assigned_rep_id = ${repId}
+      AND d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
+      AND d.contract_signed_at IS NULL
+      AND d.contract_signed_date IS NULL
+      AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+    ORDER BY ${aliasedEffectiveWonDealValueSql("d")} DESC, d.name ASC
+  `);
+  const rows = (result as any).rows ?? result;
+  return rows.map((row: any) => ({
+    dealId: String(row.deal_id),
+    dealNumber: row.deal_number ? String(row.deal_number) : null,
+    dealName: String(row.deal_name ?? "Deal"),
+    companyName: row.company_name ? String(row.company_name) : null,
+    propertyName: row.property_name ? String(row.property_name) : null,
+    value: Number(row.value ?? 0),
+    wonDate: row.won_date ? String(row.won_date).slice(0, 10) : null,
+  }));
 }
 
 /**
  * Get full dashboard data for a single rep -- used by director drill-down.
  * Returns the same shape as RepDashboardData plus win/loss stats.
+ *
+ * RECONCILIATION (reconciliation-consistency-rule): the commission window is the page-selected
+ * { from, to } — the SAME window the flat Team-Commissions list uses (getDirectorCommissionWorkspace)
+ * and the rep's own page default. Previously this used a rolling-12-month window, which silently
+ * diverged from the flat list; all three commission surfaces now share one window so they reconcile by
+ * construction. (getRollingCommissionDateRange had no other consumer and was removed.)
  */
 export async function getRepDetail(
   tenantDb: TenantDb,
@@ -3011,18 +3072,18 @@ export async function getRepDetail(
   const year = new Date().getFullYear();
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
-  const rollingCommissionDateRange = getRollingCommissionDateRange(to);
 
-  const [dashboard, winLoss, winTrend, staleDeals, staleLeads] = await runSequential([
+  const [dashboard, winLoss, winTrend, staleDeals, staleLeads, wonMissingContractDate] = await runSequential([
     () => getRepDashboard(tenantDb, repId, {
       activityDateRange: { from, to },
       followUpDateRange: { from, to },
-      commissionDateRange: rollingCommissionDateRange,
+      commissionDateRange: { from, to },
     }),
     () => getWinLossRatioByRep(tenantDb, { from, to }),
     () => getWinRateTrend(tenantDb, { from, to, repId }),
     () => getDashboardStaleDeals(tenantDb, { repId, viewerRole: "rep" }),
     () => getStaleLeadWatchlist(tenantDb, { repId }),
+    () => getRepWonMissingContractDate(tenantDb, repId),
   ]);
 
   const repWinLoss = winLoss.find((w) => w.repId === repId) ?? {
@@ -3040,6 +3101,7 @@ export async function getRepDetail(
     winRateTrend: winTrend,
     staleDeals,
     staleLeads,
+    wonMissingContractDate,
   };
 }
 

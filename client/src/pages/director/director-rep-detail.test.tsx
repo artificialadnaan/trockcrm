@@ -114,6 +114,12 @@ vi.mock("@/components/charts/chart-colors", () => ({
   formatCurrency: (value: number) => `$${value.toLocaleString()}`,
 }));
 
+// The commission drill-down has its own dedicated runtime test; the page test only needs to confirm it
+// mounts (the page's rep-scoping assertions don't depend on its internals).
+vi.mock("@/components/director/rep-commission-drilldown", () => ({
+  RepCommissionDrilldown: () => <div>Commission Breakdown</div>,
+}));
+
 vi.mock("@/components/ui/card", () => ({
   Card: ({ children, ...props }: { children: ReactNode }) => <div {...props}>{children}</div>,
   CardHeader: ({ children, ...props }: { children: ReactNode }) => <div {...props}>{children}</div>,

@@ -222,7 +222,31 @@ export interface RepDetailData {
     potentialRevenue: number;
     potentialMargin: number;
     potentialCommission: number;
+    qualifyingRevenue: number;
+    floorMet: boolean;
   };
+  commissionDeals: Array<{
+    dealId: string;
+    dealNumber: string | null;
+    dealName: string;
+    companyName: string | null;
+    propertyName: string | null;
+    paidRevenue: number;
+    commissionableMargin: number;
+    earnedCommission: number;
+    paymentCount: number;
+    lastPaidAt: string | null;
+    attributionRole: "owner" | "estimator";
+  }>;
+  wonMissingContractDate: Array<{
+    dealId: string;
+    dealNumber: string | null;
+    dealName: string;
+    companyName: string | null;
+    propertyName: string | null;
+    value: number;
+    wonDate: string | null;
+  }>;
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {
     calls: number;
