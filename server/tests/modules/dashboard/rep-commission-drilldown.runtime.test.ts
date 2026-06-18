@@ -48,6 +48,7 @@ const D = {
   negOwn: U("e09"), // REP_NEG owner dsc +5000
   negAdj: U("e10"), // REP_NEG owner dsc -1000 (a clawback/adjustment)
   wlChangeOrder: U("e11"), // REP_WL Won change order, no contract date -> excluded (CHANGE_ORDER_FIELD_LOCKED)
+  wlOnHold: U("e14"), // REP_WL Won, on_hold, no contract date -> excluded (setting a date releases no commission)
   netNegOwn: U("e12"), // REP_NETNEG owner dsc +1000
   netNegAdj: U("e13"), // REP_NETNEG owner dsc -3000 -> net direct -2000
 };
@@ -137,6 +138,10 @@ beforeAll(async () => {
     -- change orders with CHANGE_ORDER_FIELD_LOCKED, so it would be an unactionable stuck row).
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_test_data, is_change_order, contract_signed_at, contract_signed_date, won_closed_date, awarded_amount, created_at) VALUES
       ('${D.wlChangeOrder}', 'WL-6', 'WL change order', '${REP_WL}', '${ST_WON}', false, true, NULL, NULL, '2026-04-06', 25000, '2026-02-06T00:00:00Z');
+    -- On-hold Won deal missing a contract date: excluded because the commission queries filter on-hold, so
+    -- setting a date here would clear the row without releasing any commission.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, on_hold, contract_signed_at, contract_signed_date, won_closed_date, awarded_amount, created_at) VALUES
+      ('${D.wlOnHold}', 'WL-7', 'WL on hold', '${REP_WL}', '${ST_WON}', true, NULL, NULL, '2026-04-07', 80000, '2026-02-07T00:00:00Z');
 
     -- REP_NEG: owner +5000 and a -1000 adjustment (clawback) -> direct = 4000. Proves the breakdown sum
     -- reconciles with directEarnedCommission even with a NEGATIVE row (which a >0 filter would drop).
@@ -238,13 +243,15 @@ describe("View-as-rep: getRepCommissionDashboard is rep-injection-safe", () => {
 });
 
 describe("Won-but-missing-contract worklist", () => {
-  it("returns only Won-family owned deals with no contract date; excludes signed / lost / test / change-order", async () => {
+  it("returns only Won-family owned deals with no contract date; excludes signed / lost / test / change-order / on-hold", async () => {
     const rows = await getRepWonMissingContractDate(tdb, REP_WL);
     const numbers = rows.map((r) => r.dealNumber).sort();
-    // signed (WL-3), lost (WL-4), test (WL-5), AND the change order (WL-6) are all excluded. The change
-    // order matters: the contract-date PATCH rejects it (CHANGE_ORDER_FIELD_LOCKED) so it can never clear.
+    // signed (WL-3), lost (WL-4), test (WL-5), change order (WL-6), AND on-hold (WL-7) are all excluded.
+    // The change order would reject the contract-date PATCH (CHANGE_ORDER_FIELD_LOCKED); the on-hold deal
+    // would clear from the worklist without releasing any commission (commission queries filter on-hold).
     expect(numbers).toEqual(["WL-1", "WL-2"]);
     expect(numbers).not.toContain("WL-6");
+    expect(numbers).not.toContain("WL-7");
     // Highest value first (70000 before 40000), value resolved via the awarded-first chain.
     expect(rows[0]!.dealNumber).toBe("WL-1");
     expect(rows[0]!.value).toBeCloseTo(70000, 2);

@@ -2,12 +2,26 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, ChevronDown, ChevronRight, DollarSign, Eye, Lock } from "lucide-react";
 import { api } from "@/lib/api";
-import { formatCurrency } from "@/lib/deal-utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { RepDetailData } from "@/hooks/use-director-dashboard";
+
+// Commission amounts are cent-precision and this surface asserts a VISIBLE reconciliation (owner +
+// estimator + override == total). The deal-utils formatter rounds to whole dollars, which would let the
+// shown rows fail to sum to the shown total (e.g. $10.49 + $10.49 reads as $10 + $10 vs a $21 total). So
+// commission $ render at cent precision here. NaN-safe ("--"), matching the deal-utils safety contract.
+const USD_CENTS = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+function formatUsd(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "--";
+  return USD_CENTS.format(value);
+}
 
 // Engine A (getRepCommissionDashboard) — the rep's OWN commission page payload, fetched read-only for
 // the "View as rep" panel. Mirrors the shape rendered on /commissions (rep-commissions-page).
@@ -187,8 +201,8 @@ export function RepCommissionDrilldown({
               <SplitStat label="Total earned" value={cs.totalEarnedCommission} sub={periodLabel} strong />
             </div>
             <p className="text-xs text-slate-400">
-              Owner + estimator = {formatCurrency(cs.directEarnedCommission)} direct; + override ={" "}
-              {formatCurrency(cs.totalEarnedCommission)} total for {periodLabel}.
+              Owner + estimator = {formatUsd(cs.directEarnedCommission)} direct; + override ={" "}
+              {formatUsd(cs.totalEarnedCommission)} total for {periodLabel}.
               {isFlatListWindow
                 ? " Matches this rep's row on Team Commissions."
                 : " (Team Commissions shows YTD.)"}
@@ -228,7 +242,7 @@ export function RepCommissionDrilldown({
                           <RoleBadge role={deal.attributionRole} />
                         </td>
                         <td className="px-3 py-2 text-right font-semibold text-slate-900">
-                          {formatCurrency(deal.earnedCommission)}
+                          {formatUsd(deal.earnedCommission)}
                           {!cs.floorMet ? (
                             <span className="ml-1 text-xs font-normal text-amber-600">held</span>
                           ) : null}
@@ -283,7 +297,7 @@ function FloorProgress({
       <div className="flex items-center justify-between text-sm">
         <span className="font-medium text-slate-700">Floor progress</span>
         <span className={cn("font-semibold", floorMet ? "text-emerald-700" : "text-amber-700")}>
-          {formatCurrency(qualifyingRevenue)} of {formatCurrency(floor)}
+          {formatUsd(qualifyingRevenue)} of {formatUsd(floor)}
         </span>
       </div>
       <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
@@ -297,7 +311,7 @@ function FloorProgress({
       ) : (
         <p className="flex items-center gap-1 text-xs text-amber-700">
           <Lock className="h-3 w-3" />
-          Below floor — earnings held at $0. {formatCurrency(floorShortfall)} more booked revenue needed.
+          Below floor — earnings held at $0. {formatUsd(floorShortfall)} more booked revenue needed.
         </p>
       )}
     </div>
@@ -327,7 +341,7 @@ function SplitStat({
           accent === "violet" ? "text-violet-700" : "text-slate-900"
         )}
       >
-        {formatCurrency(value)}
+        {formatUsd(value)}
       </div>
       <div className="text-xs text-slate-400">{sub}</div>
     </div>
@@ -400,7 +414,7 @@ function MissingContractRow({
         </Link>
         <div className="text-xs text-slate-500">
           {[deal.companyName, deal.propertyName].filter(Boolean).join(" · ") || "—"} ·{" "}
-          {formatCurrency(deal.value)}
+          {formatUsd(deal.value)}
         </div>
       </div>
       <div className="flex items-center gap-2">
@@ -469,7 +483,55 @@ function RepViewPanel({
                       <td className="px-3 py-2 text-slate-700">{stage.stageName}</td>
                       <td className="px-3 py-2 text-right text-slate-600">{stage.dealCount}</td>
                       <td className="px-3 py-2 text-right font-medium text-slate-900">
-                        {formatCurrency(stage.commission)}
+                        {formatUsd(stage.commission)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          {/* The rep's contributing deals — the same list the rep sees on /commissions (earned + open
+              pipeline), so "View as rep" is a faithful mirror rather than just the stage roll-up. */}
+          {view.deals.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
+                    <th className="px-3 py-2 text-left">Deal</th>
+                    <th className="px-3 py-2 text-left">Stage</th>
+                    <th className="px-3 py-2 text-right">Commission</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {view.deals.map((deal) => (
+                    <tr key={deal.dealId} className="border-b border-slate-100">
+                      <td className="px-3 py-2">
+                        <Link
+                          to={`/deals/${deal.dealId}`}
+                          className="font-medium text-slate-900 underline-offset-2 hover:underline"
+                        >
+                          {deal.dealName}
+                        </Link>
+                        {deal.companyName ? (
+                          <div className="text-xs text-slate-500">{deal.companyName}</div>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span
+                          className={cn(
+                            "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset",
+                            deal.isEarned
+                              ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+                              : "bg-slate-100 text-slate-600 ring-slate-200"
+                          )}
+                        >
+                          {deal.isEarned ? "Earned" : deal.stageName}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-right font-medium text-slate-900">
+                        {formatUsd(deal.commission)}
                       </td>
                     </tr>
                   ))}

@@ -135,7 +135,7 @@ describe("RepCommissionDrilldown — split + floor", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("Floor cleared");
     expect(text).not.toContain("held");
-    expect(text).toContain("$120,000 of $100,000");
+    expect(text).toContain("$120,000.00 of $100,000.00"); // cents-preserving (commission reconciliation)
     cleanup();
   });
 
@@ -154,7 +154,7 @@ describe("RepCommissionDrilldown — split + floor", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("Below floor");
     expect(text).toContain("held"); // per-deal earnings marked held, rows still visible
-    expect(text).toContain("$60,000 more booked revenue needed"); // 100000 - 40000 shortfall
+    expect(text).toContain("$60,000.00 more booked revenue needed"); // 100000 - 40000 shortfall
     cleanup();
   });
 
@@ -258,7 +258,10 @@ describe("RepCommissionDrilldown — view as rep", () => {
         stageTotals: [
           { stageKey: "won", stageName: "Earned", commission: 6000, dealValue: 80000, dealCount: 2, percentOfTotal: 75 },
         ],
-        deals: [],
+        deals: [
+          { dealId: "d-1", dealName: "Riverside Reroof", dealNumber: "D-1", companyName: "Acme", commission: 6000, isEarned: true, stageName: "Won" },
+          { dealId: "d-2", dealName: "Open Pipeline Job", dealNumber: "D-2", companyName: null, commission: 2000, isEarned: false, stageName: "Estimating" },
+        ],
       },
     });
     const { container, cleanup } = renderDrilldown({});
@@ -275,6 +278,9 @@ describe("RepCommissionDrilldown — view as rep", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("Read-only");
     expect(text).toContain("exactly what Kevin Scott sees");
+    // The contributing-deals list renders (faithful mirror — earned + open pipeline), not just stage totals.
+    expect(text).toContain("Riverside Reroof");
+    expect(text).toContain("Open Pipeline Job");
     cleanup();
   });
 

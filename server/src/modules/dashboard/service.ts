@@ -3046,6 +3046,10 @@ export async function getRepWonMissingContractDate(
       -- Exclude change orders: setDealContractSignedDate rejects them (CHANGE_ORDER_FIELD_LOCKED), so they
       -- can never be cleared from this worklist — listing them would just create unactionable stuck rows.
       AND COALESCE(d.is_change_order, false) = false
+      -- Exclude on-hold deals: the earned/floor commission queries filter on-hold (dashboardNotOnHoldDealSql
+      -- = this same reportable predicate), so setting a contract date on an on-hold deal would clear it from
+      -- the worklist without actually releasing any commission. Stay consistent with what the page can release.
+      AND ${aliasedActiveDealCountFilterSql("d")}
       AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
     ORDER BY ${aliasedEffectiveWonDealValueSql("d")} DESC, d.name ASC
   `);
