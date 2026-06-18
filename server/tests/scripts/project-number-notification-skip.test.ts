@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   applyProjectNumberEmailSkipSetting,
@@ -28,7 +29,10 @@ describe("project number notification script skip helper", () => {
 
   it("keeps the bid-board excluded bulk-create script opted out of notifications", () => {
     const script = fs.readFileSync(
-      path.resolve(process.cwd(), "scripts/create-bidboard-excluded-real-projects.js"),
+      // Resolve relative to this test file (mirrors the import on line 8), not process.cwd() — the
+      // gate runs vitest from the server/ workspace dir, where cwd-relative "scripts/..." misses the
+      // repo-root scripts/ dir. From server/tests/scripts/, ../../../scripts is the repo root.
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../scripts/create-bidboard-excluded-real-projects.js"),
       "utf8"
     );
 

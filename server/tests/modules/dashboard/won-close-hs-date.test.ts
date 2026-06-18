@@ -74,7 +74,9 @@ describe("getWonCloseSummary (Director closed-period card)", () => {
     expect(sql).not.toContain("d.updated_at");
     expect(sql).not.toContain("d.actual_close_date");
     expect(sql).not.toContain("d.contract_signed");
-    // §6.7: terminal Won includes inactive — no hard is_active = true gate.
-    expect(sql).not.toContain("is_active = true");
+    // BASIS ALIGNMENT (Item 3, commit 7dff5eab): the closed card byte-matches the Deals Dashboard Won
+    // column by gating on is_active = true (soft-deleted Won hidden, #699). Numerically a no-op in prod
+    // (0 soft-deleted Won) but it guarantees the B2 Leaderboard reconciles to /deals.
+    expect(sql).toContain("is_active = true");
   });
 });
