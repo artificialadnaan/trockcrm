@@ -200,6 +200,7 @@ describe("dashboard routes", () => {
       periodKind: "last_quarter",
       scope: "mine",
       viewerUserId: "director-1",
+      viewerRole: "director",
     });
   });
 
