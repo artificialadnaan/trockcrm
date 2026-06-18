@@ -12,9 +12,6 @@ import base from "./vitest.config";
 const QUARANTINE = [
   "tests/app-password-change-cookie.test.ts",
   "tests/field-route-policy.test.ts",
-  "tests/modules/commissions/reporting.test.ts",
-  "tests/modules/dashboard/at-risk-summary.test.ts",
-  "tests/modules/dashboard/won-close-hs-date.test.ts",
   "tests/modules/deals/board-service.test.ts",
   "tests/modules/deals/pipeline-team-scope.test.ts",
   "tests/modules/deals/scoping-routes.test.ts",
@@ -26,11 +23,8 @@ const QUARANTINE = [
   "tests/modules/leads/conversion-service.test.ts",
   "tests/modules/leads/reassignment.test.ts",
   "tests/modules/migration/hubspot-extra-properties-deals-migration.test.ts",
-  "tests/modules/ownership/owner-display-data-source.test.ts",
   "tests/modules/properties/properties-engagement-list-detail-consistency.test.ts",
   "tests/modules/properties/properties-linked-value-consistency.test.ts",
-  "tests/modules/sales-review/service.test.ts",
-  "tests/scripts/project-number-notification-skip.test.ts",
 ];
 
 export default mergeConfig(

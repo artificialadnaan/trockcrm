@@ -3,6 +3,11 @@ import { buildSalesReviewOverview } from "../../../src/modules/sales-review/serv
 
 describe("sales review service", () => {
   it("builds forecast, activity cadence, hygiene, and support views from canonical records", () => {
+    // The cadence calc (calls30d) measures activity age against the real wall-clock `now`
+    // (sales-review/service.ts uses new Date(), not the filters window), so a fixed past date drifts
+    // out of the 30-day window as time passes. Anchor the call activity a few days before now so
+    // calls30d stays 1 regardless of when the suite runs.
+    const recentActivityAt = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
     const overview = buildSalesReviewOverview({
       actor: { role: "director", userId: "director-1" },
       filters: { from: "2026-04-01", to: "2026-04-20" },
@@ -135,8 +140,8 @@ describe("sales review service", () => {
           nextStep: null,
           nextStepDueAt: null,
           durationMinutes: null,
-          occurredAt: new Date("2026-04-18T00:00:00.000Z"),
-          createdAt: new Date("2026-04-18T00:00:00.000Z"),
+          occurredAt: recentActivityAt,
+          createdAt: recentActivityAt,
         },
       ],
       users: [{ id: "rep-1", displayName: "Caleb Rep" }],

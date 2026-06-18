@@ -121,7 +121,10 @@ describe("dashboard At Risk summary", () => {
         repId: "rep-2",
         repName: "Blake Rep",
         workflowRoute: "normal",
-        stageEnteredAt: "2026-05-19T12:00:00.000Z",
+        // 21 days in the Contract stage. PR #481 raised the rep Contract SLA threshold 2 -> 7 days,
+        // so the original 3-days-in-stage fixture is correctly no longer at risk; bump it past the
+        // current 7-day threshold to keep demonstrating an off-hold downstream at-risk deal.
+        stageEnteredAt: "2026-05-01T12:00:00.000Z",
         onHold: false,
         onHoldStartedAt: null,
         onHoldAccumulatedSeconds: 0,

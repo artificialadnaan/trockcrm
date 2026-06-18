@@ -510,7 +510,10 @@ describe("commission reporting service", () => {
     const snapshotSql = extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase();
     expect(querySql).toContain("left join commission_deal_snapshots cds on cds.deal_id = d.id");
     expect(querySql).toContain("cds.rep_user_id = dsc.rep_user_id");
-    expect(querySql).toContain("cds.rep_user_id = d.assigned_rep_id");
+    // Pipeline/potential branch keys the snapshot delta on the DASHBOARD rep (estimator-aware filter,
+    // PR #629): deals a rep only estimated but doesn't own must compare against the viewing rep, not
+    // d.assigned_rep_id. repId resolves to "rep-1" here. Still scoped by both deal AND rep.
+    expect(querySql).toContain("left join commission_deal_snapshots cds on cds.deal_id = d.id and cds.rep_user_id = rep-1");
     expect(snapshotSql).toContain("on conflict (deal_id, rep_user_id) do update");
   });
 

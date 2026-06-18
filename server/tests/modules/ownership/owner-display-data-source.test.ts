@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 function normalize(source: string) {
@@ -7,7 +8,7 @@ function normalize(source: string) {
 
 describe("owner display data sources for lead/deal contexts", () => {
   it("exposes company owner fields from the company autocomplete used by New Lead", () => {
-    const source = normalize(readFileSync("server/src/modules/companies/service.ts", "utf8"));
+    const source = normalize(readFileSync(resolve(import.meta.dirname, "../../../src/modules/companies/service.ts"), "utf8"));
 
     expect(source).toContain("ownerUserId: companies.ownerId");
     expect(source).toContain("ownerUserName: users.displayName");
@@ -15,7 +16,7 @@ describe("owner display data sources for lead/deal contexts", () => {
   });
 
   it("exposes contact owner fields from company contact picker rows", () => {
-    const source = normalize(readFileSync("server/src/modules/companies/service.ts", "utf8"));
+    const source = normalize(readFileSync(resolve(import.meta.dirname, "../../../src/modules/companies/service.ts"), "utf8"));
 
     expect(source).toContain("ownerUserId: contacts.ownerId");
     expect(source).toContain("ownerUserName: users.displayName");
@@ -23,7 +24,7 @@ describe("owner display data sources for lead/deal contexts", () => {
   });
 
   it("decorates lead detail payloads with associated company and primary contact owners", () => {
-    const source = normalize(readFileSync("server/src/modules/leads/service.ts", "utf8"));
+    const source = normalize(readFileSync(resolve(import.meta.dirname, "../../../src/modules/leads/service.ts"), "utf8"));
 
     expect(source).toContain("companyOwnerUserId");
     expect(source).toContain("companyOwnerUserName");
@@ -32,7 +33,7 @@ describe("owner display data sources for lead/deal contexts", () => {
   });
 
   it("decorates deal detail payloads with associated company and primary contact owners", () => {
-    const source = normalize(readFileSync("server/src/modules/deals/service.ts", "utf8"));
+    const source = normalize(readFileSync(resolve(import.meta.dirname, "../../../src/modules/deals/service.ts"), "utf8"));
 
     expect(source).toContain("companyOwnerUserId");
     expect(source).toContain("companyOwnerUserName");
