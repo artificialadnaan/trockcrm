@@ -556,6 +556,13 @@ export function recountColumnFromCards(column: DealBoardColumn, cards: Deal[]): 
  * the engine at-risk predicate within the updated-at window. The Active Pipeline card, the At-Risk
  * card, and the kanban all derive from THIS set (the kanban additionally applies the text search), so
  * the three reconcile by construction — no parallel whole-pipeline query.
+ *
+ * The at-risk count/value are derived from the column's CARDS (there is no server-side at-risk
+ * aggregate — the board only ships a full-column aggregate + a preview card slice). That is shared by
+ * all three at-risk surfaces, so they stay reconciled; it also means the totals are bounded by the
+ * board's per-stage preview cap (SLA_DRILLDOWN_PREVIEW_LIMIT, 1000), far above the real at-risk volume.
+ * A stage with >1000 at-risk deals would under-count uniformly across all three — if that ever becomes
+ * reachable, the fix is a server at-risk aggregate feeding all three, not a per-card divergence here.
  */
 export function getAtRiskBoardColumns(
   boardColumns: DealBoardColumn[],
@@ -586,6 +593,16 @@ export function getActivePipelineSummary(columns: DealBoardColumn[]) {
     visibleCount: columns.reduce((sum, column) => sum + finite(column.totalCount ?? column.count), 0),
     value: columns.reduce((sum, column) => sum + finite(column.totalValue), 0),
   };
+}
+
+/**
+ * The Active Pipeline KPI card drills into the cohort it DISPLAYS: the at-risk set on the at-risk
+ * drill-down (so the click-through matches the number on the card), the full active pipeline otherwise.
+ */
+export function activePipelineDrilldownFilter(
+  boardMode: "all" | "active" | "won" | "at_risk"
+): "at_risk" | "active_pipeline" {
+  return boardMode === "at_risk" ? "at_risk" : "active_pipeline";
 }
 
 function stageAgeDaysLabel(deal: Deal) {
@@ -1082,9 +1099,15 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
         : column.cards.filter(isEngineAtRiskDeal).length),
     0
   );
-  const activePipelineDestination = buildDealsPageKpiDrilldownPath("active_pipeline", scope, undefined, {
-    queryParams: searchParams,
-  });
+  // On the at-risk drill-down the Active Pipeline card DISPLAYS the at-risk cohort, so its click-through
+  // must land on that same cohort — not the full active pipeline (which would show a larger, different set
+  // than the number on the card). Everywhere else it drills into the full active pipeline.
+  const activePipelineDestination = buildDealsPageKpiDrilldownPath(
+    activePipelineDrilldownFilter(dashboardView.boardMode),
+    scope,
+    undefined,
+    { queryParams: searchParams }
+  );
   const wonDestination = buildDealsPageKpiDrilldownPath("won", scope, selectedPeriod, {
     queryParams: searchParams,
   });

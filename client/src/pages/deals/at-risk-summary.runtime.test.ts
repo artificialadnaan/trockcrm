@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import type { Deal, DealBoardColumn } from "@/hooks/use-deals";
 import {
+  activePipelineDrilldownFilter,
   getActivePipelineSummary,
   getAtRiskBoardColumns,
   isEngineAtRiskDeal,
@@ -122,6 +123,15 @@ describe("reconciliation: Active Pipeline card === At-Risk card === kanban (one 
     expect(summary.value).toBe(125_000);
     // And it is NOT the whole open board ($999k + $888k on-track deals are excluded).
     expect(summary.value).not.toBe(125_000 + 999_000 + 888_000);
+  });
+});
+
+describe("activePipelineDrilldownFilter — card links to the cohort it shows", () => {
+  it("links the Active Pipeline card to the at-risk cohort on the at-risk drill-down, full pipeline elsewhere", () => {
+    expect(activePipelineDrilldownFilter("at_risk")).toBe("at_risk"); // matches the at-risk number shown
+    expect(activePipelineDrilldownFilter("active")).toBe("active_pipeline");
+    expect(activePipelineDrilldownFilter("all")).toBe("active_pipeline");
+    expect(activePipelineDrilldownFilter("won")).toBe("active_pipeline");
   });
 });
 
