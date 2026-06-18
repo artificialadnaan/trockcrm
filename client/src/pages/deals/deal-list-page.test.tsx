@@ -2032,7 +2032,10 @@ describe("DealListPage", () => {
     );
   });
 
-  it("filters stale kanban drill-down cards to the selected dashboard period", () => {
+  // CONVENTION SHIFT: "Stale"/"Deals At Risk" are CURRENT-STATE views — ?period is a deliberate no-op
+  // (period-windowing by updated_at would hide the stalest, most at-risk deals). So even with ?period=qtd,
+  // ALL at-risk deals show regardless of updated_at; only the non-at-risk deal is excluded (by predicate).
+  it("shows ALL at-risk stale deals regardless of ?period (current-state view); excludes non-at-risk", () => {
     mocks.useDealBoardMock.mockReturnValue({
       board: {
         columns: [
@@ -2096,9 +2099,11 @@ describe("DealListPage", () => {
 
     expect(html).toContain("QTD Stale Deal");
     expect(html).toContain("Second QTD Stale Deal");
-    expect(html).not.toContain("Old Quarter Stale Deal");
+    // The out-of-quarter stale deal is the MOST at-risk (oldest) — current-state view keeps it.
+    expect(html).toContain("Old Quarter Stale Deal");
+    // The non-at-risk deal is still excluded by the engine predicate, not by period.
     expect(html).not.toContain("Fresh QTD Deal");
-    expect(html).toMatch(/Filtered results.*>2</);
+    expect(html).toMatch(/Filtered results.*>3</);
   });
 
   it("uses engine at-risk results for the KPI count and drilldown population", () => {

@@ -90,15 +90,26 @@ describe("getAtRiskBoardColumns — the single filtered set", () => {
     expect(estimating.totalValue).toBe(100_000); // r2 on-hold contributes 0
   });
 
-  it("honors the updated-at window", () => {
+  it("is CURRENT-STATE: includes at-risk deals regardless of updated_at (?period is a no-op here)", () => {
+    // Deals at Risk is a current-state SLA view — period-windowing by updated_at would hide the stalest
+    // (least-recently-touched = MOST at-risk) deals. So getAtRiskBoardColumns takes no window and keeps them.
     const board = [
       column("estimating", [
-        deal({ id: "in", atRisk: true, value: 10, updatedAt: "2026-06-10T00:00:00.000Z" }),
-        deal({ id: "out", atRisk: true, value: 10, updatedAt: "2026-01-01T00:00:00.000Z" }),
+        deal({ id: "recent", atRisk: true, value: 10, updatedAt: "2026-06-10T00:00:00.000Z" }),
+        deal({ id: "stale", atRisk: true, value: 10, updatedAt: "2025-01-01T00:00:00.000Z" }),
       ]),
     ];
-    const cols = getAtRiskBoardColumns(board, "2026-06-01", "2026-06-30");
-    expect(cols[0].cards.map((d) => (d as { id: string }).id)).toEqual(["in"]);
+    const ids = getAtRiskBoardColumns(board)[0].cards.map((d) => (d as { id: string }).id).sort();
+    expect(ids).toEqual(["recent", "stale"]); // the very-stale deal is kept, not windowed out
+  });
+
+  it("the at-risk set is period-independent: identical cohort whatever the (now-ignored) period would be", () => {
+    // getAtRiskBoardColumns has no period parameter, so card = kanban = list = link cohort across every
+    // ?period preset by construction — the at-risk set simply cannot change with the period.
+    const a = getAtRiskBoardColumns(makeBoard());
+    const b = getAtRiskBoardColumns(makeBoard());
+    expect(getActivePipelineSummary(a)).toEqual(getActivePipelineSummary(b));
+    expect(getActivePipelineSummary(a)).toEqual({ count: 2, visibleCount: 3, value: 125_000 });
   });
 });
 
