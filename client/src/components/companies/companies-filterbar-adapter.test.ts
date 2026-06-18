@@ -1,13 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   COMPANY_LIST_SORT_OPTIONS,
-  COMPANY_VERIFICATION_STATUS_OPTIONS,
   filterBarValueToCompanyFilters,
   getCompanyDisplayDate,
 } from "./companies-filterbar-adapter";
 import type { FilterBarValue } from "@/components/filters/filterbar-params";
 
-describe("filterBarValueToCompanyFilters (FilterBar URL value -> useCompanies CompanyListFilters)", () => {
+describe("filterBarValueToCompanyFilters (FilterBar URL value -> useCompanies CompanyFilters)", () => {
   it("maps an empty value to an empty filter object (no stray keys)", () => {
     expect(filterBarValueToCompanyFilters({})).toEqual({});
   });
@@ -58,7 +57,7 @@ describe("filterBarValueToCompanyFilters (FilterBar URL value -> useCompanies Co
     }
   });
 
-  it("drops the deal-only dimensions by construction (no CompanyListFilters field)", () => {
+  it("drops the deal-only dimensions by construction (no CompanyFilters field)", () => {
     const value: FilterBarValue = {
       stageIds: ["s-1"],
       regionId: "region-1",
@@ -84,47 +83,19 @@ describe("filterBarValueToCompanyFilters (FilterBar URL value -> useCompanies Co
     expect("page" in result).toBe(false);
     expect(result).toEqual({ search: "x" });
   });
-});
 
-describe("status -> status (verification; emitted under the contracted `status` param)", () => {
-  // On main `FilterBarValue.status` is the deal-status union; RED's #577 widens the shared `status`
-  // param to a multi-domain free string. These cast the literal to exercise the verification mapping
-  // that widened param enables (the cast becomes a no-op once RED lands).
-  const withStatus = (status: string): FilterBarValue => ({ status } as unknown as FilterBarValue);
-
-  it("maps each verification status under `status` (incl. 'rejected' per contract round 2)", () => {
-    expect(filterBarValueToCompanyFilters(withStatus("pending"))).toEqual({ status: "pending" });
-    expect(filterBarValueToCompanyFilters(withStatus("verified"))).toEqual({ status: "verified" });
-    expect(filterBarValueToCompanyFilters(withStatus("rejected"))).toEqual({ status: "rejected" });
-    expect(filterBarValueToCompanyFilters(withStatus("not_required"))).toEqual({ status: "not_required" });
-  });
-
-  it("omits 'any' (the no-filter state)", () => {
-    expect("status" in filterBarValueToCompanyFilters(withStatus("any"))).toBe(false);
-  });
-
-  it("omits a non-verification (deal) status — never widens", () => {
+  it("never emits a status param — the verification Status dimension was dropped (product)", () => {
+    expect("status" in filterBarValueToCompanyFilters({ status: "verified" })).toBe(false);
     expect("status" in filterBarValueToCompanyFilters({ status: "on_hold" })).toBe(false);
-    expect("status" in filterBarValueToCompanyFilters({ status: "active" })).toBe(false);
-    expect("status" in filterBarValueToCompanyFilters(withStatus("garbage"))).toBe(false);
   });
 });
 
-describe("COMPANY_LIST_SORT_OPTIONS / COMPANY_VERIFICATION_STATUS_OPTIONS (contract allow-lists)", () => {
+describe("COMPANY_LIST_SORT_OPTIONS (contract allow-list)", () => {
   it("every sort option's sortBy is in the company allow-list", () => {
     const allowed = new Set(["last_activity_at", "created_at", "name"]);
     for (const option of COMPANY_LIST_SORT_OPTIONS) {
       expect(allowed.has(option.sortBy)).toBe(true);
     }
-  });
-
-  it("offers all four verification statuses including 'rejected'", () => {
-    expect(COMPANY_VERIFICATION_STATUS_OPTIONS.map((o) => o.value)).toEqual([
-      "pending",
-      "verified",
-      "rejected",
-      "not_required",
-    ]);
   });
 });
 
