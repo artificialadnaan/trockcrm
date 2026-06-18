@@ -276,6 +276,17 @@ export async function runDailyTaskGeneration(): Promise<void> {
         const { evaluateTaskRules, TASK_RULES, createTenantTaskRulePersistence } = await loadTaskRuleDependencies();
         const taskPersistence = createTenantTaskRulePersistence(client, schemaName);
 
+        // Lifecycle: dismiss first-outreach tasks whose contact has been contacted (flag flipped via the
+        // touchpoint trigger), gone inactive, or aged out of the window. This runs FIRST — before the
+        // overdue-marking UPDATE and the "Overdue Task" notification insert below — so a resolved/expired
+        // first-outreach task that's also past-due is dismissed instead of being marked overdue and
+        // generating a stale overdue alert for a task the job is about to close. It also drains the
+        // historical backlog on the first run after deploy, and clears resolved contacts before the
+        // needsOutreach create loop re-evaluates who still needs a task. (Folded into the running total
+        // only AFTER COMMIT, like officeTasksCreated/officeOverdueMarked, so a later rollback doesn't
+        // over-report dismissals in the summary log.)
+        officeFirstOutreachDismissed = await dismissResolvedFirstOutreachTasks(client, schemaName, office.id);
+
         const overdueResult = await client.query(
           `UPDATE ${schemaName}.tasks
            SET is_overdue = true,
@@ -340,14 +351,6 @@ export async function runDailyTaskGeneration(): Promise<void> {
           );
           officeTasksCreated += countGeneratedTasks(outcomes);
         }
-
-        // Lifecycle: dismiss first-outreach tasks whose contact has been contacted (flag flipped via the
-        // touchpoint trigger), gone inactive, or aged out of the window — BEFORE re-evaluating who still
-        // needs one (mirrors the stale-lead dismiss ordering). This also drains the historical backlog on
-        // the first run after deploy.
-        // Folded into the running total only AFTER COMMIT (like officeTasksCreated/officeOverdueMarked), so
-        // a later-step failure that rolls back this office doesn't over-report dismissals in the summary log.
-        officeFirstOutreachDismissed = await dismissResolvedFirstOutreachTasks(client, schemaName, office.id);
 
         const needsOutreach = await client.query(
           `SELECT c.id AS contact_id, c.first_name, c.last_name
