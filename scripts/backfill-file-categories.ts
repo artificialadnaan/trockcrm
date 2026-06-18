@@ -23,9 +23,12 @@ import { buildFolderPath } from "../server/src/modules/files/file-constants.js";
  *  - auditable/reversible: a committed run echoes every applied change to stdout AND writes a JSON
  *    snapshot of the ACTUALLY-applied changes (id, from, to) per office to the OS temp dir (owner-only).
  *
- * Usage (this script is not registered in scripts/run-script.ts; invoke it directly with tsx):
- *   node --import tsx scripts/backfill-file-categories.ts            # dry-run (default)
- *   node --import tsx scripts/backfill-file-categories.ts --commit   # apply
+ * Usage — run from the repo root. The leading `build --workspace=shared` is REQUIRED: the server
+ * modules this script imports (inferFileCategory, buildFolderPath) resolve `@trock-crm/shared` through
+ * its built `dist`, which a fresh source checkout doesn't have (only Vitest aliases it to source). The
+ * script isn't registered in scripts/run-script.ts, so invoke it directly with tsx:
+ *   npm run build --workspace=shared && node --import tsx scripts/backfill-file-categories.ts            # dry-run
+ *   npm run build --workspace=shared && node --import tsx scripts/backfill-file-categories.ts --commit   # apply
  */
 
 // Office schemas are discovered at runtime (see discoverOfficeSchemas), never hardcoded, so the backfill
