@@ -101,6 +101,14 @@ describe("buildEvidenceCsv — columns + values", () => {
     expect(csv).not.toContain("65%");
   });
 
+  it("carries the visible #dealNumber in the Deal column (matches the popup cell), and just the name when absent", () => {
+    const withNum = buildEvidenceCsv(evidence("projection", [record({ name: "Acme Reroof", dealNumber: "1042" })]));
+    const withoutNum = buildEvidenceCsv(evidence("projection", [record({ name: "Acme Reroof", dealNumber: null })]));
+    const dealIdx = cells(lines(withNum)[0]).indexOf("Deal");
+    expect(cells(lines(withNum)[1])[dealIdx]).toBe("Acme Reroof #1042");
+    expect(cells(lines(withoutNum)[1])[dealIdx]).toBe("Acme Reroof");
+  });
+
   it("renders null cells as empty (the UI's em dash becomes a blank cell)", () => {
     const csv = buildEvidenceCsv(evidence("projection", [record({ companyName: null, region: null, winProbability: null, daysInStage: null })]));
     const h = cells(lines(csv)[0]);
@@ -114,7 +122,7 @@ describe("buildEvidenceCsv — columns + values", () => {
 
 describe("buildEvidenceCsv — escaping + edge cases", () => {
   it("quotes cells containing commas, quotes, or newlines", () => {
-    const csv = buildEvidenceCsv(evidence("projection", [record({ companyName: "Acme, Inc.", name: 'He said "hi"' })]));
+    const csv = buildEvidenceCsv(evidence("projection", [record({ dealNumber: null, companyName: "Acme, Inc.", name: 'He said "hi"' })]));
     const row = cells(lines(csv)[1]);
     const h = cells(lines(csv)[0]);
     // round-trips through the quote-aware splitter to the original values
@@ -132,7 +140,7 @@ describe("buildEvidenceCsv — escaping + edge cases", () => {
   });
 
   it("quotes a carriage return in a name so the record does not split (row count stays reconciled)", () => {
-    const csv = buildEvidenceCsv(evidence("projection", [record({ name: "Acme\rWest" })]));
+    const csv = buildEvidenceCsv(evidence("projection", [record({ dealNumber: null, name: "Acme\rWest" })]));
     // The CR cell is wrapped in quotes, so CSV parsers keep it as ONE field of ONE record (not two rows).
     expect(csv).toContain('"Acme\rWest"');
     // And there is exactly one record after the header (no \n-introduced split either).
