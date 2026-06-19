@@ -4,6 +4,8 @@ import {
   buildBackfillPlan,
   runBackfillForSchema,
   discoverOfficeSchemas,
+  missingFileColumns,
+  REQUIRED_FILE_COLUMNS,
   type OtherFileRow,
   type QueryClient,
 } from "../../../scripts/backfill-file-categories.js";
@@ -159,5 +161,42 @@ describe("backfill-file-categories", () => {
       },
     };
     expect(await discoverOfficeSchemas(client)).toEqual(["office_atlanta", "office_dallas"]);
+  });
+
+  function columnsClient(presentColumns: string[]): { client: QueryClient; params: unknown[][] } {
+    const params: unknown[][] = [];
+    const client: QueryClient = {
+      async query(text: string, p?: unknown[]) {
+        if (text.includes("information_schema.columns")) {
+          params.push(p ?? []);
+          return { rows: presentColumns.map((column_name) => ({ column_name })), rowCount: presentColumns.length };
+        }
+        throw new Error(`Unexpected query: ${text}`);
+      },
+    };
+    return { client, params };
+  }
+
+  it("reports no missing columns when the office's files table has every required column", async () => {
+    const { client, params } = columnsClient([...REQUIRED_FILE_COLUMNS, "extra_unused_column"]);
+    expect(await missingFileColumns(client, "office_dallas")).toEqual([]);
+    // looks the table up by table_schema (no search_path dependency), so it can't throw 42703 itself
+    expect(params).toEqual([["office_dallas"]]);
+  });
+
+  it("flags the exact drifted column so a missing intake_source is skipped, not thrown (42703 guard)", async () => {
+    const present = REQUIRED_FILE_COLUMNS.filter((c) => c !== "intake_source");
+    const { client } = columnsClient([...present]);
+    expect(await missingFileColumns(client, "office_pwauditoffice")).toEqual(["intake_source"]);
+  });
+
+  it("treats a missing files table (zero columns) as all-columns-missing rather than erroring", async () => {
+    const { client } = columnsClient([]);
+    expect(await missingFileColumns(client, "office_ghost")).toEqual([...REQUIRED_FILE_COLUMNS]);
+  });
+
+  it("rejects an unsafe schema name before querying", async () => {
+    const { client } = columnsClient([...REQUIRED_FILE_COLUMNS]);
+    await expect(missingFileColumns(client, "public; drop table files")).rejects.toThrow("Unsafe schema name");
   });
 });
