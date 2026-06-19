@@ -75,6 +75,12 @@ function resolveDatabaseUrl() {
   if (!url) throw new Error("Missing CRM database URL. Set CRM_DATABASE_URL or DATABASE_PUBLIC_URL.");
   return url;
 }
+function buildSslConfig(): false | { rejectUnauthorized: boolean } {
+  // Railway/managed Postgres serves certs that aren't in the default CA bundle, so verification is off by
+  // default (matching the other backfill scripts). Set DATABASE_SSL_VERIFY=true to enforce it where the CA
+  // is trusted.
+  return process.env.DATABASE_SSL_VERIFY === "true" ? { rejectUnauthorized: true } : { rejectUnauthorized: false };
+}
 function quoteIdent(identifier: string): string {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(identifier)) {
     throw new Error(`Invalid identifier: ${identifier}`);
@@ -199,7 +205,7 @@ export async function main(argv = process.argv.slice(2)) {
   loadEnv();
   const client = new pg.Client({
     connectionString: resolveDatabaseUrl(),
-    ssl: { rejectUnauthorized: false },
+    ssl: buildSslConfig(),
   });
   await client.connect();
   try {

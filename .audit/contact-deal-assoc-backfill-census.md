@@ -51,7 +51,7 @@ An archived deal or contact must not resurface a primary edge on the Primary Con
 
 ## What `--commit` does
 
-For each office_* schema (discovered via `pg_namespace`, guarded on `deals` + `contact_deal_associations`),
+For each office_* schema (discovered via `pg_namespace`, restricted to `office_*` and guarded on `deals` + `contacts` + `contact_deal_associations`),
 in a transaction:
 1. **DEMOTE** any OTHER `is_primary` row on a deal we're about to (re)materialize, gated on an active target
    (so a deal is never left primary-less) — each deal ends with exactly one primary; readers join on
