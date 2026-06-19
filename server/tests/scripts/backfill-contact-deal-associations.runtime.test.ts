@@ -49,8 +49,9 @@ beforeAll(async () => {
     ('${cid(13)}','${did(3)}', true),
     ('${cid(5)}', '${did(5)}', false);`);
 
-  // Execute the script's own statements (what --commit runs) against the test schema.
-  const { demote, upsert } = backfillStatements(T);
+  // Execute the script's own statements (what --commit runs, in order) against the test schema.
+  const { lock, demote, upsert } = backfillStatements(T);
+  await pg.exec(lock);
   await pg.exec(demote);
   await pg.exec(upsert);
 }, 30000);
@@ -75,8 +76,9 @@ async function rowCount(dealNo: number): Promise<number> {
 }
 
 describe("backfillStatements — active-only + single-primary-per-deal (demote + upsert)", () => {
-  it("the exported SQL carries the active-deal/active-contact filters, the demote, and the promote", () => {
-    const { demote, upsert } = backfillStatements(T);
+  it("the exported SQL carries the deal-row lock, the active filters, the demote, and the promote", () => {
+    const { lock, demote, upsert } = backfillStatements(T);
+    expect(lock).toContain("FOR UPDATE"); // serializes against createAssociation's deal-row lock
     expect(demote).toContain("SET is_primary = false");
     expect(demote).toContain("cda.contact_id <> d.primary_contact_id");
     expect(demote).toContain("d.is_active = true");

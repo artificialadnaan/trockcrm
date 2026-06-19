@@ -22,7 +22,7 @@ Connection: `CRM_DATABASE_URL` or `DATABASE_PUBLIC_URL` (same as the other backf
 ## Background
 
 `contact_deal_associations` (cda) is the join table between `contacts` and `deals`
-(`contactId`, `dealId`, `role varchar(100)` nullable, `isPrimary bool default false`, `UNIQUE(contactId, dealId)`).
+(`contact_id`, `deal_id`, `role varchar(100)` nullable, `is_primary bool default false`, `UNIQUE(contact_id, deal_id)`).
 It is **empty in every office_\* schema**, yet office_dallas has 752 deals carrying a `primary_contact_id`.
 HubSpot held ~462 contact↔deal edges; migration 0027 repaired the deal-side `deals.primary_contact_id` but
 never re-seeded cda. Worker jobs that read cda (cold-lead warming, daily tasks, sent-email→deal mapping,
@@ -39,7 +39,7 @@ lost-deal outreach) and the contacts UI therefore run dry.
 
 **would-upsert** = active deal (`d.is_active`) whose `primary_contact_id` is an active contact
 (`EXISTS … AND c.is_active`); the upsert inserts the edge or promotes an existing one to primary.
-**would-demote** = other `is_primary` rows on those deals that get cleared (0 today — cda is empty).
+**would-demote** = other `is_primary` rows on those deals that are cleared (0 today — cda is empty).
 
 ### How 752 → 697 (active-only exclusions, mirroring the createAssociation writer)
 

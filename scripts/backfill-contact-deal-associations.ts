@@ -83,11 +83,15 @@ function quoteIdent(identifier: string): string {
 }
 
 async function fetchOfficeSchemas(client: QueryClient): Promise<string[]> {
+  // Restrict to the office_* tenant schemas the app/provisioner own (never an ad-hoc/backup schema), and
+  // require ALL THREE referenced tables so a partial schema can't abort the run when the SQL hits a missing
+  // %I.contacts / %I.contact_deal_associations.
   const result = await client.query(
     `SELECT n.nspname AS schema_name
        FROM pg_namespace n
       WHERE n.nspname LIKE 'office\\_%' ESCAPE '\\'
         AND to_regclass(format('%I.deals', n.nspname)) IS NOT NULL
+        AND to_regclass(format('%I.contacts', n.nspname)) IS NOT NULL
         AND to_regclass(format('%I.contact_deal_associations', n.nspname)) IS NOT NULL
       ORDER BY n.nspname ASC`
   );
@@ -95,11 +99,21 @@ async function fetchOfficeSchemas(client: QueryClient): Promise<string[]> {
 }
 
 /**
- * The two write statements, schema-qualified. EXPORTED so the runtime test executes the SHIPPED SQL (and
- * `--commit` and the test can never diverge). Active-deal + active-contact gated; demote-then-upsert.
+ * The write statements, schema-qualified. EXPORTED so the runtime test executes the SHIPPED SQL (so
+ * `--commit` and the test can never diverge). `lock` takes the same per-deal FOR UPDATE that
+ * createAssociation/updateAssociation use (association-service.ts) to serialize primary changes, so running
+ * --commit during a rolling deploy / concurrent manual edit can't leave two is_primary rows on a deal.
+ * Active-deal + active-contact gated; order in --commit is lock → demote → upsert (in one txn per office).
  */
-export function backfillStatements(schema: string): { demote: string; upsert: string } {
+export function backfillStatements(schema: string): { lock: string; demote: string; upsert: string } {
   const s = quoteIdent(schema);
+  const lock = `
+    SELECT d.id
+    FROM ${s}.deals d
+    WHERE d.primary_contact_id IS NOT NULL
+      AND d.is_active = true
+      AND EXISTS (SELECT 1 FROM ${s}.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true)
+    FOR UPDATE`;
   const demote = `
     UPDATE ${s}.contact_deal_associations cda
        SET is_primary = false
@@ -118,7 +132,7 @@ export function backfillStatements(schema: string): { demote: string; upsert: st
       AND d.is_active = true
       AND EXISTS (SELECT 1 FROM ${s}.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true)
     ON CONFLICT (contact_id, deal_id) DO UPDATE SET is_primary = true`;
-  return { demote, upsert };
+  return { lock, demote, upsert };
 }
 
 /** Read-only census: rows the upsert would write + primaries the demote would clear (matches the predicates). */
@@ -155,9 +169,10 @@ export async function runBackfill(input: { client: QueryClient; mode: Mode }): P
 
   if (input.mode === "commit") {
     for (const schema of schemas) {
-      const { demote, upsert } = backfillStatements(schema);
+      const { lock, demote, upsert } = backfillStatements(schema);
       await input.client.query("BEGIN");
       try {
+        await input.client.query(lock); // hold the eligible deal rows so a concurrent createAssociation can't interleave a 2nd primary
         const demoteRes = await input.client.query(demote);
         const upsertRes = await input.client.query(upsert);
         await input.client.query("COMMIT");
