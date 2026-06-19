@@ -57,6 +57,23 @@ export function buildPropertySortOrder(sortBy: string | undefined, sortDir: "asc
       // Folded `dv.linked_value` (text) cast to numeric so the directory sorts by money value, not
       // lexically; COALESCE(...,0) so properties with no active linked deal sort as $0, not NULL.
       return [propertyOrderExpr(sql`COALESCE(dv.linked_value::numeric, 0)`, sortDir)];
+    case "engagement":
+      // Engagement is a status (won/active_deal/active_lead/none) derived from counts — per product it
+      // sorts by the active-deal count that drives it (folded `da.active_cnt`, identical to the displayed
+      // "Active deals" count). COALESCE(...,0) + NULLS LAST so zero-engagement properties sink to the bottom.
+      return [propertyOrderExpr(sql`COALESCE(da.active_cnt, 0)`, sortDir)];
+    case "last_touch":
+      // Folded Last touch = latest of the property's own last_activity_at and the MAX lead/deal activity
+      // (la/da derived tables) — mirrors buildPropertyLastActivityAt (combineLatestTimestamp) so the sort
+      // key equals the displayed value. NULLIF('-infinity') maps "no activity anywhere" to NULL → NULLS LAST.
+      return [propertyOrderExpr(
+        sql`NULLIF(GREATEST(
+          COALESCE(${properties.lastActivityAt}, '-infinity'::timestamptz),
+          COALESCE(la.last_activity, '-infinity'::timestamptz),
+          COALESCE(da.last_activity, '-infinity'::timestamptz)
+        ), '-infinity'::timestamptz)`,
+        sortDir
+      )];
     default:
       return [asc(companies.name), asc(properties.name), asc(properties.address)];
   }
@@ -329,6 +346,31 @@ export async function listProperties(
     .groupBy(deals.propertyId)
     .as("dv");
 
+  // Per-property deal aggregate (1:1), folded so Engagement + Last touch sort over the FULL filtered set
+  // before LIMIT. active_cnt = active, not-on-hold deals — the same input the engagement classifier and
+  // the displayed "Active deals" count use, so the sorted value reconciles with the cell. last_activity =
+  // MAX over ALL the property's deals (matches the displayed last-touch deal source).
+  const dealAgg = tenantDb
+    .select({
+      propertyId: deals.propertyId,
+      lastActivity: sql<string | null>`MAX(${deals.lastActivityAt})`.as("last_activity"),
+      activeCnt: sql<number>`COUNT(*) FILTER (WHERE ${deals.isActive} AND COALESCE(${deals.onHold}, false) = false)`.as("active_cnt"),
+    })
+    .from(deals)
+    .where(isNotNull(deals.propertyId))
+    .groupBy(deals.propertyId)
+    .as("da");
+  // Per-property lead aggregate (1:1): MAX activity feeds the folded Last touch GREATEST.
+  const leadAgg = tenantDb
+    .select({
+      propertyId: leads.propertyId,
+      lastActivity: sql<string | null>`MAX(${leads.lastActivityAt})`.as("last_activity"),
+    })
+    .from(leads)
+    .where(isNotNull(leads.propertyId))
+    .groupBy(leads.propertyId)
+    .as("la");
+
   const conditions = [eq(properties.isActive, filters.isActive ?? true)];
 
   if (filters.companyId) {
@@ -392,6 +434,8 @@ export async function listProperties(
     .from(properties)
     .leftJoin(companies, eq(companies.id, properties.companyId))
     .leftJoin(linkedValues, eq(linkedValues.propertyId, properties.id))
+    .leftJoin(leadAgg, eq(leadAgg.propertyId, properties.id))
+    .leftJoin(dealAgg, eq(dealAgg.propertyId, properties.id))
     .where(where)
     // Server-side sort over the full filtered set; stable id tiebreak keeps OFFSET paging deterministic.
     .orderBy(...buildPropertySortOrder(filters.sortBy, filters.sortDir), asc(properties.id))

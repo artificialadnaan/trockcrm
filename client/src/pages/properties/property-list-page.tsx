@@ -20,15 +20,18 @@ import { cn } from "@/lib/utils";
 const PROPERTY_HEAD_CLASS = "text-[11px] font-black uppercase tracking-[0.16em] text-slate-500";
 
 // Sortable columns (key == the properties list API sortBy value), ordered server-side over the FULL
-// filtered set. Linked value is folded into the main list query (dv.linked_value) so it sorts/filters
-// over the whole set too; numeric → desc-first. The remaining aggregate columns (Engagement, Last touch)
-// are still computed in post-pagination sub-queries and are intentionally non-sortable for now.
+// filtered set. The aggregate columns are folded into the main list query as 1:1 LEFT JOINs (dv =
+// linked value, da = deal aggregate, la = lead aggregate) so they sort over the whole set before the
+// 250-row window: linked_value → dv; engagement → da.active_cnt (active-deal count, numeric desc-first);
+// last_touch → GREATEST(property/lead/deal last activity) (date desc-first). sqft is a direct column.
 const PROPERTY_SORT_COLUMNS: ReadonlyArray<SortStateColumn> = [
   { key: "name", type: "text" },
   { key: "type", type: "text" },
   { key: "company", type: "text" },
   { key: "sqft", type: "number" },
   { key: "linked_value", type: "number" },
+  { key: "engagement", type: "number" },
+  { key: "last_touch", type: "date" },
 ];
 
 const TYPE_LABELS: Record<string, string> = {
@@ -444,7 +447,12 @@ export function PropertyListPage() {
                     {...getHeaderProps("sqft")}
                     onSort={() => handleSort("sqft")}
                   />
-                  <TableHead className={PROPERTY_HEAD_CLASS}>Engagement</TableHead>
+                  <SortableTableHead
+                    label="Engagement"
+                    buttonClassName={PROPERTY_HEAD_CLASS}
+                    {...getHeaderProps("engagement")}
+                    onSort={() => handleSort("engagement")}
+                  />
                   <SortableTableHead
                     label="Linked value"
                     numeric
@@ -453,7 +461,12 @@ export function PropertyListPage() {
                     {...getHeaderProps("linked_value")}
                     onSort={() => handleSort("linked_value")}
                   />
-                  <TableHead className={PROPERTY_HEAD_CLASS}>Last touch</TableHead>
+                  <SortableTableHead
+                    label="Last touch"
+                    buttonClassName={PROPERTY_HEAD_CLASS}
+                    {...getHeaderProps("last_touch")}
+                    onSort={() => handleSort("last_touch")}
+                  />
                   <TableHead className="w-10" />
                 </TableRow>
               </TableHeader>

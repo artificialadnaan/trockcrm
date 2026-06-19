@@ -62,4 +62,28 @@ describe("buildPropertySortOrder", () => {
     expect(flatten(asc[0]!)).toContain("ASC NULLS LAST");
     expect(flatten(buildPropertySortOrder("linked_value", "desc")[0]!)).toContain("DESC NULLS LAST");
   });
+
+  it("sorts engagement on the folded active-deal count (da.active_cnt), numeric, zeros/nulls last", () => {
+    // Engagement is a status from counts; per product it sorts by the active-deal count that drives it —
+    // the SAME folded da.active_cnt used for the displayed Active-deals count, so sort == cell.
+    const desc = buildPropertySortOrder("engagement", "desc");
+    expect(desc).toHaveLength(1);
+    expect(flatten(desc[0]!)).toContain("COALESCE(da.active_cnt, 0)");
+    expect(flatten(desc[0]!)).toContain("DESC NULLS LAST");
+    expect(flatten(buildPropertySortOrder("engagement", "asc")[0]!)).toContain("ASC NULLS LAST");
+  });
+
+  it("sorts last_touch on the folded GREATEST(property/lead/deal activity), nulls last", () => {
+    // Last touch folds GREATEST(properties.last_activity_at, la.last_activity, da.last_activity) — mirrors
+    // buildPropertyLastActivityAt so the sort key equals the displayed value; NULLIF('-infinity') maps a
+    // property with no activity anywhere to NULL → NULLS LAST.
+    const desc = buildPropertySortOrder("last_touch", "desc");
+    expect(desc).toHaveLength(1);
+    const sqlText = flatten(desc[0]!);
+    expect(sqlText).toContain("GREATEST");
+    expect(sqlText).toContain("la.last_activity");
+    expect(sqlText).toContain("da.last_activity");
+    expect(sqlText).toContain("DESC NULLS LAST");
+    expect(flatten(buildPropertySortOrder("last_touch", "asc")[0]!)).toContain("ASC NULLS LAST");
+  });
 });
