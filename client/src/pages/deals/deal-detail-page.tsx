@@ -634,7 +634,9 @@ export function DealDetailPage() {
   const slaStatusValue = getSlaStatusValue(slaResult);
   const slaCaptionContext = getSlaCaptionContext(slaResult);
   const isSlaBreached = slaResult?.isAtRisk === true;
-  const dealValue = resolveBestEstimate(deal);
+  // Detail header value uses the deal's stage (server now provides stageSlug; fall back to the loaded
+  // currentStage) so an estimating deal shows the DD-over-bid value, matching the board/list (Codex P2).
+  const dealValue = resolveBestEstimate({ ...deal, stageSlug: deal.stageSlug ?? currentStage?.slug });
   const dealValueIsLost = resolveDealValueKind(deal) === "lost";
   const address = formatDealAddress(deal);
   const procoreProjectUrl = buildProcoreProjectUrl(deal.procoreProjectId);

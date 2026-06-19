@@ -1913,6 +1913,10 @@ export async function getDealDetail(
       primaryContactOwnerUserId: contacts.ownerId,
       primaryContactOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${contacts.ownerId})`,
       projectType: sql<string | null>`COALESCE(${projectTypeConfig.name}, ${deals.projectType})`,
+      // The deal's canonical stage slug (deals has no stage_slug column) so the detail header's value
+      // resolver (resolveBestEstimate) applies the stage-aware chain — estimating DD-over-bid — and the
+      // detail header reconciles with the board/list for the same deal (Codex P2).
+      stageSlug: sql<string | null>`(SELECT slug FROM public.pipeline_stage_config WHERE id = ${deals.stageId})`,
     })
     .from(deals)
     .leftJoin(users, eq(users.id, deals.assignedRepId))
