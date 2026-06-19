@@ -20,14 +20,20 @@
 --                           for a row created without an explicit role.
 --   * FK-guarded      — only inserts when the referenced contact EXISTS (and is active), so the
 --                           contact_deal_associations_contact_id_fkey -> contacts(id) constraint cannot fail.
+--   * single primary per deal — a demote UPDATE first clears is_primary on ANY OTHER cda row for the
+--                           same deal, THEN the upsert sets the target. So each deal ends with exactly one
+--                           primary (matches the app writer, which clears existing primaries before setting
+--                           a new one; readers join on cda.is_primary = true). The demote is gated on an
+--                           active target contact, so a deal whose primary is inactive (INSERT skips it)
+--                           keeps its existing primary rather than being left primary-less.
 --   * promote-on-conflict / idempotent — ON CONFLICT (contact_id, deal_id) DO UPDATE SET is_primary = true
 --                           against the UNIQUE(contact_id, deal_id) constraint. If a (contact, deal) edge
 --                           already exists (e.g. a manually-created non-primary row), it is PROMOTED to
---                           primary so the deal's one primary is always marked — the backfill never silently
---                           fails to set a primary. Re-running sets the same true, so it stays idempotent.
+--                           primary. Re-running demotes-then-promotes the same rows, so it stays idempotent.
 --
--- PROD WRITE: this performs an INSERT on merge+deploy. It is read-mostly-safe (insert-only, conflict-skipped)
--- but it DOES write rows. Do not merge until the census in the PR body is approved.
+-- PROD WRITE: this performs an UPDATE (demote) + INSERT/UPSERT on merge+deploy. cda is empty in every
+-- office today, so the demote is a no-op now; it is defensive for replay / new tenants / a concurrent
+-- manual writer. Do not merge until the census in the PR body is approved.
 --
 -- Per-tenant (office_*) DO-loop + the TENANT_SCHEMA block so freshly provisioned tenants (whose deals/
 -- contacts tables start empty) also run it idempotently.
@@ -49,6 +55,23 @@ BEGIN
       CONTINUE;
     END IF;
 
+    -- Demote any STALE primary on a deal we are about to (re)materialize, so each deal ends with exactly
+    -- ONE primary (the app writer clears existing primaries before setting a new one; readers join on
+    -- cda.is_primary = true). Gated on an active target contact so we never demote without setting a new
+    -- primary (an inactive primary_contact_id is skipped by the INSERT, so its deal keeps its old primary).
+    EXECUTE format(
+      'UPDATE %I.contact_deal_associations cda
+          SET is_primary = false
+       FROM %I.deals d
+       WHERE cda.deal_id = d.id
+         AND cda.is_primary = true
+         AND cda.contact_id <> d.primary_contact_id
+         AND d.primary_contact_id IS NOT NULL
+         AND d.is_active = true
+         AND EXISTS (SELECT 1 FROM %I.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true)',
+      tenant_schema, tenant_schema, tenant_schema
+    );
+
     EXECUTE format(
       'INSERT INTO %I.contact_deal_associations (contact_id, deal_id, is_primary)
        SELECT d.primary_contact_id, d.id, true
@@ -66,6 +89,16 @@ END $mig$;
 -- office_dallas at migration time too (redundant with the DO-loop above; ON CONFLICT re-marks the same
 -- primary, a no-op). On a brand-new tenant the deals table is empty, so this inserts zero rows.
 -- TENANT_SCHEMA_START
+UPDATE office_dallas.contact_deal_associations cda
+   SET is_primary = false
+FROM office_dallas.deals d
+WHERE cda.deal_id = d.id
+  AND cda.is_primary = true
+  AND cda.contact_id <> d.primary_contact_id
+  AND d.primary_contact_id IS NOT NULL
+  AND d.is_active = true
+  AND EXISTS (SELECT 1 FROM office_dallas.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true);
+
 INSERT INTO office_dallas.contact_deal_associations (contact_id, deal_id, is_primary)
 SELECT d.primary_contact_id, d.id, true
 FROM office_dallas.deals d

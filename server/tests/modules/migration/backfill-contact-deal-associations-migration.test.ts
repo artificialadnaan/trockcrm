@@ -62,6 +62,17 @@ describe("migration 0169 — backfill contact_deal_associations", () => {
     expect(sql).not.toContain("DO NOTHING");
   });
 
+  it("demotes any OTHER existing primary on the deal before promoting (one primary per deal, both blocks)", () => {
+    // Without this, a deal with a different cda primary + a matching deals.primary_contact_id would end
+    // with TWO is_primary=true rows; readers join on is_primary=true. The demote clears the others first.
+    const demotes = sql.match(/SET is_primary = false/g) ?? [];
+    expect(demotes.length).toBeGreaterThanOrEqual(2); // DO-loop + TENANT_SCHEMA block
+    const otherPrimary = sql.match(/cda\.contact_id <> d\.primary_contact_id/g) ?? [];
+    expect(otherPrimary.length).toBeGreaterThanOrEqual(2);
+    // (Demote-before-promote ordering + the actual single-primary outcome are proven by the companion
+    // PGlite runtime test backfill-contact-deal-associations.runtime.test.ts, which executes both statements.)
+  });
+
   it("includes a TENANT_SCHEMA block (office_dallas literal) for newly provisioned tenants", () => {
     expect(sql).toContain("-- TENANT_SCHEMA_START");
     expect(sql).toContain("-- TENANT_SCHEMA_END");
