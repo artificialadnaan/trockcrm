@@ -571,6 +571,40 @@ describe("TaskListPage project context", () => {
     expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).toBeNull();
   });
 
+  it("blanks the bucket list on a scope change even while a linked task is open (linked task stays)", () => {
+    let scopeLoading = false;
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [makeTask()] : [],
+      loading: scopeLoading,
+      error: null,
+      refetch: vi.fn(),
+    }));
+    mocks.useTaskMock.mockReturnValue({
+      task: { ...makeTask(), id: "linked-1", title: "Review linked task" },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPage("/tasks/linked-1"); // director on a linked-task URL
+    expect(container.textContent).toContain("Review linked task");
+    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).not.toBeNull();
+
+    scopeLoading = true;
+    const picker = container.querySelector<HTMLSelectElement>('[data-testid="assignee-filter"] select');
+    act(() => {
+      if (picker) {
+        picker.value = "rep-2";
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    // The bucket list blanks (old assignee's rows + their controls gone) but the linked task remains.
+    expect(container.textContent).toContain("Loading tasks...");
+    expect(container.textContent).toContain("Review linked task");
+    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).toBeNull();
+  });
+
   it("a sort-only refetch (same scope) does NOT blank the page", () => {
     let sortLoading = false;
     mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({

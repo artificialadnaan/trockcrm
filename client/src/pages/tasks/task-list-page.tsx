@@ -548,7 +548,10 @@ function TaskListPageContent({ role }: { role: string }) {
     }
   }, [loading, assigneeFilter]);
   const scopeChanging = hasResolvedOnce && loadedScope !== assigneeFilter;
-  const showInitialLoading = loading && (!hasResolvedOnce || scopeChanging) && !(taskId && linkedTask);
+  // No linked-task exemption: the linked task renders in its own section above the bucket list, so the
+  // list must still blank on a first load / scope swap (otherwise a linked-task URL re-opens the
+  // stale-row hole — the old assignee's rows would stay actionable during the refetch).
+  const showInitialLoading = loading && (!hasResolvedOnce || scopeChanging);
 
   return (
     <div className="space-y-6">
