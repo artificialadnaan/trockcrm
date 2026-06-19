@@ -33,6 +33,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { FileUploadZone } from "@/components/files/file-upload-zone";
+import {
+  SortHeaderButton,
+  ariaSort,
+  nextSortState,
+  sortHeaderProps,
+  type ColumnType,
+  type SortState,
+} from "@/components/reports/sortable";
 import { useFiles, useFileStats, downloadFile, deleteFileRecord } from "@/hooks/use-files";
 import type { FileRecord } from "@/hooks/use-files";
 import { useDeals } from "@/hooks/use-deals";
@@ -257,7 +265,18 @@ function isDocument(file: FileRecord) {
   return file.category !== "photo" && !file.mimeType.startsWith("image/");
 }
 
-function nextSortBy(value: "created_at" | "display_name" | "file_size_bytes") {
+type FilesSortKey = "created_at" | "display_name" | "file_size_bytes";
+
+// The clickable-header sort keys map 1:1 to the files API sortBy values; the column type drives the
+// default direction (text → asc, number/date → desc) via the shared sort rule. Type / Linked To have no
+// server sortField today and stay non-sortable.
+const FILES_SORT_TYPES: Record<FilesSortKey, ColumnType> = {
+  display_name: "text",
+  file_size_bytes: "number",
+  created_at: "date",
+};
+
+function nextSortBy(value: FilesSortKey): FilesSortKey {
   if (value === "created_at") return "display_name";
   if (value === "display_name") return "file_size_bytes";
   return "created_at";
@@ -482,27 +501,58 @@ function FileGridCard({
   );
 }
 
+function SortableFileTh({
+  label,
+  sortKey,
+  sortState,
+  onSort,
+  numeric,
+  className,
+}: {
+  label: string;
+  sortKey: FilesSortKey;
+  sortState: SortState;
+  onSort: (key: FilesSortKey) => void;
+  numeric?: boolean;
+  className: string;
+}) {
+  const hp = sortHeaderProps(sortState, sortKey);
+  return (
+    <th className={className} aria-sort={ariaSort(hp.active, hp.dir)}>
+      <SortHeaderButton label={label} numeric={numeric} active={hp.active} dir={hp.dir} onClick={() => onSort(sortKey)} />
+    </th>
+  );
+}
+
 function FilesTable({
   rows,
   dealMap,
   onDownload,
   onDelete,
+  sortBy,
+  sortDir,
+  onSort,
 }: {
   rows: FileRecord[];
   dealMap: Map<string, Deal>;
   onDownload: (id: string) => void;
   onDelete: (id: string) => void;
+  sortBy: FilesSortKey;
+  sortDir: "asc" | "desc";
+  onSort: (key: FilesSortKey) => void;
 }) {
+  // Files always has a server sort (default created_at desc), so sortState is never null here.
+  const sortState: SortState = { key: sortBy, dir: sortDir };
   return (
     <div className="overflow-x-auto" data-view="list">
       <table className="w-full min-w-[860px]">
         <thead>
           <tr className="border-b border-slate-100 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">
-            <th className="px-5 py-3 text-left">File</th>
+            <SortableFileTh label="File" sortKey="display_name" sortState={sortState} onSort={onSort} className="px-5 py-3 text-left" />
             <th className="px-5 py-3 text-left">Type</th>
             <th className="px-5 py-3 text-left">Linked To</th>
-            <th className="px-5 py-3 text-right">Size</th>
-            <th className="px-5 py-3 text-left">Uploaded</th>
+            <SortableFileTh label="Size" sortKey="file_size_bytes" sortState={sortState} onSort={onSort} numeric className="px-5 py-3 text-right" />
+            <SortableFileTh label="Uploaded" sortKey="created_at" sortState={sortState} onSort={onSort} className="px-5 py-3 text-left" />
             <th className="w-20 px-5 py-3" aria-hidden />
           </tr>
         </thead>
@@ -569,8 +619,15 @@ export function FilesPage() {
   const [view, setView] = useState<FileView>("grid");
   const [typeFilter, setTypeFilter] = useState<FileCategory | "all">("all");
   const [linkedFilter, setLinkedFilter] = useState<LinkedFilter>("any");
-  const [sortBy, setSortBy] = useState<"created_at" | "display_name" | "file_size_bytes">("created_at");
+  const [sortBy, setSortBy] = useState<FilesSortKey>("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  // Clickable list headers reuse the shared sort rule over the same sortBy/sortDir state the cycle button
+  // uses, so both drive the SAME server-side ORDER BY (over the full set, not the in-memory window).
+  const handleSort = (key: FilesSortKey) => {
+    const next = nextSortState({ key: sortBy, dir: sortDir }, key, FILES_SORT_TYPES[key]);
+    setSortBy(next.key as FilesSortKey);
+    setSortDir(next.dir);
+  };
   const [showUpload, setShowUpload] = useState(false);
   const [uploadCategory, setUploadCategory] = useState<FileCategory | "auto">("auto");
   const [uploadDealId, setUploadDealId] = useState("");
@@ -931,7 +988,15 @@ export function FilesPage() {
               ) : null}
             </div>
           ) : (
-            <FilesTable rows={visibleFiles} dealMap={dealMap} onDownload={handleDownload} onDelete={handleDelete} />
+            <FilesTable
+              rows={visibleFiles}
+              dealMap={dealMap}
+              onDownload={handleDownload}
+              onDelete={handleDelete}
+              sortBy={sortBy}
+              sortDir={sortDir}
+              onSort={handleSort}
+            />
           )}
 
           <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3 text-xs text-slate-600">

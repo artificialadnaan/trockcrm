@@ -552,4 +552,56 @@ describe("CompanyListPage", () => {
       await cleanup();
     }
   });
+
+  describe("sortable headers (server-side sort, direct columns only)", () => {
+    function headerButton(container: HTMLElement, label: string): HTMLButtonElement {
+      const btn = Array.from(container.querySelectorAll("button")).find((b) =>
+        (b.getAttribute("aria-label") ?? "").startsWith(`Sort by ${label}`)
+      );
+      if (!btn) throw new Error(`no sortable header "${label}"`);
+      return btn as HTMLButtonElement;
+    }
+
+    it("clicking a direct-column header sends the mapped sortBy/sortDir to the API", async () => {
+      const { container, cleanup } = await renderPageDom();
+      try {
+        await act(async () => {
+          headerButton(container, "Company").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.useCompaniesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "name", sortDir: "asc" })
+        );
+
+        await act(async () => {
+          headerButton(container, "Last activity").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.useCompaniesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "last_activity", sortDir: "desc" })
+        );
+
+        await act(async () => {
+          headerButton(container, "Owner").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.useCompaniesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "owner", sortDir: "asc" })
+        );
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("aggregate columns (Pipeline / Active deals) are not sortable headers", async () => {
+      const { container, cleanup } = await renderPageDom();
+      try {
+        const labels = Array.from(container.querySelectorAll("button"))
+          .map((b) => b.getAttribute("aria-label") ?? "")
+          .filter((l) => l.startsWith("Sort by "));
+        expect(labels.some((l) => l.includes("Pipeline"))).toBe(false);
+        expect(labels.some((l) => l.includes("Active deals"))).toBe(false);
+        expect(labels.some((l) => l.includes("Properties"))).toBe(false);
+      } finally {
+        await cleanup();
+      }
+    });
+  });
 });

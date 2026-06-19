@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   useAuthMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
   useOwnerAssigneesMock: vi.fn(),
+  useContactFiltersOverride: undefined as undefined | { sortBy?: string; sortDir?: "asc" | "desc" },
 }));
 
 vi.mock("@/hooks/use-contacts", () => ({
@@ -48,7 +49,14 @@ vi.mock("sonner", () => ({
 
 vi.mock("@/hooks/use-contact-filters", () => ({
   useContactFilters: () => ({
-    filters: { isActive: true, sortBy: "updated_at", sortDir: "desc", page: 1, limit: 50 },
+    filters: {
+      isActive: true,
+      sortBy: "updated_at",
+      sortDir: "desc",
+      page: 1,
+      limit: 50,
+      ...(mocks.useContactFiltersOverride ?? {}),
+    },
     setFilters: mocks.setFiltersMock,
     resetFilters: mocks.resetFiltersMock,
   }),
@@ -567,5 +575,55 @@ describe("ContactListPage", () => {
     } finally {
       await cleanup();
     }
+  });
+
+  describe("sortable headers (server-side sort over the full set)", () => {
+    function headerButton(container: HTMLElement, label: string): HTMLButtonElement {
+      const btn = Array.from(container.querySelectorAll("button")).find((b) =>
+        (b.getAttribute("aria-label") ?? "").startsWith(`Sort by ${label}`)
+      );
+      if (!btn) throw new Error(`no sortable header "${label}"`);
+      return btn as HTMLButtonElement;
+    }
+
+    it("clicking a header sends the mapped sortBy/sortDir to the API (default direction by type)", async () => {
+      const { container, cleanup } = await renderPageDom();
+      try {
+        // text column → default asc; date column → default desc.
+        await act(async () => {
+          headerButton(container, "Contact").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.setFiltersMock).toHaveBeenCalledWith({ sortBy: "name", sortDir: "asc" });
+
+        await act(async () => {
+          headerButton(container, "Last touch").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.setFiltersMock).toHaveBeenCalledWith({ sortBy: "last_touch_at", sortDir: "desc" });
+
+        await act(async () => {
+          headerButton(container, "Company").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.setFiltersMock).toHaveBeenCalledWith({ sortBy: "company_name", sortDir: "asc" });
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("the active column reflects the persisted sort and toggles its direction on re-click", async () => {
+      // Persisted filter already sorts by last_touch_at desc → that header is active; re-click flips to asc.
+      mocks.useContactFiltersOverride = { sortBy: "last_touch_at", sortDir: "desc" };
+      const { container, cleanup } = await renderPageDom();
+      try {
+        const lastTouch = headerButton(container, "Last touch");
+        expect(lastTouch.getAttribute("aria-label")).toContain("sorted descending");
+        await act(async () => {
+          lastTouch.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.setFiltersMock).toHaveBeenCalledWith({ sortBy: "last_touch_at", sortDir: "asc" });
+      } finally {
+        mocks.useContactFiltersOverride = undefined;
+        await cleanup();
+      }
+    });
   });
 });

@@ -602,4 +602,35 @@ describe("FilesPage", () => {
     expect(gridButton?.getAttribute("aria-pressed")).toBe("true");
     expect(listButton?.getAttribute("aria-pressed")).toBe("false");
   });
+
+  it("list-view headers drive the server sort param (full set), reusing the shared sort rule", () => {
+    mounted = mountPage();
+    // Switch to list view so the sortable column headers render.
+    act(() => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('button[aria-label="List view"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const header = (label: string) =>
+      Array.from(mounted!.container.querySelectorAll("button")).find((b) =>
+        (b.getAttribute("aria-label") ?? "").startsWith(`Sort by ${label}`),
+      )!;
+
+    // Default sort is created_at desc; click File (text) → display_name asc; Size (number) → desc.
+    act(() => header("File").dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    let lastArgs = mocks.useFilesMock.mock.calls[mocks.useFilesMock.mock.calls.length - 1][0] as { sortBy: string; sortDir: string };
+    expect(lastArgs.sortBy).toBe("display_name");
+    expect(lastArgs.sortDir).toBe("asc");
+
+    act(() => header("Size").dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    lastArgs = mocks.useFilesMock.mock.calls[mocks.useFilesMock.mock.calls.length - 1][0] as { sortBy: string; sortDir: string };
+    expect(lastArgs.sortBy).toBe("file_size_bytes");
+    expect(lastArgs.sortDir).toBe("desc");
+
+    // Re-clicking the active column flips direction.
+    act(() => header("Size").dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    lastArgs = mocks.useFilesMock.mock.calls[mocks.useFilesMock.mock.calls.length - 1][0] as { sortBy: string; sortDir: string };
+    expect(lastArgs.sortBy).toBe("file_size_bytes");
+    expect(lastArgs.sortDir).toBe("asc");
+  });
 });

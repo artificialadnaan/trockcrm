@@ -12,12 +12,26 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { SearchInput } from "@/components/ui/search-input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/shared/sortable-table-head";
+import { useSortState, type SortStateColumn } from "@/components/reports/sortable";
 import { useAuth } from "@/lib/auth";
 import { useOwnerAssignees } from "@/hooks/use-owner-assignees";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { assignCompanyOwnerToMe, reassignCompanyOwner, useCompanies, type Company } from "@/hooks/use-companies";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { cn } from "@/lib/utils";
+
+// Header typography for the company table.
+const HEAD_CLASS = "text-[11px] font-black uppercase tracking-[0.16em] text-slate-500";
+
+// Sortable direct columns (key == the companies list API sortBy value). Aggregate columns
+// (Properties/Contacts/Active deals/Pipeline) are computed in a separate per-page query and are
+// intentionally non-sortable for now.
+const COMPANY_SORT_COLUMNS: ReadonlyArray<SortStateColumn> = [
+  { key: "name", type: "text" },
+  { key: "owner", type: "text" },
+  { key: "last_activity", type: "date" },
+];
 
 const INDUSTRY_OPTIONS = [
   { value: "all", label: "All" },
@@ -154,12 +168,26 @@ export function CompanyListPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const activeCard = searchParams.get("card");
 
+  // useSortState is the sort source of truth (no persisted filter here); its key IS the API sortBy value,
+  // so it drives a SERVER-side ORDER BY over the full filtered set. Aggregate columns aren't orderable
+  // server-side (separate per-page query) and stay non-sortable. Default = server name ASC (no active
+  // header until a click).
+  const { sortState, toggle, getHeaderProps } = useSortState(COMPANY_SORT_COLUMNS);
+  // Reset to page 1 in the SAME click as the sort toggle (both setState calls batch into one render), so a
+  // sort from page >1 issues a single request — not (new sort, old page) then (new sort, page 1).
+  const handleSort = (key: string) => {
+    toggle(key);
+    setPage(1);
+  };
+
   const { companies: rawCompanies, pagination, loading, error, refetch } = useCompanies({
     search: search || undefined,
     industry: industry === "all" ? undefined : industry,
     ownerScope: ownerScope === "mine" ? "mine" : undefined,
     hasActivePipeline: activeCard === "pipeline" ? true : undefined,
     stale: activeCard === "stale" ? true : undefined,
+    sortBy: sortState?.key,
+    sortDir: sortState?.dir,
     page,
     limit: 50,
   });
@@ -335,13 +363,28 @@ export function CompanyListPage() {
             <div className="hidden md:block"><Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Company</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Owner</TableHead>
-                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Properties</TableHead>
-                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Contacts</TableHead>
-                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Active deals</TableHead>
-                  <TableHead className="text-right text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Pipeline</TableHead>
-                  <TableHead className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">Last activity</TableHead>
+                  <SortableTableHead
+                    label="Company"
+                    buttonClassName={HEAD_CLASS}
+                    {...getHeaderProps("name")}
+                    onSort={() => handleSort("name")}
+                  />
+                  <SortableTableHead
+                    label="Owner"
+                    buttonClassName={HEAD_CLASS}
+                    {...getHeaderProps("owner")}
+                    onSort={() => handleSort("owner")}
+                  />
+                  <TableHead className={cn("text-right", HEAD_CLASS)}>Properties</TableHead>
+                  <TableHead className={cn("text-right", HEAD_CLASS)}>Contacts</TableHead>
+                  <TableHead className={cn("text-right", HEAD_CLASS)}>Active deals</TableHead>
+                  <TableHead className={cn("text-right", HEAD_CLASS)}>Pipeline</TableHead>
+                  <SortableTableHead
+                    label="Last activity"
+                    buttonClassName={HEAD_CLASS}
+                    {...getHeaderProps("last_activity")}
+                    onSort={() => handleSort("last_activity")}
+                  />
                   <TableHead className="w-10" />
                 </TableRow>
               </TableHeader>

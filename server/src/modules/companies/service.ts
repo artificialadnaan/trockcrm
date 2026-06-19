@@ -33,6 +33,23 @@ async function uniqueSlug(tenantDb: TenantDb, base: string, excludeId?: string):
   }
 }
 
+/**
+ * ORDER BY for the company directory, applied over the FULL filtered set before LIMIT/OFFSET so the sort
+ * is global, not just the visible page. Only directly-orderable columns are supported — the aggregate
+ * columns (properties/contacts/active-deals/pipeline) are computed in a separate per-page query and are
+ * intentionally NOT sortable here (a deferred follow-up). Blanks/nulls always sink to the bottom in both
+ * directions, matching the client comparators' nulls-last rule.
+ */
+export function buildCompanySortOrder(sortBy?: string, sortDir: "asc" | "desc" = "asc") {
+  const col =
+    sortBy === "owner"
+      ? users.displayName
+      : sortBy === "last_activity"
+        ? companies.lastActivityAt
+        : companies.name;
+  return sortDir === "asc" ? sql`${col} ASC NULLS LAST` : sql`${col} DESC NULLS LAST`;
+}
+
 export async function listCompanies(
   tenantDb: TenantDb,
   options: {
@@ -43,6 +60,8 @@ export async function listCompanies(
     // Summary-card drill-downs (?card=pipeline / ?card=stale on the companies page).
     hasActivePipeline?: boolean; // company has > 0 active (non-held) pipeline value
     stale?: boolean; // last activity is null or > 30 days ago
+    sortBy?: string;
+    sortDir?: "asc" | "desc";
     page?: number;
     limit?: number;
   } = {}
@@ -97,7 +116,8 @@ export async function listCompanies(
     .from(companies)
     .leftJoin(users, eq(users.id, companies.ownerId))
     .where(where)
-    .orderBy(asc(companies.name))
+    // Stable id tiebreak so OFFSET paging is deterministic when the primary sort ties.
+    .orderBy(buildCompanySortOrder(options.sortBy, options.sortDir), asc(companies.id))
     .limit(limit)
     .offset(offset);
   const totalResult = await tenantDb

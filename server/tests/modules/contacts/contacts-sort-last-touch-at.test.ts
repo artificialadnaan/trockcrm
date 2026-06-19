@@ -34,4 +34,11 @@ describe("contacts last_touch_at sorting", () => {
     expect(sortSql).toContain("sent_at");
     expect(sortSql).toContain("GREATEST");
   });
+
+  it("sinks nulls last in BOTH directions for the plain columns (e.g. a nullable company)", () => {
+    // company_name is nullable; without explicit NULLS LAST, Postgres floats nulls to the top on DESC.
+    expect(flattenSqlChunks(buildContactSortOrder("company_name", "desc"))).toContain("DESC NULLS LAST");
+    expect(flattenSqlChunks(buildContactSortOrder("company_name", "asc"))).toContain("ASC NULLS LAST");
+    expect(flattenSqlChunks(buildContactSortOrder("name", "desc"))).toContain("DESC NULLS LAST");
+  });
 });

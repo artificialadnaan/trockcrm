@@ -197,7 +197,10 @@ export function buildContactSortOrder(sortBy: ContactFilters["sortBy"], sortDir:
       default: return contacts.updatedAt;
     }
   })();
-  return sortDir === "asc" ? asc(sortColumn) : desc(sortColumn);
+  // NULLS LAST in BOTH directions (matches the client comparators + the company/property sort builders):
+  // Postgres defaults DESC to NULLS FIRST, which would float blanks (e.g. a null company_name) to the top
+  // on a descending sort — the now-clickable "Company" header makes that reachable.
+  return sortDir === "asc" ? sql`${sortColumn} ASC NULLS LAST` : sql`${sortColumn} DESC NULLS LAST`;
 }
 
 /**
@@ -474,7 +477,9 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     .from(contacts)
     .leftJoin(users, eq(users.id, contacts.ownerId))
     .where(where)
-    .orderBy(sortOrder)
+    // Stable secondary key so OFFSET pagination is deterministic when the primary sort ties
+    // (e.g. equal last_touch_at / company / role) — without it, rows can repeat or vanish across pages.
+    .orderBy(sortOrder, asc(contacts.id))
     .limit(limit)
     .offset(offset);
 

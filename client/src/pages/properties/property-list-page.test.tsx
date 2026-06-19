@@ -388,4 +388,59 @@ describe("PropertyListPage", () => {
       await cleanup();
     }
   });
+
+  describe("sortable headers (server-side sort over the full set, direct columns only)", () => {
+    function headerButton(container: HTMLElement, label: string): HTMLButtonElement {
+      const btn = Array.from(container.querySelectorAll("button")).find((b) =>
+        (b.getAttribute("aria-label") ?? "").startsWith(`Sort by ${label}`)
+      );
+      if (!btn) throw new Error(`no sortable header "${label}"`);
+      return btn as HTMLButtonElement;
+    }
+
+    it("clicking a direct-column header sends the mapped sortBy/sortDir to the API", async () => {
+      const { container, cleanup } = await renderPageDom();
+      try {
+        await act(async () => {
+          headerButton(container, "Property").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "name", sortDir: "asc" })
+        );
+
+        await act(async () => {
+          headerButton(container, "Sq ft").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "sqft", sortDir: "desc" })
+        );
+
+        await act(async () => {
+          headerButton(container, "Owner company").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "company", sortDir: "asc" })
+        );
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("aggregate columns (Linked value / Engagement / Last touch) are not sortable headers", async () => {
+      const { container, cleanup } = await renderPageDom();
+      try {
+        const labels = Array.from(container.querySelectorAll("button"))
+          .map((b) => b.getAttribute("aria-label") ?? "")
+          .filter((l) => l.startsWith("Sort by "));
+        expect(labels.some((l) => l.includes("Linked value"))).toBe(false);
+        expect(labels.some((l) => l.includes("Engagement"))).toBe(false);
+        expect(labels.some((l) => l.includes("Last touch"))).toBe(false);
+        // ...but the direct columns ARE sortable.
+        expect(labels.some((l) => l.includes("Property"))).toBe(true);
+        expect(labels.some((l) => l.includes("Sq ft"))).toBe(true);
+      } finally {
+        await cleanup();
+      }
+    });
+  });
 });

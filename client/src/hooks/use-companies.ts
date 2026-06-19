@@ -47,6 +47,8 @@ export interface CompanyFilters {
   // Summary-card drill-downs (driven by the ?card= URL param on the companies page).
   hasActivePipeline?: boolean;
   stale?: boolean;
+  sortBy?: string;
+  sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
 }
@@ -90,6 +92,8 @@ export function useCompanies(filters: CompanyFilters = {}) {
       if (filters.ownerScope === "mine") params.set("ownerScope", "mine");
       if (filters.hasActivePipeline) params.set("hasActivePipeline", "true");
       if (filters.stale) params.set("stale", "true");
+      if (filters.sortBy) params.set("sortBy", filters.sortBy);
+      if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
 
@@ -119,7 +123,7 @@ export function useCompanies(filters: CompanyFilters = {}) {
         setLoading(false);
       }
     }
-  }, [filters.search, filters.category, filters.industry, filters.ownerScope, filters.hasActivePipeline, filters.stale, filters.page, filters.limit]);
+  }, [filters.search, filters.category, filters.industry, filters.ownerScope, filters.hasActivePipeline, filters.stale, filters.sortBy, filters.sortDir, filters.page, filters.limit]);
 
   useEffect(() => {
     fetchCompanies();
