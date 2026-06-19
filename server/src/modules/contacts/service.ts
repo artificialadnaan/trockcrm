@@ -184,7 +184,11 @@ export function buildContactLinkedDealsCountSql(): SQL<number> {
 export function buildContactSortOrder(sortBy: ContactFilters["sortBy"], sortDir: ContactFilters["sortDir"] = "desc") {
   if (sortBy === "last_touch_at") {
     const lastTouchAt = buildContactLastTouchAtSql();
-    return sortDir === "asc" ? asc(lastTouchAt) : sql`${lastTouchAt} DESC NULLS LAST`;
+    // Explicit NULLS LAST in BOTH directions. Postgres already sinks nulls last on a bare ASC (the DESC
+    // branch needs the clause because DESC defaults to NULLS FIRST), so this is behavior-identical — but
+    // spelling it out keeps untouched contacts at the bottom without relying on the ASC default and
+    // matches the explicit clause used for every other sortable column below.
+    return sortDir === "asc" ? sql`${lastTouchAt} ASC NULLS LAST` : sql`${lastTouchAt} DESC NULLS LAST`;
   }
 
   const sortColumn = (() => {
