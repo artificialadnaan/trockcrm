@@ -406,7 +406,10 @@ export async function listProperties(
 
   const where = and(...conditions);
 
-  const needsAggregateJoin = filters.sortBy === "engagement" || filters.sortBy === "last_touch";
+  // Engagement sorts only need the deal aggregate (da.active_cnt); Last touch needs BOTH the deal and lead
+  // aggregates (GREATEST over property/lead/deal activity). Join only what the chosen sort actually reads.
+  const needsDealAgg = filters.sortBy === "engagement" || filters.sortBy === "last_touch";
+  const needsLeadAgg = filters.sortBy === "last_touch";
   let rowsQuery = tenantDb
     .select({
       id: properties.id,
@@ -436,12 +439,13 @@ export async function listProperties(
     .leftJoin(companies, eq(companies.id, properties.companyId))
     .leftJoin(linkedValues, eq(linkedValues.propertyId, properties.id))
     .$dynamic();
-  // da/la are full-table aggregates that ONLY back the Engagement / Last touch sorts — skip the joins
-  // entirely on the common (name/type/company/sqft/linked_value) sorts so they don't pay for the scans.
-  if (needsAggregateJoin) {
-    rowsQuery = rowsQuery
-      .leftJoin(leadAgg, eq(leadAgg.propertyId, properties.id))
-      .leftJoin(dealAgg, eq(dealAgg.propertyId, properties.id));
+  // Full-table aggregates back ONLY the Engagement / Last touch sorts, so common name/type/company/sqft/
+  // linked_value sorts skip them. Engagement reads just da.active_cnt; only Last touch also needs la.
+  if (needsDealAgg) {
+    rowsQuery = rowsQuery.leftJoin(dealAgg, eq(dealAgg.propertyId, properties.id));
+  }
+  if (needsLeadAgg) {
+    rowsQuery = rowsQuery.leftJoin(leadAgg, eq(leadAgg.propertyId, properties.id));
   }
   const rows = await rowsQuery
     .where(where)
