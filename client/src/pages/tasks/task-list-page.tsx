@@ -392,7 +392,9 @@ function TaskGroup({
           {tasks.length > 0 ? (
             tasks.map((task) => <TaskRow key={task.id} task={task} onUpdate={onUpdate} />)
           ) : (
-            <div className="p-8 text-center text-sm font-semibold text-slate-500">No tasks in this group.</div>
+            <div className="p-8 text-center text-sm font-semibold text-slate-500">
+              {loading ? "Loading…" : "No tasks in this group."}
+            </div>
           )}
         </div>
       ) : null}
@@ -531,27 +533,15 @@ function TaskListPageContent({ role }: { role: string }) {
   // Authoritative, server-computed count — independent of the Completed bucket's sort/limit.
   const completedThisWeek = counts.completedThisWeek;
 
-  // Whole-page loader policy. Blank the page for a genuine dataset swap — the first load OR an
-  // assignee-scope change — but NOT for a per-bucket sort refetch (those keep the other buckets +
-  // their prior rows, each group showing its own inline "updating" spinner). Blanking on a scope
-  // change matters for safety: useTasks preserves the previous arrays while the new assignee's
-  // requests are in flight, so without this the previous assignee's INTERACTIVE rows would stay
-  // actionable (a stray complete/snooze) until the refetch lands. `loadedScope` is the assignee the
-  // currently-settled data belongs to; when it differs from the active filter, a scope swap is in
-  // flight. State (not a ref) so the loader re-renders deterministically when the scope flips.
-  const [loadedScope, setLoadedScope] = useState<string | undefined>(undefined);
+  // Whole-page loader only on the very first load. Subsequent refetches don't blank the page: a
+  // sort refetch keeps each bucket's rows (header shows an inline spinner), and a scope (assignee)
+  // change can't leave stale interactive rows because useTasks drops the previous scope's rows
+  // synchronously — so the buckets simply reload (empty → "Loading…") instead of showing old rows.
   const [hasResolvedOnce, setHasResolvedOnce] = useState(false);
   useEffect(() => {
-    if (!loading) {
-      setLoadedScope(assigneeFilter);
-      setHasResolvedOnce(true);
-    }
-  }, [loading, assigneeFilter]);
-  const scopeChanging = hasResolvedOnce && loadedScope !== assigneeFilter;
-  // No linked-task exemption: the linked task renders in its own section above the bucket list, so the
-  // list must still blank on a first load / scope swap (otherwise a linked-task URL re-opens the
-  // stale-row hole — the old assignee's rows would stay actionable during the refetch).
-  const showInitialLoading = loading && (!hasResolvedOnce || scopeChanging);
+    if (!loading) setHasResolvedOnce(true);
+  }, [loading]);
+  const showInitialLoading = loading && !hasResolvedOnce;
 
   return (
     <div className="space-y-6">

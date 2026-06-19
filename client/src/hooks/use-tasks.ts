@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 
 export type TaskStatus =
@@ -222,6 +222,17 @@ export function useTasks(filters: TaskFilters = {}) {
   const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 100, total: 0, totalPages: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Drop stale rows the instant the SCOPE (assignedTo) changes — synchronously, before paint — so an
+  // in-flight refetch never shows the previous assignee's interactive rows (a stray complete/snooze
+  // on a task outside the newly selected filter). Same-scope changes (sort, search, page) keep the
+  // rows so re-sorting doesn't flicker. React's "adjust state during render" pattern; the ref guard
+  // makes it fire once per scope change, not every render.
+  const scopeRef = useRef(filters.assignedTo);
+  if (scopeRef.current !== filters.assignedTo) {
+    scopeRef.current = filters.assignedTo;
+    setTasks([]);
+  }
 
   const fetchTasks = useCallback(async () => {
     setLoading(true);

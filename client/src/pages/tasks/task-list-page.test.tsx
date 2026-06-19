@@ -543,7 +543,10 @@ describe("TaskListPage project context", () => {
     expect(container.querySelector('[data-sort-group="overdue"] select')).not.toBeNull();
   });
 
-  it("blanks the page while a NEW assignee scope is loading (no stale interactive rows from the old scope)", () => {
+  it("a scope (assignee) change reloads in place without a full-page blank after first load", () => {
+    // The stale-row SAFETY (the previous assignee's rows can't stay actionable mid-refetch) lives in
+    // useTasks, which drops the rows synchronously on a scope change — gate-proven in
+    // use-tasks.scope.test.tsx. The page just reloads in place; it does not whole-page blank again.
     let scopeLoading = false;
     mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
       tasks: filters.section === "overdue" ? [makeTask()] : [],
@@ -552,43 +555,8 @@ describe("TaskListPage project context", () => {
       refetch: vi.fn(),
     }));
 
-    renderPage(); // director; first load settles (loading false) → groups render, scope recorded
+    renderPage();
     expect(container.textContent).not.toContain("Loading tasks...");
-    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).not.toBeNull();
-
-    // Switch assignee while the new scope's requests are in flight (loading true).
-    scopeLoading = true;
-    const picker = container.querySelector<HTMLSelectElement>('[data-testid="assignee-filter"] select');
-    act(() => {
-      if (picker) {
-        picker.value = "rep-2";
-        picker.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-    });
-
-    // The whole list is replaced by the loader — the previous assignee's actionable rows are gone.
-    expect(container.textContent).toContain("Loading tasks...");
-    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).toBeNull();
-  });
-
-  it("blanks the bucket list on a scope change even while a linked task is open (linked task stays)", () => {
-    let scopeLoading = false;
-    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
-      tasks: filters.section === "overdue" ? [makeTask()] : [],
-      loading: scopeLoading,
-      error: null,
-      refetch: vi.fn(),
-    }));
-    mocks.useTaskMock.mockReturnValue({
-      task: { ...makeTask(), id: "linked-1", title: "Review linked task" },
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-
-    renderPage("/tasks/linked-1"); // director on a linked-task URL
-    expect(container.textContent).toContain("Review linked task");
-    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).not.toBeNull();
 
     scopeLoading = true;
     const picker = container.querySelector<HTMLSelectElement>('[data-testid="assignee-filter"] select');
@@ -599,10 +567,8 @@ describe("TaskListPage project context", () => {
       }
     });
 
-    // The bucket list blanks (old assignee's rows + their controls gone) but the linked task remains.
-    expect(container.textContent).toContain("Loading tasks...");
-    expect(container.textContent).toContain("Review linked task");
-    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).toBeNull();
+    expect(container.textContent).not.toContain("Loading tasks...");
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", assignedTo: "rep-2" }));
   });
 
   it("a sort-only refetch (same scope) does NOT blank the page", () => {
