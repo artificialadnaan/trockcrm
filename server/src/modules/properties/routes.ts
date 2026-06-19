@@ -4,6 +4,7 @@ import { requireAdmin } from "../../middleware/rbac.js";
 import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { redactDealList, shouldIncludeHubspotId } from "../deals/redact.js";
 import { createProperty, deleteProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
+import { parseMoneyBound } from "./query-params.js";
 
 const router = Router();
 
@@ -11,13 +12,6 @@ router.get("/", async (req, res, next) => {
   try {
     const { search, companyId, type, sortBy, sortDir, page, limit, isActive, minLinkedValue, maxLinkedValue } =
       req.query as Record<string, string>;
-    // Parse a money bound: blank/absent → undefined (no bound); a non-finite value is ignored rather than
-    // poisoning the query with NaN.
-    const parseMoneyBound = (raw: string | undefined): number | undefined => {
-      if (raw == null || raw.trim() === "") return undefined;
-      const value = Number(raw);
-      return Number.isFinite(value) ? value : undefined;
-    };
     const result = await listProperties(req.tenantDb!, {
       search,
       companyId,

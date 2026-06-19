@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, ilike, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, ilike, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   companies,
@@ -323,7 +323,9 @@ export async function listProperties(
       )}), 0)::text`.as("linked_value"),
     })
     .from(deals)
-    .where(eq(deals.isActive, true))
+    // Only active deals that are actually attached to a property: a NULL property_id can never match the
+    // 1:1 LEFT JOIN below, so excluding it here keeps those rows out of the GROUP BY scan on every request.
+    .where(and(eq(deals.isActive, true), isNotNull(deals.propertyId)))
     .groupBy(deals.propertyId)
     .as("dv");
 
