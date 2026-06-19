@@ -22,8 +22,8 @@ import {
 } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
-  ESTIMATING_STAGE_SLUG,
   getDealAtRiskResult,
+  isGenuineEstimatingDealStageSlug,
   isGenuineWonDealStageSlug,
   resolveEffectiveStageEnteredAt,
   USER_ROLES,
@@ -915,7 +915,7 @@ function buildStagePageOrder(sort: StagePageSort | undefined, stage: PipelineSta
     case "value_desc":
       return LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
         ? sql`${workspaceEffectiveDealValueSql(stage)} desc, d.id desc`
-        : sql`${aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug))} desc, d.id desc`;
+        : sql`${aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)))} desc, d.id desc`;
     case "newest":
     default:
       return sql`d.created_at desc, d.id desc`;
@@ -1163,9 +1163,21 @@ function dealEstimateSentAtSql() {
 
 type PipelineValueSource = "won" | "estimating" | "current";
 
-function pipelineValueSourceForStageSlug(stageSlug: string): PipelineValueSource {
-  // 'estimating' stage only: DD outranks bid (awarded > dd > bid). Excludes service_estimating.
-  if (stageSlug === ESTIMATING_STAGE_SLUG) return "estimating";
+// Route for a pipeline_stage_config row, derived from its workflow family (the query scopes to
+// standard_deal | service_deal). Used to canonicalize a STAGE's slug for the estimating classification.
+function dealRouteForStageFamily(workflowFamily: string | null | undefined): WorkflowRoute {
+  return workflowFamily === "service_deal" ? "service" : "normal";
+}
+
+function pipelineValueSourceForStageSlug(
+  stageSlug: string,
+  workflowRoute?: WorkflowRoute | null
+): PipelineValueSource {
+  // Canonical 'estimating' stage only (route-aware): DD outranks bid (awarded > dd > bid). Excludes
+  // service_estimating; INCLUDES the legacy estimate_in_progress alias (canonicalizes to estimating). Keying
+  // on the canonical stage (not raw slug equality) keeps this per-column total consistent with the TS card
+  // resolver and the SQL estimatingStageIds set (Codex P2).
+  if (isGenuineEstimatingDealStageSlug(stageSlug, workflowRoute)) return "estimating";
   return WON_TERMINAL_STAGE_SLUGS.includes(stageSlug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
     ? "won"
     : "current";
@@ -1240,7 +1252,7 @@ function addWorkspaceEstimateSentDateConditions(
 }
 
 function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
-  const rawValue = aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug));
+  const rawValue = aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)));
 
   return sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`;
 }
@@ -1677,7 +1689,9 @@ export async function getDeals(
     wonStageIds = stages.filter((stage) => wonSlugs.includes(stage.slug)).map((stage) => stage.id);
     lostStageIds = stages.filter((stage) => lostSlugs.includes(stage.slug)).map((stage) => stage.id);
     estimatingStageIds = stages
-      .filter((stage) => stage.slug === ESTIMATING_STAGE_SLUG)
+      .filter((stage) =>
+        isGenuineEstimatingDealStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily))
+      )
       .map((stage) => stage.id);
   }
   conditions.push(
@@ -2968,7 +2982,7 @@ export async function getDealsForPipeline(
 
     const where = and(...stageConditions, ...commonConditions);
     const countedDealFilter = aliasedActiveDealCountFilterSql("deals");
-    const valueSource = pipelineValueSourceForStageSlug(stage.slug);
+    const valueSource = pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily));
     const summaryRows = await tenantDb
       .select({
         totalCount: sql<number>`count(*)`,
@@ -3042,7 +3056,10 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   );
   // 'estimating' stage drill: the value filter below must use the estimating chain (awarded>dd>bid) so it
   // reconciles with the stage total/sort (which already route through pipelineValueSourceForStageSlug).
-  const isEstimatingStage = stage.slug === ESTIMATING_STAGE_SLUG;
+  const isEstimatingStage = isGenuineEstimatingDealStageSlug(
+    stage.slug,
+    dealRouteForStageFamily(stage.workflowFamily)
+  );
   const stageSlugs = isWonTerminalStage
     ? WON_TERMINAL_STAGE_SLUGS
     : LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])

@@ -561,6 +561,50 @@ describe("getDealsForPipeline", () => {
     expectSqlTermsInOrder(orderByText ?? "", ["awarded_amount", "bid_estimate"]);
   });
 
+  it("canonicalizes a legacy 'estimate_in_progress' column to the estimating chain (DD before bid) — Codex P2", async () => {
+    // estimate_in_progress (standard_deal family) canonicalizes to 'estimating', so its per-column value
+    // source must be the estimating chain (dd_estimate before bid_estimate), matching the TS card resolver.
+    dbState.responses = [
+      [
+        {
+          id: "stage-eip",
+          slug: "estimate_in_progress",
+          name: "Estimate In Progress",
+          displayOrder: 1,
+          isTerminal: false,
+          isActivePipeline: true,
+          workflowFamily: "standard_deal",
+        },
+      ],
+    ];
+
+    const tenantChains: any[] = [];
+    const tenantDb = {
+      select: vi.fn((...selectArgs: unknown[]) => {
+        const chain = createChainableMock();
+        chain._selectArgs = selectArgs;
+        tenantChains.push(chain);
+        chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
+          const isCardsQuery = chain.leftJoin.mock.calls.length > 0;
+          return resolve(isCardsQuery ? [] : [{ totalCount: 0, activeCount: 0, totalValue: 0 }]);
+        });
+        return chain;
+      }),
+    } as any;
+
+    const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
+    await getDealsForPipeline(tenantDb, "director", "director-1", {
+      activeOfficeId: null,
+      scope: "all",
+      previewLimit: 5,
+    });
+
+    const summaryChain = findStageSummaryChain(tenantChains, "stage-eip");
+    const totalValueSql = selectedSqlText(summaryChain, "totalValue");
+    // Estimating chain: dd_estimate outranks bid_estimate (would be reversed on the default chain).
+    expectSqlTermsInOrder(totalValueSql, ["dd_estimate", "bid_estimate"]);
+  });
+
   it("clamps oversized drill-down preview requests to the server maximum", async () => {
     dbState.responses = [
       [

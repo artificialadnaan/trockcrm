@@ -45,8 +45,17 @@ const FORECAST_FIRST_VALUE_CHAIN = [
 // STAGE-AWARE override for the single 'estimating' stage (2026-06-18, Adnaan): during estimating the
 // bid is in-progress/incomplete, so DD outranks bid — awarded > dd_estimate > bid_board_total_sales >
 // bid_estimate. Awarded still wins; bid is NOT skipped, just outranked when DD exists (a bid-only
-// estimating deal keeps its bid, never $0). Applies ONLY to the canonical 'estimating' slug, NOT
-// service_estimating. Same `> 0` gating + on-hold-zeroing as the default chain.
+// estimating deal keeps its bid, never $0). Applies ONLY to the canonical 'estimating' stage (route-aware:
+// includes the legacy estimate_in_progress alias, excludes service_estimating). Same `> 0` gating +
+// on-hold-zeroing as the default chain.
+//
+// SCOPE (Adnaan, 2026-06-19, re Codex P2): this DD-over-bid rule is applied ONLY on the DEALS pipeline value
+// paths — the kanban/stage-workspace per-column totals (pipelineValueSourceForStageSlug) and the deals-list
+// filter/sort/total + stage drill (aliasedStageAwareEffectiveDealValueSql), mirrored by the TS card resolvers
+// (getRawDealValue / resolveBestEstimate). Dashboard + reports value aggregates DELIBERATELY keep the default
+// open chain (deal-value-sql default + reports foundations bases), so an estimating deal can read DD-first on
+// the deals board and bid-first in a report. Verified ~inert on prod (only ~2 estimating deals have bid != DD).
+// Extending platform-wide is a deliberate follow-up, NOT an accidental gap.
 const ESTIMATING_VALUE_CHAIN = [
   "awarded_amount",
   "dd_estimate",
