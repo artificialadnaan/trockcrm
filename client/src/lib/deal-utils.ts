@@ -1,5 +1,5 @@
 import {
-  ESTIMATING_STAGE_SLUG,
+  isGenuineEstimatingDealStageSlug,
   isGenuineLostDealStageSlug,
   isGenuineWonDealStageSlug,
 } from "@trock-crm/shared/types";
@@ -132,8 +132,10 @@ export function resolveBestEstimate(deal: {
   // > 0. STAGE-AWARE override for the single 'estimating' stage (2026-06-18): DD outranks the in-progress
   // bid — awarded > dd > bid_board > bid. Bid is NOT skipped, just outranked when DD exists. Excludes
   // service_estimating. Every other stage is unchanged: awarded > bid_board > bid > dd.
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
   const candidates: Array<[DealEstimateSource, string | null | undefined]> =
-    deal.stageSlug === ESTIMATING_STAGE_SLUG
+    isGenuineEstimatingDealStageSlug(deal.stageSlug, workflowRoute)
       ? [
           ["awarded", deal.awardedAmount],
           ["estimate", deal.ddEstimate],

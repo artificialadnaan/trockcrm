@@ -16,7 +16,7 @@ path in server/src/modules/deals/service.ts, and the five stage-writer paths:
    getHoldStateAtStageEntry() before writing it.
 */
 
-import { ESTIMATING_STAGE_SLUG } from "./workflow.js";
+import { isGenuineEstimatingDealStageSlug } from "./workflow.js";
 
 type DealValueLike = {
   onHold?: boolean | null;
@@ -70,10 +70,11 @@ function getRawDealValue(deal: DealValueLike): number {
   // when DD exists (a bid-only estimating deal keeps its bid). Excludes service_estimating. Every other
   // stage is unchanged: awarded > bid_board > bid > dd.
   const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
-  const candidates =
-    stageSlug === ESTIMATING_STAGE_SLUG
-      ? [deal.awardedAmount, deal.ddEstimate, deal.bidBoardTotalSales, deal.bidEstimate]
-      : [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate];
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  const candidates = isGenuineEstimatingDealStageSlug(stageSlug, workflowRoute)
+    ? [deal.awardedAmount, deal.ddEstimate, deal.bidBoardTotalSales, deal.bidEstimate]
+    : [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate];
 
   for (const candidate of candidates) {
     const value = toNumber(candidate);

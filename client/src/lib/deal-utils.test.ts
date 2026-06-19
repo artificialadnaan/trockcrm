@@ -280,6 +280,33 @@ describe("estimating-stage value precedence — DD outranks bid (2026-06-18)", (
       })
     ).toEqual({ value: 900000, source: "bid_board" });
   });
+
+  // Canonicalization (Codex P2): keys on the CANONICAL stage via workflowRoute, not raw slug equality.
+  it("service route + BARE 'estimating' slug → bid > DD (canonicalizes to service_estimating, excluded)", () => {
+    expect(
+      resolveBestEstimate({
+        stageSlug: "estimating",
+        workflowRoute: "service",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toEqual({ value: 900000, source: "bid_board" });
+  });
+
+  it("legacy 'estimate_in_progress' (normal route) → DD > bid (canonicalizes to estimating)", () => {
+    expect(
+      resolveBestEstimate({
+        stageSlug: "estimate_in_progress",
+        workflowRoute: "normal",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toEqual({ value: 800000, source: "estimate" });
+  });
 });
 
 describe("resolveDealValueKind / isLostBidDeal", () => {

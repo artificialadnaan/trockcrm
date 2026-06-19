@@ -436,6 +436,35 @@ describe("estimating-stage value rule — DD outranks bid (2026-06-18)", () => {
     ).toBe(900000);
   });
 
+  // Canonicalization (Codex P2): the rule keys on the CANONICAL stage via workflowRoute, not raw equality.
+  it("service route + BARE 'estimating' slug → bid > DD (canonicalizes to service_estimating, excluded)", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "estimating",
+        workflowRoute: "service",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toBe(900000);
+  });
+
+  it("legacy 'estimate_in_progress' (normal route) → DD > bid (canonicalizes to estimating)", () => {
+    expect(
+      getEffectiveDealValue({
+        onHold: false,
+        stageSlug: "estimate_in_progress",
+        workflowRoute: "normal",
+        awardedAmount: null,
+        bidBoardTotalSales: "900000",
+        bidEstimate: "880000",
+        ddEstimate: "800000",
+      })
+    ).toBe(800000);
+  });
+
   it("estimating + on-hold → 0 regardless of DD", () => {
     expect(
       getEffectiveDealValue({ onHold: true, stageSlug: "estimating", ddEstimate: "800000" })

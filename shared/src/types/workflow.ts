@@ -438,6 +438,19 @@ export function isGenuineLostDealStageSlug(
   return toCanonicalDealStageSlug(stageSlug, workflowRoute) === "lost";
 }
 
+// True ONLY for the canonical normal-route 'estimating' stage (the DD-over-bid value rule, 2026-06-18).
+// Canonicalizes route-aware so it is correct for the cases bare equality gets wrong: a service-route record
+// carrying the bare "estimating" slug canonicalizes to "service_estimating" (→ false, bid > DD), and the
+// legacy "estimate_in_progress" alias canonicalizes to "estimating" (→ true, DD > bid). service_estimating
+// is deliberately NOT estimating. Mirrors isGenuineWon/LostDealStageSlug.
+export function isGenuineEstimatingDealStageSlug(
+  stageSlug: string | null | undefined,
+  workflowRoute?: WorkflowRoute | null
+): boolean {
+  if (!stageSlug) return false;
+  return toCanonicalDealStageSlug(stageSlug, workflowRoute) === ESTIMATING_STAGE_SLUG;
+}
+
 export function getWorkflowFamilyForStage(
   stageSlug: string,
   workflowRoute?: WorkflowRoute | null
