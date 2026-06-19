@@ -788,4 +788,36 @@ describe("DealForm region auto-suggestion", () => {
     // placeholder, not an "Auto:" value.
     expect(container.textContent).toContain("Select region");
   }, 30000);
+
+  it("flags the auto-derived region as a suggestion in CREATE mode after a property is selected", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE create-mode region suggestion",
+      companyId: "company-1",
+      projectTypeId: "type-roofing",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    // Selecting a property fills propertyState, which drives the auto-select effect (create mode has no
+    // saved region, so regionManuallyOverridden starts false).
+    await act(async () => {
+      mocks.propertySelectorProps?.onPropertySelected?.({
+        id: "property-1",
+        address: "5000 Triangle Pkwy",
+        city: "Peachtree Corners",
+        state: "GA",
+        zip: "30092",
+      });
+      mocks.propertySelectorProps?.onChange("property-1");
+    });
+
+    expect(container.textContent).toMatch(/auto-detected/i);
+    expect(container.textContent).toContain("East Coast");
+    expect(container.textContent).toMatch(/save to confirm/i);
+  }, 30000);
 });
