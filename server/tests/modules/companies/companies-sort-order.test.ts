@@ -48,4 +48,35 @@ describe("buildCompanySortOrder", () => {
   it("falls back to name for an unknown sortBy", () => {
     expect(leadingColumnName(buildCompanySortOrder("not_a_column", "asc"))).toBe("name");
   });
+
+  // The 4 folded aggregate columns are now sortable over the FULL filtered set via the per-relation
+  // derived-table LEFT JOINs (p=properties, ct=contacts, d=deals). The ORDER BY references the derived
+  // output columns by name, NUMERIC (not lexical), NULLS LAST in both directions. The asc(companies.id)
+  // tiebreak is appended separately by listCompanies' .orderBy() (heavy ties at value 0).
+  describe("folded aggregate sort keys", () => {
+    it("properties_count → COALESCE(p.cnt, 0), nulls last both directions", () => {
+      expect(flatten(buildCompanySortOrder("properties_count", "asc"))).toContain("COALESCE(p.cnt, 0)");
+      expect(flatten(buildCompanySortOrder("properties_count", "asc"))).toContain("ASC NULLS LAST");
+      expect(flatten(buildCompanySortOrder("properties_count", "desc"))).toContain("DESC NULLS LAST");
+    });
+
+    it("contacts_count → COALESCE(ct.cnt, 0), nulls last both directions", () => {
+      expect(flatten(buildCompanySortOrder("contacts_count", "asc"))).toContain("COALESCE(ct.cnt, 0)");
+      expect(flatten(buildCompanySortOrder("contacts_count", "asc"))).toContain("ASC NULLS LAST");
+      expect(flatten(buildCompanySortOrder("contacts_count", "desc"))).toContain("DESC NULLS LAST");
+    });
+
+    it("active_deals_count → COALESCE(d.active_cnt, 0), nulls last both directions", () => {
+      expect(flatten(buildCompanySortOrder("active_deals_count", "asc"))).toContain("COALESCE(d.active_cnt, 0)");
+      expect(flatten(buildCompanySortOrder("active_deals_count", "desc"))).toContain("DESC NULLS LAST");
+    });
+
+    it("pipeline_value → NUMERIC (not lexical) cast of d.pipeline, nulls last both directions", () => {
+      // The folded pipeline column is ::text; the sort casts it back to numeric so $900 < $1,000
+      // (a lexical sort would place '1000' before '900').
+      expect(flatten(buildCompanySortOrder("pipeline_value", "desc"))).toContain("COALESCE(d.pipeline::numeric, 0)");
+      expect(flatten(buildCompanySortOrder("pipeline_value", "desc"))).toContain("DESC NULLS LAST");
+      expect(flatten(buildCompanySortOrder("pipeline_value", "asc"))).toContain("ASC NULLS LAST");
+    });
+  });
 });

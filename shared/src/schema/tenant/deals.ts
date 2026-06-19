@@ -13,6 +13,7 @@ import {
   date,
   timestamp,
   interval,
+  index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { DEAL_PIPELINE_DISPOSITIONS, WORKFLOW_ROUTES } from "../../types/enums.js";
@@ -257,5 +258,11 @@ export const deals = pgTable(
     uniqueIndex("deals_project_number_uidx")
       .on(table.projectNumber)
       .where(sql`${table.projectNumber} IS NOT NULL AND ${table.isChangeOrder} = false`),
+    // Partial index backing the company-directory aggregate fold (Properties/Contacts/Active-deals/
+    // Pipeline$ sort) — the deals GROUP-BY-company_id over active deals + the hasActivePipeline drill.
+    // Source of truth for migration 0167 (deals_company_active_idx); applied per-office there.
+    index("deals_company_active_idx")
+      .on(table.companyId)
+      .where(sql`${table.isActive} = true`),
   ]
 );

@@ -24,12 +24,16 @@ import { cn } from "@/lib/utils";
 // Header typography for the company table.
 const HEAD_CLASS = "text-[11px] font-black uppercase tracking-[0.16em] text-slate-500";
 
-// Sortable direct columns (key == the companies list API sortBy value). Aggregate columns
-// (Properties/Contacts/Active deals/Pipeline) are computed in a separate per-page query and are
-// intentionally non-sortable for now.
+// Sortable columns (key == the companies list API sortBy value). The 4 aggregates are now FOLDED into the
+// list query as real columns (per-relation derived-table LEFT JOINs), so they sort over the FULL filtered
+// set server-side, not just the visible page. Numeric columns default to DESC on first click (defaultDir).
 const COMPANY_SORT_COLUMNS: ReadonlyArray<SortStateColumn> = [
   { key: "name", type: "text" },
   { key: "owner", type: "text" },
+  { key: "properties_count", type: "number" },
+  { key: "contacts_count", type: "number" },
+  { key: "active_deals_count", type: "number" },
+  { key: "pipeline_value", type: "number" },
   { key: "last_activity", type: "date" },
 ];
 
@@ -169,9 +173,9 @@ export function CompanyListPage() {
   const activeCard = searchParams.get("card");
 
   // useSortState is the sort source of truth (no persisted filter here); its key IS the API sortBy value,
-  // so it drives a SERVER-side ORDER BY over the full filtered set. Aggregate columns aren't orderable
-  // server-side (separate per-page query) and stay non-sortable. Default = server name ASC (no active
-  // header until a click).
+  // so it drives a SERVER-side ORDER BY over the full filtered set — including the 4 folded aggregate
+  // columns (properties/contacts/active-deals/pipeline), now real sortable columns. Default = server name
+  // ASC (no active header until a click).
   const { sortState, toggle, getHeaderProps } = useSortState(COMPANY_SORT_COLUMNS);
   // Reset to page 1 in the SAME click as the sort toggle (both setState calls batch into one render), so a
   // sort from page >1 issues a single request — not (new sort, old page) then (new sort, page 1).
@@ -375,10 +379,38 @@ export function CompanyListPage() {
                     {...getHeaderProps("owner")}
                     onSort={() => handleSort("owner")}
                   />
-                  <TableHead className={cn("text-right", HEAD_CLASS)}>Properties</TableHead>
-                  <TableHead className={cn("text-right", HEAD_CLASS)}>Contacts</TableHead>
-                  <TableHead className={cn("text-right", HEAD_CLASS)}>Active deals</TableHead>
-                  <TableHead className={cn("text-right", HEAD_CLASS)}>Pipeline</TableHead>
+                  <SortableTableHead
+                    label="Properties"
+                    numeric
+                    className="text-right"
+                    buttonClassName={HEAD_CLASS}
+                    {...getHeaderProps("properties_count")}
+                    onSort={() => handleSort("properties_count")}
+                  />
+                  <SortableTableHead
+                    label="Contacts"
+                    numeric
+                    className="text-right"
+                    buttonClassName={HEAD_CLASS}
+                    {...getHeaderProps("contacts_count")}
+                    onSort={() => handleSort("contacts_count")}
+                  />
+                  <SortableTableHead
+                    label="Active deals"
+                    numeric
+                    className="text-right"
+                    buttonClassName={HEAD_CLASS}
+                    {...getHeaderProps("active_deals_count")}
+                    onSort={() => handleSort("active_deals_count")}
+                  />
+                  <SortableTableHead
+                    label="Pipeline"
+                    numeric
+                    className="text-right"
+                    buttonClassName={HEAD_CLASS}
+                    {...getHeaderProps("pipeline_value")}
+                    onSort={() => handleSort("pipeline_value")}
+                  />
                   <SortableTableHead
                     label="Last activity"
                     buttonClassName={HEAD_CLASS}
