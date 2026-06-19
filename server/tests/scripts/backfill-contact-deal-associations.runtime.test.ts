@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { backfillStatements } from "../../../scripts/backfill-contact-deal-associations.js";
+import { backfillStatements, parseArgs } from "../../../scripts/backfill-contact-deal-associations.js";
 
 /**
  * REAL-SQL runtime proof (PGlite) of the contact_deal_associations backfill's one-primary-per-deal
@@ -117,5 +117,18 @@ describe("backfillStatements — active-only + single-primary-per-deal (demote +
       `SELECT deal_id, COUNT(*)::int n FROM ${T}.contact_deal_associations WHERE is_primary = true GROUP BY deal_id HAVING COUNT(*) > 1`
     );
     expect(res.rows).toEqual([]);
+  });
+});
+
+describe("parseArgs — dry-run by default (writes only on explicit --commit)", () => {
+  it("no flags → dry-run (honors the documented default, never an error)", () => {
+    expect(parseArgs([])).toEqual({ mode: "dry-run" });
+  });
+  it("--dry-run → dry-run, --commit → commit", () => {
+    expect(parseArgs(["--dry-run"])).toEqual({ mode: "dry-run" });
+    expect(parseArgs(["--commit"])).toEqual({ mode: "commit" });
+  });
+  it("both flags is rejected (ambiguous)", () => {
+    expect(() => parseArgs(["--dry-run", "--commit"])).toThrow();
   });
 });

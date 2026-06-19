@@ -17,7 +17,14 @@ tsx scripts/backfill-contact-deal-associations.ts --dry-run
 tsx scripts/backfill-contact-deal-associations.ts --commit
 ```
 
-Connection: `CRM_DATABASE_URL` or `DATABASE_PUBLIC_URL` (same as the other backfills).
+No flags also runs a dry-run (writes need an explicit `--commit`). Connection: `CRM_DATABASE_URL` or
+`DATABASE_PUBLIC_URL` (same as the other backfills; TLS verification is off by default for the managed-PG
+proxy, set `DATABASE_SSL_VERIFY=true` to enforce it).
+
+**Run `--commit` during low app activity.** Each per-office txn takes the deal-row lock createAssociation
+uses; a concurrent primary EDIT (updateAssociation, which locks the association row first) on a re-run could
+deadlock → Postgres aborts one txn and the backfill rolls back cleanly (no partial state) → just re-run.
+cda is empty on the first run, so this only matters on replay.
 
 ## Background
 
@@ -51,7 +58,7 @@ An archived deal or contact must not resurface a primary edge on the Primary Con
 
 ## What `--commit` does
 
-For each office_* schema (discovered via `pg_namespace`, restricted to `office_*` and guarded on `deals` + `contacts` + `contact_deal_associations`),
+For each office_* schema (discovered via `pg_namespace` where `nspname LIKE 'office\_%'`, with `to_regclass` presence guards on `deals` + `contacts` + `contact_deal_associations`),
 in a transaction:
 1. **DEMOTE** any OTHER `is_primary` row on a deal we're about to (re)materialize, gated on an active target
    (so a deal is never left primary-less) — each deal ends with exactly one primary; readers join on

@@ -16,6 +16,13 @@
  *        join on is_primary = true). Gated on an active target so a deal is never left primary-less.
  *     2. UPSERT the primary edge (ON CONFLICT (contact_id, deal_id) DO UPDATE SET is_primary = true).
  *   Idempotent / replayable. Skips inactive/archived deals and inactive contacts (active-only).
+ *
+ * OPERATIONAL: run `--commit` during low app activity. Each per-office txn takes the deal-row lock
+ * createAssociation uses (deal-first), which serializes the primary CREATE path — the only writer active
+ * while cda is empty (the initial run). updateAssociation locks the association row first then the deal, so
+ * a concurrent primary EDIT during a re-run could deadlock; Postgres then aborts one txn and the backfill
+ * rolls back cleanly (no partial state) — just re-run. cda is empty on the first run, so this only matters
+ * on replay.
  */
 import dotenv from "dotenv";
 import fs from "node:fs";
@@ -48,12 +55,13 @@ export interface BackfillReport {
   totals: { wouldUpsert: number; wouldDemote: number; upserted: number; demoted: number };
 }
 
-function parseArgs(argv = process.argv.slice(2)): { mode: Mode } {
+export function parseArgs(argv = process.argv.slice(2)): { mode: Mode } {
   const hasDryRun = argv.includes("--dry-run");
   const hasCommit = argv.includes("--commit");
-  if (hasDryRun === hasCommit) {
-    throw new Error("Specify exactly one of --dry-run or --commit");
+  if (hasDryRun && hasCommit) {
+    throw new Error("Pass at most one of --dry-run or --commit");
   }
+  // Default (no flags) is a read-only dry-run, matching the header/runbook — only --commit ever writes.
   return { mode: hasCommit ? "commit" : "dry-run" };
 }
 
