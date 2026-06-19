@@ -136,6 +136,45 @@ export async function discoverOfficeSchemas(client: QueryClient): Promise<string
   return rows.map((row) => String(row.nspname)).filter((name) => OFFICE_SCHEMA_PATTERN.test(name));
 }
 
+/**
+ * Every `files` column this backfill reads or writes. Offices can drift out of sync (e.g. the near-empty
+ * audit office lacks the newer intake_* columns), so we pre-flight each office against this list and skip
+ * any that's missing one — a clean, intentional skip instead of an in-query 42703 mid-run.
+ */
+export const REQUIRED_FILE_COLUMNS = [
+  "id",
+  "original_filename",
+  "mime_type",
+  "subcategory",
+  "folder_path",
+  "change_order_id",
+  "created_at",
+  "category",
+  "is_active",
+  "intake_source",
+  "intake_requirement_key",
+  "updated_at",
+] as const;
+
+/**
+ * Returns the REQUIRED_FILE_COLUMNS absent from an office's `files` table (empty array = schema is
+ * compatible). Reads information_schema.columns by table_schema, so it never throws on a missing column
+ * or a missing table (a missing table yields zero rows → every column reported missing). This is the
+ * graceful schema-drift guard: an office that returns a non-empty list is skipped with a logged notice
+ * and never has its rows queried with columns it doesn't have.
+ */
+export async function missingFileColumns(client: QueryClient, schema: string): Promise<string[]> {
+  if (!OFFICE_SCHEMA_PATTERN.test(schema)) {
+    throw new Error(`Unsafe schema name: ${schema}`);
+  }
+  const { rows } = await client.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = 'files'",
+    [schema]
+  );
+  const present = new Set(rows.map((row) => String(row.column_name)));
+  return REQUIRED_FILE_COLUMNS.filter((column) => !present.has(column));
+}
+
 export async function censusByCategory(client: QueryClient, schema: string): Promise<Record<string, number>> {
   await setSchema(client, schema);
   const { rows } = await client.query(
@@ -261,12 +300,24 @@ export async function main(argv = process.argv): Promise<void> {
 
   let totalPlanned = 0;
   let totalApplied = 0;
+  const skippedOffices: string[] = [];
   try {
     const schemas = await discoverOfficeSchemas(client);
     console.log(`[file-category-backfill] offices: ${schemas.join(", ") || "(none found)"}`);
 
     for (const schema of schemas) {
       try {
+        // Pre-flight: an office whose files table has drifted (missing a column we read/write) is skipped
+        // cleanly with a notice rather than throwing a raw 42703 mid-query. The loop continues either way.
+        const missing = await missingFileColumns(client, schema);
+        if (missing.length > 0) {
+          skippedOffices.push(schema);
+          console.warn(
+            `\n=== ${schema} === SKIPPED (schema drift): files is missing column(s): ${missing.join(", ")}`
+          );
+          continue;
+        }
+
         const result = await runBackfillForSchema(client, schema, mode);
         totalPlanned += result.plan.willUpdate.length;
         totalApplied += result.appliedChanges.length;
@@ -296,9 +347,15 @@ export async function main(argv = process.argv): Promise<void> {
       }
     }
 
+    const processed = schemas.length - skippedOffices.length;
     console.log(
-      `\n[file-category-backfill] ${mode === "commit" ? "applied" : "would update"} ${mode === "commit" ? totalApplied : totalPlanned} file(s) across ${schemas.length} office(s).`
+      `\n[file-category-backfill] ${mode === "commit" ? "applied" : "would update"} ${mode === "commit" ? totalApplied : totalPlanned} file(s) across ${processed} office(s).`
     );
+    if (skippedOffices.length > 0) {
+      console.warn(
+        `[file-category-backfill] skipped ${skippedOffices.length} office(s) for schema drift: ${skippedOffices.join(", ")}`
+      );
+    }
     if (mode !== "commit") {
       console.log("[file-category-backfill] dry-run only — re-run with --commit to apply.");
     }
