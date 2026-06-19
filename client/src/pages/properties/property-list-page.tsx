@@ -172,9 +172,13 @@ export function PropertyListPage() {
   // FULL filtered set and returns the top window (limit 250), which the page then paginates in memory — so
   // the sort is global (not just the visible page). Default (no sort) keeps the server's natural order.
   const { sortState, toggle, getHeaderProps } = useSortState(PROPERTY_SORT_COLUMNS);
-  useEffect(() => {
+  // Reset to page 1 in the SAME click as the sort toggle so the two setState calls batch into one render
+  // (a [sortState] effect would re-run the fetch a second time — one render with the new sort, one with
+  // the reset page). Both branches of toggle (new column / flip) go through here.
+  const handleSort = (key: string) => {
+    toggle(key);
     setPage(1);
-  }, [sortState]);
+  };
   const { properties, loading, error } = useProperties({
     search: search || undefined,
     type: type === "all" ? undefined : type,
@@ -183,9 +187,11 @@ export function PropertyListPage() {
     limit: 250,
   });
 
-  // Summary-card drill state lives in the URL (?card=) so it is shareable + back-button-safe. The cards
-  // keep showing the FULL-set aggregates (stable), and clicking one narrows the LIST to that card's
-  // predicate — so the list count/$ reconciles with the number on the card by construction.
+  // Summary-card drill state lives in the URL (?card=) so it is shareable + back-button-safe. Clicking a
+  // card narrows the LIST to that card's predicate — so the list count/$ reconciles with the number on the
+  // card by construction (same in-memory set, one predicate). The card aggregates reduce over the loaded
+  // window (≤250-property offices: the full set; >250: the top-250 of the active sort — see the `totals`
+  // NOTE below for that accepted limitation).
   const [searchParams, setSearchParams] = useSearchParams();
   const activeCard = searchParams.get("card");
   const cardPredicate = activeCard ? PROPERTY_CARD_PREDICATES[activeCard] : undefined;
@@ -366,19 +372,19 @@ export function PropertyListPage() {
                     label="Property"
                     buttonClassName={PROPERTY_HEAD_CLASS}
                     {...getHeaderProps("name")}
-                    onSort={() => toggle("name")}
+                    onSort={() => handleSort("name")}
                   />
                   <SortableTableHead
                     label="Type"
                     buttonClassName={PROPERTY_HEAD_CLASS}
                     {...getHeaderProps("type")}
-                    onSort={() => toggle("type")}
+                    onSort={() => handleSort("type")}
                   />
                   <SortableTableHead
                     label="Owner company"
                     buttonClassName={PROPERTY_HEAD_CLASS}
                     {...getHeaderProps("company")}
-                    onSort={() => toggle("company")}
+                    onSort={() => handleSort("company")}
                   />
                   <SortableTableHead
                     label="Sq ft"
@@ -386,7 +392,7 @@ export function PropertyListPage() {
                     className="text-right"
                     buttonClassName={PROPERTY_HEAD_CLASS}
                     {...getHeaderProps("sqft")}
-                    onSort={() => toggle("sqft")}
+                    onSort={() => handleSort("sqft")}
                   />
                   <TableHead className={PROPERTY_HEAD_CLASS}>Engagement</TableHead>
                   <TableHead className={cn("text-right", PROPERTY_HEAD_CLASS)}>Linked value</TableHead>

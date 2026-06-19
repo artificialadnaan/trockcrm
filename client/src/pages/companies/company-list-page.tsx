@@ -171,11 +171,14 @@ export function CompanyListPage() {
   // useSortState is the sort source of truth (no persisted filter here); its key IS the API sortBy value,
   // so it drives a SERVER-side ORDER BY over the full filtered set. Aggregate columns aren't orderable
   // server-side (separate per-page query) and stay non-sortable. Default = server name ASC (no active
-  // header until a click), and any sort change resets to page 1.
+  // header until a click).
   const { sortState, toggle, getHeaderProps } = useSortState(COMPANY_SORT_COLUMNS);
-  useEffect(() => {
+  // Reset to page 1 in the SAME click as the sort toggle (both setState calls batch into one render), so a
+  // sort from page >1 issues a single request — not (new sort, old page) then (new sort, page 1).
+  const handleSort = (key: string) => {
+    toggle(key);
     setPage(1);
-  }, [sortState]);
+  };
 
   const { companies: rawCompanies, pagination, loading, error, refetch } = useCompanies({
     search: search || undefined,
@@ -364,13 +367,13 @@ export function CompanyListPage() {
                     label="Company"
                     buttonClassName={HEAD_CLASS}
                     {...getHeaderProps("name")}
-                    onSort={() => toggle("name")}
+                    onSort={() => handleSort("name")}
                   />
                   <SortableTableHead
                     label="Owner"
                     buttonClassName={HEAD_CLASS}
                     {...getHeaderProps("owner")}
-                    onSort={() => toggle("owner")}
+                    onSort={() => handleSort("owner")}
                   />
                   <TableHead className={cn("text-right", HEAD_CLASS)}>Properties</TableHead>
                   <TableHead className={cn("text-right", HEAD_CLASS)}>Contacts</TableHead>
@@ -380,7 +383,7 @@ export function CompanyListPage() {
                     label="Last activity"
                     buttonClassName={HEAD_CLASS}
                     {...getHeaderProps("last_activity")}
-                    onSort={() => toggle("last_activity")}
+                    onSort={() => handleSort("last_activity")}
                   />
                   <TableHead className="w-10" />
                 </TableRow>

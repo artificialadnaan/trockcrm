@@ -28,7 +28,9 @@ function leadingColumnName(value: unknown): string {
 describe("buildPropertySortOrder", () => {
   it("maps the direct columns to orderable expressions", () => {
     expect(leadingColumnName(buildPropertySortOrder("name", "asc")[0])).toBe("name"); // properties.name
-    expect(leadingColumnName(buildPropertySortOrder("type", "asc")[0])).toBe("type");
+    // Type is an ENUM cast to ::text so it sorts alphabetically by value, not enum declaration order.
+    expect(flatten(buildPropertySortOrder("type", "asc")[0])).toContain("::text");
+    expect(flatten(buildPropertySortOrder("type", "asc")[0])).toContain("ASC NULLS LAST");
     // sqft sorts on COALESCE(roof_area, unit_count) so an unset roof area falls back to unit count.
     expect(flatten(buildPropertySortOrder("sqft", "desc")[0])).toContain("COALESCE");
   });

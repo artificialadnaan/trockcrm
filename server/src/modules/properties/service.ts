@@ -41,7 +41,10 @@ export function buildPropertySortOrder(sortBy: string | undefined, sortDir: "asc
     case "name":
       return [propertyOrderExpr(properties.name, sortDir)];
     case "type":
-      return [propertyOrderExpr(properties.type, sortDir)];
+      // properties.type is a Postgres ENUM — bare ORDER BY sorts by ENUM DECLARATION order, not
+      // alphabetically. Cast to text so the directory sorts by the value the user reads (Healthcare,
+      // Industrial, Office, …) and matches the client text comparator.
+      return [propertyOrderExpr(sql`${properties.type}::text`, sortDir)];
     case "company":
       return [propertyOrderExpr(companies.name, sortDir)];
     case "sqft":

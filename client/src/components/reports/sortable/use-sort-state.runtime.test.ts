@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -18,9 +18,18 @@ const COLUMNS: ReadonlyArray<SortStateColumn> = [
   { key: "created", type: "date" },
 ];
 
+const mountedRoots: Array<{ unmount: () => void; remove: () => void }> = [];
+afterEach(() => {
+  for (const r of mountedRoots.splice(0)) {
+    act(() => r.unmount());
+    r.remove();
+  }
+});
+
 async function renderHook(options?: UseSortStateOptions) {
   const container = document.createElement("div");
   const root = createRoot(container);
+  mountedRoots.push({ unmount: () => root.unmount(), remove: () => container.remove() });
   let api: UseSortStateResult;
   function Probe() {
     api = useSortState(COLUMNS, options);
