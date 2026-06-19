@@ -1,36 +1,31 @@
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
 /**
- * REAL-SQL runtime proof (PGlite) of migration 0169's one-primary-per-deal semantics. The migration runs
- * a DEMOTE (clear other primaries on the deal) then an UPSERT (set/promote the deal's primary_contact_id),
- * both gated active-deal + active-contact — mirroring the manual createAssociation writer. This executes
- * those two statements against a literal schema and asserts each deal ends with EXACTLY ONE primary, and
- * that an inactive target never leaves a deal primary-less.
+ * REAL-SQL runtime proof (PGlite) of migration 0169's one-primary-per-deal semantics. Rather than hand-copy
+ * the SQL (which could silently drift from the migration), this EXTRACTS the migration's own TENANT_SCHEMA
+ * block — the office_dallas-literal demote + upsert the provisioner replays — rewrites the schema to the test
+ * schema, and executes it, so the test proves the SHIPPED SQL. Asserts each deal ends with EXACTLY ONE
+ * primary and that an inactive target never leaves a deal primary-less.
  */
 const T = "office_bf";
 const cid = (n: number) => `00000000-0000-0000-0000-0000000000${String(n).padStart(2, "0")}`;
 const did = (n: number) => `00000000-0000-0000-0000-0000000001${String(n).padStart(2, "0")}`;
 
-// The two statements EXACTLY as migration 0169 runs them (literal schema in place of the %I format args).
-const DEMOTE = `
-  UPDATE ${T}.contact_deal_associations cda
-     SET is_primary = false
-  FROM ${T}.deals d
-  WHERE cda.deal_id = d.id
-    AND cda.is_primary = true
-    AND cda.contact_id <> d.primary_contact_id
-    AND d.primary_contact_id IS NOT NULL
-    AND d.is_active = true
-    AND EXISTS (SELECT 1 FROM ${T}.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true);`;
-const UPSERT = `
-  INSERT INTO ${T}.contact_deal_associations (contact_id, deal_id, is_primary)
-  SELECT d.primary_contact_id, d.id, true
-  FROM ${T}.deals d
-  WHERE d.primary_contact_id IS NOT NULL
-    AND d.is_active = true
-    AND EXISTS (SELECT 1 FROM ${T}.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true)
-  ON CONFLICT (contact_id, deal_id) DO UPDATE SET is_primary = true;`;
+// Pull the ACTUAL migration's TENANT_SCHEMA block (demote + upsert) and point it at the test schema, so this
+// runtime test can never pass against SQL that differs from what migration 0169 ships.
+function migrationTenantBlock(): string {
+  const sql = readFileSync(
+    resolve(import.meta.dirname, "../../../../migrations/0169_backfill_contact_deal_associations.sql"),
+    "utf8"
+  );
+  const start = sql.indexOf("-- TENANT_SCHEMA_START");
+  const end = sql.indexOf("-- TENANT_SCHEMA_END");
+  if (start === -1 || end === -1 || end < start) throw new Error("0169 TENANT_SCHEMA block not found");
+  return sql.slice(start, end).replace(/office_dallas/g, T);
+}
 
 let pg: PGlite;
 
@@ -63,9 +58,9 @@ beforeAll(async () => {
     ('${cid(13)}','${did(3)}', true),   -- stale primary Y3 on D3
     ('${cid(5)}', '${did(5)}', false);  -- manual non-primary X5 on D5`);
 
-  await pg.exec(DEMOTE);
-  await pg.exec(UPSERT);
-});
+  // Run the ACTUAL shipped migration block (demote + upsert), schema-rewritten to the test schema.
+  await pg.exec(migrationTenantBlock());
+}, 30000);
 
 afterAll(async () => {
   await pg?.close?.();
