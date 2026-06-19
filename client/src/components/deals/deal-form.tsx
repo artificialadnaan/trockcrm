@@ -165,6 +165,14 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     });
   }, [regions, formData.propertyState, regionManuallyOverridden]);
 
+  // When the region was auto-derived from property_state (not a saved value and not a manual pick), the
+  // dropdown is showing a SUGGESTION the deal does not yet have persisted — surface that explicitly so it
+  // doesn't read as stored data. The derivation itself is unchanged; only its provisional nature is shown.
+  const regionIsSuggestion = !regionManuallyOverridden && Boolean(formData.regionId);
+  const regionSuggestionName = regionIsSuggestion
+    ? getSelectedOptionLabel(regions, formData.regionId, "")
+    : "";
+
   const validateDealForm = (): boolean => {
     const errs: Record<string, string> = {};
     const MAX_MONEY = 999999999;
@@ -577,7 +585,9 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Select region">
-                    {getSelectedOptionLabel(regions, formData.regionId, "Select region")}
+                    {regionIsSuggestion
+                      ? `Auto: ${regionSuggestionName}`
+                      : getSelectedOptionLabel(regions, formData.regionId, "Select region")}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
@@ -588,6 +598,11 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                   ))}
                 </SelectContent>
               </Select>
+              {regionIsSuggestion && (
+                <p className="text-xs text-amber-600">
+                  Auto-detected {regionSuggestionName} from {formData.propertyState} — not saved yet. Save to confirm.
+                </p>
+              )}
             </div>
           </div>
 
