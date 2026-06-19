@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ChevronsUpDown, ExternalLink, Loader2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronsUpDown, Download, ExternalLink, Loader2 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   Dialog,
@@ -8,11 +8,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { useShowcaseEvidence } from "@/hooks/use-reports";
+import { downloadTextFile } from "@/lib/report-export";
 import { usd, int, winPct } from "../format";
 import { ScrollSyncX } from "../scroll-sync-x";
+import { EVIDENCE_COLUMNS, visibleEvidenceColumns, type SortKey } from "./evidence-columns";
+import { buildEvidenceCsv, buildEvidenceCsvFilename } from "./evidence-csv";
 import type { EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence } from "./types";
 import type { WeekMode } from "../week-mode";
 
@@ -29,12 +33,15 @@ function formatCohortDate(iso: string | null): string {
 }
 
 // ---- sorting (client-side; the records are the full reconciling set, so sorting never drops a row) ----
-type SortKey = "name" | "company" | "owner" | "value" | "date" | "winprob" | "region" | "type" | "stage" | "age";
+// SortKey + the column set come from the shared evidence-columns source, so the table and the CSV export
+// stay in lockstep. NUMERIC_KEYS (numeric default-sort-descending) is derived from those defs.
 interface SortState {
   key: SortKey;
   dir: "asc" | "desc";
 }
-const NUMERIC_KEYS: ReadonlySet<SortKey> = new Set(["value", "winprob", "age"]);
+const NUMERIC_KEYS: ReadonlySet<SortKey> = new Set(
+  EVIDENCE_COLUMNS.filter((c) => c.numeric).map((c) => c.key)
+);
 
 function sortAccessor(r: EvidenceRecord, key: SortKey): string | number {
   switch (key) {
@@ -72,96 +79,54 @@ function sortRecords(records: EvidenceRecord[], sort: SortState): EvidenceRecord
   });
 }
 
-interface ColumnDef {
+// Per-column React renderers (display only). Keyed by SortKey so they pair with the shared column defs;
+// the column SET + order + headers + show-filter live in evidence-columns.ts (shared with the CSV), and
+// these are only how each cell looks on screen.
+const RENDERERS: Record<SortKey, (r: EvidenceRecord) => ReactNode> = {
+  name: (r) => (
+    <div className="flex min-w-0 items-center gap-1.5">
+      <div className="min-w-0">
+        <div className="max-w-[260px] truncate font-medium text-sky-700 group-hover:underline">{r.name}</div>
+        {r.dealNumber ? <div className="text-xs text-slate-400">#{r.dealNumber}</div> : null}
+      </div>
+      <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-300 opacity-0 transition group-hover:opacity-100" />
+    </div>
+  ),
+  company: (r) => <span className="text-slate-700">{r.companyName ?? "—"}</span>,
+  owner: (r) => <span className="text-slate-600">{r.repName}</span>,
+  value: (r) => (r.value == null ? "—" : usd(r.value)),
+  // The deal's real win_probability, shown as-is. Blank renders an em dash via winPct — a missing value is
+  // "unknown", never "0%"/"NaN%".
+  date: (r) => <span className="whitespace-nowrap text-slate-600">{formatCohortDate(r.cohortDate)}</span>,
+  winprob: (r) => <span className="text-slate-600">{winPct(r.winProbability)}</span>,
+  region: (r) => <span className="text-slate-600">{r.region ?? "—"}</span>,
+  type: (r) => <span className="text-slate-600">{r.dealType ?? "—"}</span>,
+  stage: (r) => (
+    <span className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+      {r.stageLabel || "—"}
+    </span>
+  ),
+  age: (r) => (r.daysInStage == null ? "—" : `${int(r.daysInStage)}d`),
+};
+
+interface DisplayColumn {
   key: SortKey;
   header: string;
   numeric?: boolean;
-  show: boolean;
+  minWidth: number;
   render: (r: EvidenceRecord) => ReactNode;
 }
 
-function columnsFor(ev: MondayShowcaseEvidence): ColumnDef[] {
-  const hasValue = ev.metric !== "leads";
-  const cols: ColumnDef[] = [
-    {
-      key: "name",
-      header: ev.metric === "leads" ? "Lead" : "Deal",
-      show: true,
-      render: (r) => (
-        <div className="flex min-w-0 items-center gap-1.5">
-          <div className="min-w-0">
-            <div className="truncate font-medium text-sky-700 group-hover:underline">{r.name}</div>
-            {r.dealNumber ? <div className="text-xs text-slate-400">#{r.dealNumber}</div> : null}
-          </div>
-          <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-300 opacity-0 transition group-hover:opacity-100" />
-        </div>
-      ),
-    },
-    {
-      key: "company",
-      header: "Company",
-      show: true,
-      render: (r) => <span className="text-slate-700">{r.companyName ?? "—"}</span>,
-    },
-    {
-      key: "owner",
-      header: "Owner",
-      show: true,
-      render: (r) => <span className="text-slate-600">{r.repName}</span>,
-    },
-    {
-      key: "value",
-      header: "Value",
-      numeric: true,
-      show: hasValue,
-      render: (r) => (r.value == null ? "—" : usd(r.value)),
-    },
-    {
-      key: "date",
-      header: ev.dateAxisLabel,
-      show: true,
-      render: (r) => <span className="whitespace-nowrap text-slate-600">{formatCohortDate(r.cohortDate)}</span>,
-    },
-    {
-      // The deal's real win_probability, shown as-is. Hidden for leads (no win prob). Blank renders an em
-      // dash via winPct — a missing value is "unknown", never "0%"/"NaN%".
-      key: "winprob",
-      header: "Win %",
-      numeric: true,
-      show: hasValue,
-      render: (r) => <span className="text-slate-600">{winPct(r.winProbability)}</span>,
-    },
-    {
-      key: "region",
-      header: "Region",
-      show: true,
-      render: (r) => <span className="text-slate-600">{r.region ?? "—"}</span>,
-    },
-    {
-      key: "type",
-      header: "Type",
-      show: true,
-      render: (r) => <span className="text-slate-600">{r.dealType ?? "—"}</span>,
-    },
-    {
-      key: "stage",
-      header: "Stage",
-      show: true,
-      render: (r) => (
-        <span className="inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
-          {r.stageLabel || "—"}
-        </span>
-      ),
-    },
-    {
-      key: "age",
-      header: "Age",
-      numeric: true,
-      show: true,
-      render: (r) => (r.daysInStage == null ? "—" : `${int(r.daysInStage)}d`),
-    },
-  ];
-  return cols.filter((c) => c.show);
+// Resolve the shared (visible) columns into display columns: header text + per-column min-width come from
+// the shared source, the render from RENDERERS. Same set/order the CSV exports.
+function columnsFor(ev: MondayShowcaseEvidence): DisplayColumn[] {
+  return visibleEvidenceColumns(ev).map((col) => ({
+    key: col.key,
+    header: col.header(ev),
+    numeric: col.numeric,
+    minWidth: col.minWidth,
+    render: RENDERERS[col.key],
+  }));
 }
 
 function SortIcon({ state, colKey }: { state: SortState; colKey: SortKey }) {
@@ -200,6 +165,10 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
   });
   const columns = columnsFor(ev);
   const rows = sortRecords(ev.records, sort);
+  // Sum of the visible columns' floor widths. Applied as the table's min-width so the columns keep their
+  // legible widths and the table OVERFLOWS the dialog instead of compressing — which is what gives
+  // ScrollSyncX's body something to scroll (the right-edge columns, e.g. Region, become reachable).
+  const tableMinWidth = columns.reduce((sum, col) => sum + col.minWidth, 0);
 
   function toggleSort(key: SortKey) {
     setSort((cur) =>
@@ -209,15 +178,22 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
     );
   }
 
+  // Plain <table> (not the shadcn <Table> wrapper): that wrapper adds its OWN overflow-x-auto div, which
+  // would compete with — and defeat — ScrollSyncX's scroll container (and its synced top rail). Rendering
+  // the sub-components in a bare <table> leaves ScrollSyncX's body as the single horizontal scroller.
   return (
-    <Table>
+    <table className="w-full caption-bottom text-sm" style={{ minWidth: tableMinWidth }}>
       <TableHeader className="sticky top-0 z-10 bg-popover">
         <TableRow className="hover:bg-transparent">
           {/* Disciplined alignment: numeric columns right / text left, with a uniform px-3 gutter on
               every header + cell so spacing reads as a grid, not random. The header alignment mirrors
               its column's data (flex-row-reverse keeps the sort caret on the edge the numbers align to). */}
           {columns.map((col) => (
-            <TableHead key={col.key} className={cn("px-3", col.numeric ? "text-right" : "text-left")}>
+            <TableHead
+              key={col.key}
+              style={{ minWidth: col.minWidth }}
+              className={cn("whitespace-nowrap px-3", col.numeric ? "text-right" : "text-left")}
+            >
               <button
                 type="button"
                 onClick={() => toggleSort(col.key)}
@@ -252,7 +228,11 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
               title={`Open the ${ev.metric === "leads" ? "lead" : "deal"} record`}
             >
               {columns.map((col) => (
-                <TableCell key={col.key} className={cn("px-3", col.numeric ? "text-right tabular-nums" : "text-left")}>
+                <TableCell
+                  key={col.key}
+                  style={{ minWidth: col.minWidth }}
+                  className={cn("whitespace-nowrap px-3", col.numeric ? "text-right tabular-nums" : "text-left")}
+                >
                   {col.render(r)}
                 </TableCell>
               ))}
@@ -260,7 +240,7 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
           ))
         )}
       </TableBody>
-    </Table>
+    </table>
   );
 }
 
@@ -283,6 +263,13 @@ export function EvidenceDrawer({
     // office whose report produced this evidence — matching the at-risk watchlist's row navigation.
     navigate({ pathname: data.metric === "leads" ? `/leads/${r.id}` : `/deals/${r.id}`, search });
     onClose();
+  }
+
+  // Export the WHOLE cohort (data.records is the full reconciling set, not a page) with every column —
+  // exactly what the popup shows, reconciling to the clicked number by construction. Header-only when empty.
+  function exportCsv() {
+    if (!data || !request) return;
+    downloadTextFile(buildEvidenceCsv(data), buildEvidenceCsvFilename(request, data), "text/csv;charset=utf-8");
   }
 
   return (
@@ -309,7 +296,23 @@ export function EvidenceDrawer({
           <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
         ) : data ? (
           <div className="flex min-h-0 flex-col gap-3">
-            <ReconciliationBanner ev={data} />
+            {/* Toolbar: the reconciliation banner + the CSV export, side by side near the count. */}
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <ReconciliationBanner ev={data} />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={exportCsv}
+                className="shrink-0 gap-1.5"
+                title="Download every record in this popup (all columns) as a CSV"
+              >
+                <Download className="h-4 w-4" />
+                Export CSV
+              </Button>
+            </div>
             {/* Always render the table (with headers) — even for an empty cohort — so the column set,
                 notably the Win % column, stays consistent across bands. The empty-state message lives
                 inside the table body (EvidenceTable) instead of swapping the whole table out. */}

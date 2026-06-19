@@ -48,19 +48,40 @@ export function normalizeReportRows(data: unknown): Array<Record<string, unknown
   return [];
 }
 
+// Canonical CSV cell escaper, shared by every serializer below: neutralizes spreadsheet-formula
+// injection (a STRING cell starting with = + - @ tab/CR is prefixed with a single quote) and
+// quotes/doubles cells containing a comma, quote, or newline. Single source so all CSV exports escape
+// identically.
+//
+// A genuine numeric cell is data, never a formula, so it is NOT quote-prefixed — otherwise a negative
+// number like -5000 would be emitted as the text "'-5000", which a spreadsheet treats as a string and
+// drops from SUM (breaking column-total reconciliation). Only string cells get the leading-char guard.
+export function escapeCsvValue(value: unknown) {
+  const rawText = formatCellValue(value);
+  const isNumber = typeof value === "number" && Number.isFinite(value);
+  const text = !isNumber && /^[=+\-@\t\r]/.test(rawText) ? `'${rawText}` : rawText;
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
 export function serializeRowsToCsv(rows: Array<Record<string, unknown>>) {
   if (rows.length === 0) return "";
 
   const columns = Object.keys(rows[0]);
-  const escape = (value: unknown) => {
-    const rawText = formatCellValue(value);
-    const text = /^[=+\-@\t\r]/.test(rawText) ? `'${rawText}` : rawText;
-    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-  };
-
   return [
-    columns.map(escape).join(","),
-    ...rows.map((row) => columns.map((column) => escape(row[column])).join(",")),
+    columns.map(escapeCsvValue).join(","),
+    ...rows.map((row) => columns.map((column) => escapeCsvValue(row[column])).join(",")),
+  ].join("\n");
+}
+
+/**
+ * Serialize an explicit header + matrix of cells to CSV. Unlike serializeRowsToCsv (which derives its
+ * columns from the first row's keys), the column order/labels are caller-controlled — so a row-less
+ * export still emits the header line (e.g. an empty cohort still downloads a valid, column-labeled CSV).
+ */
+export function serializeCsvTable(header: string[], rows: ReadonlyArray<ReadonlyArray<unknown>>) {
+  return [
+    header.map(escapeCsvValue).join(","),
+    ...rows.map((row) => row.map(escapeCsvValue).join(",")),
   ].join("\n");
 }
 
