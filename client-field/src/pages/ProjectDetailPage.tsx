@@ -336,7 +336,7 @@ export function ProjectDetailPage() {
       <ReportBuilder
         isOpen={reportBuilderOpen}
         projectId={id}
-        projectName={project?.name ?? "Project"}
+        projectName={project?.name ?? project?.projectNumber ?? "Project"}
         creatorName={[user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.email || "Field User"}
         photos={photos}
         onClose={() => setReportBuilderOpen(false)}
