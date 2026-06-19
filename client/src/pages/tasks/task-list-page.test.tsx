@@ -543,6 +543,60 @@ describe("TaskListPage project context", () => {
     expect(container.querySelector('[data-sort-group="overdue"] select')).not.toBeNull();
   });
 
+  it("blanks the page while a NEW assignee scope is loading (no stale interactive rows from the old scope)", () => {
+    let scopeLoading = false;
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [makeTask()] : [],
+      loading: scopeLoading,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    renderPage(); // director; first load settles (loading false) → groups render, scope recorded
+    expect(container.textContent).not.toContain("Loading tasks...");
+    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).not.toBeNull();
+
+    // Switch assignee while the new scope's requests are in flight (loading true).
+    scopeLoading = true;
+    const picker = container.querySelector<HTMLSelectElement>('[data-testid="assignee-filter"] select');
+    act(() => {
+      if (picker) {
+        picker.value = "rep-2";
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    // The whole list is replaced by the loader — the previous assignee's actionable rows are gone.
+    expect(container.textContent).toContain("Loading tasks...");
+    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).toBeNull();
+  });
+
+  it("a sort-only refetch (same scope) does NOT blank the page", () => {
+    let sortLoading = false;
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [makeTask()] : [],
+      loading: filters.section === "overdue" ? sortLoading : false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    renderPage();
+    expect(container.textContent).not.toContain("Loading tasks...");
+
+    // Overdue bucket refetches for a sort change (same assignee) — page must stay visible.
+    sortLoading = true;
+    const overdueSort = container.querySelector<HTMLSelectElement>('[data-sort-group="overdue"] select');
+    act(() => {
+      if (overdueSort) {
+        overdueSort.value = "priority:desc";
+        overdueSort.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    expect(container.textContent).not.toContain("Loading tasks...");
+    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).not.toBeNull();
+  });
+
   it("changing a bucket's sort dropdown refetches that bucket server-side with the new sort", () => {
     renderPage();
 

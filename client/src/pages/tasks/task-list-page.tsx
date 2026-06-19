@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -531,16 +531,24 @@ function TaskListPageContent({ role }: { role: string }) {
   // Authoritative, server-computed count — independent of the Completed bucket's sort/limit.
   const completedThisWeek = counts.completedThisWeek;
 
-  // Only blank the whole page on the very FIRST load. After the buckets have resolved once, a
-  // per-bucket sort change refetches just that bucket and must not hide the others (each group keeps
-  // its prior rows + shows an inline "updating" spinner). A one-shot ref — rather than a live
-  // "any rows present" check — keeps this correct even in the all-empty state (changing a sort on an
-  // empty bucket must not re-trigger the whole-page loader and tear down accordion state).
-  const hasResolvedOnce = useRef(false);
+  // Whole-page loader policy. Blank the page for a genuine dataset swap — the first load OR an
+  // assignee-scope change — but NOT for a per-bucket sort refetch (those keep the other buckets +
+  // their prior rows, each group showing its own inline "updating" spinner). Blanking on a scope
+  // change matters for safety: useTasks preserves the previous arrays while the new assignee's
+  // requests are in flight, so without this the previous assignee's INTERACTIVE rows would stay
+  // actionable (a stray complete/snooze) until the refetch lands. `loadedScope` is the assignee the
+  // currently-settled data belongs to; when it differs from the active filter, a scope swap is in
+  // flight. State (not a ref) so the loader re-renders deterministically when the scope flips.
+  const [loadedScope, setLoadedScope] = useState<string | undefined>(undefined);
+  const [hasResolvedOnce, setHasResolvedOnce] = useState(false);
   useEffect(() => {
-    if (!loading) hasResolvedOnce.current = true;
-  }, [loading]);
-  const showInitialLoading = loading && !hasResolvedOnce.current && !(taskId && linkedTask);
+    if (!loading) {
+      setLoadedScope(assigneeFilter);
+      setHasResolvedOnce(true);
+    }
+  }, [loading, assigneeFilter]);
+  const scopeChanging = hasResolvedOnce && loadedScope !== assigneeFilter;
+  const showInitialLoading = loading && (!hasResolvedOnce || scopeChanging) && !(taskId && linkedTask);
 
   return (
     <div className="space-y-6">
