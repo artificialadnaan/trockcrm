@@ -31,7 +31,6 @@ import { db } from "../../db.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { computeRepEarnedFloorGate } from "../commissions/floor-gate.js";
 import {
-  getPipelineSummary,
   getWinRateTrend,
   getActivitySummaryByRep,
   getFollowUpCompliance,
@@ -2431,7 +2430,10 @@ export async function getCanonicalRepWonSummary(
   }));
 }
 
-async function getScopedPipelineSummary(
+// Exported for the runtime SQL test (director-pipeline-by-stage.runtime.test.ts), which executes this
+// against a faithful PGlite schema so the per-stage counts/$ + reconciliation to the active-pipeline
+// total are guarded in CI.
+export async function getScopedPipelineSummary(
   tenantDb: TenantDb,
   options: { includeDd?: boolean } & DashboardScopeOptions = {}
 ): Promise<PipelineSummaryRow[]> {
@@ -2593,7 +2595,11 @@ async function buildDirectorScopeSummary(
   // P2-9: 'stale' was an alias of at-risk (same isAtRisk predicate) and rendered nowhere --
   // a dead duplicate, now removed. A genuine stale-accounts metric (activity recency; see the
   // worker rep-performance rollup's stale_account_count) is deferred as separate, sourced work.
-  return { activePipeline, won, atRisk };
+  //
+  // pipelineByStage are the SAME scoped per-stage rows whose reduce is `activePipeline`, so the
+  // Pipeline-by-Stage breakdown reconciles with the Active Pipeline KPI by construction (one query,
+  // one predicate, one shared value resolver -- no divergent re-query).
+  return { activePipeline, won, atRisk, pipelineByStage: pipelineRows };
 }
 
 export async function getDirectorCommissionWorkspace(
@@ -2682,7 +2688,6 @@ export async function getDirectorDashboard(
 
   const [
     repCardsResult,
-    pipelineResult,
     winRateTrendResult,
     activityResult,
     staleLeadResult,
@@ -2696,22 +2701,19 @@ export async function getDirectorDashboard(
     scopeSummary,
     canonicalRepWon,
   ] = await runSequential([
-    // 1. Per-rep performance cards
+    // Per-rep performance cards
     () => buildRepPerformanceCards(tenantDb, { from, to, officeId: options.officeId }),
 
-    // 2. Pipeline by stage (company-wide, excluding DD)
-    () => getPipelineSummary(tenantDb, { includeDd: false, from, to }),
-
-    // 3. Win rate trend
+    // Win rate trend
     () => getWinRateTrend(tenantDb, { from, to }),
 
-    // 4. Activity by rep
+    // Activity by rep
     () => getActivitySummaryByRep(tenantDb, { from, to }),
 
-    // 5. Stale leads watchlist
+    // Stale leads watchlist
     () => getStaleLeadWatchlist(tenantDb),
 
-    // 6. DD vs pipeline
+    // DD vs pipeline
     () => getDdVsPipeline(tenantDb),
     () => getCrmOwnedProgression(tenantDb),
     () => getDashboardAtRiskRows(tenantDb, {
@@ -2799,7 +2801,9 @@ export async function getDirectorDashboard(
     repFunnelRows: funnelSummary.repFunnelRows,
     repCommissionRows,
     repCards,
-    pipelineByStage: pipelineResult.map((s) => ({
+    // Scoped per-stage rows from buildDirectorScopeSummary -- the same rows whose reduce is the
+    // Active Pipeline KPI, so the breakdown reconciles with it under both 'all' and 'mine' scope.
+    pipelineByStage: scopeSummary.pipelineByStage.map((s) => ({
       stageId: s.stageId,
       stageName: s.stageName,
       stageColor: s.stageColor,
@@ -2860,7 +2864,10 @@ export async function getDirectorDashboard(
     recentCloses,
     ddVsPipeline: ddResult,
     scopeSummary: {
-      ...scopeSummary,
+      // pipelineByStage is surfaced at the top level (above); keep it out of the nested
+      // scopeSummary so the per-stage rows aren't shipped twice.
+      activePipeline: scopeSummary.activePipeline,
+      won: scopeSummary.won,
       atRisk: atRiskScopeSummary,
     },
   };

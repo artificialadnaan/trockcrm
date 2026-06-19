@@ -1146,6 +1146,48 @@ export function DirectorDashboardPage() {
         </aside>
       </section>
 
+      {/* Pipeline by stage — Takashi (CFO) asked to see the pipeline broken down by stage
+          (opportunity / estimating / estimate-sent-to-client …) rather than by activity type.
+          Sourced from data.pipelineByStage, the SAME scoped per-stage rows whose reduce is the
+          Active Pipeline KPI above, so the per-stage $ + count sum to that KPI by construction. */}
+      <section className="mt-4 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+        <div className="mb-5 flex items-center justify-between">
+          <h2 className="text-sm font-black uppercase tracking-wide text-gray-950">Pipeline by stage</h2>
+          <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-black text-gray-700">
+            {scopeSummary.activePipeline.count} deals · {formatCurrencyCompact(scopeSummary.activePipeline.totalValue)}
+          </span>
+        </div>
+        <div className="space-y-4">
+          {data.pipelineByStage.length > 0 ? (
+            (() => {
+              const maxStageValue = Math.max(...data.pipelineByStage.map((item) => item.totalValue), 1);
+              return data.pipelineByStage.map((stage) => {
+                const width = clampPercent((stage.totalValue / maxStageValue) * 100);
+                return (
+                  <div key={stage.stageId}>
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <p className="font-bold text-gray-950">{stage.stageName}</p>
+                      <p className="font-black text-gray-950">{formatCurrencyCompact(stage.totalValue)}</p>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-gray-100">
+                      <div
+                        className="h-full rounded-full"
+                        style={{ width: `${width}%`, backgroundColor: stage.stageColor ?? "#CC0000" }}
+                      />
+                    </div>
+                    <div className="mt-1.5 text-[10px] font-bold uppercase tracking-wide text-gray-500">
+                      {stage.dealCount} {stage.dealCount === 1 ? "deal" : "deals"}
+                    </div>
+                  </div>
+                );
+              });
+            })()
+          ) : (
+            <p className="text-sm text-gray-400">No active pipeline deals for this scope.</p>
+          )}
+        </div>
+      </section>
+
       <section className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
         <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <div className="mb-5 flex items-center justify-between">
