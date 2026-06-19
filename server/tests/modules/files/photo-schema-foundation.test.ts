@@ -39,6 +39,8 @@ describe("photo schema foundation", () => {
       "deal_fallback",
       "manual_override",
     ]);
+    // Legacy values (retained for existing rows) followed by the 6 phase
+    // categories added in migration 0165. Order mirrors PHOTO_CATEGORIES.
     expect(photoCategoryEnum.enumValues).toEqual([
       "before",
       "after",
@@ -48,6 +50,12 @@ describe("photo schema foundation", () => {
       "safety",
       "delivery",
       "other",
+      "estimating",
+      "preconstruction",
+      "construction",
+      "final_completion",
+      "punch",
+      "issues",
     ]);
     expect(procorePhotoSyncStatusEnum.enumValues).toEqual([
       "pending",

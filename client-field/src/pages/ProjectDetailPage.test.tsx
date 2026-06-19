@@ -94,7 +94,9 @@ describe("ProjectDetailPage", () => {
     expect(node.textContent).toContain("safety caption");
     expect(node.textContent).toContain("#roofing");
 
-    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Damage")?.click();
+    // "damage" is a retired legacy category surfaced as "Damage (legacy)" because a
+    // loaded photo still carries it, keeping historical photos filterable.
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Damage (legacy)")?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("damage caption"));
     expect(node.textContent).not.toContain("safety caption");
 

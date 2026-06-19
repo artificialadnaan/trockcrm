@@ -1,6 +1,6 @@
 import express, { Router } from "express";
 import { files } from "@trock-crm/shared/schema";
-import { FILE_CATEGORIES, isScopeLockedFileAction } from "@trock-crm/shared/types";
+import { FILE_CATEGORIES, isScopeLockedFileAction, PHOTO_CATEGORIES } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
@@ -763,9 +763,11 @@ router.patch("/:id", async (req, res, next) => {
     await assertDealLinkedFileMutationAllowed(req, existing, isRestore ? "restore" : "metadata_update");
 
     const { displayName, description, notes, tags, category, subcategory, folderPath, photoCategory } = req.body;
-    const photoCategoryValues = ["before", "after", "progress", "site_visit", "damage", "safety", "delivery", "other"];
+    // A legacy client may send the photo's phase category in the `category` field.
+    // PHOTO_CATEGORIES (shared) covers the 6 offered values + retained legacy ones.
     const categoryTargetsPhotoCategory =
-      existing.category === "photo" && (category === null || (typeof category === "string" && photoCategoryValues.includes(category)));
+      existing.category === "photo" &&
+      (category === null || (typeof category === "string" && (PHOTO_CATEGORIES as readonly string[]).includes(category)));
     const resolvedPhotoCategory =
       photoCategory !== undefined
         ? photoCategory

@@ -3,6 +3,8 @@ import {
   filterPhotos,
   groupPhotos,
   isProjectOffOffice,
+  LEGACY_PHOTO_CATEGORIES,
+  PHOTO_CATEGORIES,
   relativeDate,
   tagsOf,
   uploadersOf,
@@ -54,8 +56,26 @@ function photo(overrides: Partial<FieldPhoto>): FieldPhoto {
 }
 
 describe("field-projects", () => {
-  it("categoryLabel maps known values and falls back gracefully", () => {
-    expect(categoryLabel("before")).toBe("Before");
+  it("offers exactly the 6 phase pills (mirror of shared PHOTO_CATEGORY_OPTIONS)", () => {
+    expect(PHOTO_CATEGORIES.map((c) => c.value)).toEqual([
+      "estimating",
+      "preconstruction",
+      "construction",
+      "final_completion",
+      "punch",
+      "issues",
+    ]);
+    // No retired value is offered for capture.
+    const offered = new Set(PHOTO_CATEGORIES.map((c) => c.value as string));
+    for (const legacy of LEGACY_PHOTO_CATEGORIES) {
+      expect(offered.has(legacy.value)).toBe(false);
+    }
+  });
+
+  it("categoryLabel maps new + legacy values and falls back gracefully", () => {
+    expect(categoryLabel("construction")).toBe("Construction");
+    expect(categoryLabel("final_completion")).toBe("Final Completion");
+    expect(categoryLabel("before")).toBe("Before"); // legacy still labels nicely
     expect(categoryLabel("site_visit")).toBe("Site Visit");
     expect(categoryLabel(null)).toBe("Uncategorized");
     expect(categoryLabel("weird_value")).toBe("weird value");

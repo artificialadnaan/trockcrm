@@ -8,6 +8,7 @@ import {
   filtersFromSearchParams,
   getPhotoTags,
   groupDealPhotos,
+  legacyCategoryOptionsInUse,
   PhotoEmptyState,
   PhotoFilterBar,
   PhotoGridSkeleton,
@@ -146,7 +147,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
         )}
       </section>
 
-      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} />
+      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} legacyCategoryOptions={legacyCategoryOptionsInUse(photos, !hasMorePhotos)} />
 
       {!loading && !error && (
         <PhotoPaginationSummary
