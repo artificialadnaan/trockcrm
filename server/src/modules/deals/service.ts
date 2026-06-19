@@ -23,6 +23,7 @@ import {
 import {
   DOMAIN_EVENTS,
   getDealAtRiskResult,
+  isGenuineEstimatingDealStageSlug,
   isGenuineWonDealStageSlug,
   resolveEffectiveStageEnteredAt,
   USER_ROLES,
@@ -68,9 +69,11 @@ import {
   aliasedActiveNonZeroDealSortTierSql,
   aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
+  aliasedDealEstimatingValueSql,
   aliasedWonHsClosedWonDateSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
+  dealEstimatingValueSql,
 } from "../shared/deal-value-sql.js";
 import {
   aliasedDealDateScopeColumns,
@@ -819,7 +822,12 @@ function buildSortWithIdTieBreaker(column: SQLWrapper, dir: "asc" | "desc") {
 
 function buildDealListOrder(
   filters: DealFilters,
-  classification: { wonStageIds: string[]; lostStageIds: string[]; stageEntryDateEnabled: boolean }
+  classification: {
+    wonStageIds: string[];
+    estimatingStageIds: string[];
+    lostStageIds: string[];
+    stageEntryDateEnabled: boolean;
+  }
 ) {
   // Primary tier: active, non-zero deals on top; on-hold and $0-value deals sink to
   // the bottom of the list (sort-only — the WHERE set is unchanged, so they still
@@ -828,16 +836,21 @@ function buildDealListOrder(
   // filters on, so sort == filter == display (D-1).
   const tier = aliasedActiveNonZeroDealSortTierSql(
     "deals",
-    aliasedStageAwareEffectiveDealValueSql("deals", classification.wonStageIds)
+    aliasedStageAwareEffectiveDealValueSql("deals", classification.wonStageIds, classification.estimatingStageIds)
   );
   return [asc(tier), ...buildDealListColumnOrder(filters, classification)];
 }
 
 function buildDealListColumnOrder(
   filters: DealFilters,
-  classification: { wonStageIds: string[]; lostStageIds: string[]; stageEntryDateEnabled: boolean }
+  classification: {
+    wonStageIds: string[];
+    estimatingStageIds: string[];
+    lostStageIds: string[];
+    stageEntryDateEnabled: boolean;
+  }
 ) {
-  const { wonStageIds, lostStageIds, stageEntryDateEnabled } = classification;
+  const { wonStageIds, estimatingStageIds, lostStageIds, stageEntryDateEnabled } = classification;
   switch (filters.sortBy) {
     case "name":
       return buildSortWithIdTieBreaker(deals.name, filters.sortDir === "asc" ? "asc" : "desc");
@@ -858,7 +871,7 @@ function buildDealListColumnOrder(
       // display (D-1; Codex #546). Raw
       // awarded_amount is null for most open deals and would mis-sort them.
       return buildSortWithIdTieBreaker(
-        aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds),
+        aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds, estimatingStageIds),
         filters.sortDir === "asc" ? "asc" : "desc"
       );
     case "stage_entered_at":
@@ -902,7 +915,7 @@ function buildStagePageOrder(sort: StagePageSort | undefined, stage: PipelineSta
     case "value_desc":
       return LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
         ? sql`${workspaceEffectiveDealValueSql(stage)} desc, d.id desc`
-        : sql`${aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug))} desc, d.id desc`;
+        : sql`${aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)))} desc, d.id desc`;
     case "newest":
     default:
       return sql`d.created_at desc, d.id desc`;
@@ -1148,21 +1161,37 @@ function dealEstimateSentAtSql() {
   `;
 }
 
-type PipelineValueSource = "won" | "current";
+type PipelineValueSource = "won" | "estimating" | "current";
 
-function pipelineValueSourceForStageSlug(stageSlug: string): PipelineValueSource {
+// Route for a pipeline_stage_config row, derived from its workflow family (the query scopes to
+// standard_deal | service_deal). Used to canonicalize a STAGE's slug for the estimating classification.
+function dealRouteForStageFamily(workflowFamily: string | null | undefined): WorkflowRoute {
+  return workflowFamily === "service_deal" ? "service" : "normal";
+}
+
+function pipelineValueSourceForStageSlug(
+  stageSlug: string,
+  workflowRoute?: WorkflowRoute | null
+): PipelineValueSource {
+  // Canonical 'estimating' stage only (route-aware): DD outranks bid (awarded > dd > bid). Excludes
+  // service_estimating; INCLUDES the legacy estimate_in_progress alias (canonicalizes to estimating). Keying
+  // on the canonical stage (not raw slug equality) keeps this per-column total consistent with the TS card
+  // resolver and the SQL estimatingStageIds set (Codex P2).
+  if (isGenuineEstimatingDealStageSlug(stageSlug, workflowRoute)) return "estimating";
   return WON_TERMINAL_STAGE_SLUGS.includes(stageSlug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
     ? "won"
     : "current";
 }
 
 function dealPipelineValueSql(valueSource: PipelineValueSource) {
+  if (valueSource === "estimating") return dealEstimatingValueSql(deals);
   return valueSource === "won"
     ? dealAwardedFirstWithFallbackSql(deals)
     : dealBestEstimateSql(deals);
 }
 
 function aliasedPipelineValueSql(alias: string, valueSource: PipelineValueSource) {
+  if (valueSource === "estimating") return aliasedDealEstimatingValueSql(alias);
   return valueSource === "won"
     ? aliasedDealAwardedFirstWithFallbackSql(alias)
     : aliasedDealBestEstimateSql(alias);
@@ -1223,7 +1252,7 @@ function addWorkspaceEstimateSentDateConditions(
 }
 
 function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
-  const rawValue = aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug));
+  const rawValue = aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)));
 
   return sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`;
 }
@@ -1638,11 +1667,11 @@ export async function getDeals(
   const stageEntryDateEnabled = isStageEntryDateFilterEnabled() || Boolean(filters.stageEntryDateWindow);
   let wonStageIds: string[] = [];
   let lostStageIds: string[] = [];
-  // Resolve Won/Lost stage-id sets once when any stage-classified dimension is in
-  // play: the outcome-aware date window (Won+Lost), and the stage-aware value
-  // filter/sort (Won — awarded-first for Won stages). Done here so those
-  // predicates classify rows without a pipeline_stage_config join (the count
-  // queries below select from `deals` alone).
+  let estimatingStageIds: string[] = [];
+  // Resolve Won/Lost/estimating stage-id sets once when any stage-classified dimension is in
+  // play: the outcome-aware date window (Won+Lost), and the stage-aware value filter/sort/total
+  // (Won → awarded-first; estimating → awarded>dd>bid). Done here so those predicates classify
+  // rows without a pipeline_stage_config join (the count queries below select from `deals` alone).
   const valueFilterRequested = Number.isFinite(filters.valueMin) || Number.isFinite(filters.valueMax);
   const needsStageClassification =
     Boolean(filters.dateFrom || filters.dateTo) ||
@@ -1659,9 +1688,19 @@ export async function getDeals(
     const lostSlugs = LOST_STAGE_SLUGS as readonly string[];
     wonStageIds = stages.filter((stage) => wonSlugs.includes(stage.slug)).map((stage) => stage.id);
     lostStageIds = stages.filter((stage) => lostSlugs.includes(stage.slug)).map((stage) => stage.id);
+    estimatingStageIds = stages
+      .filter((stage) =>
+        isGenuineEstimatingDealStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily))
+      )
+      .map((stage) => stage.id);
   }
   conditions.push(
-    ...buildDealFilterBarConditions(filters, { wonStageIds, lostStageIds, stageEntryDateEnabled })
+    ...buildDealFilterBarConditions(filters, {
+      wonStageIds,
+      estimatingStageIds,
+      lostStageIds,
+      stageEntryDateEnabled,
+    })
   );
 
   // Inclusive signed-contract range. Used by the rep dashboard YTD/MTD
@@ -1721,7 +1760,12 @@ export async function getDeals(
     : sql`coalesce(${deals.onHold}, false) = false`;
 
   // Sort
-  const sortOrder = buildDealListOrder(filters, { wonStageIds, lostStageIds, stageEntryDateEnabled });
+  const sortOrder = buildDealListOrder(filters, {
+    wonStageIds,
+    estimatingStageIds,
+    lostStageIds,
+    stageEntryDateEnabled,
+  });
 
   // Sequential tenant queries required: tenantDb is a single transaction client
   // in production, so parallel reads can fail with "client already executing".
@@ -1742,7 +1786,7 @@ export async function getDeals(
   const valueTotalResult = filters.includeValueTotal
     ? await tenantDb
         .select({
-          total: sql<number>`coalesce(sum(${aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds)}), 0)`,
+          total: sql<number>`coalesce(sum(${aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds, estimatingStageIds)}), 0)`,
         })
         .from(deals)
         .where(where)
@@ -1869,6 +1913,10 @@ export async function getDealDetail(
       primaryContactOwnerUserId: contacts.ownerId,
       primaryContactOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${contacts.ownerId})`,
       projectType: sql<string | null>`COALESCE(${projectTypeConfig.name}, ${deals.projectType})`,
+      // The deal's canonical stage slug (deals has no stage_slug column) so the detail header's value
+      // resolver (resolveBestEstimate) applies the stage-aware chain — estimating DD-over-bid — and the
+      // detail header reconciles with the board/list for the same deal (Codex P2).
+      stageSlug: sql<string | null>`(SELECT slug FROM public.pipeline_stage_config WHERE id = ${deals.stageId})`,
     })
     .from(deals)
     .leftJoin(users, eq(users.id, deals.assignedRepId))
@@ -2938,7 +2986,7 @@ export async function getDealsForPipeline(
 
     const where = and(...stageConditions, ...commonConditions);
     const countedDealFilter = aliasedActiveDealCountFilterSql("deals");
-    const valueSource = pipelineValueSourceForStageSlug(stage.slug);
+    const valueSource = pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily));
     const summaryRows = await tenantDb
       .select({
         totalCount: sql<number>`count(*)`,
@@ -2970,9 +3018,15 @@ export async function getDealsForPipeline(
   // Build response: active pipeline stages + date-filtered terminal stages.
   const pipelineColumns = responseStages.map((stage) => ({
     stage,
-    deals: (dealsByStage.get(stage.id) ?? []).map((deal) =>
-      attachAtRiskResult(deal, atRiskViewerRole, stage.slug)
-    ),
+    deals: (dealsByStage.get(stage.id) ?? []).map((deal) => ({
+      ...attachAtRiskResult(deal, atRiskViewerRole, stage.slug),
+      // Stamp the column's canonical stage slug onto each board card. Board rows are `...getTableColumns(deals)`
+      // with NO pipeline_stage_config join, so they omit stageSlug; without it the client value resolvers
+      // (bestEstimate / getEffectiveDealValue) fall to the default chain and an estimating card would show
+      // bid-first while the server-computed stage-aware column total shows DD-first — breaking the
+      // bucket==sum-of-cards invariant. The card is IN this stage's column, so stage.slug is authoritative.
+      stageSlug: stage.slug,
+    })),
     totalValue: valueByStage.get(stage.id) ?? 0,
     count: activeCountByStage.get(stage.id) ?? 0,
     activeCount: activeCountByStage.get(stage.id) ?? 0,
@@ -3003,6 +3057,12 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   const scope = await buildDealWorkspaceScope(tenantDb, input, stage);
   const isWonTerminalStage = WON_TERMINAL_STAGE_SLUGS.includes(
     stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]
+  );
+  // 'estimating' stage drill: the value filter below must use the estimating chain (awarded>dd>bid) so it
+  // reconciles with the stage total/sort (which already route through pipelineValueSourceForStageSlug).
+  const isEstimatingStage = isGenuineEstimatingDealStageSlug(
+    stage.slug,
+    dealRouteForStageFamily(stage.workflowFamily)
   );
   const stageSlugs = isWonTerminalStage
     ? WON_TERMINAL_STAGE_SLUGS
@@ -3079,7 +3139,11 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (presentButMalformed(input.valueMin) || presentButMalformed(input.valueMax)) {
     conditions.push(sql`false`);
   } else if (input.valueMin !== undefined || input.valueMax !== undefined) {
-    const valueExpr = aliasedStageAwareEffectiveDealValueSql("d", isWonTerminalStage ? stageIds : []);
+    const valueExpr = aliasedStageAwareEffectiveDealValueSql(
+      "d",
+      isWonTerminalStage ? stageIds : [],
+      isEstimatingStage ? stageIds : []
+    );
     if (input.valueMin !== undefined && input.valueMax !== undefined) {
       conditions.push(sql`${valueExpr} between ${input.valueMin} and ${input.valueMax}`);
     } else if (input.valueMin !== undefined) {

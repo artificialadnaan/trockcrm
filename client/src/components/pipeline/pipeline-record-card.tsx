@@ -16,6 +16,9 @@ export interface PipelineRecordCardData {
   id: string;
   name: string;
   stageId: string;
+  // Read by getEffectiveDealValue for the 'estimating' DD-over-bid value branch (2026-06-18), so the
+  // per-card value matches the stage-aware column total. Stamped from the column slug when a card omits it.
+  stageSlug?: string | null;
   stageEnteredAt: string;
   updatedAt: string;
   status?: string | null;

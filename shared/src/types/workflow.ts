@@ -314,6 +314,12 @@ export const LOST_DEAL_STAGE_SLUGS = [
   ...new Set([...CANONICAL_LOST_DEAL_STAGE_SLUGS, ...GENUINE_LOST_DEAL_STAGE_ALIAS_SLUGS]),
 ] as readonly string[];
 
+// The single canonical 'estimating' stage slug (normal route). Used by the stage-aware deal-value
+// resolver: in THIS stage only, DD outranks bid (awarded > dd > bid_board > bid). Deliberately EXCLUDES
+// service_estimating — the DD-over-bid rule applies ONLY to the normal-route estimating stage
+// (Adnaan, 2026-06-18). Single source of truth shared by the SQL + shared-TS + client-TS resolvers.
+export const ESTIMATING_STAGE_SLUG = "estimating" as const;
+
 const GENUINE_WON_DEAL_STAGE_SLUG_SET = new Set<string>(WON_DEAL_STAGE_SLUGS);
 const GENUINE_LOST_DEAL_STAGE_SLUG_SET = new Set<string>(LOST_DEAL_STAGE_SLUGS);
 const TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUG_SET = new Set<string>(
@@ -430,6 +436,19 @@ export function isGenuineLostDealStageSlug(
   if (!stageSlug) return false;
   if (GENUINE_LOST_DEAL_STAGE_SLUG_SET.has(stageSlug)) return true;
   return toCanonicalDealStageSlug(stageSlug, workflowRoute) === "lost";
+}
+
+// True ONLY for the canonical normal-route 'estimating' stage (the DD-over-bid value rule, 2026-06-18).
+// Canonicalizes route-aware so it is correct for the cases bare equality gets wrong: a service-route record
+// carrying the bare "estimating" slug canonicalizes to "service_estimating" (→ false, bid > DD), and the
+// legacy "estimate_in_progress" alias canonicalizes to "estimating" (→ true, DD > bid). service_estimating
+// is deliberately NOT estimating. Mirrors isGenuineWon/LostDealStageSlug.
+export function isGenuineEstimatingDealStageSlug(
+  stageSlug: string | null | undefined,
+  workflowRoute?: WorkflowRoute | null
+): boolean {
+  if (!stageSlug) return false;
+  return toCanonicalDealStageSlug(stageSlug, workflowRoute) === ESTIMATING_STAGE_SLUG;
 }
 
 export function getWorkflowFamilyForStage(

@@ -16,14 +16,16 @@ path in server/src/modules/deals/service.ts, and the five stage-writer paths:
    getHoldStateAtStageEntry() before writing it.
 */
 
+import { isGenuineEstimatingDealStageSlug } from "./workflow.js";
+
 type DealValueLike = {
   onHold?: boolean | null;
   awardedAmount?: string | number | null;
   bidBoardTotalSales?: string | number | null;
   bidEstimate?: string | number | null;
   ddEstimate?: string | number | null;
-  // Accepted for caller convenience but IGNORED by getRawDealValue (the unified awarded-first chain is
-  // stage-agnostic since 2026-06-18 — no stage-dependent branch).
+  // stageSlug / stage.slug ARE read by getRawDealValue for the 'estimating' DD-over-bid branch (2026-06-18).
+  // bidBoardStageSlug / workflowRoute remain accepted for caller convenience but are not read here.
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;
@@ -62,11 +64,17 @@ function toDate(value: string | Date | null | undefined): Date | null {
 }
 
 function getRawDealValue(deal: DealValueLike): number {
-  // SINGLE awarded-first value priority (mirrors server deal-value-sql.ts DEAL_VALUE_PRIORITY_CHAIN):
-  // awarded_amount > bid_board_total_sales > bid_estimate > dd_estimate, each gated > 0 (0 AND NULL both
-  // fall through to the next candidate). Open/estimating and Won deals resolve IDENTICALLY now — there is
-  // no stage-dependent branch (convention shift 2026-06-18; see deal-value-sql.ts for the rationale).
-  const candidates = [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate];
+  // Awarded-first value priority (mirrors server deal-value-sql.ts), each candidate gated > 0 (0 AND NULL
+  // both fall through). STAGE-AWARE override for the single 'estimating' stage (2026-06-18): there the
+  // in-progress bid is outranked by DD — awarded > dd > bid_board > bid. Bid is NOT skipped, just outranked
+  // when DD exists (a bid-only estimating deal keeps its bid). Excludes service_estimating. Every other
+  // stage is unchanged: awarded > bid_board > bid > dd.
+  const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  const candidates = isGenuineEstimatingDealStageSlug(stageSlug, workflowRoute)
+    ? [deal.awardedAmount, deal.ddEstimate, deal.bidBoardTotalSales, deal.bidEstimate]
+    : [deal.awardedAmount, deal.bidBoardTotalSales, deal.bidEstimate, deal.ddEstimate];
 
   for (const candidate of candidates) {
     const value = toNumber(candidate);

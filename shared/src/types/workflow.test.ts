@@ -5,6 +5,7 @@ import {
   LOST_DEAL_STAGE_SLUGS,
   TRANSITIONAL_WON_MAPPED_DEAL_STAGE_SLUGS,
   WON_DEAL_STAGE_SLUGS,
+  isGenuineEstimatingDealStageSlug,
   isGenuineLostDealStageSlug,
   isGenuineWonDealStageSlug,
   toCanonicalDealStageSlug,
@@ -56,6 +57,21 @@ describe("workflow stage canonicalization", () => {
     expect(isGenuineWonDealStageSlug("sent_to_production", "normal")).toBe(true);
     expect(isGenuineWonDealStageSlug("in_production", "normal")).toBe(false);
     expect(isGenuineWonDealStageSlug("close_out", "normal")).toBe(false);
+  });
+
+  it("isGenuineEstimatingDealStageSlug fires for exactly the canonical 'estimating' stage (route-aware)", () => {
+    // canonical normal-route estimating → true (with or without an explicit route)
+    expect(isGenuineEstimatingDealStageSlug("estimating", "normal")).toBe(true);
+    expect(isGenuineEstimatingDealStageSlug("estimating", null)).toBe(true);
+    // service_estimating, and a service-route record carrying the BARE 'estimating' slug, → false
+    expect(isGenuineEstimatingDealStageSlug("service_estimating", "service")).toBe(false);
+    expect(isGenuineEstimatingDealStageSlug("estimating", "service")).toBe(false);
+    // legacy 'estimate_in_progress' canonicalizes to estimating on the normal route → true; service → false
+    expect(isGenuineEstimatingDealStageSlug("estimate_in_progress", "normal")).toBe(true);
+    expect(isGenuineEstimatingDealStageSlug("estimate_in_progress", "service")).toBe(false);
+    // unrelated stages and empty input → false
+    expect(isGenuineEstimatingDealStageSlug("opportunity", "normal")).toBe(false);
+    expect(isGenuineEstimatingDealStageSlug(null)).toBe(false);
   });
 
   it("keeps lost-stage slug aliases limited to genuine lost terminal states", () => {

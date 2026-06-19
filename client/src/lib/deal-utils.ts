@@ -1,4 +1,8 @@
-import { isGenuineLostDealStageSlug, isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
+import {
+  isGenuineEstimatingDealStageSlug,
+  isGenuineLostDealStageSlug,
+  isGenuineWonDealStageSlug,
+} from "@trock-crm/shared/types";
 
 const HUBSPOT_DEAL_NUMBER_PATTERN = /^HS[-_ ]?\d+/i;
 const VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN = /\bHS[-_ ]?\d{6,}\b/gi;
@@ -118,21 +122,32 @@ export function resolveBestEstimate(deal: {
   bidBoardTotalSales?: string | null;
   bidEstimate?: string | null;
   ddEstimate?: string | null;
-  // Accepted for caller convenience but IGNORED by value resolution (the unified awarded-first chain is
-  // stage-agnostic since 2026-06-18). Other helpers (resolveDealValueKind/isLostBidDeal) still use these.
+  // stageSlug IS read here for the 'estimating' DD-over-bid branch (2026-06-18). bidBoardStageSlug /
+  // workflowRoute are accepted for caller convenience and used by other helpers (resolveDealValueKind).
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;
 }): { value: number; source: DealEstimateSource } {
-  // SINGLE awarded-first value priority (mirrors server deal-value-sql.ts DEAL_VALUE_PRIORITY_CHAIN and
-  // shared getRawDealValue): awarded > bid_board_total > bid > dd, each gated > 0. Open/estimating and Won
-  // deals resolve IDENTICALLY now (convention shift 2026-06-18) — no stage-dependent branch.
-  const candidates: Array<[DealEstimateSource, string | null | undefined]> = [
-    ["awarded", deal.awardedAmount],
-    ["bid_board", deal.bidBoardTotalSales],
-    ["bid", deal.bidEstimate],
-    ["estimate", deal.ddEstimate],
-  ];
+  // Awarded-first value priority (mirrors server deal-value-sql.ts + shared getRawDealValue), each gated
+  // > 0. STAGE-AWARE override for the single 'estimating' stage (2026-06-18): DD outranks the in-progress
+  // bid — awarded > dd > bid_board > bid. Bid is NOT skipped, just outranked when DD exists. Excludes
+  // service_estimating. Every other stage is unchanged: awarded > bid_board > bid > dd.
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  const candidates: Array<[DealEstimateSource, string | null | undefined]> =
+    isGenuineEstimatingDealStageSlug(deal.stageSlug, workflowRoute)
+      ? [
+          ["awarded", deal.awardedAmount],
+          ["estimate", deal.ddEstimate],
+          ["bid_board", deal.bidBoardTotalSales],
+          ["bid", deal.bidEstimate],
+        ]
+      : [
+          ["awarded", deal.awardedAmount],
+          ["bid_board", deal.bidBoardTotalSales],
+          ["bid", deal.bidEstimate],
+          ["estimate", deal.ddEstimate],
+        ];
 
   for (const [source, rawValue] of candidates) {
     const value = parseFloat(rawValue ?? "0");

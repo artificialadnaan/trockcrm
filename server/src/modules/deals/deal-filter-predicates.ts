@@ -3,6 +3,7 @@ import { deals } from "@trock-crm/shared/schema";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveEstimatingDealValueSql,
   aliasedEffectiveWonDealValueSql,
 } from "../shared/deal-value-sql.js";
 import {
@@ -63,7 +64,9 @@ export interface DealFilterBarInput {
 }
 
 /** Context shared by the gated/classified predicates (date + stalled). */
-export type DealFilterContext = DealDateScopeContext;
+// estimatingStageIds is value-filter-specific (the 'estimating' stage values DD over bid), so it lives on
+// the filter context rather than the shared date-scope context where it would be meaningless.
+export type DealFilterContext = DealDateScopeContext & { estimatingStageIds?: string[] };
 
 function finiteNumber(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -191,22 +194,33 @@ export function buildStatusPredicate(input: DealFilterBarInput): SQL | undefined
 }
 
 /**
- * Stage-aware effective deal value, mirroring getEffectiveDealValue
- * (shared/src/types/deal-hold.ts). As of the 2026-06-18 awarded-first unification both the
- * Won and open chains resolve through the SAME DEAL_VALUE_PRIORITY_CHAIN
- * (awarded > bid_board > bid > dd), so the stage_id CASE branches below are byte-identical —
- * the split is retained only as a future-divergence hook (and is harmless). Both are
- * on-hold-zeroed. This is the value the list DISPLAYS, so the value filter and the value sort
- * use it too (sort == filter == display, D-1; Codex #546). Won classification is by stage id
- * so no pipeline_stage_config join is needed (the deals row carries stage_id).
+ * Stage-aware effective deal value, mirroring getEffectiveDealValue (shared/src/types/deal-hold.ts).
+ * Row-level branch by stage_id (no pipeline_stage_config join — the deals row carries stage_id):
+ *   - estimating stages → awarded > dd > bid (DD outranks bid; 2026-06-18 Adnaan rule);
+ *   - Won stages        → awarded-first chain (identical to open since the 2026-06-18 unification —
+ *                         retained as a future-divergence hook);
+ *   - everything else   → the default open awarded-first chain.
+ * All branches are on-hold-zeroed. This is the value the list DISPLAYS, so the value filter and the
+ * value sort use it too (sort == filter == display, D-1; Codex #546).
  */
-export function aliasedStageAwareEffectiveDealValueSql(alias: string, wonStageIds: string[]): SQL {
+export function aliasedStageAwareEffectiveDealValueSql(
+  alias: string,
+  wonStageIds: string[],
+  estimatingStageIds: string[] = []
+): SQL {
   const openValue = aliasedEffectiveDealValueSql(alias);
-  if (wonStageIds.length === 0) return openValue;
-  const wonValue = aliasedEffectiveWonDealValueSql(alias);
   const stageId = sql.raw(`${alias}.stage_id`);
-  const ids = sql.join(wonStageIds.map((id) => sql`${id}`), sql`, `);
-  return sql`CASE WHEN ${stageId} IN (${ids}) THEN ${wonValue} ELSE ${openValue} END`;
+  const branches: SQL[] = [];
+  if (estimatingStageIds.length > 0) {
+    const estIds = sql.join(estimatingStageIds.map((id) => sql`${id}`), sql`, `);
+    branches.push(sql`WHEN ${stageId} IN (${estIds}) THEN ${aliasedEffectiveEstimatingDealValueSql(alias)}`);
+  }
+  if (wonStageIds.length > 0) {
+    const wonIds = sql.join(wonStageIds.map((id) => sql`${id}`), sql`, `);
+    branches.push(sql`WHEN ${stageId} IN (${wonIds}) THEN ${aliasedEffectiveWonDealValueSql(alias)}`);
+  }
+  if (branches.length === 0) return openValue;
+  return sql`CASE ${sql.join(branches, sql` `)} ELSE ${openValue} END`;
 }
 
 /**
@@ -262,16 +276,16 @@ function isMalformedNumber(value: number | undefined): boolean {
 }
 
 /**
- * value range — BETWEEN on the STAGE-AWARE effective value (awarded-first for Won
- * stages, best-estimate otherwise), the same number the list displays and sorts
- * by (sort == filter == display, D-1). Uses ctx.wonStageIds for classification.
+ * value range — BETWEEN on the STAGE-AWARE effective value (estimating → awarded>dd>bid; Won/open →
+ * awarded-first), the same number the list displays and sorts by (sort == filter == display, D-1).
+ * Uses ctx.wonStageIds + ctx.estimatingStageIds for classification.
  */
 export function buildValueRangePredicate(input: DealFilterBarInput, ctx: DealFilterContext = {}): SQL | undefined {
   if (isMalformedNumber(input.valueMin) || isMalformedNumber(input.valueMax)) return sql`false`;
   const min = finiteNumber(input.valueMin);
   const max = finiteNumber(input.valueMax);
   if (min === undefined && max === undefined) return undefined;
-  const value = aliasedStageAwareEffectiveDealValueSql("deals", ctx.wonStageIds ?? []);
+  const value = aliasedStageAwareEffectiveDealValueSql("deals", ctx.wonStageIds ?? [], ctx.estimatingStageIds ?? []);
   if (min !== undefined && max !== undefined) return sql`${value} BETWEEN ${min} AND ${max}`;
   if (min !== undefined) return sql`${value} >= ${min}`;
   return sql`${value} <= ${max}`;

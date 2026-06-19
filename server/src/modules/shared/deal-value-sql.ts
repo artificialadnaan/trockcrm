@@ -17,11 +17,11 @@ type DealValueColumn =
   | "dd_estimate"
   | "awarded_amount";
 
-// SINGLE deal-value priority chain (awarded-first). Open/estimating AND Won deals now resolve value
-// IDENTICALLY — awarded_amount > bid_board_total_sales > bid_estimate > dd_estimate — so one priority
-// drives every bucket total and card with no parallel open-vs-won logic. Each candidate is gated `> 0`
-// (positiveDealValueCandidateSql), so BOTH 0 and NULL fall through to the next candidate; the chain's
-// final fallback is 0.
+// DEFAULT deal-value priority chain (awarded-first): awarded_amount > bid_board_total_sales > bid_estimate
+// > dd_estimate. Used by every stage EXCEPT the single 'estimating' stage, which overrides DD ABOVE bid
+// (ESTIMATING_VALUE_CHAIN below; 2026-06-18). Won and every other open stage share THIS one chain (no
+// parallel won-vs-open logic). Each candidate is gated `> 0` (positiveDealValueCandidateSql), so BOTH 0
+// and NULL fall through to the next candidate; the chain's final fallback is 0.
 //
 // CONVENTION SHIFT (2026-06-18, "editable DD + awarded-highest" decision): the open/estimating basis was
 // formerly bid-first with awarded LAST (and distinct from the Won basis). It was flipped to awarded-first
@@ -40,6 +40,27 @@ const DEAL_VALUE_PRIORITY_CHAIN = [
 const FORECAST_FIRST_VALUE_CHAIN = [
   "forecast_revenue",
   ...DEAL_VALUE_PRIORITY_CHAIN,
+] as const satisfies readonly DealValueColumn[];
+
+// STAGE-AWARE override for the single 'estimating' stage (2026-06-18, Adnaan): during estimating the
+// bid is in-progress/incomplete, so DD outranks bid — awarded > dd_estimate > bid_board_total_sales >
+// bid_estimate. Awarded still wins; bid is NOT skipped, just outranked when DD exists (a bid-only
+// estimating deal keeps its bid, never $0). Applies ONLY to the canonical 'estimating' stage (route-aware:
+// includes the legacy estimate_in_progress alias, excludes service_estimating). Same `> 0` gating +
+// on-hold-zeroing as the default chain.
+//
+// SCOPE (Adnaan, 2026-06-19, re Codex P2): this DD-over-bid rule is applied ONLY on the DEALS pipeline value
+// paths — the kanban/stage-workspace per-column totals (pipelineValueSourceForStageSlug) and the deals-list
+// filter/sort/total + stage drill (aliasedStageAwareEffectiveDealValueSql), mirrored by the TS card resolvers
+// (getRawDealValue / resolveBestEstimate). Dashboard + reports value aggregates DELIBERATELY keep the default
+// open chain (deal-value-sql default + reports foundations bases), so an estimating deal can read DD-first on
+// the deals board and bid-first in a report. Verified ~inert on prod (only ~2 estimating deals have bid != DD).
+// Extending platform-wide is a deliberate follow-up, NOT an accidental gap.
+const ESTIMATING_VALUE_CHAIN = [
+  "awarded_amount",
+  "dd_estimate",
+  "bid_board_total_sales",
+  "bid_estimate",
 ] as const satisfies readonly DealValueColumn[];
 
 export function positiveDealValueCandidateSql(value: unknown): SQL {
@@ -84,6 +105,11 @@ export function dealBestEstimateSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
+// 'estimating' stage only: DD outranks bid (awarded > dd > bid_board > bid). See ESTIMATING_VALUE_CHAIN.
+export function dealEstimatingValueSql(table: DealValueTable): SQL {
+  return dealValueChainSql(table, ESTIMATING_VALUE_CHAIN);
+}
+
 export function dealAwardedAmountSql(table: DealValueTable): SQL {
   return sql`COALESCE(${positiveDealValueCandidateSql(table.awardedAmount)}, 0)`;
 }
@@ -111,8 +137,17 @@ export function effectiveWonDealValueSql(table: DealValueTable): SQL {
   return effectiveDealValueSql(table, dealAwardedFirstWithFallbackSql(table));
 }
 
+export function effectiveEstimatingDealValueSql(table: DealValueTable): SQL {
+  return effectiveDealValueSql(table, dealEstimatingValueSql(table));
+}
+
 export function aliasedDealBestEstimateSql(alias: string): SQL {
   return aliasedDealValueChainSql(alias, DEAL_VALUE_PRIORITY_CHAIN);
+}
+
+// 'estimating' stage only: DD outranks bid (awarded > dd > bid_board > bid). See ESTIMATING_VALUE_CHAIN.
+export function aliasedDealEstimatingValueSql(alias: string): SQL {
+  return aliasedDealValueChainSql(alias, ESTIMATING_VALUE_CHAIN);
 }
 
 export function aliasedDealAwardedAmountSql(alias: string): SQL {
@@ -151,6 +186,10 @@ export function aliasedEffectiveAwardedDealValueSql(
 
 export function aliasedEffectiveWonDealValueSql(alias: string): SQL {
   return aliasedEffectiveDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
+}
+
+export function aliasedEffectiveEstimatingDealValueSql(alias: string): SQL {
+  return aliasedEffectiveDealValueSql(alias, aliasedDealEstimatingValueSql(alias));
 }
 
 export function reportableDealFilterSql(identifierPath?: string): SQL {

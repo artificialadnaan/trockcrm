@@ -38,7 +38,10 @@ export function KanbanDealCard({
   const handleClick = onClick ?? (() => navigate(`/deals/${deal.id}`));
 
   const days = getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
-  const value = bestEstimate(deal);
+  // Value from the column-slug-stamped deal (the same object the lost-bid label uses below), so the
+  // stage-aware chain (estimating DD-over-bid) applies even if the board row omits stageSlug — keeping the
+  // card value reconciled with the server stage-aware column total. The stageSlug prop is authoritative.
+  const value = bestEstimate({ ...deal, stageSlug: deal.stageSlug ?? stageSlug });
   const displayNumber = getDealDisplayNumber(deal);
 
   const metaParts: string[] = [];
