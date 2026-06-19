@@ -7,6 +7,7 @@ import {
   boolean,
   jsonb,
   timestamp,
+  index,
 } from "drizzle-orm/pg-core";
 import { EMAIL_DIRECTIONS } from "../../types/enums.js";
 
@@ -42,4 +43,9 @@ export const emails = pgTable("emails", {
   userId: uuid("user_id").notNull(),
   sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
   syncedAt: timestamp("synced_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [
+  // Touch index mirroring activities_contact_idx — makes the contacts last_touch_at sort's
+  // MAX(emails.sent_at) subquery an Index Only Scan instead of a Seq Scan. Source-of-truth marker;
+  // migration 0166 builds it per-office as PARTIAL (WHERE contact_id IS NOT NULL) + sent_at DESC.
+  index("emails_contact_sent_at_idx").on(table.contactId, table.sentAt),
+]);

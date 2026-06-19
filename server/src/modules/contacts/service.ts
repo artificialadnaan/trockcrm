@@ -29,6 +29,7 @@ export interface ContactFilters {
   // getContacts so the card number and the filtered-list count reconcile by construction.
   isPrimary?: boolean; // has a primary deal association
   untouched?: boolean; // last touch is null or > 30 days ago
+  hasLinkedDeals?: boolean; // has at least one ACTIVE linked deal (contact_deal_associations -> active deal)
   ownerUserId?: string;
   sortBy?: "name" | "company_name" | "created_at" | "updated_at" | "last_contacted_at" | "touchpoint_count" | "last_touch_at";
   sortDir?: "asc" | "desc";
@@ -174,6 +175,20 @@ export function buildContactUntouchedSql(): SQL<boolean> {
 export function buildContactLinkedDealsCountSql(): SQL<number> {
   return sql<number>`(
     SELECT COUNT(*)::int
+    FROM contact_deal_associations cda
+    INNER JOIN deals d ON d.id = cda.deal_id
+    WHERE cda.contact_id = ${contactIdSql}
+      AND d.is_active = true
+  )`;
+}
+
+export function buildContactHasLinkedActiveDealSql(): SQL<boolean> {
+  // Filter predicate for "contacts with at least one ACTIVE linked deal" — same EXISTS shape as the
+  // buildContactLinkedDealsCountSql count subquery (contact_deal_associations -> active deal), but as a
+  // boolean EXISTS so it can drive the WHERE without a COUNT. contact_deal_associations is empty in
+  // office_dallas today, so this correctly returns an empty set until associations exist.
+  return sql<boolean>`EXISTS (
+    SELECT 1
     FROM contact_deal_associations cda
     INNER JOIN deals d ON d.id = cda.deal_id
     WHERE cda.contact_id = ${contactIdSql}
@@ -367,6 +382,12 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
   }
   if (filters.ownerUserId) {
     conditions.push(eq(contacts.ownerId, filters.ownerUserId));
+  }
+
+  // Linked-deals filter: only contacts with an EXISTS active linked deal. A BASE filter (like role/owner),
+  // so the summary-card aggregates reflect it and it AND-composes with search/scope/sort/pagination.
+  if (filters.hasLinkedDeals === true) {
+    conditions.push(buildContactHasLinkedActiveDealSql());
   }
 
   // City filter

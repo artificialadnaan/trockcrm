@@ -51,6 +51,13 @@ const OWNER_SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
 ] as const;
 
+// Linked-deals filter: "All" contacts vs only those with an active linked deal. contact_deal_associations
+// is empty in office_dallas today, so "Linked" correctly returns an empty set until associations exist.
+const LINKED_DEALS_OPTIONS = [
+  { value: "all", label: "All" },
+  { value: "linked", label: "Linked" },
+] as const;
+
 // Persistent highlight for the currently-drilled summary card (matches MetricCard's focus ring).
 const ACTIVE_CARD_CLASS = "ring-2 ring-brand-red";
 
@@ -228,6 +235,7 @@ export function ContactListPage() {
 
   const activeRole = (filters.role ?? "all") as (typeof ROLE_OPTIONS)[number]["value"];
   const activeOwnerScope = (filters.ownerScope ?? "all") as (typeof OWNER_SCOPE_OPTIONS)[number]["value"];
+  const activeLinkedDeals = (filters.hasLinkedDeals ? "linked" : "all") as (typeof LINKED_DEALS_OPTIONS)[number]["value"];
   const totals = useMemo(() => {
     // Primary + Untouched are now SERVER aggregates over the full filtered set (not the visible page),
     // so the cards reconcile with the lists they drill to. linkedDeals stays a page-scoped badge hint.
@@ -331,6 +339,13 @@ export function ContactListPage() {
                 value={activeOwnerScope}
                 onChange={(value) => setFilters({ ownerScope: value === "mine" ? "mine" : undefined })}
                 ariaLabel="Ownership filter"
+                size="touch"
+              />
+              <ScopeToggle
+                options={LINKED_DEALS_OPTIONS}
+                value={activeLinkedDeals}
+                onChange={(value) => setFilters({ hasLinkedDeals: value === "linked" ? true : undefined })}
+                ariaLabel="Linked deals filter"
                 size="touch"
               />
             </div>
