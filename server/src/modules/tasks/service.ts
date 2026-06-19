@@ -1,4 +1,4 @@
-import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray } from "drizzle-orm";
+import { eq, and, desc, asc, sql, or, isNull, isNotNull, inArray, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, jobQueue, taskResolutionState, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -19,13 +19,31 @@ const TASK_STATUS_VALUES = [
 
 type TaskStatus = (typeof TASK_STATUS_VALUES)[number];
 
+export type TaskSection = "overdue" | "today" | "this_week" | "later" | "upcoming" | "completed";
+export const TASK_SECTIONS = ["overdue", "today", "this_week", "later", "upcoming", "completed"] as const;
+
+export function isTaskSection(value: unknown): value is TaskSection {
+  return typeof value === "string" && (TASK_SECTIONS as readonly string[]).includes(value);
+}
+
+/** Fields a task bucket can be sorted by (server-side, over the full bucket). */
+export type TaskSortBy = "due_date" | "priority" | "assignee" | "created_at" | "completed_at";
+export type TaskSortDir = "asc" | "desc";
+export const TASK_SORT_FIELDS = ["due_date", "priority", "assignee", "created_at", "completed_at"] as const;
+
+export function isTaskSortBy(value: unknown): value is TaskSortBy {
+  return typeof value === "string" && (TASK_SORT_FIELDS as readonly string[]).includes(value);
+}
+
 export interface TaskFilters {
   assignedTo?: string;
   status?: string;
   type?: string;
   dealId?: string;
   contactId?: string;
-  section?: "overdue" | "today" | "upcoming" | "completed";
+  section?: TaskSection;
+  sortBy?: TaskSortBy;
+  sortDir?: TaskSortDir;
   page?: number;
   limit?: number;
 }
@@ -247,9 +265,79 @@ export async function transitionTaskStatus(
   return updatedTask;
 }
 
+// Raw column refs for ORDER BY expressions that aren't a plain Drizzle column
+// (the assignee name is a correlated subquery; the id tiebreak is referenced raw).
+const taskIdSqlRaw = sql.raw('"tasks"."id"');
+const taskAssignedToSqlRaw = sql.raw('"tasks"."assigned_to"');
+
+/** Assignee display name as an orderable SQL expression (mirrors the select alias). */
+export function buildTaskAssigneeNameSql(): SQL<string | null> {
+  return sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${taskAssignedToSqlRaw})`;
+}
+
+/** Priority urgency rank: urgent=0 (most urgent) … low=3, unknown last. */
+function taskPriorityRankSql(): SQL<number> {
+  return sql<number>`CASE ${tasks.priority}
+    WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4
+  END`;
+}
+
+/**
+ * Server-side ORDER BY for a single task bucket. Returns SQL order expressions
+ * (the chosen key + a stable `id` tiebreak) so the FULL bucket is ordered in the
+ * database, not via an in-memory re-sort of one page. Every nullable key uses
+ * NULLS LAST so undated / unassigned rows sink regardless of direction; the
+ * priority rank and the `id` tiebreak are non-nullable so they need no NULLS LAST.
+ *
+ * Injection-safe by construction: `sortBy`/`sortDir` only select a fixed SQL
+ * fragment through the switch — no caller string is ever interpolated into SQL.
+ */
+export function buildTaskSortOrder(sortBy: TaskSortBy, sortDir: TaskSortDir = "asc"): SQL[] {
+  const tiebreak = sql`${taskIdSqlRaw} ASC`;
+  switch (sortBy) {
+    case "priority": {
+      const rank = taskPriorityRankSql();
+      // "desc" surfaces the most urgent first (rank ascending); "asc" the least urgent.
+      return [sortDir === "desc" ? sql`${rank} ASC` : sql`${rank} DESC`, tiebreak];
+    }
+    case "assignee": {
+      const name = buildTaskAssigneeNameSql();
+      return [sortDir === "asc" ? sql`${name} ASC NULLS LAST` : sql`${name} DESC NULLS LAST`, tiebreak];
+    }
+    case "created_at":
+      // created_at is NOT NULL, but keep NULLS LAST for uniformity/safety.
+      return [sortDir === "asc" ? sql`${tasks.createdAt} ASC NULLS LAST` : sql`${tasks.createdAt} DESC NULLS LAST`, tiebreak];
+    case "completed_at":
+      return [sortDir === "asc" ? sql`${tasks.completedAt} ASC NULLS LAST` : sql`${tasks.completedAt} DESC NULLS LAST`, tiebreak];
+    case "due_date":
+    default: {
+      // Order by a status-aware EFFECTIVE date: scheduled tasks by scheduled_for (their surfacing
+      // time — even if the edit/PATCH flow has stamped a stray due_date on them), everything else by
+      // due_date. This interleaves the Later bucket's scheduled follow-ups by their real date instead
+      // of sinking them to NULLS LAST, so a row limit can't categorically truncate them below
+      // far-future dated rows. Elsewhere (no scheduled rows, non-null due_date) it === due_date.
+      const effectiveDate = sql`CASE
+        WHEN ${tasks.status} = 'scheduled' THEN COALESCE(${tasks.scheduledFor}, ${tasks.dueDate})
+        ELSE COALESCE(${tasks.dueDate}, ${tasks.scheduledFor})
+      END`;
+      return sortDir === "asc"
+        ? [sql`${effectiveDate} ASC NULLS LAST`, tiebreak]
+        : [sql`${effectiveDate} DESC NULLS LAST`, tiebreak];
+    }
+  }
+}
+
+/** Add `days` to a YYYY-MM-DD date string (date-only math; the result stays YYYY-MM-DD). */
+function addDaysToIsoDate(isoDate: string, days: number): string {
+  const [year, month, day] = isoDate.split("-").map((part) => Number(part));
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().slice(0, 10);
+}
+
 /**
  * Get tasks for a user, optionally filtered by section.
- * Sections map to the UI layout: Overdue, Today, Upcoming, Completed.
+ * Sections map to the UI layout: Overdue, Today, This week, Later, Completed.
  */
 export async function getTasks(
   tenantDb: TenantDb,
@@ -294,6 +382,7 @@ export async function getTasks(
   // Use office timezone (CT for T Rock) for date bucketing instead of UTC.
   // This ensures "today" matches the user's local date, not UTC midnight.
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
+  const weekEnd = addDaysToIsoDate(today, 7); // inclusive upper bound for "this week" (CT)
 
   const openStatusCondition = buildOpenTaskStatusCondition(new Date());
 
@@ -301,6 +390,19 @@ export async function getTasks(
     conditions.push(openStatusCondition, sql`${tasks.dueDate} < ${today}`);
   } else if (filters.section === "today") {
     conditions.push(openStatusCondition, sql`${tasks.dueDate} = ${today}`);
+  } else if (filters.section === "this_week") {
+    // Open work due after today, within the next 7 days.
+    conditions.push(openStatusCondition, sql`${tasks.dueDate} > ${today}`, sql`${tasks.dueDate} <= ${weekEnd}`);
+  } else if (filters.section === "later") {
+    // The "Later" bucket the page used to assemble client-side: far-future / undated open
+    // work UNION everything explicitly scheduled. Membership-identical to (upcoming-tail +
+    // the separate scheduled fetch); only the ordering is now server-controlled.
+    conditions.push(
+      or(
+        and(openStatusCondition, or(sql`${tasks.dueDate} > ${weekEnd}`, isNull(tasks.dueDate))),
+        eq(tasks.status, "scheduled" as any)
+      )
+    );
   } else if (filters.section === "upcoming") {
     conditions.push(
       openStatusCondition,
@@ -325,6 +427,16 @@ export async function getTasks(
 
   // Subquery to resolve assignee display name from public.users
   const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+
+  // Per-bucket sort: when the caller picks a sort, order the FULL filtered set in the DB.
+  // Otherwise keep the legacy section-aware default ordering (back-compat for other callers).
+  const orderBy = filters.sortBy
+    ? buildTaskSortOrder(filters.sortBy, filters.sortDir)
+    : filters.section === "completed"
+      ? [desc(tasks.completedAt)]
+      : filters.status === "scheduled"
+        ? [asc(taskColumns.scheduledFor), asc(priorityRank), asc(tasks.title)]
+        : [desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate)];
 
   const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(tasks).where(where);
   const taskRows = await tenantDb
@@ -359,16 +471,7 @@ export async function getTasks(
     .from(tasks)
     .leftJoin(deals, eq(tasks.dealId, deals.id))
     .where(where)
-    .orderBy(
-      // Priority-sectioned ordering per spec:
-      // Overdue first (is_overdue DESC), then by priority rank ASC, then by due_date ASC.
-      // Completed section: order by completedAt DESC instead.
-      ...(filters.section === "completed"
-        ? [desc(tasks.completedAt)]
-        : filters.status === "scheduled"
-          ? [asc(taskColumns.scheduledFor), asc(priorityRank), asc(tasks.title)]
-          : [desc(tasks.isOverdue), asc(priorityRank), asc(tasks.dueDate)])
-    )
+    .orderBy(...orderBy)
     .limit(limit)
     .offset(offset);
 
@@ -499,7 +602,11 @@ export async function getTaskCounts(
       )::int AS upcoming,
       COUNT(*) FILTER (
         WHERE status = 'completed'
-      )::int AS completed
+      )::int AS completed,
+      COUNT(*) FILTER (
+        WHERE status IN ('completed', 'dismissed')
+        AND completed_at >= NOW() - INTERVAL '7 days'
+      )::int AS completed_this_week
     FROM tasks
     ${scopeClause}
   `);
@@ -511,6 +618,10 @@ export async function getTaskCounts(
     today: Number(row.today ?? 0),
     upcoming: Number(row.upcoming ?? 0),
     completed: Number(row.completed ?? 0),
+    // Resolved-in-the-last-7-days (completed or dismissed). Authoritative source for the
+    // "Completed this week" summary card so it stays correct regardless of the Completed
+    // bucket's sort/limit (the old client calc was capped at the 20 fetched rows).
+    completedThisWeek: Number(row.completed_this_week ?? 0),
   };
 }
 

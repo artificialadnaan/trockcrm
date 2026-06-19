@@ -165,7 +165,7 @@ describe("TaskListPage project context", () => {
     });
     mocks.useTaskCountsMock.mockReset();
     mocks.useTaskCountsMock.mockReturnValue({
-      counts: { overdue: 1, today: 0, upcoming: 0, completed: 0 },
+      counts: { overdue: 1, today: 0, upcoming: 0, completed: 0, completedThisWeek: 0 },
       loading: false,
       error: null,
       refetch: vi.fn(),
@@ -398,7 +398,7 @@ describe("TaskListPage project context", () => {
   it("renders assignee picker for director role", () => {
     renderPage();
 
-    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Assignee"]');
+    const picker = container.querySelector<HTMLSelectElement>('[data-testid="assignee-filter"] select');
     expect(picker).not.toBeNull();
     expect(picker?.textContent).toContain("All assignees");
     expect(picker?.textContent).toContain("Brett Jones");
@@ -419,7 +419,7 @@ describe("TaskListPage project context", () => {
 
     renderPage();
 
-    expect(container.querySelector('select[aria-label="Assignee"]')).toBeNull();
+    expect(container.querySelector('[data-testid="assignee-filter"]')).toBeNull();
   });
 
   it("applies assignee filter to task fetches when picker selection changes", () => {
@@ -436,7 +436,7 @@ describe("TaskListPage project context", () => {
     });
     renderPage();
 
-    const picker = container.querySelector<HTMLSelectElement>('select[aria-label="Assignee"]');
+    const picker = container.querySelector<HTMLSelectElement>('[data-testid="assignee-filter"] select');
     expect(picker).not.toBeNull();
 
     act(() => {
@@ -453,9 +453,9 @@ describe("TaskListPage project context", () => {
     expect(mocks.useTaskCountsMock).toHaveBeenLastCalledWith("rep-2");
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", assignedTo: "rep-2" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "today", assignedTo: "rep-2" }));
-    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "upcoming", assignedTo: "rep-2" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "this_week", assignedTo: "rep-2" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "later", assignedTo: "rep-2" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "completed", assignedTo: "rep-2" }));
-    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ status: "scheduled", assignedTo: "rep-2" }));
   });
 
   it("does not fire task fetches before auth resolves", () => {
@@ -494,27 +494,27 @@ describe("TaskListPage project context", () => {
     expect(mocks.useTaskCountsMock).toHaveBeenCalled();
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "today" }));
-    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "upcoming" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "this_week" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "later" }));
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "completed" }));
-    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ status: "scheduled" }));
   });
 
-  it("completedThisWeek excludes tasks completed more than 7 days ago", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-05-08T12:00:00.000Z"));
+  it("Completed-this-week card reads the server count, not the limited Completed bucket", () => {
+    // The card must come from counts.completedThisWeek (full-set, sort-independent) so it can't
+    // drift when the Completed bucket is re-sorted/limited.
     mocks.useTaskCountsMock.mockReturnValue({
-      counts: { overdue: 0, today: 0, upcoming: 0, completed: 99 },
+      counts: { overdue: 0, today: 0, upcoming: 0, completed: 200, completedThisWeek: 7 },
       loading: false,
       error: null,
       refetch: vi.fn(),
     });
-    mocks.useTasksMock.mockImplementation((filters: { section?: string; status?: string }) => ({
+    // The Completed bucket returns only 2 rows — the card must NOT be derived from this length.
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
       tasks:
         filters.section === "completed"
           ? [
-              { ...makeTask(), id: "recent-completed", status: "completed", completedAt: "2026-05-06T12:00:00.000Z" },
-              { ...makeTask(), id: "old-completed", status: "completed", completedAt: "2026-04-20T12:00:00.000Z" },
-              { ...makeTask(), id: "missing-completed", status: "completed", completedAt: null },
+              { ...makeTask(), id: "c1", status: "completed", completedAt: "2026-05-06T12:00:00.000Z" },
+              { ...makeTask(), id: "c2", status: "completed", completedAt: "2026-05-05T12:00:00.000Z" },
             ]
           : [],
       loading: false,
@@ -527,8 +527,138 @@ describe("TaskListPage project context", () => {
     const completedCardText = Array.from(container.querySelectorAll("div"))
       .map((element) => element.textContent ?? "")
       .find((text) => text.includes("Completed this week") && text.includes("Last 7 days"));
-    expect(completedCardText).toContain("1");
-    expect(completedCardText).not.toContain("99");
-    vi.useRealTimers();
+    expect(completedCardText).toContain("7"); // the server count, not "2" (bucket length)
+  });
+
+  it("fetches every bucket with its default sort and offers a per-bucket sort dropdown", () => {
+    renderPage();
+
+    // Defaults: active buckets by due date ascending; Completed by completed date descending.
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", sortBy: "due_date", sortDir: "asc" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "this_week", sortBy: "due_date", sortDir: "asc" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "later", sortBy: "due_date", sortDir: "asc" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "completed", sortBy: "completed_at", sortDir: "desc" }));
+
+    // Each open bucket renders its own sort control.
+    expect(container.querySelector('[data-sort-group="overdue"] select')).not.toBeNull();
+  });
+
+  it("shows a placeholder in the summary cards while the assignee counts are stale (scope swap in flight)", () => {
+    mocks.useTaskCountsMock.mockReturnValue({
+      counts: { overdue: 7, today: 3, upcoming: 0, completed: 0, completedThisWeek: 5 },
+      loading: true,
+      stale: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    // The 3 summary-card VALUES (rendered in <p class="text-4xl …">) must all be the placeholder —
+    // not the previous assignee's 7 / 3 / 5 — while the new scope's counts are loading.
+    const cardValues = Array.from(container.querySelectorAll("p.text-4xl")).map((el) => el.textContent);
+    expect(cardValues).toEqual(["—", "—", "—"]);
+  });
+
+  it("a scope (assignee) change reloads in place without a full-page blank after first load", () => {
+    // The stale-row SAFETY (the previous assignee's rows can't stay actionable mid-refetch) lives in
+    // useTasks, which drops the rows synchronously on a scope change — gate-proven in
+    // use-tasks.scope.test.tsx. The page just reloads in place; it does not whole-page blank again.
+    let scopeLoading = false;
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [makeTask()] : [],
+      loading: scopeLoading,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    renderPage();
+    expect(container.textContent).not.toContain("Loading tasks...");
+
+    scopeLoading = true;
+    const picker = container.querySelector<HTMLSelectElement>('[data-testid="assignee-filter"] select');
+    act(() => {
+      if (picker) {
+        picker.value = "rep-2";
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    expect(container.textContent).not.toContain("Loading tasks...");
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", assignedTo: "rep-2" }));
+  });
+
+  it("disables a bucket's row actions while it is refetching (no acting on stale/just-mutated rows)", () => {
+    let overdueLoading = false;
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [makeTask()] : [],
+      loading: filters.section === "overdue" ? overdueLoading : false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    renderPage();
+    let completeBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Complete Call Palm Villas"]');
+    expect(completeBtn?.disabled).toBe(false); // settled → actionable
+
+    // Bucket begins refetching (e.g. right after a complete/snooze, or a sort change).
+    overdueLoading = true;
+    const overdueSort = container.querySelector<HTMLSelectElement>('[data-sort-group="overdue"] select');
+    act(() => {
+      if (overdueSort) {
+        overdueSort.value = "priority:desc";
+        overdueSort.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    completeBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Complete Call Palm Villas"]');
+    const rowContent = container.querySelector<HTMLButtonElement>('[data-testid="task-row-content"]');
+    expect(completeBtn?.disabled).toBe(true); // refreshing → locked
+    expect(rowContent?.disabled).toBe(true); // can't open edit on a stale row mid-refetch
+  });
+
+  it("a sort-only refetch (same scope) does NOT blank the page", () => {
+    let sortLoading = false;
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [makeTask()] : [],
+      loading: filters.section === "overdue" ? sortLoading : false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    renderPage();
+    expect(container.textContent).not.toContain("Loading tasks...");
+
+    // Overdue bucket refetches for a sort change (same assignee) — page must stay visible.
+    sortLoading = true;
+    const overdueSort = container.querySelector<HTMLSelectElement>('[data-sort-group="overdue"] select');
+    act(() => {
+      if (overdueSort) {
+        overdueSort.value = "priority:desc";
+        overdueSort.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    expect(container.textContent).not.toContain("Loading tasks...");
+    expect(container.querySelector('button[aria-label="Complete Call Palm Villas"]')).not.toBeNull();
+  });
+
+  it("changing a bucket's sort dropdown refetches that bucket server-side with the new sort", () => {
+    renderPage();
+
+    const overdueSort = container.querySelector<HTMLSelectElement>('[data-sort-group="overdue"] select');
+    expect(overdueSort).not.toBeNull();
+
+    mocks.useTasksMock.mockClear();
+    act(() => {
+      if (overdueSort) {
+        overdueSort.value = "priority:desc";
+        overdueSort.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    // Only the Overdue bucket switches sort; other buckets keep their own selection.
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", sortBy: "priority", sortDir: "desc" }));
+    expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "today", sortBy: "due_date", sortDir: "asc" }));
   });
 });

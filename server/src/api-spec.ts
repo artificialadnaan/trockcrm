@@ -241,8 +241,9 @@ export const apiSpec = {
           today: { type: "integer" },
           upcoming: { type: "integer" },
           completed: { type: "integer" },
+          completedThisWeek: { type: "integer", description: "Completed or dismissed in the last 7 days." },
         },
-        required: ["overdue", "today", "upcoming", "completed"],
+        required: ["overdue", "today", "upcoming", "completed", "completedThisWeek"],
       },
 
       Activity: {
@@ -2187,9 +2188,11 @@ export const apiSpec = {
           {
             name: "section",
             in: "query",
-            schema: { type: "string", enum: ["overdue", "today", "upcoming", "completed"] },
-            description: "Convenience filter — returns tasks bucketed by due date section.",
+            schema: { type: "string", enum: ["overdue", "today", "this_week", "later", "upcoming", "completed"] },
+            description: "Convenience filter — returns tasks bucketed by due date section. (`upcoming` is retained for back-compat; the Tasks page uses `this_week`/`later`.)",
           },
+          { name: "sortBy", in: "query", schema: { type: "string", enum: ["due_date", "priority", "assignee", "created_at", "completed_at"] }, description: "Per-bucket sort field; invalid values fall back to the section's default ordering." },
+          { name: "sortDir", in: "query", schema: { type: "string", enum: ["asc", "desc"] } },
           { $ref: "#/components/parameters/PageParam" },
           { $ref: "#/components/parameters/LimitParam" },
         ],

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
 
 export type TaskStatus =
@@ -176,15 +176,25 @@ export interface TaskCounts {
   today: number;
   upcoming: number;
   completed: number;
+  // Resolved (completed or dismissed) in the last 7 days — authoritative source for the
+  // "Completed this week" summary card (server-computed, not derived from the limited bucket).
+  completedThisWeek: number;
 }
 
+export type TaskSection = "overdue" | "today" | "this_week" | "later" | "upcoming" | "completed";
+export type TaskSortBy = "due_date" | "priority" | "assignee" | "created_at" | "completed_at";
+export type TaskSortDir = "asc" | "desc";
+
 export interface TaskFilters {
-  section?: "overdue" | "today" | "upcoming" | "completed";
+  section?: TaskSection;
   assignedTo?: string;
   status?: string;
   type?: string;
   dealId?: string;
   contactId?: string;
+  // Per-bucket sort wired through to the server so the FULL bucket sorts in the DB.
+  sortBy?: TaskSortBy;
+  sortDir?: TaskSortDir;
   page?: number;
   limit?: number;
 }
@@ -213,7 +223,26 @@ export function useTasks(filters: TaskFilters = {}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Last-write-wins: a scope/sort/filter change can leave an earlier request in flight; only the
+  // latest request may write results, so a slow earlier response (e.g. the previous assignee's) can't
+  // land and resurrect stale rows.
+  const requestIdRef = useRef(0);
+
+  // Drop stale rows the instant the SCOPE (assignedTo) changes — synchronously, before paint — so an
+  // in-flight refetch never shows the previous assignee's interactive rows (a stray complete/snooze
+  // on a task outside the newly selected filter). Same-scope changes (sort, search, page) keep the
+  // rows so re-sorting doesn't flicker. React's "adjust state during render" pattern; the ref guard
+  // makes it fire once per scope change. We ALSO invalidate the request token here so a previous-scope
+  // response that resolves before the passive refetch effect starts can't repopulate the cleared rows.
+  const scopeRef = useRef(filters.assignedTo);
+  if (scopeRef.current !== filters.assignedTo) {
+    scopeRef.current = filters.assignedTo;
+    setTasks([]);
+    requestIdRef.current++;
+  }
+
   const fetchTasks = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -224,6 +253,8 @@ export function useTasks(filters: TaskFilters = {}) {
       if (filters.type) params.set("type", filters.type);
       if (filters.dealId) params.set("dealId", filters.dealId);
       if (filters.contactId) params.set("contactId", filters.contactId);
+      if (filters.sortBy) params.set("sortBy", filters.sortBy);
+      if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
 
@@ -231,12 +262,14 @@ export function useTasks(filters: TaskFilters = {}) {
       const data = await api<{ tasks: Task[]; pagination: Pagination }>(
         `/tasks${qs ? `?${qs}` : ""}`
       );
+      if (requestId !== requestIdRef.current) return; // a newer request superseded this one
       setTasks(data.tasks);
       setPagination(data.pagination);
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load tasks");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [
     filters.section,
@@ -245,6 +278,8 @@ export function useTasks(filters: TaskFilters = {}) {
     filters.type,
     filters.dealId,
     filters.contactId,
+    filters.sortBy,
+    filters.sortDir,
     filters.page,
     filters.limit,
   ]);
@@ -290,18 +325,29 @@ export function useTask(taskId: string | undefined) {
 }
 
 export function useTaskCounts(userId?: string) {
-  const [counts, setCounts] = useState<TaskCounts>({ overdue: 0, today: 0, upcoming: 0, completed: 0 });
+  const [counts, setCounts] = useState<TaskCounts>({ overdue: 0, today: 0, upcoming: 0, completed: 0, completedThisWeek: 0 });
   const [loading, setLoading] = useState(true);
+  // The scope (userId) the loaded counts belong to; updated only when a response actually lands, so
+  // a scope change is detectable synchronously at render without an effect-timing race.
+  const [loadedUserId, setLoadedUserId] = useState<string | undefined>(undefined);
+  const loadedOnceRef = useRef(false);
+  const requestIdRef = useRef(0);
 
   const fetchCounts = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
     try {
       const qs = userId ? `?userId=${encodeURIComponent(userId)}` : "";
       const data = await api<{ counts: TaskCounts }>(`/tasks/counts${qs}`);
+      if (requestId !== requestIdRef.current) return; // superseded by a newer scope's request
       setCounts(data.counts);
+      setLoadedUserId(userId);
+      loadedOnceRef.current = true;
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       console.error("Failed to load task counts:", err);
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [userId]);
 
@@ -309,7 +355,11 @@ export function useTaskCounts(userId?: string) {
     fetchCounts();
   }, [fetchCounts]);
 
-  return { counts, loading, refetch: fetchCounts };
+  // The loaded counts belong to a different assignee than the active filter → an in-flight scope
+  // swap. Callers should not display these numbers (they're the previous assignee's).
+  const stale = loadedOnceRef.current && loadedUserId !== userId;
+
+  return { counts, loading, stale, refetch: fetchCounts };
 }
 
 export function useProjectTasks(projectId: string | undefined) {
