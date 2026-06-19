@@ -389,7 +389,7 @@ describe("PropertyListPage", () => {
     }
   });
 
-  describe("sortable headers (server-side sort over the full set, direct columns only)", () => {
+  describe("sortable headers (server-side sort over the full set — direct + folded aggregate columns)", () => {
     function headerButton(container: HTMLElement, label: string): HTMLButtonElement {
       const btn = Array.from(container.querySelectorAll("button")).find((b) =>
         (b.getAttribute("aria-label") ?? "").startsWith(`Sort by ${label}`)
@@ -448,18 +448,30 @@ describe("PropertyListPage", () => {
       }
     });
 
-    it("Engagement / Last touch stay non-sortable (no orderable backing)", async () => {
+    it("Engagement and Last touch are now sortable (folded server-side over the full set)", async () => {
       const { container, cleanup } = await renderPageDom();
       try {
+        // Engagement sorts by the active-deal count (numeric column → first click DESC).
+        await act(async () => {
+          headerButton(container, "Engagement").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "engagement", sortDir: "desc" })
+        );
+        // Last touch is a date column → first click DESC (most recent first).
+        await act(async () => {
+          headerButton(container, "Last touch").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "last_touch", sortDir: "desc" })
+        );
+        // Every aggregate + direct column header is now sortable.
         const labels = Array.from(container.querySelectorAll("button"))
           .map((b) => b.getAttribute("aria-label") ?? "")
           .filter((l) => l.startsWith("Sort by "));
-        expect(labels.some((l) => l.includes("Engagement"))).toBe(false);
-        expect(labels.some((l) => l.includes("Last touch"))).toBe(false);
-        // ...but the direct columns AND the folded Linked value ARE sortable.
-        expect(labels.some((l) => l.includes("Property"))).toBe(true);
-        expect(labels.some((l) => l.includes("Sq ft"))).toBe(true);
-        expect(labels.some((l) => l.includes("Linked value"))).toBe(true);
+        for (const col of ["Property", "Type", "Owner company", "Sq ft", "Engagement", "Linked value", "Last touch"]) {
+          expect(labels.some((l) => l.includes(col))).toBe(true);
+        }
       } finally {
         await cleanup();
       }

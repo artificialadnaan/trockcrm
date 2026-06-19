@@ -406,7 +406,8 @@ export async function listProperties(
 
   const where = and(...conditions);
 
-  const rows = await tenantDb
+  const needsAggregateJoin = filters.sortBy === "engagement" || filters.sortBy === "last_touch";
+  let rowsQuery = tenantDb
     .select({
       id: properties.id,
       companyId: properties.companyId,
@@ -434,8 +435,15 @@ export async function listProperties(
     .from(properties)
     .leftJoin(companies, eq(companies.id, properties.companyId))
     .leftJoin(linkedValues, eq(linkedValues.propertyId, properties.id))
-    .leftJoin(leadAgg, eq(leadAgg.propertyId, properties.id))
-    .leftJoin(dealAgg, eq(dealAgg.propertyId, properties.id))
+    .$dynamic();
+  // da/la are full-table aggregates that ONLY back the Engagement / Last touch sorts — skip the joins
+  // entirely on the common (name/type/company/sqft/linked_value) sorts so they don't pay for the scans.
+  if (needsAggregateJoin) {
+    rowsQuery = rowsQuery
+      .leftJoin(leadAgg, eq(leadAgg.propertyId, properties.id))
+      .leftJoin(dealAgg, eq(dealAgg.propertyId, properties.id));
+  }
+  const rows = await rowsQuery
     .where(where)
     // Server-side sort over the full filtered set; stable id tiebreak keeps OFFSET paging deterministic.
     .orderBy(...buildPropertySortOrder(filters.sortBy, filters.sortDir), asc(properties.id))

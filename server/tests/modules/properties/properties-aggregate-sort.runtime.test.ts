@@ -149,12 +149,22 @@ describe("listProperties — Engagement + Last touch folded sorts", () => {
     expect(names(sorted.properties).slice(0, 6)).toEqual([
       "Prop 10", "Prop 02", "Prop 12", "Prop 05", "Prop 03", "Prop 08",
     ]);
-    const times = sorted.properties.map((p: any) =>
-      p.lastActivityAt ? new Date(p.lastActivityAt).getTime() : null
-    );
+    const times = sorted.properties.map((p: any) => {
+      if (p.lastActivityAt == null) return null;
+      const t = new Date(p.lastActivityAt).getTime();
+      expect(Number.isFinite(t)).toBe(true); // a displayed last touch must parse to a real instant first
+      return t;
+    });
     expect(isDescNullsLast(times)).toBe(true); // sorted value == the displayed lastActivityAt, nulls last
     // The six properties with no activity anywhere sink to the bottom as nulls.
     expect(times.filter((t) => t == null)).toHaveLength(6);
+  });
+
+  it("LAST TOUCH desc is a FULL-set sort: a recent property outside the default window surfaces with limit 3", async () => {
+    // Prop 10 sits at name-position 10 (outside a 3-row default window) but has the most recent activity
+    // (property column 2026-06-20), so a full-set last_touch sort must still pull it to the top of page 1.
+    const top = await listProperties({ sortBy: "last_touch", sortDir: "desc", limit: 3 });
+    expect(names(top.properties)).toEqual(["Prop 10", "Prop 02", "Prop 12"]);
   });
 
   it("LAST TOUCH asc lists oldest→newest with no-activity (null) properties last (NULLS LAST both ways)", async () => {
