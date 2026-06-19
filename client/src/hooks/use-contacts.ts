@@ -53,6 +53,8 @@ export interface ContactFilters {
   // Summary-card drill-downs (driven by the ?card= URL param on the contacts page).
   isPrimary?: boolean;
   untouched?: boolean;
+  // Filter: only contacts with at least one active linked deal.
+  hasLinkedDeals?: boolean;
   sortBy?: string;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -103,6 +105,7 @@ export function useContacts(filters: ContactFilters = {}) {
       if (filters.hasOutreach === false) params.set("hasOutreach", "false");
       if (filters.isPrimary) params.set("isPrimary", "true");
       if (filters.untouched) params.set("untouched", "true");
+      if (filters.hasLinkedDeals) params.set("hasLinkedDeals", "true");
       if (filters.sortBy) params.set("sortBy", filters.sortBy);
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
@@ -139,6 +142,7 @@ export function useContacts(filters: ContactFilters = {}) {
     filters.hasOutreach,
     filters.isPrimary,
     filters.untouched,
+    filters.hasLinkedDeals,
     filters.sortBy,
     filters.sortDir,
     filters.page,

@@ -66,6 +66,8 @@ router.get("/", async (req, res, next) => {
       // Summary-card drill-downs (?card=primary / ?card=untouched on the contacts page).
       isPrimary: req.query.isPrimary === "true" ? true : undefined,
       untouched: req.query.untouched === "true" ? true : undefined,
+      // Linked-deals filter (only contacts with an active linked deal).
+      hasLinkedDeals: req.query.hasLinkedDeals === "true" ? true : undefined,
       sortBy: req.query.sortBy as any,
       sortDir: (req.query.sortDir === "asc" || req.query.sortDir === "desc" ? req.query.sortDir : undefined) as
         | "asc"

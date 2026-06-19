@@ -64,5 +64,9 @@ export const tasks = pgTable(
         sql`${table.originRule} IS NOT NULL AND ${table.dedupeKey} IS NOT NULL AND ${table.status} IN ('scheduled', 'pending', 'in_progress', 'waiting_on', 'blocked')`
       ),
     index("tasks_origin_rule_reason_code_idx").on(table.originRule, table.reasonCode),
+    // Touch index mirroring activities_contact_idx — makes the contacts last_touch_at sort's
+    // MAX(tasks.updated_at) subquery an Index Only Scan instead of a Seq Scan. Source-of-truth marker;
+    // migration 0166 builds it per-office as PARTIAL (WHERE contact_id IS NOT NULL) + updated_at DESC.
+    index("tasks_contact_updated_at_idx").on(table.contactId, table.updatedAt),
   ]
 );
