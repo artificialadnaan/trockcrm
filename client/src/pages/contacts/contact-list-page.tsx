@@ -167,13 +167,14 @@ export function ContactCard({
 const HEAD_CLASS = "text-[11px] font-black uppercase tracking-[0.16em] text-slate-500";
 
 // Sortable columns map to the contacts list API's sortBy values (server-side sort over the FULL filtered
-// set, not the visible page). Role / Quick actions / Linked-deals have no server sort field today and stay
-// non-sortable. The default server sort is updated_at (not a visible column), so no header is active until
-// the user clicks one.
+// set, not the visible page). Role / Quick actions have no server sort field today and stay non-sortable.
+// The default server sort is updated_at (not a visible column), so no header is active until the user
+// clicks one.
 const CONTACT_SORT_TYPES: Record<string, ColumnType> = {
   name: "text",
   company_name: "text",
   last_touch_at: "date",
+  linked_deals_count: "number",
 };
 
 export function ContactListPage() {
@@ -397,7 +398,14 @@ export function ContactListPage() {
                   />
                   <TableHead className={HEAD_CLASS}>Role</TableHead>
                   <TableHead className={HEAD_CLASS}>Quick actions</TableHead>
-                  <TableHead className={cn("text-right", HEAD_CLASS)}>Linked deals</TableHead>
+                  <SortableTableHead
+                    label="Linked deals"
+                    numeric
+                    className="text-right"
+                    buttonClassName={HEAD_CLASS}
+                    {...sortHeaderProps(sortState, "linked_deals_count")}
+                    onSort={() => handleSort("linked_deals_count")}
+                  />
                   <SortableTableHead
                     label="Last touch"
                     buttonClassName={HEAD_CLASS}
