@@ -160,7 +160,12 @@ router.post("/upload-url", async (req, res, next) => {
     const autoDetect = autoCategorize === true;
 
     if (!originalFilename || !mimeType || !fileSizeBytes || (!autoDetect && !category)) {
-      throw new AppError(400, "originalFilename, mimeType, fileSizeBytes, and category are required.");
+      throw new AppError(
+        400,
+        autoDetect
+          ? "originalFilename, mimeType, and fileSizeBytes are required."
+          : "originalFilename, mimeType, fileSizeBytes, and category are required."
+      );
     }
 
     if (!autoDetect && !FILE_CATEGORIES.includes(category)) {
@@ -222,7 +227,12 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
     const autoDetect = (req.headers["x-auto-categorize"] as string) === "true";
 
     if (!originalFilename || (!autoDetect && !category)) {
-      throw new AppError(400, "x-original-filename and x-file-category headers are required.");
+      throw new AppError(
+        400,
+        autoDetect
+          ? "x-original-filename header is required."
+          : "x-original-filename and x-file-category headers are required."
+      );
     }
 
     if (!autoDetect && !FILE_CATEGORIES.includes(category as any)) {

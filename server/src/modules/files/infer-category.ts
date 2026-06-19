@@ -104,7 +104,7 @@ export function inferFileCategory(input: InferFileCategoryInput): FileCategory {
   }
 
   // 3. The user's subcategory hint outranks the filename.
-  const fromSubcategory = matchKeyword((input.subcategory ?? "").toLowerCase());
+  const fromSubcategory = matchKeyword((input.subcategory ?? "").trim().toLowerCase());
   if (fromSubcategory) {
     return fromSubcategory;
   }
