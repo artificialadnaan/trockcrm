@@ -131,4 +131,8 @@ describe("parseArgs — dry-run by default (writes only on explicit --commit)", 
   it("both flags is rejected (ambiguous)", () => {
     expect(() => parseArgs(["--dry-run", "--commit"])).toThrow();
   });
+  it("rejects unknown flags so a typo can't fall through to a full-scope commit", () => {
+    expect(() => parseArgs(["--force"])).toThrow();
+    expect(() => parseArgs(["--commit", "--office=dallas"])).toThrow();
+  });
 });

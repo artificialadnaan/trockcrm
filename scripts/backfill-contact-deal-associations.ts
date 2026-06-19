@@ -56,6 +56,12 @@ export interface BackfillReport {
 }
 
 export function parseArgs(argv = process.argv.slice(2)): { mode: Mode } {
+  // Reject anything that isn't a known flag so a typo'd/ignored arg can't silently fall through to a
+  // full-scope --commit (e.g. `--commit --office=dallas` must error, not commit every office).
+  const unknown = argv.filter((a) => a !== "--dry-run" && a !== "--commit");
+  if (unknown.length > 0) {
+    throw new Error(`Unknown argument(s): ${unknown.join(", ")}. Pass only --dry-run or --commit.`);
+  }
   const hasDryRun = argv.includes("--dry-run");
   const hasCommit = argv.includes("--commit");
   if (hasDryRun && hasCommit) {
