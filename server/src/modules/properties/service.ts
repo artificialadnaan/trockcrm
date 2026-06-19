@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, ilike, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, ilike, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   companies,
@@ -17,6 +17,9 @@ export interface PropertyFilters {
   companyId?: string;
   type?: string;
   isActive?: boolean;
+  /** Inclusive lower/upper bounds on a property's folded Linked Value (sum of active linked deal value). */
+  minLinkedValue?: number;
+  maxLinkedValue?: number;
   sortBy?: string;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -30,11 +33,12 @@ function propertyOrderExpr(col: unknown, dir: "asc" | "desc") {
 
 /**
  * ORDER BY for the properties directory, applied over the FULL filtered set before LIMIT/OFFSET so the
- * sort is global, not just the visible page. Only directly-orderable columns are supported — Property
- * name, Type, Owner company, and Sq ft (COALESCE(roof_area, unit_count)). The aggregate columns
- * (Linked value, Engagement, Last touch) are computed in separate post-pagination sub-queries and are
- * intentionally NOT sortable (a deferred follow-up). No sortBy keeps the directory's natural multi-key
- * order (owner company → property name → address).
+ * sort is global, not just the visible page. Directly-orderable columns — Property name, Type, Owner
+ * company, Sq ft (COALESCE(roof_area, unit_count)) — plus Linked value, which is folded into the main
+ * query as the LEFT JOINed `dv.linked_value` derived column (so its ORDER BY also runs over the full set
+ * before LIMIT). The remaining aggregate columns (Engagement, Last touch) are still computed in
+ * post-pagination sub-queries and are intentionally NOT sortable (a deferred follow-up). No sortBy keeps
+ * the directory's natural multi-key order (owner company → property name → address).
  */
 export function buildPropertySortOrder(sortBy: string | undefined, sortDir: "asc" | "desc" = "asc"): SQL[] {
   switch (sortBy) {
@@ -49,6 +53,27 @@ export function buildPropertySortOrder(sortBy: string | undefined, sortDir: "asc
       return [propertyOrderExpr(companies.name, sortDir)];
     case "sqft":
       return [propertyOrderExpr(sql`COALESCE(${properties.roofArea}, ${properties.unitCount})`, sortDir)];
+    case "linked_value":
+      // Folded `dv.linked_value` (text) cast to numeric so the directory sorts by money value, not
+      // lexically; COALESCE(...,0) so properties with no active linked deal sort as $0, not NULL.
+      return [propertyOrderExpr(sql`COALESCE(dv.linked_value::numeric, 0)`, sortDir)];
+    case "engagement":
+      // Engagement is a status (won/active_deal/active_lead/none) derived from counts — per product it
+      // sorts by the active-deal count that drives it (folded `da.active_cnt`, identical to the displayed
+      // "Active deals" count). COALESCE(...,0) + NULLS LAST so zero-engagement properties sink to the bottom.
+      return [propertyOrderExpr(sql`COALESCE(da.active_cnt, 0)`, sortDir)];
+    case "last_touch":
+      // Folded Last touch = latest of the property's own last_activity_at and the MAX lead/deal activity
+      // (la/da derived tables) — mirrors buildPropertyLastActivityAt (combineLatestTimestamp) so the sort
+      // key equals the displayed value. NULLIF('-infinity') maps "no activity anywhere" to NULL → NULLS LAST.
+      return [propertyOrderExpr(
+        sql`NULLIF(GREATEST(
+          COALESCE(${properties.lastActivityAt}, '-infinity'::timestamptz),
+          COALESCE(la.last_activity, '-infinity'::timestamptz),
+          COALESCE(da.last_activity, '-infinity'::timestamptz)
+        ), '-infinity'::timestamptz)`,
+        sortDir
+      )];
     default:
       return [asc(companies.name), asc(properties.name), asc(properties.address)];
   }
@@ -300,6 +325,52 @@ export async function listProperties(
   const limit = filters.limit ?? 100;
   const offset = (page - 1) * limit;
 
+  // Linked Value is FOLDED into the main query as a 1:1 LEFT JOINed derived table (`dv`) — one
+  // GROUP BY property_id pass over active deals — so the WHERE (min/max range) and ORDER BY can reference
+  // it and operate over the FULL filtered set BEFORE LIMIT/OFFSET (not just the visible page). The SUM
+  // expression is byte-identical to the property-detail resolver below (and to the old per-page
+  // sub-query) so the folded value always equals the displayed value. A per-relation derived table (not a
+  // multi-relation join) keeps the 1:1 join from fanning out the property rows.
+  const linkedValues = tenantDb
+    .select({
+      propertyId: deals.propertyId,
+      linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
+        deals,
+        dealBestEstimateWithForecastSql(deals)
+      )}), 0)::text`.as("linked_value"),
+    })
+    .from(deals)
+    // Only active deals that are actually attached to a property: a NULL property_id can never match the
+    // 1:1 LEFT JOIN below, so excluding it here keeps those rows out of the GROUP BY scan on every request.
+    .where(and(eq(deals.isActive, true), isNotNull(deals.propertyId)))
+    .groupBy(deals.propertyId)
+    .as("dv");
+
+  // Per-property deal aggregate (1:1), folded so Engagement + Last touch sort over the FULL filtered set
+  // before LIMIT. active_cnt = active, not-on-hold deals — the same input the engagement classifier and
+  // the displayed "Active deals" count use, so the sorted value reconciles with the cell. last_activity =
+  // MAX over ALL the property's deals (matches the displayed last-touch deal source).
+  const dealAgg = tenantDb
+    .select({
+      propertyId: deals.propertyId,
+      lastActivity: sql<string | null>`MAX(${deals.lastActivityAt})`.as("last_activity"),
+      activeCnt: sql<number>`COUNT(*) FILTER (WHERE ${deals.isActive} AND COALESCE(${deals.onHold}, false) = false)`.as("active_cnt"),
+    })
+    .from(deals)
+    .where(isNotNull(deals.propertyId))
+    .groupBy(deals.propertyId)
+    .as("da");
+  // Per-property lead aggregate (1:1): MAX activity feeds the folded Last touch GREATEST.
+  const leadAgg = tenantDb
+    .select({
+      propertyId: leads.propertyId,
+      lastActivity: sql<string | null>`MAX(${leads.lastActivityAt})`.as("last_activity"),
+    })
+    .from(leads)
+    .where(isNotNull(leads.propertyId))
+    .groupBy(leads.propertyId)
+    .as("la");
+
   const conditions = [eq(properties.isActive, filters.isActive ?? true)];
 
   if (filters.companyId) {
@@ -322,9 +393,24 @@ export async function listProperties(
     );
   }
 
+  // Min/max Linked Value range, AND-composed with the Type filter + search above. Bounds are bind
+  // params (never interpolated). `!= null` so a 0 lower bound is honoured (>= 0), and the COALESCE
+  // matches the sort so properties with no active linked deal count as $0.
+  const hasLinkedValueFilter = filters.minLinkedValue != null || filters.maxLinkedValue != null;
+  if (filters.minLinkedValue != null) {
+    conditions.push(sql`COALESCE(dv.linked_value::numeric, 0) >= ${filters.minLinkedValue}`);
+  }
+  if (filters.maxLinkedValue != null) {
+    conditions.push(sql`COALESCE(dv.linked_value::numeric, 0) <= ${filters.maxLinkedValue}`);
+  }
+
   const where = and(...conditions);
 
-  const rows = await tenantDb
+  // Engagement sorts only need the deal aggregate (da.active_cnt); Last touch needs BOTH the deal and lead
+  // aggregates (GREATEST over property/lead/deal activity). Join only what the chosen sort actually reads.
+  const needsDealAgg = filters.sortBy === "engagement" || filters.sortBy === "last_touch";
+  const needsLeadAgg = filters.sortBy === "last_touch";
+  let rowsQuery = tenantDb
     .select({
       id: properties.id,
       companyId: properties.companyId,
@@ -346,15 +432,35 @@ export async function listProperties(
       createdAt: properties.createdAt,
       updatedAt: properties.updatedAt,
       companyName: companies.name,
+      // Folded Linked Value (text); LEFT JOIN leaves it NULL for properties with no active deal → '0'.
+      linkedValue: sql<string>`COALESCE(dv.linked_value, '0')`,
     })
     .from(properties)
     .leftJoin(companies, eq(companies.id, properties.companyId))
+    .leftJoin(linkedValues, eq(linkedValues.propertyId, properties.id))
+    .$dynamic();
+  // Full-table aggregates back ONLY the Engagement / Last touch sorts, so common name/type/company/sqft/
+  // linked_value sorts skip them. Engagement reads just da.active_cnt; only Last touch also needs la.
+  if (needsDealAgg) {
+    rowsQuery = rowsQuery.leftJoin(dealAgg, eq(dealAgg.propertyId, properties.id));
+  }
+  if (needsLeadAgg) {
+    rowsQuery = rowsQuery.leftJoin(leadAgg, eq(leadAgg.propertyId, properties.id));
+  }
+  const rows = await rowsQuery
     .where(where)
     // Server-side sort over the full filtered set; stable id tiebreak keeps OFFSET paging deterministic.
     .orderBy(...buildPropertySortOrder(filters.sortBy, filters.sortDir), asc(properties.id))
     .limit(limit)
     .offset(offset);
-  const totalResult = await tenantDb.select({ count: count() }).from(properties).where(where);
+  // The count must join `dv` only when the WHERE actually references it (a linked-value range filter is
+  // set) so the filtered total stays correct; the 1:1 join never changes the property row count, so
+  // total == COUNT(filtered properties). When unfiltered we skip the join to avoid a redundant aggregate.
+  const totalBase = tenantDb.select({ count: count() }).from(properties);
+  const totalResult = await (hasLinkedValueFilter
+    ? totalBase.leftJoin(linkedValues, eq(linkedValues.propertyId, properties.id))
+    : totalBase
+  ).where(where);
 
   const propertyIds = rows.map((row) => row.id);
   if (propertyIds.length === 0) {
@@ -402,17 +508,9 @@ export async function listProperties(
     .from(deals)
     .where(inArray(deals.propertyId, propertyIds))
     .groupBy(deals.propertyId);
-  const activeDealValues = await tenantDb
-    .select({
-      propertyId: deals.propertyId,
-      linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
-        deals,
-        dealBestEstimateWithForecastSql(deals)
-      )}), 0)::text`,
-    })
-    .from(deals)
-    .where(and(inArray(deals.propertyId, propertyIds), eq(deals.isActive, true)))
-    .groupBy(deals.propertyId);
+  // Linked Value is no longer fetched here — it is FOLDED into the main row query (`dv` LEFT JOIN above)
+  // via the byte-identical resolver SUM, so it can drive the WHERE range filter + ORDER BY over the full
+  // set. Each row already carries `linkedValue`.
   const photoCounts = await tenantDb.execute(sql`
       SELECT linked.property_id, COUNT(DISTINCT linked.file_id)::int AS photos_count
       FROM (
@@ -439,7 +537,6 @@ export async function listProperties(
   const convertedCountMap = new Map(convertedCounts.map((row) => [row.propertyId, coerceCount(row.count)]));
   const leadActivityMap = new Map(leadActivity.map((row) => [row.propertyId, coerceTimestamp(row.lastActivityAt)]));
   const dealActivityMap = new Map(dealActivity.map((row) => [row.propertyId, coerceTimestamp(row.lastActivityAt)]));
-  const linkedValueMap = new Map(activeDealValues.map((row) => [row.propertyId, toNumericString(row.linkedValue)]));
   const photoCountRows = (photoCounts as any).rows ?? photoCounts;
   const photosCountMap = new Map(photoCountRows.map((row: any) => [row.property_id, Number(row.photos_count ?? 0)]));
 
@@ -460,8 +557,9 @@ export async function listProperties(
         leadCount: leadCountMap.get(row.id) ?? 0,
         convertedDealCount: convertedCountMap.get(row.id) ?? 0,
       }),
-      linkedValue: linkedValueMap.get(row.id) ?? "0",
-      activePipelineValue: linkedValueMap.get(row.id) ?? "0",
+      // Folded in the main query (`dv` LEFT JOIN); COALESCE already floors NULL → '0', normalize defensively.
+      linkedValue: toNumericString(row.linkedValue),
+      activePipelineValue: toNumericString(row.linkedValue),
       photosCount: photosCountMap.get(row.id) ?? 0,
     })),
     page,

@@ -19,14 +19,19 @@ import { cn } from "@/lib/utils";
 // Header typography for the property table.
 const PROPERTY_HEAD_CLASS = "text-[11px] font-black uppercase tracking-[0.16em] text-slate-500";
 
-// Sortable DIRECT columns (key == the properties list API sortBy value), ordered server-side over the
-// full filtered set. The aggregate columns (Engagement, Linked value, Last touch) are computed in
-// post-pagination sub-queries and are intentionally non-sortable for now.
+// Sortable columns (key == the properties list API sortBy value), ordered server-side over the FULL
+// filtered set. The aggregate columns are folded into the main list query as 1:1 LEFT JOINs (dv =
+// linked value, da = deal aggregate, la = lead aggregate) so they sort over the whole set before the
+// 250-row window: linked_value → dv; engagement → da.active_cnt (active-deal count, numeric desc-first);
+// last_touch → GREATEST(property/lead/deal last activity) (date desc-first). sqft is a direct column.
 const PROPERTY_SORT_COLUMNS: ReadonlyArray<SortStateColumn> = [
   { key: "name", type: "text" },
   { key: "type", type: "text" },
   { key: "company", type: "text" },
   { key: "sqft", type: "number" },
+  { key: "linked_value", type: "number" },
+  { key: "engagement", type: "number" },
+  { key: "last_touch", type: "date" },
 ];
 
 const TYPE_LABELS: Record<string, string> = {
@@ -166,6 +171,10 @@ export function PropertyListPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [type, setType] = useState<(typeof TYPE_OPTIONS)[number]["value"]>("all");
+  // Linked Value min/max range — raw text inputs parsed to numeric bounds passed to the server, which
+  // filters over the FULL set (dv.linked_value lives in the main query now) before the 250-row window.
+  const [minLinkedValueInput, setMinLinkedValueInput] = useState("");
+  const [maxLinkedValueInput, setMaxLinkedValueInput] = useState("");
   const [page, setPage] = useState(1);
   const pageSize = 50;
   // useSortState is the sort source of truth (key == API sortBy). The server applies the ORDER BY over the
@@ -179,11 +188,23 @@ export function PropertyListPage() {
     toggle(key);
     setPage(1);
   };
+  // A money bound is sent only when it parses to a finite, non-negative number; blank → no bound. The
+  // bounds AND-compose server-side with the Type filter + search (and with each other → a closed range).
+  const parseLinkedValueBound = (raw: string): number | undefined => {
+    const trimmed = raw.trim();
+    if (trimmed === "") return undefined;
+    const value = Number(trimmed);
+    return Number.isFinite(value) && value >= 0 ? value : undefined;
+  };
+  const minLinkedValue = parseLinkedValueBound(minLinkedValueInput);
+  const maxLinkedValue = parseLinkedValueBound(maxLinkedValueInput);
   const { properties, loading, error } = useProperties({
     search: search || undefined,
     type: type === "all" ? undefined : type,
     sortBy: sortState?.key,
     sortDir: sortState?.dir,
+    minLinkedValue,
+    maxLinkedValue,
     limit: 250,
   });
 
@@ -340,6 +361,38 @@ export function PropertyListPage() {
                 ariaLabel="Property type filter"
                 size="touch"
               />
+              {/* Linked Value min/max range — composes (AND) with the search + Type filter, server-side
+                  over the full set. inputMode=numeric for the mobile keypad; non-negative only. */}
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-[0.12em] text-slate-400">Linked $</span>
+                <Input
+                  type="number"
+                  min={0}
+                  inputMode="numeric"
+                  value={minLinkedValueInput}
+                  onChange={(event) => {
+                    setMinLinkedValueInput(event.target.value);
+                    setPage(1);
+                  }}
+                  placeholder="Min"
+                  aria-label="Minimum linked value"
+                  className="h-9 w-24 border-slate-200"
+                />
+                <span className="text-slate-400">–</span>
+                <Input
+                  type="number"
+                  min={0}
+                  inputMode="numeric"
+                  value={maxLinkedValueInput}
+                  onChange={(event) => {
+                    setMaxLinkedValueInput(event.target.value);
+                    setPage(1);
+                  }}
+                  placeholder="Max"
+                  aria-label="Maximum linked value"
+                  className="h-9 w-24 border-slate-200"
+                />
+              </div>
             </div>
             <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-slate-500">
               {loading ? "Loading properties" : `${filteredProperties.length} results`}
@@ -394,9 +447,26 @@ export function PropertyListPage() {
                     {...getHeaderProps("sqft")}
                     onSort={() => handleSort("sqft")}
                   />
-                  <TableHead className={PROPERTY_HEAD_CLASS}>Engagement</TableHead>
-                  <TableHead className={cn("text-right", PROPERTY_HEAD_CLASS)}>Linked value</TableHead>
-                  <TableHead className={PROPERTY_HEAD_CLASS}>Last touch</TableHead>
+                  <SortableTableHead
+                    label="Engagement"
+                    buttonClassName={PROPERTY_HEAD_CLASS}
+                    {...getHeaderProps("engagement")}
+                    onSort={() => handleSort("engagement")}
+                  />
+                  <SortableTableHead
+                    label="Linked value"
+                    numeric
+                    className="text-right"
+                    buttonClassName={PROPERTY_HEAD_CLASS}
+                    {...getHeaderProps("linked_value")}
+                    onSort={() => handleSort("linked_value")}
+                  />
+                  <SortableTableHead
+                    label="Last touch"
+                    buttonClassName={PROPERTY_HEAD_CLASS}
+                    {...getHeaderProps("last_touch")}
+                    onSort={() => handleSort("last_touch")}
+                  />
                   <TableHead className="w-10" />
                 </TableRow>
               </TableHeader>

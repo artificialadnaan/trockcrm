@@ -20,5 +20,9 @@ export default defineConfig({
     maxWorkers: 4,
     minWorkers: 1,
     testTimeout: 15_000,
+    // PGlite-backed *.runtime.test.* suites boot an in-process Postgres and seed fixtures in beforeAll,
+    // which can exceed Vitest's 10s default hook timeout under normal startup latency (the seed hook is
+    // NOT covered by testTimeout). Give hooks headroom so the default test command never flakes/skips.
+    hookTimeout: 30_000,
   },
 });

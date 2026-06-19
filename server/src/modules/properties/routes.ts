@@ -4,18 +4,22 @@ import { requireAdmin } from "../../middleware/rbac.js";
 import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-delete-audit.js";
 import { redactDealList, shouldIncludeHubspotId } from "../deals/redact.js";
 import { createProperty, deleteProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
+import { parseMoneyBound } from "./query-params.js";
 
 const router = Router();
 
 router.get("/", async (req, res, next) => {
   try {
-    const { search, companyId, type, sortBy, sortDir, page, limit, isActive } = req.query as Record<string, string>;
+    const { search, companyId, type, sortBy, sortDir, page, limit, isActive, minLinkedValue, maxLinkedValue } =
+      req.query as Record<string, string>;
     const result = await listProperties(req.tenantDb!, {
       search,
       companyId,
       type,
       sortBy,
       sortDir: sortDir === "asc" ? "asc" : sortDir === "desc" ? "desc" : undefined,
+      minLinkedValue: parseMoneyBound(minLinkedValue),
+      maxLinkedValue: parseMoneyBound(maxLinkedValue),
       page: page ? parseInt(page, 10) : 1,
       limit: limit ? parseInt(limit, 10) : 100,
       isActive: isActive === "false" ? false : true,
