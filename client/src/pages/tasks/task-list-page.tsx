@@ -143,10 +143,14 @@ function stopRowKeyDownPropagation(event: React.KeyboardEvent) {
   }
 }
 
-function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
+function TaskRow({ task, onUpdate, refreshing = false }: { task: Task; onUpdate: () => void; refreshing?: boolean }) {
   const navigate = useNavigate();
   const [editOpen, setEditOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // While the bucket is refetching (e.g. right after this row's own complete/snooze), these rows are
+  // stale until fresh data lands — lock their mutating actions so a just-resolved row can't be
+  // re-acted on. The edit dialog, once open, stays open (its own submit is independently guarded).
+  const locked = busy || refreshing;
   const isDone = isTerminalTaskStatus(task.status);
   const Icon = TYPE_ICONS[task.type] ?? MoreHorizontal;
   const projectContext = getTaskProjectContext(task);
@@ -189,7 +193,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
   };
 
   const openEdit = () => {
-    if (isDone) return;
+    if (isDone || refreshing) return;
     setEditOpen(true);
   };
 
@@ -203,7 +207,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
       >
         <button
           type="button"
-          disabled={busy || isDone}
+          disabled={locked || isDone}
           onClick={complete}
           onKeyDown={stopRowKeyDownPropagation}
           aria-label={`Complete ${taskTitle}`}
@@ -218,7 +222,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
         <button
           type="button"
           data-testid="task-row-content"
-          disabled={isDone}
+          disabled={isDone || refreshing}
           onClick={openEdit}
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") {
@@ -270,7 +274,7 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
           {!isDone ? (
             <button
               type="button"
-              disabled={busy}
+              disabled={locked}
               onClick={snooze}
               onKeyDown={stopRowKeyDownPropagation}
               className="flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-amber-50 hover:text-amber-600"
@@ -390,7 +394,7 @@ function TaskGroup({
       {open ? (
         <div>
           {tasks.length > 0 ? (
-            tasks.map((task) => <TaskRow key={task.id} task={task} onUpdate={onUpdate} />)
+            tasks.map((task) => <TaskRow key={task.id} task={task} onUpdate={onUpdate} refreshing={loading} />)
           ) : (
             <div className="p-8 text-center text-sm font-semibold text-slate-500">
               {loading ? "Loading…" : "No tasks in this group."}

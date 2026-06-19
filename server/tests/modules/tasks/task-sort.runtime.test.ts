@@ -33,6 +33,7 @@ const T = {
   l2: uid("6"), // due NULL + scheduled_for NULL (fully undated), high, Bravo, pending
   s1: uid("7"), // scheduled status, due NULL, scheduled_for +20d (latest), Alpha
   s2: uid("10"), // scheduled status, due NULL, scheduled_for +2d (soonest of all later rows), Alpha
+  s3: uid("14"), // scheduled status WITH a stray due_date (+1d) but scheduled_for +15d → must sort by +15d, Alpha
   // other buckets
   o1: uid("8"), // overdue (due -2), pending
   d1: uid("9"), // today (due today), pending
@@ -80,6 +81,7 @@ beforeAll(async () => {
       ('${T.l2}','L2','manual','high',  'pending','${U_BRAVO}',  NULL,                   NULL, NULL, NOW() - INTERVAL '4 days'),
       ('${T.s1}','S1','manual','normal','scheduled','${U_ALPHA}',NULL, NOW() + INTERVAL '20 days', NULL, NOW() - INTERVAL '4 days'),
       ('${T.s2}','S2','manual','normal','scheduled','${U_ALPHA}',NULL, NOW() + INTERVAL '2 days',  NULL, NOW() - INTERVAL '4 days'),
+      ('${T.s3}','S3','manual','normal','scheduled','${U_ALPHA}','${addDays(today, 1)}', NOW() + INTERVAL '15 days', NULL, NOW() - INTERVAL '4 days'),
       ('${T.o1}','O1','manual','normal','pending','${U_ALPHA}',  '${addDays(today, -2)}',NULL, NULL, NOW() - INTERVAL '4 days'),
       ('${T.d1}','D1','manual','normal','pending','${U_ALPHA}',  '${today}',             NULL, NULL, NOW() - INTERVAL '4 days'),
       ('${T.c1}','C1','manual','normal','completed','${U_ALPHA}',NULL, NULL, NOW() - INTERVAL '1 days',  NOW() - INTERVAL '8 days'),
@@ -118,15 +120,23 @@ describe("tasks per-bucket sort — server-side ordering over the full bucket", 
     expect(ids(result)).toEqual([T.w3, T.w2, T.w1, T.w4]); // 1d, 2d, 3d, 5d ago
   });
 
-  it("Later default sorts by effective date (due_date ?? scheduled_for), interleaving scheduled, undated last", async () => {
+  it("Later default sorts by effective date (status-aware), interleaving scheduled, undated last", async () => {
     const result = await getTasks(tdb, { section: "later", sortBy: "due_date", sortDir: "asc" }, "director", "dir");
-    // effective: s2 (+2d sched) < l1 (+10d due) < s1 (+20d sched) < l2 (no due/sched → NULLS LAST)
-    expect(ids(result)).toEqual([T.s2, T.l1, T.s1, T.l2]);
+    // effective: s2 (sched +2) < l1 (due +10) < s3 (sched +15) < s1 (sched +20) < l2 (NULLS LAST)
+    expect(ids(result)).toEqual([T.s2, T.l1, T.s3, T.s1, T.l2]);
   });
 
   it("Later effective-date desc keeps the fully-undated row last (NULLS LAST)", async () => {
     const result = await getTasks(tdb, { section: "later", sortBy: "due_date", sortDir: "desc" }, "director", "dir");
-    expect(ids(result)).toEqual([T.s1, T.l1, T.s2, T.l2]);
+    expect(ids(result)).toEqual([T.s1, T.s3, T.l1, T.s2, T.l2]);
+  });
+
+  it("a scheduled task with a stray due_date still sorts by scheduled_for in Later (status-aware effective date)", async () => {
+    const result = await getTasks(tdb, { section: "later", sortBy: "due_date", sortDir: "asc" }, "director", "dir");
+    // s3 has due_date today+1 but is scheduled for +15d: it must land at the +15 slot (index 2), not
+    // first by its due date. Proves COALESCE doesn't naively take due_date for scheduled rows.
+    expect(ids(result).indexOf(T.s3)).toBe(2);
+    expect(ids(result)[0]).toBe(T.s2); // soonest scheduled (+2) stays first, not s3
   });
 
   it("a row limit on Later keeps the soonest SCHEDULED task (interleaved by date, not truncated under dated rows)", async () => {
@@ -150,7 +160,7 @@ describe("tasks section membership — sort changes ORDER only, never WHICH task
 
   it("later = far-future/undated open work UNION scheduled (the old client-assembled union)", async () => {
     const result = await getTasks(tdb, { section: "later", sortBy: "due_date", sortDir: "asc" }, "director", "dir");
-    expect(ids(result).sort()).toEqual([T.l1, T.l2, T.s1, T.s2].sort()); // includes scheduled tasks; excludes this_week
+    expect(ids(result).sort()).toEqual([T.l1, T.l2, T.s1, T.s2, T.s3].sort()); // includes scheduled tasks; excludes this_week
   });
 
   it("overdue and today buckets are unchanged by the restructure", async () => {
@@ -169,9 +179,9 @@ describe("tasks section membership — sort changes ORDER only, never WHICH task
     }
     // No id appears twice across the active buckets…
     expect(new Set(collected).size).toBe(collected.length);
-    // …and every open/scheduled task is covered exactly once (w1-4, l1-2, s1-2, o1, d1 = 10).
+    // …and every open/scheduled task is covered exactly once (w1-4, l1-2, s1-3, o1, d1 = 11).
     expect(collected.sort()).toEqual(
-      [T.w1, T.w2, T.w3, T.w4, T.l1, T.l2, T.s1, T.s2, T.o1, T.d1].sort()
+      [T.w1, T.w2, T.w3, T.w4, T.l1, T.l2, T.s1, T.s2, T.s3, T.o1, T.d1].sort()
     );
   });
 });

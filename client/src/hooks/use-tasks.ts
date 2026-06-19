@@ -223,21 +223,23 @@ export function useTasks(filters: TaskFilters = {}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Last-write-wins: a scope/sort/filter change can leave an earlier request in flight; only the
+  // latest request may write results, so a slow earlier response (e.g. the previous assignee's) can't
+  // land and resurrect stale rows.
+  const requestIdRef = useRef(0);
+
   // Drop stale rows the instant the SCOPE (assignedTo) changes — synchronously, before paint — so an
   // in-flight refetch never shows the previous assignee's interactive rows (a stray complete/snooze
   // on a task outside the newly selected filter). Same-scope changes (sort, search, page) keep the
   // rows so re-sorting doesn't flicker. React's "adjust state during render" pattern; the ref guard
-  // makes it fire once per scope change, not every render.
+  // makes it fire once per scope change. We ALSO invalidate the request token here so a previous-scope
+  // response that resolves before the passive refetch effect starts can't repopulate the cleared rows.
   const scopeRef = useRef(filters.assignedTo);
   if (scopeRef.current !== filters.assignedTo) {
     scopeRef.current = filters.assignedTo;
     setTasks([]);
+    requestIdRef.current++;
   }
-
-  // Last-write-wins: a scope/sort/filter change can leave an earlier request in flight; only the
-  // latest request may write results, so a slow earlier response (e.g. the previous assignee's) can't
-  // land after the synchronous scope-clear and resurrect stale rows.
-  const requestIdRef = useRef(0);
 
   const fetchTasks = useCallback(async () => {
     const requestId = ++requestIdRef.current;
@@ -333,6 +335,7 @@ export function useTaskCounts(userId?: string) {
 
   const fetchCounts = useCallback(async () => {
     const requestId = ++requestIdRef.current;
+    setLoading(true);
     try {
       const qs = userId ? `?userId=${encodeURIComponent(userId)}` : "";
       const data = await api<{ counts: TaskCounts }>(`/tasks/counts${qs}`);

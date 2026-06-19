@@ -311,12 +311,15 @@ export function buildTaskSortOrder(sortBy: TaskSortBy, sortDir: TaskSortDir = "a
       return [sortDir === "asc" ? sql`${tasks.completedAt} ASC NULLS LAST` : sql`${tasks.completedAt} DESC NULLS LAST`, tiebreak];
     case "due_date":
     default: {
-      // Order by EFFECTIVE date = due_date, falling back to scheduled_for. Scheduled tasks (null
-      // due_date, real scheduled_for) only land in the "Later" bucket; COALESCE interleaves them by
-      // their scheduled date instead of sinking them all to NULLS LAST — so they keep a meaningful
-      // order AND a row limit on Later can't categorically truncate them below far-future dated rows.
-      // Everywhere else (no scheduled tasks, non-null due_date) COALESCE === due_date → no change.
-      const effectiveDate = sql`COALESCE(${tasks.dueDate}, ${tasks.scheduledFor})`;
+      // Order by a status-aware EFFECTIVE date: scheduled tasks by scheduled_for (their surfacing
+      // time — even if the edit/PATCH flow has stamped a stray due_date on them), everything else by
+      // due_date. This interleaves the Later bucket's scheduled follow-ups by their real date instead
+      // of sinking them to NULLS LAST, so a row limit can't categorically truncate them below
+      // far-future dated rows. Elsewhere (no scheduled rows, non-null due_date) it === due_date.
+      const effectiveDate = sql`CASE
+        WHEN ${tasks.status} = 'scheduled' THEN COALESCE(${tasks.scheduledFor}, ${tasks.dueDate})
+        ELSE COALESCE(${tasks.dueDate}, ${tasks.scheduledFor})
+      END`;
       return sortDir === "asc"
         ? [sql`${effectiveDate} ASC NULLS LAST`, tiebreak]
         : [sql`${effectiveDate} DESC NULLS LAST`, tiebreak];

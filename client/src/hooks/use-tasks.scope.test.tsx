@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const apiMock = vi.fn();
 vi.mock("@/lib/api", () => ({ api: (...args: unknown[]) => apiMock(...args) }));
 
-import { useTasks, type TaskFilters } from "./use-tasks";
+import { useTasks, useTaskCounts, type TaskFilters } from "./use-tasks";
 
 /**
  * Gate-proof for the stale-row guard (Codex #773): when the SCOPE (assignedTo) changes, useTasks must
@@ -90,11 +90,15 @@ describe("useTasks scope guard", () => {
       root?.render(<Harness filters={{ section: "overdue", assignedTo: "B" }} />);
     });
 
-    await act(async () => { dB.resolve(resp(["b1"])); }); // B settles first
-    expect(out()?.textContent).toBe("b1");
+    // The OLD A request resolves FIRST — before B even settles. The scope change invalidated the
+    // request token synchronously, so A must be dropped and the cleared rows must stay empty (this
+    // covers the window before B's passive fetch effect has run).
+    await act(async () => { dA.resolve(resp(["a1", "a2"])); });
+    expect(out()?.textContent).toBe("");
 
-    await act(async () => { dA.resolve(resp(["a1", "a2"])); }); // the OLD A response arrives LATE
-    expect(out()?.textContent).toBe("b1"); // …and is dropped — B's rows are not clobbered
+    // Then B settles and its rows show — never clobbered by the stale A response.
+    await act(async () => { dB.resolve(resp(["b1"])); });
+    expect(out()?.textContent).toBe("b1");
   });
 
   it("keeps rows during a same-scope (sort) change so re-sorting doesn't flicker", async () => {
@@ -112,5 +116,57 @@ describe("useTasks scope guard", () => {
       root?.render(<Harness filters={{ section: "overdue", assignedTo: "A", sortBy: "priority", sortDir: "desc" }} />);
     });
     expect(out()?.textContent).toBe("a1,a2");
+  });
+});
+
+function CountsHarness({ userId }: { userId?: string }) {
+  const { counts, loading, stale } = useTaskCounts(userId);
+  return (
+    <div data-testid="out" data-loading={String(loading)} data-stale={String(stale)}>
+      {counts.overdue}
+    </div>
+  );
+}
+
+describe("useTaskCounts scope guard", () => {
+  let container: HTMLDivElement;
+  let root: Root | null;
+
+  const out = () => container.querySelector('[data-testid="out"]');
+  const flush = async () => { await act(async () => {}); };
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    document.body.innerHTML = "";
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = null;
+    apiMock.mockReset();
+  });
+
+  afterEach(() => {
+    if (root) act(() => root?.unmount());
+    root = null;
+    container.remove();
+  });
+
+  it("marks counts stale + loading while a scope (userId) change is in flight, not before", async () => {
+    apiMock.mockResolvedValueOnce({ counts: { overdue: 1, today: 0, upcoming: 0, completed: 0, completedThisWeek: 0 } });
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<CountsHarness userId={undefined} />);
+    });
+    await flush();
+    expect(out()?.getAttribute("data-stale")).toBe("false"); // settled for the "all" scope
+    expect(out()?.getAttribute("data-loading")).toBe("false");
+    expect(out()?.textContent).toBe("1");
+
+    // Switch to a specific assignee; that request stays in flight.
+    apiMock.mockReturnValueOnce(new Promise(() => {}));
+    await act(async () => {
+      root?.render(<CountsHarness userId="rep-2" />);
+    });
+    expect(out()?.getAttribute("data-stale")).toBe("true"); // loaded counts belong to a different scope
+    expect(out()?.getAttribute("data-loading")).toBe("true"); // fetchCounts sets loading on refetch
   });
 });

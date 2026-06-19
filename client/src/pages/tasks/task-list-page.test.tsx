@@ -588,6 +588,35 @@ describe("TaskListPage project context", () => {
     expect(mocks.useTasksMock).toHaveBeenCalledWith(expect.objectContaining({ section: "overdue", assignedTo: "rep-2" }));
   });
 
+  it("disables a bucket's row actions while it is refetching (no acting on stale/just-mutated rows)", () => {
+    let overdueLoading = false;
+    mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
+      tasks: filters.section === "overdue" ? [makeTask()] : [],
+      loading: filters.section === "overdue" ? overdueLoading : false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+
+    renderPage();
+    let completeBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Complete Call Palm Villas"]');
+    expect(completeBtn?.disabled).toBe(false); // settled → actionable
+
+    // Bucket begins refetching (e.g. right after a complete/snooze, or a sort change).
+    overdueLoading = true;
+    const overdueSort = container.querySelector<HTMLSelectElement>('[data-sort-group="overdue"] select');
+    act(() => {
+      if (overdueSort) {
+        overdueSort.value = "priority:desc";
+        overdueSort.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+
+    completeBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Complete Call Palm Villas"]');
+    const rowContent = container.querySelector<HTMLButtonElement>('[data-testid="task-row-content"]');
+    expect(completeBtn?.disabled).toBe(true); // refreshing → locked
+    expect(rowContent?.disabled).toBe(true); // can't open edit on a stale row mid-refetch
+  });
+
   it("a sort-only refetch (same scope) does NOT blank the page", () => {
     let sortLoading = false;
     mocks.useTasksMock.mockImplementation((filters: { section?: string }) => ({
