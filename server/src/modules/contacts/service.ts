@@ -31,7 +31,7 @@ export interface ContactFilters {
   untouched?: boolean; // last touch is null or > 30 days ago
   hasLinkedDeals?: boolean; // has at least one ACTIVE linked deal (contact_deal_associations -> active deal)
   ownerUserId?: string;
-  sortBy?: "name" | "company_name" | "created_at" | "updated_at" | "last_contacted_at" | "touchpoint_count" | "last_touch_at";
+  sortBy?: "name" | "company_name" | "created_at" | "updated_at" | "last_contacted_at" | "touchpoint_count" | "last_touch_at" | "linked_deals_count";
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
@@ -200,6 +200,13 @@ export function buildContactSortOrder(sortBy: ContactFilters["sortBy"], sortDir:
   if (sortBy === "last_touch_at") {
     const lastTouchAt = buildContactLastTouchAtSql();
     return sortDir === "asc" ? asc(lastTouchAt) : sql`${lastTouchAt} DESC NULLS LAST`;
+  }
+
+  if (sortBy === "linked_deals_count") {
+    // Sort key IS buildContactLinkedDealsCountSql — the SAME COUNT subquery rendered for the displayed
+    // "Linked deals" count — so the sort key is byte-identical to the displayed value (no drift).
+    const linkedDeals = buildContactLinkedDealsCountSql();
+    return sortDir === "asc" ? sql`${linkedDeals} ASC NULLS LAST` : sql`${linkedDeals} DESC NULLS LAST`;
   }
 
   const sortColumn = (() => {
