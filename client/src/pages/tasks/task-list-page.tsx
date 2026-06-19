@@ -472,13 +472,15 @@ function TaskListPageContent({ role }: { role: string }) {
   const laterSort = parseSortValue(sortByGroup.later);
   const completedSort = parseSortValue(sortByGroup.completed);
 
-  const { counts, loading: countsLoading, refetch: refetchCounts } = useTaskCounts(assigneeFilter);
+  const { counts, loading: countsLoading, stale: countsStale, refetch: refetchCounts } = useTaskCounts(assigneeFilter);
   // Each displayed bucket is now exactly one server query, sorted server-side over its full set.
   const { tasks: overdueTasks, loading: overdueLoading, error: overdueError, refetch: refetchOverdue } = useTasks({ section: "overdue", assignedTo: assigneeFilter, sortBy: overdueSort.sortBy, sortDir: overdueSort.sortDir });
   const { tasks: todayTasks, loading: todayLoading, error: todayError, refetch: refetchToday } = useTasks({ section: "today", assignedTo: assigneeFilter, sortBy: todaySort.sortBy, sortDir: todaySort.sortDir });
   const { tasks: thisWeekTasks, loading: thisWeekLoading, error: thisWeekError, refetch: refetchThisWeek } = useTasks({ section: "this_week", assignedTo: assigneeFilter, sortBy: thisWeekSort.sortBy, sortDir: thisWeekSort.sortDir });
   // limit 200 preserves the prior display ceiling: "Later" used to be two fetches (scheduled ≤100 +
-  // the >7-day tail of upcoming ≤100); it's now a single unified server query.
+  // the >7-day tail of upcoming ≤100); it's now a single unified server query. The default sort is by
+  // effective date (due_date ?? scheduled_for), so near-term scheduled follow-ups are kept even when
+  // the bucket is busy — the limit drops the furthest-out rows, not scheduled tasks categorically.
   const { tasks: laterTasks, loading: laterLoading, error: laterError, refetch: refetchLater } = useTasks({ section: "later", limit: 200, assignedTo: assigneeFilter, sortBy: laterSort.sortBy, sortDir: laterSort.sortDir });
   const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", limit: 20, assignedTo: assigneeFilter, sortBy: completedSort.sortBy, sortDir: completedSort.sortDir });
   const { task: linkedTask, loading: linkedTaskLoading, error: linkedTaskError, refetch: refetchLinkedTask } = useTask(taskId);
@@ -532,6 +534,9 @@ function TaskListPageContent({ role }: { role: string }) {
 
   // Authoritative, server-computed count — independent of the Completed bucket's sort/limit.
   const completedThisWeek = counts.completedThisWeek;
+  // While a scope (assignee) swap is in flight the loaded counts belong to the previous assignee —
+  // show a placeholder rather than another assignee's numbers.
+  const cardValue = (value: number) => (countsStale ? "—" : String(value));
 
   // Whole-page loader only on the very first load. Subsequent refetches don't blank the page: a
   // sort refetch keeps each bucket's rows (header shows an inline spinner), and a scope (assignee)
@@ -570,9 +575,9 @@ function TaskListPageContent({ role }: { role: string }) {
       ) : null}
 
       <div className="grid gap-4 md:grid-cols-3">
-        <MetricCard eyebrow="Overdue" value={String(counts.overdue)} badge="Red path" caption="Past due" tone={counts.overdue > 0 ? "red" : "white"} accent="red" />
-        <MetricCard eyebrow="Due today" value={String(counts.today)} badge="Today" caption="Current work" tone="white" accent="red" />
-        <MetricCard eyebrow="Completed this week" value={String(completedThisWeek)} badge="Done" caption="Last 7 days" tone="green" accent="green" />
+        <MetricCard eyebrow="Overdue" value={cardValue(counts.overdue)} badge="Red path" caption="Past due" tone={!countsStale && counts.overdue > 0 ? "red" : "white"} accent="red" />
+        <MetricCard eyebrow="Due today" value={cardValue(counts.today)} badge="Today" caption="Current work" tone="white" accent="red" />
+        <MetricCard eyebrow="Completed this week" value={cardValue(completedThisWeek)} badge="Done" caption="Last 7 days" tone="green" accent="green" />
       </div>
 
       <section className="rounded-lg border border-slate-200 bg-white p-3">

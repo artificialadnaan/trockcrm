@@ -543,6 +543,23 @@ describe("TaskListPage project context", () => {
     expect(container.querySelector('[data-sort-group="overdue"] select')).not.toBeNull();
   });
 
+  it("shows a placeholder in the summary cards while the assignee counts are stale (scope swap in flight)", () => {
+    mocks.useTaskCountsMock.mockReturnValue({
+      counts: { overdue: 7, today: 3, upcoming: 0, completed: 0, completedThisWeek: 5 },
+      loading: true,
+      stale: true,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    // The 3 summary-card VALUES (rendered in <p class="text-4xl …">) must all be the placeholder —
+    // not the previous assignee's 7 / 3 / 5 — while the new scope's counts are loading.
+    const cardValues = Array.from(container.querySelectorAll("p.text-4xl")).map((el) => el.textContent);
+    expect(cardValues).toEqual(["—", "—", "—"]);
+  });
+
   it("a scope (assignee) change reloads in place without a full-page blank after first load", () => {
     // The stale-row SAFETY (the previous assignee's rows can't stay actionable mid-refetch) lives in
     // useTasks, which drops the rows synchronously on a scope change — gate-proven in

@@ -20,6 +20,11 @@ const TASK_STATUS_VALUES = [
 type TaskStatus = (typeof TASK_STATUS_VALUES)[number];
 
 export type TaskSection = "overdue" | "today" | "this_week" | "later" | "upcoming" | "completed";
+export const TASK_SECTIONS = ["overdue", "today", "this_week", "later", "upcoming", "completed"] as const;
+
+export function isTaskSection(value: unknown): value is TaskSection {
+  return typeof value === "string" && (TASK_SECTIONS as readonly string[]).includes(value);
+}
 
 /** Fields a task bucket can be sorted by (server-side, over the full bucket). */
 export type TaskSortBy = "due_date" | "priority" | "assignee" | "created_at" | "completed_at";
@@ -305,13 +310,17 @@ export function buildTaskSortOrder(sortBy: TaskSortBy, sortDir: TaskSortDir = "a
     case "completed_at":
       return [sortDir === "asc" ? sql`${tasks.completedAt} ASC NULLS LAST` : sql`${tasks.completedAt} DESC NULLS LAST`, tiebreak];
     case "due_date":
-    default:
-      // Scheduled tasks carry a null due_date but a real scheduled_for, and they only ever land in
-      // the "Later" bucket. scheduled_for is the secondary key so those follow-ups keep their
-      // temporal order (instead of collapsing to the id tiebreak); it's null elsewhere → no effect.
+    default: {
+      // Order by EFFECTIVE date = due_date, falling back to scheduled_for. Scheduled tasks (null
+      // due_date, real scheduled_for) only land in the "Later" bucket; COALESCE interleaves them by
+      // their scheduled date instead of sinking them all to NULLS LAST — so they keep a meaningful
+      // order AND a row limit on Later can't categorically truncate them below far-future dated rows.
+      // Everywhere else (no scheduled tasks, non-null due_date) COALESCE === due_date → no change.
+      const effectiveDate = sql`COALESCE(${tasks.dueDate}, ${tasks.scheduledFor})`;
       return sortDir === "asc"
-        ? [sql`${tasks.dueDate} ASC NULLS LAST`, sql`${tasks.scheduledFor} ASC NULLS LAST`, tiebreak]
-        : [sql`${tasks.dueDate} DESC NULLS LAST`, sql`${tasks.scheduledFor} DESC NULLS LAST`, tiebreak];
+        ? [sql`${effectiveDate} ASC NULLS LAST`, tiebreak]
+        : [sql`${effectiveDate} DESC NULLS LAST`, tiebreak];
+    }
   }
 }
 

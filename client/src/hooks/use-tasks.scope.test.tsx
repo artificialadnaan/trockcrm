@@ -69,6 +69,34 @@ describe("useTasks scope guard", () => {
     expect(out()?.textContent).toBe("");
   });
 
+  it("ignores a stale in-flight response from the previous scope (last-write-wins)", async () => {
+    const defer = () => {
+      let resolve!: (v: unknown) => void;
+      const promise = new Promise((r) => { resolve = r; });
+      return { promise, resolve };
+    };
+    const dA = defer();
+    const dB = defer();
+
+    apiMock.mockReturnValueOnce(dA.promise); // scope A request — left in flight
+    await act(async () => {
+      root = createRoot(container);
+      root.render(<Harness filters={{ section: "overdue", assignedTo: "A" }} />);
+    });
+    expect(out()?.textContent).toBe(""); // A hasn't settled
+
+    apiMock.mockReturnValueOnce(dB.promise); // scope B request — also in flight
+    await act(async () => {
+      root?.render(<Harness filters={{ section: "overdue", assignedTo: "B" }} />);
+    });
+
+    await act(async () => { dB.resolve(resp(["b1"])); }); // B settles first
+    expect(out()?.textContent).toBe("b1");
+
+    await act(async () => { dA.resolve(resp(["a1", "a2"])); }); // the OLD A response arrives LATE
+    expect(out()?.textContent).toBe("b1"); // …and is dropped — B's rows are not clobbered
+  });
+
   it("keeps rows during a same-scope (sort) change so re-sorting doesn't flicker", async () => {
     apiMock.mockResolvedValueOnce(resp(["a1", "a2"]));
     await act(async () => {

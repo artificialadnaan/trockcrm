@@ -234,7 +234,13 @@ export function useTasks(filters: TaskFilters = {}) {
     setTasks([]);
   }
 
+  // Last-write-wins: a scope/sort/filter change can leave an earlier request in flight; only the
+  // latest request may write results, so a slow earlier response (e.g. the previous assignee's) can't
+  // land after the synchronous scope-clear and resurrect stale rows.
+  const requestIdRef = useRef(0);
+
   const fetchTasks = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -254,12 +260,14 @@ export function useTasks(filters: TaskFilters = {}) {
       const data = await api<{ tasks: Task[]; pagination: Pagination }>(
         `/tasks${qs ? `?${qs}` : ""}`
       );
+      if (requestId !== requestIdRef.current) return; // a newer request superseded this one
       setTasks(data.tasks);
       setPagination(data.pagination);
     } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : "Failed to load tasks");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [
     filters.section,
@@ -317,16 +325,26 @@ export function useTask(taskId: string | undefined) {
 export function useTaskCounts(userId?: string) {
   const [counts, setCounts] = useState<TaskCounts>({ overdue: 0, today: 0, upcoming: 0, completed: 0, completedThisWeek: 0 });
   const [loading, setLoading] = useState(true);
+  // The scope (userId) the loaded counts belong to; updated only when a response actually lands, so
+  // a scope change is detectable synchronously at render without an effect-timing race.
+  const [loadedUserId, setLoadedUserId] = useState<string | undefined>(undefined);
+  const loadedOnceRef = useRef(false);
+  const requestIdRef = useRef(0);
 
   const fetchCounts = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     try {
       const qs = userId ? `?userId=${encodeURIComponent(userId)}` : "";
       const data = await api<{ counts: TaskCounts }>(`/tasks/counts${qs}`);
+      if (requestId !== requestIdRef.current) return; // superseded by a newer scope's request
       setCounts(data.counts);
+      setLoadedUserId(userId);
+      loadedOnceRef.current = true;
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       console.error("Failed to load task counts:", err);
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [userId]);
 
@@ -334,7 +352,11 @@ export function useTaskCounts(userId?: string) {
     fetchCounts();
   }, [fetchCounts]);
 
-  return { counts, loading, refetch: fetchCounts };
+  // The loaded counts belong to a different assignee than the active filter → an in-flight scope
+  // swap. Callers should not display these numbers (they're the previous assignee's).
+  const stale = loadedOnceRef.current && loadedUserId !== userId;
+
+  return { counts, loading, stale, refetch: fetchCounts };
 }
 
 export function useProjectTasks(projectId: string | undefined) {

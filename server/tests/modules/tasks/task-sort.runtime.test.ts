@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { tasks } from "@trock-crm/shared/schema";
-import { getTasks, getTaskCounts } from "../../../src/modules/tasks/service.js";
+import { getTasks, getTaskCounts, isTaskSection } from "../../../src/modules/tasks/service.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 /**
@@ -31,8 +31,8 @@ const T = {
   // later bucket (open far-future / undated, plus scheduled)
   l1: uid("5"), // due +10 (far future), normal, Alpha,  pending
   l2: uid("6"), // due NULL + scheduled_for NULL (fully undated), high, Bravo, pending
-  s1: uid("7"), // scheduled status, due NULL, scheduled_for +10d, Alpha
-  s2: uid("10"), // scheduled status, due NULL, scheduled_for +5d (sooner than s1), Alpha
+  s1: uid("7"), // scheduled status, due NULL, scheduled_for +20d (latest), Alpha
+  s2: uid("10"), // scheduled status, due NULL, scheduled_for +2d (soonest of all later rows), Alpha
   // other buckets
   o1: uid("8"), // overdue (due -2), pending
   d1: uid("9"), // today (due today), pending
@@ -78,8 +78,8 @@ beforeAll(async () => {
       ('${T.w4}','W4','manual','normal','pending','${U_ALPHA}',  '${addDays(today, 2)}', NULL, NULL, NOW() - INTERVAL '5 days'),
       ('${T.l1}','L1','manual','normal','pending','${U_ALPHA}',  '${addDays(today, 10)}',NULL, NULL, NOW() - INTERVAL '4 days'),
       ('${T.l2}','L2','manual','high',  'pending','${U_BRAVO}',  NULL,                   NULL, NULL, NOW() - INTERVAL '4 days'),
-      ('${T.s1}','S1','manual','normal','scheduled','${U_ALPHA}',NULL, NOW() + INTERVAL '10 days', NULL, NOW() - INTERVAL '4 days'),
-      ('${T.s2}','S2','manual','normal','scheduled','${U_ALPHA}',NULL, NOW() + INTERVAL '5 days',  NULL, NOW() - INTERVAL '4 days'),
+      ('${T.s1}','S1','manual','normal','scheduled','${U_ALPHA}',NULL, NOW() + INTERVAL '20 days', NULL, NOW() - INTERVAL '4 days'),
+      ('${T.s2}','S2','manual','normal','scheduled','${U_ALPHA}',NULL, NOW() + INTERVAL '2 days',  NULL, NOW() - INTERVAL '4 days'),
       ('${T.o1}','O1','manual','normal','pending','${U_ALPHA}',  '${addDays(today, -2)}',NULL, NULL, NOW() - INTERVAL '4 days'),
       ('${T.d1}','D1','manual','normal','pending','${U_ALPHA}',  '${today}',             NULL, NULL, NOW() - INTERVAL '4 days'),
       ('${T.c1}','C1','manual','normal','completed','${U_ALPHA}',NULL, NULL, NOW() - INTERVAL '1 days',  NOW() - INTERVAL '8 days'),
@@ -118,16 +118,27 @@ describe("tasks per-bucket sort — server-side ordering over the full bucket", 
     expect(ids(result)).toEqual([T.w3, T.w2, T.w1, T.w4]); // 1d, 2d, 3d, 5d ago
   });
 
-  it("due_date desc keeps the dated row first and the fully-undated row last (NULLS LAST on both keys)", async () => {
-    const result = await getTasks(tdb, { section: "later", sortBy: "due_date", sortDir: "desc" }, "director", "dir");
-    expect(result.tasks[0]?.id).toBe(T.l1); // only dated 'later' row sorts first
-    expect(result.tasks[result.tasks.length - 1]?.id).toBe(T.l2); // no due_date AND no scheduled_for → last
+  it("Later default sorts by effective date (due_date ?? scheduled_for), interleaving scheduled, undated last", async () => {
+    const result = await getTasks(tdb, { section: "later", sortBy: "due_date", sortDir: "asc" }, "director", "dir");
+    // effective: s2 (+2d sched) < l1 (+10d due) < s1 (+20d sched) < l2 (no due/sched → NULLS LAST)
+    expect(ids(result)).toEqual([T.s2, T.l1, T.s1, T.l2]);
   });
 
-  it("Later default (due_date asc) orders scheduled tasks by scheduled_for so follow-ups keep temporal order", async () => {
-    const result = await getTasks(tdb, { section: "later", sortBy: "due_date", sortDir: "asc" }, "director", "dir");
-    // l1 (dated) first; then scheduled by scheduled_for asc (s2 @ +5d before s1 @ +10d); fully-undated l2 last.
-    expect(ids(result)).toEqual([T.l1, T.s2, T.s1, T.l2]);
+  it("Later effective-date desc keeps the fully-undated row last (NULLS LAST)", async () => {
+    const result = await getTasks(tdb, { section: "later", sortBy: "due_date", sortDir: "desc" }, "director", "dir");
+    expect(ids(result)).toEqual([T.s1, T.l1, T.s2, T.l2]);
+  });
+
+  it("a row limit on Later keeps the soonest SCHEDULED task (interleaved by date, not truncated under dated rows)", async () => {
+    // The bug: with due_date NULLS LAST, >limit dated rows would push every scheduled task off the
+    // page. Sorting by effective date keeps the soonest scheduled task even under a tight limit.
+    const result = await getTasks(tdb, { section: "later", sortBy: "due_date", sortDir: "asc", limit: 1 }, "director", "dir");
+    expect(ids(result)).toEqual([T.s2]); // s2 is a scheduled task and the soonest by effective date
+  });
+
+  it("completed_at desc orders the Completed bucket most-recently-resolved first", async () => {
+    const result = await getTasks(tdb, { section: "completed", sortBy: "completed_at", sortDir: "desc" }, "director", "dir");
+    expect(ids(result)).toEqual([T.c1, T.c3, T.c2]); // c1 (1d), c3 (2d), c2 (10d)
   });
 });
 
@@ -162,6 +173,17 @@ describe("tasks section membership — sort changes ORDER only, never WHICH task
     expect(collected.sort()).toEqual(
       [T.w1, T.w2, T.w3, T.w4, T.l1, T.l2, T.s1, T.s2, T.o1, T.d1].sort()
     );
+  });
+});
+
+describe("isTaskSection — section query-param allowlist", () => {
+  it("accepts the known sections and rejects unknown / wrong-type values", () => {
+    for (const s of ["overdue", "today", "this_week", "later", "upcoming", "completed"]) {
+      expect(isTaskSection(s)).toBe(true);
+    }
+    for (const s of ["", "garbage", "LATER", "Later", undefined, null, 5, {}]) {
+      expect(isTaskSection(s)).toBe(false);
+    }
   });
 });
 

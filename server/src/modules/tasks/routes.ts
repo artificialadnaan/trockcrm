@@ -18,7 +18,7 @@ import {
   dismissTask,
   snoozeTask,
   isTaskSortBy,
-  type TaskSection,
+  isTaskSection,
   type TaskSortDir,
 } from "./service.js";
 import {
@@ -132,13 +132,17 @@ router.get("/", async (req, res, next) => {
     const sortDir: TaskSortDir | undefined =
       sortDirParam === "asc" || sortDirParam === "desc" ? sortDirParam : undefined;
 
+    // Validate section against the allowlist; an unknown value becomes undefined (the base list,
+    // same as omitting it) rather than being cast straight through to the service.
+    const section = isTaskSection(req.query.section) ? req.query.section : undefined;
+
     const filters = {
       assignedTo: req.query.assignedTo as string | undefined,
       status: req.query.status as string | undefined,
       type: req.query.type as string | undefined,
       dealId: req.query.dealId as string | undefined,
       contactId: req.query.contactId as string | undefined,
-      section: req.query.section as TaskSection | undefined,
+      section,
       sortBy,
       sortDir,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
