@@ -147,7 +147,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
         )}
       </section>
 
-      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} legacyCategoryOptions={legacyCategoryOptionsInUse(photos)} />
+      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} legacyCategoryOptions={legacyCategoryOptionsInUse(photos, !hasMorePhotos)} />
 
       {!loading && !error && (
         <PhotoPaginationSummary

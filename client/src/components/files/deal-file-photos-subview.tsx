@@ -134,7 +134,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
 
   return (
     <div className="space-y-3">
-      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} showGrouping={false} legacyCategoryOptions={legacyCategoryOptionsInUse(photos)} />
+      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} showGrouping={false} legacyCategoryOptions={legacyCategoryOptionsInUse(photos, !hasMorePhotos)} />
 
       {!loading && !error && (
         <PhotoPaginationSummary

@@ -98,7 +98,10 @@ export function ProjectDetailPage() {
   // Surface a legacy category chip only when a loaded photo still carries it, so
   // historical photos stay filterable without offering retired values for new captures.
   const legacyCategoriesInUse = useMemo(() => {
-    const present = new Set(photos.map((photo) => photo.photoCategory));
+    // Derive from the same token filterPhotos matches on (photoCategory else
+    // subcategory) so a legacy chip appears whenever a photo — including a
+    // subcategory-backed legacy one — is actually filterable by it.
+    const present = new Set(photos.map((photo) => photo.photoCategory ?? photo.subcategory ?? undefined));
     return LEGACY_PHOTO_CATEGORIES.filter((category) => present.has(category.value));
   }, [photos]);
   const groupedPhotos = useMemo(() => groupPhotos(filteredPhotos, grouping), [filteredPhotos, grouping]);

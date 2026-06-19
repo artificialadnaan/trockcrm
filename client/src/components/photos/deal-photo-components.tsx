@@ -163,7 +163,9 @@ export function displayPhotoCategory(photo: DealPhotoRecord): string | null {
   // photoCategoryLabel resolves both the 6 offered values and retained legacy
   // values, so photos tagged before the phase rollout still show their label.
   if (photo.photoCategory) return photoCategoryLabel(photo.photoCategory);
-  if (photo.subcategory) return photo.subcategory.replace(/_/g, " ");
+  // Web capture stores the phase on `subcategory`; route it through the shared
+  // label map so it reads "Final Completion", not "final completion".
+  if (photo.subcategory) return photoCategoryLabel(photo.subcategory);
   return null;
 }
 
@@ -201,11 +203,20 @@ export function filtersFromSearchParams(params: URLSearchParams): PhotoFilterSta
   };
 }
 
+/**
+ * The category token a photo is filtered/grouped by: its photoCategory, else its
+ * subcategory normalised to the same snake_case shape as the filter values
+ * (so a web-captured "Site Visit" subcategory matches the "site_visit" chip),
+ * else "uncategorized".
+ */
+export function photoFilterCategory(photo: DealPhotoRecord): string {
+  return photo.photoCategory ?? (photo.subcategory ? photo.subcategory.toLowerCase().replace(/\s+/g, "_") : "uncategorized");
+}
+
 export function matchesPhotoFilters(photo: DealPhotoRecord, filters: PhotoFilterState) {
   if (!filters.showDeleted && photo.deletedAt) return false;
   if (filters.categories.length > 0) {
-    const category = photo.photoCategory ?? (photo.subcategory ? photo.subcategory.toLowerCase().replace(/\s+/g, "_") : "uncategorized");
-    if (!filters.categories.includes(category)) return false;
+    if (!filters.categories.includes(photoFilterCategory(photo))) return false;
   }
   if (filters.tags.length > 0) {
     const selectedTags = filters.tags.map((tag) => tag.toLowerCase());
@@ -220,15 +231,22 @@ export function matchesPhotoFilters(photo: DealPhotoRecord, filters: PhotoFilter
 }
 
 /**
- * Legacy (retired) category options that are still in use by the given photos, so
- * the filter surfaces them only when a historical photo carries one — never an
- * empty chip on a deal with no legacy photos.
+ * Legacy (retired) category options to surface in the filter, so historical
+ * photos stay filterable without offering retired values for new captures.
+ *
+ * When the photo set is fully loaded we show only the legacy categories actually
+ * in use (no empty chips). While more pages remain (`allLoaded=false`) we can't
+ * yet know which legacy categories exist — and legacy photos are the oldest, so
+ * they sit on the LAST pages — so we surface all of them rather than hide the
+ * only UI path to filter them.
  */
 export function legacyCategoryOptionsInUse(
-  photos: DealPhotoRecord[]
+  photos: DealPhotoRecord[],
+  allLoaded = true
 ): Array<{ value: string; label: string }> {
-  const present = new Set(photos.map((photo) => photo.photoCategory));
-  return LEGACY_PHOTO_CATEGORY_ITEMS.filter((option) => present.has(option.value as PhotoCategory));
+  if (!allLoaded) return [...LEGACY_PHOTO_CATEGORY_ITEMS];
+  const present = new Set(photos.map(photoFilterCategory));
+  return LEGACY_PHOTO_CATEGORY_ITEMS.filter((option) => present.has(option.value));
 }
 
 export function groupDealPhotos(photos: DealPhotoRecord[], filters: PhotoFilterState) {

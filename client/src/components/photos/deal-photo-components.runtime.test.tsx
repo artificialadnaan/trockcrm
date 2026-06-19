@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   PHOTO_CATEGORIES,
   displayPhotoCategory,
+  legacyCategoryOptionsInUse,
   matchesPhotoFilters,
+  photoFilterCategory,
   type DealPhotoRecord,
   type PhotoFilterState,
 } from "./deal-photo-components";
@@ -82,5 +84,43 @@ describe("web photo categories", () => {
   it("matches new-category photos through the filter", () => {
     const fresh = photo({ photoCategory: "punch" });
     expect(matchesPhotoFilters(fresh, { ...baseFilters, categories: ["punch"] })).toBe(true);
+  });
+
+  it("labels subcategory-backed (web-captured) phase photos via the shared map", () => {
+    // Web capture stores the phase on subcategory; should still read titled-case.
+    expect(displayPhotoCategory(photo({ photoCategory: null, subcategory: "final_completion" }))).toBe("Final Completion");
+  });
+
+  it("derives the filter token from photoCategory, else normalized subcategory, else uncategorized", () => {
+    expect(photoFilterCategory(photo({ photoCategory: "construction" }))).toBe("construction");
+    expect(photoFilterCategory(photo({ photoCategory: null, subcategory: "Site Visit" }))).toBe("site_visit");
+    expect(photoFilterCategory(photo({ photoCategory: null, subcategory: null }))).toBe("uncategorized");
+  });
+
+  it("filters a web-captured legacy photo (subcategory) via the normalized chip", () => {
+    const webLegacy = photo({ photoCategory: null, subcategory: "Site Visit" });
+    expect(matchesPhotoFilters(webLegacy, { ...baseFilters, categories: ["site_visit"] })).toBe(true);
+  });
+});
+
+describe("legacyCategoryOptionsInUse", () => {
+  it("surfaces only the legacy categories present once fully loaded", () => {
+    const photos = [photo({ photoCategory: "damage" }), photo({ photoCategory: "construction" })];
+    expect(legacyCategoryOptionsInUse(photos, true).map((o) => o.value)).toEqual(["damage"]);
+  });
+
+  it("includes subcategory-backed legacy photos (normalized)", () => {
+    const photos = [photo({ photoCategory: null, subcategory: "Site Visit" })];
+    expect(legacyCategoryOptionsInUse(photos, true).map((o) => o.value)).toEqual(["site_visit"]);
+  });
+
+  it("returns no legacy chips for an all-new, fully-loaded deal", () => {
+    const photos = [photo({ photoCategory: "punch" }), photo({ photoCategory: null })];
+    expect(legacyCategoryOptionsInUse(photos, true)).toEqual([]);
+  });
+
+  it("surfaces ALL legacy categories while more pages remain (legacy photos are oldest)", () => {
+    // allLoaded=false → can't know which legacy values exist yet; never hide the path to them.
+    expect(legacyCategoryOptionsInUse([], false)).toHaveLength(8);
   });
 });

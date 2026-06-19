@@ -16,17 +16,12 @@ import { Input } from "@/components/ui/input";
 import { useAuth } from "@/lib/auth";
 import { buildFieldCaptureUrl } from "@/lib/field-app";
 import { searchPhotoUploadTargets, uploadFile, type PhotoUploadTarget } from "@/hooks/use-files";
+import { PHOTO_CATEGORY_OPTION_ITEMS } from "@trock-crm/shared/types";
 
-const SUBCATEGORIES = [
-  "Progress",
-  "Site Visit",
-  "Damage",
-  "Safety",
-  "Delivery",
-  "Other",
-] as const;
-
-type Subcategory = (typeof SUBCATEGORIES)[number];
+// The 6 phase categories (shared source of truth). Stored on the `subcategory`
+// field as the snake_case value, so it filters + labels identically to a
+// photoCategory pick (matchesPhotoFilters / displayPhotoCategory normalise it).
+const CATEGORY_OPTIONS = PHOTO_CATEGORY_OPTION_ITEMS;
 
 interface QueuedPhoto {
   id: string;
@@ -89,7 +84,7 @@ export function PhotoCapturePage() {
   const [targetResults, setTargetResults] = useState<PhotoUploadTarget[]>([]);
   const [targetLoading, setTargetLoading] = useState(false);
   const [selectedTarget, setSelectedTarget] = useState<PhotoUploadTarget | null>(null);
-  const [selectedSubcategory, setSelectedSubcategory] = useState<Subcategory | null>(null);
+  const [selectedSubcategory, setSelectedSubcategory] = useState<string | null>(null);
   const [queue, setQueue] = useState<QueuedPhoto[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadComplete, setUploadComplete] = useState(false);
@@ -207,7 +202,7 @@ export function PhotoCapturePage() {
         await uploadFile({
           file: photo.file,
           category: "photo",
-          subcategory: selectedSubcategory?.toLowerCase() || undefined,
+          subcategory: selectedSubcategory || undefined,
           dealId: selectedTarget.type === "lead" ? undefined : selectedTarget.id,
           leadId: selectedTarget.type === "lead" ? selectedTarget.id : undefined,
           description: photo.note || undefined,
@@ -246,8 +241,8 @@ export function PhotoCapturePage() {
     }
   }
 
-  function toggleSubcategory(sub: Subcategory) {
-    setSelectedSubcategory((prev) => (prev === sub ? null : sub));
+  function toggleSubcategory(value: string) {
+    setSelectedSubcategory((prev) => (prev === value ? null : value));
   }
 
   // ─── Derived ──────────────────────────────────────────────────────────
@@ -377,24 +372,24 @@ export function PhotoCapturePage() {
             )}
           </div>
 
-          {/* Subcategory Quick Tags */}
+          {/* Phase Category Quick Tags */}
           <div className="space-y-2">
             <label className="text-xs font-medium text-white/50 uppercase tracking-wider">
               Category
             </label>
             <div className="flex gap-2 overflow-x-auto pb-1 -mx-4 px-4 scrollbar-hide">
-              {SUBCATEGORIES.map((sub) => (
+              {CATEGORY_OPTIONS.map((option) => (
                 <button
-                  key={sub}
+                  key={option.value}
                   type="button"
-                  onClick={() => toggleSubcategory(sub)}
+                  onClick={() => toggleSubcategory(option.value)}
                   className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium transition-colors ${
-                    selectedSubcategory === sub
+                    selectedSubcategory === option.value
                       ? "bg-[#CC0000] text-white"
                       : "bg-white/10 text-white/70 hover:bg-white/20"
                   }`}
                 >
-                  {sub}
+                  {option.label}
                 </button>
               ))}
             </div>
