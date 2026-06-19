@@ -82,7 +82,9 @@ export function DecoratedKanbanCard({
           </p>
           <DealValue
             deal={{ ...deal, stageSlug: deal.stageSlug ?? stageSlug }}
-            value={getEffectiveDealValue(deal)}
+            // Value from the column-slug-stamped deal so the stage-aware chain (estimating DD-over-bid)
+            // applies even if the board row omits stageSlug — reconciles the card with the column total.
+            value={getEffectiveDealValue({ ...deal, stageSlug: deal.stageSlug ?? stageSlug })}
             compact
             className="shrink-0 text-sm font-black tabular-nums text-slate-950"
           />

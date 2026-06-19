@@ -211,6 +211,25 @@ describe("KanbanDealCard", () => {
     expect(html).toMatch(/\$95\d/); // bid_board ($950K), not DD
   });
 
+  it("uses the stageSlug column prop for the VALUE when the board row omits stageSlug (estimating fallback)", () => {
+    // Board rows can omit stageSlug; the column prop is authoritative. The displayed value (not just the
+    // lost-bid label) must honor it, so an estimating card values DD-over-bid even without deal.stageSlug.
+    const deal = makeDeal({
+      awardedAmount: null,
+      bidBoardTotalSales: "950000",
+      bidEstimate: "920000",
+      ddEstimate: "800000",
+    });
+    deal.stageSlug = undefined;
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <KanbanDealCard deal={deal} stageSlug="estimating" />
+      </MemoryRouter>
+    );
+    expect(html).toMatch(/\$80\d/); // DD ($800K) via the column-prop fallback
+    expect(html).not.toMatch(/\$9[25]\d/); // NOT bid
+  });
+
   it("renders the shared at-risk badge when the pipeline card receives it", () => {
     const html = render(makeDeal({ atRisk: makeAtRiskResult() }));
 
