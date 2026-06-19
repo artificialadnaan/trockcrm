@@ -503,6 +503,20 @@ describe("DirectorDashboardPage", () => {
     expect(html).toContain("Refresh dashboard");
   });
 
+  it("renders the Pipeline-by-Stage breakdown with per-stage count + $ and the reconciling total", () => {
+    const html = renderPageHtml();
+
+    // The new stage breakdown Takashi asked for: heading + the stage row from pipelineByStage.
+    // (Currency strings aren't asserted — compact ICU notation degrades to full numbers in the test
+    // runtime; the $ reconciliation is guarded by the server runtime test instead.)
+    expect(html).toContain("Pipeline by stage");
+    expect(html).toContain("Opportunity");
+    expect(html).toContain("3 deals"); // the stage deal count
+    // Header echoes the Active Pipeline KPI count (scopeSummary.activePipeline) so the breakdown
+    // reads as a decomposition of that number.
+    expect(html).toContain("4 deals");
+  });
+
   it("surfaces notes in the activity pulse so the bar reflects the full total", () => {
     const html = renderPageHtml();
 
