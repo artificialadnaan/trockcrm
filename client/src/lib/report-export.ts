@@ -50,8 +50,12 @@ export function normalizeReportRows(data: unknown): Array<Record<string, unknown
 
 // Canonical CSV cell escaper, shared by every serializer below: neutralizes spreadsheet-formula
 // injection (a STRING cell starting with = + - @ tab/CR is prefixed with a single quote) and
-// quotes/doubles cells containing a comma, quote, or newline. Single source so all CSV exports escape
-// identically.
+// quotes/doubles cells containing a comma, quote, or newline OR a carriage return. Single source so all
+// CSV exports escape identically.
+//
+// CR is quoted (not just LF) because a bare \r — e.g. in a company/deal name pasted from CRM data — is a
+// record separator to most CSV parsers, so an unquoted \r would split one record across two rows and the
+// exported row count would stop reconciling.
 //
 // A genuine numeric cell is data, never a formula, so it is NOT quote-prefixed — otherwise a negative
 // number like -5000 would be emitted as the text "'-5000", which a spreadsheet treats as a string and
@@ -60,7 +64,7 @@ export function escapeCsvValue(value: unknown) {
   const rawText = formatCellValue(value);
   const isNumber = typeof value === "number" && Number.isFinite(value);
   const text = !isNumber && /^[=+\-@\t\r]/.test(rawText) ? `'${rawText}` : rawText;
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 export function serializeRowsToCsv(rows: Array<Record<string, unknown>>) {

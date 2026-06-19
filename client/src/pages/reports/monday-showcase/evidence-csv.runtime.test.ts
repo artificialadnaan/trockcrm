@@ -131,6 +131,14 @@ describe("buildEvidenceCsv — escaping + edge cases", () => {
     expect(csv).toContain("'=cmd()");
   });
 
+  it("quotes a carriage return in a name so the record does not split (row count stays reconciled)", () => {
+    const csv = buildEvidenceCsv(evidence("projection", [record({ name: "Acme\rWest" })]));
+    // The CR cell is wrapped in quotes, so CSV parsers keep it as ONE field of ONE record (not two rows).
+    expect(csv).toContain('"Acme\rWest"');
+    // And there is exactly one record after the header (no \n-introduced split either).
+    expect(lines(csv)).toHaveLength(2);
+  });
+
   it("an EMPTY cohort still produces a valid header-only CSV (export never breaks)", () => {
     const csv = buildEvidenceCsv(evidence("projection", []));
     expect(lines(csv)).toHaveLength(1);

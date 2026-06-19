@@ -86,6 +86,13 @@ describe("report export helpers", () => {
     expect(escapeCsvValue("-cmd|' /C calc")).toBe("'-cmd|' /C calc");
   });
 
+  it("escapeCsvValue quotes carriage returns (a bare \\r is a record separator that would split a row)", () => {
+    // \r anywhere in the cell must be quoted, not just \n — otherwise a CRM-pasted name with a CR would
+    // split one record across two rows and the row count would stop reconciling.
+    expect(escapeCsvValue("Acme\rInc")).toBe('"Acme\rInc"');
+    expect(escapeCsvValue("Acme\r\nInc")).toBe('"Acme\r\nInc"');
+  });
+
   it("renders printable html with report title and tabular rows", () => {
     const html = buildPrintableReportHtml({
       reportName: "Pipeline Summary",
