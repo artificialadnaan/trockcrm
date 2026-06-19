@@ -35,15 +35,15 @@ describe("ProjectsPage", () => {
   it("renders starred and active sections, searches, and optimistically toggles stars", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: true, officeId: "office-1", officeSlug: "dallas" },
-        { id: "deal-2", name: "Safety Walk", dealNumber: "TR-2", propertyName: "Safety Walk", propertyAddress: "456 Main", stage: "Estimating", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", projectNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: true, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-2", name: "Safety Walk", dealNumber: "TR-2", projectNumber: "TR-2", propertyName: "Safety Walk", propertyAddress: "456 Main", stage: "Estimating", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: true, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-1", name: "Roof Repair", dealNumber: "TR-1", projectNumber: "TR-1", propertyName: "Roof Repair", propertyAddress: "123 Main", stage: "Contract", lastActivityAt: null, photoCount: 2, starred: true, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ starred: false, officeId: "office-1", officeSlug: "dallas" })
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-2", name: "Safety Walk", dealNumber: "TR-2", propertyName: "Safety Walk", propertyAddress: "456 Main", stage: "Estimating", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-2", name: "Safety Walk", dealNumber: "TR-2", projectNumber: "TR-2", propertyName: "Safety Walk", propertyAddress: "456 Main", stage: "Estimating", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ projects: [] });
 
@@ -53,8 +53,8 @@ describe("ProjectsPage", () => {
     expect(node.textContent).toContain("Roof Repair");
     expect(node.textContent).toContain("ALL ACTIVE");
     expect(node.textContent).toContain("Safety Walk");
-    expect(node.querySelector('a[aria-label="Open Roof Repair (TR-1)"]')?.textContent).toContain("Deal # TR-1");
-    expect(node.querySelector('a[aria-label="Open Safety Walk (TR-2)"]')?.textContent).toContain("Deal # TR-2");
+    expect(node.querySelector('a[aria-label="Open Roof Repair (TR-1)"]')?.textContent).toContain("Project # TR-1");
+    expect(node.querySelector('a[aria-label="Open Safety Walk (TR-2)"]')?.textContent).toContain("Project # TR-2");
 
     node.querySelector<HTMLButtonElement>('[aria-label="Unstar project"]')?.click();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith("/field/projects/deal-1/star", { method: "DELETE" }));
@@ -67,19 +67,36 @@ describe("ProjectsPage", () => {
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalledWith(expect.stringContaining("search=Safety")));
   });
 
-  it("shows duplicate-name projects with distinct deal identifiers", async () => {
+  it("shows the canonical project number for HubSpot-imported deals — never the HS- id — and keeps duplicate names distinct", async () => {
     apiMock
       .mockResolvedValueOnce({ projects: [
-        { id: "deal-1", name: "Steeplechase", dealNumber: "HS-320839598785", propertyName: "Steeplechase", propertyAddress: "123 Main", stage: "Estimate Sent to Client", lastActivityAt: null, photoCount: 54, starred: false, officeId: "office-1", officeSlug: "dallas" },
-        { id: "deal-2", name: "Steeplechase", dealNumber: "HS-324283495135", propertyName: "Steeplechase", propertyAddress: "No address on file", stage: "Due Diligence", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-1", name: "Steeplechase", dealNumber: "HS-320839598785", projectNumber: "DFW-4-15026-aa", propertyName: "Steeplechase", propertyAddress: "123 Main", stage: "Estimate Sent to Client", lastActivityAt: null, photoCount: 54, starred: false, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-2", name: "Steeplechase", dealNumber: "HS-324283495135", projectNumber: "DFW-4-15026-ab", propertyName: "Steeplechase", propertyAddress: "No address on file", stage: "Due Diligence", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
       ] })
       .mockResolvedValueOnce({ projects: [] });
 
     const node = renderPage();
 
     await vi.waitFor(() => expect(node.textContent).toContain("Steeplechase"));
-    expect(node.querySelector('a[aria-label="Open Steeplechase (HS-320839598785)"]')?.textContent).toContain("Deal # HS-320839598785");
-    expect(node.querySelector('a[aria-label="Open Steeplechase (HS-324283495135)"]')?.textContent).toContain("Deal # HS-324283495135");
+    expect(node.querySelector('a[aria-label="Open Steeplechase (DFW-4-15026-aa)"]')?.textContent).toContain("Project # DFW-4-15026-aa");
+    expect(node.querySelector('a[aria-label="Open Steeplechase (DFW-4-15026-ab)"]')?.textContent).toContain("Project # DFW-4-15026-ab");
+    // The meaningless HubSpot id must never be rendered.
+    expect(node.textContent).not.toContain("HS-320839598785");
+    expect(node.textContent).not.toContain("HS-324283495135");
+  });
+
+  it("shows 'Project pending' (not the HS- id) when there is no canonical project number", async () => {
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-3", name: "Park West", dealNumber: "HS-303033014984", projectNumber: null, propertyName: "Park West", propertyAddress: "789 Main", stage: "Estimating", lastActivityAt: null, photoCount: 1, starred: false, officeId: "office-1", officeSlug: "dallas" },
+      ] })
+      .mockResolvedValueOnce({ projects: [] });
+
+    const node = renderPage();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Park West"));
+    expect(node.textContent).toContain("Project pending");
+    expect(node.textContent).not.toContain("HS-303033014984");
   });
 
   it("shows empty state when no active projects exist", async () => {

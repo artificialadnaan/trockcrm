@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { deals, leads } from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
+import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildFileDownloadUrlFromRecord, getDealPhotoTimeline, searchPhotoUploadTargets, type PhotoUploadTarget } from "../files/service.js";
 import type { DealPhotoTimelineFilters } from "../files/photo-timeline-filters.js";
@@ -31,7 +32,20 @@ const textArray = (values: readonly string[]) => sql`ARRAY[${sql.join(values.map
 export type FieldProject = {
   id: string;
   name: string;
+  /**
+   * RAW `deals.deal_number`. For HubSpot-imported deals this is the meaningless HubSpot id
+   * ("HS-…") — do NOT display it. Kept raw because it is also a stable, unique, non-null key used
+   * internally (e.g. the photo-report R2 storage path) and for record matching. Clients display
+   * `projectNumber` instead.
+   */
   dealNumber: string;
+  /**
+   * The human-facing project number to DISPLAY: the canonical value (project_number, else a
+   * non-HubSpot deal_number), or null when there isn't one yet ("pending"). Resolved server-side via
+   * the shared resolver so the field clients never show the HubSpot id. This is the field clients
+   * should render.
+   */
+  projectNumber: string | null;
   propertyName: string | null;
   propertyAddress: string | null;
   stage: string;
@@ -77,7 +91,11 @@ function mapFieldProject(row: any): FieldProject {
   return {
     id: row.id,
     name: row.name,
+    // Raw deal_number stays raw (storage-path / matching key). The display number is resolved the
+    // same way the CRM + global search do: project_number, else a non-HubSpot deal_number, else null
+    // — so the HubSpot id in deal_number is never shown.
     dealNumber: row.deal_number,
+    projectNumber: resolveDealDisplayNumber({ projectNumber: row.project_number, dealNumber: row.deal_number }),
     propertyName: row.property_name ?? null,
     propertyAddress: row.property_address ?? null,
     stage: row.stage_name ?? "Active",
@@ -101,6 +119,9 @@ function activeProjectWhere(search?: string) {
       AND (
         d.name ILIKE ${`%${normalizedSearch}%`}
         OR d.deal_number ILIKE ${`%${normalizedSearch}%`}
+        -- For HubSpot-imported deals the canonical DFW/ATL number lives in project_number (deal_number
+        -- holds the HS- id), so it must be searchable too.
+        OR d.project_number ILIKE ${`%${normalizedSearch}%`}
         OR d.property_address ILIKE ${`%${normalizedSearch}%`}
         OR d.property_city ILIKE ${`%${normalizedSearch}%`}
       )
@@ -144,6 +165,7 @@ export async function listFieldProjects(
       d.id,
       d.name,
       d.deal_number,
+      d.project_number,
       d.name AS property_name,
       NULLIF(CONCAT_WS(', ', NULLIF(d.property_address, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), NULLIF(d.property_zip, '')), '') AS property_address,
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
@@ -178,6 +200,7 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, access: Field
       d.id,
       d.name,
       d.deal_number,
+      d.project_number,
       d.name AS property_name,
       NULLIF(CONCAT_WS(', ', NULLIF(d.property_address, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), NULLIF(d.property_zip, '')), '') AS property_address,
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
@@ -231,6 +254,7 @@ export async function assertActiveFieldProject(tenantDb: TenantDb, _access: Fiel
       d.id,
       d.name,
       d.deal_number,
+      d.project_number,
       d.name AS property_name,
       NULLIF(CONCAT_WS(', ', NULLIF(d.property_address, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), NULLIF(d.property_zip, '')), '') AS property_address,
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,

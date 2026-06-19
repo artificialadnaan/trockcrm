@@ -22,13 +22,15 @@ function ProjectCard({
     <Link
       to={`/projects/${project.id}`}
       className="block border-b border-border bg-white py-4 active:bg-muted"
-      aria-label={`Open ${project.name} (${project.dealNumber})`}
+      aria-label={`Open ${project.name} (${project.projectNumber ?? "project pending"})`}
     >
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-lg font-bold">{project.name}</h2>
           <div className="mt-1 flex flex-wrap items-start gap-2 text-sm">
-            <p className="font-semibold text-foreground break-all">Deal # {project.dealNumber}</p>
+            <p className="font-semibold text-foreground break-all">
+              {project.projectNumber ? `Project # ${project.projectNumber}` : "Project pending"}
+            </p>
             <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-bold text-muted-foreground">{project.stage}</span>
             {offOffice ? (
               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold uppercase text-amber-700">

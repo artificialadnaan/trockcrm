@@ -3,7 +3,10 @@ import { LEGACY_PHOTO_CATEGORY_ITEMS, PHOTO_CATEGORY_OPTION_ITEMS, photoCategory
 export type FieldProject = {
   id: string;
   name: string;
+  /** RAW deals.deal_number — the HubSpot id ("HS-…") for HubSpot-imported deals. Never display this; render `projectNumber`. */
   dealNumber: string;
+  /** The human-facing project number to display (canonical DFW/ATL), or null when pending. Server-resolved. */
+  projectNumber: string | null;
   propertyName: string | null;
   propertyAddress: string | null;
   stage: string;

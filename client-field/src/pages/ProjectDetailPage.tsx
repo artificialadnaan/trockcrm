@@ -138,7 +138,9 @@ export function ProjectDetailPage() {
         </div>
         {project ? (
           <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
-            <p className="font-semibold text-foreground">Deal # {project.dealNumber}</p>
+            <p className="font-semibold text-foreground">
+              {project.projectNumber ? `Project # ${project.projectNumber}` : "Project pending"}
+            </p>
             <span className="rounded-full bg-muted px-2 py-0.5 font-semibold text-muted-foreground">{project.stage}</span>
             {offOffice ? (
               <span className="rounded-full bg-amber-100 px-2 py-0.5 font-bold uppercase text-amber-700">{project.officeSlug} · view-only</span>
@@ -334,7 +336,7 @@ export function ProjectDetailPage() {
       <ReportBuilder
         isOpen={reportBuilderOpen}
         projectId={id}
-        projectName={project?.name ?? project?.dealNumber ?? "Project"}
+        projectName={project?.name ?? "Project"}
         creatorName={[user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.email || "Field User"}
         photos={photos}
         onClose={() => setReportBuilderOpen(false)}

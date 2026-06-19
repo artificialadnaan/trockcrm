@@ -5,11 +5,26 @@ import {
   isProjectOffOffice,
   LEGACY_PHOTO_CATEGORIES,
   PHOTO_CATEGORIES,
+  projectNumberLabel,
   relativeDate,
   tagsOf,
   uploadersOf,
   type FieldPhoto,
 } from "../field-projects";
+
+describe("projectNumberLabel", () => {
+  it("prefixes a present project number with '#'", () => {
+    expect(projectNumberLabel("DFW-1-09026-af")).toBe("#DFW-1-09026-af");
+    expect(projectNumberLabel("  ATL-4-16326-ab  ")).toBe("#ATL-4-16326-ab");
+  });
+
+  it("shows 'Project pending' when there is no number (server never sends the HubSpot id here)", () => {
+    expect(projectNumberLabel(null)).toBe("Project pending");
+    expect(projectNumberLabel(undefined)).toBe("Project pending");
+    expect(projectNumberLabel("")).toBe("Project pending");
+    expect(projectNumberLabel("   ")).toBe("Project pending");
+  });
+});
 
 describe("isProjectOffOffice", () => {
   it("is false (writable) when the project's office matches the writable office", () => {

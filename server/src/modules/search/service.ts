@@ -14,6 +14,7 @@ import {
   escapeLikePattern,
 } from "./unified-search.js";
 import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
+import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
 import { capPerOffice, deriveDealStatus, mergeAndLimit, mergeWithOfficeCap, type DealLifecycle } from "./global-search-helpers.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -395,14 +396,13 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
   }));
 }
 
-const HUBSPOT_DEAL_NUMBER_PATTERN = /^HS[-_ ]?\d+/i;
-
+/**
+ * Secondary label for a deal search result = the canonical display number, or "" when there is none
+ * (the "pending" case). Delegates to the shared resolver so search, the CRM, and the field API stay
+ * byte-identical (never exposes an HS- HubSpot id). Empty-string contract preserved for callers.
+ */
 export function pickDealSecondaryLabel(projectNumber: string | null, dealNumber: string | null): string {
-  const project = projectNumber?.trim();
-  if (project) return project;
-  const deal = dealNumber?.trim();
-  if (deal && !HUBSPOT_DEAL_NUMBER_PATTERN.test(deal)) return deal;
-  return "";
+  return resolveDealDisplayNumber({ projectNumber, dealNumber }) ?? "";
 }
 
 async function searchContacts(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {

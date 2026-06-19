@@ -4,8 +4,11 @@
 
 export type FieldProject = {
   id: string;
-  name: string;
+  /** RAW deals.deal_number — the HubSpot id ("HS-…") for HubSpot-imported deals. Never display this; render `projectNumber`. */
   dealNumber: string;
+  /** The human-facing project number to display (canonical DFW/ATL), or null when pending. Server-resolved. */
+  projectNumber: string | null;
+  name: string;
   propertyName: string | null;
   propertyAddress: string | null;
   stage: string;
@@ -103,6 +106,16 @@ export function groupCaptureTargets(targets: FieldCaptureTarget[]) {
     opportunity: targets.filter((target) => target.type === "opportunity"),
     deal: targets.filter((target) => target.type === "deal"),
   };
+}
+
+/**
+ * Field-app label for a project's number: "#<number>" when there is a canonical number, else a
+ * muted "Project pending". The server already resolves `projectNumber` (canonical DFW/ATL, never the
+ * HubSpot id), so this only handles the empty/pending case.
+ */
+export function projectNumberLabel(projectNumber: string | null | undefined): string {
+  const trimmed = projectNumber?.trim();
+  return trimmed ? `#${trimmed}` : "Project pending";
 }
 
 export function relativeDate(value: string | null) {

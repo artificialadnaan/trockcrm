@@ -6,7 +6,7 @@ import { theme } from "../../../src/theme/theme";
 import { useDebouncedValue } from "../../../src/hooks/useDebouncedValue";
 import { useProjects, useStarredProjects, useToggleStar } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { isProjectOffOffice, relativeDate, type FieldProject } from "../../../src/projects/field-projects";
+import { isProjectOffOffice, projectNumberLabel, relativeDate, type FieldProject } from "../../../src/projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
@@ -37,7 +37,7 @@ export default function ProjectsScreen() {
       params: {
         id: project.id,
         name: project.name,
-        dealNumber: project.dealNumber,
+        projectNumber: project.projectNumber ?? "",
         propertyAddress: project.propertyAddress ?? "",
         stage: project.stage,
         starred: project.starred ? "1" : "0",
@@ -149,16 +149,19 @@ function ProjectRow({
         onPress={onPress}
         style={({ pressed }) => [{ flex: 1, gap: 4 }, pressed && { opacity: 0.6 }]}
         accessibilityRole="button"
-        accessibilityLabel={`Open ${project.name}, deal ${project.dealNumber}, ${project.stage}`}
+        accessibilityLabel={`Open ${project.name}, ${project.projectNumber ? `project number ${project.projectNumber}` : "project pending"}, ${project.stage}`}
       >
         {/* Full-width name on its own line — the stage badge no longer competes for width (#1). */}
         <Text style={styles.rowName} numberOfLines={1}>
           {project.name}
         </Text>
-        {/* Deal # is promoted to a prominent, non-truncating element so rows that differ
-            only by deal # stay distinguishable; the stage badge wraps beside it (#2). */}
+        {/* Project # is promoted to a prominent, non-truncating element so rows that differ
+            only by project # stay distinguishable; the stage badge wraps beside it (#2). Shows the
+            canonical DFW/ATL number (never the HubSpot id); a muted "Project pending" when none. */}
         <View style={styles.rowBadges}>
-          <Text style={styles.rowDeal}>#{project.dealNumber}</Text>
+          <Text style={[styles.rowDeal, !project.projectNumber && styles.rowDealPending]}>
+            {projectNumberLabel(project.projectNumber)}
+          </Text>
           <Badge label={project.stage} />
         </View>
         {/* Always render the address line (muted fallback) so cards keep a consistent height (#3). */}
@@ -208,6 +211,7 @@ const styles = StyleSheet.create({
   rowName: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
   rowBadges: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: theme.space.sm },
   rowDeal: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },
+  rowDealPending: { color: theme.color.textMuted, fontStyle: "italic" },
   rowAddress: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   rowAddressMissing: { fontStyle: "italic", color: theme.color.textMuted, opacity: 0.7 },
   rowMeta: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },
