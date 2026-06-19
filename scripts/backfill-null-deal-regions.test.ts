@@ -124,12 +124,16 @@ describe("buildNullRegionBackfillPlan", () => {
     expect(plan.changes[0]?.targetRegionId).toBe("id-east-by-name");
   });
 
-  it("matches the target region by SLUG alone when the name differs (exercises the OR's slug branch)", () => {
+  it("matches by SLUG when the name differs, and records the matched row's display name (reconciles with reports)", () => {
+    // region_config row matches IL's band by slug but is displayed as "Eastern Region". Detail / Region
+    // filter / Reports-by-Region group by THAT name, so the plan + census must use it (not "East Coast").
     const regions: NullRegionConfigRow[] = [
       { id: "id-east-by-slug", slug: "east_coast", name: "Eastern Region", isActive: true, displayOrder: 3 },
     ];
     const plan = buildNullRegionBackfillPlan({ deals: [deal({ propertyState: "IL" })], regions });
     expect(plan.changes[0]?.targetRegionId).toBe("id-east-by-slug");
+    expect(plan.changes[0]?.targetRegionName).toBe("Eastern Region");
+    expect(plan.byTargetRegion).toEqual({ "Eastern Region": 1 });
   });
 
   it("ignores inactive region_config rows when matching (active-only, like the form)", () => {

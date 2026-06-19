@@ -185,6 +185,11 @@ export function buildNullRegionBackfillPlan(input: {
       continue;
     }
 
+    // Report/display name is the MATCHED region_config row's name (what detail, the Region filter, and
+    // Reports-by-Region group by via rc.name) — NOT the deal-region band name. They coincide today, but if
+    // a row matched by slug with a different display name, recording dealRegion.name would make the census
+    // / audit snapshot say "East Coast" while the committed rows land in the renamed report bucket.
+    const reportName = match.name;
     plan.changes.push({
       schemaName: deal.schemaName,
       dealId: deal.dealId,
@@ -195,11 +200,11 @@ export function buildNullRegionBackfillPlan(input: {
       effectiveState: normalized,
       targetRegionSlug: dealRegion.slug,
       targetRegionId: match.id,
-      targetRegionName: dealRegion.name,
+      targetRegionName: reportName,
     });
     plan.counts.willUpdate += 1;
     bucket.willUpdate += 1;
-    plan.byTargetRegion[dealRegion.name] = (plan.byTargetRegion[dealRegion.name] ?? 0) + 1;
+    plan.byTargetRegion[reportName] = (plan.byTargetRegion[reportName] ?? 0) + 1;
     if (!deal.isActive) plan.counts.inactiveDealsUpdated += 1;
   }
 
