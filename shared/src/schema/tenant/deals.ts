@@ -264,5 +264,10 @@ export const deals = pgTable(
     index("deals_company_active_idx")
       .on(table.companyId)
       .where(sql`${table.isActive} = true`),
+    // Partial index backing the Properties Linked Value fold (listProperties' active-deal aggregate
+    // grouped by property_id). Source-of-truth mirror of migration 0168_deals_property_active_idx.sql.
+    index("deals_property_active_idx")
+      .on(table.propertyId)
+      .where(sql`${table.isActive} = TRUE`),
   ]
 );

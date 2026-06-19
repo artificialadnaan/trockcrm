@@ -51,4 +51,15 @@ describe("buildPropertySortOrder", () => {
     expect(flatten(buildPropertySortOrder("name", "desc")[0]!)).toContain("DESC NULLS LAST");
     expect(flatten(buildPropertySortOrder("sqft", "desc")[0]!)).toContain("DESC NULLS LAST");
   });
+
+  it("sorts linked_value on the folded derived column, numeric, nulls last", () => {
+    // Linked value sorts on the LEFT JOINed dv.linked_value derived column (folded into the main query so
+    // the ORDER BY runs over the FULL filtered set before LIMIT), coerced to numeric so it sorts by money
+    // value not lexically, with blanks/nulls sunk to the bottom in both directions.
+    const asc = buildPropertySortOrder("linked_value", "asc");
+    expect(asc).toHaveLength(1);
+    expect(flatten(asc[0]!)).toContain("COALESCE(dv.linked_value::numeric, 0)");
+    expect(flatten(asc[0]!)).toContain("ASC NULLS LAST");
+    expect(flatten(buildPropertySortOrder("linked_value", "desc")[0]!)).toContain("DESC NULLS LAST");
+  });
 });

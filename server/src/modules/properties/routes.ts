@@ -9,13 +9,23 @@ const router = Router();
 
 router.get("/", async (req, res, next) => {
   try {
-    const { search, companyId, type, sortBy, sortDir, page, limit, isActive } = req.query as Record<string, string>;
+    const { search, companyId, type, sortBy, sortDir, page, limit, isActive, minLinkedValue, maxLinkedValue } =
+      req.query as Record<string, string>;
+    // Parse a money bound: blank/absent → undefined (no bound); a non-finite value is ignored rather than
+    // poisoning the query with NaN.
+    const parseMoneyBound = (raw: string | undefined): number | undefined => {
+      if (raw == null || raw.trim() === "") return undefined;
+      const value = Number(raw);
+      return Number.isFinite(value) ? value : undefined;
+    };
     const result = await listProperties(req.tenantDb!, {
       search,
       companyId,
       type,
       sortBy,
       sortDir: sortDir === "asc" ? "asc" : sortDir === "desc" ? "desc" : undefined,
+      minLinkedValue: parseMoneyBound(minLinkedValue),
+      maxLinkedValue: parseMoneyBound(maxLinkedValue),
       page: page ? parseInt(page, 10) : 1,
       limit: limit ? parseInt(limit, 10) : 100,
       isActive: isActive === "false" ? false : true,

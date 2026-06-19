@@ -426,18 +426,85 @@ describe("PropertyListPage", () => {
       }
     });
 
-    it("aggregate columns (Linked value / Engagement / Last touch) are not sortable headers", async () => {
+    it("Linked value is a sortable numeric header (folded server-side, desc-first)", async () => {
+      const { container, cleanup } = await renderPageDom();
+      try {
+        // First click on a numeric column defaults to DESC (biggest value first).
+        await act(async () => {
+          headerButton(container, "Linked value").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "linked_value", sortDir: "desc" })
+        );
+        // Second click flips to ASC.
+        await act(async () => {
+          headerButton(container, "Linked value").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sortBy: "linked_value", sortDir: "asc" })
+        );
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("Engagement / Last touch stay non-sortable (no orderable backing)", async () => {
       const { container, cleanup } = await renderPageDom();
       try {
         const labels = Array.from(container.querySelectorAll("button"))
           .map((b) => b.getAttribute("aria-label") ?? "")
           .filter((l) => l.startsWith("Sort by "));
-        expect(labels.some((l) => l.includes("Linked value"))).toBe(false);
         expect(labels.some((l) => l.includes("Engagement"))).toBe(false);
         expect(labels.some((l) => l.includes("Last touch"))).toBe(false);
-        // ...but the direct columns ARE sortable.
+        // ...but the direct columns AND the folded Linked value ARE sortable.
         expect(labels.some((l) => l.includes("Property"))).toBe(true);
         expect(labels.some((l) => l.includes("Sq ft"))).toBe(true);
+        expect(labels.some((l) => l.includes("Linked value"))).toBe(true);
+      } finally {
+        await cleanup();
+      }
+    });
+  });
+
+  describe("Linked Value range filter (server-side, composes with type + search)", () => {
+    function inputByLabel(container: HTMLElement, label: string): HTMLInputElement {
+      const el = Array.from(container.querySelectorAll("input")).find(
+        (i) => i.getAttribute("aria-label") === label
+      );
+      if (!el) throw new Error(`no input "${label}"`);
+      return el as HTMLInputElement;
+    }
+
+    function setInput(input: HTMLInputElement, value: string) {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    it("sends min/max bounds as numbers; blank clears the bound", async () => {
+      const { container, cleanup } = await renderPageDom();
+      try {
+        await act(async () => {
+          setInput(inputByLabel(container, "Minimum linked value"), "1000");
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ minLinkedValue: 1000 })
+        );
+
+        await act(async () => {
+          setInput(inputByLabel(container, "Maximum linked value"), "5000");
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ minLinkedValue: 1000, maxLinkedValue: 5000 })
+        );
+
+        // Clearing the min input drops the lower bound (undefined), keeps the max.
+        await act(async () => {
+          setInput(inputByLabel(container, "Minimum linked value"), "");
+        });
+        expect(mocks.usePropertiesMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({ minLinkedValue: undefined, maxLinkedValue: 5000 })
+        );
       } finally {
         await cleanup();
       }

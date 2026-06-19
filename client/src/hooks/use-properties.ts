@@ -45,6 +45,8 @@ export interface PropertyListFilters {
   type?: string;
   sortBy?: string;
   sortDir?: "asc" | "desc";
+  minLinkedValue?: number;
+  maxLinkedValue?: number;
   page?: number;
   limit?: number;
   isActive?: boolean;
@@ -153,6 +155,8 @@ export function useProperties(filters: PropertyListFilters = {}, options: Office
       if (filters.type) params.set("type", filters.type);
       if (filters.sortBy) params.set("sortBy", filters.sortBy);
       if (filters.sortDir) params.set("sortDir", filters.sortDir);
+      if (filters.minLinkedValue != null) params.set("minLinkedValue", String(filters.minLinkedValue));
+      if (filters.maxLinkedValue != null) params.set("maxLinkedValue", String(filters.maxLinkedValue));
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
       if (filters.isActive === false) params.set("isActive", "false");
@@ -172,7 +176,7 @@ export function useProperties(filters: PropertyListFilters = {}, options: Office
         setLoading(false);
       }
     }
-  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search, filters.type, filters.sortBy, filters.sortDir, isDisabled, options.officeId]);
+  }, [filters.companyId, filters.isActive, filters.limit, filters.page, filters.search, filters.type, filters.sortBy, filters.sortDir, filters.minLinkedValue, filters.maxLinkedValue, isDisabled, options.officeId]);
 
   useEffect(() => {
     fetchProperties();
