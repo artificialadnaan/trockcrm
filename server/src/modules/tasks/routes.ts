@@ -17,6 +17,9 @@ import {
   completeTask,
   dismissTask,
   snoozeTask,
+  isTaskSortBy,
+  type TaskSection,
+  type TaskSortDir,
 } from "./service.js";
 import {
   prepareTaskAssignmentEmail,
@@ -121,13 +124,23 @@ router.get("/assignees", async (req, res, next) => {
 // GET /api/tasks — list tasks (paginated, filtered by section)
 router.get("/", async (req, res, next) => {
   try {
+    // Validate sort params against the allowlist; unknown values fall back to the
+    // section's default ordering (never reaches SQL — buildTaskSortOrder is a fixed switch).
+    const sortByParam = req.query.sortBy;
+    const sortBy = isTaskSortBy(sortByParam) ? sortByParam : undefined;
+    const sortDirParam = req.query.sortDir;
+    const sortDir: TaskSortDir | undefined =
+      sortDirParam === "asc" || sortDirParam === "desc" ? sortDirParam : undefined;
+
     const filters = {
       assignedTo: req.query.assignedTo as string | undefined,
       status: req.query.status as string | undefined,
       type: req.query.type as string | undefined,
       dealId: req.query.dealId as string | undefined,
       contactId: req.query.contactId as string | undefined,
-      section: req.query.section as "overdue" | "today" | "upcoming" | "completed" | undefined,
+      section: req.query.section as TaskSection | undefined,
+      sortBy,
+      sortDir,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
     };

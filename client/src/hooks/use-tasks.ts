@@ -176,15 +176,25 @@ export interface TaskCounts {
   today: number;
   upcoming: number;
   completed: number;
+  // Resolved (completed or dismissed) in the last 7 days — authoritative source for the
+  // "Completed this week" summary card (server-computed, not derived from the limited bucket).
+  completedThisWeek: number;
 }
 
+export type TaskSection = "overdue" | "today" | "this_week" | "later" | "upcoming" | "completed";
+export type TaskSortBy = "due_date" | "priority" | "assignee" | "created_at" | "completed_at";
+export type TaskSortDir = "asc" | "desc";
+
 export interface TaskFilters {
-  section?: "overdue" | "today" | "upcoming" | "completed";
+  section?: TaskSection;
   assignedTo?: string;
   status?: string;
   type?: string;
   dealId?: string;
   contactId?: string;
+  // Per-bucket sort wired through to the server so the FULL bucket sorts in the DB.
+  sortBy?: TaskSortBy;
+  sortDir?: TaskSortDir;
   page?: number;
   limit?: number;
 }
@@ -224,6 +234,8 @@ export function useTasks(filters: TaskFilters = {}) {
       if (filters.type) params.set("type", filters.type);
       if (filters.dealId) params.set("dealId", filters.dealId);
       if (filters.contactId) params.set("contactId", filters.contactId);
+      if (filters.sortBy) params.set("sortBy", filters.sortBy);
+      if (filters.sortDir) params.set("sortDir", filters.sortDir);
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
 
@@ -245,6 +257,8 @@ export function useTasks(filters: TaskFilters = {}) {
     filters.type,
     filters.dealId,
     filters.contactId,
+    filters.sortBy,
+    filters.sortDir,
     filters.page,
     filters.limit,
   ]);
@@ -290,7 +304,7 @@ export function useTask(taskId: string | undefined) {
 }
 
 export function useTaskCounts(userId?: string) {
-  const [counts, setCounts] = useState<TaskCounts>({ overdue: 0, today: 0, upcoming: 0, completed: 0 });
+  const [counts, setCounts] = useState<TaskCounts>({ overdue: 0, today: 0, upcoming: 0, completed: 0, completedThisWeek: 0 });
   const [loading, setLoading] = useState(true);
 
   const fetchCounts = useCallback(async () => {

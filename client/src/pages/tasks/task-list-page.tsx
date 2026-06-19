@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -25,6 +25,8 @@ import {
   useTask,
   useTasks,
   type Task,
+  type TaskSortBy,
+  type TaskSortDir,
 } from "@/hooks/use-tasks";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
@@ -45,6 +47,44 @@ const GROUP_META: Record<GroupKey, { label: string; eyebrow: string; dotClass: s
   later: { label: "Later", eyebrow: "Scheduled and upcoming", dotClass: "bg-slate-400", defaultOpen: false },
   completed: { label: "Completed recently", eyebrow: "Done", dotClass: "bg-emerald-500", defaultOpen: false },
 };
+
+// Per-bucket sort options. Each option pairs a field with its natural direction (the issue's
+// 4-option "Sort: …" dropdown); the chosen pair is sent to the server as sortBy/sortDir so the
+// FULL bucket sorts in the DB, not just the loaded cards. Completed swaps Due-date → Completed-date.
+type SortOption = { value: string; label: string };
+
+const ACTIVE_SORT_OPTIONS: SortOption[] = [
+  { value: "due_date:asc", label: "Due date" },
+  { value: "priority:desc", label: "Priority" },
+  { value: "assignee:asc", label: "Assignee" },
+  { value: "created_at:desc", label: "Newest" },
+];
+
+const COMPLETED_SORT_OPTIONS: SortOption[] = [
+  { value: "completed_at:desc", label: "Completed date" },
+  { value: "priority:desc", label: "Priority" },
+  { value: "assignee:asc", label: "Assignee" },
+  { value: "created_at:desc", label: "Newest" },
+];
+
+// Sensible default per bucket: due-soonest-first for active work, most-recently-completed-first
+// for the Completed bucket.
+const DEFAULT_SORT: Record<GroupKey, string> = {
+  overdue: "due_date:asc",
+  today: "due_date:asc",
+  this_week: "due_date:asc",
+  later: "due_date:asc",
+  completed: "completed_at:desc",
+};
+
+function sortOptionsForGroup(groupKey: GroupKey): SortOption[] {
+  return groupKey === "completed" ? COMPLETED_SORT_OPTIONS : ACTIVE_SORT_OPTIONS;
+}
+
+function parseSortValue(value: string): { sortBy: TaskSortBy; sortDir: TaskSortDir } {
+  const [sortBy, sortDir] = value.split(":") as [TaskSortBy, TaskSortDir];
+  return { sortBy, sortDir };
+}
 
 const PRIORITY_CLASSES: Record<string, string> = {
   urgent: "bg-brand-red text-white",
@@ -91,15 +131,6 @@ function formatDueDate(value: string | null) {
   const date = new Date(`${value}T00:00:00`);
   if (Number.isNaN(date.getTime())) return "No date";
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
-function daysUntil(value: string | null) {
-  if (!value) return Number.POSITIVE_INFINITY;
-  const date = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(date.getTime())) return Number.POSITIVE_INFINITY;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return Math.ceil((date.getTime() - today.getTime()) / 86400000);
 }
 
 function typeLabel(value: string) {
@@ -266,40 +297,96 @@ function TaskRow({ task, onUpdate }: { task: Task; onUpdate: () => void }) {
   );
 }
 
+function TaskGroupSortControl({
+  groupKey,
+  value,
+  onChange,
+  loading,
+}: {
+  groupKey: GroupKey;
+  value: string;
+  onChange: (value: string) => void;
+  loading: boolean;
+}) {
+  const meta = GROUP_META[groupKey];
+  const options = sortOptionsForGroup(groupKey);
+  const selectedLabel = options.find((option) => option.value === value)?.label ?? options[0].label;
+  const ariaLabel = `Sort ${meta.label} tasks`;
+
+  return (
+    <div data-sort-group={groupKey} className="flex items-center gap-1.5">
+      {loading ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-slate-400" aria-hidden /> : null}
+      <span className="hidden text-[11px] font-black uppercase tracking-[0.14em] text-slate-500 sm:inline">Sort</span>
+      <Select value={value} onValueChange={(next) => { if (next) onChange(next); }}>
+        <SelectTrigger aria-label={ariaLabel} className="h-8 w-[150px] border-slate-200 bg-white">
+          <SelectValue>{selectedLabel}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 function TaskGroup({
   groupKey,
   tasks,
   onUpdate,
+  sortValue,
+  onSortChange,
+  loading,
 }: {
   groupKey: GroupKey;
   tasks: Task[];
   onUpdate: () => void;
+  sortValue: string;
+  onSortChange: (value: string) => void;
+  loading: boolean;
 }) {
   const meta = GROUP_META[groupKey];
   const [open, setOpen] = useState(meta.defaultOpen);
+  const toggle = () => setOpen((value) => !value);
 
   return (
     <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center justify-between gap-4 border-b border-slate-200 bg-slate-50 px-4 py-3 text-left"
-        aria-expanded={open}
-      >
-        <div className="flex items-center gap-3">
-          <span className={cn("h-2.5 w-2.5 rounded-full", meta.dotClass)} />
-          <div>
+      {/* Header bar is NOT a single button: the collapse toggle and the sort dropdown are siblings
+          so the dropdown never nests inside (or toggles) the accordion. */}
+      <div className="flex w-full flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3">
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center gap-3 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+        >
+          <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", meta.dotClass)} />
+          <div className="min-w-0">
             <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">{meta.eyebrow}</p>
             <h2 className="text-sm font-black uppercase text-slate-950">{meta.label}</h2>
           </div>
-        </div>
-        <div className="flex items-center gap-3">
+        </button>
+        <div className="flex items-center gap-2">
+          {open ? (
+            <TaskGroupSortControl groupKey={groupKey} value={sortValue} onChange={onSortChange} loading={loading} />
+          ) : null}
           <span className="rounded-full bg-white px-2.5 py-0.5 text-xs font-black tabular-nums text-slate-700 ring-1 ring-slate-200">
             {tasks.length}
           </span>
-          <ChevronDown className={cn("h-4 w-4 text-slate-500 transition-transform", open ? "rotate-180" : "")} />
+          <button
+            type="button"
+            onClick={toggle}
+            aria-expanded={open}
+            aria-label={`${open ? "Collapse" : "Expand"} ${meta.label}`}
+            className="flex h-8 w-8 items-center justify-center rounded text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+          >
+            <ChevronDown className={cn("h-4 w-4 transition-transform", open ? "rotate-180" : "")} />
+          </button>
         </div>
-      </button>
+      </div>
       {open ? (
         <div>
           {tasks.length > 0 ? (
@@ -326,7 +413,7 @@ function AssigneeFilter({
     : "All assignees";
 
   return (
-    <div className="flex items-center gap-2">
+    <div data-testid="assignee-filter" className="flex items-center gap-2">
       <label htmlFor="task-assignee-filter" className="text-[11px] font-black uppercase tracking-[0.16em] text-slate-500">
         Assignee
       </label>
@@ -372,16 +459,37 @@ function TaskListPageContent({ role }: { role: string }) {
   const canAssign = role === "admin" || role === "director";
   const selectedAssignee = canAssign ? searchParams.get("assignee") ?? "" : "";
   const assigneeFilter = selectedAssignee || undefined;
+  // Per-bucket sort selection (ephemeral view preference, kept in local state — not URL).
+  const [sortByGroup, setSortByGroup] = useState<Record<GroupKey, string>>(DEFAULT_SORT);
+  const setGroupSort = (groupKey: GroupKey) => (value: string) =>
+    setSortByGroup((prev) => ({ ...prev, [groupKey]: value }));
+
+  const overdueSort = parseSortValue(sortByGroup.overdue);
+  const todaySort = parseSortValue(sortByGroup.today);
+  const thisWeekSort = parseSortValue(sortByGroup.this_week);
+  const laterSort = parseSortValue(sortByGroup.later);
+  const completedSort = parseSortValue(sortByGroup.completed);
+
   const { counts, loading: countsLoading, refetch: refetchCounts } = useTaskCounts(assigneeFilter);
-  const { tasks: overdueTasks, loading: overdueLoading, error: overdueError, refetch: refetchOverdue } = useTasks({ section: "overdue", assignedTo: assigneeFilter });
-  const { tasks: todayTasks, loading: todayLoading, error: todayError, refetch: refetchToday } = useTasks({ section: "today", assignedTo: assigneeFilter });
-  const { tasks: upcomingTasks, loading: upcomingLoading, error: upcomingError, refetch: refetchUpcoming } = useTasks({ section: "upcoming", assignedTo: assigneeFilter });
-  const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", limit: 20, assignedTo: assigneeFilter });
-  const { tasks: scheduledTasks, loading: scheduledLoading, error: scheduledError, refetch: refetchScheduled } = useTasks({ status: "scheduled", limit: 100, assignedTo: assigneeFilter });
+  // Each displayed bucket is now exactly one server query, sorted server-side over its full set.
+  const { tasks: overdueTasks, loading: overdueLoading, error: overdueError, refetch: refetchOverdue } = useTasks({ section: "overdue", assignedTo: assigneeFilter, sortBy: overdueSort.sortBy, sortDir: overdueSort.sortDir });
+  const { tasks: todayTasks, loading: todayLoading, error: todayError, refetch: refetchToday } = useTasks({ section: "today", assignedTo: assigneeFilter, sortBy: todaySort.sortBy, sortDir: todaySort.sortDir });
+  const { tasks: thisWeekTasks, loading: thisWeekLoading, error: thisWeekError, refetch: refetchThisWeek } = useTasks({ section: "this_week", assignedTo: assigneeFilter, sortBy: thisWeekSort.sortBy, sortDir: thisWeekSort.sortDir });
+  // limit 200 preserves the prior display ceiling: "Later" used to be two fetches (scheduled ≤100 +
+  // the >7-day tail of upcoming ≤100); it's now a single unified server query.
+  const { tasks: laterTasks, loading: laterLoading, error: laterError, refetch: refetchLater } = useTasks({ section: "later", limit: 200, assignedTo: assigneeFilter, sortBy: laterSort.sortBy, sortDir: laterSort.sortDir });
+  const { tasks: completedTasks, loading: completedLoading, error: completedError, refetch: refetchCompleted } = useTasks({ section: "completed", limit: 20, assignedTo: assigneeFilter, sortBy: completedSort.sortBy, sortDir: completedSort.sortDir });
   const { task: linkedTask, loading: linkedTaskLoading, error: linkedTaskError, refetch: refetchLinkedTask } = useTask(taskId);
 
-  const loading = countsLoading || overdueLoading || todayLoading || upcomingLoading || completedLoading || scheduledLoading || linkedTaskLoading;
-  const error = linkedTaskError ?? overdueError ?? todayError ?? upcomingError ?? completedError ?? scheduledError;
+  const groupLoading: Record<GroupKey, boolean> = {
+    overdue: overdueLoading,
+    today: todayLoading,
+    this_week: thisWeekLoading,
+    later: laterLoading,
+    completed: completedLoading,
+  };
+  const loading = countsLoading || overdueLoading || todayLoading || thisWeekLoading || laterLoading || completedLoading || linkedTaskLoading;
+  const error = linkedTaskError ?? overdueError ?? todayError ?? thisWeekError ?? laterError ?? completedError;
 
   const updateAssignee = (assigneeId: string) => {
     const next = new URLSearchParams(searchParams);
@@ -394,9 +502,9 @@ function TaskListPageContent({ role }: { role: string }) {
     refetchCounts();
     refetchOverdue();
     refetchToday();
-    refetchUpcoming();
+    refetchThisWeek();
+    refetchLater();
     refetchCompleted();
-    refetchScheduled();
     refetchLinkedTask();
   };
 
@@ -408,29 +516,31 @@ function TaskListPageContent({ role }: { role: string }) {
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(normalizedQuery));
     };
-    const thisWeek: Task[] = [];
-    const later: Task[] = [...scheduledTasks];
 
-    for (const task of upcomingTasks) {
-      if (daysUntil(task.dueDate) <= 7) thisWeek.push(task);
-      else later.push(task);
-    }
-
+    // Server already sorted each bucket; search only filters (never reorders), so the
+    // server-chosen order is preserved.
     return {
       overdue: overdueTasks.filter(matches),
       today: todayTasks.filter(matches),
-      this_week: thisWeek.filter(matches),
-      later: later.filter(matches),
+      this_week: thisWeekTasks.filter(matches),
+      later: laterTasks.filter(matches),
       completed: completedTasks.filter(matches),
     } satisfies Record<GroupKey, Task[]>;
-  }, [completedTasks, overdueTasks, query, scheduledTasks, todayTasks, upcomingTasks]);
+  }, [completedTasks, overdueTasks, query, laterTasks, todayTasks, thisWeekTasks]);
 
-  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  const completedThisWeek = completedTasks.filter((task) => {
-    if (!task.completedAt) return false;
-    const completedAt = new Date(task.completedAt).getTime();
-    return !Number.isNaN(completedAt) && completedAt >= sevenDaysAgo;
-  }).length;
+  // Authoritative, server-computed count — independent of the Completed bucket's sort/limit.
+  const completedThisWeek = counts.completedThisWeek;
+
+  // Only blank the whole page on the very FIRST load. After the buckets have resolved once, a
+  // per-bucket sort change refetches just that bucket and must not hide the others (each group keeps
+  // its prior rows + shows an inline "updating" spinner). A one-shot ref — rather than a live
+  // "any rows present" check — keeps this correct even in the all-empty state (changing a sort on an
+  // empty bucket must not re-trigger the whole-page loader and tear down accordion state).
+  const hasResolvedOnce = useRef(false);
+  useEffect(() => {
+    if (!loading) hasResolvedOnce.current = true;
+  }, [loading]);
+  const showInitialLoading = loading && !hasResolvedOnce.current && !(taskId && linkedTask);
 
   return (
     <div className="space-y-6">
@@ -493,14 +603,22 @@ function TaskListPageContent({ role }: { role: string }) {
         </div>
       ) : null}
 
-      {loading ? (
+      {showInitialLoading ? (
         <div className="rounded-lg border border-slate-200 bg-white p-8 text-sm font-semibold text-slate-500">
           Loading tasks...
         </div>
       ) : (
         <div className="space-y-4">
           {(Object.keys(GROUP_META) as GroupKey[]).map((groupKey) => (
-            <TaskGroup key={groupKey} groupKey={groupKey} tasks={grouped[groupKey]} onUpdate={refetchAll} />
+            <TaskGroup
+              key={groupKey}
+              groupKey={groupKey}
+              tasks={grouped[groupKey]}
+              onUpdate={refetchAll}
+              sortValue={sortByGroup[groupKey]}
+              onSortChange={setGroupSort(groupKey)}
+              loading={groupLoading[groupKey]}
+            />
           ))}
         </div>
       )}
