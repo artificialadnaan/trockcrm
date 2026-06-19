@@ -706,3 +706,83 @@ describe("DealForm direct-create context", () => {
     expect(mocks.createDeal).not.toHaveBeenCalled();
   }, 30000);
 });
+
+describe("DealForm region auto-suggestion", () => {
+  let roots: Root[] = [];
+  let containers: HTMLElement[] = [];
+
+  const THREE_REGIONS = {
+    regions: [
+      { id: "region-west", name: "West Coast", slug: "west_coast", states: [], displayOrder: 1, isActive: true },
+      { id: "region-central", name: "Central", slug: "central", states: [], displayOrder: 2, isActive: true },
+      { id: "region-east", name: "East Coast", slug: "east_coast", states: [], displayOrder: 3, isActive: true },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.companySelectorProps = null;
+    mocks.propertySelectorProps = null;
+    setupCommonMocks();
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+    mocks.useRegions.mockReturnValue(THREE_REGIONS);
+    mocks.updateDeal.mockResolvedValue({ deal: { id: "deal-onyx", sourceLeadId: null } });
+  });
+
+  afterEach(() => {
+    for (const root of roots) act(() => root.unmount());
+    for (const container of containers) container.remove();
+    roots = [];
+    containers = [];
+  });
+
+  const editDeal = (over: Record<string, unknown>) =>
+    ({
+      id: "deal-onyx",
+      dealNumber: "DFW-1-15426-ab",
+      name: "The Onyx",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      sourceLeadId: null,
+      isBidBoardOwned: false,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+      propertyState: "IL",
+      ...over,
+    }) as any;
+
+  it("flags an auto-derived region on a null-region deal as an unsaved suggestion", async () => {
+    const { container, root } = await renderEditForm(editDeal({ regionId: null, propertyState: "IL" }));
+    containers.push(container);
+    roots.push(root);
+
+    expect(container.textContent).toMatch(/auto-detected/i);
+    expect(container.textContent).toContain("East Coast");
+    expect(container.textContent).toMatch(/save to confirm/i);
+  }, 30000);
+
+  it("does not flag a deal that already has a saved region (no phantom-value warning)", async () => {
+    const { container, root } = await renderEditForm(editDeal({ regionId: "region-east", propertyState: "IL" }));
+    containers.push(container);
+    roots.push(root);
+
+    expect(container.textContent).not.toMatch(/auto-detected/i);
+    expect(container.textContent).not.toMatch(/save to confirm/i);
+  }, 30000);
+
+  it("does not flag when the state maps to no region (deal stays Unassigned)", async () => {
+    const { container, root } = await renderEditForm(editDeal({ regionId: null, propertyState: "PR" }));
+    containers.push(container);
+    roots.push(root);
+
+    expect(container.textContent).not.toMatch(/auto-detected/i);
+  }, 30000);
+});
