@@ -4,7 +4,7 @@ import { PHOTO_CATEGORIES } from "../projects/field-projects";
 import { theme } from "../theme/theme";
 import { Chip } from "./ui";
 
-/** Horizontal chip row for the 8 photo categories (tap-again to clear). */
+/** Horizontal chip row for the 6 phase photo categories (tap-again to clear). */
 export function CategoryPicker({
   value,
   onChange,

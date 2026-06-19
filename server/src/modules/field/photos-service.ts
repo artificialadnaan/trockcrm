@@ -2,6 +2,7 @@ import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import type { PhotoCategory, UserRole } from "@trock-crm/shared/types";
+import { PHOTO_CATEGORIES } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { generateDownloadUrl, generateMockDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
 import {
@@ -16,7 +17,10 @@ import { assertAccessibleFieldCaptureTarget, type FieldPhoto } from "./projects-
 type TenantDb = NodePgDatabase<typeof schema>;
 
 const IMAGE_CONTENT_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
-const PHOTO_CATEGORY_VALUES = new Set(["before", "after", "progress", "site_visit", "damage", "safety", "delivery", "other"]);
+// Accept every value valid in the photo_category enum (the 6 offered phase
+// categories + retained legacy values). Sourced from the shared single source of
+// truth so adding a category never drifts from server validation.
+const PHOTO_CATEGORY_VALUES = new Set<string>(PHOTO_CATEGORIES);
 const PHOTO_ADDRESS_SOURCES = new Set(["exif", "live_gps"]);
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

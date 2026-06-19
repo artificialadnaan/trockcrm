@@ -1,3 +1,5 @@
+import { LEGACY_PHOTO_CATEGORY_ITEMS, PHOTO_CATEGORY_OPTION_ITEMS, photoCategoryLabel } from "@trock-crm/shared/types";
+
 export type FieldProject = {
   id: string;
   name: string;
@@ -68,16 +70,14 @@ export type FieldPhoto = {
 
 export type PhotoGrouping = "date" | "category" | "uploader" | "none";
 
-export const PHOTO_CATEGORIES = [
-  { value: "before", label: "Before" },
-  { value: "after", label: "After" },
-  { value: "progress", label: "Progress" },
-  { value: "site_visit", label: "Site Visit" },
-  { value: "damage", label: "Damage" },
-  { value: "safety", label: "Safety" },
-  { value: "delivery", label: "Delivery" },
-  { value: "other", label: "Other" },
-] as const;
+// The 6 phase categories offered for capture (shared single source of truth).
+// Legacy values are no longer offered but still render a label via categoryLabel.
+export const PHOTO_CATEGORIES = PHOTO_CATEGORY_OPTION_ITEMS;
+
+// Retired categories, surfaced in gallery filters (marked "(legacy)") only when a
+// photo still carries one, so historical photos stay reachable without offering
+// the old values for new captures.
+export const LEGACY_PHOTO_CATEGORIES = LEGACY_PHOTO_CATEGORY_ITEMS;
 
 export function groupCaptureTargets(targets: FieldCaptureTarget[]) {
   return {
@@ -98,8 +98,8 @@ export function relativeDate(value: string | null) {
 }
 
 export function categoryLabel(value: string | null) {
-  if (!value) return "Uncategorized";
-  return PHOTO_CATEGORIES.find((category) => category.value === value)?.label ?? value.replace(/_/g, " ");
+  // photoCategoryLabel resolves offered + legacy values; null → "Uncategorized".
+  return photoCategoryLabel(value) ?? "Uncategorized";
 }
 
 function ordinal(day: number) {

@@ -11,6 +11,7 @@ import {
   formatPhotoTime,
   getPhotoTags,
   initials,
+  legacyCategoryOptionsInUse,
   matchesPhotoFilters,
   PhotoEmptyState,
   PhotoFilterBar,
@@ -133,7 +134,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
 
   return (
     <div className="space-y-3">
-      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} showGrouping={false} />
+      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} showGrouping={false} legacyCategoryOptions={legacyCategoryOptionsInUse(photos)} />
 
       {!loading && !error && (
         <PhotoPaginationSummary

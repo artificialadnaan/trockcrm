@@ -201,8 +201,8 @@ describe("CapturePage", () => {
     Array.from(node.querySelectorAll("button")).find((button) => button.textContent?.includes("Safety Walk"))?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("Safety Walk"));
 
-    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Damage")?.click();
-    await vi.waitFor(() => expect(node.querySelector('[aria-pressed="true"]')?.textContent).toBe("Damage"));
+    Array.from(node.querySelectorAll("button")).find((button) => button.textContent === "Construction")?.click();
+    await vi.waitFor(() => expect(node.querySelector('[aria-pressed="true"]')?.textContent).toBe("Construction"));
   });
 
   it("uploads lead-target photos, clears the session, and returns to projects", async () => {

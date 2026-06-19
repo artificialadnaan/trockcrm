@@ -32,18 +32,16 @@ import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api } from "@/lib/api";
 import { getImmediatePhotoPreviewUrl, isPhotoImagePreviewable, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
+import {
+  LEGACY_PHOTO_CATEGORY_ITEMS,
+  PHOTO_CATEGORY_OPTION_ITEMS,
+  photoCategoryLabel,
+  type PhotoCategory,
+} from "@trock-crm/shared/types";
 import { PhotoHistoryTimeline } from "./photo-history-timeline";
 
 export type PhotoGrouping = "date" | "category" | "uploader" | "none";
-export type PhotoCategory =
-  | "before"
-  | "after"
-  | "progress"
-  | "site_visit"
-  | "damage"
-  | "safety"
-  | "delivery"
-  | "other";
+export type { PhotoCategory };
 
 export interface DealPhotoRecord {
   id: string;
@@ -84,16 +82,10 @@ export interface PhotoFilterState {
   showDeleted: boolean;
 }
 
-export const PHOTO_CATEGORIES: Array<{ value: PhotoCategory; label: string }> = [
-  { value: "before", label: "Before" },
-  { value: "after", label: "After" },
-  { value: "progress", label: "Progress" },
-  { value: "site_visit", label: "Site Visit" },
-  { value: "damage", label: "Damage" },
-  { value: "safety", label: "Safety" },
-  { value: "delivery", label: "Delivery" },
-  { value: "other", label: "Other" },
-];
+// The 6 phase categories offered when tagging a photo (shared single source of
+// truth). Legacy values are surfaced in the filter only, never offered for new
+// tagging — see PhotoFilterBar / displayPhotoCategory.
+export const PHOTO_CATEGORIES = PHOTO_CATEGORY_OPTION_ITEMS;
 
 const GROUP_OPTIONS: Array<{ value: PhotoGrouping; label: string }> = [
   { value: "date", label: "Date" },
@@ -168,9 +160,9 @@ export function initials(name?: string | null) {
 }
 
 export function displayPhotoCategory(photo: DealPhotoRecord): string | null {
-  if (photo.photoCategory) {
-    return PHOTO_CATEGORIES.find((category) => category.value === photo.photoCategory)?.label ?? photo.photoCategory;
-  }
+  // photoCategoryLabel resolves both the 6 offered values and retained legacy
+  // values, so photos tagged before the phase rollout still show their label.
+  if (photo.photoCategory) return photoCategoryLabel(photo.photoCategory);
   if (photo.subcategory) return photo.subcategory.replace(/_/g, " ");
   return null;
 }
@@ -225,6 +217,18 @@ export function matchesPhotoFilters(photo: DealPhotoRecord, filters: PhotoFilter
   if (filters.from && day < filters.from) return false;
   if (filters.to && day > filters.to) return false;
   return true;
+}
+
+/**
+ * Legacy (retired) category options that are still in use by the given photos, so
+ * the filter surfaces them only when a historical photo carries one — never an
+ * empty chip on a deal with no legacy photos.
+ */
+export function legacyCategoryOptionsInUse(
+  photos: DealPhotoRecord[]
+): Array<{ value: string; label: string }> {
+  const present = new Set(photos.map((photo) => photo.photoCategory));
+  return LEGACY_PHOTO_CATEGORY_ITEMS.filter((option) => present.has(option.value as PhotoCategory));
 }
 
 export function groupDealPhotos(photos: DealPhotoRecord[], filters: PhotoFilterState) {
@@ -488,20 +492,33 @@ export function PhotoFilterBar({
   uploaders,
   onChange,
   showGrouping = true,
+  legacyCategoryOptions = LEGACY_PHOTO_CATEGORY_ITEMS,
 }: {
   filters: PhotoFilterState;
   availableTags: string[];
   uploaders: Array<{ id: string; name: string; avatarUrl: string | null }>;
   onChange: (filters: PhotoFilterState) => void;
   showGrouping?: boolean;
+  /**
+   * Legacy (no-longer-offered) categories to surface in the filter so photos
+   * tagged before the phase rollout stay reachable. Callers should pass only the
+   * legacy values actually present in the current photo set; defaults to all
+   * legacy values so old photos are never unreachable.
+   */
+  legacyCategoryOptions?: ReadonlyArray<{ value: string; label: string }>;
 }) {
   const activeFilters = filters.categories.length + filters.tags.length + filters.uploaderIds.length + (filters.from ? 1 : 0) + (filters.to ? 1 : 0) + (filters.showDeleted ? 1 : 0);
+  const categoryOptions = [
+    ...PHOTO_CATEGORIES,
+    { value: "uncategorized", label: "Uncategorized" },
+    ...legacyCategoryOptions.map((option) => ({ value: option.value, label: `${option.label} (legacy)` })),
+  ];
   return (
     <div data-testid="photo-filter-bar" className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 p-2">
       <MultiSelectButton
         label="Category"
         selectedCount={filters.categories.length}
-        options={[...PHOTO_CATEGORIES, { value: "uncategorized", label: "Uncategorized" }]}
+        options={categoryOptions}
         selected={filters.categories}
         onChange={(categories) => onChange({ ...filters, categories })}
       />

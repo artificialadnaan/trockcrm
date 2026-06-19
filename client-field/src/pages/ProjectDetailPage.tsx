@@ -11,6 +11,7 @@ import {
   filterPhotos,
   groupPhotos,
   isProjectOffOffice,
+  LEGACY_PHOTO_CATEGORIES,
   PHOTO_CATEGORIES,
   type FieldPhoto,
   type FieldProject,
@@ -94,6 +95,12 @@ export function ProjectDetailPage() {
     return Array.from(map.values()).sort((left, right) => left.localeCompare(right));
   }, [photos]);
   const filteredPhotos = useMemo(() => filterPhotos(photos, { categories, tags, uploaderIds, from, to }), [categories, from, photos, tags, to, uploaderIds]);
+  // Surface a legacy category chip only when a loaded photo still carries it, so
+  // historical photos stay filterable without offering retired values for new captures.
+  const legacyCategoriesInUse = useMemo(() => {
+    const present = new Set(photos.map((photo) => photo.photoCategory));
+    return LEGACY_PHOTO_CATEGORIES.filter((category) => present.has(category.value));
+  }, [photos]);
   const groupedPhotos = useMemo(() => groupPhotos(filteredPhotos, grouping), [filteredPhotos, grouping]);
   const selectedIndex = selectedPhotoId ? filteredPhotos.findIndex((photo) => photo.id === selectedPhotoId) : -1;
   const selectedPhoto = selectedIndex >= 0 ? filteredPhotos[selectedIndex] : null;
@@ -210,6 +217,16 @@ export function ProjectDetailPage() {
             onClick={() => setCategories((current) => current.includes(category.value) ? current.filter((value) => value !== category.value) : [...current, category.value])}
           >
             {category.label}
+          </button>
+        ))}
+        {legacyCategoriesInUse.map((category) => (
+          <button
+            key={category.value}
+            type="button"
+            className={`shrink-0 rounded-full px-3 py-2 text-sm font-bold ${categories.includes(category.value) ? "bg-primary text-primary-foreground" : "bg-muted"}`}
+            onClick={() => setCategories((current) => current.includes(category.value) ? current.filter((value) => value !== category.value) : [...current, category.value])}
+          >
+            {category.label} (legacy)
           </button>
         ))}
         {availableTags.map((tag) => (

@@ -71,7 +71,22 @@ export type FieldPhoto = {
 
 export type PhotoGrouping = "date" | "category" | "uploader" | "none";
 
+// The 6 phase categories offered for capture. Kept in sync with the shared
+// source of truth (shared/src/types/enums.ts PHOTO_CATEGORY_OPTIONS); the Expo
+// bundle can't import the workspace `shared` package, so this is a deliberate
+// mirror — update both together.
 export const PHOTO_CATEGORIES = [
+  { value: "estimating", label: "Estimating" },
+  { value: "preconstruction", label: "Preconstruction" },
+  { value: "construction", label: "Construction" },
+  { value: "final_completion", label: "Final Completion" },
+  { value: "punch", label: "Punch" },
+  { value: "issues", label: "Issues" },
+] as const;
+
+// Legacy categories — no longer offered for capture, retained only so photos
+// tagged before the phase rollout still resolve a human label.
+export const LEGACY_PHOTO_CATEGORIES = [
   { value: "before", label: "Before" },
   { value: "after", label: "After" },
   { value: "progress", label: "Progress" },
@@ -102,7 +117,8 @@ export function relativeDate(value: string | null) {
 
 export function categoryLabel(value: string | null) {
   if (!value) return "Uncategorized";
-  return PHOTO_CATEGORIES.find((category) => category.value === value)?.label ?? value.replace(/_/g, " ");
+  const match = [...PHOTO_CATEGORIES, ...LEGACY_PHOTO_CATEGORIES].find((category) => category.value === value);
+  return match?.label ?? value.replace(/_/g, " ");
 }
 
 function ordinal(day: number) {

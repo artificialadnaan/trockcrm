@@ -194,8 +194,10 @@ describe("DealFilePhotosSubview", () => {
     await vi.waitFor(() => expect(node.textContent).toContain("Roof corner damage"));
 
     node.querySelector<HTMLButtonElement>('[aria-label="Category filter"]')?.click();
-    await vi.waitFor(() => expect(document.body.textContent).toContain("Safety"));
-    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Safety")?.click();
+    // "safety" is a retired legacy category — still offered in the filter (marked
+    // "(legacy)") so photos tagged before the phase rollout stay reachable.
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Safety (legacy)"));
+    Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Safety (legacy)")?.click();
 
     await vi.waitFor(() => expect(node.textContent).toContain("Safety setup"));
     expect(node.textContent).not.toContain("Roof corner damage");

@@ -238,7 +238,26 @@ export const FILE_CATEGORIES = [
 ] as const;
 export type FileCategory = (typeof FILE_CATEGORIES)[number];
 
-export const PHOTO_CATEGORIES = [
+// ── Photo categories (project-phase taxonomy) ──────────────────────────────
+// The 6 phase categories offered to users when capturing/tagging a photo
+// (TRockCam mobile pills + the CRM web picker/filter). This is the single
+// source of truth for what is OFFERED going forward.
+export const PHOTO_CATEGORY_OPTIONS = [
+  "estimating",
+  "preconstruction",
+  "construction",
+  "final_completion",
+  "punch",
+  "issues",
+] as const;
+export type PhotoCategoryOption = (typeof PHOTO_CATEGORY_OPTIONS)[number];
+
+// Legacy values from the pre-phase taxonomy. NO LONGER OFFERED for new captures,
+// but retained because existing photo rows reference them and the per-tenant
+// `photo_category` Postgres enum still contains them (enum values can't be
+// dropped without orphaning rows). Kept here so historical photos still resolve
+// a human label and stay filterable. Do not add to capture/edit pickers.
+export const LEGACY_PHOTO_CATEGORIES = [
   "before",
   "after",
   "progress",
@@ -248,7 +267,51 @@ export const PHOTO_CATEGORIES = [
   "delivery",
   "other",
 ] as const;
+export type LegacyPhotoCategory = (typeof LEGACY_PHOTO_CATEGORIES)[number];
+
+// Full set of values valid in the `photo_category` DB enum + the PhotoCategory
+// type: legacy values (created in migration 0077) followed by the new phase
+// values (appended in migration 0165). Order mirrors the physical enum order.
+export const PHOTO_CATEGORIES = [
+  ...LEGACY_PHOTO_CATEGORIES,
+  ...PHOTO_CATEGORY_OPTIONS,
+] as const;
 export type PhotoCategory = (typeof PHOTO_CATEGORIES)[number];
+
+// Human-readable label for every category value (offered + legacy). Used by the
+// web/field clients and any server-side rendering so old photos keep their
+// original label after the offered list changed.
+export const PHOTO_CATEGORY_LABELS: Record<PhotoCategory, string> = {
+  estimating: "Estimating",
+  preconstruction: "Preconstruction",
+  construction: "Construction",
+  final_completion: "Final Completion",
+  punch: "Punch",
+  issues: "Issues",
+  before: "Before",
+  after: "After",
+  progress: "Progress",
+  site_visit: "Site Visit",
+  damage: "Damage",
+  safety: "Safety",
+  delivery: "Delivery",
+  other: "Other",
+};
+
+// {value,label} list of the 6 offered phase categories, in display order.
+export const PHOTO_CATEGORY_OPTION_ITEMS: ReadonlyArray<{ value: PhotoCategoryOption; label: string }> =
+  PHOTO_CATEGORY_OPTIONS.map((value) => ({ value, label: PHOTO_CATEGORY_LABELS[value] }));
+
+// {value,label} list of the legacy categories, for surfacing historical photos
+// in filters without offering them as new choices.
+export const LEGACY_PHOTO_CATEGORY_ITEMS: ReadonlyArray<{ value: LegacyPhotoCategory; label: string }> =
+  LEGACY_PHOTO_CATEGORIES.map((value) => ({ value, label: PHOTO_CATEGORY_LABELS[value] }));
+
+/** Resolve a stored photo-category value to its display label (handles legacy values). */
+export function photoCategoryLabel(value: string | null | undefined): string | null {
+  if (!value) return null;
+  return PHOTO_CATEGORY_LABELS[value as PhotoCategory] ?? value.replace(/_/g, " ");
+}
 
 export const PHOTO_ADDRESS_SOURCES = [
   "exif",
