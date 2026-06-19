@@ -8,18 +8,23 @@
 -- the contacts UI read cda and therefore silently run dry. This migration seeds one cda row per deal that
 -- has a primary contact, materializing the primary edge that already exists on the deal row.
 --
--- SHAPE / SAFETY
+-- SHAPE / SAFETY — mirrors the manual createAssociation writer (association-service.ts) EXACTLY, which
+-- requires BOTH the deal and the contact to be active.
+--   * active-only     — d.is_active = true AND the contact is active (EXISTS ... AND c.is_active = true).
+--                           An archived deal or archived contact must NOT resurface a primary edge on the
+--                           Primary Contacts card / deal pages / APIs, so those rows are excluded (this
+--                           drops the 54 inactive-deal + 16 inactive-contact rows the first census flagged).
 --   * is_primary = true   — every seeded row is the deal's PRIMARY contact (that is what primary_contact_id
---                           means), mirroring the manual createAssociation writer in association-service.ts.
+--                           means).
 --   * role            — left NULL (column is nullable, no default), matching createAssociation's `role ?? null`
 --                           for a row created without an explicit role.
---   * FK-guarded      — only inserts when the referenced contact still EXISTS, so the
+--   * FK-guarded      — only inserts when the referenced contact EXISTS (and is active), so the
 --                           contact_deal_associations_contact_id_fkey -> contacts(id) constraint cannot fail.
---                           (deal_id always exists; the SELECT is FROM deals.) Census: 0 dangling
---                           primary_contact_id rows in prod, so nothing is dropped today.
---   * idempotent / replayable — ON CONFLICT (contact_id, deal_id) DO NOTHING against the existing
---                           UNIQUE(contact_id, deal_id) constraint, so re-running (or the manual writer
---                           having already created a row) is a no-op and never duplicates an edge.
+--   * promote-on-conflict / idempotent — ON CONFLICT (contact_id, deal_id) DO UPDATE SET is_primary = true
+--                           against the UNIQUE(contact_id, deal_id) constraint. If a (contact, deal) edge
+--                           already exists (e.g. a manually-created non-primary row), it is PROMOTED to
+--                           primary so the deal's one primary is always marked — the backfill never silently
+--                           fails to set a primary. Re-running sets the same true, so it stays idempotent.
 --
 -- PROD WRITE: this performs an INSERT on merge+deploy. It is read-mostly-safe (insert-only, conflict-skipped)
 -- but it DOES write rows. Do not merge until the census in the PR body is approved.
@@ -49,21 +54,23 @@ BEGIN
        SELECT d.primary_contact_id, d.id, true
        FROM %I.deals d
        WHERE d.primary_contact_id IS NOT NULL
-         AND EXISTS (SELECT 1 FROM %I.contacts c WHERE c.id = d.primary_contact_id)
-       ON CONFLICT (contact_id, deal_id) DO NOTHING',
+         AND d.is_active = true
+         AND EXISTS (SELECT 1 FROM %I.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true)
+       ON CONFLICT (contact_id, deal_id) DO UPDATE SET is_primary = true',
       tenant_schema, tenant_schema, tenant_schema
     );
   END LOOP;
 END $mig$;
 
 -- New tenants: cloned by the office provisioner (office_dallas -> new schema). Runs idempotently for
--- office_dallas at migration time too (redundant with the DO-loop above; ON CONFLICT DO NOTHING makes it a
--- no-op). On a brand-new tenant the deals table is empty, so this inserts zero rows.
+-- office_dallas at migration time too (redundant with the DO-loop above; ON CONFLICT re-marks the same
+-- primary, a no-op). On a brand-new tenant the deals table is empty, so this inserts zero rows.
 -- TENANT_SCHEMA_START
 INSERT INTO office_dallas.contact_deal_associations (contact_id, deal_id, is_primary)
 SELECT d.primary_contact_id, d.id, true
 FROM office_dallas.deals d
 WHERE d.primary_contact_id IS NOT NULL
-  AND EXISTS (SELECT 1 FROM office_dallas.contacts c WHERE c.id = d.primary_contact_id)
-ON CONFLICT (contact_id, deal_id) DO NOTHING;
+  AND d.is_active = true
+  AND EXISTS (SELECT 1 FROM office_dallas.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true)
+ON CONFLICT (contact_id, deal_id) DO UPDATE SET is_primary = true;
 -- TENANT_SCHEMA_END

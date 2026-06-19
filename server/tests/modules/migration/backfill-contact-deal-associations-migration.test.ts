@@ -6,8 +6,9 @@ import { describe, expect, it } from "vitest";
  * Migration 0169 backfills the empty contact_deal_associations (cda) join table from
  * deals.primary_contact_id (HubSpot held the edges; migration 0027 repaired the deal-side column but
  * never re-seeded cda, so worker jobs reading cda run dry). This asserts the SQL file shape so the
- * per-office DO-loop, the contacts EXISTS FK guard, ON CONFLICT DO NOTHING idempotency, the
- * TENANT_SCHEMA block, and the "no CONCURRENTLY in a txn" rule cannot regress.
+ * per-office DO-loop, the active-deal + active-contact filters (matching the createAssociation writer),
+ * the promote-on-conflict (DO UPDATE SET is_primary) behavior, the TENANT_SCHEMA block, and the
+ * "no CONCURRENTLY in a txn" rule cannot regress.
  */
 const migrationPath = resolve(
   import.meta.dirname,
@@ -41,16 +42,24 @@ describe("migration 0169 — backfill contact_deal_associations", () => {
     expect(sql).toContain("WHERE d.primary_contact_id IS NOT NULL");
   });
 
-  it("FK-guards the insert with an EXISTS check against contacts so dangling pointers are skipped", () => {
+  it("FK-guards the insert against ACTIVE contacts (mirrors createAssociation requiring an active contact)", () => {
     expect(sql).toContain(
-      "EXISTS (SELECT 1 FROM %I.contacts c WHERE c.id = d.primary_contact_id)"
+      "EXISTS (SELECT 1 FROM %I.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true)"
     );
   });
 
-  it("is idempotent / replayable via ON CONFLICT (contact_id, deal_id) DO NOTHING", () => {
-    // Matches the UNIQUE(contact_id, deal_id) constraint; both the DO-loop and TENANT_SCHEMA block use it.
-    const matches = sql.match(/ON CONFLICT \(contact_id, deal_id\) DO NOTHING/g) ?? [];
+  it("skips inactive/archived deals AND contacts in both blocks (active-only, matching app semantics)", () => {
+    // An archived deal or contact must not resurface a primary edge on the Primary Contacts card / APIs.
+    expect((sql.match(/d\.is_active = true/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect((sql.match(/c\.is_active = true/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("promotes conflicting pairs to primary (idempotent) via ON CONFLICT DO UPDATE SET is_primary = true", () => {
+    // Both the DO-loop and the TENANT_SCHEMA block promote an existing edge to primary rather than skip it,
+    // so the deal's one primary is always marked; re-running sets the same true (idempotent). No DO NOTHING.
+    const matches = sql.match(/ON CONFLICT \(contact_id, deal_id\) DO UPDATE SET is_primary = true/g) ?? [];
     expect(matches.length).toBeGreaterThanOrEqual(2);
+    expect(sql).not.toContain("DO NOTHING");
   });
 
   it("includes a TENANT_SCHEMA block (office_dallas literal) for newly provisioned tenants", () => {
@@ -60,7 +69,7 @@ describe("migration 0169 — backfill contact_deal_associations", () => {
       "INSERT INTO office_dallas.contact_deal_associations (contact_id, deal_id, is_primary)"
     );
     expect(sql).toContain(
-      "EXISTS (SELECT 1 FROM office_dallas.contacts c WHERE c.id = d.primary_contact_id)"
+      "EXISTS (SELECT 1 FROM office_dallas.contacts c WHERE c.id = d.primary_contact_id AND c.is_active = true)"
     );
   });
 
