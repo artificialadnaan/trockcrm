@@ -1,5 +1,5 @@
-import { eq, and, ilike, asc, desc, count, inArray, sql, getTableColumns } from "drizzle-orm";
-import { companies, contacts, deals, users } from "@trock-crm/shared/schema";
+import { eq, and, ilike, asc, desc, count, inArray, sql, getTableColumns, type SQL } from "drizzle-orm";
+import { companies, contacts, deals, properties, users } from "@trock-crm/shared/schema";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildCompanySearchCondition } from "../search/unified-search.js";
@@ -34,11 +34,27 @@ async function uniqueSlug(tenantDb: TenantDb, base: string, excludeId?: string):
 }
 
 /**
+ * The on-hold-zeroed, forecast-first SUM of a company's ACTIVE-deal value. ONE expression embedded in
+ * BOTH the summary-card aggregate (companyPipelineSql, a correlated subquery over baseWhere) AND the
+ * folded per-row pipeline_value derived column (the deals LEFT JOIN that makes Pipeline$ sortable), so
+ * the "Active pipeline" card === the SUM of the pipeline column over the list it drills to — reconcile by
+ * construction, never drift. Reuses the shared deal-value resolver (forecast → awarded → … → bid_estimate)
+ * and references the un-aliased `deals` relation that is in scope at every call site (the correlated
+ * subquery's FROM and the GROUP BY company_id derived table both expose it as `deals`).
+ */
+function companyPipelineSumSql(): SQL {
+  return sql`SUM(CASE WHEN COALESCE(deals.on_hold, false) THEN 0 ELSE ${aliasedDealBestEstimateWithForecastSql("deals")} END)`;
+}
+
+/**
  * ORDER BY for the company directory, applied over the FULL filtered set before LIMIT/OFFSET so the sort
- * is global, not just the visible page. Only directly-orderable columns are supported — the aggregate
- * columns (properties/contacts/active-deals/pipeline) are computed in a separate per-page query and are
- * intentionally NOT sortable here (a deferred follow-up). Blanks/nulls always sink to the bottom in both
- * directions, matching the client comparators' nulls-last rule.
+ * is global, not just the visible page. Direct company columns (name/owner/last_activity) plus the 4
+ * FOLDED aggregate columns are supported: the aggregates are exposed by the per-relation derived-table
+ * LEFT JOINs in listCompanies (p=properties, ct=contacts, d=deals), so they order the full set — counts
+ * sort numerically and pipeline ($ stored as ::text) is cast back to numeric so it never sorts lexically.
+ * Blanks/nulls always sink to the bottom in both directions (matching the client comparators' nulls-last
+ * rule); listCompanies appends a stable asc(companies.id) tiebreak after this (heavy ties at value 0).
+ * The sortBy → column mapping is a CLOSED switch (no raw-param column interpolation → no injection surface).
  */
 export function buildCompanySortOrder(sortBy?: string, sortDir: "asc" | "desc" = "asc") {
   const col =
@@ -46,7 +62,15 @@ export function buildCompanySortOrder(sortBy?: string, sortDir: "asc" | "desc" =
       ? users.displayName
       : sortBy === "last_activity"
         ? companies.lastActivityAt
-        : companies.name;
+        : sortBy === "properties_count"
+          ? sql`COALESCE(p.cnt, 0)`
+          : sortBy === "contacts_count"
+            ? sql`COALESCE(ct.cnt, 0)`
+            : sortBy === "active_deals_count"
+              ? sql`COALESCE(d.active_cnt, 0)`
+              : sortBy === "pipeline_value"
+                ? sql`COALESCE(d.pipeline::numeric, 0)`
+                : companies.name;
   return sortDir === "asc" ? sql`${col} ASC NULLS LAST` : sql`${col} DESC NULLS LAST`;
 }
 
@@ -71,9 +95,11 @@ export async function listCompanies(
   const offset = (page - 1) * limit;
 
   // Per-company predicates reused for BOTH the summary-card aggregates and the ?card= drill filters,
-  // so each card's number === the count/sum of the list it drills to (reconcile by construction).
+  // so each card's number === the count/sum of the list it drills to (reconcile by construction). The
+  // pipeline SUM is the SHARED companyPipelineSumSql() — the identical expression the folded per-row
+  // pipeline_value column uses below, so the card $ and the column $ can never drift.
   const companyPipelineSql = sql<string>`(
-    SELECT COALESCE(SUM(CASE WHEN COALESCE(deals.on_hold, false) THEN 0 ELSE ${aliasedDealBestEstimateWithForecastSql("deals")} END), 0)
+    SELECT COALESCE(${companyPipelineSumSql()}, 0)
       FROM deals
      WHERE deals.company_id = ${companies.id}
        AND deals.is_active = true
@@ -107,16 +133,67 @@ export async function listCompanies(
   }
   const where = and(...listConditions);
 
+  // Per-relation PRE-AGGREGATED derived tables, each a single GROUP BY over the FK and joined 1:1, so the
+  // 4 directory aggregates become real output columns the ORDER BY can reference and sort over the FULL
+  // filtered set BEFORE limit/offset — what makes Properties/Contacts/Active-deals/Pipeline$ sortable.
+  // Per-RELATION (never one multi-relation join) so COUNT/SUM can't fan out (3 deals × 2 contacts ×
+  // 3 properties = 18 phantom rows). Counts cast ::int so the driver returns numbers (not bigint strings).
+  const propAgg = tenantDb
+    .select({
+      companyId: properties.companyId,
+      cnt: sql<number>`COUNT(*)::int`.as("cnt"),
+    })
+    .from(properties)
+    .where(eq(properties.isActive, true))
+    .groupBy(properties.companyId)
+    .as("p");
+  const contactAgg = tenantDb
+    .select({
+      companyId: contacts.companyId,
+      cnt: sql<number>`COUNT(*)::int`.as("cnt"),
+    })
+    .from(contacts)
+    .where(eq(contacts.isActive, true))
+    .groupBy(contacts.companyId)
+    .as("ct");
+  const dealAgg = tenantDb
+    .select({
+      companyId: deals.companyId,
+      // total active deals (held + non-held) for the "active/total" badge denominator
+      totalCnt: sql<number>`COUNT(*)::int`.as("total_cnt"),
+      // active, non-held deals = the badge numerator and the active_deals_count sort key
+      activeCnt: sql<number>`CAST(COUNT(*) FILTER (WHERE COALESCE(${deals.onHold}, false) = false) AS int)`.as("active_cnt"),
+      // pipeline $ via the SHARED resolver SUM — byte-identical to companyPipelineSql / pipelineTotal
+      pipeline: sql<string>`COALESCE(${companyPipelineSumSql()}, 0)::text`.as("pipeline"),
+    })
+    .from(deals)
+    .where(eq(deals.isActive, true))
+    .groupBy(deals.companyId)
+    .as("d");
+
   const rows = await tenantDb
     .select({
       ...getTableColumns(companies),
       ownerUserId: companies.ownerId,
       ownerUserName: users.displayName,
+      // Folded aggregates (real columns; sortable). LEFT JOIN → no-match coalesces to 0 / '0'. Referenced
+      // by RAW alias-qualified name (p/ct/d) — Drizzle drops the subquery-alias qualifier when an aliased
+      // sql expression is embedded in a sql template, which would make the two `cnt` columns ambiguous;
+      // the explicit prefix also matches the ORDER BY exprs in buildCompanySortOrder (reconcile-by-name).
+      propertiesCount: sql<number>`COALESCE(p.cnt, 0)`,
+      contactsCount: sql<number>`COALESCE(ct.cnt, 0)`,
+      contactCount: sql<number>`COALESCE(ct.cnt, 0)`, // legacy alias (same value)
+      activeDealsCount: sql<number>`COALESCE(d.active_cnt, 0)`,
+      dealCount: sql<number>`COALESCE(d.total_cnt, 0)`, // legacy: all active deals (held + non-held)
+      pipelineValue: sql<string>`COALESCE(d.pipeline, '0')`,
     })
     .from(companies)
     .leftJoin(users, eq(users.id, companies.ownerId))
+    .leftJoin(propAgg, eq(propAgg.companyId, companies.id))
+    .leftJoin(contactAgg, eq(contactAgg.companyId, companies.id))
+    .leftJoin(dealAgg, eq(dealAgg.companyId, companies.id))
     .where(where)
-    // Stable id tiebreak so OFFSET paging is deterministic when the primary sort ties.
+    // Stable id tiebreak so OFFSET paging is deterministic when the primary sort ties (heavy at value 0).
     .orderBy(buildCompanySortOrder(options.sortBy, options.sortDir), asc(companies.id))
     .limit(limit)
     .offset(offset);
@@ -127,7 +204,7 @@ export async function listCompanies(
 
   // Stable summary-card aggregates over baseWhere (NOT the visible page, NOT card-drilled). baseTotal
   // feeds the "Total accounts" card; pipelineTotal/staleCount the other two. Same predicates as the
-  // drill filters, so card === the count/sum of the list its drill opens.
+  // drill filters, so card === the count/sum of the list its drill opens. (UNTOUCHED by the folding.)
   const aggregateResult = await tenantDb
     .select({
       baseTotal: sql<number>`count(*)`,
@@ -137,54 +214,9 @@ export async function listCompanies(
     .from(companies)
     .where(baseWhere);
 
-  // Batch-fetch contact and deal counts for the page of companies
-  const companyIds = rows.map((r) => r.id);
-  let countsMap = new Map<string, {
-    contactCount: number;
-    dealCount: number;
-    propertiesCount: number;
-    contactsCount: number;
-    activeDealsCount: number;
-    pipelineValue: string;
-  }>();
-
-  if (companyIds.length > 0) {
-    const countRows = await tenantDb.execute(sql`
-      SELECT
-        c.id,
-        (SELECT COUNT(*)::int FROM contacts WHERE contacts.company_id = c.id AND contacts.is_active = true) AS contact_count,
-        (SELECT COUNT(*)::int FROM deals WHERE deals.company_id = c.id AND deals.is_active = true) AS deal_count,
-        (SELECT COUNT(*)::int FROM deals WHERE deals.company_id = c.id AND deals.is_active = true AND COALESCE(deals.on_hold, false) = false) AS active_deals_count,
-        (SELECT COUNT(*)::int FROM properties WHERE properties.company_id = c.id AND properties.is_active = true) AS properties_count,
-        (SELECT COALESCE(SUM(CASE WHEN COALESCE(deals.on_hold, false) THEN 0 ELSE ${aliasedDealBestEstimateWithForecastSql("deals")} END), 0)::text
-           FROM deals
-          WHERE deals.company_id = c.id
-            AND deals.is_active = true) AS pipeline_value
-      FROM companies c
-      WHERE c.id IN (${sql.join(companyIds.map(id => sql`${id}`), sql`, `)})
-    `);
-    const countArr = (countRows as any).rows ?? countRows;
-    for (const row of countArr) {
-      countsMap.set(row.id, {
-        contactCount: Number(row.contact_count ?? 0),
-        dealCount: Number(row.deal_count ?? 0),
-        propertiesCount: Number(row.properties_count ?? 0),
-        contactsCount: Number(row.contact_count ?? 0),
-        activeDealsCount: Number(row.active_deals_count ?? 0),
-        pipelineValue: String(row.pipeline_value ?? "0"),
-      });
-    }
-  }
-
-  const companiesWithCounts = rows.map((r) => ({
-    ...r,
-    contactCount: countsMap.get(r.id)?.contactCount ?? 0,
-    dealCount: countsMap.get(r.id)?.dealCount ?? 0,
-    propertiesCount: countsMap.get(r.id)?.propertiesCount ?? 0,
-    contactsCount: countsMap.get(r.id)?.contactsCount ?? 0,
-    activeDealsCount: countsMap.get(r.id)?.activeDealsCount ?? 0,
-    pipelineValue: countsMap.get(r.id)?.pipelineValue ?? "0",
-  }));
+  // The per-page aggregates now ride on the rows themselves (folded above) — the old post-pagination
+  // raw countRows query (a 2nd round-trip keyed on the already-paginated ids) is gone.
+  const companiesWithCounts = rows;
 
   return {
     companies: companiesWithCounts,

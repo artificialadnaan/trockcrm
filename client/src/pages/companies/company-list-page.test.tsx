@@ -553,7 +553,7 @@ describe("CompanyListPage", () => {
     }
   });
 
-  describe("sortable headers (server-side sort, direct columns only)", () => {
+  describe("sortable headers (server-side sort, direct + folded aggregate columns)", () => {
     function headerButton(container: HTMLElement, label: string): HTMLButtonElement {
       const btn = Array.from(container.querySelectorAll("button")).find((b) =>
         (b.getAttribute("aria-label") ?? "").startsWith(`Sort by ${label}`)
@@ -590,15 +590,53 @@ describe("CompanyListPage", () => {
       }
     });
 
-    it("aggregate columns (Pipeline / Active deals) are not sortable headers", async () => {
+    it("the 4 folded aggregate columns are now sortable headers", async () => {
       const { container, cleanup } = await renderPageDom();
       try {
         const labels = Array.from(container.querySelectorAll("button"))
           .map((b) => b.getAttribute("aria-label") ?? "")
           .filter((l) => l.startsWith("Sort by "));
-        expect(labels.some((l) => l.includes("Pipeline"))).toBe(false);
-        expect(labels.some((l) => l.includes("Active deals"))).toBe(false);
-        expect(labels.some((l) => l.includes("Properties"))).toBe(false);
+        expect(labels.some((l) => l.includes("Properties"))).toBe(true);
+        expect(labels.some((l) => l.includes("Contacts"))).toBe(true);
+        expect(labels.some((l) => l.includes("Active deals"))).toBe(true);
+        expect(labels.some((l) => l.includes("Pipeline"))).toBe(true);
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it("clicking a numeric aggregate header is DESC-first and maps to the right sortBy key", async () => {
+      const cases: Array<[string, string]> = [
+        ["Properties", "properties_count"],
+        ["Contacts", "contacts_count"],
+        ["Active deals", "active_deals_count"],
+        ["Pipeline", "pipeline_value"],
+      ];
+      for (const [label, key] of cases) {
+        const { container, cleanup } = await renderPageDom();
+        try {
+          await act(async () => {
+            headerButton(container, label).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          });
+          // number columns default to descending on first click (defaultDir: number → desc).
+          expect(mocks.useCompaniesMock).toHaveBeenLastCalledWith(
+            expect.objectContaining({ sortBy: key, sortDir: "desc" })
+          );
+        } finally {
+          await cleanup();
+        }
+      }
+    });
+
+    it("sets aria-sort on the active aggregate column's header cell (descending after first click)", async () => {
+      const { container, cleanup } = await renderPageDom();
+      try {
+        await act(async () => {
+          headerButton(container, "Pipeline").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        const sortedCells = Array.from(container.querySelectorAll('th[aria-sort="descending"]'));
+        expect(sortedCells.length).toBe(1);
+        expect(sortedCells[0]?.textContent).toContain("Pipeline");
       } finally {
         await cleanup();
       }
