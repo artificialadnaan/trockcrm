@@ -108,6 +108,47 @@ describe("evidence drawer Win % column", () => {
   });
 });
 
+describe("evidence drawer horizontal scroll + CSV export", () => {
+  it("gives the table a min-width so wide column sets overflow (scroll) instead of compressing", () => {
+    mount("projection", [record({ id: "a" })]);
+    const table = document.querySelector("table");
+    expect(table).not.toBeNull();
+    // The table min-width is the sum of the visible columns' floor widths (the deal column set), so the
+    // table is wider than a narrow dialog and the columns stay legible — ScrollSyncX then has something
+    // to scroll. (jsdom does no layout, but the inline style is what drives the overflow in the browser.)
+    const minWidth = parseInt((table as HTMLTableElement).style.minWidth || "0", 10);
+    expect(minWidth).toBeGreaterThan(900);
+    // Every header carries its own per-column min-width floor.
+    const heads = Array.from(document.querySelectorAll("thead th")) as HTMLTableCellElement[];
+    expect(heads.length).toBeGreaterThan(0);
+    expect(heads.every((h) => parseInt(h.style.minWidth || "0", 10) > 0)).toBe(true);
+  });
+
+  it("does NOT wrap the table in the shadcn overflow container — one scroll container (ScrollSyncX body)", () => {
+    mount("projection", [record({ id: "a" })]);
+    // The shadcn <Table> wrapper would add a [data-slot=table-container] overflow-x-auto div that competes
+    // with — and defeats — ScrollSyncX's synced top rail. We render a bare <table> instead.
+    expect(document.querySelector('[data-slot="table-container"]')).toBeNull();
+    expect(document.querySelector('[data-testid="scrollsync-body"]')).not.toBeNull();
+  });
+
+  it("renders an Export CSV button on the popup", () => {
+    mount("projection", [record({ id: "a" })]);
+    const button = Array.from(document.querySelectorAll("button")).find((b) =>
+      (b.textContent ?? "").includes("Export CSV")
+    );
+    expect(button).toBeTruthy();
+  });
+
+  it("keeps the Export CSV button available for an empty cohort (export still works)", () => {
+    mount("projection", []);
+    const button = Array.from(document.querySelectorAll("button")).find((b) =>
+      (b.textContent ?? "").includes("Export CSV")
+    );
+    expect(button).toBeTruthy();
+  });
+});
+
 describe("evidence drawer column alignment", () => {
   it("right-aligns numeric columns, left-aligns text, with a uniform px-3 gutter on every column", () => {
     mount("projection", [record({ id: "a", winProbability: 65 })]);
