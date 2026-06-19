@@ -248,13 +248,19 @@ export async function missingDealColumns(client: QueryClient, schema: string): P
   return REQUIRED_DEAL_COLUMNS.filter((column) => !present.has(column));
 }
 
-/** Active region_config rows (the form's source). region_config lives in public, shared across offices. */
+/**
+ * Active region_config rows (the form's source). region_config lives in public, shared across offices.
+ * Ordered by display_order ONLY — byte-identical to the form's /pipeline/regions endpoint
+ * (pipeline/service.ts getActiveRegions). Matching the order matters because both the form and this
+ * planner take the FIRST slug-or-name match; if prod ever had duplicate same-display_order configs, a
+ * different tiebreak here than the endpoint could resolve a different region_config row than the form did.
+ */
 export async function fetchActiveRegions(client: QueryClient): Promise<NullRegionConfigRow[]> {
   const { rows } = await client.query(
     `SELECT id::text AS id, slug, name, is_active AS "isActive", display_order AS "displayOrder"
        FROM public.region_config
       WHERE is_active = true
-      ORDER BY display_order ASC, name ASC`
+      ORDER BY display_order ASC`
   );
   return rows.map((row) => ({
     id: String(row.id),

@@ -784,5 +784,8 @@ describe("DealForm region auto-suggestion", () => {
     roots.push(root);
 
     expect(container.textContent).not.toMatch(/auto-detected/i);
+    // Positively prove the absence isn't a render failure: with no derived region the dropdown shows its
+    // placeholder, not an "Auto:" value.
+    expect(container.textContent).toContain("Select region");
   }, 30000);
 });

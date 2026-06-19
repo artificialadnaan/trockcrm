@@ -114,6 +114,33 @@ describe("buildNullRegionBackfillPlan", () => {
     expect(plan.changes.map((c) => c.targetRegionId)).toEqual(["id-east", "id-east"]);
   });
 
+  it("matches the target region by NAME alone when the slug differs (exercises the OR's name branch)", () => {
+    // No active row has slug 'east_coast', but one is named 'East Coast' — resolveRegionIdForState would
+    // still match it via name, so the planner must too.
+    const regions: NullRegionConfigRow[] = [
+      { id: "id-east-by-name", slug: "eastern", name: "East Coast", isActive: true, displayOrder: 3 },
+    ];
+    const plan = buildNullRegionBackfillPlan({ deals: [deal({ propertyState: "IL" })], regions });
+    expect(plan.changes[0]?.targetRegionId).toBe("id-east-by-name");
+  });
+
+  it("matches the target region by SLUG alone when the name differs (exercises the OR's slug branch)", () => {
+    const regions: NullRegionConfigRow[] = [
+      { id: "id-east-by-slug", slug: "east_coast", name: "Eastern Region", isActive: true, displayOrder: 3 },
+    ];
+    const plan = buildNullRegionBackfillPlan({ deals: [deal({ propertyState: "IL" })], regions });
+    expect(plan.changes[0]?.targetRegionId).toBe("id-east-by-slug");
+  });
+
+  it("ignores inactive region_config rows when matching (active-only, like the form)", () => {
+    const regions: NullRegionConfigRow[] = [
+      { id: "id-east-inactive", slug: "east_coast", name: "East Coast", isActive: false, displayOrder: 3 },
+    ];
+    const plan = buildNullRegionBackfillPlan({ deals: [deal({ propertyState: "IL" })], regions });
+    expect(plan.changes).toHaveLength(0);
+    expect(plan.counts.missingTargetRegion).toBe(1);
+  });
+
   it("records a missing target region instead of emitting a change", () => {
     const plan = buildNullRegionBackfillPlan({
       deals: [deal({ dealId: "il", propertyState: "IL" })],
