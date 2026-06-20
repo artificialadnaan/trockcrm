@@ -183,6 +183,34 @@ describe("password-change auth cookies", () => {
     expect(me.body.csrfToken).toEqual(login.body.csrfToken);
   });
 
+  it("refreshes the CSRF cookie to the session lifetime on login, even when the browser already holds one", async () => {
+    const app = createApp();
+    const fallbackOrigin = "https://frontend-production-bcab.up.railway.app";
+
+    // A returning browser carries a CSRF cookie from before the 30-day-session deploy. The global CSRF
+    // middleware only writes csrf_token when it is ABSENT, so without an explicit refresh at login the
+    // new 30-day auth cookie would pair with this older, shorter-lived CSRF cookie — which then lapses
+    // mid-session and 403s the next unsafe request while the auth session is still valid.
+    const login = await request(app)
+      .post("/api/auth/local/login")
+      .set("Origin", fallbackOrigin)
+      .set("Host", fallbackApiHost)
+      .set("Cookie", "csrf_token=carried-over-token")
+      .send({ email: "crm@example.com", password: tempSecret });
+
+    expect(login.status).toBe(200);
+    const loginCookies: string[] = login.headers["set-cookie"] ?? [];
+    const csrfSetCookie = loginCookies.find((cookie) => /^csrf_token=/.test(cookie));
+    // Login must (re)issue the CSRF cookie so its expiry tracks the 30-day auth cookie.
+    expect(csrfSetCookie).toBeDefined();
+    expect(csrfSetCookie).toMatch(/Max-Age=2592000\b/);
+    // Its value stays the one the double-submit pair already settled (no mid-flight mismatch).
+    expect(csrfSetCookie).toContain("csrf_token=carried-over-token");
+    // And it matches the token cookie's 30-day lifetime.
+    const tokenSetCookie = loginCookies.find((cookie) => /^token=[^;]/.test(cookie));
+    expect(tokenSetCookie).toMatch(/Max-Age=2592000\b/);
+  });
+
   it("does not expose response-body CSRF tokens on canonical same-origin auth responses", async () => {
     const app = createApp();
 
