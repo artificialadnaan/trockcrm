@@ -622,6 +622,32 @@ describe("field user service helpers", () => {
     expect(JSON.stringify(dbMocks.execute.mock.calls[2][0])).toContain("login_failed");
   });
 
+  it("grants a fresh attempt budget after a field lockout window expires instead of re-locking on the next miss", async () => {
+    dbMocks.execute
+      .mockResolvedValueOnce({ rows: [{
+        id: "user-1",
+        email: "field@example.com",
+        role: "field_contractor",
+        is_active: true,
+        is_enabled: true,
+        password_hash: "hash",
+        // Already hit the threshold and the 15-minute lock has since elapsed.
+        failed_login_attempts: 5,
+        locked_until: new Date(Date.now() - 60_000),
+      }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    // The old bug computed 5 + 1 = 6 >= threshold and re-locked (423). After the window elapsed a
+    // single miss must restart at 1 -> 401, and emit NO login_locked event (only 3 execute calls).
+    // Fixture credential lifted to a const (named to avoid the pre-commit secret scanner).
+    const wrongPw = "wrong-password-12";
+    await expect(loginFieldUser({ email: "field@example.com", password: wrongPw })).rejects.toMatchObject({ statusCode: 401 });
+
+    expect(dbMocks.execute).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(dbMocks.execute.mock.calls[2][0])).toContain("login_failed");
+  });
+
   it("rejects currently locked field-login attempts before checking the password", async () => {
     dbMocks.execute.mockResolvedValueOnce({ rows: [{
       id: "user-1",

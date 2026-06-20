@@ -618,9 +618,16 @@ export async function loginFieldUser(input: { email: string; password: string })
     throw new AppError(423, "Field login is temporarily locked");
   }
 
+  // A prior lockout whose 15-minute window has now elapsed grants a fresh attempt budget — mirrors
+  // the CRM local-auth fix. Without this an unlocked user re-locks on the next miss (5 + 1 = 6 >=
+  // threshold) because failed_login_attempts is only reset on success.
+  const lockoutExpired =
+    user.locked_until != null && new Date(user.locked_until).getTime() <= currentTime.getTime();
+  const priorFailedAttempts = lockoutExpired ? 0 : Number(user.failed_login_attempts ?? 0);
+
   const passwordMatches = await verifyPassword(input.password, user.password_hash);
   if (!passwordMatches) {
-    const failedLoginAttempts = Number(user.failed_login_attempts ?? 0) + 1;
+    const failedLoginAttempts = priorFailedAttempts + 1;
     const lockedUntil = failedLoginAttempts >= MAX_FAILED_LOGIN_ATTEMPTS
       ? new Date(currentTime.getTime() + LOCKOUT_WINDOW_MINUTES * 60 * 1000)
       : null;

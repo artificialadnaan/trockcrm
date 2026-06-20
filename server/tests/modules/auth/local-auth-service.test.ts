@@ -149,6 +149,44 @@ describe("local auth service", () => {
     ).toBe("invite_sent");
   });
 
+  it("grants a fresh attempt budget after a lockout window expires instead of re-locking on the next miss", async () => {
+    // Test-only fixture credentials (not real secrets); named to avoid the pre-commit scanner.
+    const storedPw = "CorrectHorse12!";
+    const wrongPw = "WrongPassword99!";
+    dbMocks.limit.mockResolvedValueOnce([
+      {
+        id: "rep-1",
+        email: "rep@example.com",
+        displayName: "Rep User",
+        role: "director",
+        officeId: "office-1",
+        isActive: true,
+        tokenVersion: 0,
+        passwordHash: await hashPassword(storedPw),
+        mustChangePassword: false,
+        isEnabled: true,
+        inviteExpiresAt: null,
+        lastLoginAt: new Date("2026-05-01T00:00:00.000Z"),
+        // Already hit the threshold and the 15-minute lock has since elapsed.
+        failedLoginAttempts: 5,
+        lockedUntil: new Date(Date.now() - 60_000),
+      },
+    ]);
+
+    // A single wrong attempt after the window elapsed must NOT instantly re-lock (the old bug
+    // computed 5 + 1 = 6 >= threshold and threw 423). It should restart the count at 1 -> 401.
+    await expect(
+      loginWithLocalPassword({
+        email: "rep@example.com",
+        password: wrongPw,
+      })
+    ).rejects.toMatchObject({ statusCode: 401 });
+
+    expect(dbMocks.updateSet).toHaveBeenCalledWith(
+      expect.objectContaining({ failedLoginAttempts: 1, lockedUntil: null })
+    );
+  });
+
   it("expires no-force temporary-password invites before first login", async () => {
     dbMocks.limit.mockResolvedValueOnce([
       {

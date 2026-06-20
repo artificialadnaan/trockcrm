@@ -462,9 +462,16 @@ export async function loginWithLocalPassword(input: {
     throw new AppError(423, "Local login is temporarily locked");
   }
 
+  // A prior lockout whose 15-minute window has now elapsed grants a fresh attempt budget. The stored
+  // failed_login_attempts is only ever reset on success/password-change/invite, so without this an
+  // unlocked user re-locks on the very next miss (5 + 1 = 6 >= threshold), never getting 5 fresh tries.
+  const lockoutExpired =
+    row.lockedUntil != null && row.lockedUntil.getTime() <= currentTime.getTime();
+  const priorFailedAttempts = lockoutExpired ? 0 : (row.failedLoginAttempts ?? 0);
+
   const passwordMatches = await verifyPassword(input.password, row.passwordHash);
   if (!passwordMatches) {
-    const failedLoginAttempts = (row.failedLoginAttempts ?? 0) + 1;
+    const failedLoginAttempts = priorFailedAttempts + 1;
     const lockedUntil = failedLoginAttempts >= MAX_FAILED_LOGIN_ATTEMPTS
       ? computeLockoutUntil(currentTime)
       : null;
