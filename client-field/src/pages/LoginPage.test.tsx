@@ -69,6 +69,22 @@ describe("LoginPage", () => {
     await vi.waitFor(() => expect(node.textContent).toContain("Invalid email or password"));
   });
 
+  it("lets the user unmask the password to verify what they typed", async () => {
+    const node = renderPage();
+    await vi.waitFor(() => expect(node.textContent).toContain("Sign in"));
+
+    const password = node.querySelector<HTMLInputElement>('[name="password"]');
+    expect(password?.getAttribute("type")).toBe("password");
+
+    const toggle = node.querySelector<HTMLButtonElement>('button[aria-label="Show password"]');
+    expect(toggle).not.toBeNull();
+    toggle!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await vi.waitFor(() =>
+      expect(node.querySelector<HTMLInputElement>('[name="password"]')?.getAttribute("type")).toBe("text"),
+    );
+  });
+
   it("renders the forgot-password admin contact as a real mailto link (no self-service reset exists)", async () => {
     const node = renderPage();
     await vi.waitFor(() => expect(node.querySelector('a[href^="mailto:aiqbal@trockgc.com"]')).not.toBeNull());

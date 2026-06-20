@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowRight, Camera, Loader2, ShieldCheck, Zap } from "lucide-react";
+import { ArrowRight, Camera, Eye, EyeOff, Loader2, ShieldCheck, Zap } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,7 @@ export function AuthEntryScreen() {
   const { localLogin } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const returnTo = new URLSearchParams(window.location.search).get("returnTo");
@@ -101,16 +102,27 @@ export function AuthEntryScreen() {
               <label className="text-sm font-bold text-slate-800" htmlFor="password">
                 Password
               </label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder="Enter your password"
-                autoComplete="current-password"
-                required
-                className="h-14 rounded-lg border-slate-200 bg-white px-4 text-base shadow-sm transition focus-visible:ring-2 focus-visible:ring-brand-red/60"
-              />
+              <div className="relative">
+                <Input
+                  id="password"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="Enter your password"
+                  autoComplete="current-password"
+                  required
+                  className="h-14 rounded-lg border-slate-200 bg-white px-4 pr-12 text-base shadow-sm transition focus-visible:ring-2 focus-visible:ring-brand-red/60"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  aria-label={`${showPassword ? "Hide" : "Show"} password`}
+                  aria-pressed={showPassword}
+                  className="absolute inset-y-0 right-0 flex items-center px-4 text-slate-500 transition-colors hover:text-slate-700"
+                >
+                  {showPassword ? <EyeOff className="h-5 w-5" aria-hidden="true" /> : <Eye className="h-5 w-5" aria-hidden="true" />}
+                </button>
+              </div>
             </div>
             {error ? (
               <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700" role="alert">

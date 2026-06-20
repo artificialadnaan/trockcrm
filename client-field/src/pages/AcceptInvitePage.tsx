@@ -1,10 +1,51 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
+import { Eye, EyeOff } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { Button, TextInput } from "../components/ui";
 import { BrandLogo } from "../components/BrandLogo";
 
 const MIN_PASSWORD_LENGTH = 8;
+
+function PasswordField({
+  name,
+  label,
+  value,
+  autoComplete,
+  onChange,
+}: {
+  name: string;
+  label: string;
+  value: string;
+  autoComplete: string;
+  onChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <label className="block space-y-2">
+      <span className="text-sm font-semibold">{label}</span>
+      <div className="relative">
+        <TextInput
+          name={name}
+          type={visible ? "text" : "password"}
+          autoComplete={autoComplete}
+          value={value}
+          onChange={onChange}
+          className="pr-12"
+        />
+        <button
+          type="button"
+          onClick={() => setVisible((prev) => !prev)}
+          aria-label={`${visible ? "Hide" : "Show"} ${label.toLowerCase()}`}
+          aria-pressed={visible}
+          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground transition hover:text-foreground"
+        >
+          {visible ? <EyeOff className="h-5 w-5" aria-hidden="true" /> : <Eye className="h-5 w-5" aria-hidden="true" />}
+        </button>
+      </div>
+    </label>
+  );
+}
 
 export function AcceptInvitePage() {
   const { user, acceptInvite, previewInvite } = useAuth();
@@ -91,14 +132,32 @@ export function AcceptInvitePage() {
                 Joining as <strong>{preview.firstName} {preview.lastName}</strong><br />
                 <span className="text-muted-foreground">{preview.email}</span>
               </p>
-              <label className="block space-y-2">
-                <span className="text-sm font-semibold">Password</span>
-                <TextInput autoComplete="new-password" name="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
-              </label>
-              <label className="block space-y-2">
-                <span className="text-sm font-semibold">Confirm password</span>
-                <TextInput autoComplete="new-password" name="confirmPassword" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} />
-              </label>
+              {/* Hidden username field: lets password managers associate and save the new credential
+                  with this account instead of orphaning it (then autofilling a stale value at login). */}
+              <input
+                type="text"
+                name="username"
+                autoComplete="username"
+                value={preview.email}
+                readOnly
+                tabIndex={-1}
+                aria-hidden="true"
+                className="sr-only"
+              />
+              <PasswordField
+                name="password"
+                label="Password"
+                autoComplete="new-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+              <PasswordField
+                name="confirmPassword"
+                label="Confirm password"
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+              />
               <p className="text-sm text-muted-foreground">{passwordHint}</p>
               {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
               <Button className="w-full" disabled={submitting} type="submit">
