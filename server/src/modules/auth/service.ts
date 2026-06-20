@@ -17,9 +17,13 @@ function getJwtSecret(): string {
   return secret || "dev-secret-change-in-production";
 }
 
-// Default token lifetime for the CRM/admin surface. The FIELD callers pass a longer options.expiresIn
-// (field-users/service.ts) and stamp surface:"field"; this default is unchanged for CRM/admin.
-const JWT_EXPIRES_IN = "24h";
+// Default token lifetime for the CRM/admin surface — office staff stay signed in for 30 days. This is
+// only the cryptographic expiry; the session-invalidation path (authMiddleware re-reads is_active +
+// monotonic token_version on EVERY request, #740/#751) still kills a deactivated/bumped session
+// instantly, well within this window. Must stay consistent with the token + CSRF cookie maxAge in
+// http-config.ts. FIELD callers pass their own options.expiresIn (field-users/service.ts) + stamp
+// surface:"field"; this default does not affect them.
+const JWT_EXPIRES_IN = "30d";
 
 export function signJwt(claims: JwtClaims, options?: { expiresIn?: SignOptions["expiresIn"] }): string {
   return jwt.sign(claims, getJwtSecret(), { expiresIn: options?.expiresIn ?? JWT_EXPIRES_IN });

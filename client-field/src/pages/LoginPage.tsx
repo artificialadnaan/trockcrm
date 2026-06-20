@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Eye, EyeOff } from "lucide-react";
 import { useAuth } from "../lib/auth";
 import { Button, TextInput } from "../components/ui";
 import { BrandLogo } from "../components/BrandLogo";
@@ -10,6 +11,7 @@ export function LoginPage() {
   const location = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>((location.state as { authError?: string } | null)?.authError ?? null);
 
@@ -53,7 +55,25 @@ export function LoginPage() {
             </label>
             <label className="block space-y-2">
               <span className="text-sm font-semibold">Password</span>
-              <TextInput autoComplete="current-password" name="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+              <div className="relative">
+                <TextInput
+                  autoComplete="current-password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  className="pr-12"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  aria-label={`${showPassword ? "Hide" : "Show"} password`}
+                  aria-pressed={showPassword}
+                  className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground transition hover:text-foreground"
+                >
+                  {showPassword ? <EyeOff className="h-5 w-5" aria-hidden="true" /> : <Eye className="h-5 w-5" aria-hidden="true" />}
+                </button>
+              </div>
             </label>
             {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-medium text-red-700">{error}</p> : null}
             <Button className="w-full rounded-lg" disabled={submitting} type="submit">

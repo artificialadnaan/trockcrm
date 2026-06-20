@@ -602,7 +602,7 @@ export const apiSpec = {
             headers: {
               "Set-Cookie": {
                 schema: { type: "string" },
-                description: "HttpOnly JWT cookie (24h TTL).",
+                description: "HttpOnly JWT cookie (30d TTL).",
               },
             },
             content: {

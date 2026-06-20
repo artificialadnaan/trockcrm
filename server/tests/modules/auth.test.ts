@@ -42,14 +42,14 @@ describe("JWT auth", () => {
     expect(decoded).toHaveProperty("exp");
   });
 
-  it("defaults to the 24h (CRM/admin) lifetime when no override is given", () => {
+  it("defaults to the 30d (CRM/admin) office-staff lifetime when no override is given", () => {
     const decoded = verifyJwt(signJwt(claims)) as JwtClaims & { iat: number; exp: number };
-    expect(decoded.exp - decoded.iat).toBe(24 * 60 * 60);
+    expect(decoded.exp - decoded.iat).toBe(30 * 24 * 60 * 60);
   });
 
-  it("honors an expiresIn override (the field surface passes a 30d lifetime)", () => {
-    const decoded = verifyJwt(signJwt(claims, { expiresIn: "30d" })) as JwtClaims & { iat: number; exp: number };
-    expect(decoded.exp - decoded.iat).toBe(30 * 24 * 60 * 60);
+  it("honors an explicit expiresIn override distinct from the default (e.g. the 10m OAuth-state token)", () => {
+    const decoded = verifyJwt(signJwt(claims, { expiresIn: "10m" })) as JwtClaims & { iat: number; exp: number };
+    expect(decoded.exp - decoded.iat).toBe(10 * 60);
   });
 
   it("round-trips the surface:'field' audience claim", () => {

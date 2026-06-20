@@ -152,4 +152,20 @@ describe("AuthEntryScreen form behavior", () => {
     expect(link?.textContent).toContain("Contact your administrator");
     expect(container.textContent).toContain("Forgot password?");
   });
+
+  it("lets the user unmask the password to verify what they typed", () => {
+    renderAuthEntry();
+
+    const password = container.querySelector<HTMLInputElement>("#password");
+    expect(password?.type).toBe("password");
+
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Show password"]');
+    expect(toggle).not.toBeNull();
+
+    act(() => {
+      toggle!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.querySelector<HTMLInputElement>("#password")?.type).toBe("text");
+  });
 });

@@ -179,6 +179,13 @@ export function isDevAuthEnabled(env: EnvInput, host: string | undefined): boole
   return isLocalDevEnv && isLocalhost;
 }
 
+// Office-staff session cookie lifetime: 30 days, matching the JWT_EXPIRES_IN default in service.ts.
+// The token cookie and the (double-submit) CSRF cookie MUST share this value — a 30-day token under a
+// shorter CSRF cookie would start failing mutating requests once the CSRF cookie expired, and a
+// shorter token cookie would drop the session early. Session invalidation is enforced per-request in
+// authMiddleware (is_active + token_version), independent of this lifetime.
+const SESSION_COOKIE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
 export function getTokenCookieOptions(env: EnvInput) {
   const isProduction = env.NODE_ENV === "production";
   const domain = sharedAuthCookieDomain(env);
@@ -189,7 +196,7 @@ export function getTokenCookieOptions(env: EnvInput) {
     sameSite: isProduction ? "lax" : "strict",
     domain,
     path: "/",
-    maxAge: 24 * 60 * 60 * 1000,
+    maxAge: SESSION_COOKIE_MAX_AGE_MS,
   } as const;
 }
 
@@ -320,7 +327,7 @@ export function getCsrfCookieOptions(env: EnvInput) {
     sameSite: isProduction ? "lax" : "strict",
     domain,
     path: "/",
-    maxAge: 24 * 60 * 60 * 1000,
+    maxAge: SESSION_COOKIE_MAX_AGE_MS,
   } as const;
 }
 

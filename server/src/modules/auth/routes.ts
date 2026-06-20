@@ -23,6 +23,8 @@ import {
 } from "../email/graph-auth.js";
 import { getGraphTokenStatus, revokeGraphTokens } from "../email/graph-token-service.js";
 import {
+  CSRF_COOKIE_NAME,
+  getCsrfCookieOptionsForRequest,
   getLegacyTokenCookieClearsForRequest,
   getLogoutCookieClearsForRequest,
   getTokenCookieOptionsForRequest,
@@ -80,6 +82,15 @@ function refreshAuthTokenCookie(
     res.cookie(clear.name, "", clear.options);
   }
   res.cookie("token", token, tokenCookieOptionsForRequest(req));
+  // Refresh the CSRF cookie's expiry in lockstep with the (now 30-day) auth cookie. The global CSRF
+  // middleware writes csrf_token only when it is ABSENT, so a returning browser holding a shorter-lived
+  // CSRF cookie (e.g. a pre-30d-deploy one) would otherwise keep it; once it lapsed mid-session the
+  // next unsafe request would 403 even though the auth session is still valid. Reuse the value the
+  // middleware already settled for this request so the double-submit pair stays consistent.
+  const csrfToken = csrfTokenForResponse(res);
+  if (csrfToken) {
+    res.cookie(CSRF_COOKIE_NAME, csrfToken, getCsrfCookieOptionsForRequest(process.env, csrfResponseRequest(req)));
+  }
 }
 
 function csrfTokenForResponse(res: import("express").Response): string | undefined {

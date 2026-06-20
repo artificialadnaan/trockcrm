@@ -67,4 +67,32 @@ describe("AcceptInvitePage", () => {
     node.querySelector<HTMLButtonElement>('button[type="submit"]')?.click();
     await vi.waitFor(() => expect(authMock.acceptInvite).toHaveBeenCalledWith("raw-token", "password-123"));
   });
+
+  it("renders a hidden username field bound to the invite email so password managers save the credential", async () => {
+    authMock.previewInvite.mockResolvedValue({ firstName: "Field", lastName: "User", email: "field@example.com" });
+    const node = renderPage("/accept-invite?token=raw-token");
+
+    await vi.waitFor(() => expect(node.querySelector('[name="password"]')).not.toBeNull());
+
+    const username = node.querySelector<HTMLInputElement>('input[autocomplete="username"]');
+    expect(username).not.toBeNull();
+    expect(username?.value).toBe("field@example.com");
+    expect(username?.readOnly).toBe(true);
+  });
+
+  it("lets the user unmask the new password to verify what they typed", async () => {
+    authMock.previewInvite.mockResolvedValue({ firstName: "Field", lastName: "User", email: "field@example.com" });
+    const node = renderPage("/accept-invite?token=raw-token");
+
+    await vi.waitFor(() => expect(node.querySelector('[name="password"]')).not.toBeNull());
+    expect(node.querySelector<HTMLInputElement>('[name="password"]')?.getAttribute("type")).toBe("password");
+
+    const toggle = node.querySelector<HTMLButtonElement>('button[aria-label="Show password"]');
+    expect(toggle).not.toBeNull();
+    toggle!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await vi.waitFor(() =>
+      expect(node.querySelector<HTMLInputElement>('[name="password"]')?.getAttribute("type")).toBe("text"),
+    );
+  });
 });
