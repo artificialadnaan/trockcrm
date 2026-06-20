@@ -47,7 +47,7 @@ export default function CaptureScreen() {
   const params = useLocalSearchParams<{
     dealId?: string;
     targetName?: string;
-    dealNumber?: string;
+    projectNumber?: string;
     stage?: string;
     propertyAddress?: string;
   }>();
@@ -145,13 +145,13 @@ export default function CaptureScreen() {
 
   function detailParamsFor(
     t: SelectedTarget,
-  ): { id: string; name: string; dealNumber?: string; stage?: string; propertyAddress?: string } {
-    const out: { id: string; name: string; dealNumber?: string; stage?: string; propertyAddress?: string } = {
+  ): { id: string; name: string; projectNumber?: string; stage?: string; propertyAddress?: string } {
+    const out: { id: string; name: string; projectNumber?: string; stage?: string; propertyAddress?: string } = {
       id: t.id,
       name: t.name,
     };
     if (typeof params.dealId === "string" && params.dealId === t.id) {
-      if (typeof params.dealNumber === "string") out.dealNumber = params.dealNumber;
+      if (typeof params.projectNumber === "string") out.projectNumber = params.projectNumber;
       if (typeof params.stage === "string") out.stage = params.stage;
       if (typeof params.propertyAddress === "string") out.propertyAddress = params.propertyAddress;
     }
@@ -268,7 +268,7 @@ export default function CaptureScreen() {
 
   function clearTarget() {
     setTarget(null);
-    router.setParams({ dealId: "", targetName: "", dealNumber: "", stage: "", propertyAddress: "" });
+    router.setParams({ dealId: "", targetName: "", projectNumber: "", stage: "", propertyAddress: "" });
   }
 
   async function upload() {

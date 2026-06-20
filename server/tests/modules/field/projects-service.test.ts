@@ -77,6 +77,8 @@ describe("field projects service", () => {
         id: "deal-1",
         name: "Roof Repair",
         dealNumber: "TR-100",
+        // No project_number on the row and a non-HubSpot deal_number → the display number falls back to it.
+        projectNumber: "TR-100",
         propertyName: "Roof Repair",
         propertyAddress: "123 Main St, Tulsa, OK, 74101",
         stage: "Contract",

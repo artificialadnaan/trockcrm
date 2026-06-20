@@ -11,6 +11,7 @@ import {
   filterPhotos,
   groupPhotos,
   isProjectOffOffice,
+  projectNumberLabel,
   tagsOf,
   uploadersOf,
   type FieldPhoto,
@@ -40,7 +41,7 @@ export default function ProjectDetailScreen() {
   const params = useLocalSearchParams<{
     id: string;
     name?: string;
-    dealNumber?: string;
+    projectNumber?: string;
     propertyAddress?: string;
     stage?: string;
     officeId?: string;
@@ -130,7 +131,7 @@ export default function ProjectDetailScreen() {
           {params.stage ? <Badge label={toStr(params.stage)} /> : null}
           {params.propertyAddress ? <Text style={styles.address}>{toStr(params.propertyAddress)}</Text> : null}
           <Text style={styles.meta}>
-            #{toStr(params.dealNumber)} · {allPhotos.length} photo{allPhotos.length === 1 ? "" : "s"}
+            {projectNumberLabel(toStr(params.projectNumber) || null)} · {allPhotos.length} photo{allPhotos.length === 1 ? "" : "s"}
           </Text>
         </View>
 
@@ -148,7 +149,7 @@ export default function ProjectDetailScreen() {
                   params: {
                     dealId,
                     targetName: toStr(params.name),
-                    dealNumber: toStr(params.dealNumber),
+                    projectNumber: toStr(params.projectNumber),
                     stage: toStr(params.stage),
                     propertyAddress: toStr(params.propertyAddress),
                   },

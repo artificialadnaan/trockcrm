@@ -4,37 +4,17 @@ import {
   isGenuineWonDealStageSlug,
 } from "@trock-crm/shared/types";
 
-const HUBSPOT_DEAL_NUMBER_PATTERN = /^HS[-_ ]?\d+/i;
+// The deal/project-number resolver is the single source of truth in @trock-crm/shared/types
+// (shared by this app, the field projects API, and global search). Re-exported here so existing
+// `@/lib/deal-utils` import sites keep working unchanged.
+export {
+  isHubspotImportedDealNumber,
+  formatDealDisplayNumber,
+  resolveDealDisplayNumber,
+} from "@trock-crm/shared/types";
+export type { DealDisplayNumber } from "@trock-crm/shared/types";
+
 const VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN = /\bHS[-_ ]?\d{6,}\b/gi;
-
-export function isHubspotImportedDealNumber(value: string | null | undefined): boolean {
-  if (!value) return false;
-  return HUBSPOT_DEAL_NUMBER_PATTERN.test(value.trim());
-}
-
-export interface DealDisplayNumber {
-  label: string;
-  isFallback: boolean;
-  isPending: boolean;
-}
-
-export function formatDealDisplayNumber(
-  deal: {
-    projectNumber?: string | null;
-    dealNumber?: string | null;
-    propertyState?: string | null;
-  }
-): DealDisplayNumber {
-  const projectNumber = deal.projectNumber?.trim();
-  if (projectNumber) return { label: projectNumber, isFallback: false, isPending: false };
-
-  const dealNumber = deal.dealNumber?.trim();
-  if (dealNumber && !isHubspotImportedDealNumber(dealNumber)) {
-    return { label: dealNumber, isFallback: true, isPending: false };
-  }
-
-  return { label: "Pending", isFallback: true, isPending: true };
-}
 
 export function sanitizeHubspotDealIdentifiers(
   value: string | null | undefined,
