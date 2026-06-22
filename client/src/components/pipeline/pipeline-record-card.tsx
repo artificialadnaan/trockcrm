@@ -11,6 +11,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
+import { OnHoldBadge } from "@/components/deals/on-hold-badge";
 
 export interface PipelineRecordCardData {
   id: string;
@@ -110,6 +111,7 @@ export function PipelineRecordCard({
                   {record.dealNumber}
                 </span>
               ) : null}
+              {entity === "deal" ? <OnHoldBadge onHold={record.onHold} compact /> : null}
               {entity === "deal" ? <AtRiskBadge atRisk={record.atRisk} compact /> : null}
               {entity === "deal" ? (
                 <ChangeOrderBadge isChangeOrder={record.isChangeOrder} compact />
