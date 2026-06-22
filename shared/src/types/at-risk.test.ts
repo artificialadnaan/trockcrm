@@ -291,7 +291,7 @@ describe("at-risk computation", () => {
   });
 });
 
-describe("close-target suppression and auto-on-hold", () => {
+describe("close-target at-risk suppression", () => {
   // 2026-06-01 07:00 CDT. The deal has been in Opportunity (rep SLA 7d) for 31 days — over threshold.
   const NOW = new Date("2026-06-01T12:00:00.000Z");
   const overThresholdDeal = {
@@ -300,7 +300,7 @@ describe("close-target suppression and auto-on-hold", () => {
     stageEnteredAt: "2026-05-01T12:00:00.000Z",
   };
 
-  it("suppresses at-risk while a future close target is within the 90-day window", () => {
+  it("suppresses at-risk while a future close target is pending", () => {
     const result = getDealAtRiskResult(
       { ...overThresholdDeal, expectedCloseDate: "2026-06-20" },
       "rep",
@@ -326,7 +326,7 @@ describe("close-target suppression and auto-on-hold", () => {
     expect(result.reason).toBe("threshold_reached");
   });
 
-  it("treats a >90-day close target as on hold (clears at-risk via the hold path)", () => {
+  it("suppresses even a far-future close target (no automatic hold)", () => {
     const result = getDealAtRiskResult(
       { ...overThresholdDeal, expectedCloseDate: "2026-11-01" },
       "rep",
@@ -334,10 +334,10 @@ describe("close-target suppression and auto-on-hold", () => {
     );
 
     expect(result.isAtRisk).toBe(false);
-    expect(result.reason).toBe("on_hold");
+    expect(result.reason).toBe("close_target_pending");
   });
 
-  it("lets a stored on_hold flag win over the close-target window", () => {
+  it("lets a stored on_hold flag take precedence over the close-target suppression", () => {
     const result = getDealAtRiskResult(
       { ...overThresholdDeal, onHold: true, expectedCloseDate: "2026-06-20" },
       "rep",

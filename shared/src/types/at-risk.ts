@@ -1,6 +1,6 @@
 import type { UserRole } from "./enums.js";
 import { getEffectiveStageAgeSeconds } from "./deal-hold.js";
-import { isAtRiskSuppressedByCloseTarget, isDealEffectivelyOnHold } from "./deal-hold-risk.js";
+import { isAtRiskSuppressedByCloseTarget } from "./deal-hold-risk.js";
 import {
   getSlaAudienceForRole,
   getSlaPolicyForRole,
@@ -265,9 +265,9 @@ export function getDealAtRiskResult(
     workflowRoute: deal.workflowRoute,
     viewerRole,
     effectiveStageAgeSeconds: getEffectiveStageAgeSeconds(deal, now),
-    // Effective on-hold = stored deals.on_hold OR the derived >90-day auto-hold; a closer future
-    // target instead suppresses the at-risk nag until it passes. ONE rule, shared across surfaces.
-    onHold: isDealEffectivelyOnHold(deal, now),
+    // On-hold stays the explicit stored deals.on_hold toggle. A today-or-future close target instead
+    // suppresses the stage-age at-risk nag until it passes. ONE rule, shared across surfaces.
+    onHold: deal.onHold,
     closeTargetSuppressesRisk: isAtRiskSuppressedByCloseTarget({
       expectedCloseDate: deal.expectedCloseDate,
       now,

@@ -1,41 +1,27 @@
 /**
- * THE single source of truth for the close-target-driven hold + at-risk rules. Shared by the deal
- * activity/SLA surface and kanban cards (client TS), the deal/at-risk APIs and dashboards (server TS),
- * and — via the SQL twins added alongside their first consumer — the forecast ladder and reports.
+ * THE single source of truth for the close-target-driven at-risk SUPPRESSION rule. Shared by the deal
+ * activity/SLA surface and kanban cards (client TS), and the deal/at-risk APIs, dashboards, reports,
+ * and worker stale-deal alerts (server TS) — every surface that computes at-risk via [[at-risk]]
+ * `getDealAtRiskResult`.
  *
- * It composes on top of the two existing models rather than forking them:
- *   - the stored on-hold model ([[deal-reporting]] `isDealActivelyOnHold` / `reportableDealSqlPredicate`)
- *   - the stage-age SLA at-risk model ([[at-risk]] `getAtRiskResult`)
+ * The "close target" is the deal's `expected_close_date` (reused, not a new column). While that date
+ * is today-or-future, the stage-age at-risk verdict is suppressed ("don't nag until the target
+ * passes"); once it passes (or is null/past), normal stage-age at-risk applies again.
  *
- * The "close target" is the deal's `expected_close_date` (reused, not a new column), so the target,
- * the auto-on-hold trigger, and the forecast-ladder bucket all key off ONE date and cannot drift:
+ * Deliberately NOT here: any automatic on-hold. On-hold remains the explicit, stored `deals.on_hold`
+ * toggle ([[deal-reporting]]). Auto-parking a deal off a routine forecast date (and zeroing its value)
+ * is intentionally out of scope — `expected_close_date` is a forecast, not a "park me" signal.
  *
- *   - A future close target MORE than {@link AUTO_ON_HOLD_TARGET_DAYS} days out puts the deal in a
- *     DERIVED "auto on hold" state. We never write `deals.on_hold` for this — it is computed — so the
- *     manual hold-time accumulator is untouched. Crossing the 90-day line flips the state in BOTH
- *     directions automatically as the date (or `now`) moves.
- *   - A future close target AT OR WITHIN the window suppresses the stage-age at-risk verdict
- *     ("don't nag until the target passes"). Once the date passes (or is null/past), normal stage-age
- *     at-risk applies again.
- *
- * Day boundary: the TS predicates take an injected `now: Date` and resolve "today" to the
+ * Day boundary: the predicate takes an injected `now: Date` and resolves "today" to the
  * America/Chicago calendar day — the SAME anchor the forecast SQL uses ((now() AT TIME ZONE
- * 'America/Chicago')::date) — so the card/header verdicts and the report SQL never disagree by a day.
+ * 'America/Chicago')::date) — so card/header verdicts and report dates never disagree by a day.
  */
-
-/** A future close target strictly beyond this many days auto-holds the deal (and clears at-risk). */
-export const AUTO_ON_HOLD_TARGET_DAYS = 90;
 
 export interface CloseTargetInput {
   /** The deal's close target = its `expected_close_date` (a calendar DATE; string "YYYY-MM-DD" or Date). */
   expectedCloseDate?: string | Date | null;
   /** The reference instant; "today" is its America/Chicago calendar day. */
   now: Date;
-}
-
-interface EffectiveOnHoldInput {
-  onHold?: boolean | null;
-  expectedCloseDate?: string | Date | null;
 }
 
 /** "YYYY-MM-DD" for the America/Chicago calendar day of `now` (DST-safe via Intl). */
@@ -62,7 +48,7 @@ function calendarDay(value: string | Date | null | undefined): string | null {
   const month = Number(m);
   const day = Number(d);
   // Reject impossible dates (e.g. 2026-02-31, 2026-13-01) that Date.UTC would silently roll over,
-  // which would otherwise corrupt the day delta and flip a hold/suppression verdict.
+  // which would otherwise corrupt the day delta and flip a suppression verdict.
   const probe = new Date(Date.UTC(year, month - 1, day));
   if (
     probe.getUTCFullYear() !== year ||
@@ -94,23 +80,11 @@ export function daysUntilCloseTarget(
   return calendarDayDiff(chicagoCalendarDay(now), target);
 }
 
-/** Derived auto-on-hold: the close target is strictly more than {@link AUTO_ON_HOLD_TARGET_DAYS} out. */
-export function isAutoOnHoldByCloseTarget({ expectedCloseDate, now }: CloseTargetInput): boolean {
-  const days = daysUntilCloseTarget(expectedCloseDate, now);
-  return days != null && days > AUTO_ON_HOLD_TARGET_DAYS;
-}
-
 /**
- * At-risk suppression: a today-or-future close target within the {@link AUTO_ON_HOLD_TARGET_DAYS}
- * window quiets the stage-age at-risk nag until it passes. (Targets beyond the window are handled by
- * {@link isAutoOnHoldByCloseTarget}, which clears at-risk via the on-hold path instead.)
+ * At-risk suppression: a today-or-future close target quiets the stage-age at-risk nag until it
+ * passes. Returns false for a null, unparseable, or already-past target (normal at-risk applies).
  */
 export function isAtRiskSuppressedByCloseTarget({ expectedCloseDate, now }: CloseTargetInput): boolean {
   const days = daysUntilCloseTarget(expectedCloseDate, now);
-  return days != null && days >= 0 && days <= AUTO_ON_HOLD_TARGET_DAYS;
-}
-
-/** Effective on-hold = stored `deals.on_hold` OR the derived >90-day auto-hold. */
-export function isDealEffectivelyOnHold(deal: EffectiveOnHoldInput, now: Date): boolean {
-  return deal.onHold === true || isAutoOnHoldByCloseTarget({ expectedCloseDate: deal.expectedCloseDate, now });
+  return days != null && days >= 0;
 }
