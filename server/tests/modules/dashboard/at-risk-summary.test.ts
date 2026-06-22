@@ -235,6 +235,7 @@ describe("dashboard At Risk summary", () => {
       daysInStage: 5,
       staleThresholdDays: 3,
       atRisk: {
+        canonicalStageSlug: "estimate_under_review",
         isAtRisk: true,
         reason: "threshold_reached",
       },
