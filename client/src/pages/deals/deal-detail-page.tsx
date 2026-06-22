@@ -216,6 +216,8 @@ function getDealDetailSlaResult(
       onHoldStartedAt: deal.onHoldStartedAt,
       onHoldAccumulatedSeconds: deal.onHoldAccumulatedSeconds,
       onHoldAccumulatedSecondsAtStageEntry: deal.onHoldAccumulatedSecondsAtStageEntry,
+      // A today-or-future close target postpones the at-risk verdict (mirrors the server path).
+      expectedCloseDate: deal.expectedCloseDate,
     },
     normalizeUserRole(userRole),
     new Date()
@@ -225,6 +227,7 @@ function getDealDetailSlaResult(
 function getSlaCaptionLabel(atRisk: AtRiskResult | null) {
   if (!atRisk) return "No data";
   if (atRisk.reason === "on_hold") return "Paused";
+  if (atRisk.reason === "close_target_pending") return "Postponed";
   if (atRisk.status === "not_applicable") return "Not applicable";
   return atRisk.isAtRisk ? "Over SLA" : "On track";
 }
@@ -232,12 +235,16 @@ function getSlaCaptionLabel(atRisk: AtRiskResult | null) {
 function getSlaStatusValue(atRisk: AtRiskResult | null) {
   if (!atRisk) return "Unknown";
   if (atRisk.reason === "on_hold") return "On Hold";
+  if (atRisk.reason === "close_target_pending") return "Postponed";
   if (atRisk.status === "not_applicable") return "Not applicable";
   return atRisk.isAtRisk ? "Overdue" : "Current";
 }
 
-function getSlaCaptionContext(atRisk: AtRiskResult | null) {
+function getSlaCaptionContext(atRisk: AtRiskResult | null, expectedCloseDate?: string | null) {
   if (!atRisk) return "SLA unavailable";
+  if (atRisk.reason === "close_target_pending" && expectedCloseDate) {
+    return `Postponed until ${formatDate(expectedCloseDate)}`;
+  }
   return atRisk.thresholdDays == null ? "No SLA threshold" : `SLA ${atRisk.thresholdDays} days`;
 }
 
@@ -632,7 +639,7 @@ export function DealDetailPage() {
   const stageAgeDays = slaResult?.effectiveStageAgeDays ?? null;
   const slaCaptionLabel = getSlaCaptionLabel(slaResult);
   const slaStatusValue = getSlaStatusValue(slaResult);
-  const slaCaptionContext = getSlaCaptionContext(slaResult);
+  const slaCaptionContext = getSlaCaptionContext(slaResult, deal.expectedCloseDate);
   const isSlaBreached = slaResult?.isAtRisk === true;
   // Detail header value uses the deal's stage (server now provides stageSlug; fall back to the loaded
   // currentStage) so an estimating deal shows the DD-over-bid value, matching the board/list (Codex P2).
@@ -939,7 +946,16 @@ export function DealDetailPage() {
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "photos" && <DealPhotosTab dealId={deal.id} onCountChange={setPhotoCount} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
-      {activeTab === "activity" && <EntityActivityTab entityType="deal" entityId={deal.id} emptyLabel="deal" showRecordings />}
+      {activeTab === "activity" && (
+        <EntityActivityTab
+          entityType="deal"
+          entityId={deal.id}
+          emptyLabel="deal"
+          showRecordings
+          closeTargetDate={deal.expectedCloseDate}
+          onDealChanged={refetch}
+        />
+      )}
       {activeTab === "timeline" && (
         <DealTimelineTab
           dealId={deal.id}

@@ -1,6 +1,9 @@
-import { Calendar, CheckSquare, FileText, Mail, MapPinned, Phone, PhoneCall, SendHorizontal, Handshake } from "lucide-react";
+import { useState } from "react";
+import { Calendar, CalendarClock, CheckSquare, FileText, Mail, MapPinned, Phone, PhoneCall, SendHorizontal, Handshake } from "lucide-react";
 import { ActivityLogForm } from "@/components/activities/activity-log-form";
 import { RecordingList } from "@/components/call-recordings/recording-list";
+import { Button } from "@/components/ui/button";
+import { MoveCloseDateDialog } from "@/components/deals/move-close-date-dialog";
 import { createActivity, useActivities, type Activity, type ActivitySourceEntityType } from "@/hooks/use-activities";
 
 type SupportedActivityEntity = Extract<ActivitySourceEntityType, "company" | "lead" | "deal">;
@@ -10,6 +13,10 @@ interface EntityActivityTabProps {
   entityId: string;
   emptyLabel: string;
   showRecordings?: boolean;
+  /** Deal-only: the current expected_close_date ("YYYY-MM-DD"), used to seed the Move Close Date picker. */
+  closeTargetDate?: string | null;
+  /** Deal-only: called after the close date moves so the host can refetch the deal (the SLA badge). */
+  onDealChanged?: () => void | Promise<void>;
 }
 
 const activityFilterKey: Record<SupportedActivityEntity, "companyId" | "leadId" | "dealId"> = {
@@ -61,9 +68,12 @@ export function EntityActivityTab({
   entityId,
   emptyLabel,
   showRecordings = false,
+  closeTargetDate = null,
+  onDealChanged,
 }: EntityActivityTabProps) {
   const scopedPayload = buildScopedPayload(entityType, entityId);
   const { activities, loading, error, refetch } = useActivities(scopedPayload);
+  const [moveCloseDateOpen, setMoveCloseDateOpen] = useState(false);
 
   const handleLogActivity = async (data: {
     type: string;
@@ -94,7 +104,29 @@ export function EntityActivityTab({
   return (
     <div className="space-y-4">
       {showRecordings ? <RecordingList entityType={entityType} entityId={entityId} /> : null}
-      <ActivityLogForm onSubmit={handleLogActivity} showProposalSent={entityType === "deal"} />
+      <ActivityLogForm
+        onSubmit={handleLogActivity}
+        showProposalSent={entityType === "deal"}
+        extraActions={
+          entityType === "deal" ? (
+            <Button size="sm" variant="outline" onClick={() => setMoveCloseDateOpen(true)}>
+              <CalendarClock className="h-4 w-4 mr-1" /> Move Close Date
+            </Button>
+          ) : undefined
+        }
+      />
+      {entityType === "deal" ? (
+        <MoveCloseDateDialog
+          open={moveCloseDateOpen}
+          onOpenChange={setMoveCloseDateOpen}
+          dealId={entityId}
+          currentDate={closeTargetDate}
+          onSaved={async () => {
+            await refetch();
+            await onDealChanged?.();
+          }}
+        />
+      ) : null}
 
       {loading ? (
         <div className="space-y-3">

@@ -126,6 +126,7 @@ function attachAtRiskResult<T extends {
   onHoldStartedAt?: string | Date | null;
   onHoldAccumulatedSeconds?: number | bigint | null;
   onHoldAccumulatedSecondsAtStageEntry?: number | bigint | null;
+  expectedCloseDate?: string | Date | null;
 }>(
   deal: T,
   viewerRole: string | null | undefined,
@@ -153,6 +154,9 @@ function attachAtRiskResult<T extends {
           deal.onHoldAccumulatedSecondsAtStageEntry == null
             ? null
             : Number(deal.onHoldAccumulatedSecondsAtStageEntry),
+        // A today-or-future close target (expected_close_date) postpones the stage-age at-risk
+        // verdict until it passes (shared rule -> reason "close_target_pending").
+        expectedCloseDate: deal.expectedCloseDate ?? null,
       },
       normalizeAtRiskViewerRole(viewerRole),
       new Date()
