@@ -290,3 +290,72 @@ describe("at-risk computation", () => {
     });
   });
 });
+
+describe("close-target suppression and auto-on-hold", () => {
+  // 2026-06-01 07:00 CDT. The deal has been in Opportunity (rep SLA 7d) for 31 days — over threshold.
+  const NOW = new Date("2026-06-01T12:00:00.000Z");
+  const overThresholdDeal = {
+    stageSlug: "opportunity" as const,
+    workflowRoute: "normal" as const,
+    stageEnteredAt: "2026-05-01T12:00:00.000Z",
+  };
+
+  it("suppresses at-risk while a future close target is within the 90-day window", () => {
+    const result = getDealAtRiskResult(
+      { ...overThresholdDeal, expectedCloseDate: "2026-06-20" },
+      "rep",
+      NOW
+    );
+
+    expect(result.isAtRisk).toBe(false);
+    expect(result.status).toBe("not_at_risk");
+    expect(result.reason).toBe("close_target_pending");
+    // the underlying stage-age is still reported for the badge/tooltip
+    expect(result.effectiveStageAgeDays).toBe(31);
+    expect(result.thresholdDays).toBe(7);
+  });
+
+  it("becomes at risk again once the close target has passed", () => {
+    const result = getDealAtRiskResult(
+      { ...overThresholdDeal, expectedCloseDate: "2026-05-20" },
+      "rep",
+      NOW
+    );
+
+    expect(result.isAtRisk).toBe(true);
+    expect(result.reason).toBe("threshold_reached");
+  });
+
+  it("treats a >90-day close target as on hold (clears at-risk via the hold path)", () => {
+    const result = getDealAtRiskResult(
+      { ...overThresholdDeal, expectedCloseDate: "2026-11-01" },
+      "rep",
+      NOW
+    );
+
+    expect(result.isAtRisk).toBe(false);
+    expect(result.reason).toBe("on_hold");
+  });
+
+  it("lets a stored on_hold flag win over the close-target window", () => {
+    const result = getDealAtRiskResult(
+      { ...overThresholdDeal, onHold: true, expectedCloseDate: "2026-06-20" },
+      "rep",
+      NOW
+    );
+
+    expect(result.isAtRisk).toBe(false);
+    expect(result.reason).toBe("on_hold");
+  });
+
+  it("applies normal stage-age at-risk when there is no close target", () => {
+    const result = getDealAtRiskResult(
+      { ...overThresholdDeal, expectedCloseDate: null },
+      "rep",
+      NOW
+    );
+
+    expect(result.isAtRisk).toBe(true);
+    expect(result.reason).toBe("threshold_reached");
+  });
+});
