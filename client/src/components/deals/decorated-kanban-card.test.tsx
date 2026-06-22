@@ -303,4 +303,16 @@ describe("DecoratedKanbanCard", () => {
     expect(renderDeal(makeDeal())).not.toContain('data-change-order="true"');
     expect(renderDeal(makeDeal({ isChangeOrder: false }))).not.toContain('data-change-order="true"');
   });
+
+  it("flags an on-hold deal with the On Hold badge", () => {
+    const html = renderDeal(makeDeal({ onHold: true }));
+
+    expect(html).toContain('data-on-hold="true"');
+    expect(html).toContain("On Hold");
+  });
+
+  it("does not flag a non-held deal as on hold", () => {
+    expect(renderDeal(makeDeal())).not.toContain('data-on-hold="true"');
+    expect(renderDeal(makeDeal({ onHold: false }))).not.toContain('data-on-hold="true"');
+  });
 });

@@ -259,6 +259,17 @@ describe("KanbanDealCard", () => {
   it("does not flag a regular deal as a change order", () => {
     expect(render(makeDeal())).not.toContain('data-change-order="true"');
   });
+
+  it("flags an on-hold deal with the On Hold badge", () => {
+    const html = render(makeDeal({ onHold: true }));
+
+    expect(html).toContain('data-on-hold="true"');
+    expect(html).toContain("On Hold");
+  });
+
+  it("does not flag a non-held deal as on hold", () => {
+    expect(render(makeDeal({ onHold: false }))).not.toContain('data-on-hold="true"');
+  });
 });
 
 describe("getDealDisplayNumber", () => {

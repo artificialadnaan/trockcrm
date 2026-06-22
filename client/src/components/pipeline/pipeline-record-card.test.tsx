@@ -102,6 +102,28 @@ describe("PipelineRecordCard", () => {
     expect(html).not.toContain('data-change-order="true"');
   });
 
+  it("flags an on-hold deal record with the On Hold badge", () => {
+    const html = render(makeRecord({ onHold: true }));
+
+    expect(html).toContain('data-on-hold="true"');
+    expect(html).toContain("On Hold");
+  });
+
+  it("does not flag a non-held deal record as on hold", () => {
+    expect(render(makeRecord())).not.toContain('data-on-hold="true"');
+    expect(render(makeRecord({ onHold: false }))).not.toContain('data-on-hold="true"');
+  });
+
+  it("never shows the On Hold badge on a non-deal (lead) record", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <PipelineRecordCard entity="lead" record={makeRecord({ onHold: true })} />
+      </MemoryRouter>
+    );
+
+    expect(html).not.toContain('data-on-hold="true"');
+  });
+
   it("uses the engine effective stage age for the record age label when supplied", () => {
     const html = render(
       makeRecord({

@@ -15,6 +15,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
+import { OnHoldBadge } from "@/components/deals/on-hold-badge";
 
 const KANBAN_SLA_AUDIENCE = "rep" satisfies SlaAudience;
 
@@ -90,6 +91,7 @@ export function DecoratedKanbanCard({
           />
         </div>
 
+        <OnHoldBadge onHold={deal.onHold} compact />
         <AtRiskBadge atRisk={deal.atRisk} compact />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
 
