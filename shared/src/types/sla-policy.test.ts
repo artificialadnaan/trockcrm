@@ -53,7 +53,7 @@ describe("SLA policy helpers", () => {
       dayCounting: "calendar_days",
       thresholdDays: 30,
       recurs: true,
-      recurrenceDays: 30,
+      recurrenceDays: 7,
     });
     expect(getSlaPolicy("contract", "rep")).toMatchObject({
       stageSlug: "contract",

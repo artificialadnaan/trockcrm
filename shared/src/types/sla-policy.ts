@@ -102,7 +102,10 @@ const SLA_POLICY = freezeSlaPolicy({
       dayCounting: SLA_POLICY_DAY_COUNTING,
       thresholdDays: 30,
       recurs: true,
-      recurrenceDays: 30,
+      // recurrenceDays is not consumed by any cadence today (the stale-deal worker re-notifies
+      // daily and never reads it), so this PR changes only the consumed SLA threshold and leaves
+      // the recurrence value as-is. Wiring recurrenceDays into the worker is a separate task.
+      recurrenceDays: 7,
     },
     leadership: {
       dayCounting: SLA_POLICY_DAY_COUNTING,
