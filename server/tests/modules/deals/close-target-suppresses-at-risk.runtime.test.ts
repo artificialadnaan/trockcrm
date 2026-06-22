@@ -13,7 +13,7 @@ import { getDealById } from "../../../src/modules/deals/service.js";
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const ST = { opp: U("57a2") };
-const D = { future: U("d11"), past: U("d12"), none: U("d13") };
+const D = { future: U("d11"), past: U("d12"), none: U("d13"), today: U("d14") };
 const ADMIN = U("ad01");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -23,6 +23,9 @@ let pg: PGlite;
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`SET TimeZone='UTC';`);
+  // The suppression rule anchors "today" to America/Chicago, so seed the today-boundary deal with the
+  // CT calendar day (not PGlite's UTC current_date) to avoid a flake when UTC has already rolled over.
+  const ctToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text UNIQUE, is_terminal boolean NOT NULL DEFAULT false);
     CREATE TABLE deals (
@@ -89,7 +92,8 @@ beforeAll(async () => {
                        stage_entered_at, expected_close_date, created_at, updated_at) VALUES
       ('${D.future}','Future target','TR-1','${ST.opp}', true, false, false, false, now() - interval '40 days', (current_date + 30)::date, now(), now()),
       ('${D.past}',  'Past target',  'TR-2','${ST.opp}', true, false, false, false, now() - interval '40 days', (current_date - 5)::date,  now(), now()),
-      ('${D.none}',  'No target',    'TR-3','${ST.opp}', true, false, false, false, now() - interval '40 days', NULL,                       now(), now());
+      ('${D.none}',  'No target',    'TR-3','${ST.opp}', true, false, false, false, now() - interval '40 days', NULL,                       now(), now()),
+      ('${D.today}', 'Today target', 'TR-4','${ST.opp}', true, false, false, false, now() - interval '40 days', '${ctToday}'::date,         now(), now());
   `);
   tdb = drizzle(pg);
 }, 30000);
@@ -101,6 +105,11 @@ afterAll(async () => {
 describe("getDealById — close-target postpones the deal-detail at-risk verdict", () => {
   it("a TODAY-OR-FUTURE expected_close_date suppresses at-risk (reason close_target_pending)", async () => {
     const deal = await getDealById(tdb, D.future, "admin", ADMIN, "rep");
+    expect(deal?.atRisk).toMatchObject({ isAtRisk: false, status: "not_at_risk", reason: "close_target_pending" });
+  });
+
+  it("TODAY's expected_close_date suppresses at-risk (the today-or-future boundary)", async () => {
+    const deal = await getDealById(tdb, D.today, "admin", ADMIN, "rep");
     expect(deal?.atRisk).toMatchObject({ isAtRisk: false, status: "not_at_risk", reason: "close_target_pending" });
   });
 
