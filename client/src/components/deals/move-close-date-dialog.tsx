@@ -78,8 +78,10 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
     try {
       await createActivity({
         type: "note",
+        // The activity feed renders body (not subject), so include the moved-to date in the body —
+        // otherwise a deal moved multiple times shows only reasons with no date each applied to.
         subject: `Close target moved to ${formatHuman(date)}`,
-        body: reason.trim(),
+        body: `Close target moved to ${formatHuman(date)}.\n\n${reason.trim()}`,
         dealId,
       });
     } catch {

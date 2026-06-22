@@ -121,8 +121,16 @@ describe("MoveCloseDateDialog", () => {
 
     expect(mocks.updateDeal).toHaveBeenCalledWith("deal-1", { expectedCloseDate: FUTURE });
     expect(mocks.createActivity).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "note", body: "Client pushed to Q4", dealId: "deal-1" })
+      expect.objectContaining({
+        type: "note",
+        // body carries BOTH the moved-to date (the feed shows body, not subject) and the reason
+        body: expect.stringContaining("Client pushed to Q4"),
+        dealId: "deal-1",
+      })
     );
+    const noteBody = mocks.createActivity.mock.calls[0][0].body as string;
+    expect(noteBody).toContain("Close target moved to"); // the date line precedes the reason
+    expect(noteBody).toContain(FUTURE.slice(0, 4)); // the moved-to year is in the body
     // the date write must precede the note (the date drives the SLA; the note is the audit layer)
     expect(mocks.updateDeal.mock.invocationCallOrder[0]).toBeLessThan(mocks.createActivity.mock.invocationCallOrder[0]);
     expect(mocks.onSaved).toHaveBeenCalled();

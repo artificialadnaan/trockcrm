@@ -968,7 +968,9 @@ export function DealDetailPage() {
           showRecordings
           closeTargetDate={deal.expectedCloseDate}
           onDealChanged={refetch}
-          canMoveCloseDate={viewerOwnsDeal || user?.role === "admin"}
+          // Owner-only: the PATCH that writes expected_close_date is gated to the assigned rep on the
+          // server (assertDealOwnerRouteAccess, no allowAdmin), so a non-owner admin would 403.
+          canMoveCloseDate={viewerOwnsDeal}
         />
       )}
       {activeTab === "timeline" && (

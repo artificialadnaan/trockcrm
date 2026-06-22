@@ -1965,7 +1965,12 @@ export async function getDealDetail(
 
   return {
     ...dealWithMetadata,
-    atRisk: attachAtRiskResult(dealWithMetadata, atRiskViewerRole, currentStage?.slug ?? null).atRisk,
+    // Deal DETAIL re-derives at-risk here (overriding getDealById's), so it must opt into the
+    // close-target suppression too — otherwise the detail page that hosts "Move Close Date" would
+    // still read threshold_reached after a future date is set.
+    atRisk: attachAtRiskResult(dealWithMetadata, atRiskViewerRole, currentStage?.slug ?? null, {
+      applyCloseTargetSuppression: true,
+    }).atRisk,
     postConversionEnrichment: evaluatePostConversionEnrichment(dealWithMetadata as any, currentStage ?? { isTerminal: true }),
     bidBoardOwnership: buildBidBoardOwnershipState(dealWithMetadata),
     stageHistory,
