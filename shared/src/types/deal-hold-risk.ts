@@ -56,7 +56,22 @@ function calendarDay(value: string | Date | null | undefined): string | null {
     return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
   }
   const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim());
-  return match ? `${match[1]}-${match[2]}-${match[3]}` : null;
+  if (!match) return null;
+  const [, y, m, d] = match;
+  const year = Number(y);
+  const month = Number(m);
+  const day = Number(d);
+  // Reject impossible dates (e.g. 2026-02-31, 2026-13-01) that Date.UTC would silently roll over,
+  // which would otherwise corrupt the day delta and flip a hold/suppression verdict.
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return `${y}-${m}-${d}`;
 }
 
 /** Whole calendar days between two "YYYY-MM-DD" days (to − from), via UTC midnights (DST-immune). */

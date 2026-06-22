@@ -25,6 +25,14 @@ describe("daysUntilCloseTarget", () => {
     expect(daysUntilCloseTarget("not-a-date", NOW)).toBeNull();
   });
 
+  it("returns null for impossible calendar dates instead of silently rolling them over", () => {
+    expect(daysUntilCloseTarget("2026-02-31", NOW)).toBeNull();
+    expect(daysUntilCloseTarget("2026-13-01", NOW)).toBeNull();
+    expect(daysUntilCloseTarget("2026-04-31", NOW)).toBeNull();
+    // a genuine leap day still parses
+    expect(daysUntilCloseTarget("2028-02-29", NOW)).not.toBeNull();
+  });
+
   it("counts whole calendar days from CT-today to the target date", () => {
     expect(daysUntilCloseTarget(TODAY, NOW)).toBe(0);
     expect(daysUntilCloseTarget(plusDays(TODAY, 14), NOW)).toBe(14);
