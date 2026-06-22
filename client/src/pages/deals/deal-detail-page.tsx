@@ -168,6 +168,20 @@ function formatDate(value: string | null | undefined) {
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+// No-UTC-drift formatter for date-ONLY values ("YYYY-MM-DD"): new Date("2026-09-01") parses as midnight
+// UTC and renders the PRIOR calendar day in zones behind UTC, so split the parts into a LOCAL date.
+function formatDateOnly(value: string | null | undefined) {
+  if (!value) return "Unscheduled";
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return formatDate(value);
+  const [, y, m, d] = match;
+  return new Date(Number(y), Number(m) - 1, Number(d)).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 function formatDealAddress(deal: DealDetail) {
   return [deal.propertyAddress, deal.propertyCity, deal.propertyState, deal.propertyZip]
     .filter(Boolean)
@@ -243,7 +257,7 @@ function getSlaStatusValue(atRisk: AtRiskResult | null) {
 function getSlaCaptionContext(atRisk: AtRiskResult | null, expectedCloseDate?: string | null) {
   if (!atRisk) return "SLA unavailable";
   if (atRisk.reason === "close_target_pending" && expectedCloseDate) {
-    return `Postponed until ${formatDate(expectedCloseDate)}`;
+    return `Postponed until ${formatDateOnly(expectedCloseDate)}`;
   }
   return atRisk.thresholdDays == null ? "No SLA threshold" : `SLA ${atRisk.thresholdDays} days`;
 }
@@ -954,6 +968,7 @@ export function DealDetailPage() {
           showRecordings
           closeTargetDate={deal.expectedCloseDate}
           onDealChanged={refetch}
+          canMoveCloseDate={viewerOwnsDeal || user?.role === "admin"}
         />
       )}
       {activeTab === "timeline" && (
@@ -1332,7 +1347,7 @@ function DealRightRail({
           {deal.intendedProjectNumber ? (
             <DetailRailItem label="Intended" value={<span className="font-mono">{deal.intendedProjectNumber}</span>} />
           ) : null}
-          <DetailRailItem label="Close target" value={formatDate(deal.expectedCloseDate)} />
+          <DetailRailItem label="Close target" value={formatDateOnly(deal.expectedCloseDate)} />
         </DetailRailSection>
 
         <DetailRailSection title="System references">

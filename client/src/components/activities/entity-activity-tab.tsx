@@ -17,6 +17,9 @@ interface EntityActivityTabProps {
   closeTargetDate?: string | null;
   /** Deal-only: called after the close date moves so the host can refetch the deal (the SLA badge). */
   onDealChanged?: () => void | Promise<void>;
+  /** Deal-only: whether the viewer may edit the deal (assigned rep or admin). Gates the Move Close Date
+   *  action so a view-only collaborator doesn't hit a 403 after filling the dialog. Default false. */
+  canMoveCloseDate?: boolean;
 }
 
 const activityFilterKey: Record<SupportedActivityEntity, "companyId" | "leadId" | "dealId"> = {
@@ -70,6 +73,7 @@ export function EntityActivityTab({
   showRecordings = false,
   closeTargetDate = null,
   onDealChanged,
+  canMoveCloseDate = false,
 }: EntityActivityTabProps) {
   const scopedPayload = buildScopedPayload(entityType, entityId);
   const { activities, loading, error, refetch } = useActivities(scopedPayload);
@@ -108,14 +112,14 @@ export function EntityActivityTab({
         onSubmit={handleLogActivity}
         showProposalSent={entityType === "deal"}
         extraActions={
-          entityType === "deal" ? (
+          entityType === "deal" && canMoveCloseDate ? (
             <Button size="sm" variant="outline" onClick={() => setMoveCloseDateOpen(true)}>
               <CalendarClock className="h-4 w-4 mr-1" /> Move Close Date
             </Button>
           ) : undefined
         }
       />
-      {entityType === "deal" ? (
+      {entityType === "deal" && canMoveCloseDate ? (
         <MoveCloseDateDialog
           open={moveCloseDateOpen}
           onOpenChange={setMoveCloseDateOpen}

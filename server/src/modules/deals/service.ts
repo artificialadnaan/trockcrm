@@ -130,7 +130,8 @@ function attachAtRiskResult<T extends {
 }>(
   deal: T,
   viewerRole: string | null | undefined,
-  fallbackStageSlug?: string | null
+  fallbackStageSlug?: string | null,
+  options?: { applyCloseTargetSuppression?: boolean }
 ): DealWithAtRisk<T> {
   const actualStageSlug = deal.stageSlug ?? fallbackStageSlug ?? deal.stageId ?? null;
   const isTerminalStage =
@@ -155,8 +156,11 @@ function attachAtRiskResult<T extends {
             ? null
             : Number(deal.onHoldAccumulatedSecondsAtStageEntry),
         // A today-or-future close target (expected_close_date) postpones the stage-age at-risk
-        // verdict until it passes (shared rule -> reason "close_target_pending").
-        expectedCloseDate: deal.expectedCloseDate ?? null,
+        // verdict until it passes (shared rule -> reason "close_target_pending"). Gated behind an
+        // explicit opt-in so ONLY the deal-detail path (getDealById) suppresses today; the list,
+        // kanban, stage-page, dashboard counts, and worker alerts stay on pure stage-age until a
+        // follow-up wires them together — avoids a half-applied cross-surface mismatch.
+        expectedCloseDate: options?.applyCloseTargetSuppression ? deal.expectedCloseDate ?? null : null,
       },
       normalizeAtRiskViewerRole(viewerRole),
       new Date()
@@ -1886,7 +1890,9 @@ export async function getDealById(
     throw new AppError(403, "You can only view your own deals");
   }
 
-  return attachAtRiskResult(deal, atRiskViewerRole);
+  // Deal detail is the one surface wired for close-target suppression today (the "Move Close Date"
+  // action lives here); opt in explicitly so the shared list/kanban callers stay unaffected.
+  return attachAtRiskResult(deal, atRiskViewerRole, undefined, { applyCloseTargetSuppression: true });
 }
 
 /**

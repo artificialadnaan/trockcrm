@@ -53,29 +53,45 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
     }
   }, [open, currentDate]);
 
-  const canSave = date !== "" && reason.trim() !== "" && !saving;
+  // "Today" in the business timezone (America/Chicago) — a date before this won't postpone the SLA
+  // (the shared rule only suppresses for today-or-future targets), so block it in the save gate.
+  const businessToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+  const isPastDate = date !== "" && date < businessToday;
+  const canSave = date !== "" && !isPastDate && reason.trim() !== "" && !saving;
 
   const handleSave = async () => {
     if (!canSave) return;
     setSaving(true);
     setError(null);
+
+    // The date write postpones the SLA — it is the ONLY step whose failure should block + error.
     try {
-      // 1) Move the close target — this is what postpones the SLA, so persist it first.
       await updateDeal(dealId, { expectedCloseDate: date });
-      // 2) Record WHY as a note on the activity feed (the date is already saved if this throws).
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't move the close date. Please try again.");
+      setSaving(false);
+      return;
+    }
+
+    // The date is committed. The reason note and the refetch are best-effort: a failure in either must
+    // NOT strand the saved date or invite a duplicate retry of the (already-successful) date write.
+    try {
       await createActivity({
         type: "note",
         subject: `Close target moved to ${formatHuman(date)}`,
         body: reason.trim(),
         dealId,
       });
-      await onSaved();
-      onOpenChange(false);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't move the close date. Please try again.");
-    } finally {
-      setSaving(false);
+    } catch {
+      // best-effort audit note
     }
+    try {
+      await onSaved();
+    } catch {
+      // best-effort refresh; the date is already saved server-side
+    }
+    setSaving(false);
+    onOpenChange(false);
   };
 
   return (
@@ -99,9 +115,15 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
             <Input
               id="move-close-date"
               type="date"
+              min={businessToday}
               value={date}
               onChange={(e) => setDate(e.target.value)}
             />
+            {isPastDate ? (
+              <p className="text-xs text-amber-600">
+                Pick today or a future date — a past date won't postpone the SLA.
+              </p>
+            ) : null}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="move-close-reason">Why is it moving?</Label>
