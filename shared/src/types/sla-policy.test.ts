@@ -51,9 +51,9 @@ describe("SLA policy helpers", () => {
       stageSlug: "estimate_sent_to_client",
       audience: "rep",
       dayCounting: "calendar_days",
-      thresholdDays: 7,
+      thresholdDays: 30,
       recurs: true,
-      recurrenceDays: 7,
+      recurrenceDays: 30,
     });
     expect(getSlaPolicy("contract", "rep")).toMatchObject({
       stageSlug: "contract",

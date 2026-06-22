@@ -100,9 +100,9 @@ const SLA_POLICY = freezeSlaPolicy({
   estimate_sent_to_client: {
     rep: {
       dayCounting: SLA_POLICY_DAY_COUNTING,
-      thresholdDays: 7,
+      thresholdDays: 30,
       recurs: true,
-      recurrenceDays: 7,
+      recurrenceDays: 30,
     },
     leadership: {
       dayCounting: SLA_POLICY_DAY_COUNTING,

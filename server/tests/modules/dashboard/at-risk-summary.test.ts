@@ -176,7 +176,10 @@ describe("dashboard At Risk summary", () => {
         stageName: "Bid Sent",
         stageSlug: "bid_sent",
         workflowRoute: "normal",
-        stageEnteredAt: "2026-05-14T12:00:00.000Z",
+        // 51 days in Bid Sent (canonical estimate_sent_to_client). The rep
+        // estimate-sent SLA moved 7 -> 30 days, so an over-SLA bottleneck
+        // fixture must now exceed 30 days in stage to stay at risk.
+        stageEnteredAt: "2026-04-01T12:00:00.000Z",
         onHold: false,
         onHoldStartedAt: null,
         onHoldAccumulatedSeconds: 0,
@@ -210,23 +213,30 @@ describe("dashboard At Risk summary", () => {
 
     const bottlenecks = buildDashboardDownstreamBottlenecks(rows, "rep", now);
 
+    // Bottlenecks sort by time past threshold (most overdue first). With the
+    // rep estimate-sent SLA at 30 days, legacy-bid-sent-risk is 51 days in
+    // stage (21 days over) and now leads under-review-risk (5 days, 2 over).
     expect(bottlenecks.map((deal) => deal.dealId)).toEqual([
-      "under-review-risk",
       "legacy-bid-sent-risk",
+      "under-review-risk",
     ]);
     expect(bottlenecks[0]).toMatchObject({
-      daysInStage: 5,
-      staleThresholdDays: 3,
+      dealId: "legacy-bid-sent-risk",
+      daysInStage: 51,
+      staleThresholdDays: 30,
       atRisk: {
+        canonicalStageSlug: "estimate_sent_to_client",
         isAtRisk: true,
         reason: "threshold_reached",
       },
     });
     expect(bottlenecks[1]).toMatchObject({
-      dealId: "legacy-bid-sent-risk",
+      dealId: "under-review-risk",
+      daysInStage: 5,
+      staleThresholdDays: 3,
       atRisk: {
-        canonicalStageSlug: "estimate_sent_to_client",
         isAtRisk: true,
+        reason: "threshold_reached",
       },
     });
   });
