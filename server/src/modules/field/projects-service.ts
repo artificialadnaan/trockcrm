@@ -442,6 +442,59 @@ export async function searchFieldCaptureTargets(
 }
 
 export type FieldCaptureTarget = PhotoUploadTarget & OfficeTag;
+export type NearbyFieldCaptureTarget = PhotoUploadTarget & { type: "deal"; distanceMiles: number };
+
+export async function listNearbyFieldCaptureTargets(
+  tenantDb: TenantDb,
+  _access: FieldAccessContext,
+  input: { latitude: number; longitude: number; limit?: number }
+): Promise<{ targets: NearbyFieldCaptureTarget[] }> {
+  const limit = Math.min(Math.max(input.limit ?? 3, 1), 20);
+  const haversine = sql<number>`
+    3959 * acos(
+      LEAST(1.0, GREATEST(-1.0,
+        cos(radians(${input.latitude})) * cos(radians(CAST(d.property_lat AS DOUBLE PRECISION)))
+        * cos(radians(CAST(d.property_lng AS DOUBLE PRECISION)) - radians(${input.longitude}))
+        + sin(radians(${input.latitude})) * sin(radians(CAST(d.property_lat AS DOUBLE PRECISION)))
+      ))
+    )
+  `;
+
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.id,
+      d.name,
+      d.deal_number,
+      d.project_number,
+      COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
+      c.name AS company_name,
+      COALESCE(d.last_activity_at, d.updated_at, d.created_at) AS last_updated_at,
+      ${haversine} AS distance_miles
+    FROM deals d
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    WHERE ${activeProjectWhere()}
+      AND d.pipeline_disposition IS DISTINCT FROM 'opportunity'
+      AND d.property_lat IS NOT NULL
+      AND d.property_lng IS NOT NULL
+    ORDER BY distance_miles ASC, COALESCE(d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
+    LIMIT ${limit}
+  `);
+
+  const rows = ((result as any).rows ?? result) as any[];
+  return {
+    targets: rows.map((row) => ({
+      id: row.id,
+      type: "deal" as const,
+      name: row.name,
+      recordNumber: resolveDealDisplayNumber({ projectNumber: row.project_number, dealNumber: row.deal_number }),
+      stageName: row.stage_name ?? null,
+      companyName: row.company_name ?? null,
+      lastUpdatedAt: row.last_updated_at,
+      distanceMiles: Number(row.distance_miles ?? 0),
+    })),
+  };
+}
 
 const CAPTURE_TARGET_TYPE_RANK: Record<PhotoUploadTarget["type"], number> = { lead: 0, opportunity: 1, deal: 2 };
 

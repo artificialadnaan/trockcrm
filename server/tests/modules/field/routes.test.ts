@@ -50,6 +50,7 @@ const projectMocks = vi.hoisted(() => ({
   listFieldProjects: vi.fn(),
   listFieldProjectPhotos: vi.fn(),
   listStarredFieldProjects: vi.fn(),
+  listNearbyFieldCaptureTargets: vi.fn(),
   searchFieldCaptureTargets: vi.fn(),
   mergeFieldCaptureTargets: vi.fn(() => []),
   assertAccessibleFieldCaptureTarget: vi.fn(),
@@ -105,6 +106,7 @@ describe("field routes", () => {
     vi.clearAllMocks();
     projectMocks.listFieldProjects.mockResolvedValue({ projects: [], total: 0, page: 1, perPage: 50 });
     projectMocks.listStarredFieldProjects.mockResolvedValue({ projects: [] });
+    projectMocks.listNearbyFieldCaptureTargets.mockResolvedValue({ targets: [] });
     projectMocks.searchFieldCaptureTargets.mockResolvedValue({ targets: [] });
     projectMocks.assertAccessibleFieldCaptureTarget.mockResolvedValue({ id: "lead-1", type: "lead" });
     projectMocks.starFieldProject.mockResolvedValue({ starred: true });
@@ -276,6 +278,50 @@ describe("field routes", () => {
       search: "waters",
       limit: 15,
     });
+  });
+
+  it("routes nearby field targets through the deal/project-only nearby service with a default limit of 3", async () => {
+    projectMocks.listNearbyFieldCaptureTargets.mockResolvedValueOnce({
+      targets: [{
+        id: "deal-1",
+        type: "deal",
+        name: "121 Preston Oaks",
+        recordNumber: "DFW-1-17426-aa",
+        stageName: "Construction",
+        companyName: "Preston Oaks HOA",
+        lastUpdatedAt: new Date("2026-06-20T12:00:00.000Z"),
+        distanceMiles: 0.42,
+      }],
+    });
+
+    const res = await invokeRoute("get", "/photo-targets/nearby", { query: { lat: "32.911", lng: "-96.775" } });
+
+    expect(projectMocks.listNearbyFieldCaptureTargets).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      userId: "admin-1",
+      userRole: "admin",
+    }), {
+      latitude: 32.911,
+      longitude: -96.775,
+      limit: 3,
+    });
+    expect(res.body).toEqual({
+      targets: [expect.objectContaining({
+        id: "deal-1",
+        type: "deal",
+        distanceMiles: 0.42,
+      })],
+    });
+  });
+
+  it.each([
+    { lat: "abc", lng: "-96.775" },
+    { lat: "91", lng: "-96.775" },
+    { lat: "32.911", lng: "-181" },
+  ])("rejects invalid nearby coordinate query %# with 400", async (query) => {
+    await expect(invokeRoute("get", "/photo-targets/nearby", { query })).rejects.toMatchObject({
+      statusCode: 400,
+    });
+    expect(projectMocks.listNearbyFieldCaptureTargets).not.toHaveBeenCalled();
   });
 
   it.each(["abc", "15abc", "-1", "999"])("rejects invalid field target search limit %s with 400", async (limit) => {

@@ -42,6 +42,7 @@ export type FieldCaptureTarget = {
   stageName: string | null;
   companyName: string | null;
   lastUpdatedAt: string;
+  distanceMiles?: number | null;
 };
 
 export type FieldPhoto = {

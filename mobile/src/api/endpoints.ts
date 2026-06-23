@@ -102,6 +102,14 @@ export const getProjectTags = (f: Fetcher, dealId: string, q: string, limit = 8)
 export const searchCaptureTargets = (f: Fetcher, search: string, limit = 20) =>
   f<CaptureTargetsResponse>("/field/photo-targets/search", { query: { search, limit } });
 
+export const getNearbyCaptureTargets = (
+  f: Fetcher,
+  params: { latitude: number; longitude: number; limit?: number },
+) =>
+  f<CaptureTargetsResponse>("/field/photo-targets/nearby", {
+    query: { lat: params.latitude, lng: params.longitude, limit: params.limit ?? 3 },
+  });
+
 export const validateCaptureTarget = (
   f: Fetcher,
   target: { dealId?: string; leadId?: string; opportunityId?: string },
