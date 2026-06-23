@@ -559,7 +559,7 @@ export function RepDashboardPreview() {
           <ArrowUpRight className="ml-1.5 h-4 w-4" />
         </Button>
         <Button size="lg" onClick={() => navigate("/deals")}>
-          Open my pipeline
+          Open my deals
           <ArrowUpRight className="ml-1.5 h-4 w-4" />
         </Button>
       </div>
