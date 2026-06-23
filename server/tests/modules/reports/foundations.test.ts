@@ -82,13 +82,18 @@ describe("F3 value basis", () => {
     // Both bases are now awarded-FIRST: awarded_amount precedes bid_board_total_sales in the COALESCE chain.
     expect(won.indexOf("awarded_amount")).toBeLessThan(won.indexOf("bid_board_total_sales"));
     expect(open.indexOf("awarded_amount")).toBeLessThan(open.indexOf("bid_board_total_sales"));
-    // The open basis was formerly awarded-LAST; as of the awarded-highest decision both bases resolve
-    // through the SAME chain (DEAL_VALUE_PRIORITY_CHAIN), so they now produce an IDENTICAL expression. The
-    // basis is retained only as a labeling/context selector (a Won column vs an open column caption).
-    expect(won).toBe(open);
-    // BOTH bases still zero out on-hold value.
+    // Both bases resolve through the SAME awarded-first VALUE chain (DEAL_VALUE_PRIORITY_CHAIN); the basis
+    // is a labeling/context selector. They now differ ONLY in the on-hold ZEROING wrapper: the Won basis
+    // zeros on the stored on_hold flag ALONE (realized revenue is never auto-parked by a stale forecast),
+    // while the open basis ALSO zeros a far-out (90+ day) close target (effective hold). See deal-value-sql.
+    expect(won.indexOf("bid_board_total_sales")).toBeLessThan(won.indexOf("bid_estimate"));
+    expect(open.indexOf("bid_board_total_sales")).toBeLessThan(open.indexOf("bid_estimate"));
+    // BOTH bases zero out the stored on-hold value.
     expect(won).toContain("on_hold");
     expect(open).toContain("on_hold");
+    // ONLY the open basis carries the far-future auto-park leg; the Won basis must NOT (P1: realized-safe).
+    expect(open).toContain("expected_close_date");
+    expect(won).not.toContain("expected_close_date");
   });
 
   it("labels every basis", () => {

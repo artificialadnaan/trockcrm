@@ -36,7 +36,7 @@ beforeAll(async () => {
     CREATE TABLE deal_stage_history (deal_id uuid, from_stage_id uuid, to_stage_id uuid, created_at timestamptz);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text, stage_id uuid NOT NULL, assigned_rep_id uuid, estimator_user_id uuid,
-      is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
+      is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, expected_close_date date,
       created_at timestamptz, won_closed_date date, lost_at timestamptz, updated_at timestamptz,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric
     );
@@ -139,7 +139,7 @@ describe("Executive Trends — win-rate unification holds under a Central sessio
       CREATE TABLE deal_stage_history (deal_id uuid, from_stage_id uuid, to_stage_id uuid, created_at timestamptz);
       CREATE TABLE deals (
         id uuid PRIMARY KEY, name text, stage_id uuid NOT NULL, assigned_rep_id uuid, estimator_user_id uuid,
-        is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
+        is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, expected_close_date date,
         created_at timestamptz, won_closed_date date, lost_at timestamptz, updated_at timestamptz,
         awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric
       );

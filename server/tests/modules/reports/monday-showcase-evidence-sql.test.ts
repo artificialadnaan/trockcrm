@@ -111,11 +111,13 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
     expect(text).toContain("is_terminal = false");
     // open best-estimate basis (bid-board first), same as the region report's openVal
     expect(text.toLowerCase()).toContain("bid_board_total_sales");
-    // crucially NOT future-dated (semantic check, not the literal word): the projection metric adds an
-    // `expected_close_date IS NOT NULL` future-date filter; the full-open-pipeline metric must NOT have it.
+    // crucially NOT future-dated: the projection metric adds an `expected_close_date >= today` COHORT
+    // filter; the full-open-pipeline metric must NOT have it. (Both now reference expected_close_date in
+    // the open VALUE column for the far-out auto-park zeroing — a `>` + INTERVAL leg, NOT the `>=` cohort
+    // — so we key the check on the cohort's `>=`, which only the projection carries.)
     const projection = extractSqlText(buildProjectionEvidenceSql());
-    expect(projection).toMatch(/expected_close_date[\s\S]{0,40}IS NOT NULL/i);
-    expect(text).not.toMatch(/expected_close_date[\s\S]{0,40}IS NOT NULL/i);
+    expect(projection).toMatch(/expected_close_date\s*>=/i);
+    expect(text).not.toMatch(/expected_close_date\s*>=/i);
   });
 
   it("pipeline evidence: a stageSlug narrows to one stage (reconciles to a single region×stage heatmap cell)", () => {

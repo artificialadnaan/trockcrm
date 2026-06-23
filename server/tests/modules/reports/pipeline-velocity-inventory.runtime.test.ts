@@ -35,7 +35,7 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, name text, stage_id uuid NOT NULL, assigned_rep_id uuid,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       created_at timestamptz, stage_entered_at timestamptz,
-      on_hold boolean NOT NULL DEFAULT false, on_hold_started_at timestamptz,
+      on_hold boolean NOT NULL DEFAULT false, expected_close_date date, on_hold_started_at timestamptz,
       on_hold_accumulated_seconds numeric, on_hold_accumulated_seconds_at_stage_entry numeric,
       is_bid_board_owned boolean NOT NULL DEFAULT false, bid_board_stage_entered_at timestamptz,
       forecast_revenue numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric, awarded_amount numeric

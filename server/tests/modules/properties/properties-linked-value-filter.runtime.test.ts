@@ -66,7 +66,7 @@ beforeAll(async () => {
       bid_board_total_sales numeric(14,2),
       bid_estimate numeric(14,2),
       dd_estimate numeric(14,2),
-      on_hold boolean NOT NULL DEFAULT false,
+      on_hold boolean NOT NULL DEFAULT false, expected_close_date date,
       last_activity_at timestamptz,
       is_active boolean NOT NULL DEFAULT true
     );
