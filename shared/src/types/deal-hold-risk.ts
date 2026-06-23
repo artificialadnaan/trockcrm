@@ -8,9 +8,13 @@
  * is today-or-future, the stage-age at-risk verdict is suppressed ("don't nag until the target
  * passes"); once it passes (or is null/past), normal stage-age at-risk applies again.
  *
- * Deliberately NOT here: any automatic on-hold. On-hold remains the explicit, stored `deals.on_hold`
- * toggle ([[deal-reporting]]). Auto-parking a deal off a routine forecast date (and zeroing its value)
- * is intentionally out of scope — `expected_close_date` is a forecast, not a "park me" signal.
+ * Derived hold horizon: `CLOSE_TARGET_HOLD_HORIZON_DAYS` (bottom of file) is the threshold at which a
+ * close target is far enough out that the deal reads as "effectively on hold" — the basis for the deals
+ * On Hold filter pill (and, in a follow-up, value-zeroing). This is DISTINCT from the at-risk
+ * SUPPRESSION above: suppression quiets the stage-age nag for ANY today-or-future target; the hold
+ * horizon is the much-farther-out (90-day) threshold. On-hold also remains the explicit, stored
+ * `deals.on_hold` toggle ([[deal-reporting]]); the derived horizon is an OR-leg on top of it, never a
+ * replacement.
  *
  * Day boundary: the predicate takes an injected `now: Date` and resolves "today" to the
  * America/Chicago calendar day — the SAME anchor the forecast SQL uses ((now() AT TIME ZONE
@@ -88,3 +92,12 @@ export function isAtRiskSuppressedByCloseTarget({ expectedCloseDate, now }: Clos
   const days = daysUntilCloseTarget(expectedCloseDate, now);
   return days != null && days >= 0;
 }
+
+/**
+ * The close-target hold horizon (CT-calendar days). A deal whose `expected_close_date` is more than
+ * this many days out reads as "effectively on hold" — an OR-leg on top of the stored `deals.on_hold`
+ * flag. Shared by the On Hold filter's SQL predicate ([[deal-reporting]] `effectiveOnHoldSqlPredicate`)
+ * and the TS twin so the day-math can never drift between SQL and TS. 90 days ≈ a full quarter past the
+ * near-term forecast windows (30/60/90).
+ */
+export const CLOSE_TARGET_HOLD_HORIZON_DAYS = 90;

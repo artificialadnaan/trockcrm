@@ -39,10 +39,11 @@ function viewerMatchesRecordOffice(viewer: Viewer): boolean {
   return getViewerOfficeId(viewer) !== null;
 }
 
-// Generic so the return type FOLLOWS the (already-whitelisted) input: deals pass a "…|watched" union
-// and get it back; leads pass a narrow "mine"|"team"|"all" (via their readListScope) and STAY narrow —
-// so this shared helper never widens leads' scope into "watched". Runtime only defaults undefined → "mine".
-export function normalizeCollaborativeScope<S extends "mine" | "team" | "all" | "watched">(
+// Generic so the return type FOLLOWS the (already-whitelisted) input: deals pass a "…|watched|on_hold"
+// union and get it back; leads pass a narrow "mine"|"team"|"all" (via their readListScope) and STAY
+// narrow — so this shared helper never widens leads' scope into a deals-only scope. Runtime only defaults
+// undefined → "mine".
+export function normalizeCollaborativeScope<S extends "mine" | "team" | "all" | "watched" | "on_hold">(
   _role: string,
   requested: S | undefined
 ): S | "mine" {
@@ -51,9 +52,10 @@ export function normalizeCollaborativeScope<S extends "mine" | "team" | "all" | 
 
 export function getCollaborativeReadRole(
   role: string,
-  // Type widened to accept the now-possible "watched"; the elevation BODY is intentionally unchanged
-  // — only requested === "all" elevates a rep, so "watched" keeps the viewer's own role (self-scoped).
-  requested: "mine" | "team" | "all" | "watched" | undefined
+  // Type widened to accept the now-possible deals-only "watched"/"on_hold"; the elevation BODY is
+  // intentionally unchanged — only requested === "all" elevates a rep, so the deals-only scopes keep the
+  // viewer's own role (self-scoped).
+  requested: "mine" | "team" | "all" | "watched" | "on_hold" | undefined
 ) {
   if (role === "rep" && requested === "all") {
     return "director";

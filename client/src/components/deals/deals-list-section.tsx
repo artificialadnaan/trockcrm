@@ -72,7 +72,7 @@ export type DealListSortState = {
 type DealListActiveFilter = boolean | "all" | "pipeline";
 
 interface DealsListSectionProps {
-  scope?: "mine" | "team" | "all" | "watched";
+  scope?: "mine" | "team" | "all" | "watched" | "on_hold";
   workflowFamily?: Parameters<typeof usePipelineStages>[0];
   enableDateFilter?: boolean;
   enableExport?: boolean;
@@ -511,7 +511,7 @@ export function buildDealListParams(input: {
   sort: DealListSortState;
   page: number;
   limit: number;
-  scope?: "mine" | "team" | "all" | "watched";
+  scope?: "mine" | "team" | "all" | "watched" | "on_hold";
   dateField?: "updated" | "created" | "outcome";
 }) {
   const params = new URLSearchParams();
@@ -576,7 +576,7 @@ export async function fetchAllFilteredDeals(input: {
   dateTo?: string;
   isActive: DealListActiveFilter;
   sort: DealListSortState;
-  scope?: "mine" | "team" | "all" | "watched";
+  scope?: "mine" | "team" | "all" | "watched" | "on_hold";
   apiClient?: typeof api;
   dateField?: "updated" | "created" | "outcome";
 }) {

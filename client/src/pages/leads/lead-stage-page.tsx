@@ -1,7 +1,7 @@
 import { Navigate, useNavigate, useParams } from "react-router-dom";
 import { useLeadStagePage } from "@/hooks/use-leads";
 import { buildLeadStageSummary } from "@/lib/pipeline-stage-summary";
-import { useNormalizedStageRoute } from "@/lib/pipeline-scope";
+import { useNormalizedStageRoute, containNonDealsScope } from "@/lib/pipeline-scope";
 import { PipelineStagePageHeader } from "@/components/pipeline/pipeline-stage-page-header";
 import { PipelineStageTable } from "@/components/pipeline/pipeline-stage-table";
 
@@ -9,12 +9,13 @@ export function LeadStagePage() {
   const navigate = useNavigate();
   const { stageId } = useParams();
   const route = useNormalizedStageRoute("leads", stageId!);
-  // useNormalizedStageRoute already coerces a leads "watched" scope to the role default at runtime
-  // (deals-only scope); narrow the type here too so it matches the leads-only useLeadStagePage union.
+  // useNormalizedStageRoute already coerces the deals-only scopes (watched/on_hold) to the role default
+  // at runtime; narrow the type here too (via the shared containment helper) so it matches the
+  // leads-only useLeadStagePage Mine|All|Team union.
   const { data, loading, error } = useLeadStagePage({
     stageId: stageId!,
     ...route.query,
-    scope: route.query.scope === "watched" ? "mine" : route.query.scope,
+    scope: containNonDealsScope(route.query.scope),
   });
   const summary = buildLeadStageSummary(data);
 

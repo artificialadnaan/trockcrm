@@ -56,6 +56,7 @@ import {
   buildDealMineVisibilityCondition,
   buildAliasedDealWatchedCondition,
   buildDealWatchedCondition,
+  buildDealOnHoldCondition,
   resolveMineVisibilityFeatures,
 } from "../shared/mine-visibility.js";
 import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
@@ -752,7 +753,7 @@ function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
 }
 
-type WorkspaceScope = "mine" | "team" | "all" | "watched";
+type WorkspaceScope = "mine" | "team" | "all" | "watched" | "on_hold";
 
 export interface DealBoardInput {
   role: string;
@@ -1356,6 +1357,10 @@ async function buildDealWorkspaceScope(
           })
         : sql`false`
     );
+  } else if (input.scope === "on_hold") {
+    // On Hold = effectively on hold (stored on_hold OR a close target 90+ days out). Base columns, so no
+    // capability gate — push the shared predicate unconditionally, qualified to the stage query's "d" alias.
+    filters.push(buildDealOnHoldCondition("d"));
   } else if (input.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
     filters.push(teamRepIds.length > 0 ? sql`d.assigned_rep_id IN (${sqlList(teamRepIds)})` : sql`false`);
@@ -1646,6 +1651,10 @@ export async function getDeals(
           })
         : sql`false`
     );
+  } else if (scope === "on_hold") {
+    // On Hold = effectively on hold (stored on_hold OR a close target 90+ days out). Base columns, so no
+    // capability gate — push the shared predicate unconditionally.
+    conditions.push(buildDealOnHoldCondition("deals"));
   } else if (scope === "team") {
     const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
@@ -2869,6 +2878,11 @@ export async function getDealsForPipeline(
           })
         : sql`false`
     );
+  } else if (filters?.scope === "on_hold") {
+    // On Hold = effectively on hold (stored on_hold OR a close target 90+ days out). Base columns, so no
+    // capability gate. Like Watched/Mine, do NOT set assignedRepFilterHandled so a per-stage assignedRep
+    // narrowing still applies.
+    commonConditions.push(buildDealOnHoldCondition("deals"));
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     if (filters?.assignedRepId) {

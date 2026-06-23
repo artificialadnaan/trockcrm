@@ -355,7 +355,7 @@ export interface DealFilters {
   sortDir?: "asc" | "desc";
   page?: number;
   limit?: number;
-  scope?: "mine" | "team" | "all" | "watched";
+  scope?: "mine" | "team" | "all" | "watched" | "on_hold";
   /** Opt-in: also request pagination.valueTotal (the running-total card, #4). Only the surfaces
    *  that show the Total card set this, so plain list calls don't pay for the extra aggregate. */
   includeValueTotal?: boolean;
@@ -407,7 +407,7 @@ export interface DealBoardResponse {
 
 export interface DealStagePageResponse {
   stage: DealBoardColumn["stage"];
-  scope: "mine" | "team" | "all" | "watched";
+  scope: "mine" | "team" | "all" | "watched" | "on_hold";
   summary: {
     count: number;
     activeCount?: number;
@@ -846,7 +846,7 @@ export async function getDealScopingReadiness(dealId: string) {
 }
 
 export function useDealBoard(
-  scope: "mine" | "team" | "all" | "watched",
+  scope: "mine" | "team" | "all" | "watched" | "on_hold",
   includeDd: boolean,
   terminalDateFilters?: Record<TerminalOutcome, TerminalDateFilter>,
   previewLimit: number | null = 8,
@@ -917,7 +917,7 @@ export function useDealBoard(
   return { board, loading, error, refetch };
 }
 
-export function useDealStagePage(input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" | "watched" }) {
+export function useDealStagePage(input: StagePageQuery & { stageId: string; scope: "mine" | "team" | "all" | "watched" | "on_hold" }) {
   const [data, setData] = useState<DealStagePageResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
