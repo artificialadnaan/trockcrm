@@ -4,10 +4,12 @@
 export const qk = {
   projects: (uid: string, search: string) => ["projects", uid, search] as const,
   starred: (uid: string) => ["starred", uid] as const,
-  // Coordinates are rounded into the key (~0.001° ≈ 100m) so tiny GPS jitter doesn't refetch on every
-  // render, while a real move still busts the cache.
+  // Exact coordinates — NOT rounded. Location only updates on discrete events (focus / app-active /
+  // pull-to-refresh), never a continuous watch, so there's no jitter stream to debounce; rounding would
+  // instead let a real move within the rounding cell keep the same key and leave Nearby ranked for the
+  // previous position. Keying on the exact fix means any position change busts the cache and refetches.
   nearby: (uid: string, lat: number, lng: number) =>
-    ["nearby", uid, lat.toFixed(3), lng.toFixed(3)] as const,
+    ["nearby", uid, lat, lng] as const,
   projectPhotos: (uid: string, dealId: string) => ["projectPhotos", uid, dealId] as const,
   projectReports: (uid: string, dealId: string) => ["projectReports", uid, dealId] as const,
   pending: (uid: string) => ["pending", uid] as const,
