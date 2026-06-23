@@ -59,6 +59,10 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
   const isPastDate = date !== "" && date < businessToday;
   const canSave = date !== "" && !isPastDate && reason.trim() !== "" && !saving;
 
+  // Whether the deal currently HAS an SLA-postponing close target (a saved today-or-future date) that
+  // can be removed to drop the deal back to its normal stage-age SLA.
+  const hasActivePostponement = currentDate != null && currentDate >= businessToday;
+
   const handleSave = async () => {
     if (!canSave) return;
     setSaving(true);
@@ -91,6 +95,41 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
       await onSaved();
     } catch {
       // best-effort refresh; the date is already saved server-side
+    }
+    setSaving(false);
+    onOpenChange(false);
+  };
+
+  // "Remove postponement" — clear the close target so the deal drops straight back to its normal
+  // stage-age SLA (the at-risk engine has nothing to suppress once expected_close_date is null).
+  const handleRemove = async () => {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+
+    // Clearing the close target is the load-bearing write; mirror handleSave's failure isolation.
+    try {
+      await updateDeal(dealId, { expectedCloseDate: null });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't remove the postponement. Please try again.");
+      setSaving(false);
+      return;
+    }
+
+    try {
+      await createActivity({
+        type: "note",
+        subject: "Close target removed",
+        body: "Close target removed — SLA resumed to normal stage age.",
+        dealId,
+      });
+    } catch {
+      // best-effort audit note
+    }
+    try {
+      await onSaved();
+    } catch {
+      // best-effort refresh; the clear is already saved server-side
     }
     setSaving(false);
     onOpenChange(false);
@@ -140,6 +179,16 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
           {error ? <p className="text-sm text-red-600">{error}</p> : null}
         </div>
         <DialogFooter>
+          {hasActivePostponement ? (
+            <Button
+              variant="ghost"
+              onClick={handleRemove}
+              disabled={saving}
+              className="mr-auto text-red-600 hover:bg-red-50 hover:text-red-700"
+            >
+              Remove postponement
+            </Button>
+          ) : null}
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
             Cancel
           </Button>

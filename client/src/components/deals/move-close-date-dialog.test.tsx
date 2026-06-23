@@ -157,4 +157,28 @@ describe("MoveCloseDateDialog", () => {
     const c = render(FUTURE);
     expect((c.querySelector("#move-close-date") as HTMLInputElement).value).toBe(FUTURE);
   });
+
+  it("offers Remove postponement ONLY when the deal has an active (future) close target", () => {
+    const removeBtn = (c: HTMLElement) =>
+      Array.from(c.querySelectorAll("button")).find((b) => b.textContent?.includes("Remove postponement"));
+    expect(removeBtn(render(null))).toBeUndefined(); // nothing postponed
+    expect(removeBtn(render("2020-01-01"))).toBeUndefined(); // a past date isn't postponing the SLA
+    expect(removeBtn(render(FUTURE))).toBeDefined(); // active postponement -> offer the undo
+  });
+
+  it("Remove postponement clears the close date, logs a note, refreshes + closes", async () => {
+    const c = render(FUTURE);
+    const removeBtn = Array.from(c.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Remove postponement")
+    )!;
+    await act(async () => {
+      removeBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(mocks.updateDeal).toHaveBeenCalledWith("deal-1", { expectedCloseDate: null });
+    expect(mocks.createActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "note", dealId: "deal-1" })
+    );
+    expect(mocks.onSaved).toHaveBeenCalled();
+    expect(mocks.onOpenChange).toHaveBeenCalledWith(false);
+  });
 });
