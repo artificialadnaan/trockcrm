@@ -40,6 +40,19 @@ describe("dashboard At Risk summary", () => {
         onHoldAccumulatedSecondsAtStageEntry: 0,
       },
       {
+        dealId: "auto-held-by-close-target",
+        dealValue: 9000,
+        stageName: "Opportunity",
+        stageSlug: "opportunity",
+        workflowRoute: "normal",
+        stageEnteredAt: "2026-04-01T12:00:00.000Z",
+        onHold: false,
+        onHoldStartedAt: null,
+        onHoldAccumulatedSeconds: 0,
+        onHoldAccumulatedSecondsAtStageEntry: 0,
+        expectedCloseDate: "2026-09-01",
+      },
+      {
         dealId: "terminal",
         dealValue: 4000,
         stageSlug: "won",
@@ -64,6 +77,9 @@ describe("dashboard At Risk summary", () => {
       "rep-risk",
       "leadership-only-safe",
     ]);
+    expect(buildDashboardAtRiskDeals(rows, "rep", now)).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ dealId: "auto-held-by-close-target" })])
+    );
     expect(buildDashboardAtRiskDeals(rows, "rep", now)[1]).toMatchObject({
       dealId: "leadership-only-safe",
       stageName: "Estimate Under Review",

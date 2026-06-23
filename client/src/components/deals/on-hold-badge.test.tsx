@@ -34,4 +34,12 @@ describe("OnHoldBadge", () => {
 
     expect(html).toContain("ml-2");
   });
+
+  // The badge is a DUMB boolean: the (won-aware) effective-hold computation lives in the card via
+  // isDealValueEffectivelyOnHold, which passes the result as `onHold`. So a far-out OPEN deal renders the
+  // badge because the card passes onHold={true}, NOT because the badge inspects a close date.
+  it("renders whatever effective-held boolean the caller computed (onHold=true regardless of source)", () => {
+    expect(renderToStaticMarkup(<OnHoldBadge onHold />)).toContain('data-on-hold="true"');
+    expect(renderToStaticMarkup(<OnHoldBadge onHold={false} />)).toBe("");
+  });
 });

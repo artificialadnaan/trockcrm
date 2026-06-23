@@ -1,5 +1,10 @@
 import { sql, type SQL } from "drizzle-orm";
-import { reportableDealSqlPredicate } from "@trock-crm/shared/types";
+import {
+  reportableDealSqlPredicate,
+  effectiveOnHoldSqlPredicate,
+  closeTargetFarOutSqlPredicate,
+} from "@trock-crm/shared/types";
+import { TERMINAL_STAGE_SLUGS } from "./pipeline-terminal-stages.js";
 
 type DealValueTable = {
   onHold: unknown;
@@ -122,7 +127,25 @@ export function dealBestEstimateWithForecastSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, FORECAST_FIRST_VALUE_CHAIN);
 }
 
+// OPEN-pipeline value-zeroing keys on EFFECTIVE hold = stored on_hold OR a close target past the 90-day
+// horizon, so a far-out OPEN deal contributes $0 to pipeline/forecast just like a parked one. Same
+// boundary as the On Hold filter (shared CLOSE_TARGET_HOLD_HORIZON_DAYS + the America/Chicago anchor) so
+// the two can't disagree. (The reportable/count predicate is intentionally unchanged — a far-out deal is
+// $0 but still counted.) The far-future auto-park leg lives ONLY in the ALIASED form
+// (aliasedEffectiveDealValueSql), which runs against OPEN-filtered report populations. The COLUMN form is
+// stored-on_hold ONLY: its sole consumer is the property linked-value SUM, which runs over MIXED (open +
+// won) linked deals with no terminal filter, so applying the horizon here would wrongly zero realized
+// won revenue. (A drizzle table can't be cheaply stage-filtered; the aliased report queries already
+// exclude terminal deals, so they carry the auto-park leg safely.)
 export function effectiveDealValueSql(table: DealValueTable, rawValueSql: SQL = dealBestEstimateSql(table)): SQL {
+  return storedOnHoldDealValueSql(table, rawValueSql);
+}
+
+// REALIZED-safe value-zeroing: stored on_hold ONLY. A won/awarded value is never auto-parked by a stale
+// forecast date — a deal can be won EARLY while its expected_close_date is still far out (the won path
+// stamps the won date but does NOT clear the forecast), and zeroing that realized revenue would silently
+// drop it from won/commission/report totals. Mirrors the client's won-aware getEffectiveDealValue.
+function storedOnHoldDealValueSql(table: DealValueTable, rawValueSql: SQL): SQL {
   return sql`CASE WHEN COALESCE(${table.onHold}, false) THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
 }
 
@@ -130,11 +153,11 @@ export function effectiveAwardedDealValueSql(
   table: DealValueTable,
   rawValueSql: SQL = dealAwardedAmountSql(table)
 ): SQL {
-  return effectiveDealValueSql(table, rawValueSql);
+  return storedOnHoldDealValueSql(table, rawValueSql);
 }
 
 export function effectiveWonDealValueSql(table: DealValueTable): SQL {
-  return effectiveDealValueSql(table, dealAwardedFirstWithFallbackSql(table));
+  return storedOnHoldDealValueSql(table, dealAwardedFirstWithFallbackSql(table));
 }
 
 export function effectiveEstimatingDealValueSql(table: DealValueTable): SQL {
@@ -170,10 +193,18 @@ export function aliasedOpenPipelineForecastFirstDealValueSql(alias: string): SQL
   return aliasedDealValueChainSql(alias, FORECAST_FIRST_VALUE_CHAIN);
 }
 
+// Aliased twin of effectiveDealValueSql (OPEN/best-estimate value). Reuses the SHARED
+// effectiveOnHoldSqlPredicate so the value-zero test is byte-identical to the On Hold filter — they
+// cannot drift. NOT for won-value (see aliasedEffectiveWonDealValueSql).
 export function aliasedEffectiveDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealBestEstimateSql(alias)
 ): SQL {
+  return sql`CASE WHEN ${sql.raw(effectiveOnHoldSqlPredicate(alias))} THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
+}
+
+// Aliased twin of storedOnHoldDealValueSql — REALIZED-safe (stored on_hold ONLY), for won/awarded value.
+function aliasedStoredOnHoldDealValueSql(alias: string, rawValueSql: SQL): SQL {
   return sql`CASE WHEN COALESCE(${sql.raw(`${alias}.on_hold`)}, false) THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
 }
 
@@ -181,11 +212,95 @@ export function aliasedEffectiveAwardedDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealAwardedAmountSql(alias)
 ): SQL {
-  return aliasedEffectiveDealValueSql(alias, rawValueSql);
+  return aliasedStoredOnHoldDealValueSql(alias, rawValueSql);
+}
+
+// Effective deal value for a MIXED (open + terminal) population where stage classification is available as a
+// raw SQL boolean (e.g. a joined pipeline_stage_config.slug + the Bid Board mirror) rather than resolved
+// stage-id sets. A terminal (won/lost) row is realized/preserved -> zeroed on stored on_hold ONLY; an OPEN
+// row additionally auto-parks a far-out close target. Use on aggregates that sum across outcomes without a
+// per-stage CASE (company stats, etc.) so far-out terminal value is never wrongly dropped (Codex P2).
+export function aliasedTerminalAwareEffectiveDealValueSql(
+  alias: string,
+  rawValueSql: SQL,
+  isTerminalSql: SQL
+): SQL {
+  return sql`CASE WHEN ${isTerminalSql} THEN ${aliasedStoredOnHoldDealValueSql(
+    alias,
+    rawValueSql
+  )} ELSE ${aliasedEffectiveDealValueSql(alias, rawValueSql)} END`;
+}
+
+// The canonical "is this row a realized terminal (won/lost) deal" SQL boolean for a MIXED population, used to
+// drive aliasedTerminalAwareEffectiveDealValueSql. Mirrors the client/on-hold-predicate terminal exemption:
+// the CRM stage slug is won/lost (via a joined pipeline_stage_config) OR the Bid Board mirror is terminal (a
+// BB-owned deal can be terminal in bid_board_stage_slug while its CRM stage is still open). `stageSlugColumn`
+// is the joined slug expression (e.g. "psc.slug"); `dealAlias` qualifies bid_board_stage_slug. Both are
+// trusted developer literals, never user input.
+export function aliasedTerminalDealBySlugSql(dealAlias: string, stageSlugColumn: string): SQL {
+  const terminalSlugs = sql.join(TERMINAL_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `);
+  return sql`(${sql.raw(stageSlugColumn)} IN (${terminalSlugs}) OR COALESCE(${sql.raw(
+    `${dealAlias}.bid_board_stage_slug`
+  )}, '') IN (${terminalSlugs}))`;
+}
+
+// The Bid Board MIRROR terminal signal alone: true when a deal is won/lost in bid_board_stage_slug. Use on a
+// population already constrained to a single OPEN CRM stage (a stage page) or filtered CRM-non-terminal,
+// where the only remaining terminal exposure is a BB-owned deal whose mirror is terminal while its CRM stage
+// is still open. Returns a raw SQL string fragment so worker raw-SQL callers can reuse it.
+export function bidBoardTerminalSqlPredicate(dealAlias: string): string {
+  const slugs = TERMINAL_STAGE_SLUGS.map((slug) => `'${slug.replace(/'/g, "''")}'`).join(", ");
+  return `COALESCE(${dealAlias}.bid_board_stage_slug, '') IN (${slugs})`;
+}
+
+export function aliasedBidBoardTerminalSql(dealAlias: string): SQL {
+  return sql.raw(`(${bidBoardTerminalSqlPredicate(dealAlias)})`);
 }
 
 export function aliasedEffectiveWonDealValueSql(alias: string): SQL {
-  return aliasedEffectiveDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
+  return aliasedStoredOnHoldDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
+}
+
+// Aliased twin for a LOST terminal deal — REALIZED/PRESERVED value, zeroed on stored on_hold ONLY. A lost
+// bid is a historical record whose value is kept for Loss Analysis, so it is NEVER auto-parked by a stale
+// far-out forecast date (only its stored flag zeros it). Mirrors the client getEffectiveDealValue's
+// terminal (won OR lost) exemption and the won twin above; uses the same unified awarded-first chain.
+export function aliasedEffectiveLostDealValueSql(alias: string): SQL {
+  return aliasedStoredOnHoldDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
+}
+
+// TERMINAL-AWARE effective-on-hold SQL condition — the SQL twin of the shared TS isDealEffectivelyOnHold.
+// A deal is effectively on hold when the stored `on_hold` flag is set OR — for an OPEN (non-terminal) deal
+// — its close target is more than CLOSE_TARGET_HOLD_HORIZON_DAYS out. A won/lost deal is realized/preserved,
+// so the far-out auto-park leg NEVER applies to it (only its stored flag holds it); `terminalStageIds`
+// (won ∪ lost) gates that leg via `stage_id NOT IN (...)`. Pass `[]` for the legacy open-only predicate
+// (a population with no terminal rows). Reuses the SHARED far-out day-math so SQL and TS can't drift, and
+// the shared identifier validation (closeTargetFarOutSqlPredicate throws on an invalid path before any raw
+// column string is built here).
+export function aliasedEffectiveOnHoldConditionSql(
+  identifierPath = "deals",
+  terminalStageIds: string[] = []
+): SQL {
+  const farOut = sql.raw(closeTargetFarOutSqlPredicate(identifierPath));
+  const onHoldColumn = identifierPath ? `${identifierPath}.on_hold` : "on_hold";
+  const stored = sql.raw(`COALESCE(${onHoldColumn}, false) = true`);
+  // Two INDEPENDENT terminal signals gate the far-out auto-park leg, mirroring the client
+  // isDealValueEffectivelyOnHold: (1) the CRM stage_id is won/lost (caller-resolved ids), and (2) the Bid
+  // Board mirror is terminal — a BB-owned deal can be won/lost in bid_board_stage_slug while its CRM stage_id
+  // is still open. Either makes the deal realized/preserved, so the stale forecast date must NOT auto-park it.
+  const guards: SQL[] = [];
+  if (terminalStageIds.length > 0) {
+    const stageIdColumn = sql.raw(`${identifierPath}.stage_id`);
+    guards.push(
+      sql`${stageIdColumn} NOT IN (${sql.join(terminalStageIds.map((id) => sql`${id}`), sql`, `)})`
+    );
+  }
+  const bidBoardStageSlug = sql.raw(`COALESCE(${identifierPath}.bid_board_stage_slug, '')`);
+  guards.push(
+    sql`${bidBoardStageSlug} NOT IN (${sql.join(TERMINAL_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})`
+  );
+  const farOutForOpen = sql`${sql.join(guards, sql` AND `)} AND (${farOut})`;
+  return sql`(${stored} OR (${farOutForOpen}))`;
 }
 
 export function aliasedEffectiveEstimatingDealValueSql(alias: string): SQL {

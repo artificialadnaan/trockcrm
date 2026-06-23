@@ -1,5 +1,20 @@
-import { getDealAtRiskResult, reportableDealSqlPredicate, type WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  closeTargetFarOutSqlPredicate,
+  getDealAtRiskResult,
+  LOST_DEAL_STAGE_SLUGS,
+  reportableDealSqlPredicate,
+  WON_DEAL_STAGE_SLUGS,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 import { pool } from "../db.js";
+
+// A Bid Board-owned deal can be terminal (won/lost) in bid_board_stage_slug while its CRM stage_id still
+// joins to a non-terminal stage — its realized value must be PRESERVED, never auto-parked by a far-out
+// forecast date (mirrors the server terminal exemption).
+const TERMINAL_BID_BOARD_SLUG_LIST = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]
+  .map((slug) => `'${slug.replace(/'/g, "''")}'`)
+  .join(", ");
+const BID_BOARD_TERMINAL_SQL = `COALESCE(d.bid_board_stage_slug, '') IN (${TERMINAL_BID_BOARD_SLUG_LIST})`;
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -14,6 +29,11 @@ const currentDealValueSql = `COALESCE(
   CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
   0
 )`;
+// "Total active pipeline value" sums a CRM-non-terminal population, so it must zero a far-out (90+ day)
+// auto-held deal to $0 — matching the deals list/kanban totals — EXCEPT a Bid Board-mirrored terminal deal,
+// whose realized value is preserved. The stored on_hold case is already excluded by REPORTABLE_DEAL_SQL in
+// the WHERE, so only the far-out leg is added here (Codex P2).
+const effectiveCurrentDealValueSql = `CASE WHEN NOT (${BID_BOARD_TERMINAL_SQL}) AND (${closeTargetFarOutSqlPredicate("d")}) THEN 0 ELSE ${currentDealValueSql} END`;
 
 async function loadTaskRuleDependencies() {
   const [{ evaluateTaskRules }, { TASK_RULES }, { createTenantTaskRulePersistence }] = (await Promise.all([
@@ -29,6 +49,7 @@ interface DigestAtRiskDealRow {
   stage_slug: string | null;
   workflow_route: string | null;
   stage_entered_at: string | Date | null;
+  expected_close_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -54,6 +75,11 @@ function countDigestAtRiskDeals(rows: DigestAtRiskDealRow[], now: Date): number 
         stageSlug: row.stage_slug,
         workflowRoute: normalizeWorkflowRoute(row.workflow_route),
         stageEnteredAt: row.stage_entered_at,
+        // Match the app's aggregate at-risk (applyCloseTargetSuppression:false): exclude the 90+ day
+        // auto-held case only, not a near close target, so the digest stale count mirrors the deals
+        // list/dashboard (Codex P2).
+        expectedCloseDate: row.expected_close_date,
+        applyCloseTargetSuppression: false,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
         onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
@@ -127,6 +153,7 @@ export async function runWeeklyDigest(): Promise<void> {
                d.stage_entered_at,
                latest_current_stage_entered_at.entered_at
              ) AS stage_entered_at,
+             d.expected_close_date,
              d.on_hold,
              d.on_hold_started_at,
              d.on_hold_accumulated_seconds,
@@ -173,7 +200,7 @@ export async function runWeeklyDigest(): Promise<void> {
 
         // 4. Total active pipeline value
         const valueRes = await client.query(
-          `SELECT COALESCE(SUM(${currentDealValueSql}), 0) AS total_value
+          `SELECT COALESCE(SUM(${effectiveCurrentDealValueSql}), 0) AS total_value
            FROM ${schemaName}.deals d
            JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
            WHERE d.is_active = true

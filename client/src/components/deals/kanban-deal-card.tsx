@@ -7,7 +7,11 @@ import type { Deal } from "@/hooks/use-deals";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
 import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
 import { OnHoldBadge } from "@/components/deals/on-hold-badge";
-import { getEffectiveStageAgeDeal, getEffectiveStageAgeDays } from "@trock-crm/shared/types";
+import {
+  getEffectiveStageAgeDeal,
+  getEffectiveStageAgeDays,
+  isDealValueEffectivelyOnHold,
+} from "@trock-crm/shared/types";
 
 export function getDealDisplayNumber(deal: Pick<Deal, "dealNumber" | "projectNumber">) {
   return formatDealDisplayNumber(deal);
@@ -42,7 +46,11 @@ export function KanbanDealCard({
   // Value from the column-slug-stamped deal (the same object the lost-bid label uses below), so the
   // stage-aware chain (estimating DD-over-bid) applies even if the board row omits stageSlug — keeping the
   // card value reconciled with the server stage-aware column total. The stageSlug prop is authoritative.
-  const value = bestEstimate({ ...deal, stageSlug: deal.stageSlug ?? stageSlug });
+  // A (won-aware) effectively-held deal shows $0 so the card matches its On Hold badge AND the server's
+  // zeroed rollup — held = stored on_hold OR (for an OPEN deal) a far-out close target.
+  const dealForValue = { ...deal, stageSlug: stageSlug ?? deal.stageSlug };
+  const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue);
+  const value = effectivelyHeld ? 0 : bestEstimate(dealForValue);
   const displayNumber = getDealDisplayNumber(deal);
 
   const metaParts: string[] = [];
@@ -85,14 +93,16 @@ export function KanbanDealCard({
         <div className="flex items-start justify-between gap-2">
           <p className="truncate text-sm font-medium text-gray-900">{deal.name}</p>
           <DealValue
-            deal={{ ...deal, stageSlug: deal.stageSlug ?? stageSlug }}
+            deal={dealForValue}
             value={value}
             compact
             className="whitespace-nowrap text-sm font-semibold tabular-nums text-gray-900"
           />
         </div>
-        <OnHoldBadge onHold={deal.onHold} compact className="mt-1" />
-        <AtRiskBadge atRisk={deal.atRisk} compact className="mt-1" />
+        <OnHoldBadge onHold={effectivelyHeld} compact className="mt-1" />
+        {/* A held deal is never also "at risk" (the On Hold badge takes the slot) — suppress so an
+            auto-held far-out deal can't show both badges at once. */}
+        <AtRiskBadge atRisk={effectivelyHeld ? null : deal.atRisk} compact className="mt-1" />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact className="mt-1" />
         <p className="mt-0.5 truncate text-xs text-gray-500">{metaParts.join(" · ")}</p>
       </div>

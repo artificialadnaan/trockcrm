@@ -57,6 +57,7 @@ function expectColumnOrder(sqlText: string, columns: readonly string[]) {
 describe("deal-value-sql", () => {
   const table = {
     onHold: sql.raw("d.on_hold"),
+    expectedCloseDate: sql.raw("d.expected_close_date"),
     forecastRevenue: sql.raw("d.forecast_revenue"),
     bidBoardTotalSales: sql.raw("d.bid_board_total_sales"),
     bidEstimate: sql.raw("d.bid_estimate"),
@@ -70,6 +71,39 @@ describe("deal-value-sql", () => {
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.awarded_amount");
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.bid_estimate");
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.dd_estimate");
+  });
+
+  it("ALIASED open value zeros on EFFECTIVE hold: stored on_hold OR a close target past the 90-day horizon", () => {
+    // The far-future auto-park leg lives ONLY in the aliased form, which runs against OPEN-filtered report
+    // populations; it reuses the shared filter predicate verbatim, so the two can never drift.
+    const aliased = normalize(aliasedEffectiveDealValueSql("d")).toLowerCase();
+    expect(aliased).toContain("coalesce(d.on_hold, false) = true");
+    expect(aliased).toContain("d.expected_close_date is not null");
+    expect(aliased).toContain("d.expected_close_date > (now() at time zone 'america/chicago')::date + interval '90 days'");
+  });
+
+  it("COLUMN-form value is stored-on_hold ONLY (its consumer, property linked-value, sums MIXED open+won deals)", () => {
+    // No far-future leg here: the column form runs over un-stage-filtered linked deals, so auto-parking
+    // would zero realized WON revenue in that mixed population (the P2). Stored on_hold still zeros.
+    const column = normalize(effectiveDealValueSql(table)).toLowerCase();
+    expect(column).toContain("coalesce(d.on_hold, false)");
+    expect(column).not.toContain("expected_close_date");
+    expect(column).not.toContain("interval '90 days'");
+  });
+
+  it("WON/AWARDED value zeros on STORED on_hold ONLY — never the far-future leg (early-won revenue safe)", () => {
+    // a deal won EARLY can keep a far-out expected_close_date; the won/awarded helpers must NOT zero it,
+    // or realized revenue/commissions silently vanish until the forecast date ages in (the P1).
+    for (const realized of [
+      normalize(aliasedEffectiveWonDealValueSql("d")).toLowerCase(),
+      normalize(effectiveWonDealValueSql(table)).toLowerCase(),
+      normalize(aliasedEffectiveAwardedDealValueSql("d")).toLowerCase(),
+      normalize(effectiveAwardedDealValueSql(table)).toLowerCase(),
+    ]) {
+      expect(realized).toContain("coalesce(d.on_hold, false)"); // stored-hold zeroing kept
+      expect(realized).not.toContain("expected_close_date"); // but NO auto-park horizon
+      expect(realized).not.toContain("interval '90 days'");
+    }
   });
 
   // Convention shift 2026-06-18: the open/best-estimate chain is now AWARDED-FIRST (unified with the won

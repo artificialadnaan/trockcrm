@@ -16,10 +16,19 @@ path in server/src/modules/deals/service.ts, and the five stage-writer paths:
    getHoldStateAtStageEntry() before writing it.
 */
 
-import { isGenuineEstimatingDealStageSlug } from "./workflow.js";
+import {
+  isGenuineEstimatingDealStageSlug,
+  isGenuineWonDealStageSlug,
+  isGenuineLostDealStageSlug,
+} from "./workflow.js";
+import { isDealEffectivelyOnHold } from "./deal-hold-risk.js";
 
 type DealValueLike = {
   onHold?: boolean | null;
+  // The close target — a deal more than CLOSE_TARGET_HOLD_HORIZON_DAYS out is effectively on hold and
+  // zeroed even without the stored flag. Optional: a caller whose deal type lacks it falls back to the
+  // stored on_hold leg only (graceful — the far-out leg simply never fires).
+  expectedCloseDate?: string | Date | null;
   awardedAmount?: string | number | null;
   bidBoardTotalSales?: string | number | null;
   bidEstimate?: string | number | null;
@@ -124,12 +133,43 @@ export function getHoldStateAtStageEntry(
   };
 }
 
-export function getEffectiveDealValue(deal: DealValueLike): number {
-  return deal.onHold ? 0 : getRawDealValue(deal);
+/**
+ * Whether a deal's value reads as on hold for ZEROING purposes: the stored on_hold flag OR — for an OPEN
+ * deal only — a close target past the 90-day horizon. A WON deal is realized, so the far-future leg never
+ * applies (its `expected_close_date` may still be far out if it was won early; only its stored flag
+ * zeros it). This is the won-aware twin of the server's stage-aware value SQL: card display
+ * (getEffectiveDealValue) and the On Hold badge both read it, so the card's $0 and badge always agree
+ * with the server rollup. `now` defaults to the call instant; pass an explicit instant in tests. At-risk
+ * counts use the same effective hold rule through getDealAtRiskResult.
+ */
+export function isDealValueEffectivelyOnHold(deal: DealValueLike, now: Date = new Date()): boolean {
+  const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  // Terminal (won OR lost) deals are exempt from the far-future auto-park: won/lost value is realized or
+  // preserved, not a stale forecast to zero. Terminal-ness honors the Bid Board mirror on BOTH outcomes —
+  // a Bid Board-owned deal can reach a won (sent_to_production) OR lost (closed_lost) terminal alias in
+  // bidBoardStageSlug while its CRM stageSlug is still open; both canonicalize to the terminal outcome.
+  const bidBoardStageSlug = deal.bidBoardStageSlug ?? null;
+  const isTerminal =
+    isGenuineWonDealStageSlug(stageSlug, workflowRoute) ||
+    isGenuineWonDealStageSlug(bidBoardStageSlug, workflowRoute) ||
+    isGenuineLostDealStageSlug(stageSlug, workflowRoute) ||
+    isGenuineLostDealStageSlug(bidBoardStageSlug, workflowRoute);
+  return isDealEffectivelyOnHold({
+    onHold: deal.onHold,
+    expectedCloseDate: deal.expectedCloseDate,
+    now,
+    isTerminal,
+  });
 }
 
-export function getEffectiveAwardedDealValue(deal: DealValueLike): number {
-  return deal.onHold ? 0 : getRawAwardedDealValue(deal);
+export function getEffectiveDealValue(deal: DealValueLike, now: Date = new Date()): number {
+  return isDealValueEffectivelyOnHold(deal, now) ? 0 : getRawDealValue(deal);
+}
+
+export function getEffectiveAwardedDealValue(deal: DealValueLike, now: Date = new Date()): number {
+  return isDealValueEffectivelyOnHold(deal, now) ? 0 : getRawAwardedDealValue(deal);
 }
 
 export function resolveEffectiveStageEnteredAt(

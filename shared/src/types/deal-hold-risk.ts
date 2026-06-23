@@ -1,7 +1,7 @@
 /**
- * THE single source of truth for the close-target-driven at-risk SUPPRESSION rule. Shared by the deal
- * activity/SLA surface and kanban cards (client TS), and the deal/at-risk APIs, dashboards, reports,
- * and worker stale-deal alerts (server TS) — every surface that computes at-risk via [[at-risk]]
+ * THE single source of truth for close-target-driven at-risk suppression and derived hold behavior. Shared
+ * by the deal activity/SLA surface and kanban cards (client TS), and the deal/at-risk APIs, dashboards,
+ * reports, and worker stale-deal alerts (server TS) — every surface that computes at-risk via [[at-risk]]
  * `getDealAtRiskResult`.
  *
  * The "close target" is the deal's `expected_close_date` (reused, not a new column). While that date
@@ -10,11 +10,10 @@
  *
  * Derived hold horizon: `CLOSE_TARGET_HOLD_HORIZON_DAYS` (bottom of file) is the threshold at which a
  * close target is far enough out that the deal reads as "effectively on hold" — the basis for the deals
- * On Hold filter pill (and, in a follow-up, value-zeroing). This is DISTINCT from the at-risk
- * SUPPRESSION above: suppression quiets the stage-age nag for ANY today-or-future target; the hold
- * horizon is the much-farther-out (90-day) threshold. On-hold also remains the explicit, stored
- * `deals.on_hold` toggle ([[deal-reporting]]); the derived horizon is an OR-leg on top of it, never a
- * replacement.
+ * On Hold filter pill, value-zeroing, and at-risk exclusion. This is DISTINCT from the shorter pending
+ * close-target suppression above, which callers opt into for detail-style SLA messaging. On-hold also
+ * remains the explicit, stored `deals.on_hold` toggle ([[deal-reporting]]); the derived horizon is an
+ * OR-leg on top of it, never a replacement.
  *
  * Day boundary: the predicate takes an injected `now: Date` and resolves "today" to the
  * America/Chicago calendar day — the SAME anchor the forecast SQL uses ((now() AT TIME ZONE
@@ -101,3 +100,37 @@ export function isAtRiskSuppressedByCloseTarget({ expectedCloseDate, now }: Clos
  * near-term forecast windows (30/60/90).
  */
 export const CLOSE_TARGET_HOLD_HORIZON_DAYS = 90;
+
+export interface EffectiveOnHoldInput {
+  /** The stored `deals.on_hold` flag. */
+  onHold?: boolean | null;
+  /** The deal's close target = its `expected_close_date`. */
+  expectedCloseDate?: string | Date | null;
+  /** The reference instant; "today" is its America/Chicago calendar day. */
+  now: Date;
+  /**
+   * Whether the deal is already TERMINAL (won OR lost). The far-future auto-park leg applies to OPEN
+   * pipeline value only — a deal can be won EARLY (its won path stamps the won date but leaves the
+   * forecast date far out) and a lost deal is a historical bid whose value is preserved for Loss
+   * Analysis; in both cases the value is realized/preserved, NOT a stale forecast to zero. So a terminal
+   * deal is effectively on hold ONLY via the explicit stored flag, never the horizon. Mirrors the server,
+   * where won-value SQL helpers + terminal columns zero on stored on_hold only.
+   */
+  isTerminal?: boolean;
+}
+
+/**
+ * "Effectively on hold" = the stored `on_hold` flag OR (for an OPEN deal) a close target more than
+ * CLOSE_TARGET_HOLD_HORIZON_DAYS CT-days out (auto-park). The TS twin of [[deal-reporting]]
+ * `effectiveOnHoldSqlPredicate`: STRICTLY greater-than the horizon, mirroring the SQL's
+ * `> ... + INTERVAL '90 days'`, so a deal exactly 90 days out is NOT yet held in either world. Drives
+ * client value-zeroing (getEffectiveDealValue), the On Hold badge, and at-risk exclusion.
+ */
+export function isDealEffectivelyOnHold({ onHold, expectedCloseDate, now, isTerminal }: EffectiveOnHoldInput): boolean {
+  if (onHold === true) return true;
+  // A terminal (won/lost) deal is realized/preserved — never auto-parked by a stale forecast date (only
+  // its stored flag holds it).
+  if (isTerminal === true) return false;
+  const days = daysUntilCloseTarget(expectedCloseDate, now);
+  return days != null && days > CLOSE_TARGET_HOLD_HORIZON_DAYS;
+}

@@ -315,6 +315,17 @@ describe("close-target at-risk suppression", () => {
     expect(result.thresholdDays).toBe(7);
   });
 
+  it("can apply only the 90-day auto-hold exclusion without pending-target suppression", () => {
+    const result = getDealAtRiskResult(
+      { ...overThresholdDeal, expectedCloseDate: "2026-06-20", applyCloseTargetSuppression: false },
+      "rep",
+      NOW
+    );
+
+    expect(result.isAtRisk).toBe(true);
+    expect(result.reason).toBe("threshold_reached");
+  });
+
   it("becomes at risk again once the close target has passed", () => {
     const result = getDealAtRiskResult(
       { ...overThresholdDeal, expectedCloseDate: "2026-05-20" },
@@ -326,7 +337,7 @@ describe("close-target at-risk suppression", () => {
     expect(result.reason).toBe("threshold_reached");
   });
 
-  it("suppresses even a far-future close target (no automatic hold)", () => {
+  it("treats a far-future close target as effectively on hold", () => {
     const result = getDealAtRiskResult(
       { ...overThresholdDeal, expectedCloseDate: "2026-11-01" },
       "rep",
@@ -334,7 +345,7 @@ describe("close-target at-risk suppression", () => {
     );
 
     expect(result.isAtRisk).toBe(false);
-    expect(result.reason).toBe("close_target_pending");
+    expect(result.reason).toBe("on_hold");
   });
 
   it("lets a stored on_hold flag take precedence over the close-target suppression", () => {

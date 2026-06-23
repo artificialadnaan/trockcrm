@@ -71,6 +71,11 @@ import {
   aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
   aliasedDealEstimatingValueSql,
+  aliasedEffectiveDealValueSql,
+  aliasedBidBoardTerminalSql,
+  aliasedEffectiveOnHoldConditionSql,
+  aliasedTerminalAwareEffectiveDealValueSql,
+  aliasedTerminalDealBySlugSql,
   aliasedWonHsClosedWonDateSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
@@ -156,12 +161,10 @@ function attachAtRiskResult<T extends {
           deal.onHoldAccumulatedSecondsAtStageEntry == null
             ? null
             : Number(deal.onHoldAccumulatedSecondsAtStageEntry),
-        // A today-or-future close target (expected_close_date) postpones the stage-age at-risk
-        // verdict until it passes (shared rule -> reason "close_target_pending"). Gated behind an
-        // explicit opt-in so ONLY the deal-detail path (getDealById) suppresses today; the list,
-        // kanban, stage-page, dashboard counts, and worker alerts stay on pure stage-age until a
-        // follow-up wires them together — avoids a half-applied cross-surface mismatch.
-        expectedCloseDate: options?.applyCloseTargetSuppression ? deal.expectedCloseDate ?? null : null,
+        // Forward the close target everywhere so 90+ day targets count as effective hold. The
+        // shorter today-or-future SLA pause remains opt-in for detail-style messaging.
+        expectedCloseDate: deal.expectedCloseDate ?? null,
+        applyCloseTargetSuppression: options?.applyCloseTargetSuppression === true,
       },
       normalizeAtRiskViewerRole(viewerRole),
       new Date()
@@ -808,6 +811,7 @@ type DealStageWorkspaceRow = {
   property_state: string | null;
   updated_at: string;
   stage_entered_at: string;
+  expected_close_date: string | null;
   is_bid_board_owned: boolean;
   is_change_order: boolean;
   bid_board_stage_slug: string | null;
@@ -841,11 +845,21 @@ function buildDealListOrder(
   // Primary tier: active, non-zero deals on top; on-hold and $0-value deals sink to
   // the bottom of the list (sort-only — the WHERE set is unchanged, so they still
   // appear, just last). Within each tier the requested column sort + id tiebreaker
-  // apply. The tier reuses the SAME stage-aware effective value the list displays and
-  // filters on, so sort == filter == display (D-1).
+  // apply.
+  //
+  // The tier runs on EVERY list request — even a plain created/name sort that never resolves the stage-id
+  // sets — so it must be TERMINAL-aware WITHOUT a stage-id round-trip. It reads the JOINED
+  // pipeline_stage_config.slug (the row query left-joins it) plus the Bid Board mirror: a realized won/lost
+  // deal keeps its preserved value and is NOT sunk as $0/on-hold even when its forecast date is far out,
+  // while an OPEN row still auto-parks a far-out close target (Codex P2). Tier is a binary >0 check, so the
+  // simpler best-estimate chain matches the stage-aware value's positivity for every classification.
   const tier = aliasedActiveNonZeroDealSortTierSql(
     "deals",
-    aliasedStageAwareEffectiveDealValueSql("deals", classification.wonStageIds, classification.estimatingStageIds)
+    aliasedTerminalAwareEffectiveDealValueSql(
+      "deals",
+      aliasedDealBestEstimateSql("deals"),
+      aliasedTerminalDealBySlugSql("deals", "pipeline_stage_config.slug")
+    )
   );
   return [asc(tier), ...buildDealListColumnOrder(filters, classification)];
 }
@@ -880,7 +894,7 @@ function buildDealListColumnOrder(
       // display (D-1; Codex #546). Raw
       // awarded_amount is null for most open deals and would mis-sort them.
       return buildSortWithIdTieBreaker(
-        aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds, estimatingStageIds),
+        aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds, estimatingStageIds, lostStageIds),
         filters.sortDir === "asc" ? "asc" : "desc"
       );
     case "stage_entered_at":
@@ -896,13 +910,13 @@ function buildDealListColumnOrder(
   }
 }
 
-function buildPipelineStageCardsOrder(valueSource: PipelineValueSource) {
+function buildPipelineStageCardsOrder(effectiveValueSql: ReturnType<typeof dealPipelineValueSql>) {
   // Two-tier order: active, non-zero cards on top; on-hold / $0 cards sink to the
   // bottom of the column. This is sort-only — every card still loads (the preview
-  // limit is the board's effective-all 1000), nothing is hidden. The value tier
-  // uses the SAME per-stage value source the column counts/sums, so the tier
-  // matches what the column displays.
-  const tier = aliasedActiveNonZeroDealSortTierSql("deals", dealPipelineValueSql(valueSource));
+  // limit is the board's effective-all 1000), nothing is hidden. The tier uses the
+  // SAME column EFFECTIVE value the header sums (terminal-aware, far-future-zeroed for
+  // open stages), so an auto-held $0 card sinks exactly as it shows $0.
+  const tier = aliasedActiveNonZeroDealSortTierSql("deals", effectiveValueSql);
   // Sort before preview limiting so each column shows the actual newest cards,
   // not an arbitrary subset from a tied timestamp group.
   return [asc(tier), desc(deals.createdAt), desc(deals.id)] as const;
@@ -922,9 +936,14 @@ function buildStagePageOrder(sort: StagePageSort | undefined, stage: PipelineSta
     case "name_asc":
       return sql`d.name asc, d.id asc`;
     case "value_desc":
-      return LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
-        ? sql`${workspaceEffectiveDealValueSql(stage)} desc, d.id desc`
-        : sql`${aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)))} desc, d.id desc`;
+      // OPEN/estimating + LOST stages sort by the EFFECTIVE value (the same expression the header total + row
+      // display use), so an auto-held far-out deal with a large raw bid sinks instead of sorting ahead of real
+      // positive-value deals, and a BB-mirrored terminal row keeps its realized value (Codex P2). WON stages
+      // keep the raw awarded-first sort (on-hold Won rows are already excluded from the Won page, and Won
+      // value is never far-out-zeroed, so raw == effective there).
+      return WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+        ? sql`${aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)))} desc, d.id desc`
+        : sql`${workspaceEffectiveDealValueSql(stage)} desc, d.id desc`;
     case "newest":
     default:
       return sql`d.created_at desc, d.id desc`;
@@ -1072,6 +1091,17 @@ async function listDealStages() {
     .orderBy(asc(pipelineStageConfig.displayOrder));
 }
 
+// Won ∪ lost stage ids — the "realized/preserved" terminal set the effective-on-hold predicate
+// (buildDealOnHoldCondition / aliasedEffectiveOnHoldConditionSql) exempts from the far-out auto-park leg: a
+// terminal deal is held ONLY by its stored on_hold flag, never by a stale forecast date (mirrors the value
+// helpers + the TS isDealEffectivelyOnHold twin). Resolved from the stage config so the on_hold scope
+// filter classifies rows without a pipeline_stage_config join at the count/list query.
+async function resolveTerminalStageIds(): Promise<string[]> {
+  const stages = await listDealStages();
+  const terminalSlugs = TERMINAL_STAGE_SLUGS as readonly string[];
+  return stages.filter((stage) => terminalSlugs.includes(stage.slug)).map((stage) => stage.id);
+}
+
 const sqlList = (values: readonly string[]) => sql.join(values.map((value) => sql`${value}`), sql`, `);
 
 function workspaceWonWindowDateSql() {
@@ -1206,6 +1236,13 @@ function aliasedPipelineValueSql(alias: string, valueSource: PipelineValueSource
     : aliasedDealBestEstimateSql(alias);
 }
 
+function isTerminalValueStage(valueSource: PipelineValueSource, stage: Pick<PipelineStageRow, "slug">) {
+  return (
+    valueSource === "won" ||
+    LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
+  );
+}
+
 function addEstimateSentDateConditions(
   conditions: any[],
   input: { estimateSentFrom?: string; estimateSentTo?: string }
@@ -1261,9 +1298,20 @@ function addWorkspaceEstimateSentDateConditions(
 }
 
 function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
-  const rawValue = aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)));
-
-  return sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`;
+  const valueSource = pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily));
+  const rawValue = aliasedPipelineValueSql("d", valueSource);
+  // Mirror the kanban column total (getDealsForPipeline): a TERMINAL (won/lost) stage keeps its realized/
+  // preserved value, zeroed on stored on_hold ONLY; an OPEN/estimating stage ALSO zeros a far-out (90+ day)
+  // close target so the stage-page header total matches the $0 the DealsListSection cards show for those
+  // auto-held open deals.
+  const isTerminalStage = isTerminalValueStage(valueSource, stage);
+  if (isTerminalStage) {
+    return sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`;
+  }
+  // OPEN/estimating stage page: zero a far-out (90+ day) auto-held deal — BUT preserve a Bid Board-owned deal
+  // whose bid_board_stage_slug is already won/lost (CRM stage still open here), matching the client + value
+  // filter, so the header total never drops below the visible row values (Codex P2).
+  return aliasedTerminalAwareEffectiveDealValueSql("d", rawValue, aliasedBidBoardTerminalSql("d"));
 }
 
 function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealStagePageInput) {
@@ -1358,9 +1406,10 @@ async function buildDealWorkspaceScope(
         : sql`false`
     );
   } else if (input.scope === "on_hold") {
-    // On Hold = effectively on hold (stored on_hold OR a close target more than 90 days out). Base columns, so no
-    // capability gate — push the shared predicate unconditionally, qualified to the stage query's "d" alias.
-    filters.push(buildDealOnHoldCondition("d"));
+    // On Hold = effectively on hold (stored on_hold OR, for an OPEN deal, a close target more than 90 days
+    // out). TERMINAL-aware: won/lost rows are realized/preserved (held only by the stored flag), so pass the
+    // terminal id set to exempt them. Base columns, so no capability gate.
+    filters.push(buildDealOnHoldCondition("d", await resolveTerminalStageIds()));
   } else if (input.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
     filters.push(teamRepIds.length > 0 ? sql`d.assigned_rep_id IN (${sqlList(teamRepIds)})` : sql`false`);
@@ -1390,6 +1439,9 @@ function mapDealStageWorkspaceRow(
     propertyState: row.property_state,
     updatedAt: row.updated_at,
     stageEnteredAt: row.stage_entered_at,
+    // Hydrate the close target so attachAtRiskResult marks a far-out (90+ day) row effectively on hold —
+    // matching the header/status logic and the $0 card value (Codex P2).
+    expectedCloseDate: row.expected_close_date,
     isBidBoardOwned: row.is_bid_board_owned,
     isChangeOrder: row.is_change_order,
     bidBoardStageSlug: row.bid_board_stage_slug,
@@ -1652,9 +1704,10 @@ export async function getDeals(
         : sql`false`
     );
   } else if (scope === "on_hold") {
-    // On Hold = effectively on hold (stored on_hold OR a close target more than 90 days out). Base columns, so no
-    // capability gate — push the shared predicate unconditionally.
-    conditions.push(buildDealOnHoldCondition("deals"));
+    // On Hold = effectively on hold (stored on_hold OR, for an OPEN deal, a close target more than 90 days
+    // out). TERMINAL-aware: won/lost rows are realized/preserved (held only by the stored flag), so pass the
+    // terminal id set to exempt them. Base columns, so no capability gate.
+    conditions.push(buildDealOnHoldCondition("deals", await resolveTerminalStageIds()));
   } else if (scope === "team") {
     const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
@@ -1685,19 +1738,20 @@ export async function getDeals(
   let wonStageIds: string[] = [];
   let lostStageIds: string[] = [];
   let estimatingStageIds: string[] = [];
-  // Resolve Won/Lost/estimating stage-id sets once when any stage-classified dimension is in
-  // play: the outcome-aware date window (Won+Lost), and the stage-aware value filter/sort/total
-  // (Won → awarded-first; estimating → awarded>dd>bid). Done here so those predicates classify
-  // rows without a pipeline_stage_config join (the count queries below select from `deals` alone).
+  // Resolve Won/Lost/estimating stage-id sets once when any stage-classified dimension is in play: the
+  // outcome-aware date window, the stage-aware value filter/sort/total, and the EFFECTIVE-hold + terminal-aware
+  // status filter (which needs the won ∪ lost ids to exempt realized rows from the far-out auto-park leg).
+  // Done here so those predicates classify rows without a pipeline_stage_config join (the count queries
+  // select from `deals` alone). The always-running SORT TIER instead reads the JOINED stage slug (it can't
+  // pay a stage-id round-trip on every plain list), so it does NOT force resolution here.
   const valueFilterRequested = Number.isFinite(filters.valueMin) || Number.isFinite(filters.valueMax);
   const needsStageClassification =
     Boolean(filters.dateFrom || filters.dateTo) ||
     valueFilterRequested ||
     filters.sortBy === "awarded_amount" ||
     filters.sortBy === "display_date" ||
-    // The running-total SUM (#4) uses the stage-aware value expression. Post-2026-06-18 open and Won
-    // resolve through the same awarded-first chain (the stage_id CASE branches are identical), but the
-    // Won set is still resolved here so the SUM expression stays byte-identical to the list's display value.
+    filters.status === "active" ||
+    filters.status === "on_hold" ||
     Boolean(filters.includeValueTotal);
   if (needsStageClassification) {
     const stages = await listDealStages();
@@ -1803,7 +1857,7 @@ export async function getDeals(
   const valueTotalResult = filters.includeValueTotal
     ? await tenantDb
         .select({
-          total: sql<number>`coalesce(sum(${aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds, estimatingStageIds)}), 0)`,
+          total: sql<number>`coalesce(sum(${aliasedStageAwareEffectiveDealValueSql("deals", wonStageIds, estimatingStageIds, lostStageIds)}), 0)`,
         })
         .from(deals)
         .where(where)
@@ -2879,10 +2933,11 @@ export async function getDealsForPipeline(
         : sql`false`
     );
   } else if (filters?.scope === "on_hold") {
-    // On Hold = effectively on hold (stored on_hold OR a close target more than 90 days out). Base columns, so no
-    // capability gate. Like Watched/Mine, do NOT set assignedRepFilterHandled so a per-stage assignedRep
-    // narrowing still applies.
-    commonConditions.push(buildDealOnHoldCondition("deals"));
+    // On Hold = effectively on hold (stored on_hold OR, for an OPEN deal, a close target more than 90 days
+    // out). TERMINAL-aware: won/lost rows are realized/preserved (held only by the stored flag), so exempt
+    // them via the already-resolved won ∪ lost id sets. Base columns, so no capability gate. Like
+    // Watched/Mine, do NOT set assignedRepFilterHandled so a per-stage assignedRep narrowing still applies.
+    commonConditions.push(buildDealOnHoldCondition("deals", [...wonStageIds, ...lostStageIds]));
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     if (filters?.assignedRepId) {
@@ -3016,11 +3071,20 @@ export async function getDealsForPipeline(
     const where = and(...stageConditions, ...commonConditions);
     const countedDealFilter = aliasedActiveDealCountFilterSql("deals");
     const valueSource = pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily));
+    // Sum the EFFECTIVE value so a far-out OPEN deal contributes $0 to the column total just as it shows
+    // $0 on its card — keeping the column header total reconciled with the sum of the cards. A TERMINAL
+    // column (won OR lost) is exempt from the far-future auto-park (realized/preserved value, mirroring
+    // the TS card's terminal exemption); its raw value still has stored-on-hold excluded by the FILTER.
+    // Only OPEN / estimating columns carry the far-future leg.
+    const isTerminalColumn = isTerminalValueStage(valueSource, stage);
+    const columnEffectiveValue = isTerminalColumn
+      ? dealPipelineValueSql(valueSource)
+      : aliasedEffectiveDealValueSql("deals", dealPipelineValueSql(valueSource));
     const summaryRows = await tenantDb
       .select({
         totalCount: sql<number>`count(*)`,
         activeCount: sql<number>`count(*) filter (where ${countedDealFilter})`,
-        totalValue: sql<number>`COALESCE(SUM(${dealPipelineValueSql(valueSource)}) FILTER (WHERE ${countedDealFilter}), 0)`,
+        totalValue: sql<number>`COALESCE(SUM(${columnEffectiveValue}) FILTER (WHERE ${countedDealFilter}), 0)`,
       })
       .from(deals)
       .where(where);
@@ -3035,7 +3099,7 @@ export async function getDealsForPipeline(
       .leftJoin(companies, eq(companies.id, deals.companyId))
       .leftJoin(users, eq(users.id, deals.assignedRepId))
       .where(where)
-      .orderBy(...buildPipelineStageCardsOrder(valueSource))
+      .orderBy(...buildPipelineStageCardsOrder(columnEffectiveValue))
       .limit(pipelineCardsPerStageLimit);
     dealsByStage.set(stage.id, stageDeals);
 
@@ -3087,6 +3151,12 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   const isWonTerminalStage = WON_TERMINAL_STAGE_SLUGS.includes(
     stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]
   );
+  const isLostTerminalStage = LOST_TERMINAL_STAGE_SLUGS.includes(
+    stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number]
+  );
+  // A terminal (won/lost) stage page holds realized/preserved deals: zeroed/held on the stored on_hold flag
+  // only, never auto-parked by a far-out forecast date (mirrors the value helpers + the TS twin).
+  const isTerminalStagePage = isWonTerminalStage || isLostTerminalStage;
   // 'estimating' stage drill: the value filter below must use the estimating chain (awarded>dd>bid) so it
   // reconciles with the stage total/sort (which already route through pipelineValueSourceForStageSlug).
   const isEstimatingStage = isGenuineEstimatingDealStageSlug(
@@ -3145,11 +3215,17 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     conditions.push(sql`d.workflow_route = ${input.workflowRoute}`);
   }
   // Status (lifecycle) — mirror buildStatusPredicate so the summary narrows the SAME way the list does
-  // (is_active + on_hold are orthogonal; on_hold is a subset of active). GREEN #616 follow-up.
+  // (is_active + on_hold are orthogonal; on_hold is a subset of active). GREEN #616 follow-up. EFFECTIVE-hold
+  // aware (Codex P2): an OPEN stage page treats a far-out auto-held deal as On-Hold (matching its $0/badge);
+  // a TERMINAL (won/lost) stage page is realized/preserved, so it keys on the stored flag ONLY (every row
+  // here is this one stage, so terminal-ness is uniform — no per-row stage_id guard needed).
+  const stageEffectiveHoldSql = isTerminalStagePage
+    ? sql`coalesce(d.on_hold, false) = true`
+    : aliasedEffectiveOnHoldConditionSql("d", []);
   if (input.status === "active") {
-    conditions.push(sql`d.is_active = true and coalesce(d.on_hold, false) = false`);
+    conditions.push(sql`d.is_active = true and not (${stageEffectiveHoldSql})`);
   } else if (input.status === "on_hold") {
-    conditions.push(sql`d.is_active = true and coalesce(d.on_hold, false) = true`);
+    conditions.push(sql`d.is_active = true and (${stageEffectiveHoldSql})`);
   } else if (input.status === "inactive") {
     conditions.push(sql`d.is_active = false`);
   } else if (input.status && input.status !== "any") {
@@ -3171,7 +3247,8 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     const valueExpr = aliasedStageAwareEffectiveDealValueSql(
       "d",
       isWonTerminalStage ? stageIds : [],
-      isEstimatingStage ? stageIds : []
+      isEstimatingStage ? stageIds : [],
+      isLostTerminalStage ? stageIds : []
     );
     if (input.valueMin !== undefined && input.valueMax !== undefined) {
       conditions.push(sql`${valueExpr} between ${input.valueMin} and ${input.valueMax}`);
@@ -3252,6 +3329,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.property_state,
       d.updated_at,
       d.stage_entered_at,
+      d.expected_close_date,
       d.is_bid_board_owned,
       d.is_change_order,
       d.bid_board_stage_slug,

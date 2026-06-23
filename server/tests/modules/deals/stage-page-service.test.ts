@@ -1037,9 +1037,10 @@ describe("listDealStagePage", () => {
 
     // No status = the active-only default still applies on a non-terminal stage (unchanged).
     const noneSql = await runEstimatingStage({});
-    expect(noneSql).toContain("d.is_active = true");
-    expect(noneSql).not.toContain("d.is_active = false");
-    expect(noneSql).not.toContain("coalesce(d.on_hold, false) = true");
+    const noneWhere = fromDealsWhereSql(noneSql);
+    expect(noneWhere).toContain("d.is_active = true");
+    expect(noneWhere).not.toContain("d.is_active = false");
+    expect(noneWhere).not.toContain("coalesce(d.on_hold, false) = true");
     // The avg-visible-age aggregate stays over the visible (on_hold-only) rows — NOT is_active-gated — so a
     // terminal/inactive page (rows visible but is_active=false) still yields an average, not null (Codex r2).
     expect(noneSql).toContain("avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false)");

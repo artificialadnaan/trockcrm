@@ -1,6 +1,6 @@
 import type { UserRole } from "./enums.js";
 import { getEffectiveStageAgeSeconds } from "./deal-hold.js";
-import { isAtRiskSuppressedByCloseTarget } from "./deal-hold-risk.js";
+import { isAtRiskSuppressedByCloseTarget, isDealEffectivelyOnHold } from "./deal-hold-risk.js";
 import {
   getSlaAudienceForRole,
   getSlaPolicyForRole,
@@ -55,6 +55,12 @@ export interface AtRiskDealInput {
   onHoldAccumulatedSecondsAtStageEntry?: number | null;
   /** The deal's close target (= expected_close_date); drives close-target suppression / auto-on-hold. */
   expectedCloseDate?: string | Date | null;
+  /**
+   * Whether a today-or-future close target inside the auto-hold window should suppress risk.
+   * Defaults to true for deal-detail style SLA messaging. Callers that only want the 90+ day
+   * effective-hold exclusion should pass false while still forwarding expectedCloseDate.
+   */
+  applyCloseTargetSuppression?: boolean;
 }
 
 /**
@@ -260,17 +266,30 @@ export function getDealAtRiskResult(
   viewerRole: UserRole | null | undefined,
   now: Date
 ): AtRiskResult {
+  const canonicalStageSlug = resolveCanonicalDealStageSlug(deal.stageSlug, deal.workflowRoute);
+  const isTerminalStage =
+    canonicalStageSlug != null && isTerminalCanonicalDealStage(canonicalStageSlug);
+  const effectiveOnHold = isDealEffectivelyOnHold({
+    onHold: deal.onHold,
+    expectedCloseDate: deal.expectedCloseDate,
+    now,
+    isTerminal: isTerminalStage,
+  });
+  const applyCloseTargetSuppression = deal.applyCloseTargetSuppression ?? true;
+
   return getAtRiskResult({
     stageSlug: deal.stageSlug,
     workflowRoute: deal.workflowRoute,
     viewerRole,
     effectiveStageAgeSeconds: getEffectiveStageAgeSeconds(deal, now),
-    // On-hold stays the explicit stored deals.on_hold toggle. A today-or-future close target instead
-    // suppresses the stage-age at-risk nag until it passes. ONE rule, shared across surfaces.
-    onHold: deal.onHold,
-    closeTargetSuppressesRisk: isAtRiskSuppressedByCloseTarget({
-      expectedCloseDate: deal.expectedCloseDate,
-      now,
-    }),
+    // Stored hold and 90+ day close targets both clear risk as "on_hold"; shorter pending
+    // close-target SLA pauses stay opt-in by caller.
+    onHold: effectiveOnHold,
+    closeTargetSuppressesRisk:
+      applyCloseTargetSuppression &&
+      isAtRiskSuppressedByCloseTarget({
+        expectedCloseDate: deal.expectedCloseDate,
+        now,
+      }),
   });
 }

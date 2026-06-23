@@ -54,7 +54,12 @@ beforeAll(async () => {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), company_id uuid, property_id uuid, source_lead_id uuid,
       forecast_revenue numeric(14,2), awarded_amount numeric(14,2), bid_board_total_sales numeric(14,2),
       bid_estimate numeric(14,2), dd_estimate numeric(14,2),
-      on_hold boolean NOT NULL DEFAULT false, last_activity_at timestamptz, is_active boolean NOT NULL DEFAULT true
+      stage_id uuid, bid_board_stage_slug text,
+      on_hold boolean NOT NULL DEFAULT false, expected_close_date date, last_activity_at timestamptz, is_active boolean NOT NULL DEFAULT true
+    );
+    CREATE TABLE ${T}.pipeline_stage_config (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      slug text NOT NULL
     );
     CREATE TABLE ${T}.leads (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), property_id uuid,

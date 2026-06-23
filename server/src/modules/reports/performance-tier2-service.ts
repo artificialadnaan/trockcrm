@@ -6,6 +6,7 @@ import { buildOfficeMatcher } from "./office-filter.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveLostDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedForecastFirstDealValueSql,
   aliasedWonHsClosedWonDateSql,
@@ -282,6 +283,7 @@ interface AtRiskDealCandidateRow extends AtRiskDealRow {
   workflow_route: WorkflowRoute | null;
   stage_entered_at: string | Date | null;
   bid_board_stage_entered_at: string | Date | null;
+  expected_close_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -389,6 +391,8 @@ function buildDirectorScorecardAtRiskRows(
           stageSlug: row.stage_slug,
           workflowRoute: row.workflow_route ?? "normal",
           stageEnteredAt: row.bid_board_stage_entered_at ?? row.stage_entered_at,
+          expectedCloseDate: row.expected_close_date,
+          applyCloseTargetSuppression: false,
           onHold: row.on_hold,
           onHoldStartedAt: row.on_hold_started_at,
           onHoldAccumulatedSeconds:
@@ -583,6 +587,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           d.workflow_route,
           d.stage_entered_at,
           d.bid_board_stage_entered_at,
+          d.expected_close_date,
           d.on_hold,
           d.on_hold_started_at,
           d.on_hold_accumulated_seconds,
@@ -1070,9 +1075,11 @@ function buildDirectorEvidenceQuery(
       const select = reportEvidenceRowSelectSql(aliasedEffectiveWonDealValueSql("d"), sql`d.won_closed_date`);
       return sql`${select} WHERE ${closedScope} AND ${wonDate} AND psc.slug IN (${sqlStringList([...WON_STAGE_SLUGS])})${repScope}${order}`;
     }
-    // lost cohort date mirrors buildWonDateSql's non-WON window basis (canonical lost_at first).
+    // lost cohort date mirrors buildWonDateSql's non-WON window basis (canonical lost_at first). Lost is a
+    // realized terminal cohort, so it must use the LOST realized-safe value (stored-on_hold only) — never the
+    // open far-out helper, which would auto-park a far-out lost deal to $0 (Codex P2).
     const lostCohortDate = sql`COALESCE(d.lost_at, d.contract_signed_at, (d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at)`;
-    const select = reportEvidenceRowSelectSql(openValue, lostCohortDate);
+    const select = reportEvidenceRowSelectSql(aliasedEffectiveLostDealValueSql("d"), lostCohortDate);
     return sql`${select} WHERE ${closedScope} AND ${wonDate} AND psc.slug IN (${sqlStringList([...LOST_STAGE_SLUGS])})${repScope}${order}`;
   }
 

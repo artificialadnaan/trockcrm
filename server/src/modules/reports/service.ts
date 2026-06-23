@@ -23,9 +23,13 @@ import { db } from "../../db.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   aliasedActiveDealCountFilterSql,
+  aliasedDealBestEstimateSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveLostDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedReportableDealFilterSql,
+  aliasedTerminalAwareEffectiveDealValueSql,
+  aliasedTerminalDealBySlugSql,
   aliasedWonHsClosedWonDateSql,
   reportableDealFilterSql,
 } from "../shared/deal-value-sql.js";
@@ -160,6 +164,7 @@ type StaleDealCandidateRow = {
   rep_name?: string | null;
   stage_slug: string | null;
   stage_entered_at: string | Date | null;
+  expected_close_date?: string | Date | null;
   workflow_route: string | null;
   on_hold?: boolean | null;
   on_hold_started_at?: string | Date | null;
@@ -178,6 +183,8 @@ function getDealStaleAtRisk(row: StaleDealCandidateRow, now: Date) {
       stageSlug: row.stage_slug,
       workflowRoute: normalizeWorkflowRoute(row.workflow_route),
       stageEnteredAt: row.stage_entered_at,
+      expectedCloseDate: row.expected_close_date ?? null,
+      applyCloseTargetSuppression: false,
       onHold: row.on_hold,
       onHoldStartedAt: row.on_hold_started_at,
       onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
@@ -971,6 +978,7 @@ export async function getStaleDeals(
       u.display_name AS rep_name,
       COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
       COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+      d.expected_close_date,
       d.on_hold,
       d.on_hold_started_at,
       d.on_hold_accumulated_seconds,
@@ -1025,7 +1033,7 @@ export async function getLostDealsByReason(
       COALESCE(ldr.label, 'Unknown') AS reason_label,
       COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS count,
       COALESCE(SUM(
-        ${aliasedEffectiveDealValueSql("d")}
+        ${aliasedEffectiveLostDealValueSql("d")}
       ), 0)::numeric AS total_value
     FROM deals d
     LEFT JOIN lost_deal_reasons ldr ON ldr.id = d.lost_reason_id
@@ -1740,6 +1748,7 @@ export async function getRegionalOwnershipOverview(
         d.assigned_rep_id,
         COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+        d.expected_close_date,
         d.workflow_route,
         d.on_hold,
         d.on_hold_started_at,
@@ -2291,7 +2300,7 @@ export async function getUnifiedWorkflowOverview(
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS service_deal_count,
         COALESCE(SUM(
-          ${aliasedEffectiveDealValueSql("d")}
+          ${aliasedTerminalAwareEffectiveDealValueSql("d", aliasedDealBestEstimateSql("d"), aliasedTerminalDealBySlugSql("d", "psc.slug"))}
         ), 0)::numeric AS total_value
       FROM deals d
       LEFT JOIN companies c ON c.id = d.company_id
@@ -2363,6 +2372,7 @@ export async function getUnifiedWorkflowOverview(
         d.workflow_route,
         u.display_name AS rep_name,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+        d.expected_close_date,
         d.on_hold,
         d.on_hold_started_at,
         d.on_hold_accumulated_seconds,
@@ -2389,6 +2399,7 @@ export async function getUnifiedWorkflowOverview(
         d.workflow_route,
         COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+        d.expected_close_date,
         d.on_hold,
         d.on_hold_started_at,
         d.on_hold_accumulated_seconds,
@@ -2453,7 +2464,7 @@ export async function getUnifiedWorkflowOverview(
         d.bid_board_stage_status AS mirrored_stage_status,
         d.workflow_route,
         COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
-        COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}), 0)::numeric AS total_value
+        COALESCE(SUM(${aliasedTerminalAwareEffectiveDealValueSql("d", aliasedDealBestEstimateSql("d"), aliasedTerminalDealBySlugSql("d", "psc.slug"))}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       LEFT JOIN pipeline_stage_config mirror_psc

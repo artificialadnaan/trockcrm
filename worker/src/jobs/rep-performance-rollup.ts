@@ -1,4 +1,5 @@
 import {
+  closeTargetFarOutSqlPredicate,
   getDealAtRiskResult,
   isReportableDeal,
   reportableDealSqlPredicate,
@@ -29,6 +30,17 @@ const lostStageSqlList = LOST_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join("
 const terminalStageSqlList = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]
   .map((slug) => `'${slug}'`)
   .join(", ");
+// A Bid Board-owned deal can be terminal in bid_board_stage_slug while its CRM stage_id still joins to a
+// non-terminal stage — its realized value is preserved, never auto-parked (mirrors the server exemption).
+const bidBoardTerminalSql = `COALESCE(d.bid_board_stage_slug, '') IN (${terminalStageSqlList})`;
+// CURRENT-period pipeline_value: zero a far-out (90+ day) auto-held OPEN deal to $0 (deals-list parity),
+// EXCEPT a Bid Board-mirrored terminal deal. on_hold is already excluded via REPORTABLE_DEAL_SQL, so only the
+// far-out leg is added (Codex P2). closed_value/awardedFirst stays raw — it sums realized won deals.
+const effectiveCurrentDealValueSql = `CASE WHEN NOT (${bidBoardTerminalSql}) AND (${closeTargetFarOutSqlPredicate("d")}) THEN 0 ELSE ${currentDealValueSql} END`;
+// HISTORICAL snapshots (last_month/quarter/year) reflect what was open AS OF that period, so they must NOT
+// re-zero by today's 90-day horizon (a deal won early with a stale far-future target, or the window moving
+// past 90 days, would otherwise mutate a closed historical period). $1 is the period_kind bind (Codex P2).
+const periodAwarePipelineValueSql = `CASE WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN ${currentDealValueSql} ELSE ${effectiveCurrentDealValueSql} END`;
 
 const PERIOD_KINDS = [
   "mtd",
@@ -53,6 +65,7 @@ interface RepAtRiskInputRow {
   stage_slug: string | null;
   workflow_route: string | null;
   stage_entered_at: string | Date | null;
+  expected_close_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -141,6 +154,11 @@ export function computeRepAtRiskCountsFromRows(
         stageSlug: row.stage_slug,
         workflowRoute: normalizeWorkflowRoute(row.workflow_route),
         stageEnteredAt: row.stage_entered_at,
+        // Match the app's aggregate at-risk (applyCloseTargetSuppression:false): exclude the 90+ day
+        // auto-held case only, not a near close target, so the rep rollup mirrors the deals list/dashboard
+        // (Codex P2).
+        expectedCloseDate: row.expected_close_date,
+        applyCloseTargetSuppression: false,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
         onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
@@ -177,6 +195,7 @@ async function getRepAtRiskCountsForPeriod(
          d.stage_entered_at,
          latest_current_stage_entered_at.entered_at
        ) AS stage_entered_at,
+       d.expected_close_date,
        d.on_hold,
        d.on_hold_started_at,
        d.on_hold_accumulated_seconds,
@@ -253,7 +272,7 @@ async function refreshOfficePeriod(
               ELSE d.is_active = true AND NOT psc.is_terminal AND ${REPORTABLE_DEAL_SQL}
             END
          )::int AS deals_count,
-         COALESCE(SUM(${currentDealValueSql})
+         COALESCE(SUM(${periodAwarePipelineValueSql})
            FILTER (
              WHERE CASE
                -- Historical pipeline_value follows the same deterministic

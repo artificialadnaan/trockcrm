@@ -1,5 +1,5 @@
 import { eq, and, ilike, asc, desc, count, inArray, sql, getTableColumns, type SQL } from "drizzle-orm";
-import { companies, contacts, deals, properties, users } from "@trock-crm/shared/schema";
+import { companies, contacts, deals, pipelineStageConfig, properties, users } from "@trock-crm/shared/schema";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildCompanySearchCondition } from "../search/unified-search.js";
@@ -7,7 +7,8 @@ import { normalizeDirectoryName } from "../../services/directoryDedup.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateWithForecastSql,
-  aliasedEffectiveDealValueSql,
+  aliasedTerminalAwareEffectiveDealValueSql,
+  aliasedTerminalDealBySlugSql,
 } from "../shared/deal-value-sql.js";
 
 type TenantDb = NodePgDatabase<any>;
@@ -42,8 +43,16 @@ async function uniqueSlug(tenantDb: TenantDb, base: string, excludeId?: string):
  * and references the un-aliased `deals` relation that is in scope at every call site (the correlated
  * subquery's FROM and the GROUP BY company_id derived table both expose it as `deals`).
  */
+// Company Pipeline$ — TERMINAL-aware/effective (Codex P2): a realized won/lost deal keeps its value
+// (stored-on_hold only) while an OPEN deal auto-parks a far-out (90+ day) close target, so the company card,
+// the folded list column, and the company-detail stat all read the same $ the deals list shows. Requires a
+// joined pipeline_stage_config (every using query JOINs it as `pipeline_stage_config`).
 function companyPipelineSumSql(): SQL {
-  return sql`SUM(CASE WHEN COALESCE(deals.on_hold, false) THEN 0 ELSE ${aliasedDealBestEstimateWithForecastSql("deals")} END)`;
+  return sql`SUM(${aliasedTerminalAwareEffectiveDealValueSql(
+    "deals",
+    aliasedDealBestEstimateWithForecastSql("deals"),
+    aliasedTerminalDealBySlugSql("deals", "pipeline_stage_config.slug")
+  )})`;
 }
 
 /**
@@ -101,6 +110,7 @@ export async function listCompanies(
   const companyPipelineSql = sql<string>`(
     SELECT COALESCE(${companyPipelineSumSql()}, 0)
       FROM deals
+      LEFT JOIN pipeline_stage_config ON pipeline_stage_config.id = deals.stage_id
      WHERE deals.company_id = ${companies.id}
        AND deals.is_active = true
   )`;
@@ -167,6 +177,8 @@ export async function listCompanies(
       pipeline: sql<string>`COALESCE(${companyPipelineSumSql()}, 0)::text`.as("pipeline"),
     })
     .from(deals)
+    // 1:1 stage join so companyPipelineSumSql can classify terminal rows (won't fan the COUNT aggregates).
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
     .where(eq(deals.isActive, true))
     .groupBy(deals.companyId)
     .as("d");
@@ -494,9 +506,14 @@ export async function getCompanyStats(tenantDb: TenantDb, companyId: string) {
     WHERE company_id = ${companyId}
       AND is_active = true
   `);
+  // TERMINAL-aware (Codex P2): a company's active deals are a MIXED set (open + realized won/lost), so the
+  // value must preserve terminal rows (zeroed on stored on_hold only) while still auto-parking far-out OPEN
+  // deals. Join the stage config for the CRM-stage terminal signal and OR in the Bid Board mirror, matching
+  // the client/value-helper terminal exemption.
   const pipelineValue = await tenantDb.execute(sql`
-    SELECT COALESCE(SUM(${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))}), 0)::text AS pipeline_value
+    SELECT COALESCE(SUM(${aliasedTerminalAwareEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"), aliasedTerminalDealBySlugSql("d", "psc.slug"))}), 0)::text AS pipeline_value
     FROM deals d
+    LEFT JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE d.company_id = ${companyId}
       AND d.is_active = true
   `);

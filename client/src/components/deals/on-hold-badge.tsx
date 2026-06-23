@@ -4,8 +4,10 @@ import { cn } from "@/lib/utils";
 
 interface OnHoldBadgeProps {
   /**
-   * Genuine on-hold state for the deal (the stored `deals.on_hold` toggle, surfaced as `deal.onHold`).
-   * Optional/undefined-tolerant so card surfaces that don't carry the flag simply render nothing.
+   * Whether the deal reads as on hold. A dumb boolean: callers pass the EFFECTIVE held state — the stored
+   * `deals.on_hold` flag OR (for an OPEN deal) a far-out close target — via the shared, won-aware
+   * `isDealValueEffectivelyOnHold`, so the badge always agrees with the card's $0. Undefined-tolerant so
+   * surfaces that don't carry hold state render nothing.
    */
   onHold?: boolean | null;
   /** Compact form for dense surfaces (kanban cards): same visible label, a shorter tooltip. */
@@ -14,12 +16,13 @@ interface OnHoldBadgeProps {
 }
 
 /**
- * Marks a deal that is On Hold. On-hold deals are intentionally valued at $0 in pipeline/forecast
- * rollups, so this badge explains the otherwise-mysterious $0 wherever the deal surfaces as a card.
- * Mirrors `AtRiskBadge` / `ChangeOrderBadge` (outline Badge + the app's first-class status-flag
- * typography), in amber so it reads as a distinct "paused" state — not the red at-risk or teal
- * change-order flag. An on-hold deal never shows an At Risk badge (the shared at-risk engine clears
- * risk while a deal is held), so this badge takes that slot rather than competing with it.
+ * Marks a deal that is On Hold — the stored on_hold flag OR an OPEN deal effectively held by a far-out
+ * (90+ day) close target (the caller computes that via isDealValueEffectivelyOnHold). Held deals are
+ * intentionally valued at $0 in pipeline/forecast rollups, so this badge explains the otherwise-mysterious
+ * $0 wherever the deal surfaces as a card. Mirrors `AtRiskBadge` / `ChangeOrderBadge` (outline Badge + the
+ * app's first-class status-flag typography), in amber so it reads as a distinct "paused" state — not the
+ * red at-risk or teal change-order flag. A held deal never shows an At Risk badge (the shared at-risk
+ * engine clears/suppresses risk while a deal is held), so this badge takes that slot.
  */
 export function OnHoldBadge({ onHold, compact = false, className }: OnHoldBadgeProps) {
   if (onHold !== true) return null;

@@ -32,6 +32,77 @@ describe("deal hold helpers", () => {
     ).toBe(875000);
   });
 
+  // Effective-hold value-zeroing: a far-out close target (90+ CT-days) auto-parks the deal to $0 even
+  // without the stored on_hold flag — the value twin of effectiveOnHoldSqlPredicate. `now` fixed so the
+  // horizon is deterministic.
+  const FIXED_NOW = new Date("2026-06-01T12:00:00.000Z");
+
+  it("zeros effective value for a far-out close target (90+ days) with no stored hold flag", () => {
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2026-12-01", bidEstimate: "875000" },
+        FIXED_NOW
+      )
+    ).toBe(0);
+    expect(
+      getEffectiveAwardedDealValue(
+        { onHold: false, expectedCloseDate: "2026-12-01", awardedAmount: "925000" },
+        FIXED_NOW
+      )
+    ).toBe(0);
+  });
+
+  it("keeps full effective value for a near-term close target (inside the 90-day horizon)", () => {
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2026-06-15", bidEstimate: "875000" },
+        FIXED_NOW
+      )
+    ).toBe(875000);
+  });
+
+  it("never auto-parks a deal that has no close target (the far-out leg can't fire)", () => {
+    expect(getEffectiveDealValue({ onHold: false, bidEstimate: "875000" })).toBe(875000);
+  });
+
+  it("does NOT auto-park a WON deal with a far-out target (realized revenue stays whole — guards the P1)", () => {
+    // a deal won early can keep a stale far-future expected_close_date; its value must NOT be zeroed
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2099-12-31", stageSlug: "won", workflowRoute: "normal", awardedAmount: "925000" },
+        FIXED_NOW
+      )
+    ).toBe(925000);
+    // but an explicit stored hold on a won deal still zeros it
+    expect(
+      getEffectiveDealValue(
+        { onHold: true, expectedCloseDate: "2099-12-31", stageSlug: "won", workflowRoute: "normal", awardedAmount: "925000" },
+        FIXED_NOW
+      )
+    ).toBe(0);
+  });
+
+  it("does NOT auto-park a Bid Board-won deal (won via bidBoardStageSlug while CRM stage is still open)", () => {
+    // a mirrored deal can reach a won terminal alias in bidBoardStageSlug before its CRM stage advances;
+    // its realized value must NOT be zeroed off a stale forecast date (guards the bid-board won gap)
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2099-12-31", stageSlug: "opportunity", bidBoardStageSlug: "sent_to_production", workflowRoute: "normal", awardedAmount: "500000" },
+        FIXED_NOW
+      )
+    ).toBe(500000);
+  });
+
+  it("does NOT auto-park a LOST deal with a stale far-out target (preserved bid value for Loss Analysis)", () => {
+    // a lost deal is a historical bid; its preserved value must NOT be zeroed off a stale forecast date
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2099-12-31", stageSlug: "lost", workflowRoute: "normal", bidEstimate: "440000" },
+        FIXED_NOW
+      )
+    ).toBe(440000);
+  });
+
   it("prefers awarded amount over synced Bid Board/bid for generic deal value (unified awarded-first 2026-06-18)", () => {
     expect(
       getEffectiveDealValue({

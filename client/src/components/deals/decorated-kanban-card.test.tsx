@@ -315,4 +315,27 @@ describe("DecoratedKanbanCard", () => {
     expect(renderDeal(makeDeal())).not.toContain('data-on-hold="true"');
     expect(renderDeal(makeDeal({ onHold: false }))).not.toContain('data-on-hold="true"');
   });
+
+  it("flags an OPEN deal whose close target is far past the 90-day horizon (auto-park passthrough)", () => {
+    // the card computes the won-aware effective-hold and forwards it to the badge; a far-out OPEN deal
+    // is held even without the stored flag (2099 is unambiguously past the horizon and never ages out)
+    const html = renderDeal(makeDeal({ onHold: false, expectedCloseDate: "2099-12-31" }), "opportunity");
+    expect(html).toContain('data-on-hold="true"');
+    expect(html).toContain("On Hold");
+  });
+
+  it("does NOT flag a WON deal with a far-out close target (realized revenue is never auto-parked)", () => {
+    // a deal won early can keep a stale far-future forecast date; it must NOT read as held (guards the P1)
+    const html = renderDeal(makeDeal({ onHold: false, expectedCloseDate: "2099-12-31" }), "won");
+    expect(html).not.toContain('data-on-hold="true"');
+  });
+
+  it("lets the authoritative column slug override stale row stageSlug for effective hold", () => {
+    const html = renderDeal(
+      makeDeal({ stageSlug: "opportunity", onHold: false, expectedCloseDate: "2099-12-31" }),
+      "won"
+    );
+
+    expect(html).not.toContain('data-on-hold="true"');
+  });
 });
