@@ -30,6 +30,10 @@
  *   NOTIFY and pg_notify() are rejected before execution too: PostgreSQL
  *   read-only mode does NOT block notifications, and a worker consumes the
  *   crm_events channel, so they would be real production side effects.
+ *   For the same reason — read-only mode does not stop them — DO blocks
+ *   (opaque code body), LOCK statements (ACCESS EXCLUSIVE; can block production),
+ *   and COPY to a file / TO|FROM PROGRAM (server-side file/command I/O) are also
+ *   rejected before execution. Only COPY ... TO STDOUT (a client export) is allowed.
  *
  * EXAMPLE
  *   node scripts/run-sql.cjs "SELECT count(*) FROM office_dallas.deals;"
@@ -342,6 +346,52 @@ function assertNoSideEffectingStatements(sql) {
   }
 }
 
+// Reject statements that PostgreSQL's READ ONLY transaction mode does NOT prevent
+// but which still reach OUTSIDE the database's row data — server-side I/O, an
+// opaque code body, or production-blocking locks:
+//
+//   - DO ... : runs an anonymous PL/pgSQL block. Its dollar-quoted body is blanked
+//     by the literal scan (so a `PERFORM pg_notify(...)` inside it would slip past
+//     the NOTIFY guard above), and read-only mode does not block notifications
+//     raised from inside a function/block. A read-only ad-hoc runner has no reason
+//     to execute anonymous code, so the whole statement is rejected.
+//   - LOCK [TABLE] ... : defaults to ACCESS EXCLUSIVE and writes no rows, so the
+//     server allows it in a READ ONLY transaction — but it can block production
+//     reads/writes for the life of the (sleeping) transaction.
+//   - COPY ... TO '<file>' / TO|FROM PROGRAM ... : performs server-side file or
+//     command I/O (with a superuser / pg_*_server_files / pg_execute_server_program
+//     role) that read-only mode does not stop. Only COPY ... TO STDOUT — a pure
+//     result export streamed to the client — is permitted.
+//
+// The structural fix that retires every one of these string checks is a SELECT-only
+// database role (tracked separately).
+function assertNoServerSideEffectStatements(sql) {
+  const statements = sideEffectScanStatements(sql);
+  for (const statement of statements) {
+    if (/^do\b/.test(statement)) {
+      throw new Error(
+        'DO blocks are not allowed in read-only SQL: an anonymous code body is opaque to the safety scan and can raise notifications or other side effects that read-only mode does not block.',
+      );
+    }
+    if (/^lock\b/.test(statement)) {
+      throw new Error(
+        'LOCK statements are not allowed in read-only SQL: they take an ACCESS EXCLUSIVE lock by default and can block production traffic for the life of the transaction.',
+      );
+    }
+    if (/^copy\b/.test(statement)) {
+      // The COPY target path is a string literal (already blanked), so detect the
+      // SAFE shape positively: COPY ... TO STDOUT with no PROGRAM. Everything else
+      // (TO a file, TO/FROM PROGRAM, FROM STDIN) is server-side I/O or a write.
+      const isStdoutExport = /\bto\s+stdout\b/.test(statement) && !/\bprogram\b/.test(statement);
+      if (!isStdoutExport) {
+        throw new Error(
+          'COPY to a file or PROGRAM is not allowed in read-only SQL: it performs server-side file/command I/O that read-only mode does not prevent. Only COPY ... TO STDOUT is permitted.',
+        );
+      }
+    }
+  }
+}
+
 // BEGIN TRANSACTION READ ONLY is the structural read-only guarantee. The
 // sentinel SELECT is intentionally before user SQL: it freezes transaction
 // characteristics so PostgreSQL rejects SET TRANSACTION READ WRITE attempts.
@@ -354,6 +404,7 @@ async function runQuery(client, sql) {
     await client.query('SELECT 1');
     assertNoTransactionBoundaryStatements(sql);
     assertNoSideEffectingStatements(sql);
+    assertNoServerSideEffectStatements(sql);
     const result = await client.query(sql);
     await client.query('COMMIT');
     return result;

