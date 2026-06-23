@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { AppState } from "react-native";
 import { useFocusEffect } from "expo-router";
 import * as Location from "expo-location";
 
@@ -26,9 +27,14 @@ const MAX_LAST_KNOWN_AGE_MS = 5 * 60 * 1000;
  * permission is undetermined or denied, or there's no fix, this resolves to `coords: null` and the
  * projects screen simply hides the Nearby section. Never throws to the UI.
  *
- * It re-runs on `useFocusEffect` rather than once on mount because the tab shell keeps the Projects
- * screen mounted: if the user grants location later (e.g. during photo capture on another tab), focusing
- * back here re-checks the now-granted permission and Nearby appears — no remount/restart needed.
+ * It re-resolves rather than running once on mount because the tab shell keeps the Projects screen
+ * mounted, and permission can change AFTER the first check:
+ *   - via `useFocusEffect` — focusing back here (e.g. after granting location during photo capture on
+ *     another tab) re-checks the now-granted permission; and
+ *   - via an `AppState` "active" listener (registered only while focused) — covers granting location in
+ *     iOS Settings while the app is backgrounded and the Projects tab is already focused, where no focus
+ *     change fires on return.
+ * Either way Nearby appears with no remount/restart.
  *
  * A `getLastKnownPositionAsync` answer is used only when recent enough; otherwise a fresh
  * `getCurrentPositionAsync` is fetched so the "nearby" sort reflects where the user actually is.
@@ -39,7 +45,7 @@ export function useDeviceLocation(): DeviceLocation {
   useFocusEffect(
     useCallback(() => {
       let cancelled = false;
-      (async () => {
+      const resolve = async () => {
         try {
           // getForegroundPermissionsAsync() reports status WITHOUT prompting — we never proactively ask.
           const { status } = await Location.getForegroundPermissionsAsync();
@@ -60,9 +66,15 @@ export function useDeviceLocation(): DeviceLocation {
         } catch {
           if (!cancelled) setState({ coords: null, status: "denied" });
         }
-      })();
+      };
+
+      void resolve();
+      const sub = AppState.addEventListener("change", (next) => {
+        if (next === "active") void resolve();
+      });
       return () => {
         cancelled = true;
+        sub.remove();
       };
     }, []),
   );
