@@ -147,13 +147,15 @@ export function isDealValueEffectivelyOnHold(deal: DealValueLike, now: Date = ne
   const workflowRoute =
     deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
   // Terminal (won OR lost) deals are exempt from the far-future auto-park: won/lost value is realized or
-  // preserved, not a stale forecast to zero. Won-ness also honors the Bid Board mirror — a Bid Board-owned
-  // deal can reach a won terminal alias (e.g. sent_to_production) in bidBoardStageSlug while its CRM
-  // stageSlug is still open; both canonicalize to "won".
+  // preserved, not a stale forecast to zero. Terminal-ness honors the Bid Board mirror on BOTH outcomes —
+  // a Bid Board-owned deal can reach a won (sent_to_production) OR lost (closed_lost) terminal alias in
+  // bidBoardStageSlug while its CRM stageSlug is still open; both canonicalize to the terminal outcome.
+  const bidBoardStageSlug = deal.bidBoardStageSlug ?? null;
   const isTerminal =
     isGenuineWonDealStageSlug(stageSlug, workflowRoute) ||
-    isGenuineWonDealStageSlug(deal.bidBoardStageSlug ?? null, workflowRoute) ||
-    isGenuineLostDealStageSlug(stageSlug, workflowRoute);
+    isGenuineWonDealStageSlug(bidBoardStageSlug, workflowRoute) ||
+    isGenuineLostDealStageSlug(stageSlug, workflowRoute) ||
+    isGenuineLostDealStageSlug(bidBoardStageSlug, workflowRoute);
   return isDealEffectivelyOnHold({
     onHold: deal.onHold,
     expectedCloseDate: deal.expectedCloseDate,

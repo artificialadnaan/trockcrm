@@ -1262,9 +1262,18 @@ function addWorkspaceEstimateSentDateConditions(
 }
 
 function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
-  const rawValue = aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)));
-
-  return sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`;
+  const valueSource = pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily));
+  const rawValue = aliasedPipelineValueSql("d", valueSource);
+  // Mirror the kanban column total (getDealsForPipeline): a TERMINAL (won/lost) stage keeps its realized/
+  // preserved value, zeroed on stored on_hold ONLY; an OPEN/estimating stage ALSO zeros a far-out (90+ day)
+  // close target so the stage-page header total matches the $0 the DealsListSection cards show for those
+  // auto-held open deals.
+  const isTerminalStage =
+    valueSource === "won" ||
+    LOST_STAGE_SLUGS.includes(stage.slug as (typeof LOST_STAGE_SLUGS)[number]);
+  return isTerminalStage
+    ? sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`
+    : aliasedEffectiveDealValueSql("d", rawValue);
 }
 
 function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealStagePageInput) {
