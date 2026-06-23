@@ -85,3 +85,23 @@ export function useCaptureTargets(search: string) {
     enabled: !!user && search.trim().length > 0,
   });
 }
+
+export function useNearbyCaptureTargets(
+  coords: { latitude: number; longitude: number } | null,
+  enabled = true,
+  limit = 3,
+) {
+  const { fetcher, user } = useAuth();
+  const hasCoords = Number.isFinite(coords?.latitude) && Number.isFinite(coords?.longitude);
+  return useQuery({
+    queryKey: qk.nearbyTargets(user?.id ?? "anon", coords?.latitude ?? null, coords?.longitude ?? null, limit),
+    queryFn: () =>
+      api.getNearbyCaptureTargets(fetcher, {
+        latitude: coords!.latitude,
+        longitude: coords!.longitude,
+        limit,
+      }),
+    enabled: enabled && !!user && hasCoords,
+    staleTime: 60_000,
+  });
+}

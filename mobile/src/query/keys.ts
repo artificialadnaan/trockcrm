@@ -9,4 +9,6 @@ export const qk = {
   pending: (uid: string) => ["pending", uid] as const,
   projectTags: (uid: string, dealId: string, q: string) => ["projectTags", uid, dealId, q] as const,
   targets: (uid: string, search: string) => ["targets", uid, search] as const,
+  nearbyTargets: (uid: string, latitude: number | null, longitude: number | null, limit: number) =>
+    ["nearbyTargets", uid, latitude, longitude, limit] as const,
 };

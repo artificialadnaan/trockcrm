@@ -16,6 +16,7 @@ const {
   listFieldProjects,
   listFieldProjectPhotos,
   listStarredFieldProjects,
+  listNearbyFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
 } = await import("../../../src/modules/field/projects-service.js");
@@ -257,5 +258,46 @@ describe("field projects service", () => {
       { name: "Steeplechase", dealNumber: "HS-320839598785" },
       { name: "Steeplechase", dealNumber: "HS-324283495135" },
     ]);
+  });
+
+  it("lists nearby deal/project capture targets by device coordinates without surfacing opportunities", async () => {
+    const db = tenantDb([
+      [
+        {
+          id: "deal-1",
+          name: "121 Preston Oaks",
+          deal_number: "HS-320839598785",
+          project_number: "DFW-1-17426-aa",
+          stage_name: "Construction",
+          company_name: "Preston Oaks HOA",
+          last_updated_at: new Date("2026-06-20T12:00:00.000Z"),
+          distance_miles: "0.42",
+        },
+      ],
+    ]);
+
+    const result = await listNearbyFieldCaptureTargets(db, { userId: "field-1", userRole: "field_contractor" }, {
+      latitude: 32.911,
+      longitude: -96.775,
+      limit: 3,
+    });
+
+    expect(result).toEqual({
+      targets: [{
+        id: "deal-1",
+        type: "deal",
+        name: "121 Preston Oaks",
+        recordNumber: "DFW-1-17426-aa",
+        stageName: "Construction",
+        companyName: "Preston Oaks HOA",
+        lastUpdatedAt: new Date("2026-06-20T12:00:00.000Z"),
+        distanceMiles: 0.42,
+      }],
+    });
+    const sqlText = extractSqlText(db.execute.mock.calls[0][0]);
+    expect(sqlText).toContain("property_lat");
+    expect(sqlText).toContain("property_lng");
+    expect(sqlText).toContain("pipeline_disposition IS DISTINCT FROM 'opportunity'");
+    expect(sqlText).toContain("ORDER BY distance_miles ASC");
   });
 });

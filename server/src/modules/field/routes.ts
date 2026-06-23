@@ -31,6 +31,7 @@ import {
   FIELD_PROJECTS_MAX_FETCH,
   listFieldProjects,
   listFieldProjectPhotos,
+  listNearbyFieldCaptureTargets,
   listStarredFieldProjects,
   mergeFieldCaptureTargets,
   searchFieldCaptureTargets,
@@ -67,6 +68,17 @@ function parseOptionalPositiveInt(value: unknown): number | undefined {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
     throw new AppError(400, "limit must be a positive integer between 1 and 100");
+  }
+  return parsed;
+}
+
+function parseRequiredCoordinate(value: unknown, name: "lat" | "lng", min: number, max: number): number {
+  if (typeof value !== "string") {
+    throw new AppError(400, `Valid ${name} query parameter is required.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) {
+    throw new AppError(400, `Valid ${name} query parameter is required.`);
   }
   return parsed;
 }
@@ -608,6 +620,47 @@ fieldRoutes.get("/photo-targets/search", requireFieldContractor, async (req, res
       globalLimit,
     );
     res.json({ targets, degradedOffices: failures.map((failure) => failure.office.slug) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.get("/photo-targets/nearby", requireFieldContractor, async (req, res, next) => {
+  try {
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const latitude = parseRequiredCoordinate(req.query.lat, "lat", -90, 90);
+    const longitude = parseRequiredCoordinate(req.query.lng, "lng", -180, 180);
+    const limit = req.query.limit ? parseOptionalPositiveInt(req.query.limit) : 3;
+
+    if (!isFieldCrossOfficeWritesEnabled()) {
+      const office = await getFieldOfficeById(req.fieldUser!.tenantId);
+      const result = await runInOffice(office, (db) =>
+        listNearbyFieldCaptureTargets(db, access, { latitude, longitude, limit }),
+      );
+      res.json(result);
+      return;
+    }
+
+    const globalLimit = limit ?? 3;
+    const { results, failures } = assertFanOutNotFullyDegraded(
+      await fanOutActiveOffices((db) => listNearbyFieldCaptureTargets(db, access, {
+        latitude,
+        longitude,
+        limit: globalLimit,
+      })),
+    );
+    const targets = results.flatMap(({ office, value }) =>
+      value.targets.map((target) => ({ ...target, ...officeTag(office) })),
+    );
+    targets.sort((left, right) => {
+      const distanceDelta = left.distanceMiles - right.distanceMiles;
+      if (distanceDelta !== 0) return distanceDelta;
+      return left.id.localeCompare(right.id);
+    });
+    res.json({
+      targets: targets.slice(0, globalLimit),
+      degradedOffices: failures.map((failure) => failure.office.slug),
+    });
   } catch (err) {
     next(err);
   }
