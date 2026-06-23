@@ -1205,6 +1205,13 @@ function aliasedPipelineValueSql(alias: string, valueSource: PipelineValueSource
     : aliasedDealBestEstimateSql(alias);
 }
 
+function isTerminalValueStage(valueSource: PipelineValueSource, stage: Pick<PipelineStageRow, "slug">) {
+  return (
+    valueSource === "won" ||
+    LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
+  );
+}
+
 function addEstimateSentDateConditions(
   conditions: any[],
   input: { estimateSentFrom?: string; estimateSentTo?: string }
@@ -1266,9 +1273,7 @@ function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
   // preserved value, zeroed on stored on_hold ONLY; an OPEN/estimating stage ALSO zeros a far-out (90+ day)
   // close target so the stage-page header total matches the $0 the DealsListSection cards show for those
   // auto-held open deals.
-  const isTerminalStage =
-    valueSource === "won" ||
-    LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number]);
+  const isTerminalStage = isTerminalValueStage(valueSource, stage);
   return isTerminalStage
     ? sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`
     : aliasedEffectiveDealValueSql("d", rawValue);
@@ -3029,9 +3034,7 @@ export async function getDealsForPipeline(
     // column (won OR lost) is exempt from the far-future auto-park (realized/preserved value, mirroring
     // the TS card's terminal exemption); its raw value still has stored-on-hold excluded by the FILTER.
     // Only OPEN / estimating columns carry the far-future leg.
-    const isTerminalColumn =
-      valueSource === "won" ||
-      LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number]);
+    const isTerminalColumn = isTerminalValueStage(valueSource, stage);
     const columnEffectiveValue = isTerminalColumn
       ? dealPipelineValueSql(valueSource)
       : aliasedEffectiveDealValueSql("deals", dealPipelineValueSql(valueSource));
