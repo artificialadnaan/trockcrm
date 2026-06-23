@@ -13,6 +13,7 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import {
+  GestureHandlerRootView,
   PinchGestureHandler,
   State,
   type PinchGestureHandlerGestureEvent,
@@ -31,6 +32,7 @@ export type CapturedShot = { uri: string; width?: number; height?: number; exif?
 const MIN_ZOOM = 0;
 const MAX_ZOOM = 1;
 const ZOOM_STEP = 0.1;
+const ANDROID_FIRST_BUTTON_ZOOM = MAX_ZOOM;
 const PINCH_ZOOM_SENSITIVITY = 0.35;
 
 function clampZoom(value: number) {
@@ -39,6 +41,14 @@ function clampZoom(value: number) {
 
 function displayZoom(zoom: number) {
   return `${Math.round(zoom * 100)}%`;
+}
+
+function nextButtonZoom(current: number, delta: number) {
+  if (Platform.OS === "android" && current <= MIN_ZOOM && delta > 0) {
+    // Android Camera2 ignores small normalized zoom values on devices with low maxZoomRatio.
+    return ANDROID_FIRST_BUTTON_ZOOM;
+  }
+  return clampZoom(current + delta);
 }
 
 /**
@@ -85,7 +95,7 @@ export default function CameraCapture({
   const zoomText = displayZoom(zoom);
 
   function adjustZoom(delta: number) {
-    setZoom((current) => clampZoom(current + delta));
+    setZoom((current) => nextButtonZoom(current, delta));
   }
 
   function resetZoom() {
@@ -165,32 +175,33 @@ export default function CameraCapture({
 
   return (
     <Modal visible animationType="slide" presentationStyle="fullScreen" onRequestClose={handleRequestClose}>
-      {/* A Modal renders in its own native window outside the app's SafeAreaProvider,
-          so the overlay's SafeAreaView needs its own provider to resolve real insets —
-          otherwise the counter/Done land under the status bar / Dynamic Island. */}
-      <SafeAreaProvider>
-        {!permission ? (
-          <View style={styles.center}>
-            <ActivityIndicator color={theme.color.brandRed} />
-          </View>
-        ) : !permission.granted ? (
-          <SafeAreaView style={styles.permWrap}>
-            <Text style={styles.permTitle}>Camera access</Text>
-            <Text style={styles.permText}>T-Rock Cam needs the camera to capture jobsite photos.</Text>
-            <Button title="Grant camera access" onPress={() => void requestPermission()} />
-            <Button title="Close" variant="ghost" onPress={onClose} />
-          </SafeAreaView>
-        ) : (
-          <View style={styles.fill}>
-            <PinchGestureHandler onGestureEvent={handlePinchGesture} onHandlerStateChange={handlePinchStateChange}>
-              <View style={styles.fill}>
-                <CameraView
-                  ref={cameraRef}
-                  style={StyleSheet.absoluteFill}
-                  facing="back"
-                  zoom={zoom}
-                  onCameraReady={() => setReady(true)}
-                />
+      <GestureHandlerRootView style={styles.fill}>
+        {/* A Modal renders in its own native window outside the app's SafeAreaProvider,
+            so the overlay's SafeAreaView needs its own provider to resolve real insets —
+            otherwise the counter/Done land under the status bar / Dynamic Island. */}
+        <SafeAreaProvider>
+          {!permission ? (
+            <View style={styles.center}>
+              <ActivityIndicator color={theme.color.brandRed} />
+            </View>
+          ) : !permission.granted ? (
+            <SafeAreaView style={styles.permWrap}>
+              <Text style={styles.permTitle}>Camera access</Text>
+              <Text style={styles.permText}>T-Rock Cam needs the camera to capture jobsite photos.</Text>
+              <Button title="Grant camera access" onPress={() => void requestPermission()} />
+              <Button title="Close" variant="ghost" onPress={onClose} />
+            </SafeAreaView>
+          ) : (
+            <View style={styles.fill}>
+              <PinchGestureHandler onGestureEvent={handlePinchGesture} onHandlerStateChange={handlePinchStateChange}>
+                <View style={styles.fill}>
+                  <CameraView
+                    ref={cameraRef}
+                    style={StyleSheet.absoluteFill}
+                    facing="back"
+                    zoom={zoom}
+                    onCameraReady={() => setReady(true)}
+                  />
 
                 {/* Live capture controls — hidden while a shot is being annotated so the
                     shutter can't double-fire and "Done" can't skip the pending note. The
@@ -225,10 +236,16 @@ export default function CameraCapture({
                         </Pressable>
                         <Pressable
                           onPress={resetZoom}
+                          disabled={zoom <= MIN_ZOOM}
                           hitSlop={8}
                           accessibilityRole="button"
                           accessibilityLabel="Reset zoom"
-                          style={({ pressed }) => [styles.zoomValueButton, pressed && styles.zoomButtonPressed]}
+                          accessibilityState={{ disabled: zoom <= MIN_ZOOM }}
+                          style={({ pressed }) => [
+                            styles.zoomValueButton,
+                            zoom <= MIN_ZOOM && styles.zoomButtonDisabled,
+                            pressed && zoom > MIN_ZOOM && styles.zoomButtonPressed,
+                          ]}
                         >
                           <Text style={styles.zoomValue}>{zoomText}</Text>
                         </Pressable>
@@ -276,50 +293,51 @@ export default function CameraCapture({
                     </View>
                   </SafeAreaView>
                 ) : null}
-              </View>
-            </PinchGestureHandler>
+                </View>
+              </PinchGestureHandler>
 
-            {/* After-each-shot note editor — slides up over the live camera. Owns its
-                own keyboard handling (KeyboardAvoidingView) + bottom inset so it never
-                regresses the camera's controls underneath. */}
-            {pending ? (
-              <KeyboardAvoidingView
-                style={styles.annotateRoot}
-                behavior={Platform.OS === "ios" ? "padding" : undefined}
-              >
-                <View style={styles.scrim} pointerEvents="none" />
-                <SafeAreaView edges={["bottom"]} style={styles.annotateSheet}>
-                  <PhotoCaptionEditor
-                    uri={pending.uri}
-                    caption={draft}
-                    onChangeCaption={setDraft}
-                    onAppendCaption={(text) => setDraft((prev) => (prev ? `${prev} ${text}` : text))}
-                    voiceEnabled={voiceEnabled}
-                    onBusyChange={setVoiceBusy}
-                    label="Add a note for this photo"
-                    hint="Optional — dictate or type, then continue."
-                    footer={
-                      <View style={styles.annotateActions}>
-                        <Button title="Save & next" onPress={() => commit(draft)} disabled={voiceBusy} />
-                        <Button title="Skip" variant="ghost" onPress={() => commit("")} disabled={voiceBusy} />
-                        <Pressable
-                          onPress={discard}
-                          disabled={voiceBusy}
-                          hitSlop={8}
-                          accessibilityRole="button"
-                          accessibilityLabel="Discard this photo"
-                        >
-                          <Text style={[styles.discard, voiceBusy && styles.discardDisabled]}>Discard photo</Text>
-                        </Pressable>
-                      </View>
-                    }
-                  />
-                </SafeAreaView>
-              </KeyboardAvoidingView>
-            ) : null}
-          </View>
-        )}
-      </SafeAreaProvider>
+              {/* After-each-shot note editor — slides up over the live camera. Owns its
+                  own keyboard handling (KeyboardAvoidingView) + bottom inset so it never
+                  regresses the camera's controls underneath. */}
+              {pending ? (
+                <KeyboardAvoidingView
+                  style={styles.annotateRoot}
+                  behavior={Platform.OS === "ios" ? "padding" : undefined}
+                >
+                  <View style={styles.scrim} pointerEvents="none" />
+                  <SafeAreaView edges={["bottom"]} style={styles.annotateSheet}>
+                    <PhotoCaptionEditor
+                      uri={pending.uri}
+                      caption={draft}
+                      onChangeCaption={setDraft}
+                      onAppendCaption={(text) => setDraft((prev) => (prev ? `${prev} ${text}` : text))}
+                      voiceEnabled={voiceEnabled}
+                      onBusyChange={setVoiceBusy}
+                      label="Add a note for this photo"
+                      hint="Optional — dictate or type, then continue."
+                      footer={
+                        <View style={styles.annotateActions}>
+                          <Button title="Save & next" onPress={() => commit(draft)} disabled={voiceBusy} />
+                          <Button title="Skip" variant="ghost" onPress={() => commit("")} disabled={voiceBusy} />
+                          <Pressable
+                            onPress={discard}
+                            disabled={voiceBusy}
+                            hitSlop={8}
+                            accessibilityRole="button"
+                            accessibilityLabel="Discard this photo"
+                          >
+                            <Text style={[styles.discard, voiceBusy && styles.discardDisabled]}>Discard photo</Text>
+                          </Pressable>
+                        </View>
+                      }
+                    />
+                  </SafeAreaView>
+                </KeyboardAvoidingView>
+              ) : null}
+            </View>
+          )}
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
     </Modal>
   );
 }

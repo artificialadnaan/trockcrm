@@ -31,6 +31,11 @@ jest.mock("react-native-gesture-handler", () => {
   const { View } = require("react-native");
 
   return {
+    GestureHandlerRootView: ({ children, ...props }: { children: React.ReactNode }) => (
+      <View testID="gesture-root" {...props}>
+        {children}
+      </View>
+    ),
     PinchGestureHandler: ({ children, ...props }: { children: React.ReactNode }) => (
       <View testID="pinch-handler" {...props}>
         {children}
@@ -70,7 +75,10 @@ jest.mock("../../components/PhotoCaptionEditor", () => {
 });
 
 import { State } from "react-native-gesture-handler";
+import { Platform } from "react-native";
 import CameraCapture from "../CameraCapture";
+
+const originalPlatformOs = Platform.OS;
 
 function lastCameraProps() {
   return mockCameraProps[mockCameraProps.length - 1];
@@ -82,8 +90,16 @@ function renderCamera() {
 
 describe("CameraCapture zoom", () => {
   beforeEach(() => {
+    Object.defineProperty(Platform, "OS", { configurable: true, get: () => originalPlatformOs });
     mockCameraProps.length = 0;
     mockTakePictureAsync.mockReset();
+  });
+
+  it("wraps modal gesture handlers in a local gesture root", () => {
+    const screen = renderCamera();
+
+    expect(screen.getByTestId("gesture-root")).toBeTruthy();
+    expect(screen.getByTestId("pinch-handler")).toBeTruthy();
   });
 
   it("starts unzoomed and updates CameraView zoom from the visible controls", () => {
@@ -110,5 +126,32 @@ describe("CameraCapture zoom", () => {
 
     expect(lastCameraProps().zoom).toBeCloseTo(0.35);
     expect(screen.getByText("35%")).toBeTruthy();
+  });
+
+  it("clamps zoom to min and max while disabling inert controls", () => {
+    const screen = renderCamera();
+
+    expect(screen.getByLabelText("Zoom out").props.accessibilityState).toEqual({ disabled: true });
+    expect(screen.getByLabelText("Reset zoom").props.accessibilityState).toEqual({ disabled: true });
+
+    for (let i = 0; i < 20; i += 1) fireEvent.press(screen.getByLabelText("Zoom in"));
+    expect(lastCameraProps().zoom).toBe(1);
+    expect(screen.getByText("100%")).toBeTruthy();
+    expect(screen.getByLabelText("Zoom in").props.accessibilityState).toEqual({ disabled: true });
+
+    for (let i = 0; i < 20; i += 1) fireEvent.press(screen.getByLabelText("Zoom out"));
+    expect(lastCameraProps().zoom).toBe(0);
+    expect(screen.getByText("0%")).toBeTruthy();
+    expect(screen.getByLabelText("Zoom out").props.accessibilityState).toEqual({ disabled: true });
+  });
+
+  it("uses an immediately effective first Android zoom button step", () => {
+    Object.defineProperty(Platform, "OS", { configurable: true, get: () => "android" });
+    const screen = renderCamera();
+
+    fireEvent.press(screen.getByLabelText("Zoom in"));
+
+    expect(lastCameraProps().zoom).toBe(1);
+    expect(screen.getByText("100%")).toBeTruthy();
   });
 });
