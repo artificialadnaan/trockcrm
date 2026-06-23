@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Phone, FileText, Calendar, Plus, Handshake, MapPinned, PhoneCall, SendHorizontal, Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -50,6 +50,9 @@ interface ActivityLogFormProps {
   targetOptions?: ActivityTargetOption[];
   defaultResponsibleUserId?: string;
   showProposalSent?: boolean;
+  /** Surface-specific action(s) rendered at the end of the quick-action button row (e.g. the deal
+   *  "Move Close Date" button). A generic render slot — it does NOT create an activity. Default none. */
+  extraActions?: ReactNode;
 }
 
 interface Assignee {
@@ -98,6 +101,7 @@ export function ActivityLogForm({
   targetOptions = [],
   defaultResponsibleUserId,
   showProposalSent = true,
+  extraActions,
 }: ActivityLogFormProps) {
   const { user } = useAuth();
   const [activeForm, setActiveForm] = useState<LogType | null>(null);
@@ -294,6 +298,7 @@ export function ActivityLogForm({
         >
           <Mail className="h-4 w-4 mr-1" /> Log Email
         </Button>
+        {extraActions}
       </div>
 
       {/* Inline log form */}
