@@ -75,6 +75,7 @@ export type DashboardAtRiskSummaryRow = {
   mirroredStageStatus?: string | null;
   workflowRoute?: WorkflowRoute | null;
   stageEnteredAt?: string | Date | null;
+  expectedCloseDate?: string | Date | null;
   onHold?: boolean | null;
   onHoldStartedAt?: string | Date | null;
   onHoldAccumulatedSeconds?: number | string | bigint | null;
@@ -135,6 +136,8 @@ function buildDashboardAtRiskEvaluations(
         stageSlug: row.stageSlug,
         workflowRoute: row.workflowRoute ?? "normal",
         stageEnteredAt: row.stageEnteredAt ?? null,
+        expectedCloseDate: row.expectedCloseDate ?? null,
+        applyCloseTargetSuppression: false,
         onHold: row.onHold,
         onHoldStartedAt: row.onHoldStartedAt,
         onHoldAccumulatedSeconds:
@@ -2512,6 +2515,7 @@ export async function getDashboardAtRiskRows(
       psc.name AS stage_name,
       d.bid_board_stage_status AS mirrored_stage_status,
       d.workflow_route,
+      d.expected_close_date,
       COALESCE(NULLIF(TRIM(d.region_classification), ''), TRIM(CONCAT_WS(', ', d.property_city, d.property_state)), 'Unassigned region') AS region_classification,
       COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at, latest_current_stage_entered_at.entered_at) AS stage_entered_at,
       d.on_hold,
@@ -2548,6 +2552,7 @@ export async function getDashboardAtRiskRows(
     regionClassification: row.region_classification ?? null,
     workflowRoute: (row.workflow_route ?? "normal") as WorkflowRoute,
     stageEnteredAt: row.stage_entered_at ?? null,
+    expectedCloseDate: row.expected_close_date ?? null,
     onHold: Boolean(row.on_hold),
     onHoldStartedAt: row.on_hold_started_at ?? null,
     onHoldAccumulatedSeconds: row.on_hold_accumulated_seconds ?? 0,

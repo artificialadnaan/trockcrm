@@ -139,8 +139,8 @@ export function getHoldStateAtStageEntry(
  * applies (its `expected_close_date` may still be far out if it was won early; only its stored flag
  * zeros it). This is the won-aware twin of the server's stage-aware value SQL: card display
  * (getEffectiveDealValue) and the On Hold badge both read it, so the card's $0 and badge always agree
- * with the server rollup. `now` defaults to the call instant; pass an explicit instant in tests.
- * (The reportable/count exclusion is intentionally NOT changed — a far-out OPEN deal is $0 but counted.)
+ * with the server rollup. `now` defaults to the call instant; pass an explicit instant in tests. At-risk
+ * counts use the same effective hold rule through getDealAtRiskResult.
  */
 export function isDealValueEffectivelyOnHold(deal: DealValueLike, now: Date = new Date()): boolean {
   const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;

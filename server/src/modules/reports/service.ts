@@ -160,6 +160,7 @@ type StaleDealCandidateRow = {
   rep_name?: string | null;
   stage_slug: string | null;
   stage_entered_at: string | Date | null;
+  expected_close_date?: string | Date | null;
   workflow_route: string | null;
   on_hold?: boolean | null;
   on_hold_started_at?: string | Date | null;
@@ -178,6 +179,8 @@ function getDealStaleAtRisk(row: StaleDealCandidateRow, now: Date) {
       stageSlug: row.stage_slug,
       workflowRoute: normalizeWorkflowRoute(row.workflow_route),
       stageEnteredAt: row.stage_entered_at,
+      expectedCloseDate: row.expected_close_date ?? null,
+      applyCloseTargetSuppression: false,
       onHold: row.on_hold,
       onHoldStartedAt: row.on_hold_started_at,
       onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
@@ -971,6 +974,7 @@ export async function getStaleDeals(
       u.display_name AS rep_name,
       COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
       COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+      d.expected_close_date,
       d.on_hold,
       d.on_hold_started_at,
       d.on_hold_accumulated_seconds,
@@ -1740,6 +1744,7 @@ export async function getRegionalOwnershipOverview(
         d.assigned_rep_id,
         COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+        d.expected_close_date,
         d.workflow_route,
         d.on_hold,
         d.on_hold_started_at,
@@ -2363,6 +2368,7 @@ export async function getUnifiedWorkflowOverview(
         d.workflow_route,
         u.display_name AS rep_name,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+        d.expected_close_date,
         d.on_hold,
         d.on_hold_started_at,
         d.on_hold_accumulated_seconds,
@@ -2389,6 +2395,7 @@ export async function getUnifiedWorkflowOverview(
         d.workflow_route,
         COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
+        d.expected_close_date,
         d.on_hold,
         d.on_hold_started_at,
         d.on_hold_accumulated_seconds,

@@ -1796,6 +1796,22 @@ describe("getDealsForPipeline", () => {
                 companyName: null,
                 assignedRepName: "Rep One",
               },
+              {
+                id: "deal-auto-held",
+                dealNumber: "TR-2026-AUTO-HOLD",
+                name: "Auto Held Deal",
+                stageId: "stage-opportunity",
+                assignedRepId: "rep-1",
+                workflowRoute: "normal",
+                stageEnteredAt: twentyDaysAgo,
+                expectedCloseDate: new Date(Date.now() + 120 * 24 * 60 * 60 * 1000),
+                onHold: false,
+                onHoldStartedAt: null,
+                onHoldAccumulatedSeconds: 0,
+                onHoldAccumulatedSecondsAtStageEntry: 0,
+                companyName: null,
+                assignedRepName: "Rep One",
+              },
             ]);
           }
           if (isWonQuery) {
@@ -1833,7 +1849,10 @@ describe("getDealsForPipeline", () => {
 
     const holdDeal = result.pipelineColumns
       .find((column) => column.stage.slug === "opportunity")
-      ?.deals[0];
+      ?.deals.find((deal) => deal.id === "deal-hold");
+    const autoHeldDeal = result.pipelineColumns
+      .find((column) => column.stage.slug === "opportunity")
+      ?.deals.find((deal) => deal.id === "deal-auto-held");
     const wonDeal = result.pipelineColumns
       .find((column) => column.stage.slug === "won")
       ?.deals[0];
@@ -1842,6 +1861,10 @@ describe("getDealsForPipeline", () => {
       isAtRisk: false,
       reason: "on_hold",
       effectiveStageAgeDays: 0,
+    });
+    expect(autoHeldDeal?.atRisk).toMatchObject({
+      isAtRisk: false,
+      reason: "on_hold",
     });
     expect(wonDeal?.atRisk).toMatchObject({
       isAtRisk: false,

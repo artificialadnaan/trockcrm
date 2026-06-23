@@ -4,6 +4,7 @@ export type AiAtRiskDealRow = {
   stage_slug?: string | null;
   workflow_route?: string | null;
   stage_entered_at?: string | Date | null;
+  expected_close_date?: string | Date | null;
   on_hold?: boolean | null;
   on_hold_started_at?: string | Date | null;
   on_hold_accumulated_seconds?: string | number | bigint | null;
@@ -30,6 +31,8 @@ export function getAiDealAtRiskResult(
       stageSlug: row.stage_slug,
       workflowRoute: normalizeWorkflowRoute(row.workflow_route),
       stageEnteredAt: row.stage_entered_at,
+      expectedCloseDate: row.expected_close_date ?? null,
+      applyCloseTargetSuppression: false,
       onHold: row.on_hold,
       onHoldStartedAt: row.on_hold_started_at,
       onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),

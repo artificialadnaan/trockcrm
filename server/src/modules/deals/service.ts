@@ -157,12 +157,10 @@ function attachAtRiskResult<T extends {
           deal.onHoldAccumulatedSecondsAtStageEntry == null
             ? null
             : Number(deal.onHoldAccumulatedSecondsAtStageEntry),
-        // A today-or-future close target (expected_close_date) postpones the stage-age at-risk
-        // verdict until it passes (shared rule -> reason "close_target_pending"). Gated behind an
-        // explicit opt-in so ONLY the deal-detail path (getDealById) suppresses today; the list,
-        // kanban, stage-page, dashboard counts, and worker alerts stay on pure stage-age until a
-        // follow-up wires them together — avoids a half-applied cross-surface mismatch.
-        expectedCloseDate: options?.applyCloseTargetSuppression ? deal.expectedCloseDate ?? null : null,
+        // Forward the close target everywhere so 90+ day targets count as effective hold. The
+        // shorter today-or-future SLA pause remains opt-in for detail-style messaging.
+        expectedCloseDate: deal.expectedCloseDate ?? null,
+        applyCloseTargetSuppression: options?.applyCloseTargetSuppression === true,
       },
       normalizeAtRiskViewerRole(viewerRole),
       new Date()

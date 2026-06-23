@@ -282,6 +282,7 @@ interface AtRiskDealCandidateRow extends AtRiskDealRow {
   workflow_route: WorkflowRoute | null;
   stage_entered_at: string | Date | null;
   bid_board_stage_entered_at: string | Date | null;
+  expected_close_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -389,6 +390,8 @@ function buildDirectorScorecardAtRiskRows(
           stageSlug: row.stage_slug,
           workflowRoute: row.workflow_route ?? "normal",
           stageEnteredAt: row.bid_board_stage_entered_at ?? row.stage_entered_at,
+          expectedCloseDate: row.expected_close_date,
+          applyCloseTargetSuppression: false,
           onHold: row.on_hold,
           onHoldStartedAt: row.on_hold_started_at,
           onHoldAccumulatedSeconds:
@@ -583,6 +586,7 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
           d.workflow_route,
           d.stage_entered_at,
           d.bid_board_stage_entered_at,
+          d.expected_close_date,
           d.on_hold,
           d.on_hold_started_at,
           d.on_hold_accumulated_seconds,

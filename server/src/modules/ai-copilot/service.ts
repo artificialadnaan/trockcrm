@@ -344,6 +344,7 @@ type SalesProcessDisconnectBaseRow = {
   assigned_rep_id: string | null;
   assigned_rep_name: string | null;
   stage_entered_at: string | Date | null;
+  expected_close_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -1269,6 +1270,7 @@ export async function listCurrentSalesProcessDisconnectRows(
         d.stage_entered_at,
         latest_current_stage_entered_at.entered_at
       ) AS stage_entered_at,
+      d.expected_close_date,
       d.on_hold,
       d.on_hold_started_at,
       d.on_hold_accumulated_seconds,
