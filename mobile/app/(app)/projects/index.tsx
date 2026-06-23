@@ -34,6 +34,10 @@ export default function ProjectsScreen() {
   // Don't list a starred project twice — drop them from the main list when the Starred section shows.
   const starredIds = new Set(starred.map((p) => p.id));
   const projects = starred.length > 0 ? allProjects.filter((p) => !starredIds.has(p.id)) : allProjects;
+  // An office the fan-out couldn't reach means the list is incomplete — and in proximity mode it could be
+  // omitting a CLOSER job than anything shown, so surface it rather than presenting a confident-but-partial
+  // "nearest" order. (pwauditoffice is excluded server-side, so this only fires on a real office outage.)
+  const degraded = (projectsQuery.data?.degradedOffices?.length ?? 0) > 0;
 
   function openProject(project: FieldProject) {
     router.push({
@@ -92,10 +96,13 @@ export default function ProjectsScreen() {
         keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.color.brandRed} />}
         ListHeaderComponent={
-          projectsQuery.isError || starred.length > 0 ? (
+          projectsQuery.isError || degraded || starred.length > 0 ? (
             <View style={{ gap: theme.space.md }}>
               {projectsQuery.isError ? (
                 <Banner message="Couldn't load projects. Pull to refresh." />
+              ) : degraded ? (
+                // Partial fan-out: the list is incomplete and the proximity order may omit a closer job.
+                <Banner message="Couldn't reach some offices — this list may be incomplete. Pull to refresh." />
               ) : null}
               {starred.length > 0 ? (
                 <View style={{ gap: theme.space.sm }}>
@@ -109,10 +116,13 @@ export default function ProjectsScreen() {
                       onToggleStar={() => onToggleStar(project)}
                     />
                   ))}
-                  {/* Title the main list — "Nearest projects" when sorted by proximity, else "All projects". */}
-                  <Text style={[styles.sectionTitle, { marginTop: theme.space.sm }]}>
-                    {coords ? "Nearest projects" : "All projects"}
-                  </Text>
+                  {/* Title the main list — only when it has rows (avoids an orphan heading when every loaded
+                      project is starred). "Nearest projects" in proximity mode, else "All projects". */}
+                  {projects.length > 0 ? (
+                    <Text style={[styles.sectionTitle, { marginTop: theme.space.sm }]}>
+                      {coords ? "Nearest projects" : "All projects"}
+                    </Text>
+                  ) : null}
                 </View>
               ) : null}
             </View>
@@ -131,9 +141,9 @@ export default function ProjectsScreen() {
         ListEmptyComponent={
           projectsQuery.isLoading ? (
             <LoadingState label="Loading projects…" />
-          ) : // On error the header Banner already explains it + offers pull-to-refresh — don't
+          ) : // On error/degraded the header Banner already explains it + offers pull-to-refresh — don't
           // also claim "No projects yet" (those two messages contradict each other) (#8).
-          projectsQuery.isError ? null : starred.length > 0 ? null : (
+          projectsQuery.isError || degraded ? null : starred.length > 0 ? null : (
             <EmptyState
               title={searching ? "No matches" : "No projects yet"}
               subtitle={searching ? `Nothing found for "${debounced}".` : "Active projects will appear here."}
