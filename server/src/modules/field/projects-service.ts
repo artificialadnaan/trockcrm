@@ -241,7 +241,21 @@ export async function listNearbyFieldProjects(
     )
   )`;
 
+  // Rank + LIMIT the nearest candidates FIRST (cheap: distance is pure arithmetic over deals), THEN join
+  // the expensive per-deal photo_stats LATERAL for only those few rows. Computing photo_stats inline with
+  // the distance ranking would run a files count/max for EVERY coordinate-bearing active deal in the
+  // office (thousands in a big office) just to return the top handful.
   const rowsResult = await tenantDb.execute(sql`
+    WITH nearest AS (
+      SELECT d.id AS deal_id, ${distanceMiles} AS distance_miles
+      FROM deals d
+      LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE ${activeProjectWhere()}
+        AND d.property_lat IS NOT NULL
+        AND d.property_lng IS NOT NULL
+      ORDER BY distance_miles ASC
+      LIMIT ${limit}
+    )
     SELECT
       d.id,
       d.name,
@@ -253,8 +267,9 @@ export async function listNearbyFieldProjects(
       COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) AS last_activity_at,
       COALESCE(photo_stats.photo_count, 0)::int AS photo_count,
       (fsp.user_id IS NOT NULL) AS starred,
-      ${distanceMiles} AS distance_miles
-    FROM deals d
+      nearest.distance_miles AS distance_miles
+    FROM nearest
+    JOIN deals d ON d.id = nearest.deal_id
     LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
     LEFT JOIN field_user_starred_projects fsp ON fsp.deal_id = d.id AND fsp.user_id = ${access.userId}::uuid
     LEFT JOIN LATERAL (
@@ -265,11 +280,7 @@ export async function listNearbyFieldProjects(
         AND f.is_active = true
         AND f.deleted_at IS NULL
     ) photo_stats ON true
-    WHERE ${activeProjectWhere()}
-      AND d.property_lat IS NOT NULL
-      AND d.property_lng IS NOT NULL
-    ORDER BY distance_miles ASC
-    LIMIT ${limit}
+    ORDER BY nearest.distance_miles ASC
   `);
 
   const projects = ((rowsResult as any).rows ?? rowsResult).map(mapFieldProject);

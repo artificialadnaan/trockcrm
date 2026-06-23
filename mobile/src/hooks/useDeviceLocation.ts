@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useFocusEffect } from "expo-router";
 import * as Location from "expo-location";
@@ -9,6 +9,12 @@ export type DeviceLocation = {
   /** The device's current coordinates, or null when permission was denied / no fix is available yet. */
   coords: { lat: number; lng: number } | null;
   status: LocationStatus;
+  /**
+   * Re-acquire a FRESH fix right now (bypassing the cached last-known position) — for an explicit user
+   * gesture like pull-to-refresh, so a crew that drove to a new site while keeping this screen open gets
+   * Nearby re-ranked around where they actually are.
+   */
+  refresh: () => void;
 };
 
 // A last-known fix older than this is treated as too stale for a "right now / nearby" sort — we fetch a
@@ -36,52 +42,63 @@ const MAX_LAST_KNOWN_AGE_MS = 5 * 60 * 1000;
  *     change fires on return.
  * Either way Nearby appears with no remount/restart.
  *
- * A `getLastKnownPositionAsync` answer is used only when recent enough; otherwise a fresh
- * `getCurrentPositionAsync` is fetched so the "nearby" sort reflects where the user actually is.
+ * On focus/foreground a recent-enough `getLastKnownPositionAsync` answer is used for an instant result
+ * (else a fresh `getCurrentPositionAsync`); `refresh()` always forces a fresh `getCurrentPositionAsync`.
  */
 export function useDeviceLocation(): DeviceLocation {
-  const [state, setState] = useState<DeviceLocation>({ coords: null, status: "pending" });
+  const [state, setState] = useState<{ coords: { lat: number; lng: number } | null; status: LocationStatus }>({
+    coords: null,
+    status: "pending",
+  });
+  // Guards against a late async resolve setting state after the screen has fully unmounted.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const resolve = useCallback(async (fresh: boolean) => {
+    try {
+      // getForegroundPermissionsAsync() reports status WITHOUT prompting — we never proactively ask.
+      const { status } = await Location.getForegroundPermissionsAsync();
+      if (!mounted.current) return;
+      if (status !== "granted") {
+        setState({ coords: null, status: status === "denied" ? "denied" : "pending" });
+        return;
+      }
+      // `fresh` (explicit refresh) always gets a current fix; the passive focus/foreground path may use a
+      // recent last-known position for an instant answer.
+      const position = fresh
+        ? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
+        : ((await Location.getLastKnownPositionAsync({ maxAge: MAX_LAST_KNOWN_AGE_MS })) ??
+          (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })));
+      if (!mounted.current) return;
+      setState(
+        position
+          ? { coords: { lat: position.coords.latitude, lng: position.coords.longitude }, status: "granted" }
+          : { coords: null, status: "granted" },
+      );
+    } catch {
+      // A thrown error here is a transient GPS/provider failure (or a permissions-API hiccup), NOT a
+      // denial — actual denial is handled by the status !== "granted" branch above. Don't misreport it as
+      // "denied"; leave status unresolved ("pending"). Either way coords is null, so Nearby simply stays
+      // hidden and a later focus/foreground/refresh re-resolve can recover.
+      if (mounted.current) setState({ coords: null, status: "pending" });
+    }
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
-      let cancelled = false;
-      const resolve = async () => {
-        try {
-          // getForegroundPermissionsAsync() reports status WITHOUT prompting — we never proactively ask.
-          const { status } = await Location.getForegroundPermissionsAsync();
-          if (cancelled) return;
-          if (status !== "granted") {
-            setState({ coords: null, status: status === "denied" ? "denied" : "pending" });
-            return;
-          }
-          const position =
-            (await Location.getLastKnownPositionAsync({ maxAge: MAX_LAST_KNOWN_AGE_MS })) ??
-            (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }));
-          if (cancelled) return;
-          setState(
-            position
-              ? { coords: { lat: position.coords.latitude, lng: position.coords.longitude }, status: "granted" }
-              : { coords: null, status: "granted" },
-          );
-        } catch {
-          // A thrown error here is a transient GPS/provider failure (or a permissions-API hiccup), NOT a
-          // denial — actual denial is handled by the status !== "granted" branch above. Don't misreport
-          // it as "denied"; leave status unresolved ("pending"). Either way coords is null, so Nearby
-          // simply stays hidden and a later focus/foreground re-resolve can recover.
-          if (!cancelled) setState({ coords: null, status: "pending" });
-        }
-      };
-
-      void resolve();
+      void resolve(false);
       const sub = AppState.addEventListener("change", (next) => {
-        if (next === "active") void resolve();
+        if (next === "active") void resolve(false);
       });
-      return () => {
-        cancelled = true;
-        sub.remove();
-      };
-    }, []),
+      return () => sub.remove();
+    }, [resolve]),
   );
 
-  return state;
+  const refresh = useCallback(() => void resolve(true), [resolve]);
+  return { coords: state.coords, status: state.status, refresh };
 }

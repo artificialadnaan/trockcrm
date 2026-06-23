@@ -21,7 +21,7 @@ export default function ProjectsScreen() {
   const debounced = useDebouncedValue(search.trim(), 250);
   const searching = debounced.length > 0;
 
-  const { coords } = useDeviceLocation();
+  const { coords, refresh: refreshLocation } = useDeviceLocation();
   const projectsQuery = useProjects(debounced);
   const starredQuery = useStarredProjects(!searching);
   // Nearby is hidden while searching (like Starred) and whenever there's no GPS fix (the hook returns
@@ -30,9 +30,14 @@ export default function ProjectsScreen() {
   const toggleStar = useToggleStar();
 
   const allProjects = projectsQuery.data?.projects ?? [];
+  // If any office failed in the cross-office fan-out, the omitted office could hold the actual closest
+  // job — so a partial result is a MISLEADING "nearest 3". Suppress Nearby entirely when degraded (the
+  // plain All list tolerates a missing office; a ranked top-3 claim must not).
+  const nearbyDegraded = (nearbyQuery.data?.degradedOffices?.length ?? 0) > 0;
+  const nearbySource = !searching && !nearbyDegraded ? nearbyQuery.data?.projects ?? [] : [];
   // Dedup precedence Nearby > Starred > All so nothing renders twice (pure + unit-tested).
   const { nearby, starred: visibleStarred, all: projects, hasSections } = partitionProjectSections(
-    !searching ? nearbyQuery.data?.projects ?? [] : [],
+    nearbySource,
     !searching ? starredQuery.data?.projects ?? [] : [],
     allProjects,
   );
@@ -63,8 +68,12 @@ export default function ProjectsScreen() {
     void projectsQuery.refetch();
     if (!searching) {
       void starredQuery.refetch();
-      // refetch() runs the queryFn even though the query is disabled without coords — and that queryFn
-      // dereferences coords — so only refetch Nearby when we actually have a fix.
+      // Re-acquire a FRESH GPS fix first — a crew that drove to a new site with this screen open would
+      // otherwise pull-to-refresh against the focus-time coordinate. A changed fix bumps the nearby query
+      // key (coords are in it), which refetches on its own; the explicit refetch below covers the
+      // same-coordinate case (e.g. a new project added nearby). refetch() runs the queryFn even when the
+      // query is disabled without coords — and that queryFn dereferences coords — so guard it.
+      refreshLocation();
       if (coords) void nearbyQuery.refetch();
     }
   }
