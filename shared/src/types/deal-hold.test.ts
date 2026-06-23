@@ -82,6 +82,17 @@ describe("deal hold helpers", () => {
     ).toBe(0);
   });
 
+  it("does NOT auto-park a Bid Board-won deal (won via bidBoardStageSlug while CRM stage is still open)", () => {
+    // a mirrored deal can reach a won terminal alias in bidBoardStageSlug before its CRM stage advances;
+    // its realized value must NOT be zeroed off a stale forecast date (guards the bid-board won gap)
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2099-12-31", stageSlug: "opportunity", bidBoardStageSlug: "sent_to_production", workflowRoute: "normal", awardedAmount: "500000" },
+        FIXED_NOW
+      )
+    ).toBe(500000);
+  });
+
   it("prefers awarded amount over synced Bid Board/bid for generic deal value (unified awarded-first 2026-06-18)", () => {
     expect(
       getEffectiveDealValue({

@@ -142,11 +142,17 @@ export function isDealValueEffectivelyOnHold(deal: DealValueLike, now: Date = ne
   const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
   const workflowRoute =
     deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  // Won-ness must also honor the Bid Board mirror: a Bid Board-owned deal can reach a won terminal alias
+  // (e.g. sent_to_production) in bidBoardStageSlug while its CRM stageSlug is still open. Both canonicalize
+  // to "won", so either marks the deal realized — never auto-park it off a stale forecast date.
+  const isWon =
+    isGenuineWonDealStageSlug(stageSlug, workflowRoute) ||
+    isGenuineWonDealStageSlug(deal.bidBoardStageSlug ?? null, workflowRoute);
   return isDealEffectivelyOnHold({
     onHold: deal.onHold,
     expectedCloseDate: deal.expectedCloseDate,
     now,
-    isWon: isGenuineWonDealStageSlug(stageSlug, workflowRoute),
+    isWon,
   });
 }
 

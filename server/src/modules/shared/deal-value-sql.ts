@@ -1,15 +1,8 @@
 import { sql, type SQL } from "drizzle-orm";
-import {
-  reportableDealSqlPredicate,
-  effectiveOnHoldSqlPredicate,
-  CLOSE_TARGET_HOLD_HORIZON_DAYS,
-} from "@trock-crm/shared/types";
+import { reportableDealSqlPredicate, effectiveOnHoldSqlPredicate } from "@trock-crm/shared/types";
 
 type DealValueTable = {
   onHold: unknown;
-  // The close target — value-zeroing treats a deal 90+ days out as effectively on hold (auto-park).
-  // Present on every relation these helpers run against (the deals table / a SELECT d.* CTE).
-  expectedCloseDate: unknown;
   awardedAmount: unknown;
   bidBoardTotalSales?: unknown;
   bidEstimate: unknown;
@@ -133,9 +126,14 @@ export function dealBestEstimateWithForecastSql(table: DealValueTable): SQL {
 // horizon, so a far-out OPEN deal contributes $0 to pipeline/forecast just like a parked one. Same
 // boundary as the On Hold filter (shared CLOSE_TARGET_HOLD_HORIZON_DAYS + the America/Chicago anchor) so
 // the two can't disagree. (The reportable/count predicate is intentionally unchanged — a far-out deal is
-// $0 but still counted.) Use this for OPEN/best-estimate value ONLY — NOT won-value (see below).
+// $0 but still counted.) The far-future auto-park leg lives ONLY in the ALIASED form
+// (aliasedEffectiveDealValueSql), which runs against OPEN-filtered report populations. The COLUMN form is
+// stored-on_hold ONLY: its sole consumer is the property linked-value SUM, which runs over MIXED (open +
+// won) linked deals with no terminal filter, so applying the horizon here would wrongly zero realized
+// won revenue. (A drizzle table can't be cheaply stage-filtered; the aliased report queries already
+// exclude terminal deals, so they carry the auto-park leg safely.)
 export function effectiveDealValueSql(table: DealValueTable, rawValueSql: SQL = dealBestEstimateSql(table)): SQL {
-  return sql`CASE WHEN (COALESCE(${table.onHold}, false) = true OR (${table.expectedCloseDate} IS NOT NULL AND ${table.expectedCloseDate} > (now() AT TIME ZONE 'America/Chicago')::date + ${sql.raw(`INTERVAL '${CLOSE_TARGET_HOLD_HORIZON_DAYS} days'`)})) THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
+  return storedOnHoldDealValueSql(table, rawValueSql);
 }
 
 // REALIZED-safe value-zeroing: stored on_hold ONLY. A won/awarded value is never auto-parked by a stale

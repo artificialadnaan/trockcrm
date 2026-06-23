@@ -5,6 +5,7 @@ import { formatCurrencyCompact } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
 import {
   getEffectiveDealValue,
+  isDealValueEffectivelyOnHold,
   getEffectiveStageAgeDeal,
   getEffectiveStageAgeDays,
   type AtRiskResult,
@@ -20,6 +21,11 @@ export interface PipelineRecordCardData {
   // Read by getEffectiveDealValue for the 'estimating' DD-over-bid value branch (2026-06-18), so the
   // per-card value matches the stage-aware column total. Stamped from the column slug when a card omits it.
   stageSlug?: string | null;
+  // The close target + bid-board mirror stage feed the won-aware effective-hold check, so an auto-held
+  // (90+ day) OPEN card shows $0 AND the On Hold badge, matching the kanban cards. Present at runtime when
+  // a full Deal is passed structurally as this narrow type.
+  expectedCloseDate?: string | null;
+  bidBoardStageSlug?: string | null;
   stageEnteredAt: string;
   updatedAt: string;
   status?: string | null;
@@ -51,8 +57,8 @@ interface PipelineRecordCardProps {
   isDragging?: boolean;
 }
 
-function formatValue(record: PipelineRecordCardData) {
-  const value = getEffectiveDealValue(record);
+function formatValue(record: PipelineRecordCardData, now: Date) {
+  const value = getEffectiveDealValue(record, now);
   return value > 0 ? formatCurrencyCompact(value) : null;
 }
 
@@ -70,7 +76,10 @@ export function PipelineRecordCard({
   const style = transform
     ? { transform: `translate(${transform.x}px, ${transform.y}px)`, zIndex: 50 }
     : undefined;
-  const value = formatValue(record);
+  // One shared `now` so the value and the badge can't disagree across a day/90-day-boundary rollover.
+  const now = new Date();
+  const effectivelyHeld = isDealValueEffectivelyOnHold(record, now);
+  const value = formatValue(record, now);
   const location = [record.propertyCity, record.propertyState].filter(Boolean).join(", ");
   const contextLine = record.companyName ?? record.source ?? null;
   const ageLabel = `${record.atRisk?.effectiveStageAgeDays ?? getEffectiveStageAgeDays(getEffectiveStageAgeDeal(record))}d in stage`;
@@ -111,8 +120,10 @@ export function PipelineRecordCard({
                   {record.dealNumber}
                 </span>
               ) : null}
-              {entity === "deal" ? <OnHoldBadge onHold={record.onHold} compact /> : null}
-              {entity === "deal" ? <AtRiskBadge atRisk={record.atRisk} compact /> : null}
+              {entity === "deal" ? <OnHoldBadge onHold={effectivelyHeld} compact /> : null}
+              {entity === "deal" ? (
+                <AtRiskBadge atRisk={effectivelyHeld ? null : record.atRisk} compact />
+              ) : null}
               {entity === "deal" ? (
                 <ChangeOrderBadge isChangeOrder={record.isChangeOrder} compact />
               ) : null}

@@ -61,8 +61,11 @@ export function DecoratedKanbanCard({
   const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
   // The column slug is authoritative (a board row may omit deal.stageSlug). Stamp it ONCE and use the
   // same object for the value AND the badge, so the won-aware hold check and the value can't disagree
-  // (e.g. a Won-column row reading as auto-held only because its slug was missing).
+  // (e.g. a Won-column row reading as auto-held only because its slug was missing). A SHARED `now` keeps
+  // the value and the badge on the same horizon across a midnight/90-day-boundary rollover.
   const dealForValue = { ...deal, stageSlug: deal.stageSlug ?? stageSlug };
+  const now = new Date();
+  const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue, now);
 
   return (
     <button
@@ -90,14 +93,16 @@ export function DecoratedKanbanCard({
             deal={dealForValue}
             // Value from the column-slug-stamped deal so the stage-aware chain (estimating DD-over-bid)
             // applies even if the board row omits stageSlug — reconciles the card with the column total.
-            value={getEffectiveDealValue(dealForValue)}
+            value={getEffectiveDealValue(dealForValue, now)}
             compact
             className="shrink-0 text-sm font-black tabular-nums text-slate-950"
           />
         </div>
 
-        <OnHoldBadge onHold={isDealValueEffectivelyOnHold(dealForValue)} compact />
-        <AtRiskBadge atRisk={deal.atRisk} compact />
+        <OnHoldBadge onHold={effectivelyHeld} compact />
+        {/* A held deal is never also "at risk" — the On Hold badge takes the slot (mirrors the engine,
+            which clears risk while held). Suppress here so an auto-held far-out deal can't show both. */}
+        <AtRiskBadge atRisk={effectivelyHeld ? null : deal.atRisk} compact />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
 
         <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{deal.name}</p>

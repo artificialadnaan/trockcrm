@@ -3016,11 +3016,20 @@ export async function getDealsForPipeline(
     const where = and(...stageConditions, ...commonConditions);
     const countedDealFilter = aliasedActiveDealCountFilterSql("deals");
     const valueSource = pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily));
+    // Sum the EFFECTIVE (won-aware) value so a far-out OPEN deal contributes $0 to the column total just
+    // as it shows $0 on its card — keeping the column header total reconciled with the sum of the cards.
+    // Per-stage classification (this column is one stage): a won stage routes to the realized-safe
+    // stored-only helper, estimating/open stages carry the far-future auto-park leg.
+    const columnEffectiveValue = aliasedStageAwareEffectiveDealValueSql(
+      "deals",
+      valueSource === "won" ? [stage.id] : [],
+      valueSource === "estimating" ? [stage.id] : []
+    );
     const summaryRows = await tenantDb
       .select({
         totalCount: sql<number>`count(*)`,
         activeCount: sql<number>`count(*) filter (where ${countedDealFilter})`,
-        totalValue: sql<number>`COALESCE(SUM(${dealPipelineValueSql(valueSource)}) FILTER (WHERE ${countedDealFilter}), 0)`,
+        totalValue: sql<number>`COALESCE(SUM(${columnEffectiveValue}) FILTER (WHERE ${countedDealFilter}), 0)`,
       })
       .from(deals)
       .where(where);

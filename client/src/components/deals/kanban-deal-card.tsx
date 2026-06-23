@@ -93,14 +93,16 @@ export function KanbanDealCard({
         <div className="flex items-start justify-between gap-2">
           <p className="truncate text-sm font-medium text-gray-900">{deal.name}</p>
           <DealValue
-            deal={{ ...deal, stageSlug: deal.stageSlug ?? stageSlug }}
+            deal={dealForValue}
             value={value}
             compact
             className="whitespace-nowrap text-sm font-semibold tabular-nums text-gray-900"
           />
         </div>
         <OnHoldBadge onHold={effectivelyHeld} compact className="mt-1" />
-        <AtRiskBadge atRisk={deal.atRisk} compact className="mt-1" />
+        {/* A held deal is never also "at risk" (the On Hold badge takes the slot) — suppress so an
+            auto-held far-out deal can't show both badges at once. */}
+        <AtRiskBadge atRisk={effectivelyHeld ? null : deal.atRisk} compact className="mt-1" />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact className="mt-1" />
         <p className="mt-0.5 truncate text-xs text-gray-500">{metaParts.join(" · ")}</p>
       </div>
