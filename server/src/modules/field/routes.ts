@@ -217,8 +217,11 @@ fieldRoutes.get("/projects/nearby", requireFieldContractor, async (req, res, nex
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
     const lat = Number(req.query.lat);
     const lng = Number(req.query.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-      throw new AppError(400, "lat and lng query params are required");
+    // Validate the RANGE in-route, not just finiteness: an out-of-range value (e.g. lat=999) would pass a
+    // finiteness check, then throw a 400 inside every per-office call, which the fan-out's all-failed
+    // guard would surface as a misleading 503. Reject it here so the client gets the correct 400.
+    if (!Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+      throw new AppError(400, "lat and lng must be valid coordinates");
     }
     const { results, failures } = assertFanOutNotFullyDegraded(
       await fanOutActiveOffices((officeDb) =>

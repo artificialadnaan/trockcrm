@@ -44,9 +44,11 @@ export function useToggleStar() {
       starred ? api.unstarProject(fetcher, dealId) : api.starProject(fetcher, dealId),
     onSuccess: () => {
       if (!user) return;
-      // prefix-invalidate every ["projects", uid, *] and the starred list
+      // prefix-invalidate every ["projects", uid, *], the starred list, and every nearby coordinate
+      // bucket — Nearby rows also show the star, so their cached `starred` must refresh after a toggle.
       void qc.invalidateQueries({ queryKey: ["projects", user.id] });
       void qc.invalidateQueries({ queryKey: qk.starred(user.id) });
+      void qc.invalidateQueries({ queryKey: ["nearby", user.id] });
     },
   });
 }

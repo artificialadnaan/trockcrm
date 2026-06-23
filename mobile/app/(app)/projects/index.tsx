@@ -63,7 +63,9 @@ export default function ProjectsScreen() {
     void projectsQuery.refetch();
     if (!searching) {
       void starredQuery.refetch();
-      void nearbyQuery.refetch();
+      // refetch() runs the queryFn even though the query is disabled without coords — and that queryFn
+      // dereferences coords — so only refetch Nearby when we actually have a fix.
+      if (coords) void nearbyQuery.refetch();
     }
   }
 
