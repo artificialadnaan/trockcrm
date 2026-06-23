@@ -1,8 +1,15 @@
 import { sql, type SQL } from "drizzle-orm";
-import { reportableDealSqlPredicate } from "@trock-crm/shared/types";
+import {
+  reportableDealSqlPredicate,
+  effectiveOnHoldSqlPredicate,
+  CLOSE_TARGET_HOLD_HORIZON_DAYS,
+} from "@trock-crm/shared/types";
 
 type DealValueTable = {
   onHold: unknown;
+  // The close target — value-zeroing treats a deal 90+ days out as effectively on hold (auto-park).
+  // Present on every relation these helpers run against (the deals table / a SELECT d.* CTE).
+  expectedCloseDate: unknown;
   awardedAmount: unknown;
   bidBoardTotalSales?: unknown;
   bidEstimate: unknown;
@@ -122,8 +129,12 @@ export function dealBestEstimateWithForecastSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, FORECAST_FIRST_VALUE_CHAIN);
 }
 
+// Value-zeroing keys on EFFECTIVE hold = stored on_hold OR a close target past the 90-day horizon, so a
+// far-out deal contributes $0 to pipeline/forecast just like a parked one. Same boundary as the On Hold
+// filter (shared CLOSE_TARGET_HOLD_HORIZON_DAYS + the America/Chicago anchor) so the two can't disagree.
+// (The reportable/count predicate is intentionally unchanged — a far-out deal is $0 but still counted.)
 export function effectiveDealValueSql(table: DealValueTable, rawValueSql: SQL = dealBestEstimateSql(table)): SQL {
-  return sql`CASE WHEN COALESCE(${table.onHold}, false) THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
+  return sql`CASE WHEN (COALESCE(${table.onHold}, false) = true OR (${table.expectedCloseDate} IS NOT NULL AND ${table.expectedCloseDate} > (now() AT TIME ZONE 'America/Chicago')::date + ${sql.raw(`INTERVAL '${CLOSE_TARGET_HOLD_HORIZON_DAYS} days'`)})) THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
 }
 
 export function effectiveAwardedDealValueSql(
@@ -170,11 +181,13 @@ export function aliasedOpenPipelineForecastFirstDealValueSql(alias: string): SQL
   return aliasedDealValueChainSql(alias, FORECAST_FIRST_VALUE_CHAIN);
 }
 
+// Aliased twin of effectiveDealValueSql. Reuses the SHARED effectiveOnHoldSqlPredicate so the value-zero
+// test is byte-identical to the On Hold filter — they cannot drift.
 export function aliasedEffectiveDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealBestEstimateSql(alias)
 ): SQL {
-  return sql`CASE WHEN COALESCE(${sql.raw(`${alias}.on_hold`)}, false) THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
+  return sql`CASE WHEN ${sql.raw(effectiveOnHoldSqlPredicate(alias))} THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
 }
 
 export function aliasedEffectiveAwardedDealValueSql(

@@ -57,6 +57,7 @@ function expectColumnOrder(sqlText: string, columns: readonly string[]) {
 describe("deal-value-sql", () => {
   const table = {
     onHold: sql.raw("d.on_hold"),
+    expectedCloseDate: sql.raw("d.expected_close_date"),
     forecastRevenue: sql.raw("d.forecast_revenue"),
     bidBoardTotalSales: sql.raw("d.bid_board_total_sales"),
     bidEstimate: sql.raw("d.bid_estimate"),
@@ -70,6 +71,20 @@ describe("deal-value-sql", () => {
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.awarded_amount");
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.bid_estimate");
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.dd_estimate");
+  });
+
+  it("zeros on EFFECTIVE hold: stored on_hold OR a close target 90+ days out (same boundary as the filter)", () => {
+    // aliased form reuses the shared filter predicate verbatim, so they can never drift
+    const aliased = normalize(aliasedEffectiveDealValueSql("d")).toLowerCase();
+    expect(aliased).toContain("coalesce(d.on_hold, false) = true");
+    expect(aliased).toContain("d.expected_close_date is not null");
+    expect(aliased).toContain("d.expected_close_date > (now() at time zone 'america/chicago')::date + interval '90 days'");
+    // column form matches the same boundary
+    const column = normalize(effectiveDealValueSql(table)).toLowerCase();
+    expect(column).toContain("coalesce(d.on_hold, false) = true");
+    expect(column).toContain("d.expected_close_date is not null");
+    expect(column).toContain("interval '90 days'");
+    expect(column).toContain("america/chicago");
   });
 
   // Convention shift 2026-06-18: the open/best-estimate chain is now AWARDED-FIRST (unified with the won

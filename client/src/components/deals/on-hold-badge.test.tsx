@@ -34,4 +34,17 @@ describe("OnHoldBadge", () => {
 
     expect(html).toContain("ml-2");
   });
+
+  it("renders for a far-out close target (90+ days) even without the stored hold flag (auto-park)", () => {
+    // a date ~75 years out is unambiguously past the 90-day horizon and never ages into the past
+    const html = renderToStaticMarkup(<OnHoldBadge onHold={false} expectedCloseDate="2099-12-31" />);
+    expect(html).toContain('data-on-hold="true"');
+    expect(html).toContain("On Hold");
+  });
+
+  it("does NOT render for a near-term close target when the deal is not explicitly held", () => {
+    // a date well within the 90-day horizon (and not in the past relative to test run time)
+    const soon = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    expect(renderToStaticMarkup(<OnHoldBadge onHold={false} expectedCloseDate={soon} />)).toBe("");
+  });
 });

@@ -101,3 +101,25 @@ export function isAtRiskSuppressedByCloseTarget({ expectedCloseDate, now }: Clos
  * near-term forecast windows (30/60/90).
  */
 export const CLOSE_TARGET_HOLD_HORIZON_DAYS = 90;
+
+export interface EffectiveOnHoldInput {
+  /** The stored `deals.on_hold` flag. */
+  onHold?: boolean | null;
+  /** The deal's close target = its `expected_close_date`. */
+  expectedCloseDate?: string | Date | null;
+  /** The reference instant; "today" is its America/Chicago calendar day. */
+  now: Date;
+}
+
+/**
+ * "Effectively on hold" = the stored `on_hold` flag OR a close target more than
+ * CLOSE_TARGET_HOLD_HORIZON_DAYS CT-days out (auto-park). The TS twin of [[deal-reporting]]
+ * `effectiveOnHoldSqlPredicate`: STRICTLY greater-than the horizon, mirroring the SQL's
+ * `> ... + INTERVAL '90 days'`, so a deal exactly 90 days out is NOT yet held in either world. Drives
+ * client value-zeroing (getEffectiveDealValue) + the On Hold badge — NOT the reportable/count exclusion.
+ */
+export function isDealEffectivelyOnHold({ onHold, expectedCloseDate, now }: EffectiveOnHoldInput): boolean {
+  if (onHold === true) return true;
+  const days = daysUntilCloseTarget(expectedCloseDate, now);
+  return days != null && days > CLOSE_TARGET_HOLD_HORIZON_DAYS;
+}

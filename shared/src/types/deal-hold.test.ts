@@ -32,6 +32,39 @@ describe("deal hold helpers", () => {
     ).toBe(875000);
   });
 
+  // Effective-hold value-zeroing: a far-out close target (90+ CT-days) auto-parks the deal to $0 even
+  // without the stored on_hold flag — the value twin of effectiveOnHoldSqlPredicate. `now` fixed so the
+  // horizon is deterministic.
+  const FIXED_NOW = new Date("2026-06-01T12:00:00.000Z");
+
+  it("zeros effective value for a far-out close target (90+ days) with no stored hold flag", () => {
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2026-12-01", bidEstimate: "875000" },
+        FIXED_NOW
+      )
+    ).toBe(0);
+    expect(
+      getEffectiveAwardedDealValue(
+        { onHold: false, expectedCloseDate: "2026-12-01", awardedAmount: "925000" },
+        FIXED_NOW
+      )
+    ).toBe(0);
+  });
+
+  it("keeps full effective value for a near-term close target (inside the 90-day horizon)", () => {
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2026-06-15", bidEstimate: "875000" },
+        FIXED_NOW
+      )
+    ).toBe(875000);
+  });
+
+  it("never auto-parks a deal that has no close target (the far-out leg can't fire)", () => {
+    expect(getEffectiveDealValue({ onHold: false, bidEstimate: "875000" })).toBe(875000);
+  });
+
   it("prefers awarded amount over synced Bid Board/bid for generic deal value (unified awarded-first 2026-06-18)", () => {
     expect(
       getEffectiveDealValue({

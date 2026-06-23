@@ -91,7 +91,7 @@ export function DecoratedKanbanCard({
           />
         </div>
 
-        <OnHoldBadge onHold={deal.onHold} compact />
+        <OnHoldBadge onHold={deal.onHold} expectedCloseDate={deal.expectedCloseDate} compact />
         <AtRiskBadge atRisk={deal.atRisk} compact />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
 

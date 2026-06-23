@@ -91,7 +91,7 @@ export function KanbanDealCard({
             className="whitespace-nowrap text-sm font-semibold tabular-nums text-gray-900"
           />
         </div>
-        <OnHoldBadge onHold={deal.onHold} compact className="mt-1" />
+        <OnHoldBadge onHold={deal.onHold} expectedCloseDate={deal.expectedCloseDate} compact className="mt-1" />
         <AtRiskBadge atRisk={deal.atRisk} compact className="mt-1" />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact className="mt-1" />
         <p className="mt-0.5 truncate text-xs text-gray-500">{metaParts.join(" · ")}</p>

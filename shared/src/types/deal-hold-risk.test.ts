@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   daysUntilCloseTarget,
   isAtRiskSuppressedByCloseTarget,
+  isDealEffectivelyOnHold,
+  CLOSE_TARGET_HOLD_HORIZON_DAYS,
 } from "./deal-hold-risk.js";
 
 // CT (America/Chicago) is UTC-5 in June (CDT). 12:00Z = 07:00 CDT on the same calendar day.
@@ -53,7 +55,8 @@ describe("isAtRiskSuppressedByCloseTarget", () => {
     expect(isAtRiskSuppressedByCloseTarget({ expectedCloseDate: TODAY, now: NOW })).toBe(true);
     expect(isAtRiskSuppressedByCloseTarget({ expectedCloseDate: plusDays(TODAY, 1), now: NOW })).toBe(true);
     expect(isAtRiskSuppressedByCloseTarget({ expectedCloseDate: plusDays(TODAY, 45), now: NOW })).toBe(true);
-    // no upper bound: a far-future target still suppresses (it is NOT auto-held — on-hold stays manual)
+    // no upper bound: a far-future target still suppresses at-risk. (It is ALSO effectively on hold past
+    // the 90-day horizon — see isDealEffectivelyOnHold — but that is a separate, value/badge concern.)
     expect(isAtRiskSuppressedByCloseTarget({ expectedCloseDate: plusDays(TODAY, 200), now: NOW })).toBe(true);
   });
 
@@ -65,5 +68,30 @@ describe("isAtRiskSuppressedByCloseTarget", () => {
   it("does not suppress for a missing or unparseable target", () => {
     expect(isAtRiskSuppressedByCloseTarget({ expectedCloseDate: null, now: NOW })).toBe(false);
     expect(isAtRiskSuppressedByCloseTarget({ expectedCloseDate: "not-a-date", now: NOW })).toBe(false);
+  });
+});
+
+describe("isDealEffectivelyOnHold", () => {
+  it("is true when the deal is explicitly on hold (regardless of close date)", () => {
+    expect(isDealEffectivelyOnHold({ onHold: true, expectedCloseDate: null, now: NOW })).toBe(true);
+    expect(isDealEffectivelyOnHold({ onHold: true, expectedCloseDate: plusDays(TODAY, -30), now: NOW })).toBe(true);
+  });
+
+  it("is true when the close target is PAST the 90-day horizon (auto-park)", () => {
+    expect(CLOSE_TARGET_HOLD_HORIZON_DAYS).toBe(90);
+    expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: plusDays(TODAY, 91), now: NOW })).toBe(true);
+    expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: plusDays(TODAY, 200), now: NOW })).toBe(true);
+  });
+
+  it("is FALSE exactly at the 90-day boundary (strictly greater-than, mirroring the SQL '> + INTERVAL 90 days')", () => {
+    expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: plusDays(TODAY, 90), now: NOW })).toBe(false);
+    expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: plusDays(TODAY, 89), now: NOW })).toBe(false);
+  });
+
+  it("is false for a near-term, past, null, or unparseable target when not explicitly held", () => {
+    expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: plusDays(TODAY, 30), now: NOW })).toBe(false);
+    expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: plusDays(TODAY, -10), now: NOW })).toBe(false);
+    expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: null, now: NOW })).toBe(false);
+    expect(isDealEffectivelyOnHold({ onHold: null, expectedCloseDate: "not-a-date", now: NOW })).toBe(false);
   });
 });

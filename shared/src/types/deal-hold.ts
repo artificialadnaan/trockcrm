@@ -17,9 +17,14 @@ path in server/src/modules/deals/service.ts, and the five stage-writer paths:
 */
 
 import { isGenuineEstimatingDealStageSlug } from "./workflow.js";
+import { isDealEffectivelyOnHold } from "./deal-hold-risk.js";
 
 type DealValueLike = {
   onHold?: boolean | null;
+  // The close target — a deal more than CLOSE_TARGET_HOLD_HORIZON_DAYS out is effectively on hold and
+  // zeroed even without the stored flag. Optional: a caller whose deal type lacks it falls back to the
+  // stored on_hold leg only (graceful — the far-out leg simply never fires).
+  expectedCloseDate?: string | Date | null;
   awardedAmount?: string | number | null;
   bidBoardTotalSales?: string | number | null;
   bidEstimate?: string | number | null;
@@ -124,12 +129,20 @@ export function getHoldStateAtStageEntry(
   };
 }
 
-export function getEffectiveDealValue(deal: DealValueLike): number {
-  return deal.onHold ? 0 : getRawDealValue(deal);
+// Value-zeroing keys on EFFECTIVE hold (stored on_hold OR a close target 90+ days out), so a far-out
+// deal contributes $0 to pipeline/forecast just like a parked one. `now` defaults to the call instant;
+// pass an explicit instant in tests for a deterministic horizon. (The reportable/count exclusion is
+// intentionally NOT changed — a far-out deal is $0 but still counted.)
+export function getEffectiveDealValue(deal: DealValueLike, now: Date = new Date()): number {
+  return isDealEffectivelyOnHold({ onHold: deal.onHold, expectedCloseDate: deal.expectedCloseDate, now })
+    ? 0
+    : getRawDealValue(deal);
 }
 
-export function getEffectiveAwardedDealValue(deal: DealValueLike): number {
-  return deal.onHold ? 0 : getRawAwardedDealValue(deal);
+export function getEffectiveAwardedDealValue(deal: DealValueLike, now: Date = new Date()): number {
+  return isDealEffectivelyOnHold({ onHold: deal.onHold, expectedCloseDate: deal.expectedCloseDate, now })
+    ? 0
+    : getRawAwardedDealValue(deal);
 }
 
 export function resolveEffectiveStageEnteredAt(
