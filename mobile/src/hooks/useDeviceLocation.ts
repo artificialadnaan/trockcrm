@@ -58,14 +58,21 @@ export function useDeviceLocation(): DeviceLocation {
       mounted.current = false;
     };
   }, []);
+  // Monotonic request counter: a focus/foreground resolve(false) and a manual resolve(true) can be
+  // in-flight at once, and a slower older one must NOT clobber the newer fix. Each call claims the next
+  // seq and only commits if it's still the latest.
+  const requestSeq = useRef(0);
 
   const resolve = useCallback(async (fresh: boolean) => {
+    const seq = ++requestSeq.current;
+    const commit = (next: { coords: { lat: number; lng: number } | null; status: LocationStatus }) => {
+      if (mounted.current && seq === requestSeq.current) setState(next);
+    };
     try {
       // getForegroundPermissionsAsync() reports status WITHOUT prompting — we never proactively ask.
       const { status } = await Location.getForegroundPermissionsAsync();
-      if (!mounted.current) return;
       if (status !== "granted") {
-        setState({ coords: null, status: status === "denied" ? "denied" : "pending" });
+        commit({ coords: null, status: status === "denied" ? "denied" : "pending" });
         return;
       }
       // `fresh` (explicit refresh) always gets a current fix; the passive focus/foreground path may use a
@@ -74,8 +81,7 @@ export function useDeviceLocation(): DeviceLocation {
         ? await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
         : ((await Location.getLastKnownPositionAsync({ maxAge: MAX_LAST_KNOWN_AGE_MS })) ??
           (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })));
-      if (!mounted.current) return;
-      setState(
+      commit(
         position
           ? { coords: { lat: position.coords.latitude, lng: position.coords.longitude }, status: "granted" }
           : { coords: null, status: "granted" },
@@ -85,7 +91,7 @@ export function useDeviceLocation(): DeviceLocation {
       // denial — actual denial is handled by the status !== "granted" branch above. Don't misreport it as
       // "denied"; leave status unresolved ("pending"). Either way coords is null, so Nearby simply stays
       // hidden and a later focus/foreground/refresh re-resolve can recover.
-      if (mounted.current) setState({ coords: null, status: "pending" });
+      commit({ coords: null, status: "pending" });
     }
   }, []);
 

@@ -253,7 +253,10 @@ export async function listNearbyFieldProjects(
       WHERE ${activeProjectWhere()}
         AND d.property_lat IS NOT NULL
         AND d.property_lng IS NOT NULL
-      ORDER BY distance_miles ASC
+      -- Tiebreak on id so equal-distance ties pick the SAME rows across requests (the LIMIT is otherwise
+      -- non-deterministic at the boundary). The cross-office merge also tiebreaks on id, so the final
+      -- order is fully stable.
+      ORDER BY distance_miles ASC, deal_id ASC
       LIMIT ${limit}
     )
     SELECT
@@ -280,7 +283,7 @@ export async function listNearbyFieldProjects(
         AND f.is_active = true
         AND f.deleted_at IS NULL
     ) photo_stats ON true
-    ORDER BY nearest.distance_miles ASC
+    ORDER BY nearest.distance_miles ASC, d.id ASC
   `);
 
   const projects = ((rowsResult as any).rows ?? rowsResult).map(mapFieldProject);
