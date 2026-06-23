@@ -83,11 +83,18 @@ describe("getUnassignedCompanyCamProjects", () => {
 });
 
 describe("getUnassignedCompanyCamPhotos", () => {
-  it("returns only the requested project's unassigned photos", async () => {
+  it("returns only the requested project's unassigned photos, newest first", async () => {
     const { photos, pagination } = await getUnassignedCompanyCamPhotos(tdb as never, "111");
-    expect(pagination.total).toBe(2);
-    expect(photos.map((p) => p.displayName).sort()).toEqual(["a", "b"]);
+    expect(pagination).toMatchObject({ page: 1, limit: 40, total: 2, totalPages: 1 });
+    // Service orders by timestamp DESC; assert the exact order (b is newer than a) rather than sorting.
+    expect(photos.map((p) => p.displayName)).toEqual(["b", "a"]);
     expect(photos.every((p) => p.dealId === null)).toBe(true);
     expect(photos[0].dealName).toBe("Alpha CC"); // name surfaced from notes for display
+  });
+
+  it("clamps invalid pagination params (NaN/negative) instead of producing a bad query", async () => {
+    const { photos, pagination } = await getUnassignedCompanyCamPhotos(tdb as never, "111", NaN, -5);
+    expect(pagination).toMatchObject({ page: 1, limit: 40, total: 2 });
+    expect(photos.length).toBe(2);
   });
 });

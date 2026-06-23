@@ -519,8 +519,9 @@ function CompanyCamProjectRow({
   const name = project.companycamProjectName || `CompanyCam project ${project.companycamProjectId}`;
 
   return (
-    <div
-      className="flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 hover:border-[#CC0000]/30 hover:shadow-sm transition-all cursor-pointer"
+    <button
+      type="button"
+      className="w-full text-left flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 hover:border-[#CC0000]/30 hover:shadow-sm transition-all cursor-pointer"
       onClick={onClick}
     >
       <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -557,7 +558,7 @@ function CompanyCamProjectRow({
           </div>
         ))}
       </div>
-    </div>
+    </button>
   );
 }
 

@@ -344,8 +344,11 @@ export async function getUnassignedCompanyCamPhotos(
   }>;
   pagination: { page: number; limit: number; total: number; totalPages: number };
 }> {
-  const safeLimit = Math.min(limit, 200);
-  const offset = (page - 1) * safeLimit;
+  // Guard against bad query params (NaN/0/negative from `?page=abc`/`?limit=-1`) that would otherwise
+  // produce a NaN/negative OFFSET or divide-by-zero totalPages.
+  const safePage = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1;
+  const safeLimit = Number.isFinite(limit) && limit >= 1 ? Math.min(Math.floor(limit), 200) : 40;
+  const offset = (safePage - 1) * safeLimit;
   const where = and(
     eq(files.category, "photo"),
     eq(files.isActive, true),
@@ -382,7 +385,7 @@ export async function getUnassignedCompanyCamPhotos(
     .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
-  return { photos: photoRows, pagination: { page, limit: safeLimit, total, totalPages: Math.ceil(total / safeLimit) } };
+  return { photos: photoRows, pagination: { page: safePage, limit: safeLimit, total, totalPages: Math.ceil(total / safeLimit) } };
 }
 
 /**
