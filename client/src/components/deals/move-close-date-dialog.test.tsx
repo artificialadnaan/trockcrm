@@ -36,6 +36,10 @@ const FUTURE = (() => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 })();
 
+// "Today" in the business timezone — must match the component's `businessToday` so the boundary
+// case below exercises the >= comparison exactly at equality, not one day off.
+const TODAY = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+
 function setValue(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
   const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
   const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
@@ -54,7 +58,7 @@ function saveButton(c: HTMLElement): HTMLButtonElement {
 let roots: Root[] = [];
 let containers: HTMLElement[] = [];
 
-function render(currentDate: string | null = null) {
+function render(currentDate: string | null = null, officeId?: string | null) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -65,6 +69,7 @@ function render(currentDate: string | null = null) {
         onOpenChange={mocks.onOpenChange}
         dealId="deal-1"
         currentDate={currentDate}
+        officeId={officeId}
         onSaved={mocks.onSaved}
       />
     );
@@ -119,7 +124,7 @@ describe("MoveCloseDateDialog", () => {
       saveButton(c).dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
 
-    expect(mocks.updateDeal).toHaveBeenCalledWith("deal-1", { expectedCloseDate: FUTURE });
+    expect(mocks.updateDeal).toHaveBeenCalledWith("deal-1", { expectedCloseDate: FUTURE }, { officeId: undefined });
     expect(mocks.createActivity).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "note",
@@ -135,6 +140,24 @@ describe("MoveCloseDateDialog", () => {
     expect(mocks.updateDeal.mock.invocationCallOrder[0]).toBeLessThan(mocks.createActivity.mock.invocationCallOrder[0]);
     expect(mocks.onSaved).toHaveBeenCalled();
     expect(mocks.onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("threads the deal's office into the close-date PATCH (cross-office detail targets the right tenant)", async () => {
+    const c = render(null, "office_atlanta");
+    setValue(c.querySelector("#move-close-date") as HTMLInputElement, FUTURE);
+    setValue(c.querySelector("#move-close-reason") as HTMLTextAreaElement, "Client pushed to Q4");
+
+    await act(async () => {
+      saveButton(c).dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    // The PATCH must carry the office the deal was read from — without it a cross-office move hits the
+    // viewer's active office and never applies to the deal on screen.
+    expect(mocks.updateDeal).toHaveBeenCalledWith(
+      "deal-1",
+      { expectedCloseDate: FUTURE },
+      { officeId: "office_atlanta" }
+    );
   });
 
   it("still refreshes + closes when only the audit note fails (the date is already saved)", async () => {
@@ -156,5 +179,37 @@ describe("MoveCloseDateDialog", () => {
   it("seeds the picker from the deal's current close date", () => {
     const c = render(FUTURE);
     expect((c.querySelector("#move-close-date") as HTMLInputElement).value).toBe(FUTURE);
+  });
+
+  it("offers Remove postponement ONLY when the deal has an active (future) close target", () => {
+    const removeBtn = (c: HTMLElement) =>
+      Array.from(c.querySelectorAll("button")).find((b) => b.textContent?.includes("Remove postponement"));
+    expect(removeBtn(render(null))).toBeUndefined(); // nothing postponed
+    expect(removeBtn(render("2020-01-01"))).toBeUndefined(); // a past date isn't postponing the SLA
+    expect(removeBtn(render(TODAY))).toBeDefined(); // today is the >= boundary -> still an active postponement
+    expect(removeBtn(render(FUTURE))).toBeDefined(); // active postponement -> offer the undo
+  });
+
+  it("Remove postponement clears the close date, logs a note, refreshes + closes", async () => {
+    const c = render(FUTURE);
+    const removeBtn = Array.from(c.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Remove postponement")
+    )!;
+    await act(async () => {
+      removeBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(mocks.updateDeal).toHaveBeenCalledWith("deal-1", { expectedCloseDate: null }, { officeId: undefined });
+    expect(mocks.createActivity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "note",
+        subject: "Close target removed",
+        // the note records ONLY that the target was cleared — it never claims the SLA resumed (a deal
+        // that is also On Hold stays held), so assert the action copy, not an SLA-state claim
+        body: expect.stringContaining("close-date postponement was cleared"),
+        dealId: "deal-1",
+      })
+    );
+    expect(mocks.onSaved).toHaveBeenCalled();
+    expect(mocks.onOpenChange).toHaveBeenCalledWith(false);
   });
 });

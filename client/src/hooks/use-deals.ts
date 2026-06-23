@@ -679,8 +679,19 @@ export type UpdateDealPayload = Partial<WritableDealFields> & {
   migrationMode?: boolean;
 };
 
-export async function updateDeal(dealId: string, input: UpdateDealPayload) {
-  return api<{ deal: Deal }>(`/deals/${dealId}`, { method: "PATCH", json: input });
+// The office option mirrors the deal record load (useDealDetail): a cross-office edit must target the
+// SAME tenant the deal was read from, not the viewer's active office — otherwise the PATCH lands in the
+// wrong schema and the change never applies to the deal on screen.
+export async function updateDeal(
+  dealId: string,
+  input: UpdateDealPayload,
+  options: OfficeRequestOptions = {}
+) {
+  return api<{ deal: Deal }>(`/deals/${dealId}`, {
+    method: "PATCH",
+    json: input,
+    ...getOfficeRequestOptions(options.officeId),
+  });
 }
 
 // Dedicated estimator mutation — hits PATCH /deals/:id/estimator (admin/director only), NOT the

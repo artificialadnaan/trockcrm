@@ -20,6 +20,9 @@ interface EntityActivityTabProps {
   /** Deal-only: whether the viewer may edit the deal (assigned rep or admin). Gates the Move Close Date
    *  action so a view-only collaborator doesn't hit a 403 after filling the dialog. Default false. */
   canMoveCloseDate?: boolean;
+  /** Deal-only: the office the deal was read from (cross-office detail). Threaded into the Move Close
+   *  Date PATCH so a cross-office move/clear targets the deal's tenant, not the viewer's active office. */
+  officeId?: string | null;
 }
 
 const activityFilterKey: Record<SupportedActivityEntity, "companyId" | "leadId" | "dealId"> = {
@@ -74,6 +77,7 @@ export function EntityActivityTab({
   closeTargetDate = null,
   onDealChanged,
   canMoveCloseDate = false,
+  officeId = null,
 }: EntityActivityTabProps) {
   const scopedPayload = buildScopedPayload(entityType, entityId);
   const { activities, loading, error, refetch } = useActivities(scopedPayload);
@@ -125,6 +129,7 @@ export function EntityActivityTab({
           onOpenChange={setMoveCloseDateOpen}
           dealId={entityId}
           currentDate={closeTargetDate}
+          officeId={officeId}
           onSaved={async () => {
             await refetch();
             await onDealChanged?.();
