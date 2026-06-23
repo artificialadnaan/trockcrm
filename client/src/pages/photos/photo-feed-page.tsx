@@ -497,11 +497,237 @@ function groupPhotosByDate(photos: FeedPhoto[]): DateGroup[] {
   );
 }
 
+// ─── Unassigned CompanyCam Tab ──────────────────────────────────────────────
+
+interface CompanyCamProjectStat {
+  companycamProjectId: string;
+  companycamProjectName: string | null;
+  photoCount: number;
+  lastPhotoAt: string | null;
+  recentPhotos: ProjectRecentPhoto[];
+}
+
+function CompanyCamProjectRow({
+  project,
+  onClick,
+}: {
+  project: CompanyCamProjectStat;
+  onClick: () => void;
+}) {
+  const recentPhotos = project.recentPhotos?.slice(0, 5) ?? [];
+  const featurePhoto = recentPhotos[0];
+  const name = project.companycamProjectName || `CompanyCam project ${project.companycamProjectId}`;
+
+  return (
+    <div
+      className="flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 hover:border-[#CC0000]/30 hover:shadow-sm transition-all cursor-pointer"
+      onClick={onClick}
+    >
+      <div className="flex items-center gap-3 min-w-0 flex-1">
+        <div className="h-16 w-16 rounded-lg overflow-hidden bg-gray-100 shrink-0">
+          {featurePhoto ? (
+            <ProjectRecentMediaThumb photo={featurePhoto} alt={name} size="feature" />
+          ) : (
+            <div className="h-full w-full flex items-center justify-center">
+              <ImageIcon className="h-6 w-6 text-gray-300" />
+            </div>
+          )}
+        </div>
+        <div className="min-w-0">
+          <p className="font-semibold text-gray-900 truncate text-sm">{name}</p>
+          <p className="text-xs text-gray-400 font-mono truncate">cc#{project.companycamProjectId}</p>
+          {project.lastPhotoAt && (
+            <p className="text-xs text-gray-400 mt-0.5">Last photo {timeAgo(project.lastPhotoAt)}</p>
+          )}
+          <span className="inline-block mt-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+            CompanyCam · Unassigned
+          </span>
+        </div>
+      </div>
+
+      <div className="hidden md:flex flex-col items-center gap-1 shrink-0 px-4 min-w-[100px]">
+        <p className="text-xs text-gray-500 font-medium">Photos</p>
+        <p className="text-2xl font-bold text-gray-900">{project.photoCount}</p>
+      </div>
+
+      <div className="hidden lg:flex items-center gap-1 shrink-0">
+        {recentPhotos.map((photo) => (
+          <div key={photo.id} className="h-[72px] w-[72px] rounded-md overflow-hidden bg-gray-100 shrink-0">
+            <ProjectRecentMediaThumb photo={photo} alt="" size="strip" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Drill-in: paginated photos for a single unassigned CompanyCam project.
+function UnassignedProjectPhotos({
+  project,
+  onBack,
+}: {
+  project: CompanyCamProjectStat;
+  onBack: () => void;
+}) {
+  const [photos, setPhotos] = useState<FeedPhoto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api<{ photos: FeedPhoto[]; pagination: { totalPages: number; total: number } }>(
+      `/files/photos/unassigned-companycam/${encodeURIComponent(project.companycamProjectId)}?page=${page}&limit=60`,
+    )
+      .then((d) => {
+        if (cancelled) return;
+        setPhotos(d.photos);
+        setTotalPages(d.pagination.totalPages);
+        setTotal(d.pagination.total);
+      })
+      .catch((err) => console.error("Failed to load unassigned CompanyCam photos:", err))
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [project.companycamProjectId, page]);
+
+  const name = project.companycamProjectName || `CompanyCam project ${project.companycamProjectId}`;
+
+  return (
+    <div className="px-6 py-4">
+      <button
+        type="button"
+        onClick={onBack}
+        className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-4"
+      >
+        <ChevronLeft className="h-4 w-4" /> Back to unassigned projects
+      </button>
+      <h2 className="text-lg font-semibold text-gray-900">{name}</h2>
+      <p className="text-xs text-gray-500 mb-4">
+        cc#{project.companycamProjectId} &bull; {total} photo{total !== 1 ? "s" : ""}
+      </p>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-2">
+            {photos.map((photo, i) => (
+              <div
+                key={photo.id}
+                className="w-[calc(50%-4px)] sm:w-[calc(25%-6px)] md:w-[calc(20%-6.4px)] lg:w-[calc(16.666%-6.7px)] xl:w-[150px]"
+              >
+                <PhotoGridCard photo={photo} onClick={() => setSelectedIndex(i)} />
+              </div>
+            ))}
+          </div>
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-4 py-6 border-t mt-6">
+              <Button variant="outline" size="sm" onClick={() => setPage((p) => p - 1)} disabled={page <= 1}>
+                <ChevronLeft className="h-4 w-4 mr-1" /> Prev
+              </Button>
+              <span className="text-sm text-gray-500 font-medium">Page {page} of {totalPages}</span>
+              <Button variant="outline" size="sm" onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages}>
+                Next <ChevronRight className="h-4 w-4 ml-1" />
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+
+      {selectedIndex != null && photos[selectedIndex] && (
+        <PhotoLightbox
+          photo={photos[selectedIndex]}
+          initialUrl={thumbCache.get(photos[selectedIndex].id) ?? null}
+          onClose={() => setSelectedIndex(null)}
+          onPrev={selectedIndex > 0 ? () => setSelectedIndex((p) => p! - 1) : undefined}
+          onNext={selectedIndex < photos.length - 1 ? () => setSelectedIndex((p) => p! + 1) : undefined}
+        />
+      )}
+    </div>
+  );
+}
+
+function UnassignedTab() {
+  const [projects, setProjects] = useState<CompanyCamProjectStat[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<CompanyCamProjectStat | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api<{ projects: CompanyCamProjectStat[] }>("/files/photos/unassigned-companycam")
+      .then((d) => { if (!cancelled) setProjects(d.projects); })
+      .catch((err) => console.error("Failed to load unassigned CompanyCam projects:", err))
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!search) return projects;
+    const q = search.toLowerCase();
+    return projects.filter(
+      (p) => (p.companycamProjectName ?? "").toLowerCase().includes(q) || p.companycamProjectId.includes(q),
+    );
+  }, [projects, search]);
+
+  const totalPhotos = useMemo(() => projects.reduce((s, p) => s + p.photoCount, 0), [projects]);
+
+  if (selected) return <UnassignedProjectPhotos project={selected} onBack={() => setSelected(null)} />;
+
+  return (
+    <div className="px-6 py-4">
+      <div className="relative mb-3">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+        <Input
+          placeholder="Find a CompanyCam project..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="pl-9 bg-white"
+        />
+      </div>
+      {!loading && projects.length > 0 && (
+        <p className="text-xs text-gray-500 mb-4">
+          {projects.length} unassigned CompanyCam project{projects.length !== 1 ? "s" : ""} &bull; {totalPhotos} photo
+          {totalPhotos !== 1 ? "s" : ""} not yet linked to a deal
+        </p>
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-20 text-center">
+          <div className="rounded-full bg-gray-100 p-6 mb-4">
+            <ImageIcon className="h-12 w-12 text-gray-300" />
+          </div>
+          <h2 className="text-lg font-semibold text-gray-700 mb-1">No unassigned photos</h2>
+          <p className="text-sm text-gray-500">
+            {search ? "Try a different search term" : "Rescued CompanyCam photos without a deal will appear here"}
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map((project) => (
+            <CompanyCamProjectRow key={project.companycamProjectId} project={project} onClick={() => setSelected(project)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Component ─────────────────────────────────────────────────────────
 
 export function PhotoFeedPage() {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<"projects" | "photos">("projects");
+  const [activeTab, setActiveTab] = useState<"projects" | "photos" | "unassigned">("projects");
 
   // ── Projects tab state ──
   const [projectStats, setProjectStats] = useState<ProjectStat[]>([]);
@@ -606,6 +832,17 @@ export function PhotoFeedPage() {
           >
             Photos
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("unassigned")}
+            className={`px-5 py-1.5 rounded-full text-sm font-medium transition-colors ${
+              activeTab === "unassigned"
+                ? "bg-[#CC0000] text-white shadow-sm"
+                : "text-gray-600 hover:text-gray-900"
+            }`}
+          >
+            Unassigned
+          </button>
         </div>
       </div>
 
@@ -629,7 +866,10 @@ export function PhotoFeedPage() {
 
       {/* ─── Tab Content ─── */}
       <div className="flex-1 overflow-y-auto">
-        {activeTab === "projects" ? (
+        {activeTab === "unassigned" ? (
+          /* ═══════════════════ UNASSIGNED (CompanyCam) TAB ═══════════════════ */
+          <UnassignedTab />
+        ) : activeTab === "projects" ? (
           /* ═══════════════════ PROJECTS TAB ═══════════════════ */
           <div className="px-6 py-4">
             {/* Search + filter bar */}

@@ -228,6 +228,163 @@ export async function getProjectPhotoStats(
   };
 }
 
+// CompanyCam rescue photos that aren't linked to a deal (deal_id IS NULL) carry their source project
+// id/name in the `notes` JSON. Extract it with a CASE guard so the ::jsonb cast NEVER runs on a
+// non-JSON notes value (other file types store plain-text notes) — CASE only evaluates THEN when WHEN
+// is true, so non-`{` rows are skipped safely.
+const ccProjectIdExpr = sql<string | null>`CASE WHEN left(btrim(${files.notes}), 1) = '{' THEN (btrim(${files.notes})::jsonb ->> 'companycamProjectId') END`;
+const ccProjectNameExpr = sql<string | null>`CASE WHEN left(btrim(${files.notes}), 1) = '{' THEN (btrim(${files.notes})::jsonb ->> 'companycamProjectName') END`;
+
+/**
+ * Unassigned CompanyCam photos grouped by their source CompanyCam project (mirrors CompanyCam's own
+ * project-folder structure). Powers the "Unassigned" tab on the photo feed. One row per CompanyCam
+ * project that has at least one unlinked rescued photo.
+ */
+export async function getUnassignedCompanyCamProjects(tenantDb: TenantDb): Promise<{
+  projects: Array<{
+    companycamProjectId: string;
+    companycamProjectName: string | null;
+    photoCount: number;
+    lastPhotoAt: string | null;
+    recentPhotos: Array<{
+      id: string;
+      displayName: string | null;
+      mimeType: string | null;
+      r2Key: string | null;
+      externalUrl: string | null;
+      externalThumbnailUrl: string | null;
+    }>;
+  }>;
+}> {
+  // CTE makes the CASE-guarded project id a real column so we can GROUP BY it and rank within each
+  // project (a correlated subquery over the ungrouped `notes` is illegal post-GROUP BY). row_number()
+  // + json_agg FILTER picks the 5 most-recent photos per project in one pass.
+  const result = await tenantDb.execute(sql`
+    WITH cc AS (
+      SELECT ${files.id} AS id, ${files.displayName} AS display_name, ${files.mimeType} AS mime_type,
+             ${files.r2Key} AS r2_key, ${files.externalUrl} AS external_url,
+             ${files.externalThumbnailUrl} AS external_thumbnail_url,
+             COALESCE(${files.takenAt}, ${files.createdAt}) AS sort_at,
+             ${ccProjectIdExpr} AS pid, ${ccProjectNameExpr} AS pname
+      FROM ${files}
+      WHERE ${files.category} = 'photo' AND ${files.isActive} = true
+        AND ${files.subcategory} = 'CompanyCam' AND ${files.dealId} IS NULL
+    ),
+    ranked AS (
+      SELECT *, row_number() OVER (PARTITION BY pid ORDER BY sort_at DESC NULLS LAST) AS rn
+      FROM cc WHERE pid IS NOT NULL
+    )
+    SELECT
+      pid AS "companycamProjectId",
+      max(pname) AS "companycamProjectName",
+      count(*)::int AS "photoCount",
+      max(sort_at)::text AS "lastPhotoAt",
+      COALESCE(json_agg(json_build_object(
+        'id', id, 'displayName', display_name, 'mimeType', mime_type,
+        'r2Key', r2_key, 'externalUrl', external_url, 'externalThumbnailUrl', external_thumbnail_url
+      ) ORDER BY sort_at DESC NULLS LAST) FILTER (WHERE rn <= 5), '[]'::json) AS "recentPhotos"
+    FROM ranked
+    GROUP BY pid
+    ORDER BY max(sort_at) DESC NULLS LAST
+    LIMIT 1000
+  `);
+
+  const rows = (result as unknown as {
+    rows: Array<{
+      companycamProjectId: string;
+      companycamProjectName: string | null;
+      photoCount: number;
+      lastPhotoAt: string | null;
+      recentPhotos: unknown;
+    }>;
+  }).rows;
+
+  return {
+    projects: rows.map((r) => ({
+      companycamProjectId: r.companycamProjectId,
+      companycamProjectName: r.companycamProjectName,
+      photoCount: Number(r.photoCount),
+      lastPhotoAt: r.lastPhotoAt,
+      recentPhotos: Array.isArray(r.recentPhotos)
+        ? (r.recentPhotos as never[])
+        : typeof r.recentPhotos === "string"
+          ? JSON.parse(r.recentPhotos)
+          : [],
+    })),
+  };
+}
+
+/**
+ * Paginated unassigned CompanyCam photos for a single source project (the drill-in from the
+ * "Unassigned" tab). Same item shape as getPhotoFeed so the client grid can be reused.
+ */
+export async function getUnassignedCompanyCamPhotos(
+  tenantDb: TenantDb,
+  companycamProjectId: string,
+  page = 1,
+  limit = 40,
+): Promise<{
+  photos: Array<{
+    id: string;
+    displayName: string;
+    mimeType: string;
+    subcategory: string | null;
+    dealId: string | null;
+    externalUrl: string | null;
+    externalThumbnailUrl: string | null;
+    r2Key: string;
+    takenAt: Date | null;
+    createdAt: Date;
+    geoLat: string | null;
+    geoLng: string | null;
+    uploadedBy: string;
+    dealNumber: string | null;
+    dealName: string | null;
+    uploaderName: string;
+  }>;
+  pagination: { page: number; limit: number; total: number; totalPages: number };
+}> {
+  const safeLimit = Math.min(limit, 200);
+  const offset = (page - 1) * safeLimit;
+  const where = and(
+    eq(files.category, "photo"),
+    eq(files.isActive, true),
+    eq(files.subcategory, "CompanyCam"),
+    sql`${files.dealId} IS NULL`,
+    sql`${ccProjectIdExpr} = ${companycamProjectId}`,
+  );
+
+  const countResult = await tenantDb.select({ count: sql<number>`count(*)` }).from(files).where(where);
+  const photoRows = await tenantDb
+    .select({
+      id: files.id,
+      displayName: files.displayName,
+      mimeType: files.mimeType,
+      subcategory: files.subcategory,
+      dealId: files.dealId,
+      externalUrl: files.externalUrl,
+      externalThumbnailUrl: files.externalThumbnailUrl,
+      r2Key: files.r2Key,
+      takenAt: files.takenAt,
+      createdAt: files.createdAt,
+      geoLat: files.geoLat,
+      geoLng: files.geoLng,
+      uploadedBy: files.uploadedBy,
+      dealNumber: sql<string | null>`NULL`,
+      dealName: ccProjectNameExpr,
+      uploaderName: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
+    })
+    .from(files)
+    .leftJoin(users, eq(users.id, files.uploadedBy))
+    .where(where)
+    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
+    .limit(safeLimit)
+    .offset(offset);
+
+  const total = Number(countResult[0]?.count ?? 0);
+  return { photos: photoRows, pagination: { page, limit: safeLimit, total, totalPages: Math.ceil(total / safeLimit) } };
+}
+
 /**
  * Count photos created on or after `since`.
  * Same RBAC filter as getPhotoFeed — reps only see photos from their assigned deals.

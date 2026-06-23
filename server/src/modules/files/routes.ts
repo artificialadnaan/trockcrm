@@ -31,7 +31,7 @@ import {
 import { getDealById } from "../deals/service.js";
 import { assertDealScopingWriteAllowed } from "../deals/scoping-service.js";
 import { getLeadById } from "../leads/service.js";
-import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats } from "./feed-service.js";
+import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats, getUnassignedCompanyCamProjects, getUnassignedCompanyCamPhotos } from "./feed-service.js";
 import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
 import { emitUploadedFileEvent, recordUploadedFileSideEffects } from "./upload-workflow.js";
 import { assertDealCollaboratorAccess, assertLeadCollaboratorAccess } from "../../lib/collaboration-access.js";
@@ -567,6 +567,35 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
 router.get("/photos/project-stats", async (req, res, next) => {
   try {
     const result = await getProjectPhotoStats(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/files/photos/unassigned-companycam — rescued CompanyCam photos with no deal, grouped by
+// their source CompanyCam project (the "Unassigned" tab).
+router.get("/photos/unassigned-companycam", async (req, res, next) => {
+  try {
+    const result = await getUnassignedCompanyCamProjects(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/files/photos/unassigned-companycam/:companycamProjectId — paginated photos for one
+// unassigned CompanyCam project (drill-in from the "Unassigned" tab).
+router.get("/photos/unassigned-companycam/:companycamProjectId", async (req, res, next) => {
+  try {
+    const result = await getUnassignedCompanyCamPhotos(
+      req.tenantDb!,
+      req.params.companycamProjectId,
+      req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+      req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    );
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {
