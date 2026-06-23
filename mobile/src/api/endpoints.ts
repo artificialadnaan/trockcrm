@@ -58,8 +58,11 @@ export const getProjects = (
   params: { search?: string; status?: string; page?: number; perPage?: number; lat?: number; lng?: number },
 ) => f<ProjectsResponse>("/field/projects", { query: { status: "active", ...params } });
 
-export const getStarredProjects = (f: Fetcher) =>
-  f<StarredProjectsResponse>("/field/projects/starred");
+// Accepts the same optional GPS fix as getProjects so starred rows carry matching distanceMiles.
+export const getStarredProjects = (f: Fetcher, coords?: { lat: number; lng: number } | null) =>
+  f<StarredProjectsResponse>("/field/projects/starred", {
+    query: coords ? { lat: coords.lat, lng: coords.lng } : undefined,
+  });
 
 export const starProject = (f: Fetcher, dealId: string) =>
   f<StarResponse>(`/field/projects/${dealId}/star`, { method: "POST" });

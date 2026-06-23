@@ -151,6 +151,24 @@ function activeProjectWhere(search?: string) {
 // is ample depth (deeper navigation is expected to narrow via search). This is a FIELD-ONLY service.
 export const FIELD_PROJECTS_MAX_FETCH = 500;
 
+// Great-circle distance (miles) from a GPS fix to deal `d`, or NULL SQL when no fix is given. A deal with
+// NULL coordinates yields NULL — guarded by an explicit CASE because `GREATEST(-1, NULL)` returns -1 in
+// Postgres (NULL is IGNORED, not propagated), so without it a null-coordinate deal would acos(-1)=π into a
+// bogus ~12,437mi antipode distance. 3959 = Earth radius in miles; the LEAST/GREATEST(-1,1) clamp guards
+// acos against float drift past ±1. Matches the field photo-geotag distance elsewhere.
+function distanceMilesSql(lat?: number, lng?: number) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return sql`CASE WHEN d.property_lat IS NULL OR d.property_lng IS NULL THEN NULL ELSE (
+    3959 * acos(
+      LEAST(1, GREATEST(-1,
+        cos(radians(${lat})) * cos(radians(d.property_lat))
+        * cos(radians(d.property_lng) - radians(${lng}))
+        + sin(radians(${lat})) * sin(radians(d.property_lat))
+      ))
+    )
+  ) END`;
+}
+
 export async function listFieldProjects(
   tenantDb: TenantDb,
   access: FieldAccessContext,
@@ -166,26 +184,12 @@ export async function listFieldProjects(
 
   // When the caller passes a GPS fix, order the WHOLE list by proximity (closest first) instead of
   // recency. Deals with NULL coordinates yield a NULL distance and sort LAST (still listed, just after
-  // every geocoded deal), with recency as the tiebreak within each distance group. Without coords the
-  // list keeps its recency order. The haversine math (3959 = Earth radius in miles; LEAST/GREATEST clamp
-  // guards acos against float drift) matches the field photo-geotag distance elsewhere.
-  const sortByDistance = Number.isFinite(input.lat) && Number.isFinite(input.lng);
-  // A deal with NULL coordinates must yield a NULL distance (it sorts LAST and shows no label). Guard
-  // with an explicit CASE: `GREATEST(-1, NULL)` returns -1 in Postgres (NULL is IGNORED, not propagated),
-  // so without this a null-coordinate deal would acos(-1)=π into a bogus ~12,437mi antipode distance.
-  const distanceMiles = sortByDistance
-    ? sql`CASE WHEN d.property_lat IS NULL OR d.property_lng IS NULL THEN NULL ELSE (
-        3959 * acos(
-          LEAST(1, GREATEST(-1,
-            cos(radians(${input.lat})) * cos(radians(d.property_lat))
-            * cos(radians(d.property_lng) - radians(${input.lng}))
-            + sin(radians(${input.lat})) * sin(radians(d.property_lat))
-          ))
-        )
-      ) END`
-    : sql`NULL`;
+  // every geocoded deal), with recency as the tiebreak within each distance group. Without coords the list
+  // keeps its recency order.
+  const distance = distanceMilesSql(input.lat, input.lng);
+  const distanceMiles = distance ?? sql`NULL`;
   const recency = sql`COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at)`;
-  const orderBy = sortByDistance
+  const orderBy = distance
     ? sql`distance_miles ASC NULLS LAST, ${recency} DESC NULLS LAST`
     : sql`${recency} DESC NULLS LAST`;
 
@@ -230,7 +234,19 @@ export async function listFieldProjects(
   return { projects, total, page, perPage };
 }
 
-export async function listStarredFieldProjects(tenantDb: TenantDb, access: FieldAccessContext) {
+export async function listStarredFieldProjects(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  input: { lat?: number; lng?: number } = {},
+) {
+  // Carry the same distance as the main list when a GPS fix is present, so a starred project shows the
+  // SAME distance pill it would in the list (and the pinned set reads nearest-first); recency otherwise.
+  const distance = distanceMilesSql(input.lat, input.lng);
+  const distanceMiles = distance ?? sql`NULL`;
+  const recency = sql`COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at)`;
+  const orderBy = distance
+    ? sql`distance_miles ASC NULLS LAST, ${recency} DESC NULLS LAST`
+    : sql`${recency} DESC NULLS LAST`;
   const result = await tenantDb.execute(sql`
     SELECT
       d.id,
@@ -242,7 +258,8 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, access: Field
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
       COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) AS last_activity_at,
       COALESCE(photo_stats.photo_count, 0)::int AS photo_count,
-      true AS starred
+      true AS starred,
+      ${distanceMiles} AS distance_miles
     FROM field_user_starred_projects fsp
     INNER JOIN deals d ON d.id = fsp.deal_id
     LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -256,7 +273,7 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, access: Field
     ) photo_stats ON true
     WHERE fsp.user_id = ${access.userId}::uuid
       AND ${activeProjectWhere()}
-    ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
+    ORDER BY ${orderBy}, d.id ASC
   `);
 
   return { projects: ((result as any).rows ?? result).map(mapFieldProject) };

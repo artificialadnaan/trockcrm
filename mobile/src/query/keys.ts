@@ -7,7 +7,8 @@ export const qk = {
   // never a continuous watch, so there's no jitter stream to debounce.
   projects: (uid: string, search: string, coords: { lat: number; lng: number } | null = null) =>
     ["projects", uid, search, coords?.lat ?? null, coords?.lng ?? null] as const,
-  starred: (uid: string) => ["starred", uid] as const,
+  starred: (uid: string, coords: { lat: number; lng: number } | null = null) =>
+    ["starred", uid, coords?.lat ?? null, coords?.lng ?? null] as const,
   projectPhotos: (uid: string, dealId: string) => ["projectPhotos", uid, dealId] as const,
   projectReports: (uid: string, dealId: string) => ["projectReports", uid, dealId] as const,
   pending: (uid: string) => ["pending", uid] as const,

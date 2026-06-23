@@ -26,7 +26,7 @@ export default function ProjectsScreen() {
   // no distance labels and the default order.
   const { coords, refresh: refreshLocation } = useDeviceLocation();
   const projectsQuery = useProjects(debounced, coords);
-  const starredQuery = useStarredProjects(!searching);
+  const starredQuery = useStarredProjects(!searching, coords);
   const toggleStar = useToggleStar();
 
   const allProjects = projectsQuery.data?.projects ?? [];
@@ -96,7 +96,7 @@ export default function ProjectsScreen() {
         keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.color.brandRed} />}
         ListHeaderComponent={
-          projectsQuery.isError || degraded || starred.length > 0 ? (
+          projectsQuery.isError || degraded || starred.length > 0 || (coords && projects.length > 0) ? (
             <View style={{ gap: theme.space.md }}>
               {projectsQuery.isError ? (
                 <Banner message="Couldn't load projects. Pull to refresh." />
@@ -112,18 +112,18 @@ export default function ProjectsScreen() {
                       key={`starred-${project.id}`}
                       project={project}
                       writableOfficeId={writableOfficeId}
+                      distanceLabel={formatDistanceMiles(project.distanceMiles)}
                       onPress={() => openProject(project)}
                       onToggleStar={() => onToggleStar(project)}
                     />
                   ))}
-                  {/* Title the main list — only when it has rows (avoids an orphan heading when every loaded
-                      project is starred). "Nearest projects" in proximity mode, else "All projects". */}
-                  {projects.length > 0 ? (
-                    <Text style={[styles.sectionTitle, { marginTop: theme.space.sm }]}>
-                      {coords ? "Nearest projects" : "All projects"}
-                    </Text>
-                  ) : null}
                 </View>
+              ) : null}
+              {/* Title the main list when it's proximity-sorted (so the distance order is labeled even with
+                  no Starred section) OR when a Starred section sits above it (to disambiguate the two).
+                  Gated on projects.length > 0 so it can't orphan when every loaded project is starred. */}
+              {projects.length > 0 && (coords || starred.length > 0) ? (
+                <Text style={styles.sectionTitle}>{coords ? "Nearest projects" : "All projects"}</Text>
               ) : null}
             </View>
           ) : null

@@ -23,12 +23,15 @@ export function useProjects(search: string, coords?: { lat: number; lng: number 
   });
 }
 
-/** Starred projects (skipped while searching, like the web app). */
-export function useStarredProjects(enabled: boolean) {
+/**
+ * Starred projects (skipped while searching, like the web app). Passes the GPS fix so starred rows carry
+ * the same distanceMiles the list shows (and the pinned set reads nearest-first); coords are in the key.
+ */
+export function useStarredProjects(enabled: boolean, coords?: { lat: number; lng: number } | null) {
   const { fetcher, user } = useAuth();
   return useQuery({
-    queryKey: qk.starred(user?.id ?? "anon"),
-    queryFn: () => api.getStarredProjects(fetcher),
+    queryKey: qk.starred(user?.id ?? "anon", coords ?? null),
+    queryFn: () => api.getStarredProjects(fetcher, coords),
     enabled: enabled && !!user,
   });
 }
@@ -41,10 +44,10 @@ export function useToggleStar() {
       starred ? api.unstarProject(fetcher, dealId) : api.starProject(fetcher, dealId),
     onSuccess: () => {
       if (!user) return;
-      // prefix-invalidate every ["projects", uid, *] (all search/coords buckets) and the starred list, so
-      // a star toggle refreshes the cached `starred` flag everywhere it's shown.
+      // prefix-invalidate every ["projects", uid, *] and ["starred", uid, *] bucket (all search/coords
+      // variants), so a star toggle refreshes the cached `starred` flag everywhere it's shown.
       void qc.invalidateQueries({ queryKey: ["projects", user.id] });
-      void qc.invalidateQueries({ queryKey: qk.starred(user.id) });
+      void qc.invalidateQueries({ queryKey: ["starred", user.id] });
     },
   });
 }

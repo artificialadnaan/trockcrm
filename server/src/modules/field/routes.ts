@@ -227,12 +227,26 @@ fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
 fieldRoutes.get("/projects/starred", requireFieldContractor, async (req, res, next) => {
   try {
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    // Same optional GPS fix as /projects — so a starred project carries the SAME distance pill the list
+    // would show it, and the pinned set reads nearest-first; recency when no fix.
+    const coords = parseOptionalCoordinatePair(req.query.lat, req.query.lng);
     const { results, failures } = assertFanOutNotFullyDegraded(
-      await fanOutActiveOffices((officeDb) => listStarredFieldProjects(officeDb, access)),
+      await fanOutActiveOffices((officeDb) => listStarredFieldProjects(officeDb, access, { lat: coords?.lat, lng: coords?.lng })),
     );
-    const projects = results
-      .flatMap(({ office, value }) => value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })))
-      .sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+    const projects = results.flatMap(({ office, value }) =>
+      value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })),
+    );
+    if (coords) {
+      projects.sort((a, b) => {
+        const da = a.distanceMiles ?? Infinity;
+        const db = b.distanceMiles ?? Infinity;
+        if (da !== db) return da - db;
+        const recency = (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? "");
+        return recency !== 0 ? recency : a.id.localeCompare(b.id);
+      });
+    } else {
+      projects.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+    }
     res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
   } catch (err) {
     next(err);

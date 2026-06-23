@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { listFieldProjects } from "../../../src/modules/field/projects-service.js";
+import { listFieldProjects, listStarredFieldProjects } from "../../../src/modules/field/projects-service.js";
 
 /**
  * REAL-SQL (PGlite) proof that the field project LIST orders by proximity when a lat/lng is supplied
@@ -73,6 +73,26 @@ describe("listFieldProjects proximity sort", () => {
     const { projects } = await listFieldProjects(tdb, ACCESS, {});
     expect(projects.map((p) => p.id)).toEqual([D.noCoords, D.far, D.mid, D.near]);
     // No distance column selected → no distanceMiles attached.
+    expect(projects.every((p) => p.distanceMiles == null)).toBe(true);
+  });
+});
+
+describe("listStarredFieldProjects proximity sort", () => {
+  beforeAll(async () => {
+    // Star the near + far deals so the starred set has two geocoded entries to order.
+    await pg.exec(`INSERT INTO field_user_starred_projects (user_id, deal_id) VALUES
+      ('${FIELD_USER}','${D.far}'),('${FIELD_USER}','${D.near}');`);
+  });
+
+  it("carries distanceMiles and orders starred nearest-first when given a fix", async () => {
+    const { projects } = await listStarredFieldProjects(tdb, ACCESS, ORIGIN);
+    expect(projects.map((p) => p.id)).toEqual([D.near, D.far]); // near before far
+    expect(projects[0].distanceMiles).toBeGreaterThan(0);
+    expect(projects[0].distanceMiles).toBeLessThan(projects[1].distanceMiles!);
+  });
+
+  it("omits distanceMiles (recency order) when no fix is given", async () => {
+    const { projects } = await listStarredFieldProjects(tdb, ACCESS, {});
     expect(projects.every((p) => p.distanceMiles == null)).toBe(true);
   });
 });
