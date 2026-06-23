@@ -64,7 +64,11 @@ export function useDeviceLocation(): DeviceLocation {
               : { coords: null, status: "granted" },
           );
         } catch {
-          if (!cancelled) setState({ coords: null, status: "denied" });
+          // A thrown error here is a transient GPS/provider failure (or a permissions-API hiccup), NOT a
+          // denial — actual denial is handled by the status !== "granted" branch above. Don't misreport
+          // it as "denied"; leave status unresolved ("pending"). Either way coords is null, so Nearby
+          // simply stays hidden and a later focus/foreground re-resolve can recover.
+          if (!cancelled) setState({ coords: null, status: "pending" });
         }
       };
 
