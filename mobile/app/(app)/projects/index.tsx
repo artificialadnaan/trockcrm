@@ -5,9 +5,9 @@ import { useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
 import { useDebouncedValue } from "../../../src/hooks/useDebouncedValue";
 import { useDeviceLocation } from "../../../src/hooks/useDeviceLocation";
-import { useNearbyProjects, useProjects, useStarredProjects, useToggleStar } from "../../../src/query/hooks";
+import { useProjects, useStarredProjects, useToggleStar } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { formatDistanceMiles, isProjectOffOffice, partitionProjectSections, projectNumberLabel, relativeDate, selectNearbySource, type FieldProject } from "../../../src/projects/field-projects";
+import { formatDistanceMiles, isProjectOffOffice, projectNumberLabel, relativeDate, type FieldProject } from "../../../src/projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
@@ -21,30 +21,19 @@ export default function ProjectsScreen() {
   const debounced = useDebouncedValue(search.trim(), 250);
   const searching = debounced.length > 0;
 
+  // When a GPS fix is available the server orders the WHOLE list by proximity (closest first) and stamps
+  // each row's distance; without it the list stays recency-ordered. No nagging — a missing fix just means
+  // no distance labels and the default order.
   const { coords, refresh: refreshLocation } = useDeviceLocation();
-  const projectsQuery = useProjects(debounced);
+  const projectsQuery = useProjects(debounced, coords);
   const starredQuery = useStarredProjects(!searching);
-  // Nearby is hidden while searching (like Starred) and whenever there's no GPS fix (the hook returns
-  // null coords, which disables the query) — so no permission nagging and no empty section.
-  const nearbyQuery = useNearbyProjects(coords, !searching);
   const toggleStar = useToggleStar();
 
   const allProjects = projectsQuery.data?.projects ?? [];
-  // A ranked "nearest 3" is suppressed whenever it can't be trusted — while searching, when an office
-  // was omitted from the fan-out, or when the latest fetch errored (React Query retains stale data on a
-  // failed refetch). See selectNearbySource (pure + unit-tested).
-  const nearbySource = selectNearbySource({
-    searching,
-    isError: nearbyQuery.isError,
-    projects: nearbyQuery.data?.projects,
-    degradedOffices: nearbyQuery.data?.degradedOffices,
-  });
-  // Dedup precedence Nearby > Starred > All so nothing renders twice (pure + unit-tested).
-  const { nearby, starred: visibleStarred, all: projects, hasSections } = partitionProjectSections(
-    nearbySource,
-    !searching ? starredQuery.data?.projects ?? [] : [],
-    allProjects,
-  );
+  const starred = !searching ? starredQuery.data?.projects ?? [] : [];
+  // Don't list a starred project twice — drop them from the main list when the Starred section shows.
+  const starredIds = new Set(starred.map((p) => p.id));
+  const projects = starred.length > 0 ? allProjects.filter((p) => !starredIds.has(p.id)) : allProjects;
 
   function openProject(project: FieldProject) {
     router.push({
@@ -67,19 +56,14 @@ export default function ProjectsScreen() {
     toggleStar.mutate({ dealId: project.id, starred: project.starred });
   }
 
-  const refreshing = projectsQuery.isRefetching || starredQuery.isRefetching || nearbyQuery.isRefetching;
+  const refreshing = projectsQuery.isRefetching || starredQuery.isRefetching;
   function onRefresh() {
+    // Re-acquire a FRESH GPS fix so a crew that drove to a new site re-sorts around where they are. A
+    // changed fix bumps the projects query key (coords are in it) and refetches in the new distance order;
+    // the explicit refetch covers the same-coordinate case (e.g. a project added nearby).
+    refreshLocation();
     void projectsQuery.refetch();
-    if (!searching) {
-      void starredQuery.refetch();
-      // Re-acquire a FRESH GPS fix first — a crew that drove to a new site with this screen open would
-      // otherwise pull-to-refresh against the focus-time coordinate. A changed fix bumps the nearby query
-      // key (coords are in it), which refetches on its own; the explicit refetch below covers the
-      // same-coordinate case (e.g. a new project added nearby). refetch() runs the queryFn even when the
-      // query is disabled without coords — and that queryFn dereferences coords — so guard it.
-      refreshLocation();
-      if (coords) void nearbyQuery.refetch();
-    }
+    if (!searching) void starredQuery.refetch();
   }
 
   return (
@@ -108,31 +92,15 @@ export default function ProjectsScreen() {
         keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.color.brandRed} />}
         ListHeaderComponent={
-          projectsQuery.isError || hasSections ? (
+          projectsQuery.isError || starred.length > 0 ? (
             <View style={{ gap: theme.space.md }}>
               {projectsQuery.isError ? (
                 <Banner message="Couldn't load projects. Pull to refresh." />
               ) : null}
-              {/* Nearby sits above Starred — it's the "right now" context. Each row shows its distance. */}
-              {nearby.length > 0 ? (
-                <View style={{ gap: theme.space.sm }}>
-                  <Text style={styles.sectionTitle}>Nearby</Text>
-                  {nearby.map((project) => (
-                    <ProjectRow
-                      key={`nearby-${project.id}`}
-                      project={project}
-                      writableOfficeId={writableOfficeId}
-                      distanceLabel={formatDistanceMiles(project.distanceMiles)}
-                      onPress={() => openProject(project)}
-                      onToggleStar={() => onToggleStar(project)}
-                    />
-                  ))}
-                </View>
-              ) : null}
-              {visibleStarred.length > 0 ? (
+              {starred.length > 0 ? (
                 <View style={{ gap: theme.space.sm }}>
                   <Text style={styles.sectionTitle}>Starred</Text>
-                  {visibleStarred.map((project) => (
+                  {starred.map((project) => (
                     <ProjectRow
                       key={`starred-${project.id}`}
                       project={project}
@@ -141,24 +109,31 @@ export default function ProjectsScreen() {
                       onToggleStar={() => onToggleStar(project)}
                     />
                   ))}
+                  {/* Title the main list — "Nearest projects" when sorted by proximity, else "All projects". */}
+                  <Text style={[styles.sectionTitle, { marginTop: theme.space.sm }]}>
+                    {coords ? "Nearest projects" : "All projects"}
+                  </Text>
                 </View>
-              ) : null}
-              {/* Label the main list once any section renders above it, so "All projects" isn't ambiguous. */}
-              {hasSections && projects.length > 0 ? (
-                <Text style={styles.sectionTitle}>All projects</Text>
               ) : null}
             </View>
           ) : null
         }
         renderItem={({ item }) => (
-          <ProjectRow project={item} writableOfficeId={writableOfficeId} onPress={() => openProject(item)} onToggleStar={() => onToggleStar(item)} />
+          // In proximity mode the server stamps each row's distance from the device; render it as a pill.
+          <ProjectRow
+            project={item}
+            writableOfficeId={writableOfficeId}
+            distanceLabel={formatDistanceMiles(item.distanceMiles)}
+            onPress={() => openProject(item)}
+            onToggleStar={() => onToggleStar(item)}
+          />
         )}
         ListEmptyComponent={
           projectsQuery.isLoading ? (
             <LoadingState label="Loading projects…" />
           ) : // On error the header Banner already explains it + offers pull-to-refresh — don't
           // also claim "No projects yet" (those two messages contradict each other) (#8).
-          projectsQuery.isError ? null : hasSections ? null : (
+          projectsQuery.isError ? null : starred.length > 0 ? null : (
             <EmptyState
               title={searching ? "No matches" : "No projects yet"}
               subtitle={searching ? `Nothing found for "${debounced}".` : "Active projects will appear here."}

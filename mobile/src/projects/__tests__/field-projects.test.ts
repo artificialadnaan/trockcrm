@@ -5,37 +5,16 @@ import {
   groupPhotos,
   isProjectOffOffice,
   LEGACY_PHOTO_CATEGORIES,
-  partitionProjectSections,
   PHOTO_CATEGORIES,
   projectNumberLabel,
   relativeDate,
-  selectNearbySource,
   tagsOf,
   uploadersOf,
   type FieldPhoto,
-  type FieldProject,
 } from "../field-projects";
 
-function fieldProject(id: string, overrides: Partial<FieldProject> = {}): FieldProject {
-  return {
-    id,
-    dealNumber: id,
-    projectNumber: id,
-    name: id,
-    propertyName: null,
-    propertyAddress: null,
-    stage: "Active",
-    lastActivityAt: null,
-    photoCount: 0,
-    starred: false,
-    officeId: "office-1",
-    officeSlug: "dfw",
-    ...overrides,
-  };
-}
-
 describe("formatDistanceMiles", () => {
-  it("returns null for missing/non-finite distances (non-nearby rows render nothing)", () => {
+  it("returns null for missing/non-finite distances (rows without coordinates render no label)", () => {
     expect(formatDistanceMiles(null)).toBeNull();
     expect(formatDistanceMiles(undefined)).toBeNull();
     expect(formatDistanceMiles(NaN)).toBeNull();
@@ -52,67 +31,6 @@ describe("formatDistanceMiles", () => {
   });
 });
 
-describe("partitionProjectSections", () => {
-  it("removes a nearby project from both starred and all (nearby wins)", () => {
-    const result = partitionProjectSections(
-      [fieldProject("a")],
-      [fieldProject("a"), fieldProject("b")],
-      [fieldProject("a"), fieldProject("b"), fieldProject("c")],
-    );
-    expect(result.nearby.map((p) => p.id)).toEqual(["a"]);
-    expect(result.starred.map((p) => p.id)).toEqual(["b"]); // "a" dropped (it's nearby)
-    expect(result.all.map((p) => p.id)).toEqual(["c"]); // "a" + "b" dropped
-    expect(result.hasSections).toBe(true);
-  });
-
-  it("removes a starred project from all (starred wins over all)", () => {
-    const result = partitionProjectSections([], [fieldProject("b")], [fieldProject("b"), fieldProject("c")]);
-    expect(result.starred.map((p) => p.id)).toEqual(["b"]);
-    expect(result.all.map((p) => p.id)).toEqual(["c"]);
-    expect(result.hasSections).toBe(true);
-  });
-
-  it("hasSections is false when there's no nearby or visible starred", () => {
-    const result = partitionProjectSections([], [], [fieldProject("a"), fieldProject("b")]);
-    expect(result.hasSections).toBe(false);
-    expect(result.all.map((p) => p.id)).toEqual(["a", "b"]);
-  });
-
-  it("nearby alone still counts as a section even if it consumed the only starred project", () => {
-    const result = partitionProjectSections([fieldProject("a")], [fieldProject("a")], [fieldProject("a")]);
-    expect(result.nearby.map((p) => p.id)).toEqual(["a"]);
-    expect(result.starred).toEqual([]);
-    expect(result.all).toEqual([]);
-    expect(result.hasSections).toBe(true);
-  });
-});
-
-describe("selectNearbySource", () => {
-  const projects = [fieldProject("a"), fieldProject("b"), fieldProject("c")];
-
-  it("returns the ranked projects when fresh and complete", () => {
-    expect(
-      selectNearbySource({ searching: false, isError: false, projects, degradedOffices: [] }).map((p) => p.id),
-    ).toEqual(["a", "b", "c"]);
-  });
-
-  it("suppresses Nearby while searching", () => {
-    expect(selectNearbySource({ searching: true, isError: false, projects, degradedOffices: [] })).toEqual([]);
-  });
-
-  it("suppresses Nearby when any office was degraded", () => {
-    expect(selectNearbySource({ searching: false, isError: false, projects, degradedOffices: ["atl"] })).toEqual([]);
-  });
-
-  it("suppresses stale data on a failed refetch (isError, data retained)", () => {
-    // React Query keeps prior `projects` (degradedOffices empty) when a refetch errors — must still hide.
-    expect(selectNearbySource({ searching: false, isError: true, projects, degradedOffices: [] })).toEqual([]);
-  });
-
-  it("returns [] when there is no data yet", () => {
-    expect(selectNearbySource({ searching: false, isError: false })).toEqual([]);
-  });
-});
 
 describe("projectNumberLabel", () => {
   it("prefixes a present project number with '#'", () => {

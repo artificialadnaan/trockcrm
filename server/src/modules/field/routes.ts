@@ -28,15 +28,12 @@ import {
 import {
   assertAccessibleFieldCaptureTarget,
   assertActiveFieldProject,
-  FIELD_NEARBY_DEFAULT_LIMIT,
   FIELD_PROJECTS_MAX_FETCH,
   listFieldProjects,
   listFieldProjectPhotos,
   listNearbyFieldCaptureTargets,
-  listNearbyFieldProjects,
   listStarredFieldProjects,
   mergeFieldCaptureTargets,
-  mergeNearbyProjects,
   searchFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
@@ -87,6 +84,21 @@ function parseRequiredCoordinate(value: unknown, name: "lat" | "lng", min: numbe
     throw new AppError(400, `Valid ${name} query parameter is required.`);
   }
   return parsed;
+}
+
+/**
+ * Parse an OPTIONAL lat/lng pair for proximity sorting. Returns undefined when NEITHER is sent (the
+ * common case — no GPS fix). If EITHER is sent it must be a valid in-range coordinate and BOTH must be
+ * present, else a 400 — a half-sent or out-of-range pair is a client bug, not a silent fall-back to
+ * (0,0)/recency. Empty/whitespace strings (`?lat=&lng=`) count as not sent.
+ */
+function parseOptionalCoordinatePair(latRaw: unknown, lngRaw: unknown): { lat: number; lng: number } | undefined {
+  const sent = (v: unknown) => typeof v === "string" && v.trim() !== "";
+  if (!sent(latRaw) && !sent(lngRaw)) return undefined;
+  return {
+    lat: parseRequiredCoordinate(latRaw, "lat", -90, 90),
+    lng: parseRequiredCoordinate(lngRaw, "lng", -180, 180),
+  };
 }
 
 function requestAuditContext(req: any) {
@@ -168,6 +180,9 @@ fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
     // earlier 100-row cap silently returned empty/wrong pages beyond page 2. Beyond the bound, narrow
     // via search.
     const fetchPerPage = Math.min(FIELD_PROJECTS_MAX_FETCH, offset + perPage);
+    // Optional GPS fix: when present, every office orders its rows by proximity and we merge by distance
+    // globally (so the nearest projects across ALL offices float to the top); absent → recency, as before.
+    const coords = parseOptionalCoordinatePair(req.query.lat, req.query.lng);
     const { results, failures } = assertFanOutNotFullyDegraded(
       await fanOutActiveOffices((officeDb) =>
         listFieldProjects(officeDb, access, {
@@ -175,13 +190,27 @@ fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
           status,
           page: 1,
           perPage: fetchPerPage,
+          lat: coords?.lat,
+          lng: coords?.lng,
         }),
       ),
     );
     const merged = results.flatMap(({ office, value }) =>
       value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })),
     );
-    merged.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+    if (coords) {
+      // Distance ASC, NULL-coord deals last, recency then id as tiebreaks — mirrors the per-office SQL so
+      // the cross-office merge is one continuous distance order.
+      merged.sort((a, b) => {
+        const da = a.distanceMiles ?? Infinity;
+        const db = b.distanceMiles ?? Infinity;
+        if (da !== db) return da - db;
+        const recency = (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? "");
+        return recency !== 0 ? recency : a.id.localeCompare(b.id);
+      });
+    } else {
+      merged.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+    }
     const total = results.reduce((sum, { value }) => sum + value.total, 0);
     res.json({
       projects: merged.slice(offset, offset + perPage),
@@ -204,34 +233,6 @@ fieldRoutes.get("/projects/starred", requireFieldContractor, async (req, res, ne
     const projects = results
       .flatMap(({ office, value }) => value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })))
       .sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
-    res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Nearby: the 3 active projects CLOSEST to the device's GPS, across ALL offices. Like /projects this
-// fans out per-office (field is office-agnostic), but each office computes distance in SQL and returns a
-// few candidates; we then merge + re-sort by distance globally and slice to 3 so the result is the true
-// nearest 3 OVERALL, not nearest-3-per-office. Registered BEFORE the `/projects/:dealId` param routes so
-// "nearby" is never captured as a :dealId. Read-only (no deal mutation).
-fieldRoutes.get("/projects/nearby", requireFieldContractor, async (req, res, next) => {
-  try {
-    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
-    // parseRequiredCoordinate rejects missing/blank/out-of-range values up front (a 400), so an
-    // out-of-range value (e.g. lat=999) never reaches the per-office calls where it would throw inside
-    // every office and surface as a misleading fan-out 503.
-    const lat = parseRequiredCoordinate(req.query.lat, "lat", -90, 90);
-    const lng = parseRequiredCoordinate(req.query.lng, "lng", -180, 180);
-    const { results, failures } = assertFanOutNotFullyDegraded(
-      await fanOutActiveOffices((officeDb) =>
-        listNearbyFieldProjects(officeDb, access, { lat, lng, limit: FIELD_NEARBY_DEFAULT_LIMIT }),
-      ),
-    );
-    const projects = mergeNearbyProjects(
-      results.map(({ office, value }) => ({ office, projects: value.projects })),
-      3,
-    );
     res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
   } catch (err) {
     next(err);

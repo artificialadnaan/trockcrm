@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assertFanOutNotFullyDegraded,
+  excludeNonFieldOffices,
   fanOutOffices,
   pickResolvedOffice,
   type FieldOffice,
@@ -11,6 +12,16 @@ const offices: FieldOffice[] = [
   { id: "id-atlanta", slug: "atlanta" },
   { id: "id-pw", slug: "pwauditoffice" },
 ];
+
+describe("excludeNonFieldOffices", () => {
+  it("drops pwauditoffice (a non-production schema that only degrades the fan-out) and keeps real offices", () => {
+    expect(excludeNonFieldOffices(offices).map((o) => o.slug)).toEqual(["dallas", "atlanta"]);
+  });
+  it("is a no-op when there are no excluded offices", () => {
+    const real: FieldOffice[] = [{ id: "id-dallas", slug: "dallas" }];
+    expect(excludeNonFieldOffices(real)).toEqual(real);
+  });
+});
 
 describe("fanOutOffices", () => {
   it("runs the callback for EVERY office and returns each result paired with its office", async () => {

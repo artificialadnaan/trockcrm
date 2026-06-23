@@ -3,12 +3,22 @@ import { useAuth } from "../auth/AuthContext";
 import * as api from "../api/endpoints";
 import { qk } from "./keys";
 
-/** Paginated active-projects list (50/page server-side), filtered by search. */
-export function useProjects(search: string) {
+/**
+ * Paginated active-projects list (50/page server-side), filtered by search. When `coords` is supplied the
+ * server orders the list by proximity (closest first) and stamps each row's distance; the coords are in
+ * the query key so a new GPS fix refetches in the new order.
+ */
+export function useProjects(search: string, coords?: { lat: number; lng: number } | null) {
   const { fetcher, user } = useAuth();
   return useQuery({
-    queryKey: qk.projects(user?.id ?? "anon", search),
-    queryFn: () => api.getProjects(fetcher, { search: search.trim() || undefined, perPage: 50 }),
+    queryKey: qk.projects(user?.id ?? "anon", search, coords ?? null),
+    queryFn: () =>
+      api.getProjects(fetcher, {
+        search: search.trim() || undefined,
+        perPage: 50,
+        lat: coords?.lat,
+        lng: coords?.lng,
+      }),
     enabled: !!user,
   });
 }
@@ -23,19 +33,6 @@ export function useStarredProjects(enabled: boolean) {
   });
 }
 
-/**
- * The 3 active projects closest to `coords`. Disabled (never fires) without a GPS fix or while the user
- * is searching, so the Nearby section simply doesn't render in those cases — no permission nagging.
- */
-export function useNearbyProjects(coords: { lat: number; lng: number } | null, enabled: boolean) {
-  const { fetcher, user } = useAuth();
-  return useQuery({
-    queryKey: qk.nearby(user?.id ?? "anon", coords?.lat ?? 0, coords?.lng ?? 0),
-    queryFn: () => api.getNearbyProjects(fetcher, coords!.lat, coords!.lng),
-    enabled: enabled && !!user && !!coords,
-  });
-}
-
 export function useToggleStar() {
   const { fetcher, user } = useAuth();
   const qc = useQueryClient();
@@ -44,11 +41,10 @@ export function useToggleStar() {
       starred ? api.unstarProject(fetcher, dealId) : api.starProject(fetcher, dealId),
     onSuccess: () => {
       if (!user) return;
-      // prefix-invalidate every ["projects", uid, *], the starred list, and every nearby coordinate
-      // bucket — Nearby rows also show the star, so their cached `starred` must refresh after a toggle.
+      // prefix-invalidate every ["projects", uid, *] (all search/coords buckets) and the starred list, so
+      // a star toggle refreshes the cached `starred` flag everywhere it's shown.
       void qc.invalidateQueries({ queryKey: ["projects", user.id] });
       void qc.invalidateQueries({ queryKey: qk.starred(user.id) });
-      void qc.invalidateQueries({ queryKey: ["nearby", user.id] });
     },
   });
 }
