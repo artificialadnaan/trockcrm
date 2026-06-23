@@ -34,9 +34,11 @@ describe("Sidebar navigation metadata", () => {
     expect(source).toContain('{ to: "/admin/field-users", icon: Users, label: "Field Users", roles: ["admin"] }');
   });
 
-  it("renders Deals and Pipeline as distinct nav entries pointing to their own routes", () => {
+  it("renders the Deals entry and no standalone Pipeline entry, with stable nav keys", () => {
     expect(source).toContain('{ to: "/deals", icon: Handshake, label: "Deals Dashboard", roles: ["admin", "director", "rep"] }');
-    expect(source).toContain('{ to: "/pipeline", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] }');
+    // The standalone Pipeline page mirrored the Deals dashboard and was removed from the nav (both surfaces).
+    expect(source).not.toContain('label: "Pipeline"');
+    expect(mobileSource).not.toContain('label: "Pipeline"');
     expect(source).toContain("function getNavItemKey");
     expect(source).toContain("key={getNavItemKey(item)}");
     expect(source).not.toContain("key={item.to}");

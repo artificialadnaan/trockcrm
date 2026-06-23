@@ -558,7 +558,7 @@ export function RepDashboardPreview() {
           Performance report
           <ArrowUpRight className="ml-1.5 h-4 w-4" />
         </Button>
-        <Button size="lg" onClick={() => navigate("/pipeline")}>
+        <Button size="lg" onClick={() => navigate("/deals")}>
           Open my pipeline
           <ArrowUpRight className="ml-1.5 h-4 w-4" />
         </Button>

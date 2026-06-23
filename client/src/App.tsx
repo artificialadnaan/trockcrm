@@ -10,7 +10,6 @@ import { RfpReviewPage } from "@/pages/rfp-review/rfp-review-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
 import { ServiceOpportunityNewPage } from "@/pages/deals/service-opportunity-new-page";
-import { PipelinePage } from "@/pages/pipeline/pipeline-page";
 import { MyCleanupPage } from "@/pages/pipeline/my-cleanup-page";
 import { ContactListPage } from "@/pages/contacts/contact-list-page";
 import { ContactDetailPage } from "@/pages/contacts/contact-detail-page";
@@ -230,7 +229,9 @@ export function App() {
               <Route path="/leads/:id" element={<LeadDetailPage />} />
               <Route path="/properties" element={<PropertyListPage />} />
               <Route path="/properties/:id" element={<PropertyDetailPage />} />
-              <Route path="/pipeline" element={<PipelinePage />} />
+              {/* The standalone Pipeline page mirrored the Deals dashboard and was removed; keep the
+                  path as a redirect so old links/bookmarks land on Deals. Sub-routes below stay. */}
+              <Route path="/pipeline" element={<Navigate to="/deals" replace />} />
               <Route path="/pipeline/my-cleanup" element={<MyCleanupPage />} />
               <Route path="/contacts" element={<ContactListPage />} />
               <Route path="/contacts/new" element={<ContactNewPage />} />

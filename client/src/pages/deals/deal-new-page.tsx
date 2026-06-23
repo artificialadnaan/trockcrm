@@ -27,7 +27,7 @@ export function DealNewPage() {
           variant="ghost"
           size="sm"
           className="-ml-2 mb-1"
-          onClick={() => navigate("/pipeline")}
+          onClick={() => navigate("/deals")}
         >
           <ArrowLeft className="h-4 w-4 mr-1" />
           Pipeline

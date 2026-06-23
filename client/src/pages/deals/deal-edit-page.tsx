@@ -22,7 +22,7 @@ export function DealEditPage() {
     return (
       <div className="text-center py-12">
         <p className="text-red-600">{error ?? "Deal not found"}</p>
-        <Button variant="outline" className="mt-4" onClick={() => navigate("/pipeline")}>
+        <Button variant="outline" className="mt-4" onClick={() => navigate("/deals")}>
           Back to Pipeline
         </Button>
       </div>

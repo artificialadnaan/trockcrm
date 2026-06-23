@@ -4,7 +4,6 @@ import { useAuth } from "@/lib/auth";
 import { isGlobalAdmin } from "@/lib/roles";
 import {
   LayoutDashboard,
-  Kanban,
   Handshake,
   ClipboardList,
   Users,
@@ -65,7 +64,6 @@ const navItems: NavItem[] = [
   { to: "/deals", icon: Handshake, label: "Deals Dashboard", roles: ["admin", "director", "rep"] },
   { to: "/leads", icon: ClipboardList, label: "Leads", roles: ["admin", "director", "rep"] },
   { to: "/properties", icon: Building2, label: "Properties", roles: ["admin", "director", "rep"] },
-  { to: "/pipeline", icon: Kanban, label: "Pipeline", roles: ["admin", "director", "rep"] },
   { to: "/contacts", icon: Users, label: "Contacts", roles: ["admin", "director", "rep"] },
   { to: "/companies", icon: Building2, label: "Companies", roles: ["admin", "director", "rep"] },
   { to: "/email", icon: Mail, label: "Email", roles: ["admin", "director", "rep"] },

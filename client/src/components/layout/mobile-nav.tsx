@@ -4,7 +4,6 @@ import {
   LayoutDashboard,
   Handshake,
   ClipboardList,
-  Kanban,
   Menu,
   X,
   Camera,
@@ -46,7 +45,6 @@ const primaryNavItems: MobileNavItem[] = [
   { to: "/", icon: LayoutDashboard, label: "Home", roles: CRM_ROLES },
   { to: "/deals", icon: Handshake, label: "Deals Dashboard", roles: CRM_ROLES },
   { to: "/leads", icon: ClipboardList, label: "Leads", roles: CRM_ROLES },
-  { to: "/pipeline", icon: Kanban, label: "Pipeline", roles: CRM_ROLES },
 ];
 
 // "More" sheet: the rest of the sidebar destinations, role-filtered to match it.
