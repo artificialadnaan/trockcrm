@@ -74,6 +74,7 @@ import {
   aliasedEffectiveDealValueSql,
   aliasedEffectiveOnHoldConditionSql,
   aliasedTerminalAwareEffectiveDealValueSql,
+  aliasedTerminalDealBySlugSql,
   aliasedWonHsClosedWonDateSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
@@ -809,6 +810,7 @@ type DealStageWorkspaceRow = {
   property_state: string | null;
   updated_at: string;
   stage_entered_at: string;
+  expected_close_date: string | null;
   is_bid_board_owned: boolean;
   is_change_order: boolean;
   bid_board_stage_slug: string | null;
@@ -850,10 +852,13 @@ function buildDealListOrder(
   // deal keeps its preserved value and is NOT sunk as $0/on-hold even when its forecast date is far out,
   // while an OPEN row still auto-parks a far-out close target (Codex P2). Tier is a binary >0 check, so the
   // simpler best-estimate chain matches the stage-aware value's positivity for every classification.
-  const isTerminalDealBySlug = sql`(pipeline_stage_config.slug IN (${sqlStringList(TERMINAL_STAGE_SLUGS)}) OR COALESCE(deals.bid_board_stage_slug, '') IN (${sqlStringList(TERMINAL_STAGE_SLUGS)}))`;
   const tier = aliasedActiveNonZeroDealSortTierSql(
     "deals",
-    aliasedTerminalAwareEffectiveDealValueSql("deals", aliasedDealBestEstimateSql("deals"), isTerminalDealBySlug)
+    aliasedTerminalAwareEffectiveDealValueSql(
+      "deals",
+      aliasedDealBestEstimateSql("deals"),
+      aliasedTerminalDealBySlugSql("deals", "pipeline_stage_config.slug")
+    )
   );
   return [asc(tier), ...buildDealListColumnOrder(filters, classification)];
 }
@@ -1424,6 +1429,9 @@ function mapDealStageWorkspaceRow(
     propertyState: row.property_state,
     updatedAt: row.updated_at,
     stageEnteredAt: row.stage_entered_at,
+    // Hydrate the close target so attachAtRiskResult marks a far-out (90+ day) row effectively on hold —
+    // matching the header/status logic and the $0 card value (Codex P2).
+    expectedCloseDate: row.expected_close_date,
     isBidBoardOwned: row.is_bid_board_owned,
     isChangeOrder: row.is_change_order,
     bidBoardStageSlug: row.bid_board_stage_slug,
@@ -3311,6 +3319,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.property_state,
       d.updated_at,
       d.stage_entered_at,
+      d.expected_close_date,
       d.is_bid_board_owned,
       d.is_change_order,
       d.bid_board_stage_slug,

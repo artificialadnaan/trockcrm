@@ -23,10 +23,13 @@ import { db } from "../../db.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   aliasedActiveDealCountFilterSql,
+  aliasedDealBestEstimateSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveLostDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedReportableDealFilterSql,
+  aliasedTerminalAwareEffectiveDealValueSql,
+  aliasedTerminalDealBySlugSql,
   aliasedWonHsClosedWonDateSql,
   reportableDealFilterSql,
 } from "../shared/deal-value-sql.js";
@@ -2297,7 +2300,7 @@ export async function getUnifiedWorkflowOverview(
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS service_deal_count,
         COALESCE(SUM(
-          ${aliasedEffectiveDealValueSql("d")}
+          ${aliasedTerminalAwareEffectiveDealValueSql("d", aliasedDealBestEstimateSql("d"), aliasedTerminalDealBySlugSql("d", "psc.slug"))}
         ), 0)::numeric AS total_value
       FROM deals d
       LEFT JOIN companies c ON c.id = d.company_id
@@ -2461,7 +2464,7 @@ export async function getUnifiedWorkflowOverview(
         d.bid_board_stage_status AS mirrored_stage_status,
         d.workflow_route,
         COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS deal_count,
-        COALESCE(SUM(${aliasedEffectiveDealValueSql("d")}), 0)::numeric AS total_value
+        COALESCE(SUM(${aliasedTerminalAwareEffectiveDealValueSql("d", aliasedDealBestEstimateSql("d"), aliasedTerminalDealBySlugSql("d", "psc.slug"))}), 0)::numeric AS total_value
       FROM deals d
       JOIN pipeline_stage_config psc ON psc.id = d.stage_id
       LEFT JOIN pipeline_stage_config mirror_psc

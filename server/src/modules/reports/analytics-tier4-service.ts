@@ -4,10 +4,13 @@ import type * as schema from "@trock-crm/shared/schema";
 import { buildOfficeExistsMatcher } from "./office-filter.js";
 import {
   aliasedActiveDealCountFilterSql,
+  aliasedDealBestEstimateSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedOpenPipelineForecastFirstDealValueSql,
   aliasedReportableDealFilterSql,
+  aliasedTerminalAwareEffectiveDealValueSql,
+  aliasedTerminalDealBySlugSql,
   aliasedWonHsClosedWonDateSql,
 } from "../shared/deal-value-sql.js";
 import { aliasedHasUsableWonDateSql } from "../deals/service.js";
@@ -1117,8 +1120,12 @@ function buildAnalyticsEvidenceQuery(
         AND d.company_id IS NOT NULL${repScope}${order}`;
   }
   // deal_count: Market Mix totalDealCount cohort = active, created-in-window (COUNT(DISTINCT d.id)). The value
-  // column is informational (this metric reconciles on COUNT); it carries the best-estimate open value.
-  const cols = evidenceSelectColumnsSql(aliasedEffectiveDealValueSql("d"), sql`d.created_at`);
+  // column is informational (this metric reconciles on COUNT); it carries the best-estimate value, terminal-
+  // aware so a realized far-out won/lost row shows its preserved value rather than $0 (mixed cohort; Codex P2).
+  const cols = evidenceSelectColumnsSql(
+    aliasedTerminalAwareEffectiveDealValueSql("d", aliasedDealBestEstimateSql("d"), aliasedTerminalDealBySlugSql("d", "psc.slug")),
+    sql`d.created_at`
+  );
   return sql`SELECT ${cols} ${from}
     WHERE ${buildWhere(filters, sql`d.created_at`, { requireActive: true })}${repScope}${order}`;
 }

@@ -4,11 +4,28 @@ import {
   companies,
   deals,
   leads,
+  pipelineStageConfig,
   properties,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
-import { dealBestEstimateWithForecastSql, effectiveDealValueSql } from "../shared/deal-value-sql.js";
+import {
+  aliasedDealBestEstimateWithForecastSql,
+  aliasedTerminalAwareEffectiveDealValueSql,
+  aliasedTerminalDealBySlugSql,
+} from "../shared/deal-value-sql.js";
+
+// Property linked-value is a MIXED set (a property's active deals span open + realized won/lost), so the
+// value is terminal-aware: a realized won/lost deal keeps its value (stored-on_hold only) while an OPEN deal
+// auto-parks a far-out (90+ day) close target — matching the deals list/card $0 (Codex P2). Needs the joined
+// stage slug, so each linked-value query LEFT JOINs pipeline_stage_config.
+function propertyLinkedDealValueSql(): SQL {
+  return aliasedTerminalAwareEffectiveDealValueSql(
+    "deals",
+    aliasedDealBestEstimateWithForecastSql("deals"),
+    aliasedTerminalDealBySlugSql("deals", "pipeline_stage_config.slug")
+  );
+}
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -334,12 +351,10 @@ export async function listProperties(
   const linkedValues = tenantDb
     .select({
       propertyId: deals.propertyId,
-      linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
-        deals,
-        dealBestEstimateWithForecastSql(deals)
-      )}), 0)::text`.as("linked_value"),
+      linkedValue: sql<string>`COALESCE(SUM(${propertyLinkedDealValueSql()}), 0)::text`.as("linked_value"),
     })
     .from(deals)
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
     // Only active deals that are actually attached to a property: a NULL property_id can never match the
     // 1:1 LEFT JOIN below, so excluding it here keeps those rows out of the GROUP BY scan on every request.
     .where(and(eq(deals.isActive, true), isNotNull(deals.propertyId)))
@@ -700,12 +715,10 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
     .orderBy(desc(deals.updatedAt), desc(deals.createdAt));
   const linkedValueRows = await tenantDb
     .select({
-      linkedValue: sql<string>`COALESCE(SUM(${effectiveDealValueSql(
-        deals,
-        dealBestEstimateWithForecastSql(deals)
-      )}), 0)::text`,
+      linkedValue: sql<string>`COALESCE(SUM(${propertyLinkedDealValueSql()}), 0)::text`,
     })
     .from(deals)
+    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
     .where(and(eq(deals.propertyId, propertyId), eq(deals.isActive, true)));
   const photoCounts = await tenantDb.execute(sql`
       SELECT COUNT(DISTINCT linked.file_id)::int AS photos_count

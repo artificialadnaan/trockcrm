@@ -231,6 +231,19 @@ export function aliasedTerminalAwareEffectiveDealValueSql(
   )} ELSE ${aliasedEffectiveDealValueSql(alias, rawValueSql)} END`;
 }
 
+// The canonical "is this row a realized terminal (won/lost) deal" SQL boolean for a MIXED population, used to
+// drive aliasedTerminalAwareEffectiveDealValueSql. Mirrors the client/on-hold-predicate terminal exemption:
+// the CRM stage slug is won/lost (via a joined pipeline_stage_config) OR the Bid Board mirror is terminal (a
+// BB-owned deal can be terminal in bid_board_stage_slug while its CRM stage is still open). `stageSlugColumn`
+// is the joined slug expression (e.g. "psc.slug"); `dealAlias` qualifies bid_board_stage_slug. Both are
+// trusted developer literals, never user input.
+export function aliasedTerminalDealBySlugSql(dealAlias: string, stageSlugColumn: string): SQL {
+  const terminalSlugs = sql.join(TERMINAL_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `);
+  return sql`(${sql.raw(stageSlugColumn)} IN (${terminalSlugs}) OR COALESCE(${sql.raw(
+    `${dealAlias}.bid_board_stage_slug`
+  )}, '') IN (${terminalSlugs}))`;
+}
+
 export function aliasedEffectiveWonDealValueSql(alias: string): SQL {
   return aliasedStoredOnHoldDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
 }

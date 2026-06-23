@@ -6,6 +6,7 @@ import { buildOfficeMatcher } from "./office-filter.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveLostDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedForecastFirstDealValueSql,
   aliasedWonHsClosedWonDateSql,
@@ -1074,9 +1075,11 @@ function buildDirectorEvidenceQuery(
       const select = reportEvidenceRowSelectSql(aliasedEffectiveWonDealValueSql("d"), sql`d.won_closed_date`);
       return sql`${select} WHERE ${closedScope} AND ${wonDate} AND psc.slug IN (${sqlStringList([...WON_STAGE_SLUGS])})${repScope}${order}`;
     }
-    // lost cohort date mirrors buildWonDateSql's non-WON window basis (canonical lost_at first).
+    // lost cohort date mirrors buildWonDateSql's non-WON window basis (canonical lost_at first). Lost is a
+    // realized terminal cohort, so it must use the LOST realized-safe value (stored-on_hold only) — never the
+    // open far-out helper, which would auto-park a far-out lost deal to $0 (Codex P2).
     const lostCohortDate = sql`COALESCE(d.lost_at, d.contract_signed_at, (d.actual_close_date AT TIME ZONE 'UTC'), d.updated_at)`;
-    const select = reportEvidenceRowSelectSql(openValue, lostCohortDate);
+    const select = reportEvidenceRowSelectSql(aliasedEffectiveLostDealValueSql("d"), lostCohortDate);
     return sql`${select} WHERE ${closedScope} AND ${wonDate} AND psc.slug IN (${sqlStringList([...LOST_STAGE_SLUGS])})${repScope}${order}`;
   }
 

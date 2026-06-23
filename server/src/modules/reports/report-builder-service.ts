@@ -6,9 +6,11 @@ import type { UserRole } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   aliasedActiveDealCountFilterSql,
-  aliasedEffectiveDealValueSql,
+  aliasedDealBestEstimateSql,
   aliasedEffectiveWonDealValueSql,
   aliasedReportableDealFilterSql,
+  aliasedTerminalAwareEffectiveDealValueSql,
+  aliasedTerminalDealBySlugSql,
   aliasedWonHsClosedWonDateSql,
 } from "../shared/deal-value-sql.js";
 import { aliasedHasUsableWonDateSql } from "../deals/service.js";
@@ -119,7 +121,15 @@ const DATE_FIELDS: Record<ReportDateField, ReturnType<typeof sql>> = {
 };
 
 function dealValueSql() {
-  return aliasedEffectiveDealValueSql("d");
+  // The non-Won-scoped cohort can be MIXED (any selected stages, or all stages when unfiltered), so the
+  // value must be terminal-aware: a realized won/lost row keeps its value (stored-on_hold only) while an
+  // OPEN row still auto-parks a far-out close target — matching the deals list/card (Codex P2). The query
+  // LEFT JOINs pipeline_stage_config as `psc`; the Bid Board mirror covers BB-terminal-on-open rows.
+  return aliasedTerminalAwareEffectiveDealValueSql(
+    "d",
+    aliasedDealBestEstimateSql("d"),
+    aliasedTerminalDealBySlugSql("d", "psc.slug")
+  );
 }
 
 function dimensionSql(dimension: ReportDimension, dateFieldSql: ReturnType<typeof sql>) {

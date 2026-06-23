@@ -8,8 +8,8 @@ import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateWithForecastSql,
   aliasedTerminalAwareEffectiveDealValueSql,
+  aliasedTerminalDealBySlugSql,
 } from "../shared/deal-value-sql.js";
-import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<any>;
 
@@ -499,10 +499,8 @@ export async function getCompanyStats(tenantDb: TenantDb, companyId: string) {
   // value must preserve terminal rows (zeroed on stored on_hold only) while still auto-parking far-out OPEN
   // deals. Join the stage config for the CRM-stage terminal signal and OR in the Bid Board mirror, matching
   // the client/value-helper terminal exemption.
-  const terminalSlugList = sql.join(TERMINAL_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `);
-  const isTerminalDealSql = sql`(psc.slug IN (${terminalSlugList}) OR COALESCE(d.bid_board_stage_slug, '') IN (${terminalSlugList}))`;
   const pipelineValue = await tenantDb.execute(sql`
-    SELECT COALESCE(SUM(${aliasedTerminalAwareEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"), isTerminalDealSql)}), 0)::text AS pipeline_value
+    SELECT COALESCE(SUM(${aliasedTerminalAwareEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"), aliasedTerminalDealBySlugSql("d", "psc.slug"))}), 0)::text AS pipeline_value
     FROM deals d
     JOIN pipeline_stage_config psc ON psc.id = d.stage_id
     WHERE d.company_id = ${companyId}

@@ -2,12 +2,14 @@ import { and, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import { deals } from "@trock-crm/shared/schema";
 import {
   aliasedActiveDealCountFilterSql,
-  aliasedEffectiveDealValueSql,
+  aliasedDealBestEstimateSql,
   aliasedEffectiveEstimatingDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedEffectiveLostDealValueSql,
   aliasedEffectiveOnHoldConditionSql,
+  aliasedTerminalAwareEffectiveDealValueSql,
 } from "../shared/deal-value-sql.js";
+import { TERMINAL_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import {
   buildDealOutcomeDateScope,
   type DealDateScopeContext,
@@ -214,7 +216,10 @@ export function buildStatusPredicate(input: DealFilterBarInput, ctx: DealFilterC
  *                         Analysis and must NOT be auto-parked to $0 by a far-out forecast date (Codex P2;
  *                         mirrors the client getEffectiveDealValue terminal exemption);
  *   - everything else   → the default OPEN awarded-first chain, which DOES zero a far-out (90+ day) close
- *                         target (auto-park).
+ *                         target (auto-park) — UNLESS the row is terminal via its Bid Board mirror (a
+ *                         BB-owned deal can be won/lost in bid_board_stage_slug while its CRM stage_id is
+ *                         still open), in which case its realized value is preserved (stored-on_hold only;
+ *                         Codex P2, matches the client + on-hold predicate).
  * Won/Lost branches zero on stored on_hold only; the open branch additionally zeros far-out auto-held rows.
  * This is the value the list DISPLAYS, so the value filter and the value sort use it too (sort == filter ==
  * display, D-1; Codex #546).
@@ -225,7 +230,17 @@ export function aliasedStageAwareEffectiveDealValueSql(
   estimatingStageIds: string[] = [],
   lostStageIds: string[] = []
 ): SQL {
-  const openValue = aliasedEffectiveDealValueSql(alias);
+  // The open ELSE branch is itself BB-mirror-terminal-aware: a CRM-open deal whose bid_board_stage_slug is
+  // already won/lost keeps its realized value instead of being auto-parked by a far-out forecast date.
+  const bidBoardTerminal = sql`COALESCE(${sql.raw(`${alias}.bid_board_stage_slug`)}, '') IN (${sql.join(
+    TERMINAL_STAGE_SLUGS.map((slug) => sql`${slug}`),
+    sql`, `
+  )})`;
+  const openValue = aliasedTerminalAwareEffectiveDealValueSql(
+    alias,
+    aliasedDealBestEstimateSql(alias),
+    bidBoardTerminal
+  );
   const stageId = sql.raw(`${alias}.stage_id`);
   const branches: SQL[] = [];
   if (estimatingStageIds.length > 0) {

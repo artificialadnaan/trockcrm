@@ -71,10 +71,12 @@ function toStaleDealRows(rows: StaleDealCandidateRow[], now: Date): StaleDealRow
         stageSlug: row.stage_slug,
         workflowRoute: normalizeWorkflowRoute(row.workflow_route),
         stageEnteredAt: row.stage_entered_at,
-        // Align with the app at-risk: a 90+ day close target auto-parks the deal (effective on hold) and a
-        // today-or-future target suppresses the stage-age nag (default suppression), so worker stale alerts
-        // never fire on deals the dashboard/API already cleared (Codex P2).
+        // Match the app's AGGREGATE at-risk paths (deals list, dashboard, reports — all pass
+        // applyCloseTargetSuppression:false): exclude ONLY the 90+ day auto-held case, NOT a near
+        // today-or-future close target (that shorter SLA quieting is deal-detail-only). So a stale deal with
+        // a target tomorrow still alerts, while a far-out auto-parked one does not (Codex P2).
         expectedCloseDate: row.expected_close_date,
+        applyCloseTargetSuppression: false,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
         onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),

@@ -56,6 +56,10 @@ const ROWS = [
   { id: "lost_normal", stage_id: "lost", stageSlug: "lost", on_hold: false, bid_board_total_sales: 60000, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected: 60000 },
   // LOST but explicitly on hold -> stored flag still zeros even a terminal deal (matches the client).
   { id: "lost_onhold", stage_id: "lost", stageSlug: "lost", on_hold: true, bid_board_total_sales: 100000, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected: 0 },
+  // Bid Board-owned: CRM stage_id still OPEN (opportunity) but the BB mirror is terminal (won) with a
+  // far-out forecast date -> realized/preserved, NOT auto-parked to $0 (Codex P2 — BB-mirror in the value
+  // CASE's open branch). Client classifies it terminal via bidBoardStageSlug.
+  { id: "bb_mirror_far", stage_id: "opportunity", stageSlug: "opportunity", bidBoardStageSlug: "won", on_hold: false, bid_board_total_sales: 175000, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected_close_date: "2099-12-31", expected: 175000 },
 ];
 
 const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 2,060,000
@@ -68,6 +72,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id text PRIMARY KEY,
       stage_id text NOT NULL,
+      bid_board_stage_slug text,
       on_hold boolean NOT NULL DEFAULT false,
       expected_close_date date,
       bid_board_total_sales numeric,
@@ -78,9 +83,9 @@ beforeAll(async () => {
   `);
   for (const r of ROWS) {
     await db.query(
-      `INSERT INTO deals (id, stage_id, on_hold, expected_close_date, bid_board_total_sales, bid_estimate, dd_estimate, awarded_amount)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [r.id, r.stage_id, r.on_hold, ("expected_close_date" in r ? r.expected_close_date : null) ?? null, r.bid_board_total_sales, r.bid_estimate, r.dd_estimate, r.awarded_amount]
+      `INSERT INTO deals (id, stage_id, bid_board_stage_slug, on_hold, expected_close_date, bid_board_total_sales, bid_estimate, dd_estimate, awarded_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [r.id, r.stage_id, ("bidBoardStageSlug" in r ? (r as { bidBoardStageSlug?: string }).bidBoardStageSlug : null) ?? null, r.on_hold, ("expected_close_date" in r ? r.expected_close_date : null) ?? null, r.bid_board_total_sales, r.bid_estimate, r.dd_estimate, r.awarded_amount]
     );
   }
 });
@@ -113,6 +118,7 @@ describe("value-total SQL — running-total card reconciliation (#4)", () => {
         onHold: r.on_hold,
         expectedCloseDate: ("expected_close_date" in r ? r.expected_close_date : null) ?? null,
         stageSlug: r.stageSlug,
+        bidBoardStageSlug: ("bidBoardStageSlug" in r ? (r as { bidBoardStageSlug?: string }).bidBoardStageSlug : null) ?? null,
         workflowRoute: "normal",
         awardedAmount: r.awarded_amount,
         bidBoardTotalSales: r.bid_board_total_sales,

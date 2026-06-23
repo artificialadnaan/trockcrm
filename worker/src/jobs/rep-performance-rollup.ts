@@ -1,4 +1,5 @@
 import {
+  closeTargetFarOutSqlPredicate,
   getDealAtRiskResult,
   isReportableDeal,
   reportableDealSqlPredicate,
@@ -24,6 +25,10 @@ const awardedFirstDealValueSql = `COALESCE(
   CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
   0
 )`;
+// pipeline_value sums an OPEN population (NOT psc.is_terminal), so a far-out (90+ day) auto-held deal must
+// read as $0 to match the deals list/kanban totals. on_hold is already excluded via REPORTABLE_DEAL_SQL, so
+// only the far-out leg is added (Codex P2). closed_value/awardedFirst stays raw — it sums realized won deals.
+const effectiveCurrentDealValueSql = `CASE WHEN (${closeTargetFarOutSqlPredicate("d")}) THEN 0 ELSE ${currentDealValueSql} END`;
 const wonStageSqlList = WON_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const lostStageSqlList = LOST_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const terminalStageSqlList = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]
@@ -142,9 +147,11 @@ export function computeRepAtRiskCountsFromRows(
         stageSlug: row.stage_slug,
         workflowRoute: normalizeWorkflowRoute(row.workflow_route),
         stageEnteredAt: row.stage_entered_at,
-        // Align with the app at-risk so far-out auto-held / close-target-suppressed deals are not counted
-        // at-risk in the rep rollup (Codex P2).
+        // Match the app's aggregate at-risk (applyCloseTargetSuppression:false): exclude the 90+ day
+        // auto-held case only, not a near close target, so the rep rollup mirrors the deals list/dashboard
+        // (Codex P2).
         expectedCloseDate: row.expected_close_date,
+        applyCloseTargetSuppression: false,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
         onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
@@ -258,7 +265,7 @@ async function refreshOfficePeriod(
               ELSE d.is_active = true AND NOT psc.is_terminal AND ${REPORTABLE_DEAL_SQL}
             END
          )::int AS deals_count,
-         COALESCE(SUM(${currentDealValueSql})
+         COALESCE(SUM(${effectiveCurrentDealValueSql})
            FILTER (
              WHERE CASE
                -- Historical pipeline_value follows the same deterministic

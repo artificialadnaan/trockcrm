@@ -43,7 +43,7 @@ describe("worker at-risk forwards expected_close_date (Codex P2 finding A)", () 
     expect(counts).toEqual([{ repId: "rep-1", atRiskCount: 1 }]);
   });
 
-  it("a near (today-or-future, within-window) close target also suppresses the stage-age nag (app parity)", () => {
+  it("a near (today-or-future) close target does NOT suppress in the aggregate rollup (matches the app's applyCloseTargetSuppression:false paths)", () => {
     const asOf = new Date("2026-05-08T00:00:00.000Z");
     const counts = computeRepAtRiskCountsFromRows(
       [
@@ -54,7 +54,8 @@ describe("worker at-risk forwards expected_close_date (Codex P2 finding A)", () 
       ],
       asOf
     );
-    // Default applyCloseTargetSuppression=true -> a pending close target quiets the nag, matching the app.
-    expect(counts).toEqual([]);
+    // The worker rollup passes applyCloseTargetSuppression:false (like the deals list/dashboard/reports), so
+    // a near close target does NOT quiet an over-SLA deal — only the 90+ day auto-held case is excluded.
+    expect(counts).toEqual([{ repId: "rep-1", atRiskCount: 1 }]);
   });
 });
