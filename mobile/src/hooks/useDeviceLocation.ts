@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
+import { useFocusEffect } from "expo-router";
 import * as Location from "expo-location";
 
 export type LocationStatus = "pending" | "granted" | "denied";
@@ -14,7 +15,8 @@ export type DeviceLocation = {
 const MAX_LAST_KNOWN_AGE_MS = 5 * 60 * 1000;
 
 /**
- * Foreground device location for the "nearby projects" feature, resolved ONCE on mount.
+ * Foreground device location for the "nearby projects" feature, re-resolved every time the screen
+ * gains focus.
  *
  * It deliberately NEVER raises the OS permission dialog: it only *checks* the current permission
  * (`getForegroundPermissionsAsync`, which does not prompt) and reads a position when it's ALREADY
@@ -24,40 +26,46 @@ const MAX_LAST_KNOWN_AGE_MS = 5 * 60 * 1000;
  * permission is undetermined or denied, or there's no fix, this resolves to `coords: null` and the
  * projects screen simply hides the Nearby section. Never throws to the UI.
  *
+ * It re-runs on `useFocusEffect` rather than once on mount because the tab shell keeps the Projects
+ * screen mounted: if the user grants location later (e.g. during photo capture on another tab), focusing
+ * back here re-checks the now-granted permission and Nearby appears — no remount/restart needed.
+ *
  * A `getLastKnownPositionAsync` answer is used only when recent enough; otherwise a fresh
  * `getCurrentPositionAsync` is fetched so the "nearby" sort reflects where the user actually is.
  */
 export function useDeviceLocation(): DeviceLocation {
   const [state, setState] = useState<DeviceLocation>({ coords: null, status: "pending" });
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        // getForegroundPermissionsAsync() reports status WITHOUT prompting — we never proactively ask.
-        const { status } = await Location.getForegroundPermissionsAsync();
-        if (cancelled) return;
-        if (status !== "granted") {
-          setState({ coords: null, status: status === "denied" ? "denied" : "pending" });
-          return;
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      (async () => {
+        try {
+          // getForegroundPermissionsAsync() reports status WITHOUT prompting — we never proactively ask.
+          const { status } = await Location.getForegroundPermissionsAsync();
+          if (cancelled) return;
+          if (status !== "granted") {
+            setState({ coords: null, status: status === "denied" ? "denied" : "pending" });
+            return;
+          }
+          const position =
+            (await Location.getLastKnownPositionAsync({ maxAge: MAX_LAST_KNOWN_AGE_MS })) ??
+            (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }));
+          if (cancelled) return;
+          setState(
+            position
+              ? { coords: { lat: position.coords.latitude, lng: position.coords.longitude }, status: "granted" }
+              : { coords: null, status: "granted" },
+          );
+        } catch {
+          if (!cancelled) setState({ coords: null, status: "denied" });
         }
-        const position =
-          (await Location.getLastKnownPositionAsync({ maxAge: MAX_LAST_KNOWN_AGE_MS })) ??
-          (await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }));
-        if (cancelled) return;
-        setState(
-          position
-            ? { coords: { lat: position.coords.latitude, lng: position.coords.longitude }, status: "granted" }
-            : { coords: null, status: "granted" },
-        );
-      } catch {
-        if (!cancelled) setState({ coords: null, status: "denied" });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }, []),
+  );
 
   return state;
 }
