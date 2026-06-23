@@ -65,6 +65,23 @@ describe("deal hold helpers", () => {
     expect(getEffectiveDealValue({ onHold: false, bidEstimate: "875000" })).toBe(875000);
   });
 
+  it("does NOT auto-park a WON deal with a far-out target (realized revenue stays whole — guards the P1)", () => {
+    // a deal won early can keep a stale far-future expected_close_date; its value must NOT be zeroed
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2099-12-31", stageSlug: "won", workflowRoute: "normal", awardedAmount: "925000" },
+        FIXED_NOW
+      )
+    ).toBe(925000);
+    // but an explicit stored hold on a won deal still zeros it
+    expect(
+      getEffectiveDealValue(
+        { onHold: true, expectedCloseDate: "2099-12-31", stageSlug: "won", workflowRoute: "normal", awardedAmount: "925000" },
+        FIXED_NOW
+      )
+    ).toBe(0);
+  });
+
   it("prefers awarded amount over synced Bid Board/bid for generic deal value (unified awarded-first 2026-06-18)", () => {
     expect(
       getEffectiveDealValue({

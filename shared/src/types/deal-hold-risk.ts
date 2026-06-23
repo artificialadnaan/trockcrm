@@ -109,17 +109,27 @@ export interface EffectiveOnHoldInput {
   expectedCloseDate?: string | Date | null;
   /** The reference instant; "today" is its America/Chicago calendar day. */
   now: Date;
+  /**
+   * Whether the deal is already WON. The far-future auto-park leg applies to OPEN pipeline value only —
+   * a deal can be won EARLY while its `expected_close_date` is still far out (the won path stamps the
+   * won date but does NOT clear the forecast date), and its revenue is realized, NOT a stale forecast to
+   * zero. So a won deal is effectively on hold ONLY via the explicit stored flag, never the horizon.
+   * Mirrors the server, where the won-value SQL helpers zero on stored on_hold only.
+   */
+  isWon?: boolean;
 }
 
 /**
- * "Effectively on hold" = the stored `on_hold` flag OR a close target more than
+ * "Effectively on hold" = the stored `on_hold` flag OR (for an OPEN deal) a close target more than
  * CLOSE_TARGET_HOLD_HORIZON_DAYS CT-days out (auto-park). The TS twin of [[deal-reporting]]
  * `effectiveOnHoldSqlPredicate`: STRICTLY greater-than the horizon, mirroring the SQL's
  * `> ... + INTERVAL '90 days'`, so a deal exactly 90 days out is NOT yet held in either world. Drives
  * client value-zeroing (getEffectiveDealValue) + the On Hold badge — NOT the reportable/count exclusion.
  */
-export function isDealEffectivelyOnHold({ onHold, expectedCloseDate, now }: EffectiveOnHoldInput): boolean {
+export function isDealEffectivelyOnHold({ onHold, expectedCloseDate, now, isWon }: EffectiveOnHoldInput): boolean {
   if (onHold === true) return true;
+  // A won deal is realized — never auto-parked by a stale forecast date (only its stored flag holds it).
+  if (isWon === true) return false;
   const days = daysUntilCloseTarget(expectedCloseDate, now);
   return days != null && days > CLOSE_TARGET_HOLD_HORIZON_DAYS;
 }

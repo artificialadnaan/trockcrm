@@ -129,23 +129,32 @@ export function dealBestEstimateWithForecastSql(table: DealValueTable): SQL {
   return dealValueChainSql(table, FORECAST_FIRST_VALUE_CHAIN);
 }
 
-// Value-zeroing keys on EFFECTIVE hold = stored on_hold OR a close target past the 90-day horizon, so a
-// far-out deal contributes $0 to pipeline/forecast just like a parked one. Same boundary as the On Hold
-// filter (shared CLOSE_TARGET_HOLD_HORIZON_DAYS + the America/Chicago anchor) so the two can't disagree.
-// (The reportable/count predicate is intentionally unchanged — a far-out deal is $0 but still counted.)
+// OPEN-pipeline value-zeroing keys on EFFECTIVE hold = stored on_hold OR a close target past the 90-day
+// horizon, so a far-out OPEN deal contributes $0 to pipeline/forecast just like a parked one. Same
+// boundary as the On Hold filter (shared CLOSE_TARGET_HOLD_HORIZON_DAYS + the America/Chicago anchor) so
+// the two can't disagree. (The reportable/count predicate is intentionally unchanged — a far-out deal is
+// $0 but still counted.) Use this for OPEN/best-estimate value ONLY — NOT won-value (see below).
 export function effectiveDealValueSql(table: DealValueTable, rawValueSql: SQL = dealBestEstimateSql(table)): SQL {
   return sql`CASE WHEN (COALESCE(${table.onHold}, false) = true OR (${table.expectedCloseDate} IS NOT NULL AND ${table.expectedCloseDate} > (now() AT TIME ZONE 'America/Chicago')::date + ${sql.raw(`INTERVAL '${CLOSE_TARGET_HOLD_HORIZON_DAYS} days'`)})) THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
+}
+
+// REALIZED-safe value-zeroing: stored on_hold ONLY. A won/awarded value is never auto-parked by a stale
+// forecast date — a deal can be won EARLY while its expected_close_date is still far out (the won path
+// stamps the won date but does NOT clear the forecast), and zeroing that realized revenue would silently
+// drop it from won/commission/report totals. Mirrors the client's won-aware getEffectiveDealValue.
+function storedOnHoldDealValueSql(table: DealValueTable, rawValueSql: SQL): SQL {
+  return sql`CASE WHEN COALESCE(${table.onHold}, false) THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
 }
 
 export function effectiveAwardedDealValueSql(
   table: DealValueTable,
   rawValueSql: SQL = dealAwardedAmountSql(table)
 ): SQL {
-  return effectiveDealValueSql(table, rawValueSql);
+  return storedOnHoldDealValueSql(table, rawValueSql);
 }
 
 export function effectiveWonDealValueSql(table: DealValueTable): SQL {
-  return effectiveDealValueSql(table, dealAwardedFirstWithFallbackSql(table));
+  return storedOnHoldDealValueSql(table, dealAwardedFirstWithFallbackSql(table));
 }
 
 export function effectiveEstimatingDealValueSql(table: DealValueTable): SQL {
@@ -181,8 +190,9 @@ export function aliasedOpenPipelineForecastFirstDealValueSql(alias: string): SQL
   return aliasedDealValueChainSql(alias, FORECAST_FIRST_VALUE_CHAIN);
 }
 
-// Aliased twin of effectiveDealValueSql. Reuses the SHARED effectiveOnHoldSqlPredicate so the value-zero
-// test is byte-identical to the On Hold filter — they cannot drift.
+// Aliased twin of effectiveDealValueSql (OPEN/best-estimate value). Reuses the SHARED
+// effectiveOnHoldSqlPredicate so the value-zero test is byte-identical to the On Hold filter — they
+// cannot drift. NOT for won-value (see aliasedEffectiveWonDealValueSql).
 export function aliasedEffectiveDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealBestEstimateSql(alias)
@@ -190,15 +200,20 @@ export function aliasedEffectiveDealValueSql(
   return sql`CASE WHEN ${sql.raw(effectiveOnHoldSqlPredicate(alias))} THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
 }
 
+// Aliased twin of storedOnHoldDealValueSql — REALIZED-safe (stored on_hold ONLY), for won/awarded value.
+function aliasedStoredOnHoldDealValueSql(alias: string, rawValueSql: SQL): SQL {
+  return sql`CASE WHEN COALESCE(${sql.raw(`${alias}.on_hold`)}, false) THEN 0 ELSE COALESCE(${rawValueSql}, 0) END`;
+}
+
 export function aliasedEffectiveAwardedDealValueSql(
   alias: string,
   rawValueSql: SQL = aliasedDealAwardedAmountSql(alias)
 ): SQL {
-  return aliasedEffectiveDealValueSql(alias, rawValueSql);
+  return aliasedStoredOnHoldDealValueSql(alias, rawValueSql);
 }
 
 export function aliasedEffectiveWonDealValueSql(alias: string): SQL {
-  return aliasedEffectiveDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
+  return aliasedStoredOnHoldDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
 }
 
 export function aliasedEffectiveEstimatingDealValueSql(alias: string): SQL {

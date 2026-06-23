@@ -94,4 +94,13 @@ describe("isDealEffectivelyOnHold", () => {
     expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: null, now: NOW })).toBe(false);
     expect(isDealEffectivelyOnHold({ onHold: null, expectedCloseDate: "not-a-date", now: NOW })).toBe(false);
   });
+
+  it("a WON deal is NOT auto-parked by a far-out target (realized revenue), but its stored flag still holds", () => {
+    // early-won deal with a stale far-future forecast date -> NOT held (value preserved); guards the P1.
+    expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: plusDays(TODAY, 200), now: NOW, isWon: true })).toBe(false);
+    // an explicitly held won deal is still held (stored flag wins over the won exemption)
+    expect(isDealEffectivelyOnHold({ onHold: true, expectedCloseDate: plusDays(TODAY, 200), now: NOW, isWon: true })).toBe(true);
+    // the same far-out target on an OPEN deal IS auto-held (contrast)
+    expect(isDealEffectivelyOnHold({ onHold: false, expectedCloseDate: plusDays(TODAY, 200), now: NOW, isWon: false })).toBe(true);
+  });
 });

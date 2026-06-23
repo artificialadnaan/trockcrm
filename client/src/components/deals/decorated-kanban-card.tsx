@@ -6,6 +6,7 @@ import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
 import {
   getEffectiveDealValue,
+  isDealValueEffectivelyOnHold,
   getEffectiveStageAgeDeal,
   getEffectiveStageAgeDays,
   getOwnerInitialColor,
@@ -58,6 +59,10 @@ export function DecoratedKanbanCard({
   const isOverSla = showSla && slaDays > 0 && days > slaDays;
   const location = locationLine(deal);
   const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
+  // The column slug is authoritative (a board row may omit deal.stageSlug). Stamp it ONCE and use the
+  // same object for the value AND the badge, so the won-aware hold check and the value can't disagree
+  // (e.g. a Won-column row reading as auto-held only because its slug was missing).
+  const dealForValue = { ...deal, stageSlug: deal.stageSlug ?? stageSlug };
 
   return (
     <button
@@ -82,16 +87,16 @@ export function DecoratedKanbanCard({
             {displayNumber.label || "--"}
           </p>
           <DealValue
-            deal={{ ...deal, stageSlug: deal.stageSlug ?? stageSlug }}
+            deal={dealForValue}
             // Value from the column-slug-stamped deal so the stage-aware chain (estimating DD-over-bid)
             // applies even if the board row omits stageSlug — reconciles the card with the column total.
-            value={getEffectiveDealValue({ ...deal, stageSlug: deal.stageSlug ?? stageSlug })}
+            value={getEffectiveDealValue(dealForValue)}
             compact
             className="shrink-0 text-sm font-black tabular-nums text-slate-950"
           />
         </div>
 
-        <OnHoldBadge onHold={deal.onHold} expectedCloseDate={deal.expectedCloseDate} compact />
+        <OnHoldBadge onHold={isDealValueEffectivelyOnHold(dealForValue)} compact />
         <AtRiskBadge atRisk={deal.atRisk} compact />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
 

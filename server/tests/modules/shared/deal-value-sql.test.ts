@@ -73,7 +73,7 @@ describe("deal-value-sql", () => {
     expect(normalize(aliasedEffectiveDealValueSql("d"))).toContain("d.dd_estimate");
   });
 
-  it("zeros on EFFECTIVE hold: stored on_hold OR a close target 90+ days out (same boundary as the filter)", () => {
+  it("OPEN value zeros on EFFECTIVE hold: stored on_hold OR a close target past the 90-day horizon", () => {
     // aliased form reuses the shared filter predicate verbatim, so they can never drift
     const aliased = normalize(aliasedEffectiveDealValueSql("d")).toLowerCase();
     expect(aliased).toContain("coalesce(d.on_hold, false) = true");
@@ -85,6 +85,16 @@ describe("deal-value-sql", () => {
     expect(column).toContain("d.expected_close_date is not null");
     expect(column).toContain("interval '90 days'");
     expect(column).toContain("america/chicago");
+  });
+
+  it("WON/AWARDED value zeros on STORED on_hold ONLY — never the far-future leg (early-won revenue safe)", () => {
+    // a deal won EARLY can keep a far-out expected_close_date; the won/awarded helpers must NOT zero it,
+    // or realized revenue/commissions silently vanish until the forecast date ages in (the P1).
+    for (const won of [normalize(aliasedEffectiveWonDealValueSql("d")).toLowerCase(), normalize(effectiveWonDealValueSql(table)).toLowerCase()]) {
+      expect(won).toContain("coalesce(d.on_hold, false)"); // stored-hold zeroing kept
+      expect(won).not.toContain("expected_close_date"); // but NO auto-park horizon
+      expect(won).not.toContain("interval '90 days'");
+    }
   });
 
   // Convention shift 2026-06-18: the open/best-estimate chain is now AWARDED-FIRST (unified with the won

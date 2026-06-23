@@ -16,7 +16,7 @@ path in server/src/modules/deals/service.ts, and the five stage-writer paths:
    getHoldStateAtStageEntry() before writing it.
 */
 
-import { isGenuineEstimatingDealStageSlug } from "./workflow.js";
+import { isGenuineEstimatingDealStageSlug, isGenuineWonDealStageSlug } from "./workflow.js";
 import { isDealEffectivelyOnHold } from "./deal-hold-risk.js";
 
 type DealValueLike = {
@@ -129,20 +129,33 @@ export function getHoldStateAtStageEntry(
   };
 }
 
-// Value-zeroing keys on EFFECTIVE hold (stored on_hold OR a close target 90+ days out), so a far-out
-// deal contributes $0 to pipeline/forecast just like a parked one. `now` defaults to the call instant;
-// pass an explicit instant in tests for a deterministic horizon. (The reportable/count exclusion is
-// intentionally NOT changed — a far-out deal is $0 but still counted.)
+/**
+ * Whether a deal's value reads as on hold for ZEROING purposes: the stored on_hold flag OR — for an OPEN
+ * deal only — a close target past the 90-day horizon. A WON deal is realized, so the far-future leg never
+ * applies (its `expected_close_date` may still be far out if it was won early; only its stored flag
+ * zeros it). This is the won-aware twin of the server's stage-aware value SQL: card display
+ * (getEffectiveDealValue) and the On Hold badge both read it, so the card's $0 and badge always agree
+ * with the server rollup. `now` defaults to the call instant; pass an explicit instant in tests.
+ * (The reportable/count exclusion is intentionally NOT changed — a far-out OPEN deal is $0 but counted.)
+ */
+export function isDealValueEffectivelyOnHold(deal: DealValueLike, now: Date = new Date()): boolean {
+  const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
+  const workflowRoute =
+    deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+  return isDealEffectivelyOnHold({
+    onHold: deal.onHold,
+    expectedCloseDate: deal.expectedCloseDate,
+    now,
+    isWon: isGenuineWonDealStageSlug(stageSlug, workflowRoute),
+  });
+}
+
 export function getEffectiveDealValue(deal: DealValueLike, now: Date = new Date()): number {
-  return isDealEffectivelyOnHold({ onHold: deal.onHold, expectedCloseDate: deal.expectedCloseDate, now })
-    ? 0
-    : getRawDealValue(deal);
+  return isDealValueEffectivelyOnHold(deal, now) ? 0 : getRawDealValue(deal);
 }
 
 export function getEffectiveAwardedDealValue(deal: DealValueLike, now: Date = new Date()): number {
-  return isDealEffectivelyOnHold({ onHold: deal.onHold, expectedCloseDate: deal.expectedCloseDate, now })
-    ? 0
-    : getRawAwardedDealValue(deal);
+  return isDealValueEffectivelyOnHold(deal, now) ? 0 : getRawAwardedDealValue(deal);
 }
 
 export function resolveEffectiveStageEnteredAt(

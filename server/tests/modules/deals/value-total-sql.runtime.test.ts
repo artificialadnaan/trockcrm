@@ -43,6 +43,11 @@ const ROWS = [
   { id: "onhold", stage_id: "opportunity", stageSlug: "opportunity", on_hold: true, bid_board_total_sales: 999999, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected: 0 },
   // genuinely $0
   { id: "zero", stage_id: "opportunity", stageSlug: "opportunity", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected: 0 },
+  // OPEN deal with a close target far past the 90-day horizon -> effectively on hold -> 0 (auto-park).
+  { id: "open_far_future", stage_id: "opportunity", stageSlug: "opportunity", on_hold: false, bid_board_total_sales: 400000, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected_close_date: "2099-12-31", expected: 0 },
+  // WON EARLY while the forecast date is still far out -> realized revenue, NOT auto-parked: keeps its
+  // value (the won path stamps the won date but doesn't clear expected_close_date). Guards the P1.
+  { id: "won_far_future", stage_id: "won", stageSlug: "won", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 0, awarded_amount: 300000, expected_close_date: "2099-12-31", expected: 300000 },
 ];
 
 const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 1,750,000
@@ -56,6 +61,7 @@ beforeAll(async () => {
       id text PRIMARY KEY,
       stage_id text NOT NULL,
       on_hold boolean NOT NULL DEFAULT false,
+      expected_close_date date,
       bid_board_total_sales numeric,
       bid_estimate numeric,
       dd_estimate numeric,
@@ -64,9 +70,9 @@ beforeAll(async () => {
   `);
   for (const r of ROWS) {
     await db.query(
-      `INSERT INTO deals (id, stage_id, on_hold, bid_board_total_sales, bid_estimate, dd_estimate, awarded_amount)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [r.id, r.stage_id, r.on_hold, r.bid_board_total_sales, r.bid_estimate, r.dd_estimate, r.awarded_amount]
+      `INSERT INTO deals (id, stage_id, on_hold, expected_close_date, bid_board_total_sales, bid_estimate, dd_estimate, awarded_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [r.id, r.stage_id, r.on_hold, ("expected_close_date" in r ? r.expected_close_date : null) ?? null, r.bid_board_total_sales, r.bid_estimate, r.dd_estimate, r.awarded_amount]
     );
   }
 });
@@ -97,6 +103,7 @@ describe("value-total SQL — running-total card reconciliation (#4)", () => {
     for (const r of ROWS) {
       const clientValue = getEffectiveDealValue({
         onHold: r.on_hold,
+        expectedCloseDate: ("expected_close_date" in r ? r.expected_close_date : null) ?? null,
         stageSlug: r.stageSlug,
         workflowRoute: "normal",
         awardedAmount: r.awarded_amount,
