@@ -229,11 +229,11 @@ export async function getProjectPhotoStats(
 }
 
 // CompanyCam rescue photos that aren't linked to a deal (deal_id IS NULL) carry their source project
-// id/name in the `notes` JSON. Extract it with a CASE guard so the ::jsonb cast NEVER runs on a
-// non-JSON notes value (other file types store plain-text notes) — CASE only evaluates THEN when WHEN
-// is true, so non-`{` rows are skipped safely.
-const ccProjectIdExpr = sql<string | null>`CASE WHEN left(btrim(${files.notes}), 1) = '{' THEN (btrim(${files.notes})::jsonb ->> 'companycamProjectId') END`;
-const ccProjectNameExpr = sql<string | null>`CASE WHEN left(btrim(${files.notes}), 1) = '{' THEN (btrim(${files.notes})::jsonb ->> 'companycamProjectName') END`;
+// id/name in the `notes` JSON. Guard the ::jsonb cast with pg_input_is_valid so it NEVER runs on a
+// non-JSON notes value — a first-char `{` check is not enough (e.g. a hand-typed `{needs review`
+// would still abort the whole query). CASE only evaluates THEN when the validity check passes.
+const ccProjectIdExpr = sql<string | null>`CASE WHEN pg_input_is_valid(btrim(${files.notes}), 'jsonb') THEN (btrim(${files.notes})::jsonb ->> 'companycamProjectId') END`;
+const ccProjectNameExpr = sql<string | null>`CASE WHEN pg_input_is_valid(btrim(${files.notes}), 'jsonb') THEN (btrim(${files.notes})::jsonb ->> 'companycamProjectName') END`;
 
 /**
  * Unassigned CompanyCam photos grouped by their source CompanyCam project (mirrors CompanyCam's own
@@ -286,8 +286,9 @@ export async function getUnassignedCompanyCamProjects(tenantDb: TenantDb): Promi
     FROM ranked
     GROUP BY pid
     ORDER BY max(sort_at) DESC NULLS LAST
-    LIMIT 1000
   `);
+  // No LIMIT: the result is one row per distinct unassigned CompanyCam project (naturally bounded by
+  // the account's project count), so the tab never silently hides projects.
 
   const rows = (result as unknown as {
     rows: Array<{

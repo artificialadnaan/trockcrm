@@ -61,6 +61,9 @@ beforeAll(async () => {
     ins({ category: "photo", subcategory: "CompanyCam", deal_id: "00000000-0000-4000-8000-0000000000d1", r2_key: "u/111/assigned.jpg", display_name: "assigned", mime_type: "image/jpeg", notes: meta("111", "Alpha CC"), taken_at: "2026-06-23T10:00:00Z", uploaded_by: USER, is_active: "true" }),
     // Non-CompanyCam file, unassigned, with PLAIN-TEXT notes — must not break the jsonb cast, excluded
     ins({ category: "photo", subcategory: "Upload", deal_id: null, r2_key: "u/plain.jpg", display_name: "plain", mime_type: "image/jpeg", notes: "just a plain text note", taken_at: "2026-06-19T10:00:00Z", uploaded_by: USER, is_active: "true" }),
+    // CompanyCam file whose notes START WITH `{` but are MALFORMED JSON — the validity guard must skip
+    // it (not abort the whole query with a 500).
+    ins({ category: "photo", subcategory: "CompanyCam", deal_id: null, r2_key: "u/malformed.jpg", display_name: "malformed", mime_type: "image/jpeg", notes: "{needs review", taken_at: "2026-06-24T10:00:00Z", uploaded_by: USER, is_active: "true" }),
   ].join("\n"));
 
   tdb = drizzle(pg);
