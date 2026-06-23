@@ -79,15 +79,19 @@ describe("F3 value basis", () => {
   it("unifies both value bases to awarded-first (convention shift 2026-06-18)", () => {
     const won = extractSqlText(dealValueSqlForBasis("d", "won_awarded_first")).toLowerCase();
     const open = extractSqlText(dealValueSqlForBasis("d", "open_best_estimate")).toLowerCase();
-    // Both bases are now awarded-FIRST: awarded_amount precedes bid_board_total_sales in the COALESCE chain.
-    expect(won.indexOf("awarded_amount")).toBeLessThan(won.indexOf("bid_board_total_sales"));
-    expect(open.indexOf("awarded_amount")).toBeLessThan(open.indexOf("bid_board_total_sales"));
+    // Both bases are now awarded-FIRST: awarded_amount precedes bid_board_total_sales precedes bid_estimate
+    // in the COALESCE chain. Assert PRESENCE before order so an absent column (indexOf -1) can't false-pass.
+    const inOrder = (sqlText: string, cols: readonly string[]) => {
+      const positions = cols.map((c) => sqlText.indexOf(c));
+      positions.forEach((p, i) => expect(p, `${cols[i]} present`).toBeGreaterThanOrEqual(0));
+      for (let i = 1; i < positions.length; i++) expect(positions[i - 1]).toBeLessThan(positions[i]);
+    };
+    inOrder(won, ["awarded_amount", "bid_board_total_sales", "bid_estimate"]);
+    inOrder(open, ["awarded_amount", "bid_board_total_sales", "bid_estimate"]);
     // Both bases resolve through the SAME awarded-first VALUE chain (DEAL_VALUE_PRIORITY_CHAIN); the basis
     // is a labeling/context selector. They now differ ONLY in the on-hold ZEROING wrapper: the Won basis
     // zeros on the stored on_hold flag ALONE (realized revenue is never auto-parked by a stale forecast),
     // while the open basis ALSO zeros a far-out (90+ day) close target (effective hold). See deal-value-sql.
-    expect(won.indexOf("bid_board_total_sales")).toBeLessThan(won.indexOf("bid_estimate"));
-    expect(open.indexOf("bid_board_total_sales")).toBeLessThan(open.indexOf("bid_estimate"));
     // BOTH bases zero out the stored on-hold value.
     expect(won).toContain("on_hold");
     expect(open).toContain("on_hold");

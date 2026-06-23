@@ -71,6 +71,7 @@ import {
   aliasedDealAwardedFirstWithFallbackSql,
   aliasedDealBestEstimateSql,
   aliasedDealEstimatingValueSql,
+  aliasedEffectiveDealValueSql,
   aliasedWonHsClosedWonDateSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
@@ -896,13 +897,13 @@ function buildDealListColumnOrder(
   }
 }
 
-function buildPipelineStageCardsOrder(valueSource: PipelineValueSource) {
+function buildPipelineStageCardsOrder(effectiveValueSql: ReturnType<typeof dealPipelineValueSql>) {
   // Two-tier order: active, non-zero cards on top; on-hold / $0 cards sink to the
   // bottom of the column. This is sort-only — every card still loads (the preview
-  // limit is the board's effective-all 1000), nothing is hidden. The value tier
-  // uses the SAME per-stage value source the column counts/sums, so the tier
-  // matches what the column displays.
-  const tier = aliasedActiveNonZeroDealSortTierSql("deals", dealPipelineValueSql(valueSource));
+  // limit is the board's effective-all 1000), nothing is hidden. The tier uses the
+  // SAME column EFFECTIVE value the header sums (terminal-aware, far-future-zeroed for
+  // open stages), so an auto-held $0 card sinks exactly as it shows $0.
+  const tier = aliasedActiveNonZeroDealSortTierSql("deals", effectiveValueSql);
   // Sort before preview limiting so each column shows the actual newest cards,
   // not an arbitrary subset from a tied timestamp group.
   return [asc(tier), desc(deals.createdAt), desc(deals.id)] as const;
@@ -3016,15 +3017,17 @@ export async function getDealsForPipeline(
     const where = and(...stageConditions, ...commonConditions);
     const countedDealFilter = aliasedActiveDealCountFilterSql("deals");
     const valueSource = pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily));
-    // Sum the EFFECTIVE (won-aware) value so a far-out OPEN deal contributes $0 to the column total just
-    // as it shows $0 on its card — keeping the column header total reconciled with the sum of the cards.
-    // Per-stage classification (this column is one stage): a won stage routes to the realized-safe
-    // stored-only helper, estimating/open stages carry the far-future auto-park leg.
-    const columnEffectiveValue = aliasedStageAwareEffectiveDealValueSql(
-      "deals",
-      valueSource === "won" ? [stage.id] : [],
-      valueSource === "estimating" ? [stage.id] : []
-    );
+    // Sum the EFFECTIVE value so a far-out OPEN deal contributes $0 to the column total just as it shows
+    // $0 on its card — keeping the column header total reconciled with the sum of the cards. A TERMINAL
+    // column (won OR lost) is exempt from the far-future auto-park (realized/preserved value, mirroring
+    // the TS card's terminal exemption); its raw value still has stored-on-hold excluded by the FILTER.
+    // Only OPEN / estimating columns carry the far-future leg.
+    const isTerminalColumn =
+      valueSource === "won" ||
+      LOST_STAGE_SLUGS.includes(stage.slug as (typeof LOST_STAGE_SLUGS)[number]);
+    const columnEffectiveValue = isTerminalColumn
+      ? dealPipelineValueSql(valueSource)
+      : aliasedEffectiveDealValueSql("deals", dealPipelineValueSql(valueSource));
     const summaryRows = await tenantDb
       .select({
         totalCount: sql<number>`count(*)`,
@@ -3044,7 +3047,7 @@ export async function getDealsForPipeline(
       .leftJoin(companies, eq(companies.id, deals.companyId))
       .leftJoin(users, eq(users.id, deals.assignedRepId))
       .where(where)
-      .orderBy(...buildPipelineStageCardsOrder(valueSource))
+      .orderBy(...buildPipelineStageCardsOrder(columnEffectiveValue))
       .limit(pipelineCardsPerStageLimit);
     dealsByStage.set(stage.id, stageDeals);
 

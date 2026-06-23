@@ -93,6 +93,16 @@ describe("deal hold helpers", () => {
     ).toBe(500000);
   });
 
+  it("does NOT auto-park a LOST deal with a stale far-out target (preserved bid value for Loss Analysis)", () => {
+    // a lost deal is a historical bid; its preserved value must NOT be zeroed off a stale forecast date
+    expect(
+      getEffectiveDealValue(
+        { onHold: false, expectedCloseDate: "2099-12-31", stageSlug: "lost", workflowRoute: "normal", bidEstimate: "440000" },
+        FIXED_NOW
+      )
+    ).toBe(440000);
+  });
+
   it("prefers awarded amount over synced Bid Board/bid for generic deal value (unified awarded-first 2026-06-18)", () => {
     expect(
       getEffectiveDealValue({

@@ -110,13 +110,14 @@ export interface EffectiveOnHoldInput {
   /** The reference instant; "today" is its America/Chicago calendar day. */
   now: Date;
   /**
-   * Whether the deal is already WON. The far-future auto-park leg applies to OPEN pipeline value only —
-   * a deal can be won EARLY while its `expected_close_date` is still far out (the won path stamps the
-   * won date but does NOT clear the forecast date), and its revenue is realized, NOT a stale forecast to
-   * zero. So a won deal is effectively on hold ONLY via the explicit stored flag, never the horizon.
-   * Mirrors the server, where the won-value SQL helpers zero on stored on_hold only.
+   * Whether the deal is already TERMINAL (won OR lost). The far-future auto-park leg applies to OPEN
+   * pipeline value only — a deal can be won EARLY (its won path stamps the won date but leaves the
+   * forecast date far out) and a lost deal is a historical bid whose value is preserved for Loss
+   * Analysis; in both cases the value is realized/preserved, NOT a stale forecast to zero. So a terminal
+   * deal is effectively on hold ONLY via the explicit stored flag, never the horizon. Mirrors the server,
+   * where won-value SQL helpers + terminal columns zero on stored on_hold only.
    */
-  isWon?: boolean;
+  isTerminal?: boolean;
 }
 
 /**
@@ -126,10 +127,11 @@ export interface EffectiveOnHoldInput {
  * `> ... + INTERVAL '90 days'`, so a deal exactly 90 days out is NOT yet held in either world. Drives
  * client value-zeroing (getEffectiveDealValue) + the On Hold badge — NOT the reportable/count exclusion.
  */
-export function isDealEffectivelyOnHold({ onHold, expectedCloseDate, now, isWon }: EffectiveOnHoldInput): boolean {
+export function isDealEffectivelyOnHold({ onHold, expectedCloseDate, now, isTerminal }: EffectiveOnHoldInput): boolean {
   if (onHold === true) return true;
-  // A won deal is realized — never auto-parked by a stale forecast date (only its stored flag holds it).
-  if (isWon === true) return false;
+  // A terminal (won/lost) deal is realized/preserved — never auto-parked by a stale forecast date (only
+  // its stored flag holds it).
+  if (isTerminal === true) return false;
   const days = daysUntilCloseTarget(expectedCloseDate, now);
   return days != null && days > CLOSE_TARGET_HOLD_HORIZON_DAYS;
 }

@@ -16,7 +16,11 @@ path in server/src/modules/deals/service.ts, and the five stage-writer paths:
    getHoldStateAtStageEntry() before writing it.
 */
 
-import { isGenuineEstimatingDealStageSlug, isGenuineWonDealStageSlug } from "./workflow.js";
+import {
+  isGenuineEstimatingDealStageSlug,
+  isGenuineWonDealStageSlug,
+  isGenuineLostDealStageSlug,
+} from "./workflow.js";
 import { isDealEffectivelyOnHold } from "./deal-hold-risk.js";
 
 type DealValueLike = {
@@ -142,17 +146,19 @@ export function isDealValueEffectivelyOnHold(deal: DealValueLike, now: Date = ne
   const stageSlug = deal.stageSlug ?? deal.stage?.slug ?? null;
   const workflowRoute =
     deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
-  // Won-ness must also honor the Bid Board mirror: a Bid Board-owned deal can reach a won terminal alias
-  // (e.g. sent_to_production) in bidBoardStageSlug while its CRM stageSlug is still open. Both canonicalize
-  // to "won", so either marks the deal realized — never auto-park it off a stale forecast date.
-  const isWon =
+  // Terminal (won OR lost) deals are exempt from the far-future auto-park: won/lost value is realized or
+  // preserved, not a stale forecast to zero. Won-ness also honors the Bid Board mirror — a Bid Board-owned
+  // deal can reach a won terminal alias (e.g. sent_to_production) in bidBoardStageSlug while its CRM
+  // stageSlug is still open; both canonicalize to "won".
+  const isTerminal =
     isGenuineWonDealStageSlug(stageSlug, workflowRoute) ||
-    isGenuineWonDealStageSlug(deal.bidBoardStageSlug ?? null, workflowRoute);
+    isGenuineWonDealStageSlug(deal.bidBoardStageSlug ?? null, workflowRoute) ||
+    isGenuineLostDealStageSlug(stageSlug, workflowRoute);
   return isDealEffectivelyOnHold({
     onHold: deal.onHold,
     expectedCloseDate: deal.expectedCloseDate,
     now,
-    isWon,
+    isTerminal,
   });
 }
 
