@@ -28,12 +28,15 @@ import {
 import {
   assertAccessibleFieldCaptureTarget,
   assertActiveFieldProject,
+  FIELD_NEARBY_DEFAULT_LIMIT,
   FIELD_PROJECTS_MAX_FETCH,
   listFieldProjects,
   listFieldProjectPhotos,
   listNearbyFieldCaptureTargets,
+  listNearbyFieldProjects,
   listStarredFieldProjects,
   mergeFieldCaptureTargets,
+  mergeNearbyProjects,
   searchFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
@@ -73,7 +76,10 @@ function parseOptionalPositiveInt(value: unknown): number | undefined {
 }
 
 function parseRequiredCoordinate(value: unknown, name: "lat" | "lng", min: number, max: number): number {
-  if (typeof value !== "string") {
+  // Reject blanks BEFORE coercing: Number("") and Number("   ") both yield 0, which would otherwise pass
+  // the range check below and silently rank projects around (0,0) for a coordinate the caller never sent
+  // (e.g. `?lat=&lng=` from generic query/form serialization). Treat empty/whitespace as missing.
+  if (typeof value !== "string" || value.trim() === "") {
     throw new AppError(400, `Valid ${name} query parameter is required.`);
   }
   const parsed = Number(value);
@@ -198,6 +204,34 @@ fieldRoutes.get("/projects/starred", requireFieldContractor, async (req, res, ne
     const projects = results
       .flatMap(({ office, value }) => value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })))
       .sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+    res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Nearby: the 3 active projects CLOSEST to the device's GPS, across ALL offices. Like /projects this
+// fans out per-office (field is office-agnostic), but each office computes distance in SQL and returns a
+// few candidates; we then merge + re-sort by distance globally and slice to 3 so the result is the true
+// nearest 3 OVERALL, not nearest-3-per-office. Registered BEFORE the `/projects/:dealId` param routes so
+// "nearby" is never captured as a :dealId. Read-only (no deal mutation).
+fieldRoutes.get("/projects/nearby", requireFieldContractor, async (req, res, next) => {
+  try {
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    // parseRequiredCoordinate rejects missing/blank/out-of-range values up front (a 400), so an
+    // out-of-range value (e.g. lat=999) never reaches the per-office calls where it would throw inside
+    // every office and surface as a misleading fan-out 503.
+    const lat = parseRequiredCoordinate(req.query.lat, "lat", -90, 90);
+    const lng = parseRequiredCoordinate(req.query.lng, "lng", -180, 180);
+    const { results, failures } = assertFanOutNotFullyDegraded(
+      await fanOutActiveOffices((officeDb) =>
+        listNearbyFieldProjects(officeDb, access, { lat, lng, limit: FIELD_NEARBY_DEFAULT_LIMIT }),
+      ),
+    );
+    const projects = mergeNearbyProjects(
+      results.map(({ office, value }) => ({ office, projects: value.projects })),
+      3,
+    );
     res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
   } catch (err) {
     next(err);

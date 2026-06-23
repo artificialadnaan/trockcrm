@@ -23,6 +23,19 @@ export function useStarredProjects(enabled: boolean) {
   });
 }
 
+/**
+ * The 3 active projects closest to `coords`. Disabled (never fires) without a GPS fix or while the user
+ * is searching, so the Nearby section simply doesn't render in those cases — no permission nagging.
+ */
+export function useNearbyProjects(coords: { lat: number; lng: number } | null, enabled: boolean) {
+  const { fetcher, user } = useAuth();
+  return useQuery({
+    queryKey: qk.nearby(user?.id ?? "anon", coords?.lat ?? 0, coords?.lng ?? 0),
+    queryFn: () => api.getNearbyProjects(fetcher, coords!.lat, coords!.lng),
+    enabled: enabled && !!user && !!coords,
+  });
+}
+
 export function useToggleStar() {
   const { fetcher, user } = useAuth();
   const qc = useQueryClient();
@@ -31,9 +44,11 @@ export function useToggleStar() {
       starred ? api.unstarProject(fetcher, dealId) : api.starProject(fetcher, dealId),
     onSuccess: () => {
       if (!user) return;
-      // prefix-invalidate every ["projects", uid, *] and the starred list
+      // prefix-invalidate every ["projects", uid, *], the starred list, and every nearby coordinate
+      // bucket — Nearby rows also show the star, so their cached `starred` must refresh after a toggle.
       void qc.invalidateQueries({ queryKey: ["projects", user.id] });
       void qc.invalidateQueries({ queryKey: qk.starred(user.id) });
+      void qc.invalidateQueries({ queryKey: ["nearby", user.id] });
     },
   });
 }
