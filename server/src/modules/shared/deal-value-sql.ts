@@ -1,5 +1,9 @@
 import { sql, type SQL } from "drizzle-orm";
-import { reportableDealSqlPredicate, effectiveOnHoldSqlPredicate } from "@trock-crm/shared/types";
+import {
+  reportableDealSqlPredicate,
+  effectiveOnHoldSqlPredicate,
+  closeTargetFarOutSqlPredicate,
+} from "@trock-crm/shared/types";
 
 type DealValueTable = {
   onHold: unknown;
@@ -212,6 +216,40 @@ export function aliasedEffectiveAwardedDealValueSql(
 
 export function aliasedEffectiveWonDealValueSql(alias: string): SQL {
   return aliasedStoredOnHoldDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
+}
+
+// Aliased twin for a LOST terminal deal — REALIZED/PRESERVED value, zeroed on stored on_hold ONLY. A lost
+// bid is a historical record whose value is kept for Loss Analysis, so it is NEVER auto-parked by a stale
+// far-out forecast date (only its stored flag zeros it). Mirrors the client getEffectiveDealValue's
+// terminal (won OR lost) exemption and the won twin above; uses the same unified awarded-first chain.
+export function aliasedEffectiveLostDealValueSql(alias: string): SQL {
+  return aliasedStoredOnHoldDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
+}
+
+// TERMINAL-AWARE effective-on-hold SQL condition — the SQL twin of the shared TS isDealEffectivelyOnHold.
+// A deal is effectively on hold when the stored `on_hold` flag is set OR — for an OPEN (non-terminal) deal
+// — its close target is more than CLOSE_TARGET_HOLD_HORIZON_DAYS out. A won/lost deal is realized/preserved,
+// so the far-out auto-park leg NEVER applies to it (only its stored flag holds it); `terminalStageIds`
+// (won ∪ lost) gates that leg via `stage_id NOT IN (...)`. Pass `[]` for the legacy open-only predicate
+// (a population with no terminal rows). Reuses the SHARED far-out day-math so SQL and TS can't drift, and
+// the shared identifier validation (closeTargetFarOutSqlPredicate throws on an invalid path before any raw
+// column string is built here).
+export function aliasedEffectiveOnHoldConditionSql(
+  identifierPath = "deals",
+  terminalStageIds: string[] = []
+): SQL {
+  const farOut = sql.raw(closeTargetFarOutSqlPredicate(identifierPath));
+  const onHoldColumn = identifierPath ? `${identifierPath}.on_hold` : "on_hold";
+  const stored = sql.raw(`COALESCE(${onHoldColumn}, false) = true`);
+  if (terminalStageIds.length === 0) {
+    return sql`(${stored} OR (${farOut}))`;
+  }
+  const stageIdColumn = sql.raw(`${identifierPath}.stage_id`);
+  const notTerminal = sql`${stageIdColumn} NOT IN (${sql.join(
+    terminalStageIds.map((id) => sql`${id}`),
+    sql`, `
+  )})`;
+  return sql`(${stored} OR (${notTerminal} AND (${farOut})))`;
 }
 
 export function aliasedEffectiveEstimatingDealValueSql(alias: string): SQL {

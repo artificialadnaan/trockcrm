@@ -5,6 +5,8 @@ import {
   aliasedEffectiveDealValueSql,
   aliasedEffectiveEstimatingDealValueSql,
   aliasedEffectiveWonDealValueSql,
+  aliasedEffectiveLostDealValueSql,
+  aliasedEffectiveOnHoldConditionSql,
 } from "../shared/deal-value-sql.js";
 import {
   buildDealOutcomeDateScope,
@@ -171,21 +173,30 @@ export function buildWorkflowRoutePredicate(input: DealFilterBarInput): SQL | un
 /**
  * status — ONE control over TWO orthogonal columns (is_active, on_hold). The
  * mapping is explicit so the safety-critical is_active default is never ambiguous.
+ *
+ * EFFECTIVE-HOLD aware (Codex P2): "On hold" / "Active" key on the EFFECTIVE hold rule (stored on_hold OR —
+ * for an OPEN deal — a far-out close target), not the stored flag alone, so a far-out auto-held open deal
+ * reads as On-Hold (matching its $0 value + badge) instead of leaking into Active. TERMINAL-aware: a won/lost
+ * deal is realized/preserved and never auto-parked, so ctx's won ∪ lost ids exempt it from the far-out leg.
+ * Without those ids (ctx default) the rule degrades to open-only — safe only when the population has no
+ * terminal rows; the deals list resolves them whenever a status filter is set.
  */
-export function buildStatusPredicate(input: DealFilterBarInput): SQL | undefined {
+export function buildStatusPredicate(input: DealFilterBarInput, ctx: DealFilterContext = {}): SQL | undefined {
   const value = input.status;
   // Absent / empty / "any" omits (no narrowing). An unrecognized value falls to
   // the default no-match sentinel rather than silently omitting (contract §3).
   if (value === undefined || value === "" || value === "any") return undefined;
+  const terminalStageIds = [...(ctx.wonStageIds ?? []), ...(ctx.lostStageIds ?? [])];
+  const effectiveHold = aliasedEffectiveOnHoldConditionSql("deals", terminalStageIds);
   switch (value) {
     case "active":
-      return and(eq(deals.isActive, true), sql`coalesce(${deals.onHold}, false) = false`);
+      return and(eq(deals.isActive, true), sql`NOT (${effectiveHold})`);
     case "on_hold":
       // On-Hold is a CURRENT-deals view (a subset of active, paused), so require
       // is_active=true too — else a soft-deleted deal (deleteDeal sets is_active
       // false but leaves on_hold set) would reappear here (Codex #546). A deal
       // both inactive AND on-hold belongs under Inactive, not On-Hold.
-      return and(eq(deals.isActive, true), sql`coalesce(${deals.onHold}, false) = true`);
+      return and(eq(deals.isActive, true), effectiveHold);
     case "inactive":
       return eq(deals.isActive, false);
     default:
@@ -198,15 +209,21 @@ export function buildStatusPredicate(input: DealFilterBarInput): SQL | undefined
  * Row-level branch by stage_id (no pipeline_stage_config join — the deals row carries stage_id):
  *   - estimating stages → awarded > dd > bid (DD outranks bid; 2026-06-18 Adnaan rule);
  *   - Won stages        → awarded-first chain (identical to open since the 2026-06-18 unification —
- *                         retained as a future-divergence hook);
- *   - everything else   → the default open awarded-first chain.
- * All branches are on-hold-zeroed. This is the value the list DISPLAYS, so the value filter and the
- * value sort use it too (sort == filter == display, D-1; Codex #546).
+ *                         retained as a future-divergence hook), REALIZED-safe (stored on_hold only);
+ *   - Lost stages       → awarded-first chain, REALIZED-safe — a lost bid's value is PRESERVED for Loss
+ *                         Analysis and must NOT be auto-parked to $0 by a far-out forecast date (Codex P2;
+ *                         mirrors the client getEffectiveDealValue terminal exemption);
+ *   - everything else   → the default OPEN awarded-first chain, which DOES zero a far-out (90+ day) close
+ *                         target (auto-park).
+ * Won/Lost branches zero on stored on_hold only; the open branch additionally zeros far-out auto-held rows.
+ * This is the value the list DISPLAYS, so the value filter and the value sort use it too (sort == filter ==
+ * display, D-1; Codex #546).
  */
 export function aliasedStageAwareEffectiveDealValueSql(
   alias: string,
   wonStageIds: string[],
-  estimatingStageIds: string[] = []
+  estimatingStageIds: string[] = [],
+  lostStageIds: string[] = []
 ): SQL {
   const openValue = aliasedEffectiveDealValueSql(alias);
   const stageId = sql.raw(`${alias}.stage_id`);
@@ -218,6 +235,10 @@ export function aliasedStageAwareEffectiveDealValueSql(
   if (wonStageIds.length > 0) {
     const wonIds = sql.join(wonStageIds.map((id) => sql`${id}`), sql`, `);
     branches.push(sql`WHEN ${stageId} IN (${wonIds}) THEN ${aliasedEffectiveWonDealValueSql(alias)}`);
+  }
+  if (lostStageIds.length > 0) {
+    const lostIds = sql.join(lostStageIds.map((id) => sql`${id}`), sql`, `);
+    branches.push(sql`WHEN ${stageId} IN (${lostIds}) THEN ${aliasedEffectiveLostDealValueSql(alias)}`);
   }
   if (branches.length === 0) return openValue;
   return sql`CASE ${sql.join(branches, sql` `)} ELSE ${openValue} END`;
@@ -285,7 +306,12 @@ export function buildValueRangePredicate(input: DealFilterBarInput, ctx: DealFil
   const min = finiteNumber(input.valueMin);
   const max = finiteNumber(input.valueMax);
   if (min === undefined && max === undefined) return undefined;
-  const value = aliasedStageAwareEffectiveDealValueSql("deals", ctx.wonStageIds ?? [], ctx.estimatingStageIds ?? []);
+  const value = aliasedStageAwareEffectiveDealValueSql(
+    "deals",
+    ctx.wonStageIds ?? [],
+    ctx.estimatingStageIds ?? [],
+    ctx.lostStageIds ?? []
+  );
   if (min !== undefined && max !== undefined) return sql`${value} BETWEEN ${min} AND ${max}`;
   if (min !== undefined) return sql`${value} >= ${min}`;
   return sql`${value} <= ${max}`;
@@ -343,7 +369,7 @@ export const DEAL_FILTER_PREDICATES: DealFilterPredicate[] = [
   (input) => buildRegionPredicate(input),
   (input) => buildProjectTypePredicate(input),
   (input) => buildWorkflowRoutePredicate(input),
-  (input) => buildStatusPredicate(input),
+  (input, ctx) => buildStatusPredicate(input, ctx),
   (input, ctx) => buildValueRangePredicate(input, ctx),
   (input, ctx) => buildStalledPredicate(input, ctx),
   (input, ctx) => buildOutcomeAwareDatePredicate(input, ctx),

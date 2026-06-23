@@ -42,9 +42,24 @@ export function effectiveOnHoldSqlPredicate(identifierPath?: string): string {
     throw new Error(`Invalid effective on-hold SQL identifier: ${identifierPath}`);
   }
   const onHold = identifierPath ? `${identifierPath}.on_hold` : "on_hold";
+  return `(COALESCE(${onHold}, false) = true OR (${closeTargetFarOutSqlPredicate(identifierPath)}))`;
+}
+
+/**
+ * JUST the far-out auto-park leg of the effective-on-hold rule: the deal has a close target more than
+ * CLOSE_TARGET_HOLD_HORIZON_DAYS CT-days out. Extracted so a TERMINAL-AWARE caller (server) can gate this
+ * leg behind a `NOT terminal` guard while reusing the EXACT day-math — the horizon constant and the
+ * America/Chicago anchor — so the SQL and TS twin (isDealEffectivelyOnHold) can never drift. Pure string
+ * builder; consumed via `sql.raw`. The stored `on_hold` flag is the OTHER, always-applies leg (see
+ * effectiveOnHoldSqlPredicate).
+ */
+export function closeTargetFarOutSqlPredicate(identifierPath?: string): string {
+  if (identifierPath && !SQL_IDENTIFIER_PATH.test(identifierPath)) {
+    throw new Error(`Invalid effective on-hold SQL identifier: ${identifierPath}`);
+  }
   const closeDate = identifierPath ? `${identifierPath}.expected_close_date` : "expected_close_date";
-  const farOut =
+  return (
     `${closeDate} IS NOT NULL AND ` +
-    `${closeDate} > ${CT_TODAY_SQL} + INTERVAL '${CLOSE_TARGET_HOLD_HORIZON_DAYS} days'`;
-  return `(COALESCE(${onHold}, false) = true OR (${farOut}))`;
+    `${closeDate} > ${CT_TODAY_SQL} + INTERVAL '${CLOSE_TARGET_HOLD_HORIZON_DAYS} days'`
+  );
 }

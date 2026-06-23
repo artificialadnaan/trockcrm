@@ -20,6 +20,7 @@ import { aliasedStageAwareEffectiveDealValueSql } from "../../../src/modules/dea
 const dialect = new PgDialect();
 const WON_STAGE_IDS = ["won"];
 const ESTIMATING_STAGE_IDS = ["estimating"];
+const LOST_STAGE_IDS = ["lost"];
 
 // stageSlug/workflowRoute drive the CLIENT's Won classification (isGenuineWonDealStageSlug);
 // stage_id IN WON_STAGE_IDS drives the SERVER's. They are aligned here (won rows: slug "won",
@@ -48,9 +49,16 @@ const ROWS = [
   // WON EARLY while the forecast date is still far out -> realized revenue, NOT auto-parked: keeps its
   // value (the won path stamps the won date but doesn't clear expected_close_date). Guards the P1.
   { id: "won_far_future", stage_id: "won", stageSlug: "won", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 0, awarded_amount: 300000, expected_close_date: "2099-12-31", expected: 300000 },
+  // LOST with a far-out forecast date -> PRESERVED for Loss Analysis, NOT auto-parked to $0 (a lost bid is
+  // realized history; only its stored on_hold flag would zero it). Guards Codex P2 — the lost branch.
+  { id: "lost_far_future", stage_id: "lost", stageSlug: "lost", on_hold: false, bid_board_total_sales: 0, bid_estimate: 0, dd_estimate: 0, awarded_amount: 250000, expected_close_date: "2099-12-31", expected: 250000 },
+  // LOST, normal (near) forecast -> awarded-first chain, falls through to bid_board.
+  { id: "lost_normal", stage_id: "lost", stageSlug: "lost", on_hold: false, bid_board_total_sales: 60000, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected: 60000 },
+  // LOST but explicitly on hold -> stored flag still zeros even a terminal deal (matches the client).
+  { id: "lost_onhold", stage_id: "lost", stageSlug: "lost", on_hold: true, bid_board_total_sales: 100000, bid_estimate: 0, dd_estimate: 0, awarded_amount: 0, expected: 0 },
 ];
 
-const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 1,750,000
+const EXPECTED_TOTAL = ROWS.reduce((sum, row) => sum + row.expected, 0); // 2,060,000
 
 let db: PGlite;
 
@@ -83,7 +91,7 @@ afterAll(async () => {
 
 describe("value-total SQL — running-total card reconciliation (#4)", () => {
   it("SUM(stage-aware effective value) over the set equals the hand-computed total", async () => {
-    const expr = dialect.sqlToQuery(aliasedStageAwareEffectiveDealValueSql("deals", WON_STAGE_IDS, ESTIMATING_STAGE_IDS));
+    const expr = dialect.sqlToQuery(aliasedStageAwareEffectiveDealValueSql("deals", WON_STAGE_IDS, ESTIMATING_STAGE_IDS, LOST_STAGE_IDS));
     const { rows } = await db.query<{ total: string }>(
       `SELECT coalesce(sum(${expr.sql}), 0) AS total FROM deals`,
       expr.params as unknown[]
@@ -92,7 +100,7 @@ describe("value-total SQL — running-total card reconciliation (#4)", () => {
   });
 
   it("each row's SQL effective value equals the client's getEffectiveDealValue (display == sum basis)", async () => {
-    const expr = dialect.sqlToQuery(aliasedStageAwareEffectiveDealValueSql("deals", WON_STAGE_IDS, ESTIMATING_STAGE_IDS));
+    const expr = dialect.sqlToQuery(aliasedStageAwareEffectiveDealValueSql("deals", WON_STAGE_IDS, ESTIMATING_STAGE_IDS, LOST_STAGE_IDS));
     const { rows } = await db.query<{ id: string; v: string }>(
       `SELECT id, (${expr.sql}) AS v FROM deals ORDER BY id`,
       expr.params as unknown[]
