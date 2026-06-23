@@ -31,8 +31,8 @@ export type CapturedShot = { uri: string; width?: number; height?: number; exif?
 
 const MIN_ZOOM = 0;
 const MAX_ZOOM = 1;
-const ZOOM_STEP = 0.1;
-const ANDROID_FIRST_BUTTON_ZOOM = MAX_ZOOM;
+const FINE_ZOOM_STEP = 0.1;
+const ANDROID_FIRST_BUTTON_ZOOM = 0.5;
 const PINCH_ZOOM_SENSITIVITY = 0.35;
 
 function clampZoom(value: number) {
@@ -220,7 +220,7 @@ export default function CameraCapture({
                     <View pointerEvents="box-none" style={styles.zoomZone}>
                       <View style={styles.zoomRail}>
                         <Pressable
-                          onPress={() => adjustZoom(-ZOOM_STEP)}
+                          onPress={() => adjustZoom(-FINE_ZOOM_STEP)}
                           disabled={zoom <= MIN_ZOOM}
                           hitSlop={8}
                           accessibilityRole="button"
@@ -250,7 +250,7 @@ export default function CameraCapture({
                           <Text style={styles.zoomValue}>{zoomText}</Text>
                         </Pressable>
                         <Pressable
-                          onPress={() => adjustZoom(ZOOM_STEP)}
+                          onPress={() => adjustZoom(FINE_ZOOM_STEP)}
                           disabled={zoom >= MAX_ZOOM}
                           hitSlop={8}
                           accessibilityRole="button"

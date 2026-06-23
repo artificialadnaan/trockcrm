@@ -145,13 +145,14 @@ describe("CameraCapture zoom", () => {
     expect(screen.getByLabelText("Zoom out").props.accessibilityState).toEqual({ disabled: true });
   });
 
-  it("uses an immediately effective first Android zoom button step", () => {
+  it("uses an immediately effective first Android zoom button step without jumping to max", () => {
     Object.defineProperty(Platform, "OS", { configurable: true, get: () => "android" });
     const screen = renderCamera();
 
     fireEvent.press(screen.getByLabelText("Zoom in"));
 
-    expect(lastCameraProps().zoom).toBe(1);
-    expect(screen.getByText("100%")).toBeTruthy();
+    expect(lastCameraProps().zoom).toBe(0.5);
+    expect(screen.getByText("50%")).toBeTruthy();
+    expect(screen.getByLabelText("Zoom in").props.accessibilityState).toEqual({ disabled: false });
   });
 });
