@@ -76,7 +76,10 @@ function parseOptionalPositiveInt(value: unknown): number | undefined {
 }
 
 function parseRequiredCoordinate(value: unknown, name: "lat" | "lng", min: number, max: number): number {
-  if (typeof value !== "string") {
+  // Reject blanks BEFORE coercing: Number("") and Number("   ") both yield 0, which would otherwise pass
+  // the range check below and silently rank projects around (0,0) for a coordinate the caller never sent
+  // (e.g. `?lat=&lng=` from generic query/form serialization). Treat empty/whitespace as missing.
+  if (typeof value !== "string" || value.trim() === "") {
     throw new AppError(400, `Valid ${name} query parameter is required.`);
   }
   const parsed = Number(value);
@@ -215,14 +218,11 @@ fieldRoutes.get("/projects/starred", requireFieldContractor, async (req, res, ne
 fieldRoutes.get("/projects/nearby", requireFieldContractor, async (req, res, next) => {
   try {
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
-    const lat = Number(req.query.lat);
-    const lng = Number(req.query.lng);
-    // Validate the RANGE in-route, not just finiteness: an out-of-range value (e.g. lat=999) would pass a
-    // finiteness check, then throw a 400 inside every per-office call, which the fan-out's all-failed
-    // guard would surface as a misleading 503. Reject it here so the client gets the correct 400.
-    if (!Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
-      throw new AppError(400, "lat and lng must be valid coordinates");
-    }
+    // parseRequiredCoordinate rejects missing/blank/out-of-range values up front (a 400), so an
+    // out-of-range value (e.g. lat=999) never reaches the per-office calls where it would throw inside
+    // every office and surface as a misleading fan-out 503.
+    const lat = parseRequiredCoordinate(req.query.lat, "lat", -90, 90);
+    const lng = parseRequiredCoordinate(req.query.lng, "lng", -180, 180);
     const { results, failures } = assertFanOutNotFullyDegraded(
       await fanOutActiveOffices((officeDb) =>
         listNearbyFieldProjects(officeDb, access, { lat, lng, limit: FIELD_NEARBY_DEFAULT_LIMIT }),

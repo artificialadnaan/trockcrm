@@ -78,4 +78,11 @@ describe("GET /api/field/projects/nearby", () => {
     const res = await request(app()).get("/api/field/projects/nearby");
     expect(res.status).toBe(400);
   });
+
+  it("rejects blank coordinate params with a 400 (not (0,0) results)", async () => {
+    // `?lat=&lng=` arrives as empty strings; Number("") === 0 must NOT be treated as a valid coordinate.
+    const res = await request(app()).get("/api/field/projects/nearby?lat=&lng=");
+    expect(res.status).toBe(400);
+    expect(fanOutActiveOfficesMock).not.toHaveBeenCalled(); // never fanned out around 0,0
+  });
 });

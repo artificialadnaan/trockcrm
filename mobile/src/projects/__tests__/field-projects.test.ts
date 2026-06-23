@@ -9,6 +9,7 @@ import {
   PHOTO_CATEGORIES,
   projectNumberLabel,
   relativeDate,
+  selectNearbySource,
   tagsOf,
   uploadersOf,
   type FieldPhoto,
@@ -83,6 +84,33 @@ describe("partitionProjectSections", () => {
     expect(result.starred).toEqual([]);
     expect(result.all).toEqual([]);
     expect(result.hasSections).toBe(true);
+  });
+});
+
+describe("selectNearbySource", () => {
+  const projects = [fieldProject("a"), fieldProject("b"), fieldProject("c")];
+
+  it("returns the ranked projects when fresh and complete", () => {
+    expect(
+      selectNearbySource({ searching: false, isError: false, projects, degradedOffices: [] }).map((p) => p.id),
+    ).toEqual(["a", "b", "c"]);
+  });
+
+  it("suppresses Nearby while searching", () => {
+    expect(selectNearbySource({ searching: true, isError: false, projects, degradedOffices: [] })).toEqual([]);
+  });
+
+  it("suppresses Nearby when any office was degraded", () => {
+    expect(selectNearbySource({ searching: false, isError: false, projects, degradedOffices: ["atl"] })).toEqual([]);
+  });
+
+  it("suppresses stale data on a failed refetch (isError, data retained)", () => {
+    // React Query keeps prior `projects` (degradedOffices empty) when a refetch errors — must still hide.
+    expect(selectNearbySource({ searching: false, isError: true, projects, degradedOffices: [] })).toEqual([]);
+  });
+
+  it("returns [] when there is no data yet", () => {
+    expect(selectNearbySource({ searching: false, isError: false })).toEqual([]);
   });
 });
 

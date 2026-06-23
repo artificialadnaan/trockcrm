@@ -155,6 +155,26 @@ export function partitionProjectSections(
   };
 }
 
+/**
+ * Decide which projects (if any) the "Nearby" section should render. A ranked "nearest 3" must be
+ * suppressed whenever it can't be trusted:
+ *  - while searching (Nearby is a browse-mode affordance),
+ *  - when any office was omitted from the cross-office fan-out (`degradedOffices` non-empty) — the
+ *    missing office could hold the actual closest job, so a partial ranking is misleading,
+ *  - when the latest fetch errored — React Query RETAINS the prior data on a failed refetch (e.g. every
+ *    office 503s), so without this gate a stale ranking would keep rendering as if fresh.
+ */
+export function selectNearbySource(args: {
+  searching: boolean;
+  isError: boolean;
+  projects?: FieldProject[];
+  degradedOffices?: string[];
+}): FieldProject[] {
+  const { searching, isError, projects, degradedOffices } = args;
+  if (searching || isError || (degradedOffices?.length ?? 0) > 0) return [];
+  return projects ?? [];
+}
+
 export function relativeDate(value: string | null) {
   if (!value) return "no recent activity";
   const diffMs = Date.now() - new Date(value).getTime();

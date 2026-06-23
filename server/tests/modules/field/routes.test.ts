@@ -317,6 +317,9 @@ describe("field routes", () => {
     { lat: "abc", lng: "-96.775" },
     { lat: "91", lng: "-96.775" },
     { lat: "32.911", lng: "-181" },
+    { lat: "", lng: "-96.775" }, // blank string: Number("")===0 must not pass as a valid coordinate
+    { lat: "32.911", lng: "" },
+    { lat: "  ", lng: "-96.775" }, // whitespace-only likewise
   ])("rejects invalid nearby coordinate query %# with 400", async (query) => {
     await expect(invokeRoute("get", "/photo-targets/nearby", { query })).rejects.toMatchObject({
       statusCode: 400,

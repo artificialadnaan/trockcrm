@@ -7,7 +7,7 @@ import { useDebouncedValue } from "../../../src/hooks/useDebouncedValue";
 import { useDeviceLocation } from "../../../src/hooks/useDeviceLocation";
 import { useNearbyProjects, useProjects, useStarredProjects, useToggleStar } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { formatDistanceMiles, isProjectOffOffice, partitionProjectSections, projectNumberLabel, relativeDate, type FieldProject } from "../../../src/projects/field-projects";
+import { formatDistanceMiles, isProjectOffOffice, partitionProjectSections, projectNumberLabel, relativeDate, selectNearbySource, type FieldProject } from "../../../src/projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
@@ -30,11 +30,15 @@ export default function ProjectsScreen() {
   const toggleStar = useToggleStar();
 
   const allProjects = projectsQuery.data?.projects ?? [];
-  // If any office failed in the cross-office fan-out, the omitted office could hold the actual closest
-  // job — so a partial result is a MISLEADING "nearest 3". Suppress Nearby entirely when degraded (the
-  // plain All list tolerates a missing office; a ranked top-3 claim must not).
-  const nearbyDegraded = (nearbyQuery.data?.degradedOffices?.length ?? 0) > 0;
-  const nearbySource = !searching && !nearbyDegraded ? nearbyQuery.data?.projects ?? [] : [];
+  // A ranked "nearest 3" is suppressed whenever it can't be trusted — while searching, when an office
+  // was omitted from the fan-out, or when the latest fetch errored (React Query retains stale data on a
+  // failed refetch). See selectNearbySource (pure + unit-tested).
+  const nearbySource = selectNearbySource({
+    searching,
+    isError: nearbyQuery.isError,
+    projects: nearbyQuery.data?.projects,
+    degradedOffices: nearbyQuery.data?.degradedOffices,
+  });
   // Dedup precedence Nearby > Starred > All so nothing renders twice (pure + unit-tested).
   const { nearby, starred: visibleStarred, all: projects, hasSections } = partitionProjectSections(
     nearbySource,
