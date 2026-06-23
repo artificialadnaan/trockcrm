@@ -151,6 +151,20 @@ describe("getDeals — FilterBar wiring", () => {
     expect(orderText).toContain("on_hold");
   });
 
+  it("default-sort active/non-zero TIER is terminal-aware via the joined slug — far-out won/lost not sunk (Codex P2)", async () => {
+    // A plain created-sort list never resolves the stage-id sets, so the always-running sort tier reads the
+    // JOINED pipeline_stage_config.slug (+ the Bid Board mirror) to keep a realized far-out won/lost deal in
+    // the top tier instead of sinking it as $0/on-hold.
+    const { db, capturedOrderBys } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { scope: "all" }, "director", "director-1");
+
+    const orderText = capturedOrderBys.flat().map(renderText).join(" ").toLowerCase();
+    expect(orderText).toContain("pipeline_stage_config.slug");
+    expect(orderText).toContain("bid_board_stage_slug");
+  });
+
   it("returns pagination.valueTotal when includeValueTotal is requested — SUM over the SAME filtered set (#4)", async () => {
     // The running-total card needs the summed value of the ENTIRE filtered set (all pages),
     // not just the visible page, so it rides on getDeals' response. The harness resolves every

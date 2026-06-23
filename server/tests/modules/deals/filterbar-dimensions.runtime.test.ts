@@ -40,6 +40,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id text PRIMARY KEY,
       stage_id text NOT NULL DEFAULT 'open',
+      bid_board_stage_slug text,
       assigned_rep_id text,
       estimator_user_id text,
       region_id text,

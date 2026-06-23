@@ -24,6 +24,7 @@ import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shar
 import {
   aliasedActiveDealCountFilterSql,
   aliasedEffectiveDealValueSql,
+  aliasedEffectiveLostDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedReportableDealFilterSql,
   aliasedWonHsClosedWonDateSql,
@@ -1029,7 +1030,7 @@ export async function getLostDealsByReason(
       COALESCE(ldr.label, 'Unknown') AS reason_label,
       COUNT(*) FILTER (WHERE ${aliasedActiveDealCountFilterSql("d")})::int AS count,
       COALESCE(SUM(
-        ${aliasedEffectiveDealValueSql("d")}
+        ${aliasedEffectiveLostDealValueSql("d")}
       ), 0)::numeric AS total_value
     FROM deals d
     LEFT JOIN lost_deal_reasons ldr ON ldr.id = d.lost_reason_id

@@ -38,6 +38,7 @@ interface StaleDealCandidateRow {
   stage_slug: string | null;
   workflow_route: string | null;
   stage_entered_at: string | Date | null;
+  expected_close_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -70,6 +71,10 @@ function toStaleDealRows(rows: StaleDealCandidateRow[], now: Date): StaleDealRow
         stageSlug: row.stage_slug,
         workflowRoute: normalizeWorkflowRoute(row.workflow_route),
         stageEnteredAt: row.stage_entered_at,
+        // Align with the app at-risk: a 90+ day close target auto-parks the deal (effective on hold) and a
+        // today-or-future target suppresses the stage-age nag (default suppression), so worker stale alerts
+        // never fire on deals the dashboard/API already cleared (Codex P2).
+        expectedCloseDate: row.expected_close_date,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
         onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
@@ -169,6 +174,7 @@ export async function runStaleDealScan(): Promise<void> {
              d.stage_entered_at,
              latest_current_stage_entered_at.entered_at
            ) AS stage_entered_at,
+           d.expected_close_date,
            d.on_hold,
            d.on_hold_started_at,
            d.on_hold_accumulated_seconds,

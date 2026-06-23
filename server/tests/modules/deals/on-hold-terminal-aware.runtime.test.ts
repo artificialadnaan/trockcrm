@@ -27,21 +27,25 @@ const TERMINAL_IDS = ["won", "lost"];
 type Row = {
   id: string;
   stage_id: string;
+  bid_board_stage_slug: string | null;
   on_hold: boolean;
   expected_close_date: string | null;
   isTerminal: boolean;
 };
 
 const ROWS: Row[] = [
-  { id: "open_far", stage_id: "opportunity", on_hold: false, expected_close_date: FAR, isTerminal: false },
-  { id: "open_near", stage_id: "opportunity", on_hold: false, expected_close_date: NEAR, isTerminal: false },
-  { id: "open_stored_hold", stage_id: "opportunity", on_hold: true, expected_close_date: NEAR, isTerminal: false },
-  { id: "open_null_date", stage_id: "opportunity", on_hold: false, expected_close_date: null, isTerminal: false },
+  { id: "open_far", stage_id: "opportunity", bid_board_stage_slug: null, on_hold: false, expected_close_date: FAR, isTerminal: false },
+  { id: "open_near", stage_id: "opportunity", bid_board_stage_slug: null, on_hold: false, expected_close_date: NEAR, isTerminal: false },
+  { id: "open_stored_hold", stage_id: "opportunity", bid_board_stage_slug: null, on_hold: true, expected_close_date: NEAR, isTerminal: false },
+  { id: "open_null_date", stage_id: "opportunity", bid_board_stage_slug: null, on_hold: false, expected_close_date: null, isTerminal: false },
   // Terminal deals with a far-out forecast date: realized/preserved -> NOT held (finding 3).
-  { id: "won_far", stage_id: "won", on_hold: false, expected_close_date: FAR, isTerminal: true },
-  { id: "lost_far", stage_id: "lost", on_hold: false, expected_close_date: FAR, isTerminal: true },
+  { id: "won_far", stage_id: "won", bid_board_stage_slug: null, on_hold: false, expected_close_date: FAR, isTerminal: true },
+  { id: "lost_far", stage_id: "lost", bid_board_stage_slug: null, on_hold: false, expected_close_date: FAR, isTerminal: true },
   // Terminal but explicitly stored on_hold -> still held (stored flag applies to terminal too).
-  { id: "won_stored_hold", stage_id: "won", on_hold: true, expected_close_date: FAR, isTerminal: true },
+  { id: "won_stored_hold", stage_id: "won", bid_board_stage_slug: null, on_hold: true, expected_close_date: FAR, isTerminal: true },
+  // Bid Board-owned: CRM stage_id still OPEN but the BB mirror is terminal (won) -> realized -> NOT held
+  // (finding D). isTerminal=true because the client treats a terminal bidBoardStageSlug as terminal.
+  { id: "bb_mirror_far", stage_id: "opportunity", bid_board_stage_slug: "won", on_hold: false, expected_close_date: FAR, isTerminal: true },
 ];
 
 let db: PGlite;
@@ -52,6 +56,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id text PRIMARY KEY,
       stage_id text NOT NULL,
+      bid_board_stage_slug text,
       on_hold boolean NOT NULL DEFAULT false,
       expected_close_date date,
       is_active boolean NOT NULL DEFAULT true
@@ -59,8 +64,8 @@ beforeAll(async () => {
   `);
   for (const r of ROWS) {
     await db.query(
-      `INSERT INTO deals (id, stage_id, on_hold, expected_close_date) VALUES ($1,$2,$3,$4)`,
-      [r.id, r.stage_id, r.on_hold, r.expected_close_date]
+      `INSERT INTO deals (id, stage_id, bid_board_stage_slug, on_hold, expected_close_date) VALUES ($1,$2,$3,$4,$5)`,
+      [r.id, r.stage_id, r.bid_board_stage_slug, r.on_hold, r.expected_close_date]
     );
   }
 });
@@ -86,11 +91,13 @@ describe("aliasedEffectiveOnHoldConditionSql — terminal-aware, reconciles with
       });
       expect(heldById.get(r.id)).toBe(tsHeld);
     }
-    // Spot-checks of intent: open far-out held, terminal far-out NOT held, terminal+stored held.
+    // Spot-checks of intent: open far-out held, terminal far-out NOT held, terminal+stored held, and a
+    // Bid Board-mirrored terminal deal on an open CRM stage is NOT auto-parked (finding D).
     expect(heldById.get("open_far")).toBe(true);
     expect(heldById.get("won_far")).toBe(false);
     expect(heldById.get("lost_far")).toBe(false);
     expect(heldById.get("won_stored_hold")).toBe(true);
+    expect(heldById.get("bb_mirror_far")).toBe(false);
   });
 
   it("without terminal ids ([]) auto-parks even terminal far-out rows (open-only legacy behavior)", async () => {
@@ -125,7 +132,8 @@ describe("buildStatusPredicate — Active/On-hold are effective-hold + terminal-
       expr.params as unknown[]
     );
     const ids = rows.map((r) => r.id).sort();
-    // open_far + the two stored-hold rows drop out; realized won_far/lost_far stay active.
-    expect(ids).toEqual(["lost_far", "open_near", "open_null_date", "won_far"].sort());
+    // open_far + the two stored-hold rows drop out; realized won_far/lost_far + the BB-mirrored terminal
+    // bb_mirror_far stay active.
+    expect(ids).toEqual(["bb_mirror_far", "lost_far", "open_near", "open_null_date", "won_far"].sort());
   });
 });

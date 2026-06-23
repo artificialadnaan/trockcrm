@@ -20,6 +20,7 @@ function atRiskRow(
     stage_slug: "estimating",
     workflow_route: "normal",
     stage_entered_at: "2026-04-23T00:00:00.000Z",
+    expected_close_date: null,
     on_hold: false,
     on_hold_started_at: null,
     on_hold_accumulated_seconds: 0,
@@ -61,6 +62,29 @@ describe("rep performance rollup at-risk count", () => {
       { repId: "rep-1", atRiskCount: 1 },
       { repId: "rep-2", atRiskCount: 1 },
     ]);
+  });
+
+  it("excludes a deal auto-parked by a far-out (90+ day) close target — matches the app at-risk (Codex P2)", () => {
+    const asOf = new Date("2026-05-08T00:00:00.000Z");
+
+    const counts = computeRepAtRiskCountsFromRows(
+      [
+        atRiskRow({
+          rep_id: "rep-1",
+          stage_entered_at: new Date(asOf.getTime() - 15 * dayMs).toISOString(),
+        }),
+        atRiskRow({
+          rep_id: "rep-1",
+          stage_entered_at: new Date(asOf.getTime() - 15 * dayMs).toISOString(),
+          // Same stage age, but a far-out close target -> effectively on hold -> NOT at-risk, so the worker
+          // rollup no longer counts a deal the dashboard/API already cleared.
+          expected_close_date: "2099-12-31",
+        }),
+      ],
+      asOf
+    );
+
+    expect(counts).toEqual([{ repId: "rep-1", atRiskCount: 1 }]);
   });
 
   it("subtracts completed hold time before evaluating the shared engine", () => {

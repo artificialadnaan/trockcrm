@@ -73,6 +73,7 @@ import {
   aliasedDealEstimatingValueSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveOnHoldConditionSql,
+  aliasedTerminalAwareEffectiveDealValueSql,
   aliasedWonHsClosedWonDateSql,
   dealAwardedFirstWithFallbackSql,
   dealBestEstimateSql,
@@ -841,16 +842,18 @@ function buildDealListOrder(
   // Primary tier: active, non-zero deals on top; on-hold and $0-value deals sink to
   // the bottom of the list (sort-only — the WHERE set is unchanged, so they still
   // appear, just last). Within each tier the requested column sort + id tiebreaker
-  // apply. The tier reuses the SAME stage-aware effective value the list displays and
-  // filters on, so sort == filter == display (D-1).
+  // apply.
+  //
+  // The tier runs on EVERY list request — even a plain created/name sort that never resolves the stage-id
+  // sets — so it must be TERMINAL-aware WITHOUT a stage-id round-trip. It reads the JOINED
+  // pipeline_stage_config.slug (the row query left-joins it) plus the Bid Board mirror: a realized won/lost
+  // deal keeps its preserved value and is NOT sunk as $0/on-hold even when its forecast date is far out,
+  // while an OPEN row still auto-parks a far-out close target (Codex P2). Tier is a binary >0 check, so the
+  // simpler best-estimate chain matches the stage-aware value's positivity for every classification.
+  const isTerminalDealBySlug = sql`(pipeline_stage_config.slug IN (${sqlStringList(TERMINAL_STAGE_SLUGS)}) OR COALESCE(deals.bid_board_stage_slug, '') IN (${sqlStringList(TERMINAL_STAGE_SLUGS)}))`;
   const tier = aliasedActiveNonZeroDealSortTierSql(
     "deals",
-    aliasedStageAwareEffectiveDealValueSql(
-      "deals",
-      classification.wonStageIds,
-      classification.estimatingStageIds,
-      classification.lostStageIds
-    )
+    aliasedTerminalAwareEffectiveDealValueSql("deals", aliasedDealBestEstimateSql("deals"), isTerminalDealBySlug)
   );
   return [asc(tier), ...buildDealListColumnOrder(filters, classification)];
 }
@@ -1717,23 +1720,20 @@ export async function getDeals(
   let wonStageIds: string[] = [];
   let lostStageIds: string[] = [];
   let estimatingStageIds: string[] = [];
-  // Resolve Won/Lost/estimating stage-id sets once when any stage-classified dimension is in
-  // play: the outcome-aware date window (Won+Lost), and the stage-aware value filter/sort/total
-  // (Won → awarded-first; estimating → awarded>dd>bid). Done here so those predicates classify
-  // rows without a pipeline_stage_config join (the count queries below select from `deals` alone).
+  // Resolve Won/Lost/estimating stage-id sets once when any stage-classified dimension is in play: the
+  // outcome-aware date window, the stage-aware value filter/sort/total, and the EFFECTIVE-hold + terminal-aware
+  // status filter (which needs the won ∪ lost ids to exempt realized rows from the far-out auto-park leg).
+  // Done here so those predicates classify rows without a pipeline_stage_config join (the count queries
+  // select from `deals` alone). The always-running SORT TIER instead reads the JOINED stage slug (it can't
+  // pay a stage-id round-trip on every plain list), so it does NOT force resolution here.
   const valueFilterRequested = Number.isFinite(filters.valueMin) || Number.isFinite(filters.valueMax);
   const needsStageClassification =
     Boolean(filters.dateFrom || filters.dateTo) ||
     valueFilterRequested ||
     filters.sortBy === "awarded_amount" ||
     filters.sortBy === "display_date" ||
-    // The status filter's Active/On-hold branches are EFFECTIVE-hold + terminal-aware (buildStatusPredicate),
-    // so the won ∪ lost ids must be resolved to exempt realized rows from the far-out auto-park leg.
     filters.status === "active" ||
     filters.status === "on_hold" ||
-    // The running-total SUM (#4) uses the stage-aware value expression. Post-2026-06-18 open and Won
-    // resolve through the same awarded-first chain (the stage_id CASE branches are identical), but the
-    // Won set is still resolved here so the SUM expression stays byte-identical to the list's display value.
     Boolean(filters.includeValueTotal);
   if (needsStageClassification) {
     const stages = await listDealStages();

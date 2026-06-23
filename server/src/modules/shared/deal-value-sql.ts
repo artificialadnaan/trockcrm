@@ -4,6 +4,7 @@ import {
   effectiveOnHoldSqlPredicate,
   closeTargetFarOutSqlPredicate,
 } from "@trock-crm/shared/types";
+import { TERMINAL_STAGE_SLUGS } from "./pipeline-terminal-stages.js";
 
 type DealValueTable = {
   onHold: unknown;
@@ -214,6 +215,22 @@ export function aliasedEffectiveAwardedDealValueSql(
   return aliasedStoredOnHoldDealValueSql(alias, rawValueSql);
 }
 
+// Effective deal value for a MIXED (open + terminal) population where stage classification is available as a
+// raw SQL boolean (e.g. a joined pipeline_stage_config.slug + the Bid Board mirror) rather than resolved
+// stage-id sets. A terminal (won/lost) row is realized/preserved -> zeroed on stored on_hold ONLY; an OPEN
+// row additionally auto-parks a far-out close target. Use on aggregates that sum across outcomes without a
+// per-stage CASE (company stats, etc.) so far-out terminal value is never wrongly dropped (Codex P2).
+export function aliasedTerminalAwareEffectiveDealValueSql(
+  alias: string,
+  rawValueSql: SQL,
+  isTerminalSql: SQL
+): SQL {
+  return sql`CASE WHEN ${isTerminalSql} THEN ${aliasedStoredOnHoldDealValueSql(
+    alias,
+    rawValueSql
+  )} ELSE ${aliasedEffectiveDealValueSql(alias, rawValueSql)} END`;
+}
+
 export function aliasedEffectiveWonDealValueSql(alias: string): SQL {
   return aliasedStoredOnHoldDealValueSql(alias, aliasedDealAwardedFirstWithFallbackSql(alias));
 }
@@ -241,15 +258,23 @@ export function aliasedEffectiveOnHoldConditionSql(
   const farOut = sql.raw(closeTargetFarOutSqlPredicate(identifierPath));
   const onHoldColumn = identifierPath ? `${identifierPath}.on_hold` : "on_hold";
   const stored = sql.raw(`COALESCE(${onHoldColumn}, false) = true`);
-  if (terminalStageIds.length === 0) {
-    return sql`(${stored} OR (${farOut}))`;
+  // Two INDEPENDENT terminal signals gate the far-out auto-park leg, mirroring the client
+  // isDealValueEffectivelyOnHold: (1) the CRM stage_id is won/lost (caller-resolved ids), and (2) the Bid
+  // Board mirror is terminal — a BB-owned deal can be won/lost in bid_board_stage_slug while its CRM stage_id
+  // is still open. Either makes the deal realized/preserved, so the stale forecast date must NOT auto-park it.
+  const guards: SQL[] = [];
+  if (terminalStageIds.length > 0) {
+    const stageIdColumn = sql.raw(`${identifierPath}.stage_id`);
+    guards.push(
+      sql`${stageIdColumn} NOT IN (${sql.join(terminalStageIds.map((id) => sql`${id}`), sql`, `)})`
+    );
   }
-  const stageIdColumn = sql.raw(`${identifierPath}.stage_id`);
-  const notTerminal = sql`${stageIdColumn} NOT IN (${sql.join(
-    terminalStageIds.map((id) => sql`${id}`),
-    sql`, `
-  )})`;
-  return sql`(${stored} OR (${notTerminal} AND (${farOut})))`;
+  const bidBoardStageSlug = sql.raw(`COALESCE(${identifierPath}.bid_board_stage_slug, '')`);
+  guards.push(
+    sql`${bidBoardStageSlug} NOT IN (${sql.join(TERMINAL_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})`
+  );
+  const farOutForOpen = sql`${sql.join(guards, sql` AND `)} AND (${farOut})`;
+  return sql`(${stored} OR (${farOutForOpen}))`;
 }
 
 export function aliasedEffectiveEstimatingDealValueSql(alias: string): SQL {

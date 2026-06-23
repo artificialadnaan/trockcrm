@@ -29,6 +29,7 @@ interface DigestAtRiskDealRow {
   stage_slug: string | null;
   workflow_route: string | null;
   stage_entered_at: string | Date | null;
+  expected_close_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -54,6 +55,9 @@ function countDigestAtRiskDeals(rows: DigestAtRiskDealRow[], now: Date): number 
         stageSlug: row.stage_slug,
         workflowRoute: normalizeWorkflowRoute(row.workflow_route),
         stageEnteredAt: row.stage_entered_at,
+        // Align with the app at-risk so a far-out (90+ day) auto-held or close-target-suppressed deal is not
+        // counted as stale in the digest (Codex P2).
+        expectedCloseDate: row.expected_close_date,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
         onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),
@@ -127,6 +131,7 @@ export async function runWeeklyDigest(): Promise<void> {
                d.stage_entered_at,
                latest_current_stage_entered_at.entered_at
              ) AS stage_entered_at,
+             d.expected_close_date,
              d.on_hold,
              d.on_hold_started_at,
              d.on_hold_accumulated_seconds,
