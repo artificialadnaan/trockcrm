@@ -72,6 +72,7 @@ import {
   aliasedDealBestEstimateSql,
   aliasedDealEstimatingValueSql,
   aliasedEffectiveDealValueSql,
+  aliasedBidBoardTerminalSql,
   aliasedEffectiveOnHoldConditionSql,
   aliasedTerminalAwareEffectiveDealValueSql,
   aliasedTerminalDealBySlugSql,
@@ -935,9 +936,14 @@ function buildStagePageOrder(sort: StagePageSort | undefined, stage: PipelineSta
     case "name_asc":
       return sql`d.name asc, d.id asc`;
     case "value_desc":
-      return LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number])
-        ? sql`${workspaceEffectiveDealValueSql(stage)} desc, d.id desc`
-        : sql`${aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)))} desc, d.id desc`;
+      // OPEN/estimating + LOST stages sort by the EFFECTIVE value (the same expression the header total + row
+      // display use), so an auto-held far-out deal with a large raw bid sinks instead of sorting ahead of real
+      // positive-value deals, and a BB-mirrored terminal row keeps its realized value (Codex P2). WON stages
+      // keep the raw awarded-first sort (on-hold Won rows are already excluded from the Won page, and Won
+      // value is never far-out-zeroed, so raw == effective there).
+      return WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+        ? sql`${aliasedPipelineValueSql("d", pipelineValueSourceForStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)))} desc, d.id desc`
+        : sql`${workspaceEffectiveDealValueSql(stage)} desc, d.id desc`;
     case "newest":
     default:
       return sql`d.created_at desc, d.id desc`;
@@ -1299,9 +1305,13 @@ function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
   // close target so the stage-page header total matches the $0 the DealsListSection cards show for those
   // auto-held open deals.
   const isTerminalStage = isTerminalValueStage(valueSource, stage);
-  return isTerminalStage
-    ? sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`
-    : aliasedEffectiveDealValueSql("d", rawValue);
+  if (isTerminalStage) {
+    return sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`;
+  }
+  // OPEN/estimating stage page: zero a far-out (90+ day) auto-held deal — BUT preserve a Bid Board-owned deal
+  // whose bid_board_stage_slug is already won/lost (CRM stage still open here), matching the client + value
+  // filter, so the header total never drops below the visible row values (Codex P2).
+  return aliasedTerminalAwareEffectiveDealValueSql("d", rawValue, aliasedBidBoardTerminalSql("d"));
 }
 
 function terminalWorkspaceDateConditions(stage: PipelineStageRow, input: DealStagePageInput) {
