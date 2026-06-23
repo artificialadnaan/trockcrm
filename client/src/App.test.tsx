@@ -31,9 +31,10 @@ describe("App route guards", () => {
     expect(source).not.toContain("function DealsToPipelineRedirect");
     expect(source).not.toContain('path="/deals" element={<DealsToPipelineRedirect />}');
     expect(source).toContain('path="/deals" element={<DealListPage />}');
-    // The standalone Pipeline page mirrored Deals and was removed; /pipeline now redirects to /deals.
+    // The standalone Pipeline page mirrored Deals and was removed; /pipeline now redirects to /deals
+    // via the query-preserving alias redirect (bookmarked ?scope=...&... params survive the hop).
     expect(source).not.toContain("<PipelinePage />");
-    expect(source).toContain('path="/pipeline" element={<Navigate to="/deals" replace />}');
+    expect(source).toContain('path="/pipeline" element={<BoardAliasRedirect entity="deals" />}');
   });
 
   it("exposes team and global commissions routes with role guards", () => {

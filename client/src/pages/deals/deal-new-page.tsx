@@ -30,7 +30,7 @@ export function DealNewPage() {
           onClick={() => navigate("/deals")}
         >
           <ArrowLeft className="h-4 w-4 mr-1" />
-          Pipeline
+          Deals
         </Button>
         <h2 className="text-2xl font-bold">New Deal</h2>
       </div>

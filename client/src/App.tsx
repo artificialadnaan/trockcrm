@@ -231,7 +231,10 @@ export function App() {
               <Route path="/properties/:id" element={<PropertyDetailPage />} />
               {/* The standalone Pipeline page mirrored the Deals dashboard and was removed; keep the
                   path as a redirect so old links/bookmarks land on Deals. Sub-routes below stay. */}
-              <Route path="/pipeline" element={<Navigate to="/deals" replace />} />
+              {/* Pipeline board folded into the Deals dashboard. Reuse the query-preserving alias
+                  redirect so bookmarked /pipeline?scope=...&... URLs keep their params on /deals
+                  (the deals board handles scope/showDd itself). */}
+              <Route path="/pipeline" element={<BoardAliasRedirect entity="deals" />} />
               <Route path="/pipeline/my-cleanup" element={<MyCleanupPage />} />
               <Route path="/contacts" element={<ContactListPage />} />
               <Route path="/contacts/new" element={<ContactNewPage />} />
