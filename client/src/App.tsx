@@ -1,16 +1,16 @@
-import { Routes, Route, Navigate, useLocation, useSearchParams } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Suspense, lazy, useEffect, type ReactNode } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
 import { ForcePasswordChangeScreen } from "@/components/auth/force-password-change-screen";
 import { RequireRole, RequireGlobalAdmin } from "@/components/auth/require-role";
 import { AppShell } from "@/components/layout/app-shell";
+import { BoardAliasRedirect } from "@/components/shared/board-alias-redirect";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { RfpReviewPage } from "@/pages/rfp-review/rfp-review-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
 import { ServiceOpportunityNewPage } from "@/pages/deals/service-opportunity-new-page";
-import { PipelinePage } from "@/pages/pipeline/pipeline-page";
 import { MyCleanupPage } from "@/pages/pipeline/my-cleanup-page";
 import { ContactListPage } from "@/pages/contacts/contact-list-page";
 import { ContactDetailPage } from "@/pages/contacts/contact-detail-page";
@@ -124,11 +124,6 @@ const SharedPrimitivesHarness = lazy(() =>
 
 const enableSharedPrimitivesHarness = import.meta.env.DEV;
 
-function BoardAliasRedirect({ entity }: { entity: "leads" | "deals" }) {
-  const [searchParams] = useSearchParams();
-  const next = searchParams.toString();
-  return <Navigate to={next ? `/${entity}?${next}` : `/${entity}`} replace />;
-}
 
 function AuthGate({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -230,7 +225,15 @@ export function App() {
               <Route path="/leads/:id" element={<LeadDetailPage />} />
               <Route path="/properties" element={<PropertyListPage />} />
               <Route path="/properties/:id" element={<PropertyDetailPage />} />
-              <Route path="/pipeline" element={<PipelinePage />} />
+              {/* The standalone Pipeline page mirrored the Deals dashboard and was removed (product
+                  decision). /pipeline redirects to the canonical Deals board, carrying the search string
+                  so the primary control — `scope` (Mine/All/Watched/On Hold) — survives. Other legacy
+                  Pipeline-only params do NOT map and land on the Deals defaults: the list filters there
+                  live under the `dl_` namespace, the board shows DD stages by default, terminal windows
+                  seed from `period`, and there is no drag-to-move. That non-equivalence is the accepted
+                  cost of consolidating onto one board; a compat shim for a removed page isn't warranted.
+                  Sub-routes below stay. */}
+              <Route path="/pipeline" element={<BoardAliasRedirect entity="deals" />} />
               <Route path="/pipeline/my-cleanup" element={<MyCleanupPage />} />
               <Route path="/contacts" element={<ContactListPage />} />
               <Route path="/contacts/new" element={<ContactNewPage />} />
