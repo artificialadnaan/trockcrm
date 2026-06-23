@@ -258,15 +258,18 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   // Leads offer Mine|All only; coerce the parked "team" and the deals-only "watched" (carried via the
   // shared per-user scope preference) to "mine" — leads has no watched filter (contained to deals).
   const scope = containNonDealsScope(requestedScope);
-  // A parked ?scope=team bookmark is coerced to mine for this render; also rewrite the URL so
-  // the stale scope/owner params do not persist and silently re-apply when switching scope (D-12b).
+  // A deals-only scope (parked "team", or the deals-only "watched"/"on_hold" carried via the shared
+  // per-user preference) is coerced to mine for this render; also rewrite the URL so the stale scope +
+  // owner params don't persist and silently re-apply when switching scope (D-12b). Keyed on the
+  // coercion itself (scope !== requestedScope) so EVERY deals-only scope — incl. any future one — is
+  // contained here, not just an explicit list.
   useEffect(() => {
-    if (requestedScope !== "team" && requestedScope !== "watched") return;
+    if (scope === requestedScope) return;
     const next = new URLSearchParams(searchParams);
-    next.set("scope", "mine");
+    next.set("scope", scope);
     next.delete("assignedRepId");
     setSearchParams(next, { replace: true });
-  }, [requestedScope, searchParams, setSearchParams]);
+  }, [requestedScope, scope, searchParams, setSearchParams]);
   const scopeOptions = SCOPE_OPTIONS;
   const bucket = searchParams.get("bucket");
   const search = searchParams.get("search") ?? "";
