@@ -38,7 +38,7 @@ function clampZoom(value: number) {
 }
 
 function displayZoom(zoom: number) {
-  return `${(1 + zoom * 2).toFixed(1)}x`;
+  return `${Math.round(zoom * 100)}%`;
 }
 
 /**

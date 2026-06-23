@@ -90,15 +90,15 @@ describe("CameraCapture zoom", () => {
     const screen = renderCamera();
 
     expect(lastCameraProps().zoom).toBe(0);
-    expect(screen.getByText("1.0x")).toBeTruthy();
+    expect(screen.getByText("0%")).toBeTruthy();
 
     fireEvent.press(screen.getByLabelText("Zoom in"));
     expect(lastCameraProps().zoom).toBeCloseTo(0.1);
-    expect(screen.getByText("1.2x")).toBeTruthy();
+    expect(screen.getByText("10%")).toBeTruthy();
 
     fireEvent.press(screen.getByLabelText("Reset zoom"));
     expect(lastCameraProps().zoom).toBe(0);
-    expect(screen.getByText("1.0x")).toBeTruthy();
+    expect(screen.getByText("0%")).toBeTruthy();
   });
 
   it("supports pinch-to-zoom on the camera preview", () => {
@@ -109,6 +109,6 @@ describe("CameraCapture zoom", () => {
     fireEvent(pinch, "onGestureEvent", { nativeEvent: { scale: 2 } });
 
     expect(lastCameraProps().zoom).toBeCloseTo(0.35);
-    expect(screen.getByText("1.7x")).toBeTruthy();
+    expect(screen.getByText("35%")).toBeTruthy();
   });
 });
