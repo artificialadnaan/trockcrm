@@ -597,4 +597,62 @@ describe("run-sql.cjs", () => {
       ]);
     }
   });
+
+  it("(u) rejects advisory lock functions (a held lock can block/skip jobs that use the same locks)", async () => {
+    const ADVISORY_ERROR =
+      "SQL ERROR: Advisory lock functions (pg_advisory_lock*) are not allowed in read-only SQL: read-only mode permits them and a held lock can block or skip production jobs that use the same advisory locks.";
+    for (const payload of [
+      "SELECT pg_advisory_xact_lock(hashtext('daily_task_generation')); SELECT pg_sleep(600);",
+      "SELECT pg_advisory_lock(1);",
+      "SELECT pg_try_advisory_xact_lock(1);",
+      "SELECT pg_advisory_unlock_all();",
+      'SELECT pg_catalog."pg_advisory_lock"(1);',
+    ]) {
+      await rejectsBeforeExecution(payload, ADVISORY_ERROR);
+    }
+  });
+
+  it("(v) rejects pg_notify hidden behind a Unicode-escaped identifier (U&\"pg\\005Fnotify\")", async () => {
+    for (const payload of [
+      "SELECT U&\"pg\\005Fnotify\"('crm_events', 'evt');",
+      "SELECT u&\"pg\\+00005Fnotify\"('crm_events', 'evt');",
+    ]) {
+      await rejectsBeforeExecution(payload, NOTIFY_ERROR);
+    }
+  });
+
+  it("(w) an E'...' escaped quote does NOT hide a following COMMIT (escape-string mask stays in sync)", async () => {
+    await rejectsBeforeExecution(
+      "SELECT E'\\''; COMMIT; CREATE TABLE review_escape (id int);",
+      "SQL ERROR: Transaction boundary statements are not allowed in read-only SQL.",
+    );
+  });
+
+  it("(x) does NOT falsely reject legit E'...' strings or an advisory_*-named column", async () => {
+    for (const payload of [
+      "SELECT E'it\\'s a test' AS x;", // escaped quote inside a normal E-string
+      "SELECT E'line\\nbreak' AS x;", // backslash escape, single statement
+      "SELECT advisory_note FROM placeholder.widgets;", // column merely containing "advisory"
+    ]) {
+      const client = makeFakeClient({
+        onQuery: (sql) => {
+          if (sql === "BEGIN TRANSACTION READ ONLY") return { command: "BEGIN", rowCount: null, fields: [], rows: [] };
+          if (sql === "SELECT 1") return { command: "SELECT", rowCount: 1, fields: [{ name: "?column?" }], rows: [{ "?column?": 1 }] };
+          if (sql === payload) return { command: "SELECT", rowCount: 1, fields: [{ name: "x" }], rows: [{ x: 1 }] };
+          if (sql === "COMMIT") return { command: "COMMIT", rowCount: null, fields: [], rows: [] };
+          return Promise.reject(new Error("unexpected query"));
+        },
+      });
+      const { deps, error } = makeDeps({ argv: ["node", "scripts/run-sql.cjs", payload], client });
+      const code = await runSql.main(deps);
+      expect(code).toBe(0);
+      expect(error).not.toHaveBeenCalled();
+      expect(client.calls.filter((c) => c.method === "query").map((c) => c.sql)).toEqual([
+        "BEGIN TRANSACTION READ ONLY",
+        "SELECT 1",
+        payload,
+        "COMMIT",
+      ]);
+    }
+  });
 });

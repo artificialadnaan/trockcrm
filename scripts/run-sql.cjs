@@ -114,6 +114,31 @@ function formatResult(res) {
   );
 }
 
+// True when the quote at `quoteIndex` opens a PostgreSQL escape string (E'...' / e'...'),
+// which interprets backslash escapes. The e/E must be the string prefix, not the tail of
+// an identifier.
+function isEscapeStringOpen(sql, quoteIndex) {
+  if (quoteIndex < 1) return false;
+  const prev = sql[quoteIndex - 1];
+  if (prev !== 'e' && prev !== 'E') return false;
+  const before = quoteIndex >= 2 ? sql[quoteIndex - 2] : '';
+  return !/[A-Za-z0-9_$]/.test(before);
+}
+
+// Decode the body of a Unicode-escaped identifier (U&"...") so an obfuscated token like
+// `pg\005Fnotify` resolves to its real name `pg_notify` before the side-effect scan. Handles
+// the default backslash escape: \\ -> \, \XXXX (4 hex), \+XXXXXX (6 hex). A non-default
+// UESCAPE clause is rare and not decoded — such tokens simply stay literal (still safer than
+// before, since the common default form is now caught).
+function decodeUnicodeIdentifier(body) {
+  return body.replace(/\\(\\|\+[0-9A-Fa-f]{6}|[0-9A-Fa-f]{4})/g, (match, group) => {
+    if (group === '\\') return '\\';
+    const hex = group[0] === '+' ? group.slice(1) : group;
+    const codePoint = parseInt(hex, 16);
+    return Number.isNaN(codePoint) ? match : String.fromCodePoint(codePoint);
+  });
+}
+
 function maskSqlLiteralsAndComments(sql) {
   let out = '';
   for (let i = 0; i < sql.length; i += 1) {
@@ -122,9 +147,19 @@ function maskSqlLiteralsAndComments(sql) {
 
     if (ch === "'" || ch === '"') {
       const quote = ch;
+      const escapeString = quote === "'" && isEscapeStringOpen(sql, i);
       out += ' ';
       i += 1;
       while (i < sql.length) {
+        // An E'...' / e'...' escape string treats a backslash as escaping the NEXT
+        // character (e.g. \' is an escaped quote, NOT a terminator). Without this the
+        // mask desyncs on `E'\''` and hides a following statement like COMMIT,
+        // defeating the read-only guard (Codex P1).
+        if (escapeString && sql[i] === '\\') {
+          out += '  ';
+          i += 2;
+          continue;
+        }
         out += ' ';
         if (sql[i] === quote) {
           if (quote === "'" && sql[i + 1] === "'") {
@@ -192,9 +227,17 @@ function maskSqlLiteralsAndCommentsNormalizeIdentifiers(sql) {
     const next = sql[i + 1];
 
     if (ch === "'") {
+      const escapeString = isEscapeStringOpen(sql, i);
       out += ' ';
       i += 1;
       while (i < sql.length) {
+        // E'...' escape strings interpret backslash escapes; skip the escaped char so the
+        // mask stays in sync (mirrors maskSqlLiteralsAndComments; Codex P1).
+        if (escapeString && sql[i] === '\\') {
+          out += '  ';
+          i += 2;
+          continue;
+        }
         out += ' ';
         if (sql[i] === "'") {
           if (sql[i + 1] === "'") {
@@ -210,19 +253,26 @@ function maskSqlLiteralsAndCommentsNormalizeIdentifiers(sql) {
     }
 
     if (ch === '"') {
+      // A Unicode-escaped quoted identifier U&"..." resolves its \XXXX escapes to real
+      // characters, so decode the body before emitting it — otherwise `U&"pg\005Fnotify"(...)`
+      // would slip past the pg_notify scan (Codex). Other quoted identifiers pass through.
+      const unicodeEscaped =
+        i >= 2 && sql[i - 1] === '&' && (sql[i - 2] === 'u' || sql[i - 2] === 'U');
       i += 1;
+      let body = '';
       while (i < sql.length) {
         if (sql[i] === '"') {
           if (sql[i + 1] === '"') {
-            out += '"';
+            body += '"';
             i += 2;
             continue;
           }
           break;
         }
-        out += sql[i];
+        body += sql[i];
         i += 1;
       }
+      out += unicodeEscaped ? decodeUnicodeIdentifier(body) : body;
       continue;
     }
 
@@ -328,13 +378,14 @@ function assertNoTransactionBoundaryStatements(sql) {
 //     and "pg_notify"(...), while leaving string literals and comments blanked
 //     so 'pg_notify(' as data does not trigger a false positive.
 //
-// Defensive sweep: pg_notify is the only side-effecting function with a live
-// consumer in this codebase, so it is the one we explicitly block. Functions
-// that write durable data are already rejected by the server inside a READ ONLY
-// transaction. The pg_advisory_lock* family takes session/transaction locks but
-// writes nothing durable and has no listener here, so it is intentionally left
-// allowed (revisit if a consumer is added). The structural fix that retires all
-// of these string checks is a SELECT-only database role (tracked separately).
+// Defensive sweep: pg_notify is the side-effecting function with a live consumer in this
+// codebase, so it is explicitly blocked. Functions that write durable data are already
+// rejected by the server inside a READ ONLY transaction. The pg_advisory_lock* family
+// writes nothing durable (so READ ONLY permits it) but takes session/transaction locks
+// that THIS repo's worker jobs also use (worker/src/jobs/daily-tasks.ts, weekly-digest.ts),
+// so a query that grabs one and stays open can block or skip those production jobs — it is
+// blocked too. The structural fix that retires all of these string checks is a SELECT-only
+// database role (tracked separately).
 function assertNoSideEffectingStatements(sql) {
   const statements = sideEffectScanStatements(sql);
   const forbiddenStatement = /^notify\b/; // NOTIFY channel [, payload]
@@ -342,6 +393,13 @@ function assertNoSideEffectingStatements(sql) {
   if (statements.some((statement) => forbiddenStatement.test(statement) || forbiddenCall.test(statement))) {
     throw new Error(
       'NOTIFY and pg_notify() are not allowed in read-only SQL: read-only transactions do not block notifications and a worker consumes the crm_events channel.',
+    );
+  }
+  // pg_(try_)?advisory_(xact_)?(un)?lock(_shared|_all)? — the whole advisory-lock family.
+  const forbiddenAdvisoryLock = /(^|[^a-z0-9_$])pg_(try_)?advisory_(xact_)?(un)?lock(_shared|_all)?\s*\(/;
+  if (statements.some((statement) => forbiddenAdvisoryLock.test(statement))) {
+    throw new Error(
+      'Advisory lock functions (pg_advisory_lock*) are not allowed in read-only SQL: read-only mode permits them and a held lock can block or skip production jobs that use the same advisory locks.',
     );
   }
 }
