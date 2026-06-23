@@ -108,4 +108,34 @@ describe("TargetPicker nearby defaults", () => {
     expect(screen.getByText("Oak Creek Lead")).toBeTruthy();
     expect(screen.getByText("Lead")).toBeTruthy();
   });
+
+  it("falls back to manual search when GPS coordinates are unavailable", async () => {
+    mockGetLiveGps.mockResolvedValue({ takenAt: "2026-06-23T14:00:00.000Z" });
+    mockUseNearbyCaptureTargets.mockReturnValue({ data: { targets: [] }, isFetching: false });
+    const { screen } = renderPicker();
+
+    await flushGpsEffect();
+
+    expect(screen.getByText("Search to begin")).toBeTruthy();
+    expect(screen.getByText("Type a project name or number.")).toBeTruthy();
+    expect(screen.queryByText("Closest jobs")).toBeNull();
+    expect(screen.queryByText("121 Preston Oaks")).toBeNull();
+  });
+
+  it("does not request GPS when the picker reopens with an active manual search", async () => {
+    const onClose = jest.fn();
+    const onSelect = jest.fn();
+    const screen = render(<TargetPicker visible onClose={onClose} onSelect={onSelect} />);
+
+    await flushGpsEffect();
+    expect(mockGetLiveGps).toHaveBeenCalledTimes(1);
+
+    fireEvent.changeText(screen.getByPlaceholderText("Search deals, opportunities, leads"), "oak");
+    screen.rerender(<TargetPicker visible={false} onClose={onClose} onSelect={onSelect} />);
+    screen.rerender(<TargetPicker visible onClose={onClose} onSelect={onSelect} />);
+    await flushGpsEffect();
+
+    expect(mockUseCaptureTargets).toHaveBeenLastCalledWith("oak");
+    expect(mockGetLiveGps).toHaveBeenCalledTimes(1);
+  });
 });

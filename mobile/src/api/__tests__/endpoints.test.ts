@@ -16,4 +16,19 @@ describe("api endpoints", () => {
       opts: { query: { lat: 32.911, lng: -96.775, limit: 3 } },
     }]);
   });
+
+  it("defaults nearby capture target limit to 3 when omitted", async () => {
+    const calls: Array<{ path: string; opts: Parameters<Fetcher>[1] }> = [];
+    const fetcher: Fetcher = async (path, opts) => {
+      calls.push({ path, opts });
+      return { targets: [] } as never;
+    };
+
+    await getNearbyCaptureTargets(fetcher, { latitude: 32.911, longitude: -96.775 });
+
+    expect(calls).toEqual([{
+      path: "/field/photo-targets/nearby",
+      opts: { query: { lat: 32.911, lng: -96.775, limit: 3 } },
+    }]);
+  });
 });

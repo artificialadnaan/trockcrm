@@ -55,21 +55,29 @@ export function TargetPicker({
       setLocationChecked(false);
       return;
     }
+    if (debounced.length > 0) {
+      setNearbyCoords(null);
+      setLocationChecked(true);
+      return;
+    }
     let cancelled = false;
     setLocationChecked(false);
-    void getLiveGps().then((metadata) => {
-      if (cancelled) return;
-      if (metadata.latitude !== undefined && metadata.longitude !== undefined) {
-        setNearbyCoords({ latitude: metadata.latitude, longitude: metadata.longitude });
-      } else {
-        setNearbyCoords(null);
-      }
-      setLocationChecked(true);
-    });
+    void getLiveGps()
+      .then((metadata) => {
+        if (cancelled) return;
+        if (metadata.latitude !== undefined && metadata.longitude !== undefined) {
+          setNearbyCoords({ latitude: metadata.latitude, longitude: metadata.longitude });
+        } else {
+          setNearbyCoords(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLocationChecked(true);
+      });
     return () => {
       cancelled = true;
     };
-  }, [visible]);
+  }, [visible, debounced]);
 
   function renderTargetList(items: FieldCaptureTarget[], header?: string) {
     return (
