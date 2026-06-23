@@ -971,6 +971,9 @@ export function DealDetailPage() {
           // Owner-only: the PATCH that writes expected_close_date is gated to the assigned rep on the
           // server (assertDealOwnerRouteAccess, no allowAdmin), so a non-owner admin would 403.
           canMoveCloseDate={viewerOwnsDeal}
+          // Mirror the deal load (useDealDetail uses the same officeId) so a cross-office move/clear
+          // targets the deal's tenant, not the viewer's active office.
+          officeId={detailOfficeId}
         />
       )}
       {activeTab === "timeline" && (

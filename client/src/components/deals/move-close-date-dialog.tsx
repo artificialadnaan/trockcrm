@@ -21,6 +21,10 @@ interface MoveCloseDateDialogProps {
   dealId: string;
   /** The deal's current expected_close_date ("YYYY-MM-DD") used to seed the picker. */
   currentDate: string | null;
+  /** The office the deal was read from (cross-office detail loads pass ?officeId). Threaded into the
+   *  PATCH so the write targets the SAME tenant as the read — without it a cross-office move/clear hits
+   *  the viewer's active office and never applies to the deal on screen. */
+  officeId?: string | null;
   /** Called after a successful save so the caller can refetch the deal + activity feed. */
   onSaved: () => void | Promise<void>;
 }
@@ -38,7 +42,7 @@ function formatHuman(ymd: string): string {
  * reason is logged as a note on the deal's activity feed. The date write is load-bearing (it drives the
  * SLA), so it runs first; the note is a best-effort audit trail layered on top.
  */
-export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, onSaved }: MoveCloseDateDialogProps) {
+export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, officeId, onSaved }: MoveCloseDateDialogProps) {
   const [date, setDate] = useState(currentDate ?? "");
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
@@ -70,7 +74,7 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
 
     // The date write postpones the SLA — it is the ONLY step whose failure should block + error.
     try {
-      await updateDeal(dealId, { expectedCloseDate: date });
+      await updateDeal(dealId, { expectedCloseDate: date }, { officeId });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't move the close date. Please try again.");
       setSaving(false);
@@ -109,7 +113,7 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
 
     // Clearing the close target is the load-bearing write; mirror handleSave's failure isolation.
     try {
-      await updateDeal(dealId, { expectedCloseDate: null });
+      await updateDeal(dealId, { expectedCloseDate: null }, { officeId });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't remove the postponement. Please try again.");
       setSaving(false);
@@ -119,8 +123,11 @@ export function MoveCloseDateDialog({ open, onOpenChange, dealId, currentDate, o
     try {
       await createActivity({
         type: "note",
+        // State only the action taken. Don't claim "SLA resumed" — if the deal is also On Hold, the
+        // at-risk engine checks the hold before close-target suppression, so clearing the target does
+        // NOT resume the normal stage-age SLA. The note records the fact; the SLA follows the engine.
         subject: "Close target removed",
-        body: "Close target removed — SLA resumed to normal stage age.",
+        body: "Close target removed — the deal's close-date postponement was cleared.",
         dealId,
       });
     } catch {
