@@ -1268,7 +1268,7 @@ function workspaceEffectiveDealValueSql(stage: PipelineStageRow) {
   // auto-held open deals.
   const isTerminalStage =
     valueSource === "won" ||
-    LOST_STAGE_SLUGS.includes(stage.slug as (typeof LOST_STAGE_SLUGS)[number]);
+    LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number]);
   return isTerminalStage
     ? sql`CASE WHEN d.on_hold THEN 0 ELSE ${rawValue} END`
     : aliasedEffectiveDealValueSql("d", rawValue);
@@ -3031,7 +3031,7 @@ export async function getDealsForPipeline(
     // Only OPEN / estimating columns carry the far-future leg.
     const isTerminalColumn =
       valueSource === "won" ||
-      LOST_STAGE_SLUGS.includes(stage.slug as (typeof LOST_STAGE_SLUGS)[number]);
+      LOST_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof LOST_TERMINAL_STAGE_SLUGS)[number]);
     const columnEffectiveValue = isTerminalColumn
       ? dealPipelineValueSql(valueSource)
       : aliasedEffectiveDealValueSql("deals", dealPipelineValueSql(valueSource));
