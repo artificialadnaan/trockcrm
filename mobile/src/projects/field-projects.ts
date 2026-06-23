@@ -18,7 +18,19 @@ export type FieldProject = {
   /** Owning office of this (possibly cross-office) project row — server-stamped on every field read. */
   officeId: string;
   officeSlug: string;
+  /** Great-circle distance in miles from the device — set ONLY on rows from the nearby endpoint; absent elsewhere. */
+  distanceMiles?: number | null;
 };
+
+/**
+ * Field-app distance label for a nearby project: "<x.x> mi" under 10 miles (one decimal so close jobs
+ * stay distinguishable), rounded whole miles at/above 10. Returns null when there's no usable distance
+ * (non-nearby rows), so the caller renders nothing.
+ */
+export function formatDistanceMiles(mi?: number | null): string | null {
+  if (mi == null || !Number.isFinite(mi)) return null;
+  return mi < 10 ? `${mi.toFixed(1)} mi` : `${Math.round(mi)} mi`;
+}
 
 /**
  * Off-office projects are VIEW-ONLY until cross-office WRITES ship: the write endpoints (star,
@@ -117,6 +129,30 @@ export function groupCaptureTargets(targets: FieldCaptureTarget[]) {
 export function projectNumberLabel(projectNumber: string | null | undefined): string {
   const trimmed = projectNumber?.trim();
   return trimmed ? `#${trimmed}` : "Project pending";
+}
+
+/**
+ * Split the three project sources into non-overlapping display sections with precedence
+ * Nearby > Starred > All: a project shown in Nearby is removed from Starred and All; a starred project
+ * is removed from All — so nothing renders twice. `hasSections` is true when any header section (Nearby
+ * or the deduped Starred) will render, which the screen uses to decide whether to label the main list and
+ * whether to show the "no projects" empty state.
+ */
+export function partitionProjectSections(
+  nearby: FieldProject[],
+  starred: FieldProject[],
+  all: FieldProject[],
+): { nearby: FieldProject[]; starred: FieldProject[]; all: FieldProject[]; hasSections: boolean } {
+  const nearbyIds = new Set(nearby.map((p) => p.id));
+  const starredIds = new Set(starred.map((p) => p.id));
+  const visibleStarred = starred.filter((p) => !nearbyIds.has(p.id));
+  const visibleAll = all.filter((p) => !nearbyIds.has(p.id) && !starredIds.has(p.id));
+  return {
+    nearby,
+    starred: visibleStarred,
+    all: visibleAll,
+    hasSections: nearby.length > 0 || visibleStarred.length > 0,
+  };
 }
 
 export function relativeDate(value: string | null) {

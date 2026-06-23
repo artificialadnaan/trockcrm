@@ -21,6 +21,7 @@ export type InvitePreview = { firstName: string; lastName: string; email: string
 // ── Projects ──────────────────────────────────────────────────────────────────
 export type ProjectsResponse = { projects: FieldProject[]; total: number; page: number; perPage: number };
 export type StarredProjectsResponse = { projects: FieldProject[] };
+export type NearbyProjectsResponse = { projects: FieldProject[]; degradedOffices?: string[] };
 export type StarResponse = { starred: boolean };
 
 // ── Photos ────────────────────────────────────────────────────────────────────

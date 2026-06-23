@@ -4,9 +4,10 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
 import { useDebouncedValue } from "../../../src/hooks/useDebouncedValue";
-import { useProjects, useStarredProjects, useToggleStar } from "../../../src/query/hooks";
+import { useDeviceLocation } from "../../../src/hooks/useDeviceLocation";
+import { useNearbyProjects, useProjects, useStarredProjects, useToggleStar } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { isProjectOffOffice, projectNumberLabel, relativeDate, type FieldProject } from "../../../src/projects/field-projects";
+import { formatDistanceMiles, isProjectOffOffice, partitionProjectSections, projectNumberLabel, relativeDate, type FieldProject } from "../../../src/projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
@@ -20,16 +21,21 @@ export default function ProjectsScreen() {
   const debounced = useDebouncedValue(search.trim(), 250);
   const searching = debounced.length > 0;
 
+  const { coords } = useDeviceLocation();
   const projectsQuery = useProjects(debounced);
   const starredQuery = useStarredProjects(!searching);
+  // Nearby is hidden while searching (like Starred) and whenever there's no GPS fix (the hook returns
+  // null coords, which disables the query) — so no permission nagging and no empty section.
+  const nearbyQuery = useNearbyProjects(coords, !searching);
   const toggleStar = useToggleStar();
 
   const allProjects = projectsQuery.data?.projects ?? [];
-  const starred = !searching ? starredQuery.data?.projects ?? [] : [];
-  // Don't list a starred project twice — drop them from the main list when the
-  // Starred section is shown (mirrors the field web app).
-  const starredIds = new Set(starred.map((p) => p.id));
-  const projects = starred.length > 0 ? allProjects.filter((p) => !starredIds.has(p.id)) : allProjects;
+  // Dedup precedence Nearby > Starred > All so nothing renders twice (pure + unit-tested).
+  const { nearby, starred: visibleStarred, all: projects, hasSections } = partitionProjectSections(
+    !searching ? nearbyQuery.data?.projects ?? [] : [],
+    !searching ? starredQuery.data?.projects ?? [] : [],
+    allProjects,
+  );
 
   function openProject(project: FieldProject) {
     router.push({
@@ -52,10 +58,13 @@ export default function ProjectsScreen() {
     toggleStar.mutate({ dealId: project.id, starred: project.starred });
   }
 
-  const refreshing = projectsQuery.isRefetching || starredQuery.isRefetching;
+  const refreshing = projectsQuery.isRefetching || starredQuery.isRefetching || nearbyQuery.isRefetching;
   function onRefresh() {
     void projectsQuery.refetch();
-    if (!searching) void starredQuery.refetch();
+    if (!searching) {
+      void starredQuery.refetch();
+      void nearbyQuery.refetch();
+    }
   }
 
   return (
@@ -84,15 +93,31 @@ export default function ProjectsScreen() {
         keyboardShouldPersistTaps="handled"
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.color.brandRed} />}
         ListHeaderComponent={
-          projectsQuery.isError || starred.length > 0 ? (
+          projectsQuery.isError || hasSections ? (
             <View style={{ gap: theme.space.md }}>
               {projectsQuery.isError ? (
                 <Banner message="Couldn't load projects. Pull to refresh." />
               ) : null}
-              {starred.length > 0 ? (
+              {/* Nearby sits above Starred — it's the "right now" context. Each row shows its distance. */}
+              {nearby.length > 0 ? (
+                <View style={{ gap: theme.space.sm }}>
+                  <Text style={styles.sectionTitle}>Nearby</Text>
+                  {nearby.map((project) => (
+                    <ProjectRow
+                      key={`nearby-${project.id}`}
+                      project={project}
+                      writableOfficeId={writableOfficeId}
+                      distanceLabel={formatDistanceMiles(project.distanceMiles)}
+                      onPress={() => openProject(project)}
+                      onToggleStar={() => onToggleStar(project)}
+                    />
+                  ))}
+                </View>
+              ) : null}
+              {visibleStarred.length > 0 ? (
                 <View style={{ gap: theme.space.sm }}>
                   <Text style={styles.sectionTitle}>Starred</Text>
-                  {starred.map((project) => (
+                  {visibleStarred.map((project) => (
                     <ProjectRow
                       key={`starred-${project.id}`}
                       project={project}
@@ -101,8 +126,11 @@ export default function ProjectsScreen() {
                       onToggleStar={() => onToggleStar(project)}
                     />
                   ))}
-                  <Text style={[styles.sectionTitle, { marginTop: theme.space.sm }]}>All projects</Text>
                 </View>
+              ) : null}
+              {/* Label the main list once any section renders above it, so "All projects" isn't ambiguous. */}
+              {hasSections && projects.length > 0 ? (
+                <Text style={styles.sectionTitle}>All projects</Text>
               ) : null}
             </View>
           ) : null
@@ -115,7 +143,7 @@ export default function ProjectsScreen() {
             <LoadingState label="Loading projects…" />
           ) : // On error the header Banner already explains it + offers pull-to-refresh — don't
           // also claim "No projects yet" (those two messages contradict each other) (#8).
-          projectsQuery.isError ? null : starred.length > 0 ? null : (
+          projectsQuery.isError ? null : hasSections ? null : (
             <EmptyState
               title={searching ? "No matches" : "No projects yet"}
               subtitle={searching ? `Nothing found for "${debounced}".` : "Active projects will appear here."}
@@ -130,11 +158,14 @@ export default function ProjectsScreen() {
 function ProjectRow({
   project,
   writableOfficeId,
+  distanceLabel,
   onPress,
   onToggleStar,
 }: {
   project: FieldProject;
   writableOfficeId: string | null | undefined;
+  /** Distance pill shown only on Nearby rows (e.g. "2.3 mi"); omitted/undefined everywhere else. */
+  distanceLabel?: string | null;
   onPress: () => void;
   onToggleStar: () => void;
 }) {
@@ -163,6 +194,7 @@ function ProjectRow({
             {projectNumberLabel(project.projectNumber)}
           </Text>
           <Badge label={project.stage} />
+          {distanceLabel ? <Text style={styles.rowDistance}>{distanceLabel}</Text> : null}
         </View>
         {/* Always render the address line (muted fallback) so cards keep a consistent height (#3). */}
         <Text style={[styles.rowAddress, !project.propertyAddress && styles.rowAddressMissing]} numberOfLines={1}>
@@ -212,6 +244,7 @@ const styles = StyleSheet.create({
   rowBadges: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: theme.space.sm },
   rowDeal: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },
   rowDealPending: { color: theme.color.textMuted, fontStyle: "italic" },
+  rowDistance: { fontFamily: theme.font.semibold, fontSize: 12, color: theme.color.brandRed },
   rowAddress: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   rowAddressMissing: { fontStyle: "italic", color: theme.color.textMuted, opacity: 0.7 },
   rowMeta: { fontFamily: theme.font.body, fontSize: 12, color: theme.color.textMuted },

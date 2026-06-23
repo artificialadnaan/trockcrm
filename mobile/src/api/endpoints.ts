@@ -4,6 +4,7 @@ import type {
   InvitePreview,
   ProjectsResponse,
   StarredProjectsResponse,
+  NearbyProjectsResponse,
   StarResponse,
   PhotosResponse,
   PendingPhotosResponse,
@@ -56,6 +57,11 @@ export const getProjects = (f: Fetcher, params: { search?: string; status?: stri
 
 export const getStarredProjects = (f: Fetcher) =>
   f<StarredProjectsResponse>("/field/projects/starred");
+
+// The 3 active projects closest to the device. Server fans out across offices and returns the true
+// nearest 3 overall, each carrying `distanceMiles`.
+export const getNearbyProjects = (f: Fetcher, lat: number, lng: number) =>
+  f<NearbyProjectsResponse>("/field/projects/nearby", { query: { lat, lng } });
 
 export const starProject = (f: Fetcher, dealId: string) =>
   f<StarResponse>(`/field/projects/${dealId}/star`, { method: "POST" });

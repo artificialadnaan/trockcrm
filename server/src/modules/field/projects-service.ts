@@ -52,6 +52,12 @@ export type FieldProject = {
   lastActivityAt: string | null;
   photoCount: number;
   starred: boolean;
+  /**
+   * Great-circle distance in miles from the requester's GPS. Set ONLY by the nearby endpoint
+   * (`listNearbyFieldProjects`); null/absent on the regular list, starred list, and open-by-id paths,
+   * which carry no distance column.
+   */
+  distanceMiles?: number | null;
 };
 
 export type FieldPhoto = {
@@ -88,7 +94,7 @@ function iso(value: Date | string | null | undefined): string | null {
 }
 
 function mapFieldProject(row: any): FieldProject {
-  return {
+  const project: FieldProject = {
     id: row.id,
     name: row.name,
     // Raw deal_number stays raw (storage-path / matching key). The display number is resolved the
@@ -103,6 +109,10 @@ function mapFieldProject(row: any): FieldProject {
     photoCount: Number(row.photo_count ?? 0),
     starred: Boolean(row.starred),
   };
+  // Only the nearby query selects distance_miles (a NUMERIC → arrives as a string). Attach it ONLY when
+  // present so every other path's payload stays byte-identical (and the existing toEqual tests hold).
+  if (row.distance_miles != null) project.distanceMiles = Number(row.distance_miles);
+  return project;
 }
 
 function activeProjectWhere(search?: string) {
@@ -192,6 +202,78 @@ export async function listFieldProjects(
   const total = Number((((countResult as any).rows ?? countResult)[0]?.total) ?? 0);
   const projects = ((rowsResult as any).rows ?? rowsResult).map(mapFieldProject);
   return { projects, total, page, perPage };
+}
+
+// Default per-office candidate depth for the nearby query. The cross-office route fetches a FEW more
+// than the 3 it shows from EACH office, then merges + re-sorts by distance globally and slices to 3 —
+// so the true nearest 3 OVERALL win even when they're concentrated in one office. (Fetching exactly 3
+// per office would, after merge, bias toward offices rather than true distance.)
+export const FIELD_NEARBY_DEFAULT_LIMIT = 5;
+
+/**
+ * The 3-ish active projects CLOSEST to a GPS coordinate, ordered nearest-first, each carrying its
+ * `distanceMiles`. Mirrors {@link listFieldProjects} (same active-project predicate, photo_stats LATERAL,
+ * starred join, field-safe `mapFieldProject` shape) with three differences: it (1) requires non-null
+ * coordinates, (2) selects a great-circle distance, and (3) orders by that distance instead of recency.
+ * Read-only — the field module never mutates a deal.
+ */
+export async function listNearbyFieldProjects(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  input: { lat: number; lng: number; limit?: number },
+) {
+  const { lat, lng } = input;
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+    throw new AppError(400, "lat and lng must be valid coordinates");
+  }
+  const limit = Math.min(50, Math.max(1, input.limit ?? FIELD_NEARBY_DEFAULT_LIMIT));
+
+  // Haversine great-circle distance in MILES (3959 = Earth radius, mi). The LEAST/GREATEST(-1,1) clamp
+  // guards acos against float drift slightly past ±1 (which would yield NaN) for a project at the exact
+  // requester coordinate.
+  const distanceMiles = sql`(
+    3959 * acos(
+      LEAST(1, GREATEST(-1,
+        cos(radians(${lat})) * cos(radians(d.property_lat))
+        * cos(radians(d.property_lng) - radians(${lng}))
+        + sin(radians(${lat})) * sin(radians(d.property_lat))
+      ))
+    )
+  )`;
+
+  const rowsResult = await tenantDb.execute(sql`
+    SELECT
+      d.id,
+      d.name,
+      d.deal_number,
+      d.project_number,
+      d.name AS property_name,
+      NULLIF(CONCAT_WS(', ', NULLIF(d.property_address, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), NULLIF(d.property_zip, '')), '') AS property_address,
+      COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
+      COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) AS last_activity_at,
+      COALESCE(photo_stats.photo_count, 0)::int AS photo_count,
+      (fsp.user_id IS NOT NULL) AS starred,
+      ${distanceMiles} AS distance_miles
+    FROM deals d
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN field_user_starred_projects fsp ON fsp.deal_id = d.id AND fsp.user_id = ${access.userId}::uuid
+    LEFT JOIN LATERAL (
+      SELECT count(*) AS photo_count, max(COALESCE(f.taken_at, f.created_at)) AS last_photo_at
+      FROM files f
+      WHERE f.deal_id = d.id
+        AND f.category = 'photo'
+        AND f.is_active = true
+        AND f.deleted_at IS NULL
+    ) photo_stats ON true
+    WHERE ${activeProjectWhere()}
+      AND d.property_lat IS NOT NULL
+      AND d.property_lng IS NOT NULL
+    ORDER BY distance_miles ASC
+    LIMIT ${limit}
+  `);
+
+  const projects = ((rowsResult as any).rows ?? rowsResult).map(mapFieldProject);
+  return { projects };
 }
 
 export async function listStarredFieldProjects(tenantDb: TenantDb, access: FieldAccessContext) {
@@ -521,6 +603,31 @@ export function mergeFieldCaptureTargets(
     if (rankDelta !== 0) return rankDelta;
     const recencyDelta = captureTargetUpdatedMs(right.lastUpdatedAt) - captureTargetUpdatedMs(left.lastUpdatedAt);
     if (recencyDelta !== 0) return recencyDelta;
+    return left.id.localeCompare(right.id);
+  });
+  return stamped.slice(0, Math.max(0, limit));
+}
+
+export type FieldProjectWithOffice = FieldProject & OfficeTag;
+
+/**
+ * Merge per-office nearby results into the TRUE global nearest `limit`. Each office returns its own
+ * nearest candidates; stamping the owning office, re-sorting by ascending distance across ALL offices,
+ * and slicing yields the overall closest — NOT nearest-per-office (which would over-represent offices
+ * that happen to be active). A null/absent distance sorts last (defensive; the nearby query never emits
+ * one). Ties break on id for a stable order.
+ */
+export function mergeNearbyProjects(
+  perOffice: Array<{ office: FieldOffice; projects: FieldProject[] }>,
+  limit: number,
+): FieldProjectWithOffice[] {
+  const stamped: FieldProjectWithOffice[] = perOffice.flatMap(({ office, projects }) =>
+    projects.map((project) => ({ ...project, ...officeTag(office) })),
+  );
+  stamped.sort((left, right) => {
+    const leftMi = left.distanceMiles ?? Infinity;
+    const rightMi = right.distanceMiles ?? Infinity;
+    if (leftMi !== rightMi) return leftMi - rightMi;
     return left.id.localeCompare(right.id);
   });
   return stamped.slice(0, Math.max(0, limit));

@@ -28,12 +28,15 @@ import {
 import {
   assertAccessibleFieldCaptureTarget,
   assertActiveFieldProject,
+  FIELD_NEARBY_DEFAULT_LIMIT,
   FIELD_PROJECTS_MAX_FETCH,
   listFieldProjects,
   listFieldProjectPhotos,
   listNearbyFieldCaptureTargets,
+  listNearbyFieldProjects,
   listStarredFieldProjects,
   mergeFieldCaptureTargets,
+  mergeNearbyProjects,
   searchFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
@@ -198,6 +201,34 @@ fieldRoutes.get("/projects/starred", requireFieldContractor, async (req, res, ne
     const projects = results
       .flatMap(({ office, value }) => value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })))
       .sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+    res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Nearby: the 3 active projects CLOSEST to the device's GPS, across ALL offices. Like /projects this
+// fans out per-office (field is office-agnostic), but each office computes distance in SQL and returns a
+// few candidates; we then merge + re-sort by distance globally and slice to 3 so the result is the true
+// nearest 3 OVERALL, not nearest-3-per-office. Registered BEFORE the `/projects/:dealId` param routes so
+// "nearby" is never captured as a :dealId. Read-only (no deal mutation).
+fieldRoutes.get("/projects/nearby", requireFieldContractor, async (req, res, next) => {
+  try {
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      throw new AppError(400, "lat and lng query params are required");
+    }
+    const { results, failures } = assertFanOutNotFullyDegraded(
+      await fanOutActiveOffices((officeDb) =>
+        listNearbyFieldProjects(officeDb, access, { lat, lng, limit: FIELD_NEARBY_DEFAULT_LIMIT }),
+      ),
+    );
+    const projects = mergeNearbyProjects(
+      results.map(({ office, value }) => ({ office, projects: value.projects })),
+      3,
+    );
     res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
   } catch (err) {
     next(err);
