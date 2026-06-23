@@ -11,9 +11,10 @@ import { readListScope as readLeadsListScope } from "../../../src/modules/leads/
 /**
  * On Hold scope — the 4th deals-only filter pill (Mine / All / Watched / On Hold).
  * Acceptance: scope=on_hold emits ONLY the shared effective-on-hold predicate (stored on_hold OR a close
- * target 90+ CT-days out — the SAME rule value-zeroing/reports reuse), distinct from Mine (ownership) and
+ * target more than 90 CT-days out — the SAME rule value-zeroing/reports reuse), distinct from Mine (ownership) and
  * Watched (deal_subscriptions). Unlike Watched there is NO capability gate (base columns, always present),
- * it is self-scoped (no rep→director elevation), and it is contained to deals (on_hold → mine on leads).
+ * it is an office-wide overview (elevates a rep like All, NOT self-scoped), and it is contained to deals
+ * (on_hold → mine on leads).
  */
 
 const dialect = new PgDialect();
@@ -121,7 +122,7 @@ describe("getDealsForPipeline (kanban) — on_hold arm composes correctly", () =
   });
 });
 
-describe("server scope gates — on_hold survives for deals, contained for leads, no elevation", () => {
+describe("server scope gates — on_hold survives for deals, contained for leads, elevates like All", () => {
   it("deals readListScope passes 'on_hold' through (not coerced to mine)", () => {
     expect(readDealsListScope("on_hold", "rep")).toBe("on_hold");
     expect(readDealsListScope("nonsense", "rep")).toBe("mine");
@@ -131,9 +132,11 @@ describe("server scope gates — on_hold survives for deals, contained for leads
     expect(normalizeCollaborativeScope("rep", "on_hold")).toBe("on_hold");
   });
 
-  it("getCollaborativeReadRole does NOT elevate a rep on 'on_hold' (only 'all' elevates)", () => {
-    expect(getCollaborativeReadRole("rep", "on_hold")).toBe("rep");
+  it("getCollaborativeReadRole elevates a rep on 'on_hold' like 'all' (it is an office-wide overview, not self-scoped)", () => {
+    expect(getCollaborativeReadRole("rep", "on_hold")).toBe("director");
     expect(getCollaborativeReadRole("rep", "all")).toBe("director");
+    // watched stays self-scoped (the subscription IS the ownership), so it must NOT elevate
+    expect(getCollaborativeReadRole("rep", "watched")).toBe("rep");
   });
 
   it("leads readListScope CONTAINS 'on_hold' → mine (no leads leak)", () => {

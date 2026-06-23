@@ -52,12 +52,14 @@ export function normalizeCollaborativeScope<S extends "mine" | "team" | "all" | 
 
 export function getCollaborativeReadRole(
   role: string,
-  // Type widened to accept the now-possible deals-only "watched"/"on_hold"; the elevation BODY is
-  // intentionally unchanged — only requested === "all" elevates a rep, so the deals-only scopes keep the
-  // viewer's own role (self-scoped).
   requested: "mine" | "team" | "all" | "watched" | "on_hold" | undefined
 ) {
-  if (role === "rep" && requested === "all") {
+  // "On Hold" is an All-style OVERVIEW filter (the office's held/far-out deals, not the viewer's own) —
+  // self-scoping it would wrongly limit a director/admin to only THEIR held deals. Its predicate carries
+  // no ownership term, so a rep on this scope reads office-wide; elevate them like "all" so the read role
+  // matches the data (and grants nothing a rep can't already reach via the All pill). "watched" stays
+  // self-scoped (the subscription relation IS the ownership), so it deliberately does NOT elevate.
+  if (role === "rep" && (requested === "all" || requested === "on_hold")) {
     return "director";
   }
   return role;

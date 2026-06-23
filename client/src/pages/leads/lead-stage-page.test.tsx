@@ -12,9 +12,14 @@ vi.mock("@/hooks/use-leads", () => ({
   useLeadStagePage: mocks.useLeadStagePageMock,
 }));
 
-vi.mock("@/lib/pipeline-scope", () => ({
-  useNormalizedStageRoute: mocks.useNormalizedStageRouteMock,
-}));
+vi.mock("@/lib/pipeline-scope", async (importOriginal) => {
+  // Keep the real containNonDealsScope (the page now routes its scope through it); stub only the route hook.
+  const actual = await importOriginal<typeof import("@/lib/pipeline-scope")>();
+  return {
+    ...actual,
+    useNormalizedStageRoute: mocks.useNormalizedStageRouteMock,
+  };
+});
 vi.mock("@/components/pipeline/pipeline-stage-page-header", () => ({
   PipelineStagePageHeader: ({
     children,

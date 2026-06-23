@@ -1358,7 +1358,7 @@ async function buildDealWorkspaceScope(
         : sql`false`
     );
   } else if (input.scope === "on_hold") {
-    // On Hold = effectively on hold (stored on_hold OR a close target 90+ days out). Base columns, so no
+    // On Hold = effectively on hold (stored on_hold OR a close target more than 90 days out). Base columns, so no
     // capability gate — push the shared predicate unconditionally, qualified to the stage query's "d" alias.
     filters.push(buildDealOnHoldCondition("d"));
   } else if (input.scope === "team") {
@@ -1652,7 +1652,7 @@ export async function getDeals(
         : sql`false`
     );
   } else if (scope === "on_hold") {
-    // On Hold = effectively on hold (stored on_hold OR a close target 90+ days out). Base columns, so no
+    // On Hold = effectively on hold (stored on_hold OR a close target more than 90 days out). Base columns, so no
     // capability gate — push the shared predicate unconditionally.
     conditions.push(buildDealOnHoldCondition("deals"));
   } else if (scope === "team") {
@@ -2879,7 +2879,7 @@ export async function getDealsForPipeline(
         : sql`false`
     );
   } else if (filters?.scope === "on_hold") {
-    // On Hold = effectively on hold (stored on_hold OR a close target 90+ days out). Base columns, so no
+    // On Hold = effectively on hold (stored on_hold OR a close target more than 90 days out). Base columns, so no
     // capability gate. Like Watched/Mine, do NOT set assignedRepFilterHandled so a per-stage assignedRep
     // narrowing still applies.
     commonConditions.push(buildDealOnHoldCondition("deals"));
