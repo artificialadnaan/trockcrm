@@ -229,11 +229,14 @@ export function App() {
               <Route path="/leads/:id" element={<LeadDetailPage />} />
               <Route path="/properties" element={<PropertyListPage />} />
               <Route path="/properties/:id" element={<PropertyDetailPage />} />
-              {/* The standalone Pipeline page mirrored the Deals dashboard and was removed; keep the
-                  path as a redirect so old links/bookmarks land on Deals. Sub-routes below stay. */}
-              {/* Pipeline board folded into the Deals dashboard. Reuse the query-preserving alias
-                  redirect so bookmarked /pipeline?scope=...&... URLs keep their params on /deals
-                  (the deals board handles scope/showDd itself). */}
+              {/* The standalone Pipeline page mirrored the Deals dashboard and was removed (product
+                  decision). /pipeline redirects to the canonical Deals board, carrying the search string
+                  so the primary control — `scope` (Mine/All/Watched/On Hold) — survives. Other legacy
+                  Pipeline-only params do NOT map and land on the Deals defaults: the list filters there
+                  live under the `dl_` namespace, the board shows DD stages by default, terminal windows
+                  seed from `period`, and there is no drag-to-move. That non-equivalence is the accepted
+                  cost of consolidating onto one board; a compat shim for a removed page isn't warranted.
+                  Sub-routes below stay. */}
               <Route path="/pipeline" element={<BoardAliasRedirect entity="deals" />} />
               <Route path="/pipeline/my-cleanup" element={<MyCleanupPage />} />
               <Route path="/contacts" element={<ContactListPage />} />
