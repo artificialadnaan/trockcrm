@@ -48,7 +48,7 @@ export function KanbanDealCard({
   // card value reconciled with the server stage-aware column total. The stageSlug prop is authoritative.
   // A (won-aware) effectively-held deal shows $0 so the card matches its On Hold badge AND the server's
   // zeroed rollup — held = stored on_hold OR (for an OPEN deal) a far-out close target.
-  const dealForValue = { ...deal, stageSlug: deal.stageSlug ?? stageSlug };
+  const dealForValue = { ...deal, stageSlug: stageSlug ?? deal.stageSlug };
   const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue);
   const value = effectivelyHeld ? 0 : bestEstimate(dealForValue);
   const displayNumber = getDealDisplayNumber(deal);

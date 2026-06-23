@@ -270,6 +270,19 @@ describe("KanbanDealCard", () => {
   it("does not flag a non-held deal as on hold", () => {
     expect(render(makeDeal({ onHold: false }))).not.toContain('data-on-hold="true"');
   });
+
+  it("lets the authoritative column slug override stale row stageSlug for effective hold", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <KanbanDealCard
+          deal={makeDeal({ stageSlug: "opportunity", onHold: false, expectedCloseDate: "2099-12-31" })}
+          stageSlug="won"
+        />
+      </MemoryRouter>
+    );
+
+    expect(html).not.toContain('data-on-hold="true"');
+  });
 });
 
 describe("getDealDisplayNumber", () => {

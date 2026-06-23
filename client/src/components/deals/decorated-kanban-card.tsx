@@ -63,7 +63,7 @@ export function DecoratedKanbanCard({
   // same object for the value AND the badge, so the won-aware hold check and the value can't disagree
   // (e.g. a Won-column row reading as auto-held only because its slug was missing). A SHARED `now` keeps
   // the value and the badge on the same horizon across a midnight/90-day-boundary rollover.
-  const dealForValue = { ...deal, stageSlug: deal.stageSlug ?? stageSlug };
+  const dealForValue = { ...deal, stageSlug };
   const now = new Date();
   const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue, now);
 

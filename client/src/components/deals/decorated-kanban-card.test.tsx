@@ -329,4 +329,13 @@ describe("DecoratedKanbanCard", () => {
     const html = renderDeal(makeDeal({ onHold: false, expectedCloseDate: "2099-12-31" }), "won");
     expect(html).not.toContain('data-on-hold="true"');
   });
+
+  it("lets the authoritative column slug override stale row stageSlug for effective hold", () => {
+    const html = renderDeal(
+      makeDeal({ stageSlug: "opportunity", onHold: false, expectedCloseDate: "2099-12-31" }),
+      "won"
+    );
+
+    expect(html).not.toContain('data-on-hold="true"');
+  });
 });
