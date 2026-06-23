@@ -550,7 +550,7 @@ function isEstimatingBoundaryStageSlug(stageSlug: string, workflowRoute: "normal
 function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? never : any) {
   const scope = normalizeCollaborativeScope(
     req.user!.role,
-    req.query.scope as "mine" | "team" | "all" | "watched" | undefined
+    req.query.scope as "mine" | "team" | "all" | "watched" | "on_hold" | undefined
   );
   return {
     role: getCollaborativeReadRole(req.user!.role, scope),
@@ -563,10 +563,20 @@ function readBoardInput(req: Parameters<typeof router.get>[1] extends never ? ne
 }
 
 // Exported for the watched-scope test. The server runtime whitelist for GET /api/deals — an unknown
-// scope coerces to "mine" (NOT silent ALL); "watched" must survive here or the filter silently shows Mine.
-export function readListScope(value: unknown, role: string): "mine" | "team" | "all" | "watched" {
+// scope coerces to "mine" (NOT silent ALL); the deals-only "watched"/"on_hold" must survive here or the
+// filter silently shows Mine.
+export function readListScope(
+  value: unknown,
+  role: string
+): "mine" | "team" | "all" | "watched" | "on_hold" {
   void role;
-  return value === "mine" || value === "team" || value === "all" || value === "watched" ? value : "mine";
+  return value === "mine" ||
+    value === "team" ||
+    value === "all" ||
+    value === "watched" ||
+    value === "on_hold"
+    ? value
+    : "mine";
 }
 
 // Query params arrive as `string | string[] | undefined`. Reject the array form
@@ -947,7 +957,7 @@ router.get("/pipeline", async (req, res, next) => {
     const estimateSentTo = assertOptionalIsoDateQueryParam(req.query.estimateSentTo, "estimateSentTo");
     const scope = normalizeCollaborativeScope(
       req.user!.role,
-      req.query.scope as "mine" | "team" | "all" | "watched" | undefined
+      req.query.scope as "mine" | "team" | "all" | "watched" | "on_hold" | undefined
     );
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,

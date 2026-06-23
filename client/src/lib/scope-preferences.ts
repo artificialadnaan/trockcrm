@@ -3,7 +3,13 @@ import type { PipelineScope } from "@/lib/pipeline-scope";
 const STORAGE_PREFIX = "pipeline-scope-preference";
 
 function isScope(value: string | null | undefined): value is PipelineScope {
-  return value === "mine" || value === "team" || value === "all" || value === "watched";
+  return (
+    value === "mine" ||
+    value === "team" ||
+    value === "all" ||
+    value === "watched" ||
+    value === "on_hold"
+  );
 }
 
 function storageKey(userId: string) {

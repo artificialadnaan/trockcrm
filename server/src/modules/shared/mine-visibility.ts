@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import * as schema from "@trock-crm/shared/schema";
+import { effectiveOnHoldSqlPredicate } from "@trock-crm/shared/types";
 
 type TenantDbLike = {
   execute?: (query: any) => PromiseLike<unknown> | unknown;
@@ -234,6 +235,16 @@ export function buildAliasedDealWatchedCondition(
       and ds.user_id = ${userId}
       ${options.includeSubscriptionDeletedAt === false ? sql`` : sql`and ds.deleted_at is null`}
   )`;
+}
+
+// The "On Hold" scope predicate = effectively on hold: the stored `on_hold` flag OR a close target far
+// enough out (CLOSE_TARGET_HOLD_HORIZON_DAYS+ CT-days) to read as parked — the SHARED
+// `effectiveOnHoldSqlPredicate`, the exact rule value-zeroing/reports reuse, so the pill and the $ math
+// can never disagree. Unlike Watched there is NO optional table, so NO capability gate is needed
+// (`on_hold`/`expected_close_date` are base deal columns). `identifierPath` qualifies the columns to the
+// query's deals relation ("deals") or its alias ("d"); the shared builder regex-validates it.
+export function buildDealOnHoldCondition(identifierPath = "deals") {
+  return sql.raw(effectiveOnHoldSqlPredicate(identifierPath));
 }
 
 export function buildLeadMineVisibilityCondition(

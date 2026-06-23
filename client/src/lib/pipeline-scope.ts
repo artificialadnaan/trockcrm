@@ -3,7 +3,7 @@ import { normalizeStagePageSort } from "@trock-crm/shared/types";
 import { useAuth } from "@/lib/auth";
 import { normalizeStagePageQuery } from "./pipeline-stage-page";
 
-export type PipelineScope = "mine" | "team" | "all" | "watched";
+export type PipelineScope = "mine" | "team" | "all" | "watched" | "on_hold";
 export type PipelineEntity = "leads" | "deals";
 export type PipelineRole = "rep" | "director" | "admin";
 
@@ -24,17 +24,26 @@ const ROLE_ALLOWED_SCOPES: Record<PipelineRole, readonly PipelineScope[]> = {
 };
 
 export function coerceScope(value: string | null): PipelineScope | null {
-  if (value === "mine" || value === "team" || value === "all" || value === "watched") return value;
+  if (
+    value === "mine" ||
+    value === "team" ||
+    value === "all" ||
+    value === "watched" ||
+    value === "on_hold"
+  ) {
+    return value;
+  }
   return null;
 }
 
 // Non-deals-dashboard surfaces (leads list/stage, the director dashboard, the /pipeline board) all read
 // the SAME per-user scope preference but offer Mine|All only. Coerce the parked "team" and the
-// deals-only "watched" (both reachable via that shared preference) to "mine" so none of them ever render
-// an unlabeled, watched-filtered state. Deals-dashboard surfaces keep "watched". Single source of truth
-// so a new Mine/All surface can't silently re-leak watched (the Round-1 /pipeline miss).
+// deals-only pseudo-scopes "watched" / "on_hold" (all reachable via that shared preference) to "mine" so
+// none of them ever render an unlabeled, filtered state. Deals-dashboard surfaces keep them. Single
+// source of truth so a new Mine/All surface can't silently re-leak a deals-only scope (the Round-1
+// /pipeline miss).
 export function containNonDealsScope(scope: PipelineScope): "mine" | "all" {
-  return scope === "team" || scope === "watched" ? "mine" : scope;
+  return scope === "team" || scope === "watched" || scope === "on_hold" ? "mine" : scope;
 }
 
 function normalizeLeadStageRouteSort(value?: string) {
@@ -47,10 +56,12 @@ export function normalizePipelineScope(input: {
   entity: PipelineEntity;
 }) {
   const role = input.role in ROLE_DEFAULT_SCOPE ? input.role : "rep";
-  // "watched" is a DEALS-ONLY scope (the deal_subscriptions watch relation has no leads-list filter
-  // wired in v1), so it is allowed only for the deals entity; on leads it coerces to the role default.
+  // "watched" and "on_hold" are DEALS-ONLY scopes (the watch relation / the on_hold filter have no
+  // leads-list equivalent), so they are allowed only for the deals entity; on leads they coerce to the
+  // role default.
   const isAllowed = (scope: PipelineScope) =>
-    ROLE_ALLOWED_SCOPES[role].includes(scope) || (scope === "watched" && input.entity === "deals");
+    ROLE_ALLOWED_SCOPES[role].includes(scope) ||
+    ((scope === "watched" || scope === "on_hold") && input.entity === "deals");
   const allowedScope = input.requestedScope && isAllowed(input.requestedScope)
     ? input.requestedScope
     : ROLE_DEFAULT_SCOPE[role];

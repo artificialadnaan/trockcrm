@@ -27,7 +27,7 @@ import {
   type TerminalDateFilter,
   type TerminalOutcome,
 } from "@/lib/pipeline-terminal-filters";
-import type { PipelineScope } from "@/lib/pipeline-scope";
+import { coerceScope, type PipelineScope } from "@/lib/pipeline-scope";
 import { KanbanScrollColumn } from "@/components/deals/kanban-scroll-column";
 import { DecoratedKanbanCard } from "@/components/deals/decorated-kanban-card";
 import { DealsListSection } from "@/components/deals/deals-list-section";
@@ -36,13 +36,15 @@ import type { DealFilters } from "@/hooks/use-deals";
 import type { DealListSortState } from "@/components/deals/deals-list-section";
 import { resolvePreferredScope, writeStoredScopePreference } from "@/lib/scope-preferences";
 
-// Team scope is parked (PR #512) and not configured anywhere, so it is not offered here
-// -- only Mine | All (mirrors the director dashboard). The shared PipelineScope union still
-// includes "team" for URL coercion (see DealListPage); do not change it.
+// Team scope is parked (PR #512) and not configured anywhere, so it is not offered here. The pills are
+// Mine | All plus the two deals-only filter pseudo-scopes Watched and On Hold. "On Hold" matches deals
+// that are explicitly held OR have a close target more than 90 days out (effectiveOnHoldSqlPredicate). The shared
+// PipelineScope union still includes "team" for URL coercion (see DealListPage); do not change it.
 const SCOPE_OPTIONS = [
   { value: "mine", label: "Mine" },
   { value: "all", label: "All" },
   { value: "watched", label: "Watched" },
+  { value: "on_hold", label: "On Hold" },
 ] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
 const SLA_DRILLDOWN_PREVIEW_LIMIT = 1000;
@@ -438,9 +440,7 @@ export function getDashboardDealListView(input: {
 
 function getScope(searchParams: URLSearchParams, role: string | undefined): PipelineScope {
   void role;
-  const scope = searchParams.get("scope");
-  if (scope === "mine" || scope === "team" || scope === "all" || scope === "watched") return scope;
-  return "mine";
+  return coerceScope(searchParams.get("scope")) ?? "mine";
 }
 
 function readCurrentTerminalDateFilters(): Record<TerminalOutcome, TerminalDateFilter> {
