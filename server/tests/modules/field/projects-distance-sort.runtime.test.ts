@@ -91,8 +91,10 @@ describe("listStarredFieldProjects proximity sort", () => {
     expect(projects[0].distanceMiles).toBeLessThan(projects[1].distanceMiles!);
   });
 
-  it("omits distanceMiles (recency order) when no fix is given", async () => {
+  it("omits distanceMiles and orders by recency (newest first) when no fix is given", async () => {
     const { projects } = await listStarredFieldProjects(tdb, ACCESS, {});
+    // far (created 2026-05-03) is newer than near (2026-05-01) → recency order, the OPPOSITE of distance.
+    expect(projects.map((p) => p.id)).toEqual([D.far, D.near]);
     expect(projects.every((p) => p.distanceMiles == null)).toBe(true);
   });
 });
