@@ -64,8 +64,13 @@ export function getImmediatePhotoPreviewUrl(
   signedUrl: string | null | undefined = null
 ): string | null {
   if (!isPhotoImagePreviewable(photo)) return null;
+  // For grid/thumbnail previews, prefer a small external thumbnail (e.g. CompanyCam's 250px CDN thumb)
+  // over presigning + downloading the full-size R2 original — it's vastly lighter (~15KB vs ~500KB) and
+  // needs no per-photo round-trip. The full-resolution R2 image is still served for the lightbox/open
+  // path (getImmediatePhotoOpenUrl), which is unchanged.
+  if (photo.externalThumbnailUrl) return photo.externalThumbnailUrl;
   if (hasR2PhotoSource(photo)) return signedUrl ?? null;
-  return photo.externalThumbnailUrl ?? photo.externalUrl ?? signedUrl ?? null;
+  return photo.externalUrl ?? signedUrl ?? null;
 }
 
 export function getImmediatePhotoOpenUrl(
@@ -83,5 +88,8 @@ export function shouldFetchSignedPhotoUrl(
 ): boolean {
   if (signedUrl) return false;
   if (!isPhotoImagePreviewable(photo)) return false;
-  return hasR2PhotoSource(photo) || (!photo.externalThumbnailUrl && !photo.externalUrl);
+  // A small external thumbnail is served directly for previews (see getImmediatePhotoPreviewUrl), so
+  // there's no need to presign the full-size R2 original.
+  if (photo.externalThumbnailUrl) return false;
+  return hasR2PhotoSource(photo) || !photo.externalUrl;
 }

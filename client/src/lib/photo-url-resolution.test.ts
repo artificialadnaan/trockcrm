@@ -8,7 +8,7 @@ import {
 } from "./photo-url-resolution";
 
 describe("photo URL resolution", () => {
-  it("prefers signed R2 URLs over external CompanyCam URLs when r2Key is present", () => {
+  it("prefers a small external thumbnail over the full-size R2 original for grid previews", () => {
     const photo = {
       r2Key: "office_dallas/deals/DFW/photos/companycam_123.jpg",
       mimeType: "image/jpeg",
@@ -18,9 +18,12 @@ describe("photo URL resolution", () => {
 
     expect(hasR2PhotoSource(photo)).toBe(true);
     expect(isPhotoImagePreviewable(photo)).toBe(true);
-    expect(getImmediatePhotoPreviewUrl(photo)).toBeNull();
-    expect(shouldFetchSignedPhotoUrl(photo)).toBe(true);
-    expect(getImmediatePhotoPreviewUrl(photo, "https://r2.example.com/signed-thumb")).toBe("https://r2.example.com/signed-thumb");
+    // Preview serves the lightweight external thumbnail directly — no presign round-trip, no full-size download.
+    expect(getImmediatePhotoPreviewUrl(photo)).toBe("https://img.companycam.com/thumb.jpg");
+    expect(shouldFetchSignedPhotoUrl(photo)).toBe(false);
+    // ...the small thumb still wins for previews even when a signed R2 url is available.
+    expect(getImmediatePhotoPreviewUrl(photo, "https://r2.example.com/signed-thumb")).toBe("https://img.companycam.com/thumb.jpg");
+    // Opening (lightbox) still uses the full-resolution signed R2 image.
     expect(getImmediatePhotoOpenUrl(photo, "https://r2.example.com/signed-full")).toBe("https://r2.example.com/signed-full");
   });
 
