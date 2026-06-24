@@ -26,6 +26,9 @@ export interface FeedFilters {
   subcategory?: string;
   dateFrom?: string;
   dateTo?: string;
+  // Not a server filter — bump this to force a refetch (e.g. after assigning rescued photos to a deal so the
+  // newly-linked photos appear in the feed instead of waiting on the 30s new-photo poll).
+  refreshToken?: number;
 }
 
 export function usePhotoFeed(filters: FeedFilters = {}) {
@@ -79,6 +82,7 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
       filters.subcategory,
       filters.dateFrom,
       filters.dateTo,
+      filters.refreshToken,
     ]
   );
 

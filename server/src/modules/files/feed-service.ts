@@ -398,6 +398,8 @@ export async function getUnassignedCompanyCamPhotos(
  * never re-homes already-assigned photos. The deal must exist and be active in this tenant. Universal — the
  * route imposes no role gate (mirrors the GET endpoints), so any CRM user can consolidate the backlog.
  */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function assignUnassignedCompanyCamProjectToDeal(
   tenantDb: TenantDb,
   companycamProjectId: string,
@@ -406,16 +408,36 @@ export async function assignUnassignedCompanyCamProjectToDeal(
   const projectId = companycamProjectId?.trim();
   if (!projectId) throw new AppError(400, "companycamProjectId is required");
 
+  // Validate the deal id shape HERE (not just at the route) so a malformed id from any caller fails the
+  // 400 contract instead of falling through to Postgres as a generic 500 on the uuid comparison (CodeRabbit).
+  const targetDealId = dealId?.trim();
+  if (!targetDealId || !UUID_PATTERN.test(targetDealId)) {
+    throw new AppError(400, "A valid dealId is required");
+  }
+
   const [deal] = await tenantDb
     .select({ id: deals.id })
     .from(deals)
-    .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
+    .where(and(eq(deals.id, targetDealId), eq(deals.isActive, true)))
     .limit(1);
   if (!deal) throw new AppError(404, "Deal not found");
 
+  // Persist the CompanyCam project -> deal mapping (mirrors companycam linkProjectToDeal): clear it from any
+  // OTHER deal first to keep the relationship 1:1, then set it on the target. Without this, future photos for
+  // the same CompanyCam project would stay rescued/unlinked (syncAllLinkedProjects only syncs deals with a
+  // non-null companycam_project_id) and the project could later be linked to a different deal (Codex).
+  await tenantDb
+    .update(deals)
+    .set({ companycamProjectId: null })
+    .where(and(eq(deals.companycamProjectId, projectId), sql`${deals.id} <> ${targetDealId}`));
+  await tenantDb
+    .update(deals)
+    .set({ companycamProjectId: projectId })
+    .where(eq(deals.id, targetDealId));
+
   const moved = await tenantDb
     .update(files)
-    .set({ dealId })
+    .set({ dealId: targetDealId })
     .where(
       and(
         eq(files.category, "photo"),
@@ -427,7 +449,7 @@ export async function assignUnassignedCompanyCamProjectToDeal(
     )
     .returning({ id: files.id });
 
-  return { assignedCount: moved.length, dealId, companycamProjectId: projectId };
+  return { assignedCount: moved.length, dealId: targetDealId, companycamProjectId: projectId };
 }
 
 /**

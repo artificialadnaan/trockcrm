@@ -30,7 +30,7 @@ beforeAll(async () => {
   await pg.exec(tenantSchemaSql("public", [files]));
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
-    CREATE TABLE deals (id uuid PRIMARY KEY, name text, deal_number text, is_active boolean NOT NULL DEFAULT true);
+    CREATE TABLE deals (id uuid PRIMARY KEY, name text, deal_number text, is_active boolean NOT NULL DEFAULT true, companycam_project_id varchar(50));
     INSERT INTO users (id, display_name) VALUES ('${USER}', 'Rescuer');
     INSERT INTO deals (id, name, deal_number, is_active) VALUES
       ('${DEAL}','Target Deal','D-1', true),
@@ -79,7 +79,12 @@ async function dealIdFor(r2Key: string): Promise<string | null> {
 }
 
 describe("assignUnassignedCompanyCamProjectToDeal", () => {
-  it("rejects an unknown or inactive deal (no photos are moved)", async () => {
+  it("rejects a malformed, unknown, or inactive deal (no photos are moved)", async () => {
+    // Malformed id must fail the 400 contract here, not fall through to Postgres as a 500.
+    await expect(
+      assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", "not-a-uuid"),
+    ).rejects.toThrow();
+    // Well-formed but non-existent / inactive deal -> 404.
     await expect(
       assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", "00000000-0000-4000-8000-00000000dead"),
     ).rejects.toThrow();
@@ -89,7 +94,7 @@ describe("assignUnassignedCompanyCamProjectToDeal", () => {
     expect(await dealIdFor("u/111/a.jpg")).toBeNull();
   });
 
-  it("assigns EXACTLY the project's unassigned CompanyCam photos to the deal", async () => {
+  it("assigns EXACTLY the project's unassigned photos, then is idempotent on re-assign", async () => {
     const result = await assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", DEAL);
     expect(result.assignedCount).toBe(2);
     expect(result.dealId).toBe(DEAL);
@@ -100,13 +105,19 @@ describe("assignUnassignedCompanyCamProjectToDeal", () => {
     expect(await dealIdFor("u/111/done.jpg")).toBe(INACTIVE_DEAL);
     expect(await dealIdFor("u/222/c.jpg")).toBeNull();
     expect(await dealIdFor("u/plain.jpg")).toBeNull();
+    // The CompanyCam project -> deal mapping is persisted on the deal (so future photos auto-link here).
+    const { rows: dealRows } = (await pg.query(
+      `SELECT companycam_project_id FROM deals WHERE id = $1`,
+      [DEAL],
+    )) as { rows: Array<{ companycam_project_id: string | null }> };
+    expect(dealRows[0]?.companycam_project_id).toBe("111");
     // Project 111 is gone from the Unassigned tab; 222 remains.
     const { projects } = await getUnassignedCompanyCamProjects(tdb as never);
     expect(projects.map((p) => p.companycamProjectId)).toEqual(["222"]);
-  });
 
-  it("is idempotent — re-assigning moves nothing (no still-unassigned rows remain)", async () => {
-    const result = await assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", DEAL);
-    expect(result.assignedCount).toBe(0);
+    // Idempotent: a second assign in this same test finds no still-unassigned rows, so it moves nothing
+    // (self-contained — does not rely on a prior test having mutated the shared DB).
+    const again = await assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", DEAL);
+    expect(again.assignedCount).toBe(0);
   });
 });

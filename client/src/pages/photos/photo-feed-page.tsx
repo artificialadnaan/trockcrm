@@ -535,22 +535,30 @@ function AssignToDealPopover({
   const [query, setQuery] = useState("");
   const [deals, setDeals] = useState<DealSearchOption[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchFailed, setSearchFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [assigningId, setAssigningId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     setSearching(true);
+    setSearchFailed(false);
     const handle = setTimeout(() => {
       const q = query.trim();
       const qs = q ? `&search=${encodeURIComponent(q)}` : "";
-      api<{ deals: DealSearchOption[] }>(`/deals?isActive=true&limit=20${qs}`)
-        .then((d) => { if (!cancelled) setDeals(d.deals ?? []); })
-        .catch(() => { if (!cancelled) setDeals([]); })
+      // scope=all so ANY user can find ANY active deal — the deals route otherwise defaults to the caller's
+      // "mine" view, which would hide other people's deals even though the assign endpoint accepts any of
+      // them (the feature is universal). scope=all elevates the read office-wide (CodeRabbit/Codex).
+      api<{ deals: DealSearchOption[] }>(`/deals?scope=all&isActive=true&limit=20${qs}`)
+        // Keep a failed lookup DISTINCT from an empty result so the picker can offer a retry instead of
+        // misreporting "No deals found" when the request itself errored (CodeRabbit).
+        .then((d) => { if (!cancelled) { setDeals(d.deals ?? []); setSearchFailed(false); } })
+        .catch(() => { if (!cancelled) { setDeals([]); setSearchFailed(true); } })
         .finally(() => { if (!cancelled) setSearching(false); });
     }, 250);
     return () => { cancelled = true; clearTimeout(handle); };
-  }, [query, open]);
+  }, [query, open, reloadKey]);
 
   async function assign(deal: DealSearchOption) {
     setAssigningId(deal.id);
@@ -597,6 +605,18 @@ function AssignToDealPopover({
           {searching ? (
             <div className="flex justify-center py-4">
               <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+            </div>
+          ) : searchFailed ? (
+            <div className="px-3 py-4 text-center">
+              <p className="text-xs text-gray-500">Couldn&apos;t load deals.</p>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mt-1 h-7 text-xs"
+                onClick={() => setReloadKey((k) => k + 1)}
+              >
+                <RefreshCw className="mr-1 h-3 w-3" /> Retry
+              </Button>
             </div>
           ) : deals.length === 0 ? (
             <p className="px-3 py-4 text-center text-xs text-gray-500">No deals found</p>
@@ -791,7 +811,7 @@ function UnassignedProjectPhotos({
   );
 }
 
-function UnassignedTab() {
+function UnassignedTab({ onDataChanged }: { onDataChanged: () => void }) {
   const [projects, setProjects] = useState<CompanyCamProjectStat[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -825,6 +845,7 @@ function UnassignedTab() {
         onAssigned={() => {
           setProjects((prev) => prev.filter((p) => p.companycamProjectId !== selected.companycamProjectId));
           setSelected(null);
+          onDataChanged();
         }}
       />
     );
@@ -868,9 +889,10 @@ function UnassignedTab() {
               key={project.companycamProjectId}
               project={project}
               onClick={() => setSelected(project)}
-              onAssigned={() =>
-                setProjects((prev) => prev.filter((p) => p.companycamProjectId !== project.companycamProjectId))
-              }
+              onAssigned={() => {
+                setProjects((prev) => prev.filter((p) => p.companycamProjectId !== project.companycamProjectId));
+                onDataChanged();
+              }}
             />
           ))}
         </div>
@@ -896,10 +918,13 @@ export function PhotoFeedPage() {
   const [dateTo, setDateTo] = useState("");
   const [projectFilterId, setProjectFilterId] = useState("");
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
+  // Bumped after a successful unassigned-photo assignment so the Photos feed refetches (the newly-linked
+  // photos otherwise wouldn't appear until the 30s new-photo poll).
+  const [feedRefreshToken, setFeedRefreshToken] = useState(0);
 
   // Build filters for photo feed
   const feedFilters = useMemo<FeedFilters>(() => {
-    const f: FeedFilters = {};
+    const f: FeedFilters = { refreshToken: feedRefreshToken };
     if (dateFrom) f.dateFrom = new Date(dateFrom).toISOString();
     if (dateTo) {
       const end = new Date(dateTo);
@@ -908,7 +933,7 @@ export function PhotoFeedPage() {
     }
     if (projectFilterId) f.dealId = projectFilterId;
     return f;
-  }, [dateFrom, dateTo, projectFilterId]);
+  }, [dateFrom, dateTo, projectFilterId, feedRefreshToken]);
 
   const { photos, page, totalPages, total, loading, newCount, loadNewPhotos, goToPage } =
     usePhotoFeed(feedFilters);
@@ -929,6 +954,13 @@ export function PhotoFeedPage() {
       setProjectsLoading(false);
     }
   }, []);
+
+  // After photos are assigned out of the Unassigned tab, refresh the Projects stats + the Photos feed so
+  // their counts/lists aren't stale when the user switches tabs (Codex).
+  const handleUnassignedDataChanged = useCallback(() => {
+    void fetchProjectStats();
+    setFeedRefreshToken((t) => t + 1);
+  }, [fetchProjectStats]);
 
   useEffect(() => {
     fetchProjectStats();
@@ -1024,7 +1056,7 @@ export function PhotoFeedPage() {
       <div className="flex-1 overflow-y-auto">
         {activeTab === "unassigned" ? (
           /* ═══════════════════ UNASSIGNED (CompanyCam) TAB ═══════════════════ */
-          <UnassignedTab />
+          <UnassignedTab onDataChanged={handleUnassignedDataChanged} />
         ) : activeTab === "projects" ? (
           /* ═══════════════════ PROJECTS TAB ═══════════════════ */
           <div className="px-6 py-4">
