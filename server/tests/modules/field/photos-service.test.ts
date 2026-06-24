@@ -424,6 +424,27 @@ describe("field photo upload service", () => {
     }));
   });
 
+  it("excludes bulk CompanyCam imports from the pending-captures query", async () => {
+    // Rescued CompanyCam photos are deal-less but must NOT clutter the field pending inbox (they're
+    // triaged from the CRM "Unassigned" tab). The list query must carry the subcategory exclusion.
+    const localDb = { execute: vi.fn() } as any;
+    let pendingQuerySql = "";
+    localDb.execute.mockImplementation(async (query: unknown) => {
+      const sqlText = normalizeSqlText(query);
+      if (sqlText.startsWith("SAVEPOINT") || sqlText.startsWith("RELEASE SAVEPOINT")) return { rows: [] };
+      if (sqlText.includes("INFORMATION_SCHEMA.COLUMNS")) return { rows: [{ column_count: "3" }] };
+      if (sqlText.includes("FROM FILES F")) {
+        pendingQuerySql = sqlText;
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected query: ${sqlText}`);
+    });
+
+    await listPendingFieldPhotos(localDb, { userId: FIELD_USER_ID, userRole: "field_contractor" });
+
+    expect(pendingQuerySql).toContain("SUBCATEGORY IS DISTINCT FROM");
+  });
+
   it("falls back to the legacy pending-photo query without savepoints once schema inspection detects missing linkage columns", async () => {
     const localDb = { execute: vi.fn() } as any;
     const executedQueries: string[] = [];
