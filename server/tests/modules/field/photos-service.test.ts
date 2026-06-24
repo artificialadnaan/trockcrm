@@ -442,7 +442,7 @@ describe("field photo upload service", () => {
 
     await listPendingFieldPhotos(localDb, { userId: FIELD_USER_ID, userRole: "field_contractor" });
 
-    expect(pendingQuerySql).toContain("SUBCATEGORY IS DISTINCT FROM");
+    expect(pendingQuerySql).toContain("SUBCATEGORY IS DISTINCT FROM 'COMPANYCAM'");
   });
 
   it("falls back to the legacy pending-photo query without savepoints once schema inspection detects missing linkage columns", async () => {
