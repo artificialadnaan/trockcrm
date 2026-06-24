@@ -122,8 +122,8 @@ describe("local auth service", () => {
     );
     expect(dbMocks.sendSystemEmail).toHaveBeenCalledWith(
       "rep@example.com",
-      "T Rock CRM — Data Cleanup Login",
-      expect.stringContaining("Before you get full access to the CRM"),
+      "T Rock CRM — You're Invited",
+      expect.stringContaining("You've been invited to T Rock CRM"),
       expect.objectContaining({
         text: expect.stringContaining("Go to https://onboarding.trockcrm.com"),
       })
@@ -131,11 +131,14 @@ describe("local auth service", () => {
     const [, , html, options] = dbMocks.sendSystemEmail.mock.calls[0]!;
     expect(html).toContain("Hi Rep,");
     expect(html).toContain("https://onboarding.trockcrm.com");
-    expect(html).toContain("Mark historical");
     expect(html).toContain("469-690-2240");
-    expect(html).toContain("change your password immediately");
+    expect(html).toContain("Change your password immediately");
     expect(options.text).toContain("1. Go to https://onboarding.trockcrm.com");
-    expect(options.text).toContain("6. When all records are complete, click \"Complete onboarding\" to get full CRM access");
+    expect(options.text).toContain("3. Change your password immediately when prompted");
+    // It's a plain invitation now — no data-cleanup / onboarding workflow language.
+    expect(html).not.toContain("data cleanup");
+    expect(html).not.toContain("Mark historical");
+    expect(html).not.toContain("Complete onboarding");
   });
 
   it("keeps forced temporary-password invites in invite_sent status before first login", () => {

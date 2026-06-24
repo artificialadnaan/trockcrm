@@ -92,23 +92,20 @@ function buildInviteEmailContent(input: {
 
   const steps = [
     `Go to ${input.loginUrl}`,
-    "Log in with the credentials above and change your password immediately when prompted",
-    "Review and clean up each record assigned to you — fill in missing fields, verify existing data",
-    "For records you can't fix (customer left, deal is dead, etc.), click Skip and select a reason",
-    'Use the "Mark historical" button to bulk-pass any old closed deals',
-    'When all records are complete, click "Complete onboarding" to get full CRM access',
+    "Log in with the credentials above",
+    "Change your password immediately when prompted",
   ];
 
   return {
     recipientEmail: input.recipientEmail,
     loginUrl: input.loginUrl,
-    subject: "T Rock CRM — Data Cleanup Login",
+    subject: "T Rock CRM — You're Invited",
     html: `
       <p>Hi ${firstName},</p>
-      <p>Your T Rock CRM account is ready. Before you get full access to the CRM, you need to complete a data cleanup of the records assigned to you.</p>
+      <p>You've been invited to T Rock CRM. Your account is ready to use.</p>
       <p><strong>Your login credentials:</strong></p>
       <p>Email: ${input.recipientEmail}<br />${passwordLine}</p>
-      <p><strong>How to get started:</strong></p>
+      <p><strong>Getting started:</strong></p>
       <ol>
         ${steps.map((step) => `<li>${step.replace(input.loginUrl, `<a href="${input.loginUrl}">${input.loginUrl}</a>`)}</li>`).join("\n        ")}
       </ol>
@@ -119,14 +116,14 @@ function buildInviteEmailContent(input: {
     text: [
       `Hi ${firstName},`,
       "",
-      "Your T Rock CRM account is ready. Before you get full access to the CRM, you need to complete a data cleanup of the records assigned to you.",
+      "You've been invited to T Rock CRM. Your account is ready to use.",
       "",
       "Your login credentials:",
       "",
       `Email: ${input.recipientEmail}`,
       passwordLine,
       "",
-      "How to get started:",
+      "Getting started:",
       "",
       ...steps.map((step, index) => `${index + 1}. ${step}`),
       "",
