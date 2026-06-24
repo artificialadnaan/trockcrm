@@ -418,6 +418,9 @@ export async function listPendingFieldPhotos(
       AND f.contact_id IS NULL
       AND f.procore_project_id IS NULL
       AND f.change_order_id IS NULL
+      -- Bulk-imported CompanyCam photos (the rescue) are deal-less but are NOT field "pending captures";
+      -- they're triaged from the CRM "Unassigned" tab. Keep them out of the field capture inbox.
+      AND f.subcategory IS DISTINCT FROM 'CompanyCam'
     ORDER BY COALESCE(f.taken_at, f.created_at) DESC
     LIMIT 50
   `,
@@ -453,6 +456,7 @@ export async function listPendingFieldPhotos(
         AND f.uploaded_by = ${access.userId}::uuid
         AND f.deal_id IS NULL
         AND f.lead_id IS NULL
+        AND f.subcategory IS DISTINCT FROM 'CompanyCam'
       ORDER BY COALESCE(f.taken_at, f.created_at) DESC
       LIMIT 50
     `,
