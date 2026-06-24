@@ -68,7 +68,8 @@ router.post("/", async (req, res, next) => {
     if (!name) throw new AppError(400, "Company name is required");
     const { company, dedupResult } = await createCompany(
       req.tenantDb!,
-      { name, category: category || "other", address, city, state, zip, phone, website, notes },
+      // The creator becomes the account owner so newly-created companies aren't left Unassigned.
+      { name, category: category || "other", address, city, state, zip, phone, website, notes, ownerUserId: req.user!.id },
       skipDedupCheck === true
     );
 
