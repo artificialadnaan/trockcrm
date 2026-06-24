@@ -258,7 +258,11 @@ export async function renderFieldPhotoReportPdf(input: {
     autoFirstPage: true,
     bufferPages: true,
     size: [PAGE_WIDTH, PAGE_HEIGHT],
-    margin: PAGE_MARGIN,
+    // Zero page margins: this report positions EVERYTHING absolutely (PAGE_MARGIN is used as a layout
+    // constant, not the doc margin). With a non-zero bottom margin, pdfkit's auto-page-break fired every
+    // time the footer drew text near the page bottom — spawning a blank page per footer fragment (the
+    // "blank pages at the end"). Pages are now created ONLY by explicit addPage() calls.
+    margin: 0,
   });
 
   const chunks: Buffer[] = [];
@@ -305,19 +309,24 @@ export async function renderFieldPhotoReportPdf(input: {
     projectName: `${input.cover.projectName} - ${input.cover.reportTitle}`,
   });
 
+  // A full-page section divider only earns its place when there's MORE THAN ONE section to separate; a
+  // single-section report goes straight from the cover to the photos (no near-blank divider page).
+  const useSectionDividers = input.sections.length > 1;
   let sectionIndex = 0;
   for (const section of input.sections) {
     sectionIndex += 1;
     const pages = chunk(section.photos, 4);
-    doc.addPage();
-    pageMeta.push({
-      kind: "section",
-      footerLabel: `Section ${sectionIndex}`,
-      projectName: input.cover.projectName,
-      reportTitle: input.cover.reportTitle,
-      dateLabel: input.cover.reportDateLabel,
-    });
-    drawSectionTitlePage(doc, reportFonts, input.cover.reportTitle, input.cover.reportDateLabel, section.title);
+    if (useSectionDividers) {
+      doc.addPage();
+      pageMeta.push({
+        kind: "section",
+        footerLabel: `Section ${sectionIndex}`,
+        projectName: input.cover.projectName,
+        reportTitle: input.cover.reportTitle,
+        dateLabel: input.cover.reportDateLabel,
+      });
+      drawSectionTitlePage(doc, reportFonts, input.cover.reportTitle, input.cover.reportDateLabel, section.title);
+    }
 
     for (const photos of pages) {
       doc.addPage();
