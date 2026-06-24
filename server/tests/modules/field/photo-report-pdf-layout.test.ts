@@ -42,6 +42,26 @@ describe("renderFieldPhotoReportPdf page count", () => {
     expect(countPdfPages(buffer)).toBe(2);
   });
 
+  it("preserves a single-section custom title compactly without adding a divider page", async () => {
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "South Stairwell Doors", photos: [photo(1), photo(2)] }],
+    });
+    // Still cover + one photo page (no divider) even though the section carries a distinct title.
+    expect(countPdfPages(buffer)).toBe(2);
+  });
+
+  it("does not spill onto blank pages when the footer project name is very long", async () => {
+    // Project names can run ~140 chars; the footer draws it bottom-aligned where any wrap would spill.
+    const longName = "Denton Student Housing Exterior Envelope and Door Hardware Punchlist Walkthrough Report Building C";
+    const buffer = await renderFieldPhotoReportPdf({
+      cover: { ...cover, projectName: longName },
+      sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3), photo(4)] }],
+    });
+    // No-wrap + ellipsis footer text keeps it at cover + one photo page.
+    expect(countPdfPages(buffer)).toBe(2);
+  });
+
   it("keeps a divider page per section when there are multiple sections", async () => {
     const buffer = await renderFieldPhotoReportPdf({
       cover: { ...cover, photoCount: 2 },
