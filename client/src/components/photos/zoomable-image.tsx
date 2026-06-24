@@ -13,7 +13,7 @@ function clamp(value: number, min: number, max: number) {
  * toward the cursor, drag pans while zoomed, double-click toggles 1x↔2.5x, and the on-screen controls
  * zoom in/out/reset. Zoom resets whenever `src` changes (i.e. navigating to the next photo).
  */
-export function ZoomableImage({ src, alt }: { src: string; alt: string }) {
+export function ZoomableImage({ src, alt, onError }: { src: string; alt: string; onError?: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -106,6 +106,7 @@ export function ZoomableImage({ src, alt }: { src: string; alt: string }) {
         <img
           src={src}
           alt={alt}
+          onError={() => onError?.()}
           draggable={false}
           className="max-h-[78vh] max-w-full select-none object-contain"
           style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`, transition: drag.current ? "none" : "transform 0.1s ease-out" }}

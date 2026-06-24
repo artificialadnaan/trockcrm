@@ -68,10 +68,12 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
     error,
     loadMoreError,
     pagination,
+    uploaderFacets,
     hasMorePhotos,
     fetchPhotos,
     loadMorePhotos,
     getPhotoImageUrl,
+    getPhotoOpenUrl,
     ensurePhotoImageUrl,
     refreshPhotoSignedUrl,
     patchPhoto,
@@ -116,9 +118,16 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
   }, [availableSuggestedTags, photos]);
   const uploaders = useMemo(() => {
     const map = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
-    photos.forEach((photo) => map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl }));
+    // Deal-wide facet first (stable regardless of which pages are loaded), then any uploader already on a
+    // loaded page as a fallback until the facet arrives.
+    uploaderFacets.forEach((uploader) => map.set(uploader.id, uploader));
+    photos.forEach((photo) => {
+      if (!map.has(photo.uploadedBy)) {
+        map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl });
+      }
+    });
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [photos]);
+  }, [uploaderFacets, photos]);
   const visiblePhotos = useMemo(() => photos.filter((photo) => matchesPhotoFilters(photo, filters)), [filters, photos]);
   const sortedPhotos = useMemo(() => sortDealPhotosForFiles(visiblePhotos, sortKey, sortDir), [sortDir, sortKey, visiblePhotos]);
 
@@ -213,6 +222,8 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
         selectedId={selectedId}
         onSelectedIdChange={setSelectedId}
         getPhotoImageUrl={getPhotoImageUrl}
+        getPhotoOpenUrl={getPhotoOpenUrl}
+        refreshPhotoSignedUrl={refreshPhotoSignedUrl}
         ensurePhotoImageUrl={ensurePhotoImageUrl}
         patchPhoto={patchPhoto}
         savePhotoAddress={savePhotoAddress}

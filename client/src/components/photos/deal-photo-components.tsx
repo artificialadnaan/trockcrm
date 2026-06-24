@@ -439,8 +439,19 @@ export function useDealPhotosData({
     void fetchPhotos();
   }, [fetchPhotos]);
 
+  // Photos we've already force-refreshed once after an <img> error. Bounds the recovery to a SINGLE retry
+  // per photo so a permanently-broken object (404, deleted R2 key) can't loop onError → refetch → onError
+  // and hammer /files/:id/download until the rate limiter trips.
+  const refreshedIds = React.useRef(new Set<string>());
+
   const getPhotoImageUrl = useCallback((photo: DealPhotoRecord) => {
     return getImmediatePhotoPreviewUrl(photo, downloadUrls[photo.id]) ?? "";
+  }, [downloadUrls]);
+
+  // High-res "open" URL for the lightbox, signed-URL aware — so after a tile recovers an expired R2 URL,
+  // opening the viewer uses the fresh one instead of the stale batched fullUrl.
+  const getPhotoOpenUrl = useCallback((photo: DealPhotoRecord) => {
+    return getImmediatePhotoOpenUrl(photo, downloadUrls[photo.id]) ?? "";
   }, [downloadUrls]);
 
   const ensurePhotoImageUrl = useCallback(async (photo: DealPhotoRecord) => {
@@ -469,6 +480,10 @@ export function useDealPhotosData({
   // stored in downloadUrls, and getImmediatePhoto*Url prefers a present signed URL over the stale batched one.
   const refreshPhotoSignedUrl = useCallback(async (photo: DealPhotoRecord) => {
     if (!isPhotoImagePreviewable(photo)) return "";
+    // One recovery attempt per photo — a fresh signed URL that ALSO fails is a permanent error, so stop
+    // rather than re-fetch on every subsequent onError.
+    if (refreshedIds.current.has(photo.id)) return downloadUrls[photo.id] ?? "";
+    refreshedIds.current.add(photo.id);
     const pending = previewRequests.current.get(photo.id);
     if (pending) return pending;
     const request = api<{ url: string }>(`/files/${photo.id}/download?preview=1`)
@@ -481,7 +496,7 @@ export function useDealPhotosData({
       });
     previewRequests.current.set(photo.id, request);
     return request;
-  }, []);
+  }, [downloadUrls]);
 
   async function patchPhoto(photoId: string, body: Record<string, unknown>) {
     const { file } = await api<{ file: DealPhotoRecord }>(`/files/${photoId}`, { method: "PATCH", json: body });
@@ -522,6 +537,7 @@ export function useDealPhotosData({
     goToPage,
     retry,
     getPhotoImageUrl,
+    getPhotoOpenUrl,
     ensurePhotoImageUrl,
     refreshPhotoSignedUrl,
     patchPhoto,
@@ -776,7 +792,9 @@ export function PhotoViewerModal({
   selectedId,
   onSelectedIdChange,
   getPhotoImageUrl,
+  getPhotoOpenUrl,
   ensurePhotoImageUrl,
+  refreshPhotoSignedUrl,
   patchPhoto,
   savePhotoAddress,
   deletePhoto,
@@ -786,7 +804,9 @@ export function PhotoViewerModal({
   selectedId: string | null;
   onSelectedIdChange: (id: string | null) => void;
   getPhotoImageUrl: (photo: DealPhotoRecord) => string;
+  getPhotoOpenUrl?: (photo: DealPhotoRecord) => string;
   ensurePhotoImageUrl: (photo: DealPhotoRecord) => Promise<string>;
+  refreshPhotoSignedUrl?: (photo: DealPhotoRecord) => Promise<string>;
   patchPhoto: (photoId: string, body: Record<string, unknown>) => Promise<void>;
   savePhotoAddress: (photoId: string, body: { address: string; latitude?: number; longitude?: number }) => Promise<void>;
   deletePhoto: (photoId: string) => Promise<void>;
@@ -804,7 +824,9 @@ export function PhotoViewerModal({
   // The viewer shows the HIGH-RES (full) image so it stays sharp when zoomed; the grid keeps the thumbnail.
   // Falls back to the thumbnail until the full URL resolves.
   const selectedPhotoFullUrl =
-    selectedPhoto && selectedPhotoIsImage ? getImmediatePhotoOpenUrl(selectedPhoto) ?? selectedPhotoImageUrl : "";
+    selectedPhoto && selectedPhotoIsImage
+      ? (getPhotoOpenUrl ? getPhotoOpenUrl(selectedPhoto) : getImmediatePhotoOpenUrl(selectedPhoto) ?? "") || selectedPhotoImageUrl
+      : "";
 
   useEffect(() => {
     if (!selectedPhoto || !isPhotoImagePreviewable(selectedPhoto) || getPhotoImageUrl(selectedPhoto)) return;
@@ -843,7 +865,7 @@ export function PhotoViewerModal({
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
               <div className="flex min-h-[45vh] items-center justify-center overflow-hidden rounded-lg bg-black">
                 {selectedPhotoFullUrl ? (
-                  <ZoomableImage key={selectedPhoto.id} src={selectedPhotoFullUrl} alt={selectedPhoto.displayName} />
+                  <ZoomableImage key={selectedPhoto.id} src={selectedPhotoFullUrl} alt={selectedPhoto.displayName} onError={() => void refreshPhotoSignedUrl?.(selectedPhoto)} />
                 ) : selectedPhotoIsImage ? (
                   <div className="flex flex-col items-center gap-3 px-6 text-center text-white">
                     <Camera className="h-12 w-12 text-white/75" />

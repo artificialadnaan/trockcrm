@@ -1,4 +1,4 @@
-import React, { useCallback, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Animated, StyleSheet } from "react-native";
 import {
   PanGestureHandler,
@@ -23,13 +23,19 @@ export function ZoomablePhoto({
   uri,
   width,
   height,
+  active = true,
   onZoomChange,
 }: {
   uri: string;
   width: number;
   height: number;
+  /** Whether this is the photo currently on screen; going inactive resets zoom/pan so paging back is clean. */
+  active?: boolean;
   onZoomChange?: (zoomed: boolean) => void;
 }) {
+  // Mirrors lastScale > 1 so the pan handler is only enabled while zoomed (a 1x one-finger drag must not
+  // translate the image or fight the pager).
+  const [isZoomed, setIsZoomed] = useState(false);
   const pinchScale = useRef(new Animated.Value(1)).current;
   const baseScale = useRef(new Animated.Value(1)).current;
   const scale = useRef(Animated.multiply(baseScale, pinchScale)).current;
@@ -63,11 +69,18 @@ export function ZoomablePhoto({
       lastScale.current = clamped;
       baseScale.setValue(clamped);
       pinchScale.setValue(1);
-      if (clamped <= MIN_SCALE) resetPan();
-      onZoomChange?.(clamped > MIN_SCALE);
+      const zoomed = clamped > MIN_SCALE;
+      if (!zoomed) resetPan();
+      setIsZoomed(zoomed);
+      onZoomChange?.(zoomed);
     },
     [baseScale, pinchScale, resetPan, onZoomChange],
   );
+
+  // When this photo scrolls off-screen, snap it back to 1x so returning to it (and the pager) starts clean.
+  useEffect(() => {
+    if (!active && lastScale.current > MIN_SCALE) applyScale(MIN_SCALE);
+  }, [active, applyScale]);
 
   const onPinchEvent = Animated.event([{ nativeEvent: { scale: pinchScale } }], { useNativeDriver: true });
 
@@ -111,6 +124,7 @@ export function ZoomablePhoto({
       <Animated.View style={{ width, height }}>
         <PanGestureHandler
           ref={panRef}
+          enabled={isZoomed}
           minPointers={1}
           maxPointers={1}
           avgTouches

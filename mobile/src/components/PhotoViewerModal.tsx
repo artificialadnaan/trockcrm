@@ -60,7 +60,11 @@ export function PhotoViewerModal({
   const onScrollEnd = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {
       const next = Math.round(e.nativeEvent.contentOffset.x / width);
-      if (next !== index) setIndex(next);
+      if (next !== index) {
+        setIndex(next);
+        // A freshly shown photo starts at 1x — re-enable paging even if the previous one was zoomed.
+        setZoomed(false);
+      }
     },
     [index, width],
   );
@@ -74,6 +78,7 @@ export function PhotoViewerModal({
     (next: number) => {
       if (next < 0 || next >= photos.length) return;
       setIndex(next);
+      setZoomed(false);
       listRef.current?.scrollToIndex({ index: next, animated: true });
     },
     [photos.length],
@@ -105,17 +110,24 @@ export function PhotoViewerModal({
               keyExtractor={(p) => p.id}
               horizontal
               pagingEnabled
+              extraData={safeIndex}
               scrollEnabled={!zoomed}
               showsHorizontalScrollIndicator={false}
               initialScrollIndex={initialIndex}
               getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
               onMomentumScrollEnd={onScrollEnd}
-              renderItem={({ item }) => {
+              renderItem={({ item, index: itemIndex }) => {
                 const uri = item.fullImageUrl ?? item.imageUrl;
                 return (
                   <View style={{ width, height: height * 0.58, alignItems: "center", justifyContent: "center" }}>
                     {uri ? (
-                      <ZoomablePhoto uri={uri} width={width} height={height * 0.58} onZoomChange={setZoomed} />
+                      <ZoomablePhoto
+                        uri={uri}
+                        width={width}
+                        height={height * 0.58}
+                        active={itemIndex === safeIndex}
+                        onZoomChange={(z) => itemIndex === safeIndex && setZoomed(z)}
+                      />
                     ) : (
                       <Text style={styles.noImage}>Image unavailable</Text>
                     )}
