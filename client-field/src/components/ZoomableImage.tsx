@@ -27,10 +27,16 @@ export function ZoomableImage({
 }) {
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const containerRef = useRef<HTMLDivElement>(null);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const pinch = useRef<{ dist: number; scale: number; midX: number; midY: number; ox: number; oy: number } | null>(null);
   const pan = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const lastTap = useRef(0);
+  // Mirror scale so the native wheel listener reads the latest value without re-binding.
+  const scaleRef = useRef(scale);
+  useEffect(() => {
+    scaleRef.current = scale;
+  }, [scale]);
 
   const reset = useCallback(() => {
     setScale(1);
@@ -45,12 +51,12 @@ export function ZoomableImage({
     onZoomedChange?.(scale > MIN_SCALE);
   }, [scale, onZoomedChange]);
 
+  // Set scale + offset separately (no setOffset nested inside a setScale updater — that runs impurely,
+  // twice under StrictMode).
   const zoom = useCallback((next: number) => {
-    setScale((prev) => {
-      const c = clamp(next, MIN_SCALE, MAX_SCALE);
-      if (c === MIN_SCALE) setOffset({ x: 0, y: 0 });
-      return c;
-    });
+    const c = clamp(next, MIN_SCALE, MAX_SCALE);
+    setScale(c);
+    if (c === MIN_SCALE) setOffset({ x: 0, y: 0 });
   }, []);
 
   const twoPointerDistance = () => {
@@ -103,21 +109,29 @@ export function ZoomableImage({
     if (pointers.current.size === 0) pan.current = null;
   };
 
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    zoom(scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15));
-    lastTap.current = 0;
-  };
+  // Native, NON-passive wheel listener so preventDefault() actually stops page scroll (React's onWheel is
+  // passive, so preventDefault there is a no-op + warning).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheelNative = (e: WheelEvent) => {
+      e.preventDefault();
+      zoom(scaleRef.current * (e.deltaY < 0 ? 1.15 : 1 / 1.15));
+      lastTap.current = 0;
+    };
+    el.addEventListener("wheel", onWheelNative, { passive: false });
+    return () => el.removeEventListener("wheel", onWheelNative);
+  }, [zoom]);
 
   return (
     <div className="relative flex h-full w-full items-center justify-center overflow-hidden">
       <div
+        ref={containerRef}
         className="flex h-full w-full touch-none items-center justify-center"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
-        onWheel={onWheel}
       >
         <img
           src={src}

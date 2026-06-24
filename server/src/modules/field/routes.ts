@@ -644,8 +644,12 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
     const uploaderIds = typeof req.query.uploader === "string" && req.query.uploader.length > 0
       ? req.query.uploader.split(",")
       : undefined;
-    const page = req.query.page ? Math.max(1, parseInt(req.query.page as string, 10)) : 1;
-    const perPage = req.query.perPage ? parseInt(req.query.perPage as string, 10) : undefined;
+    // Parse defensively: parseInt of a non-numeric value is NaN, which must NOT flow downstream into the
+    // limit/offset math — fall back to default (page 1, perPage undefined → service default).
+    const pageRaw = parseInt(req.query.page as string, 10);
+    const page = Number.isFinite(pageRaw) ? Math.max(1, pageRaw) : 1;
+    const perPageRaw = parseInt(req.query.perPage as string, 10);
+    const perPage = Number.isFinite(perPageRaw) ? perPageRaw : undefined;
     const { value, office } = await withResolvedOffice(
       "deal",
       dealId,

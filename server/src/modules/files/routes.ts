@@ -536,10 +536,14 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
   try {
     await assertDealFileAccess(req, req.params.dealId);
 
-    const page = req.query.page ? Math.max(1, parseInt(req.query.page as string, 10)) : 1;
+    // Parse defensively — parseInt of non-numeric text is NaN, and Math.max/min won't coerce it, so guard
+    // for finite values and fall back to the defaults (else NaN would reach getDealPhotoTimeline).
+    const pageRaw = parseInt(req.query.page as string, 10);
+    const page = Number.isFinite(pageRaw) ? Math.max(1, pageRaw) : 1;
     // Numbered pages: clamp the page size to [1, 200]. The server batch-presigns every photo on the page,
     // so the cap bounds that work (and keeps each page snappy) regardless of what the client requests.
-    const limit = req.query.limit ? Math.min(200, Math.max(1, parseInt(req.query.limit as string, 10))) : 60;
+    const limitRaw = parseInt(req.query.limit as string, 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw)) : 60;
     const categories = typeof req.query.category === "string" && req.query.category.length > 0
       ? req.query.category.split(",")
       : undefined;

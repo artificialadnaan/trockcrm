@@ -29,33 +29,46 @@ export function ZoomableImage({ src, alt }: { src: string; alt: string }) {
     reset();
   }, [src, reset]);
 
+  // Mirror scale in a ref so the stable zoomTo / native-wheel callbacks read the latest value WITHOUT
+  // nesting setOffset inside the setScale updater (which would run impurely — twice under StrictMode).
+  const scaleRef = useRef(scale);
+  useEffect(() => {
+    scaleRef.current = scale;
+  }, [scale]);
+
   const zoomTo = useCallback((nextScale: number, pivot?: { x: number; y: number }) => {
+    const prev = scaleRef.current;
     const clamped = clamp(nextScale, MIN_SCALE, MAX_SCALE);
-    setScale((prev) => {
-      if (clamped === MIN_SCALE) {
-        setOffset({ x: 0, y: 0 });
-        return MIN_SCALE;
-      }
-      // Keep the point under the cursor stationary while zooming.
-      if (pivot && containerRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        const cx = pivot.x - rect.left - rect.width / 2;
-        const cy = pivot.y - rect.top - rect.height / 2;
-        const ratio = clamped / prev;
-        setOffset((o) => ({ x: cx - (cx - o.x) * ratio, y: cy - (cy - o.y) * ratio }));
-      }
-      return clamped;
-    });
+    if (clamped === MIN_SCALE) {
+      setScale(MIN_SCALE);
+      setOffset({ x: 0, y: 0 });
+      return;
+    }
+    // Keep the point under the cursor stationary while zooming. Scale + offset are set separately (no
+    // nested updater) so each stays a pure state update.
+    if (pivot && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      const cx = pivot.x - rect.left - rect.width / 2;
+      const cy = pivot.y - rect.top - rect.height / 2;
+      const ratio = clamped / prev;
+      setOffset((o) => ({ x: cx - (cx - o.x) * ratio, y: cy - (cy - o.y) * ratio }));
+    }
+    setScale(clamped);
   }, []);
 
-  const onWheel = useCallback(
-    (e: React.WheelEvent) => {
+  // Native, NON-passive wheel listener so preventDefault() actually stops page scroll — React's onWheel is
+  // attached passively, so calling preventDefault there is a no-op (and warns).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheelNative = (e: WheelEvent) => {
       e.preventDefault();
       const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-      zoomTo(scale * factor, { x: e.clientX, y: e.clientY });
-    },
-    [scale, zoomTo],
-  );
+      zoomTo(scaleRef.current * factor, { x: e.clientX, y: e.clientY });
+    };
+    el.addEventListener("wheel", onWheelNative, { passive: false });
+    return () => el.removeEventListener("wheel", onWheelNative);
+  }, [zoomTo]);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -83,7 +96,6 @@ export function ZoomableImage({ src, alt }: { src: string; alt: string }) {
       <div
         ref={containerRef}
         className="flex h-full w-full touch-none items-center justify-center"
-        onWheel={onWheel}
         onDoubleClick={(e) => zoomTo(scale > MIN_SCALE ? MIN_SCALE : 2.5, { x: e.clientX, y: e.clientY })}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

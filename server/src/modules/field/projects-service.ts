@@ -429,8 +429,12 @@ export async function listFieldProjectPhotos(
   input: { page?: number; perPage?: number } = {},
 ) {
   await assertActiveFieldProject(tenantDb, access, dealId);
-  const page = Math.max(1, input.page ?? 1);
-  const perPage = Math.min(FIELD_PHOTOS_MAX_PER_PAGE, Math.max(1, input.perPage ?? FIELD_PHOTOS_DEFAULT_PER_PAGE));
+  // Finite-guard before clamping: Math.max/min don't coerce NaN, so a non-numeric query param must fall
+  // back to the default rather than passing NaN into the offset/limit math.
+  const page = Number.isFinite(input.page) ? Math.max(1, input.page as number) : 1;
+  const perPage = Number.isFinite(input.perPage)
+    ? Math.min(FIELD_PHOTOS_MAX_PER_PAGE, Math.max(1, input.perPage as number))
+    : FIELD_PHOTOS_DEFAULT_PER_PAGE;
   const result = await getDealPhotoTimeline(tenantDb, dealId, page, perPage, filters);
   // thumbnailUrl/fullUrl are already resolved in-batch by getDealPhotoTimeline — no per-photo work here.
   const photos = result.photos.map((photo) => safePhoto(photo, photo.thumbnailUrl, photo.fullUrl));
