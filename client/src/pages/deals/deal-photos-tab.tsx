@@ -14,7 +14,7 @@ import {
   PhotoGridSkeleton,
   PhotoGridTile,
   PhotoGroupHeading,
-  PhotoPaginationSummary,
+  PhotoPageNavigator,
   PhotoViewerModal,
   useDealPhotosData,
   type DealPhotoRecord,
@@ -36,13 +36,11 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
   const {
     photos,
     loading,
-    loadingMore,
     error,
-    loadMoreError,
     pagination,
     hasMorePhotos,
     fetchPhotos,
-    loadMorePhotos,
+    goToPage,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
     patchPhoto,
@@ -150,13 +148,12 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
       <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} legacyCategoryOptions={legacyCategoryOptionsInUse(photos, !hasMorePhotos)} />
 
       {!loading && !error && (
-        <PhotoPaginationSummary
-          loadedCount={photos.length}
-          totalCount={pagination.total}
-          hasMore={hasMorePhotos}
-          loadingMore={loadingMore}
-          loadMoreError={loadMoreError}
-          onLoadMore={() => void loadMorePhotos()}
+        <PhotoPageNavigator
+          page={pagination.page}
+          totalPages={pagination.totalPages}
+          total={pagination.total}
+          loading={loading}
+          onPageChange={(p) => void goToPage(p)}
         />
       )}
 
@@ -191,15 +188,13 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
         </section>
       ))}
 
-      {!loading && !error && hasMorePhotos && flatPhotos.length > 0 && (
-        <PhotoPaginationSummary
-          loadedCount={photos.length}
-          totalCount={pagination.total}
-          hasMore={hasMorePhotos}
-          loadingMore={loadingMore}
-          loadMoreError={null}
-          showLoadMore={false}
-          onLoadMore={() => void loadMorePhotos()}
+      {!loading && !error && flatPhotos.length > 0 && (
+        <PhotoPageNavigator
+          page={pagination.page}
+          totalPages={pagination.totalPages}
+          total={pagination.total}
+          loading={loading}
+          onPageChange={(p) => void goToPage(p)}
         />
       )}
 

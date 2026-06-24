@@ -31,7 +31,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api } from "@/lib/api";
-import { getImmediatePhotoPreviewUrl, isPhotoImagePreviewable, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
+import { getImmediatePhotoOpenUrl, getImmediatePhotoPreviewUrl, isPhotoImagePreviewable, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
+import { ZoomableImage } from "@/components/photos/zoomable-image";
 import {
   LEGACY_PHOTO_CATEGORY_ITEMS,
   PHOTO_CATEGORY_OPTION_ITEMS,
@@ -55,6 +56,11 @@ export interface DealPhotoRecord {
   r2Key: string;
   externalUrl: string | null;
   externalThumbnailUrl: string | null;
+  // Server-resolved display URLs (batched into the list) — used directly so the client never fetches a
+  // signed URL per photo. thumbnailUrl = grid; fullUrl = high-res for the zoomable viewer. Optional because
+  // other endpoints (PATCH, etc.) return the raw file record without them.
+  thumbnailUrl?: string | null;
+  fullUrl?: string | null;
   description: string | null;
   takenAt: string | null;
   createdAt: string;
@@ -358,6 +364,14 @@ export function useDealPhotosData({
     await fetchPhotosPage(pagination.page + 1, { append: true });
   }, [fetchPhotosPage, loading, loadingMore, pagination.page, pagination.totalPages]);
 
+  // Numbered pages: jump to a page, REPLACING the current set (not accumulating). Clamped to [1, totalPages].
+  const goToPage = useCallback(async (page: number) => {
+    const totalPages = Math.max(1, pagination.totalPages || 1);
+    const target = Math.min(Math.max(1, page), totalPages);
+    if (loading || target === pagination.page) return;
+    await fetchPhotosPage(target);
+  }, [fetchPhotosPage, loading, pagination.page, pagination.totalPages]);
+
   const refreshLoadedPhotos = useCallback(async () => {
     const pagesToRefresh = Math.max(1, pagination.page);
     setLoading(true);
@@ -458,6 +472,7 @@ export function useDealPhotosData({
     hasMorePhotos: pagination.page < pagination.totalPages,
     fetchPhotos,
     loadMorePhotos,
+    goToPage,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
     patchPhoto,
@@ -500,6 +515,68 @@ export function PhotoPaginationSummary({
           {loadingMore ? "Loading..." : "Load more"}
         </Button>
       )}
+    </div>
+  );
+}
+
+/** Compact page list: 1 … p-1 p p+1 … N (no gaps for small counts). */
+function buildPageItems(page: number, totalPages: number): Array<number | "ellipsis"> {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
+  const items = new Set<number>([1, totalPages, page, page - 1, page + 1]);
+  const sorted = Array.from(items).filter((n) => n >= 1 && n <= totalPages).sort((a, b) => a - b);
+  const result: Array<number | "ellipsis"> = [];
+  sorted.forEach((n, i) => {
+    if (i > 0 && n - sorted[i - 1] > 1) result.push("ellipsis");
+    result.push(n);
+  });
+  return result;
+}
+
+/** Numbered-page navigation for the photo grid (replaces "Load more"). Each page replaces the grid. */
+export function PhotoPageNavigator({
+  page,
+  totalPages,
+  total,
+  loading,
+  onPageChange,
+}: {
+  page: number;
+  totalPages: number;
+  total: number;
+  loading: boolean;
+  onPageChange: (page: number) => void;
+}) {
+  if (total === 0 || totalPages <= 1) return null;
+  const items = buildPageItems(page, totalPages);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
+      <span>Page {page.toLocaleString()} of {totalPages.toLocaleString()} · {total.toLocaleString()} photos</span>
+      <div className="flex items-center gap-1">
+        <Button type="button" variant="outline" size="sm" aria-label="Previous page" disabled={loading || page <= 1} onClick={() => onPageChange(page - 1)}>
+          Prev
+        </Button>
+        {items.map((item, i) =>
+          item === "ellipsis" ? (
+            <span key={`e-${i}`} className="px-1 text-muted-foreground">…</span>
+          ) : (
+            <Button
+              key={item}
+              type="button"
+              variant={item === page ? "default" : "outline"}
+              size="sm"
+              aria-label={`Page ${item}`}
+              aria-current={item === page ? "page" : undefined}
+              disabled={loading}
+              onClick={() => onPageChange(item)}
+            >
+              {item}
+            </Button>
+          ),
+        )}
+        <Button type="button" variant="outline" size="sm" aria-label="Next page" disabled={loading || page >= totalPages} onClick={() => onPageChange(page + 1)}>
+          Next
+        </Button>
+      </div>
     </div>
   );
 }
@@ -675,6 +752,10 @@ export function PhotoViewerModal({
   const selectedUploaderName = selectedPhoto?.uploaderName ?? "Unknown user";
   const selectedPhotoIsImage = selectedPhoto ? isPhotoImagePreviewable(selectedPhoto) : false;
   const selectedPhotoImageUrl = selectedPhoto && selectedPhotoIsImage ? getPhotoImageUrl(selectedPhoto) : "";
+  // The viewer shows the HIGH-RES (full) image so it stays sharp when zoomed; the grid keeps the thumbnail.
+  // Falls back to the thumbnail until the full URL resolves.
+  const selectedPhotoFullUrl =
+    selectedPhoto && selectedPhotoIsImage ? getImmediatePhotoOpenUrl(selectedPhoto) ?? selectedPhotoImageUrl : "";
 
   useEffect(() => {
     if (!selectedPhoto || !isPhotoImagePreviewable(selectedPhoto) || getPhotoImageUrl(selectedPhoto)) return;
@@ -711,9 +792,9 @@ export function PhotoViewerModal({
         {selectedPhoto && (
           <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-              <div className="flex min-h-[45vh] items-center justify-center rounded-lg bg-black">
-                {selectedPhotoImageUrl ? (
-                  <img src={selectedPhotoImageUrl} alt={selectedPhoto.displayName} className="max-h-[72vh] max-w-full object-contain" />
+              <div className="flex min-h-[45vh] items-center justify-center overflow-hidden rounded-lg bg-black">
+                {selectedPhotoFullUrl ? (
+                  <ZoomableImage key={selectedPhoto.id} src={selectedPhotoFullUrl} alt={selectedPhoto.displayName} />
                 ) : selectedPhotoIsImage ? (
                   <div className="flex flex-col items-center gap-3 px-6 text-center text-white">
                     <Camera className="h-12 w-12 text-white/75" />
