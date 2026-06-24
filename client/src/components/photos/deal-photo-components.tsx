@@ -381,9 +381,12 @@ export function useDealPhotosData({
   const goToPage = useCallback(async (page: number) => {
     const totalPages = Math.max(1, pagination.totalPages || 1);
     const target = Math.min(Math.max(1, page), totalPages);
-    if (loading || target === pagination.page) return;
+    if (loading) return;
+    // Re-clicking the current page is a no-op ONLY when it's already showing photos. After a failed jump
+    // (photos cleared, error set, pagination.page still the old page) the current-page click must reload.
+    if (target === pagination.page && !error && photos.length > 0) return;
     await fetchPhotosPage(target);
-  }, [fetchPhotosPage, loading, pagination.page, pagination.totalPages]);
+  }, [error, fetchPhotosPage, loading, pagination.page, pagination.totalPages, photos.length]);
 
   // Reload exactly the currently-displayed page range after a mutation (delete/restore): one page for the
   // numbered tab, the accumulated [1..n] span for the load-more subview. If a delete shrank the set so the
@@ -462,6 +465,13 @@ export function useDealPhotosData({
 
   // High-res "open" URL for the lightbox, signed-URL aware — so after a tile recovers an expired R2 URL,
   // opening the viewer uses the fresh one instead of the stale batched fullUrl.
+  //
+  // Sharing the `downloadUrls` cache with the preview path is intentional and does NOT downscale the
+  // viewer: `?preview=1` on /files/:id/download is only an audit-logging flag (it never resizes — the route
+  // returns the same presigned R2 ORIGINAL). And `downloadUrls` is populated ONLY for R2-backed photos
+  // (shouldFetchSignedPhotoUrl is false for external CompanyCam photos that carry their own thumb/full URLs),
+  // where resolvePhotoDisplayUrls sets thumbnailUrl === fullUrl. So there is no preview-vs-full distinction
+  // to lose here; a separate "open URL" cache would be dead complexity.
   const getPhotoOpenUrl = useCallback((photo: DealPhotoRecord) => {
     return getImmediatePhotoOpenUrl(photo, downloadUrls[photo.id]) ?? "";
   }, [downloadUrls]);
