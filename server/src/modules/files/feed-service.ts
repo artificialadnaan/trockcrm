@@ -2,6 +2,7 @@ import { eq, and, desc, gte, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { files, deals, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -387,6 +388,46 @@ export async function getUnassignedCompanyCamPhotos(
 
   const total = Number(countResult[0]?.count ?? 0);
   return { photos: photoRows, pagination: { page: safePage, limit: safeLimit, total, totalPages: Math.ceil(total / safeLimit) } };
+}
+
+/**
+ * "Assign to deal" action on the Unassigned tab: move EVERY unassigned (deal-less) CompanyCam photo of one
+ * source project onto a deal. Sets files.deal_id for exactly the rows getUnassignedCompanyCamPhotos lists for
+ * the project (the SAME five-predicate filter), so the project drops out of the Unassigned tab and its photos
+ * appear under the deal. Idempotent: it only touches still-unassigned rows, so re-running moves nothing and
+ * never re-homes already-assigned photos. The deal must exist and be active in this tenant. Universal — the
+ * route imposes no role gate (mirrors the GET endpoints), so any CRM user can consolidate the backlog.
+ */
+export async function assignUnassignedCompanyCamProjectToDeal(
+  tenantDb: TenantDb,
+  companycamProjectId: string,
+  dealId: string,
+): Promise<{ assignedCount: number; dealId: string; companycamProjectId: string }> {
+  const projectId = companycamProjectId?.trim();
+  if (!projectId) throw new AppError(400, "companycamProjectId is required");
+
+  const [deal] = await tenantDb
+    .select({ id: deals.id })
+    .from(deals)
+    .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
+    .limit(1);
+  if (!deal) throw new AppError(404, "Deal not found");
+
+  const moved = await tenantDb
+    .update(files)
+    .set({ dealId })
+    .where(
+      and(
+        eq(files.category, "photo"),
+        eq(files.isActive, true),
+        eq(files.subcategory, "CompanyCam"),
+        sql`${files.dealId} IS NULL`,
+        sql`${ccProjectIdExpr} = ${projectId}`,
+      ),
+    )
+    .returning({ id: files.id });
+
+  return { assignedCount: moved.length, dealId, companycamProjectId: projectId };
 }
 
 /**
