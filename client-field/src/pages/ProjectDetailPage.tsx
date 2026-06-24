@@ -6,6 +6,7 @@ import { useAuth } from "../lib/auth";
 import { BrandLogo } from "../components/BrandLogo";
 import { Button, TextInput } from "../components/ui";
 import { ReportBuilder } from "../components/ReportBuilder";
+import { ZoomableImage } from "../components/ZoomableImage";
 import {
   categoryLabel,
   filterPhotos,
@@ -19,6 +20,27 @@ import {
 } from "../lib/field-projects";
 
 const GROUP_SEQUENCE: PhotoGrouping[] = ["date", "category", "uploader", "none"];
+
+// Photos are grouped by date across the whole project, so we load EVERY page (not just the first 200) —
+// the server batches each photo's display URLs, so a 400-photo deal is ~2 fast requests. Page 1 reveals
+// totalPages; the rest fetch in parallel and accumulate.
+const FIELD_PHOTOS_PER_PAGE = 200;
+async function fetchAllProjectPhotos(projectId: string): Promise<FieldPhoto[]> {
+  const first = await api<{ photos: FieldPhoto[]; pagination: { totalPages: number } }>(
+    `/field/projects/${projectId}/photos?page=1&perPage=${FIELD_PHOTOS_PER_PAGE}`,
+  );
+  const all = [...first.photos];
+  const totalPages = first.pagination?.totalPages ?? 1;
+  if (totalPages > 1) {
+    const rest = await Promise.all(
+      Array.from({ length: totalPages - 1 }, (_, i) =>
+        api<{ photos: FieldPhoto[] }>(`/field/projects/${projectId}/photos?page=${i + 2}&perPage=${FIELD_PHOTOS_PER_PAGE}`),
+      ),
+    );
+    rest.forEach((r) => all.push(...r.photos));
+  }
+  return all;
+}
 
 export function ProjectDetailPage() {
   const { id = "" } = useParams();
@@ -45,14 +67,14 @@ export function ProjectDetailPage() {
     try {
       const [projectsResult, photosResult, reportsResult] = await Promise.allSettled([
         api<{ projects: FieldProject[] }>("/field/projects?status=active&page=1&perPage=100"),
-        api<{ photos: FieldPhoto[] }>(`/field/projects/${id}/photos`),
+        fetchAllProjectPhotos(id),
         api<{ reports: Array<{ id: string; title: string; createdAt: string; description: string | null }> }>(`/field/projects/${id}/reports`),
       ]);
       if (projectsResult.status !== "fulfilled" || photosResult.status !== "fulfilled") {
         throw new Error("Failed to load project");
       }
       setProject(projectsResult.value.projects.find((item) => item.id === id) ?? null);
-      setPhotos(photosResult.value.photos);
+      setPhotos(photosResult.value);
       setReports(reportsResult.status === "fulfilled" ? reportsResult.value.reports : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load project");
@@ -418,14 +440,17 @@ function FilterDrawer({
 function FieldPhotoViewer({ photo, onClose, onPrev, onNext }: { photo: FieldPhoto; onClose: () => void; onPrev?: () => void; onNext?: () => void }) {
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [touchStart, setTouchStart] = useState<number | null>(null);
+  // While the image is pinch-zoomed, the one-finger drag pans the photo — so suppress swipe-to-navigate.
+  const [imageZoomed, setImageZoomed] = useState(false);
   const source = photo.addressSource === "exif" ? "From photo" : photo.addressSource === "live_gps" ? "Captured at upload" : photo.addressSource === "deal_fallback" ? "Project address" : photo.addressSource === "manual_override" ? "Manually set" : "No source";
+  const viewerUrl = photo.fullImageUrl ?? photo.imageUrl;
 
   return (
     <div
       className="fixed inset-0 z-50 bg-black text-white"
-      onTouchStart={(event) => setTouchStart(event.touches[0]?.clientX ?? null)}
+      onTouchStart={(event) => setTouchStart(imageZoomed ? null : event.touches[0]?.clientX ?? null)}
       onTouchEnd={(event) => {
-        if (touchStart == null) return;
+        if (touchStart == null || imageZoomed) return;
         const diff = (event.changedTouches[0]?.clientX ?? touchStart) - touchStart;
         if (diff > 50) onPrev?.();
         if (diff < -50) onNext?.();
@@ -433,11 +458,12 @@ function FieldPhotoViewer({ photo, onClose, onPrev, onNext }: { photo: FieldPhot
       }}
     >
       <button type="button" aria-label="Close photo viewer" className="absolute right-4 top-4 z-10 rounded-full bg-black/60 p-2" onClick={onClose}><X className="h-6 w-6" /></button>
-      {onPrev ? <button type="button" aria-label="Previous photo" className="absolute left-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onPrev}><ChevronLeft /></button> : null}
-      {onNext ? <button type="button" aria-label="Next photo" className="absolute right-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onNext}><ChevronRight /></button> : null}
-      <button type="button" className="flex h-full w-full items-center justify-center px-3 pb-56 pt-12" onClick={() => setDetailsOpen((open) => !open)}>
-        {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} className="max-h-full max-w-full object-contain" /> : <span>Image unavailable</span>}
-      </button>
+      {onPrev && !imageZoomed ? <button type="button" aria-label="Previous photo" className="absolute left-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onPrev}><ChevronLeft /></button> : null}
+      {onNext && !imageZoomed ? <button type="button" aria-label="Next photo" className="absolute right-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onNext}><ChevronRight /></button> : null}
+      {/* Tap the image to toggle details; pinch/double-tap/drag to zoom + pan (ZoomableImage). */}
+      <div className="flex h-full w-full items-center justify-center px-3 pb-56 pt-12" onClick={() => setDetailsOpen((open) => !open)}>
+        {viewerUrl ? <ZoomableImage key={photo.id} src={viewerUrl} alt={photo.displayName} onZoomedChange={setImageZoomed} /> : <span>Image unavailable</span>}
+      </div>
       {detailsOpen ? (
         <aside className="absolute inset-x-0 bottom-0 max-h-[50vh] overflow-y-auto rounded-t-2xl bg-white p-4 text-foreground">
           <h2 className="text-xl font-black">{photo.description || photo.displayName}</h2>
