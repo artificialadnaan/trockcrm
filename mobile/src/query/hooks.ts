@@ -55,6 +55,10 @@ export function useProjectPhotos(dealId: string | undefined) {
       const totalPages = Math.min(first.pagination?.totalPages ?? 1, PHOTOS_MAX_PAGES);
       const photos = [...first.photos];
 
+      // `partial` tracks pages we couldn't load. We keep the non-blanking behavior (show what loaded) but
+      // surface partial so the screen can block report/share — generating from an incomplete set would
+      // silently omit photos.
+      let partial = false;
       for (let page = 2; page <= totalPages; page += PHOTOS_PAGE_CONCURRENCY) {
         const batch = [];
         for (let p = page; p < page + PHOTOS_PAGE_CONCURRENCY && p <= totalPages; p += 1) {
@@ -65,10 +69,11 @@ export function useProjectPhotos(dealId: string | undefined) {
         const results = await Promise.allSettled(batch);
         for (const result of results) {
           if (result.status === "fulfilled") photos.push(...result.value.photos);
+          else partial = true;
         }
       }
 
-      return { photos, pagination: first.pagination };
+      return { photos, pagination: first.pagination, partial };
     },
     enabled: !!user && !!dealId,
   });

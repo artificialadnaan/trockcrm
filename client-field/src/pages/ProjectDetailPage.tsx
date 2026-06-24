@@ -27,13 +27,16 @@ const GROUP_SEQUENCE: PhotoGrouping[] = ["date", "category", "uploader", "none"]
 // chunk is allSettled so a single 429/5xx drops just that page instead of aborting the whole gallery.
 const FIELD_PHOTOS_PER_PAGE = 200;
 const FIELD_PHOTOS_FETCH_CONCURRENCY = 4;
-async function fetchAllProjectPhotos(projectId: string): Promise<FieldPhoto[]> {
+async function fetchAllProjectPhotos(projectId: string): Promise<{ photos: FieldPhoto[]; partial: boolean }> {
   const first = await api<{ photos: FieldPhoto[]; pagination: { totalPages: number } }>(
     `/field/projects/${projectId}/photos?page=1&perPage=${FIELD_PHOTOS_PER_PAGE}`,
   );
   const all = [...first.photos];
   const totalPages = first.pagination?.totalPages ?? 1;
   const remaining = Array.from({ length: Math.max(0, totalPages - 1) }, (_, i) => i + 2);
+  // Track dropped pages: keep the non-blanking behavior (show what loaded), but report `partial` so the
+  // caller can warn and block report/share — an incomplete photo set would silently omit photos otherwise.
+  let partial = false;
   for (let i = 0; i < remaining.length; i += FIELD_PHOTOS_FETCH_CONCURRENCY) {
     const chunk = remaining.slice(i, i + FIELD_PHOTOS_FETCH_CONCURRENCY);
     const results = await Promise.allSettled(
@@ -43,9 +46,10 @@ async function fetchAllProjectPhotos(projectId: string): Promise<FieldPhoto[]> {
     );
     results.forEach((r) => {
       if (r.status === "fulfilled") all.push(...r.value.photos);
+      else partial = true;
     });
   }
-  return all;
+  return { photos: all, partial };
 }
 
 export function ProjectDetailPage() {
@@ -66,6 +70,9 @@ export function ProjectDetailPage() {
   const [uploaderIds, setUploaderIds] = useState<string[]>([]);
   const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
   const [reportBuilderOpen, setReportBuilderOpen] = useState(false);
+  // True when one or more photo pages failed to load — the gallery shows what loaded, but report/share are
+  // blocked so we never generate from an incomplete set.
+  const [photosPartial, setPhotosPartial] = useState(false);
 
   async function loadDetail() {
     setLoading(true);
@@ -80,7 +87,8 @@ export function ProjectDetailPage() {
         throw new Error("Failed to load project");
       }
       setProject(projectsResult.value.projects.find((item) => item.id === id) ?? null);
-      setPhotos(photosResult.value);
+      setPhotos(photosResult.value.photos);
+      setPhotosPartial(photosResult.value.partial);
       setReports(reportsResult.status === "fulfilled" ? reportsResult.value.reports : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load project");
@@ -181,12 +189,23 @@ export function ProjectDetailPage() {
           </p>
         ) : (
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
+            <Button
+              variant="ghost"
+              disabled={photosPartial}
+              title={photosPartial ? "Some photos failed to load — reload before generating a report" : undefined}
+              onClick={() => setReportBuilderOpen(true)}
+            >
               <FileText className="mr-2 h-4 w-4" />
               Generate Report
             </Button>
           </div>
         )}
+        {photosPartial ? (
+          <p className="mt-2 flex items-center justify-between gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">
+            <span>Some photos couldn’t be loaded, so report generation is paused to avoid omitting any. Reload to try again.</span>
+            <Button variant="ghost" onClick={() => void loadDetail()}>Reload</Button>
+          </p>
+        ) : null}
       </header>
 
       {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-semibold text-red-700">{error}</p> : null}
@@ -203,7 +222,12 @@ export function ProjectDetailPage() {
             </div>
           </div>
           {!offOffice ? (
-            <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
+            <Button
+              variant="ghost"
+              disabled={photosPartial}
+              title={photosPartial ? "Some photos failed to load — reload before generating a report" : undefined}
+              onClick={() => setReportBuilderOpen(true)}
+            >
               <FileText className="mr-2 h-4 w-4" />
               Build
             </Button>
