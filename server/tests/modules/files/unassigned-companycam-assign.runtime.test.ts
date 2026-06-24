@@ -19,6 +19,8 @@ const USER = "00000000-0000-4000-8000-000000000001";
 const DEAL = "00000000-0000-4000-8000-0000000000d1";
 const INACTIVE_DEAL = "00000000-0000-4000-8000-0000000000d2";
 const OTHER_DEAL = "00000000-0000-4000-8000-0000000000d3";
+const LINKED_DEAL = "00000000-0000-4000-8000-0000000000d4"; // already linked to a DIFFERENT cc project
+const TEST_DEAL = "00000000-0000-4000-8000-0000000000d5"; // active but is_test_data (hidden from the picker)
 let tdb: ReturnType<typeof drizzle>;
 let pg: PGlite;
 
@@ -31,12 +33,14 @@ beforeAll(async () => {
   await pg.exec(tenantSchemaSql("public", [files]));
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
-    CREATE TABLE deals (id uuid PRIMARY KEY, name text, deal_number text, is_active boolean NOT NULL DEFAULT true, companycam_project_id varchar(50));
+    CREATE TABLE deals (id uuid PRIMARY KEY, name text, deal_number text, is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, companycam_project_id varchar(50));
     INSERT INTO users (id, display_name) VALUES ('${USER}', 'Rescuer');
-    INSERT INTO deals (id, name, deal_number, is_active) VALUES
-      ('${DEAL}','Target Deal','D-1', true),
-      ('${INACTIVE_DEAL}','Archived Deal','D-2', false),
-      ('${OTHER_DEAL}','Other Deal','D-3', true);
+    INSERT INTO deals (id, name, deal_number, is_active, is_test_data, companycam_project_id) VALUES
+      ('${DEAL}','Target Deal','D-1', true, false, NULL),
+      ('${INACTIVE_DEAL}','Archived Deal','D-2', false, false, NULL),
+      ('${OTHER_DEAL}','Other Deal','D-3', true, false, NULL),
+      ('${LINKED_DEAL}','Linked Deal','D-4', true, false, '999'),
+      ('${TEST_DEAL}','Test Deal','D-5', true, true, NULL);
   `);
 
   const base = {
@@ -81,18 +85,23 @@ async function dealIdFor(r2Key: string): Promise<string | null> {
 }
 
 describe("assignUnassignedCompanyCamProjectToDeal", () => {
-  it("rejects a malformed, unknown, or inactive deal (no photos are moved)", async () => {
-    // Malformed id must fail the 400 contract here, not fall through to Postgres as a 500.
-    await expect(
-      assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", "not-a-uuid"),
-    ).rejects.toThrow();
-    // Well-formed but non-existent / inactive deal -> 404.
-    await expect(
-      assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", "00000000-0000-4000-8000-00000000dead"),
-    ).rejects.toThrow();
-    await expect(
-      assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", INACTIVE_DEAL),
-    ).rejects.toThrow();
+  it("rejects with the right status: malformed (400), unknown (404), inactive (404), conflicting link (409)", async () => {
+    const expectStatus = async (dealId: string, status: number) => {
+      try {
+        await assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", dealId);
+        throw new Error(`expected a rejection with status ${status}`);
+      } catch (err) {
+        // Assert the AppError contract status, not just that SOMETHING threw, so a generic Postgres 500
+        // can't masquerade as the intended 400/404/409.
+        expect((err as { statusCode?: number }).statusCode).toBe(status);
+      }
+    };
+    await expectStatus("not-a-uuid", 400); // malformed id never reaches Postgres
+    await expectStatus("00000000-0000-4000-8000-00000000dead", 404); // well-formed but unknown
+    await expectStatus(INACTIVE_DEAL, 404); // inactive
+    await expectStatus(TEST_DEAL, 404); // active but test-data — hidden from the picker, must not be a target
+    await expectStatus(LINKED_DEAL, 409); // already linked to a DIFFERENT cc project — don't clobber it
+    // No photos moved by any rejection.
     expect(await dealIdFor("u/111/a.jpg")).toBeNull();
   });
 

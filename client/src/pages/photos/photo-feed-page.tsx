@@ -567,9 +567,15 @@ function AssignToDealPopover({
         `/files/photos/unassigned-companycam/${encodeURIComponent(companycamProjectId)}/assign`,
         { method: "POST", json: { dealId: deal.id } },
       );
-      toast.success(
-        `Assigned ${res.assignedCount} photo${res.assignedCount !== 1 ? "s" : ""} to ${formatDealDisplayNumber(deal).label}`,
-      );
+      if (res.assignedCount > 0) {
+        toast.success(
+          `Assigned ${res.assignedCount} photo${res.assignedCount !== 1 ? "s" : ""} to ${formatDealDisplayNumber(deal).label}`,
+        );
+      } else {
+        // The race-safe server path can claim 0 rows (e.g. the project was already assigned elsewhere) and
+        // does NOT persist the deal link — don't imply a successful assignment.
+        toast.info("No photos were assigned — they may have already been assigned to a deal.");
+      }
       setOpen(false);
       onAssigned(res.assignedCount, deal);
     } catch (err) {

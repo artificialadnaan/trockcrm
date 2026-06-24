@@ -39,9 +39,14 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
   const [loading, setLoading] = useState(true);
   const [newCount, setNewCount] = useState(0);
   const lastFetchedAt = useRef<string>(new Date().toISOString());
+  // Monotonic request id: a filter/refreshToken change (or page change) can leave an older request in
+  // flight that resolves AFTER the newer one and would otherwise clobber the fresh feed. Only the latest
+  // request applies state.
+  const requestSeq = useRef(0);
 
   const fetchFeed = useCallback(
     async (pageNum: number = 1) => {
+      const seq = ++requestSeq.current;
       setLoading(true);
       try {
         const params = new URLSearchParams();
@@ -63,6 +68,7 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
           };
         }>(`/files/photos/feed?${params}`);
 
+        if (seq !== requestSeq.current) return; // a newer request superseded this one — ignore stale data
         setPhotos(data.photos);
         setPage(data.pagination.page);
         setTotalPages(data.pagination.totalPages);
@@ -70,9 +76,10 @@ export function usePhotoFeed(filters: FeedFilters = {}) {
         lastFetchedAt.current = new Date().toISOString();
         setNewCount(0);
       } catch (err) {
+        if (seq !== requestSeq.current) return;
         console.error("Failed to fetch photo feed:", err);
       } finally {
-        setLoading(false);
+        if (seq === requestSeq.current) setLoading(false);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps

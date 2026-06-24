@@ -416,11 +416,20 @@ export async function assignUnassignedCompanyCamProjectToDeal(
   }
 
   const [deal] = await tenantDb
-    .select({ id: deals.id })
+    .select({ id: deals.id, companycamProjectId: deals.companycamProjectId })
     .from(deals)
-    .where(and(eq(deals.id, targetDealId), eq(deals.isActive, true)))
+    // Exclude test-data deals (mirrors excludeTestDataCondition on the normal deals list/search): they are
+    // hidden from the picker, so a crafted/stale request must not be able to bury production photos on one.
+    .where(and(eq(deals.id, targetDealId), eq(deals.isActive, true), sql`COALESCE(${deals.isTestData}, false) = false`))
     .limit(1);
   if (!deal) throw new AppError(404, "Deal not found");
+
+  // A deal links to at most ONE CompanyCam project. Refuse to overwrite a DIFFERENT existing link (which
+  // would orphan that project) — only an unlinked deal, or one already linked to this same project, may
+  // proceed (Codex). The clear-then-set below then safely (re)affirms the mapping.
+  if (deal.companycamProjectId && deal.companycamProjectId !== projectId) {
+    throw new AppError(409, "This deal is already linked to a different CompanyCam project");
+  }
 
   // Serialize concurrent assignments of the SAME CompanyCam project (transaction-scoped, auto-released at
   // commit) so two users can't race to relink it. Mirrors the createCompany dedup-lock pattern.
