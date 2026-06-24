@@ -536,8 +536,10 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
   try {
     await assertDealFileAccess(req, req.params.dealId);
 
-    const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    const page = req.query.page ? Math.max(1, parseInt(req.query.page as string, 10)) : 1;
+    // Numbered pages: clamp the page size to [1, 200]. The server batch-presigns every photo on the page,
+    // so the cap bounds that work (and keeps each page snappy) regardless of what the client requests.
+    const limit = req.query.limit ? Math.min(200, Math.max(1, parseInt(req.query.limit as string, 10))) : 60;
     const categories = typeof req.query.category === "string" && req.query.category.length > 0
       ? req.query.category.split(",")
       : undefined;

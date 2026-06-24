@@ -1169,6 +1169,39 @@ export async function getFileDownloadUrl(
   return buildFileDownloadUrlFromRecord(file);
 }
 
+/**
+ * Resolve a photo's display URLs WITHOUT a per-photo round-trip from the client. Returns a
+ * `thumbnailUrl` (small, for the grid) and a `fullUrl` (high-res, for the zoomable lightbox):
+ *  - External (e.g. CompanyCam): thumbnail = externalThumbnailUrl (its "thumbnail"/"web" size),
+ *    full = externalUrl (the original). These are plain CDN URLs — no signing, no DB call.
+ *  - R2-stored: a single presigned URL to the original serves BOTH (R2 keeps no resized variant). The
+ *    presign is a LOCAL HMAC op (no network), so resolving a whole page in-batch is cheap.
+ * Computing these on the server and returning them inside the photo LIST is what lets a 400-photo deal
+ * load without firing 400 separate `/files/:id/download` requests (which trip the rate limiter).
+ */
+export async function resolvePhotoDisplayUrls(photo: {
+  r2Key?: string | null;
+  externalUrl?: string | null;
+  externalThumbnailUrl?: string | null;
+  displayName?: string | null;
+  fileExtension?: string | null;
+}): Promise<{ thumbnailUrl: string | null; fullUrl: string | null }> {
+  if (photo.externalUrl || photo.externalThumbnailUrl) {
+    const full = photo.externalUrl ?? photo.externalThumbnailUrl ?? null;
+    const thumbnail = photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
+    return { thumbnailUrl: thumbnail, fullUrl: full };
+  }
+  if (photo.r2Key) {
+    const { url } = await buildFileDownloadUrlFromRecord({
+      r2Key: photo.r2Key,
+      displayName: photo.displayName ?? "photo",
+      fileExtension: photo.fileExtension,
+    });
+    return { thumbnailUrl: url, fullUrl: url };
+  }
+  return { thumbnailUrl: null, fullUrl: null };
+}
+
 export function shouldServeExternalFileUrl(file: {
   r2Key?: string | null;
   externalUrl?: string | null;
@@ -1418,7 +1451,15 @@ export async function getDealPhotoTimeline(
   limit: number = 50,
   filters: DealPhotoTimelineFilters = {}
 ): Promise<{
-  photos: Array<typeof files.$inferSelect & { uploaderName: string; uploaderAvatarUrl: string | null }>;
+  photos: Array<
+    typeof files.$inferSelect & {
+      uploaderName: string;
+      uploaderAvatarUrl: string | null;
+      // Display URLs resolved server-side IN-BATCH so clients never round-trip per photo (rate-limit safe).
+      thumbnailUrl: string | null;
+      fullUrl: string | null;
+    }
+  >;
   pagination: { page: number; limit: number; total: number; totalPages: number };
 }> {
   const offset = (page - 1) * limit;
@@ -1484,8 +1525,15 @@ export async function getDealPhotoTimeline(
 
   const total = Number(countResult[0]?.count ?? 0);
 
+  // Resolve each photo's thumbnail + full-res URL HERE (in one batch) rather than letting the client
+  // fetch a signed URL per photo — that N+1 is what trips the rate limiter on a 400-photo deal. Presigns
+  // are local, so this stays cheap even at the max page size.
+  const photos = await Promise.all(
+    photoRows.map(async (photo) => ({ ...photo, ...(await resolvePhotoDisplayUrls(photo)) })),
+  );
+
   return {
-    photos: photoRows,
+    photos,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
 }

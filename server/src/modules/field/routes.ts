@@ -644,6 +644,8 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
     const uploaderIds = typeof req.query.uploader === "string" && req.query.uploader.length > 0
       ? req.query.uploader.split(",")
       : undefined;
+    const page = req.query.page ? Math.max(1, parseInt(req.query.page as string, 10)) : 1;
+    const perPage = req.query.perPage ? parseInt(req.query.perPage as string, 10) : undefined;
     const { value, office } = await withResolvedOffice(
       "deal",
       dealId,
@@ -654,7 +656,7 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
           from: req.query.from as string | undefined,
           to: req.query.to as string | undefined,
           includeDeleted: false,
-        }),
+        }, { page, perPage }),
       "Project not found",
     );
     res.json({ ...value, ...officeTag(office) });

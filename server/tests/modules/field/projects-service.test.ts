@@ -173,23 +173,29 @@ describe("field projects service", () => {
         deletedAt: null,
         externalThumbnailUrl: null,
         externalUrl: null,
+        // getDealPhotoTimeline now resolves the display URLs in-batch; listFieldProjectPhotos just maps them.
+        thumbnailUrl: "https://signed.example/thumb.jpg",
+        fullUrl: "https://signed.example/full.jpg",
       }],
-      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
     });
 
     const result = await listFieldProjectPhotos(db, { userId: "field-1", userRole: "field_contractor" }, "deal-1", { categories: ["damage"] });
 
-    expect(fileServiceMocks.getDealPhotoTimeline).toHaveBeenCalledWith(db, "deal-1", 1, 200, {
+    // Default numbered-pages window: page 1, perPage 60.
+    expect(fileServiceMocks.getDealPhotoTimeline).toHaveBeenCalledWith(db, "deal-1", 1, 60, {
       categories: ["damage"],
     });
     expect(result.photos[0]).toEqual(expect.objectContaining({
       id: "photo-1",
-      imageUrl: "https://signed.example/photo.jpg",
+      imageUrl: "https://signed.example/thumb.jpg", // thumbnail for the grid
+      fullImageUrl: "https://signed.example/full.jpg", // high-res for the viewer
       category: "photo",
       photoCategory: "damage",
       address: "123 Main St",
     }));
-    expect(fileServiceMocks.buildFileDownloadUrlFromRecord).toHaveBeenCalledWith(expect.objectContaining({ id: "photo-1" }));
+    // URL resolution moved into getDealPhotoTimeline (batched), so listFieldProjectPhotos no longer presigns per photo.
+    expect(fileServiceMocks.buildFileDownloadUrlFromRecord).not.toHaveBeenCalled();
     expect(fileServiceMocks.getFileDownloadUrl).not.toHaveBeenCalled();
     expect(JSON.stringify(result.photos[0])).not.toContain("r2Key");
     expect(JSON.stringify(result.photos[0])).not.toContain("r2Bucket");
