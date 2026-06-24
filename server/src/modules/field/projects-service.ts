@@ -85,7 +85,10 @@ export type FieldPhoto = {
   geocodedAt: string | null;
   procoreSyncStatus: string | null;
   deletedAt: string | null;
+  /** Thumbnail URL for the grid. */
   imageUrl: string | null;
+  /** High-resolution URL for the zoomable full-screen viewer (may equal imageUrl for R2 originals). */
+  fullImageUrl: string | null;
 };
 
 function iso(value: Date | string | null | undefined): string | null {
@@ -475,7 +478,7 @@ export async function assertScopedCaptureTargetAccess(
   assertOwnedByRep(lead.assignedRepId);
 }
 
-function safePhoto(photo: any, imageUrl: string | null): FieldPhoto {
+function safePhoto(photo: any, imageUrl: string | null, fullImageUrl: string | null): FieldPhoto {
   return {
     id: photo.id,
     category: "photo",
@@ -501,24 +504,36 @@ function safePhoto(photo: any, imageUrl: string | null): FieldPhoto {
     geocodedAt: iso(photo.geocodedAt),
     procoreSyncStatus: photo.procoreSyncStatus ?? null,
     deletedAt: iso(photo.deletedAt),
+    // imageUrl = thumbnail (grid); fullImageUrl = high-res (zoomable viewer). Both resolved server-side
+    // in-batch by getDealPhotoTimeline, so the client never round-trips per photo.
     imageUrl,
+    fullImageUrl,
   };
 }
+
+// Field photos page size, clamped server-side so a client can't request an unbounded page (the batch
+// presign is bounded by this). Default 200 matches the field surface's prior single-load cap, so an
+// un-paginated client doesn't regress; clients that walk pages pass page/perPage to reach everything.
+export const FIELD_PHOTOS_DEFAULT_PER_PAGE = 200;
+export const FIELD_PHOTOS_MAX_PER_PAGE = 200;
 
 export async function listFieldProjectPhotos(
   tenantDb: TenantDb,
   access: FieldAccessContext,
   dealId: string,
-  filters: DealPhotoTimelineFilters = {}
+  filters: DealPhotoTimelineFilters = {},
+  input: { page?: number; perPage?: number } = {},
 ) {
   await assertActiveFieldProject(tenantDb, access, dealId);
-  const result = await getDealPhotoTimeline(tenantDb, dealId, 1, 200, filters);
-  const photos = await Promise.all(result.photos.map(async (photo) => {
-    const imageUrl = photo.externalThumbnailUrl
-      ?? photo.externalUrl
-      ?? (photo.r2Key ? (await buildFileDownloadUrlFromRecord(photo)).url : null);
-    return safePhoto(photo, imageUrl);
-  }));
+  // Finite-guard before clamping: Math.max/min don't coerce NaN, so a non-numeric query param must fall
+  // back to the default rather than passing NaN into the offset/limit math.
+  const page = Number.isFinite(input.page) ? Math.max(1, input.page as number) : 1;
+  const perPage = Number.isFinite(input.perPage)
+    ? Math.min(FIELD_PHOTOS_MAX_PER_PAGE, Math.max(1, input.perPage as number))
+    : FIELD_PHOTOS_DEFAULT_PER_PAGE;
+  const result = await getDealPhotoTimeline(tenantDb, dealId, page, perPage, filters);
+  // thumbnailUrl/fullUrl are already resolved in-batch by getDealPhotoTimeline — no per-photo work here.
+  const photos = result.photos.map((photo) => safePhoto(photo, photo.thumbnailUrl, photo.fullUrl));
   return { photos, pagination: result.pagination };
 }
 

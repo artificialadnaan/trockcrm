@@ -262,6 +262,48 @@ describe("photo reports service", () => {
     expect(pdfMocks.renderFieldPhotoReportPdf).not.toHaveBeenCalled();
   });
 
+  it("resolves a selected photo that lives on a later timeline page", async () => {
+    const db = createDb();
+    // Two pages of photos; the selected photo-201 is only on page 2. The old first-page-only validation
+    // would 400 it as unavailable — now we page through until every selected id is found.
+    projectMocks.listFieldProjectPhotos.mockImplementation(
+      async (_db: unknown, _access: unknown, _dealId: string, _filters: unknown, input?: { page?: number }) => {
+        if (input?.page === 2) {
+          return {
+            photos: [
+              {
+                id: "photo-201",
+                displayName: "Late page photo",
+                description: null,
+                takenAt: "2026-05-03T12:00:00.000Z",
+                createdAt: "2026-05-03T12:00:00.000Z",
+                uploaderName: "Field User",
+                imageUrl: "https://example.test/photo-201.jpg",
+                tags: [],
+              },
+            ],
+            pagination: { page: 2, limit: 200, total: 201, totalPages: 2 },
+          };
+        }
+        return {
+          photos: [{ id: "photo-1", displayName: "First page", description: null, takenAt: null, createdAt: "2026-05-01T12:00:00.000Z", uploaderName: "Field User", imageUrl: "https://example.test/photo-1.jpg", tags: [] }],
+          pagination: { page: 1, limit: 200, total: 201, totalPages: 2 },
+        };
+      },
+    );
+
+    const result = await previewFieldPhotoReport(db, access, {
+      projectId: "deal-1",
+      photoIds: ["photo-201"],
+      groupBy: "none",
+      creatorName: "Field User",
+    });
+
+    expect(result.cover.photoCount).toBe(1);
+    // Paged to page 2 to find the late selection.
+    expect(projectMocks.listFieldProjectPhotos).toHaveBeenCalledWith(db, access, "deal-1", { includeDeleted: false }, { page: 2, perPage: 200 });
+  });
+
   it("deletes the uploaded object if persisting the report record fails", async () => {
     const db = createDb();
     mockRenderPhotoQueries(db, [

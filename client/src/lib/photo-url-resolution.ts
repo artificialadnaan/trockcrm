@@ -5,6 +5,13 @@ export interface PhotoUrlSource {
   displayName?: string | null;
   externalUrl?: string | null;
   externalThumbnailUrl?: string | null;
+  /**
+   * Server-resolved display URLs (from the photo list). When present they're used directly, so the
+   * client NEVER fetches a signed URL per photo — that N+1 is what trips the rate limiter on a big deal.
+   * `thumbnailUrl` = grid; `fullUrl` = high-res for the zoomable viewer.
+   */
+  thumbnailUrl?: string | null;
+  fullUrl?: string | null;
 }
 
 const IMAGE_EXTENSIONS = new Set([".avif", ".gif", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".webp"]);
@@ -64,8 +71,12 @@ export function getImmediatePhotoPreviewUrl(
   signedUrl: string | null | undefined = null
 ): string | null {
   if (!isPhotoImagePreviewable(photo)) return null;
-  if (hasR2PhotoSource(photo)) return signedUrl ?? null;
-  return photo.externalThumbnailUrl ?? photo.externalUrl ?? signedUrl ?? null;
+  // A freshly-fetched signed URL wins — it's only set after the batched one failed/expired (refresh path).
+  if (signedUrl) return signedUrl;
+  // Otherwise the server-resolved thumbnail — no per-photo round-trip.
+  if (photo.thumbnailUrl) return photo.thumbnailUrl;
+  if (hasR2PhotoSource(photo)) return null;
+  return photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
 }
 
 export function getImmediatePhotoOpenUrl(
@@ -73,8 +84,11 @@ export function getImmediatePhotoOpenUrl(
   signedUrl: string | null | undefined = null
 ): string | null {
   if (!isPhotoImagePreviewable(photo)) return null;
-  if (hasR2PhotoSource(photo)) return signedUrl ?? null;
-  return photo.externalUrl ?? photo.externalThumbnailUrl ?? signedUrl ?? null;
+  if (signedUrl) return signedUrl;
+  // Server-resolved full-res (high-res for the zoomable viewer) — no per-photo round-trip.
+  if (photo.fullUrl) return photo.fullUrl;
+  if (hasR2PhotoSource(photo)) return null;
+  return photo.externalUrl ?? photo.externalThumbnailUrl ?? null;
 }
 
 export function shouldFetchSignedPhotoUrl(
@@ -82,6 +96,8 @@ export function shouldFetchSignedPhotoUrl(
   signedUrl: string | null | undefined = null
 ): boolean {
   if (signedUrl) return false;
+  // The server now resolves URLs in-batch in the photo list — if it gave us either, never round-trip.
+  if (photo.thumbnailUrl || photo.fullUrl) return false;
   if (!isPhotoImagePreviewable(photo)) return false;
   return hasR2PhotoSource(photo) || (!photo.externalThumbnailUrl && !photo.externalUrl);
 }

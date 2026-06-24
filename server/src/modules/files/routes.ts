@@ -26,6 +26,7 @@ import {
   getTagSuggestions,
   getDealFolderTree,
   getDealPhotoTimeline,
+  getDealPhotoUploaders,
   searchPhotoUploadTargets,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
@@ -536,8 +537,14 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
   try {
     await assertDealFileAccess(req, req.params.dealId);
 
-    const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    // Parse defensively — parseInt of non-numeric text is NaN, and Math.max/min won't coerce it, so guard
+    // for finite values and fall back to the defaults (else NaN would reach getDealPhotoTimeline).
+    const pageRaw = parseInt(req.query.page as string, 10);
+    const page = Number.isFinite(pageRaw) ? Math.max(1, pageRaw) : 1;
+    // Numbered pages: clamp the page size to [1, 200]. The server batch-presigns every photo on the page,
+    // so the cap bounds that work (and keeps each page snappy) regardless of what the client requests.
+    const limitRaw = parseInt(req.query.limit as string, 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw)) : 60;
     const categories = typeof req.query.category === "string" && req.query.category.length > 0
       ? req.query.category.split(",")
       : undefined;
@@ -548,16 +555,21 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
       ? req.query.uploader.split(",")
       : undefined;
 
+    const includeDeleted = req.query.deleted === "1" || req.query.deleted === "true";
+    // req.tenantDb is a single transaction-bound pg client — running these two queries with Promise.all
+    // would trip "client already executing" and 500 the page. Await them sequentially on the same client.
     const result = await getDealPhotoTimeline(req.tenantDb!, req.params.dealId, page, limit, {
       categories,
       tags,
       uploaderIds,
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,
-      includeDeleted: req.query.deleted === "1" || req.query.deleted === "true",
+      includeDeleted,
     });
+    // Deal-wide uploader facet so the filter dropdown is stable across pages (not just this page's set).
+    const uploaders = await getDealPhotoUploaders(req.tenantDb!, req.params.dealId, { includeDeleted });
     await req.commitTransaction!();
-    res.json(result);
+    res.json({ ...result, facets: { uploaders } });
   } catch (err) {
     next(err);
   }

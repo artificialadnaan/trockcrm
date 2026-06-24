@@ -1150,14 +1150,18 @@ export async function buildFileDownloadUrlFromRecord(file: {
   r2Key: string;
   displayName: string;
   fileExtension?: string | null;
-}): Promise<{ url: string; filename: string }> {
+}, ttlSeconds = 3600): Promise<{ url: string; filename: string }> {
   const filename = file.displayName + (file.fileExtension ?? "");
   const url = isR2Configured()
-    ? await generateDownloadUrl(file.r2Key, 3600, filename)
+    ? await generateDownloadUrl(file.r2Key, ttlSeconds, filename)
     : generateMockDownloadUrl(file.r2Key);
 
   return { url, filename };
 }
+
+// Batched LIST URLs live longer than a one-off download because a gallery can stay open a while before a
+// tile scrolls into view. 6h covers essentially any session; the client also refreshes on image error.
+const PHOTO_LIST_URL_TTL_SECONDS = 6 * 60 * 60;
 
 export async function getFileDownloadUrl(
   tenantDb: TenantDb,
@@ -1167,6 +1171,43 @@ export async function getFileDownloadUrl(
   if (!file) throw new AppError(404, "File not found");
 
   return buildFileDownloadUrlFromRecord(file);
+}
+
+/**
+ * Resolve a photo's display URLs WITHOUT a per-photo round-trip from the client. Returns a
+ * `thumbnailUrl` (small, for the grid) and a `fullUrl` (high-res, for the zoomable lightbox). The
+ * priority MATCHES the download route's durability semantics (`shouldServeExternalFileUrl`): when an R2
+ * copy exists it wins — the external URL on an R2-backed import (CompanyCam writes BOTH) is metadata only
+ * and can expire, so we never serve it over the durable R2 original.
+ *  - R2-stored: one presigned URL to the original serves BOTH (R2 keeps no resized variant). The presign
+ *    is a LOCAL HMAC op (no network), so resolving a whole page in-batch is cheap.
+ *  - External-only (no r2Key): thumbnail = externalThumbnailUrl (its "thumbnail"/"web" size), full =
+ *    externalUrl (the original). Plain CDN URLs — no signing.
+ * Computing these on the server and returning them inside the photo LIST is what lets a 400-photo deal
+ * load without firing 400 separate `/files/:id/download` requests (which trip the rate limiter).
+ */
+export async function resolvePhotoDisplayUrls(photo: {
+  r2Key?: string | null;
+  externalUrl?: string | null;
+  externalThumbnailUrl?: string | null;
+  displayName?: string | null;
+  fileExtension?: string | null;
+}): Promise<{ thumbnailUrl: string | null; fullUrl: string | null }> {
+  // R2 copy wins (durable) — matches shouldServeExternalFileUrl / the download route.
+  if (photo.r2Key) {
+    const { url } = await buildFileDownloadUrlFromRecord({
+      r2Key: photo.r2Key,
+      displayName: photo.displayName ?? "photo",
+      fileExtension: photo.fileExtension,
+    }, PHOTO_LIST_URL_TTL_SECONDS);
+    return { thumbnailUrl: url, fullUrl: url };
+  }
+  if (photo.externalUrl || photo.externalThumbnailUrl) {
+    const full = photo.externalUrl ?? photo.externalThumbnailUrl ?? null;
+    const thumbnail = photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
+    return { thumbnailUrl: thumbnail, fullUrl: full };
+  }
+  return { thumbnailUrl: null, fullUrl: null };
 }
 
 export function shouldServeExternalFileUrl(file: {
@@ -1418,7 +1459,15 @@ export async function getDealPhotoTimeline(
   limit: number = 50,
   filters: DealPhotoTimelineFilters = {}
 ): Promise<{
-  photos: Array<typeof files.$inferSelect & { uploaderName: string; uploaderAvatarUrl: string | null }>;
+  photos: Array<
+    typeof files.$inferSelect & {
+      uploaderName: string;
+      uploaderAvatarUrl: string | null;
+      // Display URLs resolved server-side IN-BATCH so clients never round-trip per photo (rate-limit safe).
+      thumbnailUrl: string | null;
+      fullUrl: string | null;
+    }
+  >;
   pagination: { page: number; limit: number; total: number; totalPages: number };
 }> {
   const offset = (page - 1) * limit;
@@ -1484,8 +1533,46 @@ export async function getDealPhotoTimeline(
 
   const total = Number(countResult[0]?.count ?? 0);
 
+  // Resolve each photo's thumbnail + full-res URL HERE (in one batch) rather than letting the client
+  // fetch a signed URL per photo — that N+1 is what trips the rate limiter on a 400-photo deal. Presigns
+  // are local, so this stays cheap even at the max page size.
+  const photos = await Promise.all(
+    photoRows.map(async (photo) => ({ ...photo, ...(await resolvePhotoDisplayUrls(photo)) })),
+  );
+
   return {
-    photos: photoRows,
+    photos,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
+}
+
+/**
+ * Distinct uploaders across ALL of a deal's photos — the filter-bar's uploader facet. Derived from the
+ * whole deal (not the current page) so the option list stays stable as the user pages through, and an
+ * already-selected uploader never vanishes from the dropdown. Ignores the uploader/category/tag/date
+ * filters on purpose; only deal scope + the always-on photo/active/latest predicates apply (plus the
+ * deleted toggle), so every contributor is always offered.
+ */
+export async function getDealPhotoUploaders(
+  tenantDb: TenantDb,
+  dealId: string,
+  options: { includeDeleted?: boolean } = {},
+): Promise<Array<{ id: string; name: string; avatarUrl: string | null }>> {
+  const conditions = await buildDealPhotoTimelineConditions(tenantDb, dealId, {
+    includeDeleted: options.includeDeleted,
+  });
+
+  const rows = await tenantDb
+    .selectDistinct({
+      id: files.uploadedBy,
+      name: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
+      avatarUrl: users.avatarUrl,
+    })
+    .from(files)
+    .leftJoin(users, eq(users.id, files.uploadedBy))
+    .where(conditions);
+
+  return rows
+    .filter((row): row is { id: string; name: string; avatarUrl: string | null } => Boolean(row.id))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }

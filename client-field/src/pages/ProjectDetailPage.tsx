@@ -6,6 +6,7 @@ import { useAuth } from "../lib/auth";
 import { BrandLogo } from "../components/BrandLogo";
 import { Button, TextInput } from "../components/ui";
 import { ReportBuilder } from "../components/ReportBuilder";
+import { ZoomableImage } from "../components/ZoomableImage";
 import {
   categoryLabel,
   filterPhotos,
@@ -19,6 +20,37 @@ import {
 } from "../lib/field-projects";
 
 const GROUP_SEQUENCE: PhotoGrouping[] = ["date", "category", "uploader", "none"];
+
+// Photos are grouped by date across the whole project, so we load EVERY page (not just the first 200) —
+// the server batches each photo's display URLs, so a 400-photo deal is ~2 fast requests. Page 1 reveals
+// totalPages; the rest fetch in BOUNDED chunks (not one big fan-out) so we don't burst the API, and each
+// chunk is allSettled so a single 429/5xx drops just that page instead of aborting the whole gallery.
+const FIELD_PHOTOS_PER_PAGE = 200;
+const FIELD_PHOTOS_FETCH_CONCURRENCY = 4;
+async function fetchAllProjectPhotos(projectId: string): Promise<{ photos: FieldPhoto[]; partial: boolean }> {
+  const first = await api<{ photos: FieldPhoto[]; pagination: { totalPages: number } }>(
+    `/field/projects/${projectId}/photos?page=1&perPage=${FIELD_PHOTOS_PER_PAGE}`,
+  );
+  const all = [...first.photos];
+  const totalPages = first.pagination?.totalPages ?? 1;
+  const remaining = Array.from({ length: Math.max(0, totalPages - 1) }, (_, i) => i + 2);
+  // Track dropped pages: keep the non-blanking behavior (show what loaded), but report `partial` so the
+  // caller can warn and block report/share — an incomplete photo set would silently omit photos otherwise.
+  let partial = false;
+  for (let i = 0; i < remaining.length; i += FIELD_PHOTOS_FETCH_CONCURRENCY) {
+    const chunk = remaining.slice(i, i + FIELD_PHOTOS_FETCH_CONCURRENCY);
+    const results = await Promise.allSettled(
+      chunk.map((page) =>
+        api<{ photos: FieldPhoto[] }>(`/field/projects/${projectId}/photos?page=${page}&perPage=${FIELD_PHOTOS_PER_PAGE}`),
+      ),
+    );
+    results.forEach((r) => {
+      if (r.status === "fulfilled") all.push(...r.value.photos);
+      else partial = true;
+    });
+  }
+  return { photos: all, partial };
+}
 
 export function ProjectDetailPage() {
   const { id = "" } = useParams();
@@ -38,6 +70,9 @@ export function ProjectDetailPage() {
   const [uploaderIds, setUploaderIds] = useState<string[]>([]);
   const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
   const [reportBuilderOpen, setReportBuilderOpen] = useState(false);
+  // True when one or more photo pages failed to load — the gallery shows what loaded, but report/share are
+  // blocked so we never generate from an incomplete set.
+  const [photosPartial, setPhotosPartial] = useState(false);
 
   async function loadDetail() {
     setLoading(true);
@@ -45,7 +80,7 @@ export function ProjectDetailPage() {
     try {
       const [projectsResult, photosResult, reportsResult] = await Promise.allSettled([
         api<{ projects: FieldProject[] }>("/field/projects?status=active&page=1&perPage=100"),
-        api<{ photos: FieldPhoto[] }>(`/field/projects/${id}/photos`),
+        fetchAllProjectPhotos(id),
         api<{ reports: Array<{ id: string; title: string; createdAt: string; description: string | null }> }>(`/field/projects/${id}/reports`),
       ]);
       if (projectsResult.status !== "fulfilled" || photosResult.status !== "fulfilled") {
@@ -53,6 +88,7 @@ export function ProjectDetailPage() {
       }
       setProject(projectsResult.value.projects.find((item) => item.id === id) ?? null);
       setPhotos(photosResult.value.photos);
+      setPhotosPartial(photosResult.value.partial);
       setReports(reportsResult.status === "fulfilled" ? reportsResult.value.reports : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load project");
@@ -153,12 +189,23 @@ export function ProjectDetailPage() {
           </p>
         ) : (
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
+            <Button
+              variant="ghost"
+              disabled={photosPartial}
+              title={photosPartial ? "Some photos failed to load — reload before generating a report" : undefined}
+              onClick={() => setReportBuilderOpen(true)}
+            >
               <FileText className="mr-2 h-4 w-4" />
               Generate Report
             </Button>
           </div>
         )}
+        {photosPartial ? (
+          <p className="mt-2 flex items-center justify-between gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800">
+            <span>Some photos couldn’t be loaded, so report generation is paused to avoid omitting any. Reload to try again.</span>
+            <Button variant="ghost" onClick={() => void loadDetail()}>Reload</Button>
+          </p>
+        ) : null}
       </header>
 
       {error ? <p className="rounded-md bg-red-50 p-3 text-sm font-semibold text-red-700">{error}</p> : null}
@@ -175,7 +222,12 @@ export function ProjectDetailPage() {
             </div>
           </div>
           {!offOffice ? (
-            <Button variant="ghost" onClick={() => setReportBuilderOpen(true)}>
+            <Button
+              variant="ghost"
+              disabled={photosPartial}
+              title={photosPartial ? "Some photos failed to load — reload before generating a report" : undefined}
+              onClick={() => setReportBuilderOpen(true)}
+            >
               <FileText className="mr-2 h-4 w-4" />
               Build
             </Button>
@@ -418,14 +470,22 @@ function FilterDrawer({
 function FieldPhotoViewer({ photo, onClose, onPrev, onNext }: { photo: FieldPhoto; onClose: () => void; onPrev?: () => void; onNext?: () => void }) {
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [touchStart, setTouchStart] = useState<number | null>(null);
+  // While the image is pinch-zoomed, the one-finger drag pans the photo — so suppress swipe-to-navigate.
+  const [imageZoomed, setImageZoomed] = useState(false);
   const source = photo.addressSource === "exif" ? "From photo" : photo.addressSource === "live_gps" ? "Captured at upload" : photo.addressSource === "deal_fallback" ? "Project address" : photo.addressSource === "manual_override" ? "Manually set" : "No source";
+  const viewerUrl = photo.fullImageUrl ?? photo.imageUrl;
 
   return (
     <div
       className="fixed inset-0 z-50 bg-black text-white"
-      onTouchStart={(event) => setTouchStart(event.touches[0]?.clientX ?? null)}
+      // Only arm swipe-to-navigate for a genuine SINGLE-finger gesture — a pinch (2nd finger) must never
+      // navigate, even at 1x before the zoom state has updated.
+      onTouchStart={(event) => setTouchStart(imageZoomed || event.touches.length > 1 ? null : event.touches[0]?.clientX ?? null)}
+      onTouchMove={(event) => {
+        if (event.touches.length > 1) setTouchStart(null);
+      }}
       onTouchEnd={(event) => {
-        if (touchStart == null) return;
+        if (touchStart == null || imageZoomed || event.touches.length > 0) return;
         const diff = (event.changedTouches[0]?.clientX ?? touchStart) - touchStart;
         if (diff > 50) onPrev?.();
         if (diff < -50) onNext?.();
@@ -433,11 +493,17 @@ function FieldPhotoViewer({ photo, onClose, onPrev, onNext }: { photo: FieldPhot
       }}
     >
       <button type="button" aria-label="Close photo viewer" className="absolute right-4 top-4 z-10 rounded-full bg-black/60 p-2" onClick={onClose}><X className="h-6 w-6" /></button>
-      {onPrev ? <button type="button" aria-label="Previous photo" className="absolute left-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onPrev}><ChevronLeft /></button> : null}
-      {onNext ? <button type="button" aria-label="Next photo" className="absolute right-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onNext}><ChevronRight /></button> : null}
-      <button type="button" className="flex h-full w-full items-center justify-center px-3 pb-56 pt-12" onClick={() => setDetailsOpen((open) => !open)}>
-        {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} className="max-h-full max-w-full object-contain" /> : <span>Image unavailable</span>}
-      </button>
+      {onPrev && !imageZoomed ? <button type="button" aria-label="Previous photo" className="absolute left-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onPrev}><ChevronLeft /></button> : null}
+      {onNext && !imageZoomed ? <button type="button" aria-label="Next photo" className="absolute right-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onNext}><ChevronRight /></button> : null}
+      {/* A CONFIRMED single tap toggles details; pinch/double-tap/drag zoom + pan inside ZoomableImage (it
+          distinguishes a real tap from a gesture, so zooming/panning no longer flips the details sheet). */}
+      <div className="flex h-full w-full items-center justify-center px-3 pb-56 pt-12">
+        {viewerUrl ? (
+          <ZoomableImage key={photo.id} src={viewerUrl} alt={photo.displayName} onZoomedChange={setImageZoomed} onTap={() => setDetailsOpen((open) => !open)} />
+        ) : (
+          <span>Image unavailable</span>
+        )}
+      </div>
       {detailsOpen ? (
         <aside className="absolute inset-x-0 bottom-0 max-h-[50vh] overflow-y-auto rounded-t-2xl bg-white p-4 text-foreground">
           <h2 className="text-xl font-black">{photo.description || photo.displayName}</h2>

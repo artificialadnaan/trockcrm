@@ -61,6 +61,9 @@ export default function ProjectDetailScreen() {
   const photosQuery = useProjectPhotos(dealId);
   const reportsQuery = useProjectReports(dealId);
   const allPhotos = useMemo(() => photosQuery.data?.photos ?? [], [photosQuery.data]);
+  // Some photo pages failed to load — the gallery still shows what loaded, but report/share are blocked so
+  // we never generate from an incomplete set.
+  const photosPartial = photosQuery.data?.partial ?? false;
 
   const [grouping, setGrouping] = useState<PhotoGrouping>("date");
   const [categories, setCategories] = useState<string[]>([]);
@@ -164,7 +167,7 @@ export default function ProjectDetailScreen() {
               // active filters that exclude every photo still enable Build and open
               // an empty builder (#15).
               onPress={() => setReportOpen(true)}
-              disabled={filtered.length === 0}
+              disabled={filtered.length === 0 || photosPartial}
               style={{ flex: 1 }}
             />
           </View>
@@ -173,12 +176,19 @@ export default function ProjectDetailScreen() {
         {/* Share works cross-office: the endpoint resolves the deal's owning office and mints only a
             public photo token (no deal mutation), so — unlike capture/report generation — it stays
             available even on view-only off-office projects. */}
-        {filtered.length > 0 ? (
+        {filtered.length > 0 && !photosPartial ? (
           <Button
             title="Share photos"
             variant="ghost"
             icon={<Ionicons name="share-outline" size={18} color={theme.color.brandRed} />}
             onPress={() => setShareOpen(true)}
+          />
+        ) : null}
+
+        {photosPartial ? (
+          <Banner
+            message="Some photos couldn’t be loaded, so report and share are paused to avoid omitting any. Pull to refresh to try again."
+            tone="error"
           />
         ) : null}
 

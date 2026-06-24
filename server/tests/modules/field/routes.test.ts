@@ -189,7 +189,7 @@ describe("field routes", () => {
       from: "2026-05-01",
       to: "2026-05-05",
       includeDeleted: false,
-    });
+    }, { page: 1, perPage: undefined });
   });
 
   it("fetches enough rows per office to cover deep pages (cross-office pagination beyond the first window)", async () => {

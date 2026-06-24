@@ -134,6 +134,8 @@ function toFieldUploadedPhoto(file: any, imageUrl: string | null): FieldPhoto {
     procoreSyncStatus: file.procoreSyncStatus ?? null,
     deletedAt: iso(file.deletedAt),
     imageUrl,
+    // A freshly-uploaded photo is an R2 original with no resized variant, so full-res == the same URL.
+    fullImageUrl: imageUrl,
   };
 }
 

@@ -731,6 +731,12 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
     const uploaderIds = typeof req.query.uploader === "string" && req.query.uploader.length > 0
       ? req.query.uploader.split(",")
       : undefined;
+    // Parse defensively: parseInt of a non-numeric value is NaN, which must NOT flow downstream into the
+    // limit/offset math — fall back to default (page 1, perPage undefined → service default).
+    const pageRaw = parseInt(req.query.page as string, 10);
+    const page = Number.isFinite(pageRaw) ? Math.max(1, pageRaw) : 1;
+    const perPageRaw = parseInt(req.query.perPage as string, 10);
+    const perPage = Number.isFinite(perPageRaw) ? perPageRaw : undefined;
     const { value, office } = await withResolvedOffice(
       "deal",
       dealId,
@@ -741,7 +747,7 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
           from: req.query.from as string | undefined,
           to: req.query.to as string | undefined,
           includeDeleted: false,
-        }),
+        }, { page, perPage }),
       "Project not found",
     );
     res.json({ ...value, ...officeTag(office) });

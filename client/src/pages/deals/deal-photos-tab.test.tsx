@@ -256,20 +256,21 @@ describe("DealPhotosTab component", () => {
 
     const node = renderTab();
 
-    await vi.waitFor(() => expect(node.textContent).toContain("Showing 100 of 101 photos"));
+    await vi.waitFor(() => expect(node.textContent).toContain("Page 1 of 2 · 101 photos"));
     expect(vi.mocked(api)).toHaveBeenCalledWith(expect.stringContaining("page=1"));
     expect(vi.mocked(api)).toHaveBeenCalledWith(expect.stringContaining("limit=100"));
-    expect(node.querySelectorAll<HTMLButtonElement>('[aria-label="Load more photos"]')).toHaveLength(1);
     expect(node.textContent).not.toContain("Late CompanyCam photo");
 
-    node.querySelector<HTMLButtonElement>('[aria-label="Load more photos"]')?.click();
+    // Numbered pages: clicking page 2 REPLACES the grid with page two (it does not accumulate).
+    node.querySelector<HTMLButtonElement>('[aria-label="Page 2"]')?.click();
 
     await vi.waitFor(() => expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Late CompanyCam photo"]')).not.toBeNull());
-    expect(node.textContent).toContain("Showing 101 of 101 photos");
+    expect(node.textContent).toContain("Page 2 of 2");
+    expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Photo 1"]')).toBeNull();
     expect(vi.mocked(api)).toHaveBeenCalledWith(expect.stringContaining("page=2"));
   });
 
-  it("keeps already loaded photos visible when loading the next page fails", async () => {
+  it("surfaces an error with retry when navigating to a page that fails", async () => {
     const pageOne = Array.from({ length: 100 }, (_, index) => ({
       ...mockPhotos[0],
       id: `photo-${index + 1}`,
@@ -286,12 +287,12 @@ describe("DealPhotosTab component", () => {
     });
 
     const node = renderTab();
-    await vi.waitFor(() => expect(node.textContent).toContain("Showing 100 of 101 photos"));
+    await vi.waitFor(() => expect(node.textContent).toContain("Page 1 of 2"));
 
-    node.querySelector<HTMLButtonElement>('[aria-label="Load more photos"]')?.click();
+    node.querySelector<HTMLButtonElement>('[aria-label="Next page"]')?.click();
 
-    await vi.waitFor(() => expect(node.textContent).toContain("Could not load more photos. Try again."));
-    expect(node.querySelector<HTMLButtonElement>('[aria-label="Open photo Photo 1"]')).not.toBeNull();
-    expect(node.textContent).not.toContain("Network unavailableRetry");
+    // A failed page navigation surfaces the error with a Retry that re-fetches the same page.
+    await vi.waitFor(() => expect(node.textContent).toContain("Network unavailable"));
+    expect(Array.from(node.querySelectorAll("button")).some((b) => b.textContent === "Retry")).toBe(true);
   });
 });

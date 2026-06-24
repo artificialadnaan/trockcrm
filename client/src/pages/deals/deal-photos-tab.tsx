@@ -14,7 +14,7 @@ import {
   PhotoGridSkeleton,
   PhotoGridTile,
   PhotoGroupHeading,
-  PhotoPaginationSummary,
+  PhotoPageNavigator,
   PhotoViewerModal,
   useDealPhotosData,
   type DealPhotoRecord,
@@ -36,15 +36,16 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
   const {
     photos,
     loading,
-    loadingMore,
     error,
-    loadMoreError,
     pagination,
+    uploaderFacets,
     hasMorePhotos,
-    fetchPhotos,
-    loadMorePhotos,
+    goToPage,
+    retry,
     getPhotoImageUrl,
+    getPhotoOpenUrl,
     ensurePhotoImageUrl,
+    refreshPhotoSignedUrl,
     patchPhoto,
     savePhotoAddress,
     deletePhoto,
@@ -94,9 +95,16 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
   }, [availableSuggestedTags, photos]);
   const uploaders = useMemo(() => {
     const map = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
-    photos.forEach((photo) => map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl }));
+    // Deal-wide facet first (stable across pages), then any uploader on the current page as a fallback
+    // for the brief moment before the facet loads.
+    uploaderFacets.forEach((uploader) => map.set(uploader.id, uploader));
+    photos.forEach((photo) => {
+      if (!map.has(photo.uploadedBy)) {
+        map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl });
+      }
+    });
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [photos]);
+  }, [uploaderFacets, photos]);
   const groups = useMemo(() => groupDealPhotos(photos, filters), [photos, filters]);
   const flatPhotos = groups.flatMap((group) => group.photos);
 
@@ -147,16 +155,15 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
         )}
       </section>
 
-      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} legacyCategoryOptions={legacyCategoryOptionsInUse(photos, !hasMorePhotos)} />
+      <PhotoFilterBar filters={filters} availableTags={availableTags} uploaders={uploaders} onChange={updateFilters} legacyCategoryOptions={legacyCategoryOptionsInUse(photos, pagination.totalPages <= 1)} />
 
       {!loading && !error && (
-        <PhotoPaginationSummary
-          loadedCount={photos.length}
-          totalCount={pagination.total}
-          hasMore={hasMorePhotos}
-          loadingMore={loadingMore}
-          loadMoreError={loadMoreError}
-          onLoadMore={() => void loadMorePhotos()}
+        <PhotoPageNavigator
+          page={pagination.page}
+          totalPages={pagination.totalPages}
+          total={pagination.total}
+          loading={loading}
+          onPageChange={(p) => void goToPage(p)}
         />
       )}
 
@@ -165,7 +172,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
       {!loading && error && (
         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           {error}
-          <Button className="ml-3" variant="outline" size="sm" onClick={fetchPhotos}>Retry</Button>
+          <Button className="ml-3" variant="outline" size="sm" onClick={() => void retry()}>Retry</Button>
         </div>
       )}
 
@@ -183,6 +190,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
                 photo={photo}
                 imageUrl={getPhotoImageUrl(photo)}
                 loadImageUrl={() => void ensurePhotoImageUrl(photo)}
+                onImageError={() => void refreshPhotoSignedUrl(photo)}
                 onOpen={() => setSelectedId(photo.id)}
                 onRestore={() => restorePhoto(photo.id)}
               />
@@ -191,15 +199,13 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
         </section>
       ))}
 
-      {!loading && !error && hasMorePhotos && flatPhotos.length > 0 && (
-        <PhotoPaginationSummary
-          loadedCount={photos.length}
-          totalCount={pagination.total}
-          hasMore={hasMorePhotos}
-          loadingMore={loadingMore}
-          loadMoreError={null}
-          showLoadMore={false}
-          onLoadMore={() => void loadMorePhotos()}
+      {!loading && !error && flatPhotos.length > 0 && (
+        <PhotoPageNavigator
+          page={pagination.page}
+          totalPages={pagination.totalPages}
+          total={pagination.total}
+          loading={loading}
+          onPageChange={(p) => void goToPage(p)}
         />
       )}
 
@@ -208,7 +214,9 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
         selectedId={selectedId}
         onSelectedIdChange={setSelectedId}
         getPhotoImageUrl={getPhotoImageUrl}
+        getPhotoOpenUrl={getPhotoOpenUrl}
         ensurePhotoImageUrl={ensurePhotoImageUrl}
+        refreshPhotoSignedUrl={refreshPhotoSignedUrl}
         patchPhoto={patchPhoto}
         savePhotoAddress={savePhotoAddress}
         deletePhoto={deletePhoto}

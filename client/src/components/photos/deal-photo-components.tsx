@@ -31,7 +31,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api } from "@/lib/api";
-import { getImmediatePhotoPreviewUrl, isPhotoImagePreviewable, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
+import { getImmediatePhotoOpenUrl, getImmediatePhotoPreviewUrl, isPhotoImagePreviewable, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
+import { ZoomableImage } from "@/components/photos/zoomable-image";
 import {
   LEGACY_PHOTO_CATEGORY_ITEMS,
   PHOTO_CATEGORY_OPTION_ITEMS,
@@ -55,6 +56,11 @@ export interface DealPhotoRecord {
   r2Key: string;
   externalUrl: string | null;
   externalThumbnailUrl: string | null;
+  // Server-resolved display URLs (batched into the list) — used directly so the client never fetches a
+  // signed URL per photo. thumbnailUrl = grid; fullUrl = high-res for the zoomable viewer. Optional because
+  // other endpoints (PATCH, etc.) return the raw file record without them.
+  thumbnailUrl?: string | null;
+  fullUrl?: string | null;
   description: string | null;
   takenAt: string | null;
   createdAt: string;
@@ -302,12 +308,46 @@ export function useDealPhotosData({
     total: 0,
     totalPages: 0,
   });
+  // Deal-wide uploader facet from the server, so the filter dropdown lists every contributor regardless
+  // of which numbered page is shown (deriving it from the current page would drop uploaders off-page).
+  const [uploaderFacets, setUploaderFacets] = useState<Array<{ id: string; name: string; avatarUrl: string | null }>>([]);
   const [downloadUrls, setDownloadUrls] = useState<Record<string, string>>({});
   const previewRequests = React.useRef(new Map<string, Promise<string>>());
   const requestId = React.useRef(0);
+  // The page the user last asked for — so the error-state Retry re-fetches THAT page, not page 1.
+  const requestedPage = React.useRef(1);
+  // The page range currently displayed. Numbered pages replace → a single page [p, p]; the load-more
+  // subview accumulates → [1, lastLoaded]. A mutation refresh reloads exactly this range, clamped.
+  const loadedRange = React.useRef({ first: 1, last: 1 });
+
+  // Photos we've already force-refreshed once after an <img> error. Bounds the recovery to a SINGLE retry
+  // per photo so a permanently-broken object (404, deleted R2 key) can't loop onError → refetch → onError
+  // and hammer /files/:id/download until the rate limiter trips.
+  const refreshedIds = React.useRef(new Set<string>());
+
+  // When the list endpoint returns fresh photos it carries newly-signed batched URLs (6h). Drop any one-off
+  // recovery URL (1h, from a prior onError) for those ids so the fresher list URL wins — otherwise the stale
+  // recovery URL keeps being preferred and, once it expires, refreshedIds blocks another refresh (broken tile
+  // until remount). Clearing refreshedIds too re-arms recovery against the new URL.
+  const pruneRecoveryCache = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    for (const id of ids) refreshedIds.current.delete(id);
+    setDownloadUrls((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const id of ids) {
+        if (id in next) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, []);
 
   const fetchPhotosPage = useCallback(async (page: number, options: { append?: boolean } = {}) => {
     const append = options.append ?? false;
+    requestedPage.current = page;
     const currentRequestId = requestId.current + 1;
     requestId.current = currentRequestId;
     if (append) {
@@ -322,15 +362,21 @@ export function useDealPhotosData({
       const params = new URLSearchParams({ page: String(page), limit: String(DEAL_PHOTO_PAGE_SIZE) });
       const filterParams = buildPhotoFilterSearchParams(filters);
       filterParams.forEach((value, key) => params.set(key, value));
-      const data = await api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(`/files/deal/${dealId}/photos?${params}`);
+      const data = await api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number }; facets?: { uploaders: Array<{ id: string; name: string; avatarUrl: string | null }> } }>(`/files/deal/${dealId}/photos?${params}`);
       if (requestId.current !== currentRequestId) return;
       setPagination(data.pagination);
+      if (data.facets?.uploaders) setUploaderFacets(data.facets.uploaders);
+      loadedRange.current = append
+        ? { first: Math.min(loadedRange.current.first, page), last: Math.max(loadedRange.current.last, page) }
+        : { first: page, last: page };
       setPhotos((current) => {
         if (!append) return data.photos;
         const merged = new Map(current.map((photo) => [photo.id, photo]));
         data.photos.forEach((photo) => merged.set(photo.id, photo));
         return Array.from(merged.values());
       });
+      // These rows just arrived with fresh batched URLs — retire any stale recovery URL for them.
+      pruneRecoveryCache(data.photos.map((photo) => photo.id));
       onCountChange?.(data.pagination.total);
     } catch (err) {
       if (requestId.current === currentRequestId) {
@@ -347,7 +393,7 @@ export function useDealPhotosData({
         setLoadingMore(false);
       }
     }
-  }, [dealId, filters, onCountChange]);
+  }, [dealId, filters, onCountChange, pruneRecoveryCache]);
 
   const fetchPhotos = useCallback(async () => {
     await fetchPhotosPage(1);
@@ -358,48 +404,108 @@ export function useDealPhotosData({
     await fetchPhotosPage(pagination.page + 1, { append: true });
   }, [fetchPhotosPage, loading, loadingMore, pagination.page, pagination.totalPages]);
 
+  // Numbered pages: jump to a page, REPLACING the current set (not accumulating). Clamped to [1, totalPages].
+  const goToPage = useCallback(async (page: number) => {
+    const totalPages = Math.max(1, pagination.totalPages || 1);
+    const target = Math.min(Math.max(1, page), totalPages);
+    if (loading) return;
+    // Re-clicking the current page is a no-op ONLY when it's already showing photos. After a failed jump
+    // (photos cleared, error set, pagination.page still the old page) the current-page click must reload.
+    if (target === pagination.page && !error && photos.length > 0) return;
+    await fetchPhotosPage(target);
+  }, [error, fetchPhotosPage, loading, pagination.page, pagination.totalPages, photos.length]);
+
+  // Reload exactly the currently-displayed page range after a mutation (delete/restore): one page for the
+  // numbered tab, the accumulated [1..n] span for the load-more subview. If a delete shrank the set so the
+  // range overshoots totalPages (e.g. removing the only photo on page 2), clamp/back up to the last valid
+  // page instead of replacing with an empty over-shot page.
   const refreshLoadedPhotos = useCallback(async () => {
-    const pagesToRefresh = Math.max(1, pagination.page);
+    const currentRequestId = requestId.current + 1;
+    requestId.current = currentRequestId;
     setLoading(true);
     setError(null);
     setLoadMoreError(null);
+    const filterParams = buildPhotoFilterSearchParams(filters);
+    const fetchPage = (p: number) => {
+      const params = new URLSearchParams({ page: String(p), limit: String(DEAL_PHOTO_PAGE_SIZE) });
+      filterParams.forEach((value, key) => params.set(key, value));
+      return api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number }; facets?: { uploaders: Array<{ id: string; name: string; avatarUrl: string | null }> } }>(
+        `/files/deal/${dealId}/photos?${params}`,
+      );
+    };
+    // Reload [lo..hi] in bounded chunks rather than one big Promise.all — the Files subview can have many
+    // pages loaded, and a delete/restore would otherwise burst dozens of simultaneous requests and trip the
+    // very rate limiter this PR exists to relieve.
+    const REFRESH_CHUNK = 4;
+    const fetchRange = async (lo: number, hi: number) => {
+      const results: Array<Awaited<ReturnType<typeof fetchPage>>> = [];
+      for (let start = lo; start <= hi; start += REFRESH_CHUNK) {
+        const end = Math.min(start + REFRESH_CHUNK - 1, hi);
+        const chunk = await Promise.all(Array.from({ length: end - start + 1 }, (_, i) => fetchPage(start + i)));
+        results.push(...chunk);
+      }
+      return results;
+    };
     try {
-      const filterParams = buildPhotoFilterSearchParams(filters);
-      const requests = Array.from({ length: pagesToRefresh }, (_, index) => {
-        const params = new URLSearchParams({
-          page: String(index + 1),
-          limit: String(DEAL_PHOTO_PAGE_SIZE),
-        });
-        filterParams.forEach((value, key) => params.set(key, value));
-        return api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(
-          `/files/deal/${dealId}/photos?${params}`
-        );
-      });
-      const pages = await Promise.all(requests);
+      let { first, last } = loadedRange.current;
+      let pages = await fetchRange(first, last);
+      if (requestId.current !== currentRequestId) return;
+      const totalPages = Math.max(1, pages[0]?.pagination.totalPages ?? 1);
+      if (last > totalPages) {
+        last = totalPages;
+        first = Math.min(first, totalPages); // numbered (first===last) jumps to the last valid page
+        pages = await fetchRange(first, last);
+        if (requestId.current !== currentRequestId) return;
+      }
+      loadedRange.current = { first, last };
       const merged = new Map<string, DealPhotoRecord>();
       pages.forEach((pageResult) => pageResult.photos.forEach((photo) => merged.set(photo.id, photo)));
-      const latestPagination = pages[pages.length - 1]?.pagination ?? {
-        page: 1,
-        limit: DEAL_PHOTO_PAGE_SIZE,
-        total: 0,
-        totalPages: 0,
-      };
-      setPhotos(Array.from(merged.values()));
-      setPagination(latestPagination);
-      onCountChange?.(latestPagination.total);
+      const latest = pages[pages.length - 1]!.pagination;
+      const mergedPhotos = Array.from(merged.values());
+      setPhotos(mergedPhotos);
+      setPagination(latest);
+      // The endpoint returns the deal-wide uploader facet — refresh it so a mutation that removes an
+      // uploader's last photo drops them from the filter dropdown (instead of leaving a stale option).
+      const refreshedFacets = pages.find((pageResult) => pageResult.facets?.uploaders)?.facets?.uploaders;
+      if (refreshedFacets) setUploaderFacets(refreshedFacets);
+      // Freshly reloaded rows carry new batched URLs — retire stale recovery URLs for them.
+      pruneRecoveryCache(mergedPhotos.map((photo) => photo.id));
+      requestedPage.current = latest.page;
+      onCountChange?.(latest.total);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load photos");
+      if (requestId.current === currentRequestId) setError(err instanceof Error ? err.message : "Failed to load photos");
     } finally {
-      setLoading(false);
+      if (requestId.current === currentRequestId) setLoading(false);
     }
-  }, [dealId, filters, onCountChange, pagination.page]);
+  }, [dealId, filters, onCountChange, pruneRecoveryCache]);
+
+  // Retry the page the user last requested (the failed target), not page 1.
+  const retry = useCallback(async () => {
+    await fetchPhotosPage(requestedPage.current);
+  }, [fetchPhotosPage]);
 
   useEffect(() => {
     void fetchPhotos();
   }, [fetchPhotos]);
 
+  // Photos we've already force-refreshed once after an <img> error. Bounds the recovery to a SINGLE retry
+  // per photo so a permanently-broken object (404, deleted R2 key) can't loop onError → refetch → onError
+  // and hammer /files/:id/download until the rate limiter trips.
   const getPhotoImageUrl = useCallback((photo: DealPhotoRecord) => {
     return getImmediatePhotoPreviewUrl(photo, downloadUrls[photo.id]) ?? "";
+  }, [downloadUrls]);
+
+  // High-res "open" URL for the lightbox, signed-URL aware — so after a tile recovers an expired R2 URL,
+  // opening the viewer uses the fresh one instead of the stale batched fullUrl.
+  //
+  // Sharing the `downloadUrls` cache with the preview path is intentional and does NOT downscale the
+  // viewer: `?preview=1` on /files/:id/download is only an audit-logging flag (it never resizes — the route
+  // returns the same presigned R2 ORIGINAL). And `downloadUrls` is populated ONLY for R2-backed photos
+  // (shouldFetchSignedPhotoUrl is false for external CompanyCam photos that carry their own thumb/full URLs),
+  // where resolvePhotoDisplayUrls sets thumbnailUrl === fullUrl. So there is no preview-vs-full distinction
+  // to lose here; a separate "open URL" cache would be dead complexity.
+  const getPhotoOpenUrl = useCallback((photo: DealPhotoRecord) => {
+    return getImmediatePhotoOpenUrl(photo, downloadUrls[photo.id]) ?? "";
   }, [downloadUrls]);
 
   const ensurePhotoImageUrl = useCallback(async (photo: DealPhotoRecord) => {
@@ -419,6 +525,29 @@ export function useDealPhotosData({
         previewRequests.current.delete(photo.id);
       });
 
+    previewRequests.current.set(photo.id, request);
+    return request;
+  }, [downloadUrls]);
+
+  // Force a FRESH signed URL — used when an <img> errors (e.g. a batched R2 URL expired after a long-open
+  // gallery). Always fetches (bypasses the batched-URL short-circuit), deduped per photo. The new URL is
+  // stored in downloadUrls, and getImmediatePhoto*Url prefers a present signed URL over the stale batched one.
+  const refreshPhotoSignedUrl = useCallback(async (photo: DealPhotoRecord) => {
+    if (!isPhotoImagePreviewable(photo)) return "";
+    // One recovery attempt per photo — a fresh signed URL that ALSO fails is a permanent error, so stop
+    // rather than re-fetch on every subsequent onError.
+    if (refreshedIds.current.has(photo.id)) return downloadUrls[photo.id] ?? "";
+    refreshedIds.current.add(photo.id);
+    const pending = previewRequests.current.get(photo.id);
+    if (pending) return pending;
+    const request = api<{ url: string }>(`/files/${photo.id}/download?preview=1`)
+      .then((data) => {
+        setDownloadUrls((current) => ({ ...current, [photo.id]: data.url }));
+        return data.url;
+      })
+      .finally(() => {
+        previewRequests.current.delete(photo.id);
+      });
     previewRequests.current.set(photo.id, request);
     return request;
   }, [downloadUrls]);
@@ -455,11 +584,16 @@ export function useDealPhotosData({
     error,
     loadMoreError,
     pagination,
+    uploaderFacets,
     hasMorePhotos: pagination.page < pagination.totalPages,
     fetchPhotos,
     loadMorePhotos,
+    goToPage,
+    retry,
     getPhotoImageUrl,
+    getPhotoOpenUrl,
     ensurePhotoImageUrl,
+    refreshPhotoSignedUrl,
     patchPhoto,
     savePhotoAddress,
     deletePhoto,
@@ -500,6 +634,68 @@ export function PhotoPaginationSummary({
           {loadingMore ? "Loading..." : "Load more"}
         </Button>
       )}
+    </div>
+  );
+}
+
+/** Compact page list: 1 … p-1 p p+1 … N (no gaps for small counts). */
+function buildPageItems(page: number, totalPages: number): Array<number | "ellipsis"> {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
+  const items = new Set<number>([1, totalPages, page, page - 1, page + 1]);
+  const sorted = Array.from(items).filter((n) => n >= 1 && n <= totalPages).sort((a, b) => a - b);
+  const result: Array<number | "ellipsis"> = [];
+  sorted.forEach((n, i) => {
+    if (i > 0 && n - sorted[i - 1] > 1) result.push("ellipsis");
+    result.push(n);
+  });
+  return result;
+}
+
+/** Numbered-page navigation for the photo grid (replaces "Load more"). Each page replaces the grid. */
+export function PhotoPageNavigator({
+  page,
+  totalPages,
+  total,
+  loading,
+  onPageChange,
+}: {
+  page: number;
+  totalPages: number;
+  total: number;
+  loading: boolean;
+  onPageChange: (page: number) => void;
+}) {
+  if (total === 0 || totalPages <= 1) return null;
+  const items = buildPageItems(page, totalPages);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
+      <span>Page {page.toLocaleString()} of {totalPages.toLocaleString()} · {total.toLocaleString()} photos</span>
+      <div className="flex items-center gap-1">
+        <Button type="button" variant="outline" size="sm" aria-label="Previous page" disabled={loading || page <= 1} onClick={() => onPageChange(page - 1)}>
+          Prev
+        </Button>
+        {items.map((item, i) =>
+          item === "ellipsis" ? (
+            <span key={`e-${i}`} className="px-1 text-muted-foreground">…</span>
+          ) : (
+            <Button
+              key={item}
+              type="button"
+              variant={item === page ? "default" : "outline"}
+              size="sm"
+              aria-label={`Page ${item}`}
+              aria-current={item === page ? "page" : undefined}
+              disabled={loading}
+              onClick={() => onPageChange(item)}
+            >
+              {item}
+            </Button>
+          ),
+        )}
+        <Button type="button" variant="outline" size="sm" aria-label="Next page" disabled={loading || page >= totalPages} onClick={() => onPageChange(page + 1)}>
+          Next
+        </Button>
+      </div>
     </div>
   );
 }
@@ -650,7 +846,9 @@ export function PhotoViewerModal({
   selectedId,
   onSelectedIdChange,
   getPhotoImageUrl,
+  getPhotoOpenUrl,
   ensurePhotoImageUrl,
+  refreshPhotoSignedUrl,
   patchPhoto,
   savePhotoAddress,
   deletePhoto,
@@ -660,7 +858,9 @@ export function PhotoViewerModal({
   selectedId: string | null;
   onSelectedIdChange: (id: string | null) => void;
   getPhotoImageUrl: (photo: DealPhotoRecord) => string;
+  getPhotoOpenUrl?: (photo: DealPhotoRecord) => string;
   ensurePhotoImageUrl: (photo: DealPhotoRecord) => Promise<string>;
+  refreshPhotoSignedUrl?: (photo: DealPhotoRecord) => Promise<string>;
   patchPhoto: (photoId: string, body: Record<string, unknown>) => Promise<void>;
   savePhotoAddress: (photoId: string, body: { address: string; latitude?: number; longitude?: number }) => Promise<void>;
   deletePhoto: (photoId: string) => Promise<void>;
@@ -675,6 +875,12 @@ export function PhotoViewerModal({
   const selectedUploaderName = selectedPhoto?.uploaderName ?? "Unknown user";
   const selectedPhotoIsImage = selectedPhoto ? isPhotoImagePreviewable(selectedPhoto) : false;
   const selectedPhotoImageUrl = selectedPhoto && selectedPhotoIsImage ? getPhotoImageUrl(selectedPhoto) : "";
+  // The viewer shows the HIGH-RES (full) image so it stays sharp when zoomed; the grid keeps the thumbnail.
+  // Falls back to the thumbnail until the full URL resolves.
+  const selectedPhotoFullUrl =
+    selectedPhoto && selectedPhotoIsImage
+      ? (getPhotoOpenUrl ? getPhotoOpenUrl(selectedPhoto) : getImmediatePhotoOpenUrl(selectedPhoto) ?? "") || selectedPhotoImageUrl
+      : "";
 
   useEffect(() => {
     if (!selectedPhoto || !isPhotoImagePreviewable(selectedPhoto) || getPhotoImageUrl(selectedPhoto)) return;
@@ -711,9 +917,9 @@ export function PhotoViewerModal({
         {selectedPhoto && (
           <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-5xl">
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-              <div className="flex min-h-[45vh] items-center justify-center rounded-lg bg-black">
-                {selectedPhotoImageUrl ? (
-                  <img src={selectedPhotoImageUrl} alt={selectedPhoto.displayName} className="max-h-[72vh] max-w-full object-contain" />
+              <div className="flex min-h-[45vh] items-center justify-center overflow-hidden rounded-lg bg-black">
+                {selectedPhotoFullUrl ? (
+                  <ZoomableImage key={selectedPhoto.id} src={selectedPhotoFullUrl} alt={selectedPhoto.displayName} onError={() => void refreshPhotoSignedUrl?.(selectedPhoto)} />
                 ) : selectedPhotoIsImage ? (
                   <div className="flex flex-col items-center gap-3 px-6 text-center text-white">
                     <Camera className="h-12 w-12 text-white/75" />
@@ -881,12 +1087,15 @@ export function PhotoGridTile({
   photo,
   imageUrl,
   loadImageUrl,
+  onImageError,
   onOpen,
   onRestore,
 }: {
   photo: DealPhotoRecord;
   imageUrl: string;
   loadImageUrl: () => void;
+  /** Fired when the <img> fails (e.g. a batched signed URL expired) so the parent can fetch a fresh one. */
+  onImageError?: () => void;
   onOpen: () => void;
   onRestore: () => void;
 }) {
@@ -908,7 +1117,7 @@ export function PhotoGridTile({
         onClick={onOpen}
       >
         {imageUrl ? (
-          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" />
+          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" onError={() => onImageError?.()} />
         ) : (
           <div className="flex h-full items-center justify-center">
             {isImage ? <Camera className="h-7 w-7 text-muted-foreground" /> : <FileText className="h-7 w-7 text-muted-foreground" />}

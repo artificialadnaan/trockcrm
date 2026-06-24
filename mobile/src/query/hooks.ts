@@ -53,12 +53,44 @@ export function useToggleStar() {
   });
 }
 
-/** All photos for a project; filtering/grouping happens client-side. */
+// Server caps a photo page at 200; on a 400+ photo deal one request can't return everything, so we page
+// through and concatenate. Bounded concurrency keeps it fast without flooding the rate limiter.
+const PHOTOS_PER_PAGE = 200;
+const PHOTOS_PAGE_CONCURRENCY = 3;
+// Hard ceiling on pages fetched, so a bad totalPages can never spin forever (200 * 50 = 10k photos).
+const PHOTOS_MAX_PAGES = 50;
+
+/** ALL photos for a project (paged through server-side, concatenated); filtering/grouping is client-side. */
 export function useProjectPhotos(dealId: string | undefined) {
   const { fetcher, user } = useAuth();
   return useQuery({
     queryKey: qk.projectPhotos(user?.id ?? "anon", dealId ?? ""),
-    queryFn: () => api.getProjectPhotos(fetcher, dealId!),
+    queryFn: async () => {
+      const first = await api.getProjectPhotos(fetcher, dealId!, { page: 1, perPage: PHOTOS_PER_PAGE });
+      const reportedPages = first.pagination?.totalPages ?? 1;
+      const totalPages = Math.min(reportedPages, PHOTOS_MAX_PAGES);
+      const photos = [...first.photos];
+
+      // `partial` tracks pages we couldn't load. We keep the non-blanking behavior (show what loaded) but
+      // surface partial so the screen can block report/share — generating from an incomplete set would
+      // silently omit photos. Hitting the page cap (>10k photos) is also a truncation → partial.
+      let partial = reportedPages > PHOTOS_MAX_PAGES;
+      for (let page = 2; page <= totalPages; page += PHOTOS_PAGE_CONCURRENCY) {
+        const batch = [];
+        for (let p = page; p < page + PHOTOS_PAGE_CONCURRENCY && p <= totalPages; p += 1) {
+          batch.push(api.getProjectPhotos(fetcher, dealId!, { page: p, perPage: PHOTOS_PER_PAGE }));
+        }
+        // allSettled, not all: a transient 429/5xx on one later page must not blank the whole gallery —
+        // we keep every page that did load (page 1 is already in `photos`).
+        const results = await Promise.allSettled(batch);
+        for (const result of results) {
+          if (result.status === "fulfilled") photos.push(...result.value.photos);
+          else partial = true;
+        }
+      }
+
+      return { photos, pagination: first.pagination, partial };
+    },
     enabled: !!user && !!dealId,
   });
 }

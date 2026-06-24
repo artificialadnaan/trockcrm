@@ -68,11 +68,14 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
     error,
     loadMoreError,
     pagination,
+    uploaderFacets,
     hasMorePhotos,
     fetchPhotos,
     loadMorePhotos,
     getPhotoImageUrl,
+    getPhotoOpenUrl,
     ensurePhotoImageUrl,
+    refreshPhotoSignedUrl,
     patchPhoto,
     savePhotoAddress,
     deletePhoto,
@@ -115,9 +118,16 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
   }, [availableSuggestedTags, photos]);
   const uploaders = useMemo(() => {
     const map = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
-    photos.forEach((photo) => map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl }));
+    // Deal-wide facet first (stable regardless of which pages are loaded), then any uploader already on a
+    // loaded page as a fallback until the facet arrives.
+    uploaderFacets.forEach((uploader) => map.set(uploader.id, uploader));
+    photos.forEach((photo) => {
+      if (!map.has(photo.uploadedBy)) {
+        map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl });
+      }
+    });
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [photos]);
+  }, [uploaderFacets, photos]);
   const visiblePhotos = useMemo(() => photos.filter((photo) => matchesPhotoFilters(photo, filters)), [filters, photos]);
   const sortedPhotos = useMemo(() => sortDealPhotosForFiles(visiblePhotos, sortKey, sortDir), [sortDir, sortKey, visiblePhotos]);
 
@@ -184,6 +194,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
                 photo={photo}
                 imageUrl={getPhotoImageUrl(photo)}
                 loadImageUrl={() => void ensurePhotoImageUrl(photo)}
+                onImageError={() => void refreshPhotoSignedUrl(photo)}
                 onOpen={() => setSelectedId(photo.id)}
                 onDownload={() => downloadPhoto(photo.id)}
                 onDelete={() => deletePhoto(photo.id)}
@@ -211,6 +222,8 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
         selectedId={selectedId}
         onSelectedIdChange={setSelectedId}
         getPhotoImageUrl={getPhotoImageUrl}
+        getPhotoOpenUrl={getPhotoOpenUrl}
+        refreshPhotoSignedUrl={refreshPhotoSignedUrl}
         ensurePhotoImageUrl={ensurePhotoImageUrl}
         patchPhoto={patchPhoto}
         savePhotoAddress={savePhotoAddress}
@@ -225,6 +238,7 @@ function PhotoFileRow({
   photo,
   imageUrl,
   loadImageUrl,
+  onImageError,
   onOpen,
   onDownload,
   onDelete,
@@ -233,6 +247,7 @@ function PhotoFileRow({
   photo: DealPhotoRecord;
   imageUrl: string;
   loadImageUrl: () => void;
+  onImageError?: () => void;
   onOpen: () => void;
   onDownload: () => void;
   onDelete: () => void;
@@ -254,7 +269,7 @@ function PhotoFileRow({
     <div ref={rowRef} className={`grid gap-3 px-3 py-3 transition hover:bg-accent/50 lg:grid-cols-[64px_minmax(180px,1.4fr)_120px_minmax(150px,1fr)_minmax(180px,1fr)_135px_135px_90px_92px] lg:items-center ${photo.deletedAt ? "opacity-55" : ""}`}>
       <button type="button" aria-label={`Open photo ${photo.displayName}`} className="h-12 w-12 overflow-hidden rounded border bg-muted" onClick={onOpen}>
         {imageUrl ? (
-          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" />
+          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" onError={() => onImageError?.()} />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
             {isImage ? "Photo" : <FileText className="h-4 w-4" />}
