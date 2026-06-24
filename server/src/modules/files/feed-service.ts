@@ -424,21 +424,47 @@ export async function assignUnassignedCompanyCamProjectToDeal(
     .limit(1);
   if (!deal) throw new AppError(404, "Deal not found");
 
-  // A deal links to at most ONE CompanyCam project. Refuse to overwrite a DIFFERENT existing link (which
-  // would orphan that project) — only an unlinked deal, or one already linked to this same project, may
-  // proceed (Codex). The clear-then-set below then safely (re)affirms the mapping.
+  // Fast-fail: a deal links to at most ONE CompanyCam project, so refuse a target already linked to a
+  // DIFFERENT project (the authoritative re-check happens under the lock below).
   if (deal.companycamProjectId && deal.companycamProjectId !== projectId) {
     throw new AppError(409, "This deal is already linked to a different CompanyCam project");
   }
 
-  // Serialize concurrent assignments of the SAME CompanyCam project (transaction-scoped, auto-released at
-  // commit) so two users can't race to relink it. Mirrors the createCompany dedup-lock pattern.
-  await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${projectId}))`);
+  // Serialize on BOTH the project AND the target deal (transaction-scoped advisory locks, auto-released at
+  // commit). The project lock alone is insufficient: two DIFFERENT projects assigned to the same unlinked
+  // deal would take different project locks, both move their photos, and the last writer would orphan the
+  // other project's auto-sync mapping (Codex). Acquire in sorted key order so two concurrent requests that
+  // touch the same {project, deal} pair can't deadlock.
+  for (const key of [projectId, targetDealId].sort()) {
+    await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
+  }
 
-  // CLAIM THE PHOTOS FIRST. The UPDATE takes row locks on the project's unassigned files, so a concurrent
-  // request blocks and then matches 0 rows (deal_id is no longer NULL). We only persist the project -> deal
-  // link when this request actually moved rows — otherwise a stale/racing assignment that claimed 0 files
-  // would still hijack deals.companycam_project_id to its deal while the photos live on the other deal (Codex).
+  // Authoritative re-read UNDER the locks (the target's link may have changed since the validation read).
+  const [locked] = await tenantDb
+    .select({ companycamProjectId: deals.companycamProjectId })
+    .from(deals)
+    .where(eq(deals.id, targetDealId))
+    .limit(1);
+  if (locked?.companycamProjectId && locked.companycamProjectId !== projectId) {
+    throw new AppError(409, "This deal is already linked to a different CompanyCam project");
+  }
+
+  // Don't STEAL the project from a deal it's already linked to. The Unassigned backlog only requires
+  // deal_id IS NULL, so a project can be split (some photos synced to deal A, stragglers still unassigned);
+  // re-pointing the link to a different deal here would split the project across deals and send its future
+  // syncs to the wrong one. Require an explicit relink in that case (Codex).
+  const [linkedElsewhere] = await tenantDb
+    .select({ id: deals.id })
+    .from(deals)
+    .where(and(eq(deals.companycamProjectId, projectId), sql`${deals.id} <> ${targetDealId}`))
+    .limit(1);
+  if (linkedElsewhere) {
+    throw new AppError(409, "This CompanyCam project is already linked to another deal");
+  }
+
+  // CLAIM THE PHOTOS. The UPDATE takes row locks on the project's unassigned files, so a concurrent request
+  // blocks and then matches 0 rows (deal_id is no longer NULL). We only persist the project -> deal link when
+  // this request actually moved rows — a stale assignment that claimed 0 files must not stamp the mapping.
   const moved = await tenantDb
     .update(files)
     .set({ dealId: targetDealId })
@@ -454,13 +480,9 @@ export async function assignUnassignedCompanyCamProjectToDeal(
     .returning({ id: files.id });
 
   if (moved.length > 0) {
-    // Persist the CompanyCam project -> deal mapping (mirrors companycam linkProjectToDeal): clear it from any
-    // OTHER deal first to keep the relationship 1:1, then set it on the target — so future photos for the
-    // project auto-link here (syncAllLinkedProjects only syncs deals with a non-null companycam_project_id).
-    await tenantDb
-      .update(deals)
-      .set({ companycamProjectId: null })
-      .where(and(eq(deals.companycamProjectId, projectId), sql`${deals.id} <> ${targetDealId}`));
+    // Persist the project -> deal mapping so future photos auto-link here (syncAllLinkedProjects only syncs
+    // deals with a non-null companycam_project_id). Safe to set unconditionally: the checks above guarantee
+    // the target is unlinked-or-same and the project is linked nowhere else.
     await tenantDb
       .update(deals)
       .set({ companycamProjectId: projectId })

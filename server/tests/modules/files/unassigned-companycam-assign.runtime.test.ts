@@ -131,10 +131,11 @@ describe("assignUnassignedCompanyCamProjectToDeal", () => {
     const again = await assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", DEAL);
     expect(again.assignedCount).toBe(0);
 
-    // Race-safe: assigning the now-claimed project to a DIFFERENT deal moves 0 rows and must NOT hijack the
-    // project -> deal mapping — the link stays with the deal that actually holds the photos (Codex).
-    const hijack = await assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", OTHER_DEAL);
-    expect(hijack.assignedCount).toBe(0);
+    // Strict 1:1: now that 111 is linked to DEAL, assigning it to a DIFFERENT deal is rejected (409) rather
+    // than silently splitting the project across deals — and the original link is left untouched (Codex).
+    await expect(
+      assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", OTHER_DEAL),
+    ).rejects.toMatchObject({ statusCode: 409 });
     const { rows: links } = (await pg.query(
       `SELECT id, companycam_project_id FROM deals WHERE id IN ($1, $2)`,
       [DEAL, OTHER_DEAL],
