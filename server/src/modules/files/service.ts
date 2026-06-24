@@ -1171,11 +1171,14 @@ export async function getFileDownloadUrl(
 
 /**
  * Resolve a photo's display URLs WITHOUT a per-photo round-trip from the client. Returns a
- * `thumbnailUrl` (small, for the grid) and a `fullUrl` (high-res, for the zoomable lightbox):
- *  - External (e.g. CompanyCam): thumbnail = externalThumbnailUrl (its "thumbnail"/"web" size),
- *    full = externalUrl (the original). These are plain CDN URLs — no signing, no DB call.
- *  - R2-stored: a single presigned URL to the original serves BOTH (R2 keeps no resized variant). The
- *    presign is a LOCAL HMAC op (no network), so resolving a whole page in-batch is cheap.
+ * `thumbnailUrl` (small, for the grid) and a `fullUrl` (high-res, for the zoomable lightbox). The
+ * priority MATCHES the download route's durability semantics (`shouldServeExternalFileUrl`): when an R2
+ * copy exists it wins — the external URL on an R2-backed import (CompanyCam writes BOTH) is metadata only
+ * and can expire, so we never serve it over the durable R2 original.
+ *  - R2-stored: one presigned URL to the original serves BOTH (R2 keeps no resized variant). The presign
+ *    is a LOCAL HMAC op (no network), so resolving a whole page in-batch is cheap.
+ *  - External-only (no r2Key): thumbnail = externalThumbnailUrl (its "thumbnail"/"web" size), full =
+ *    externalUrl (the original). Plain CDN URLs — no signing.
  * Computing these on the server and returning them inside the photo LIST is what lets a 400-photo deal
  * load without firing 400 separate `/files/:id/download` requests (which trip the rate limiter).
  */
@@ -1186,11 +1189,7 @@ export async function resolvePhotoDisplayUrls(photo: {
   displayName?: string | null;
   fileExtension?: string | null;
 }): Promise<{ thumbnailUrl: string | null; fullUrl: string | null }> {
-  if (photo.externalUrl || photo.externalThumbnailUrl) {
-    const full = photo.externalUrl ?? photo.externalThumbnailUrl ?? null;
-    const thumbnail = photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
-    return { thumbnailUrl: thumbnail, fullUrl: full };
-  }
+  // R2 copy wins (durable) — matches shouldServeExternalFileUrl / the download route.
   if (photo.r2Key) {
     const { url } = await buildFileDownloadUrlFromRecord({
       r2Key: photo.r2Key,
@@ -1198,6 +1197,11 @@ export async function resolvePhotoDisplayUrls(photo: {
       fileExtension: photo.fileExtension,
     });
     return { thumbnailUrl: url, fullUrl: url };
+  }
+  if (photo.externalUrl || photo.externalThumbnailUrl) {
+    const full = photo.externalUrl ?? photo.externalThumbnailUrl ?? null;
+    const thumbnail = photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
+    return { thumbnailUrl: thumbnail, fullUrl: full };
   }
   return { thumbnailUrl: null, fullUrl: null };
 }

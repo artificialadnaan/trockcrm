@@ -311,9 +311,12 @@ export function useDealPhotosData({
   const [downloadUrls, setDownloadUrls] = useState<Record<string, string>>({});
   const previewRequests = React.useRef(new Map<string, Promise<string>>());
   const requestId = React.useRef(0);
+  // The page the user last asked for — so the error-state Retry re-fetches THAT page, not page 1.
+  const requestedPage = React.useRef(1);
 
   const fetchPhotosPage = useCallback(async (page: number, options: { append?: boolean } = {}) => {
     const append = options.append ?? false;
+    requestedPage.current = page;
     const currentRequestId = requestId.current + 1;
     requestId.current = currentRequestId;
     if (append) {
@@ -372,41 +375,17 @@ export function useDealPhotosData({
     await fetchPhotosPage(target);
   }, [fetchPhotosPage, loading, pagination.page, pagination.totalPages]);
 
+  // Numbered pages: after a mutation (delete/restore) reload ONLY the current page, replacing it. Refetching
+  // pages 1..N and merging (the old load-more behavior) would re-accumulate earlier pages and desync the
+  // paginator + the page's filter/group counts.
   const refreshLoadedPhotos = useCallback(async () => {
-    const pagesToRefresh = Math.max(1, pagination.page);
-    setLoading(true);
-    setError(null);
-    setLoadMoreError(null);
-    try {
-      const filterParams = buildPhotoFilterSearchParams(filters);
-      const requests = Array.from({ length: pagesToRefresh }, (_, index) => {
-        const params = new URLSearchParams({
-          page: String(index + 1),
-          limit: String(DEAL_PHOTO_PAGE_SIZE),
-        });
-        filterParams.forEach((value, key) => params.set(key, value));
-        return api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(
-          `/files/deal/${dealId}/photos?${params}`
-        );
-      });
-      const pages = await Promise.all(requests);
-      const merged = new Map<string, DealPhotoRecord>();
-      pages.forEach((pageResult) => pageResult.photos.forEach((photo) => merged.set(photo.id, photo)));
-      const latestPagination = pages[pages.length - 1]?.pagination ?? {
-        page: 1,
-        limit: DEAL_PHOTO_PAGE_SIZE,
-        total: 0,
-        totalPages: 0,
-      };
-      setPhotos(Array.from(merged.values()));
-      setPagination(latestPagination);
-      onCountChange?.(latestPagination.total);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load photos");
-    } finally {
-      setLoading(false);
-    }
-  }, [dealId, filters, onCountChange, pagination.page]);
+    await fetchPhotosPage(requestedPage.current);
+  }, [fetchPhotosPage]);
+
+  // Retry the page the user last requested (the failed target), not page 1.
+  const retry = useCallback(async () => {
+    await fetchPhotosPage(requestedPage.current);
+  }, [fetchPhotosPage]);
 
   useEffect(() => {
     void fetchPhotos();
@@ -473,6 +452,7 @@ export function useDealPhotosData({
     fetchPhotos,
     loadMorePhotos,
     goToPage,
+    retry,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
     patchPhoto,

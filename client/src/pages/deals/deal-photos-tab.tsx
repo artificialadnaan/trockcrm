@@ -39,8 +39,8 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
     error,
     pagination,
     hasMorePhotos,
-    fetchPhotos,
     goToPage,
+    retry,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
     patchPhoto,
@@ -162,7 +162,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
       {!loading && error && (
         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           {error}
-          <Button className="ml-3" variant="outline" size="sm" onClick={fetchPhotos}>Retry</Button>
+          <Button className="ml-3" variant="outline" size="sm" onClick={() => void retry()}>Retry</Button>
         </div>
       )}
 

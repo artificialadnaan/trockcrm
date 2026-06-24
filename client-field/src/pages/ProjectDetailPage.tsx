@@ -23,21 +23,27 @@ const GROUP_SEQUENCE: PhotoGrouping[] = ["date", "category", "uploader", "none"]
 
 // Photos are grouped by date across the whole project, so we load EVERY page (not just the first 200) —
 // the server batches each photo's display URLs, so a 400-photo deal is ~2 fast requests. Page 1 reveals
-// totalPages; the rest fetch in parallel and accumulate.
+// totalPages; the rest fetch in BOUNDED chunks (not one big fan-out) so we don't burst the API, and each
+// chunk is allSettled so a single 429/5xx drops just that page instead of aborting the whole gallery.
 const FIELD_PHOTOS_PER_PAGE = 200;
+const FIELD_PHOTOS_FETCH_CONCURRENCY = 4;
 async function fetchAllProjectPhotos(projectId: string): Promise<FieldPhoto[]> {
   const first = await api<{ photos: FieldPhoto[]; pagination: { totalPages: number } }>(
     `/field/projects/${projectId}/photos?page=1&perPage=${FIELD_PHOTOS_PER_PAGE}`,
   );
   const all = [...first.photos];
   const totalPages = first.pagination?.totalPages ?? 1;
-  if (totalPages > 1) {
-    const rest = await Promise.all(
-      Array.from({ length: totalPages - 1 }, (_, i) =>
-        api<{ photos: FieldPhoto[] }>(`/field/projects/${projectId}/photos?page=${i + 2}&perPage=${FIELD_PHOTOS_PER_PAGE}`),
+  const remaining = Array.from({ length: Math.max(0, totalPages - 1) }, (_, i) => i + 2);
+  for (let i = 0; i < remaining.length; i += FIELD_PHOTOS_FETCH_CONCURRENCY) {
+    const chunk = remaining.slice(i, i + FIELD_PHOTOS_FETCH_CONCURRENCY);
+    const results = await Promise.allSettled(
+      chunk.map((page) =>
+        api<{ photos: FieldPhoto[] }>(`/field/projects/${projectId}/photos?page=${page}&perPage=${FIELD_PHOTOS_PER_PAGE}`),
       ),
     );
-    rest.forEach((r) => all.push(...r.photos));
+    results.forEach((r) => {
+      if (r.status === "fulfilled") all.push(...r.value.photos);
+    });
   }
   return all;
 }
@@ -460,9 +466,14 @@ function FieldPhotoViewer({ photo, onClose, onPrev, onNext }: { photo: FieldPhot
       <button type="button" aria-label="Close photo viewer" className="absolute right-4 top-4 z-10 rounded-full bg-black/60 p-2" onClick={onClose}><X className="h-6 w-6" /></button>
       {onPrev && !imageZoomed ? <button type="button" aria-label="Previous photo" className="absolute left-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onPrev}><ChevronLeft /></button> : null}
       {onNext && !imageZoomed ? <button type="button" aria-label="Next photo" className="absolute right-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onNext}><ChevronRight /></button> : null}
-      {/* Tap the image to toggle details; pinch/double-tap/drag to zoom + pan (ZoomableImage). */}
-      <div className="flex h-full w-full items-center justify-center px-3 pb-56 pt-12" onClick={() => setDetailsOpen((open) => !open)}>
-        {viewerUrl ? <ZoomableImage key={photo.id} src={viewerUrl} alt={photo.displayName} onZoomedChange={setImageZoomed} /> : <span>Image unavailable</span>}
+      {/* A CONFIRMED single tap toggles details; pinch/double-tap/drag zoom + pan inside ZoomableImage (it
+          distinguishes a real tap from a gesture, so zooming/panning no longer flips the details sheet). */}
+      <div className="flex h-full w-full items-center justify-center px-3 pb-56 pt-12">
+        {viewerUrl ? (
+          <ZoomableImage key={photo.id} src={viewerUrl} alt={photo.displayName} onZoomedChange={setImageZoomed} onTap={() => setDetailsOpen((open) => !open)} />
+        ) : (
+          <span>Image unavailable</span>
+        )}
       </div>
       {detailsOpen ? (
         <aside className="absolute inset-x-0 bottom-0 max-h-[50vh] overflow-y-auto rounded-t-2xl bg-white p-4 text-foreground">

@@ -38,6 +38,19 @@ describe("resolvePhotoDisplayUrls", () => {
     expect(urls.fullUrl).toBe(urls.thumbnailUrl); // R2 keeps only the original
   });
 
+  it("prefers the durable R2 copy over external URLs when BOTH exist (CompanyCam production import)", async () => {
+    const urls = await resolvePhotoDisplayUrls({
+      r2Key: "office/deal/photo.jpg",
+      displayName: "photo",
+      fileExtension: ".jpg",
+      // The external URLs are metadata that can expire — must NOT be served over the R2 original.
+      externalUrl: "https://cdn.companycam.test/original.jpg",
+      externalThumbnailUrl: "https://cdn.companycam.test/thumb.jpg",
+    });
+    expect(urls.fullUrl).not.toContain("companycam");
+    expect(urls.thumbnailUrl).toBe(urls.fullUrl); // both = the R2 presigned original
+  });
+
   it("returns null/null when there's neither an external URL nor an r2 key", async () => {
     expect(await resolvePhotoDisplayUrls({})).toEqual({ thumbnailUrl: null, fullUrl: null });
   });
