@@ -84,12 +84,28 @@ export function assertFanOutNotFullyDegraded<T>(outcome: FanOutOutcome<T>): FanO
   return outcome;
 }
 
-/** All ACTIVE offices. Field is office-agnostic, so this is the full active set — NOT the user's accessible subset. */
+// Non-production offices to keep OUT of the field cross-office fan-out. `pwauditoffice` is an
+// internal audit/test schema that lags real migrations (it's missing columns real offices have, e.g. the
+// geocode/intake fields), so fanning field reads into it surfaces no real data and reliably DEGRADES the
+// fan-out — which previously suppressed location features for everyone. There's no `offices.is_production`
+// column to key off, so this is an explicit slug denylist; extend it if more non-production schemas appear.
+export const FIELD_EXCLUDED_OFFICE_SLUGS = new Set<string>(["pwauditoffice"]);
+
+/** Pure filter (unit-testable without a DB): drop non-production offices from the field fan-out set. */
+export function excludeNonFieldOffices(offices: readonly FieldOffice[]): FieldOffice[] {
+  return offices.filter((office) => !FIELD_EXCLUDED_OFFICE_SLUGS.has(office.slug));
+}
+
+/**
+ * All ACTIVE, PRODUCTION offices for the field surface. Field is office-agnostic, so this is the full
+ * active set (NOT the user's accessible subset) MINUS non-production schemas (see
+ * {@link FIELD_EXCLUDED_OFFICE_SLUGS}) that would only degrade the fan-out.
+ */
 export async function listActiveFieldOffices(): Promise<FieldOffice[]> {
   const { rows } = await pool.query<{ id: string; slug: string }>(
     "SELECT id, slug FROM public.offices WHERE is_active = true ORDER BY slug",
   );
-  return rows.map((row) => ({ id: row.id, slug: row.slug }));
+  return excludeNonFieldOffices(rows.map((row) => ({ id: row.id, slug: row.slug })));
 }
 
 /**

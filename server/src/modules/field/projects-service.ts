@@ -53,9 +53,9 @@ export type FieldProject = {
   photoCount: number;
   starred: boolean;
   /**
-   * Great-circle distance in miles from the requester's GPS. Set ONLY by the nearby endpoint
-   * (`listNearbyFieldProjects`); null/absent on the regular list, starred list, and open-by-id paths,
-   * which carry no distance column.
+   * Great-circle distance in miles from the requester's GPS. Set on the project LIST only when the
+   * caller passes a `lat`/`lng` (proximity mode) — and even then it's null for a deal with no
+   * coordinates. Absent on the starred list and open-by-id paths, which carry no distance column.
    */
   distanceMiles?: number | null;
 };
@@ -151,10 +151,28 @@ function activeProjectWhere(search?: string) {
 // is ample depth (deeper navigation is expected to narrow via search). This is a FIELD-ONLY service.
 export const FIELD_PROJECTS_MAX_FETCH = 500;
 
+// Great-circle distance (miles) from a GPS fix to deal `d`, or NULL SQL when no fix is given. A deal with
+// NULL coordinates yields NULL — guarded by an explicit CASE because `GREATEST(-1, NULL)` returns -1 in
+// Postgres (NULL is IGNORED, not propagated), so without it a null-coordinate deal would acos(-1)=π into a
+// bogus ~12,437mi antipode distance. 3959 = Earth radius in miles; the LEAST/GREATEST(-1,1) clamp guards
+// acos against float drift past ±1. Matches the field photo-geotag distance elsewhere.
+function distanceMilesSql(lat?: number, lng?: number) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return sql`CASE WHEN d.property_lat IS NULL OR d.property_lng IS NULL THEN NULL ELSE (
+    3959 * acos(
+      LEAST(1, GREATEST(-1,
+        cos(radians(${lat})) * cos(radians(d.property_lat))
+        * cos(radians(d.property_lng) - radians(${lng}))
+        + sin(radians(${lat})) * sin(radians(d.property_lat))
+      ))
+    )
+  ) END`;
+}
+
 export async function listFieldProjects(
   tenantDb: TenantDb,
   access: FieldAccessContext,
-  input: { search?: string; status?: string; page?: number; perPage?: number } = {}
+  input: { search?: string; status?: string; page?: number; perPage?: number; lat?: number; lng?: number } = {}
 ) {
   if (input.status && input.status !== "active") {
     throw new AppError(400, "Only active field projects are supported");
@@ -163,6 +181,17 @@ export async function listFieldProjects(
   const perPage = Math.min(FIELD_PROJECTS_MAX_FETCH, Math.max(1, input.perPage ?? 50));
   const offset = (page - 1) * perPage;
   const where = activeProjectWhere(input.search);
+
+  // When the caller passes a GPS fix, order the WHOLE list by proximity (closest first) instead of
+  // recency. Deals with NULL coordinates yield a NULL distance and sort LAST (still listed, just after
+  // every geocoded deal), with recency as the tiebreak within each distance group. Without coords the list
+  // keeps its recency order.
+  const distance = distanceMilesSql(input.lat, input.lng);
+  const distanceMiles = distance ?? sql`NULL`;
+  const recency = sql`COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at)`;
+  const orderBy = distance
+    ? sql`distance_miles ASC NULLS LAST, ${recency} DESC NULLS LAST`
+    : sql`${recency} DESC NULLS LAST`;
 
   const countResult = await tenantDb.execute(sql`
     SELECT count(*)::int AS total
@@ -181,7 +210,8 @@ export async function listFieldProjects(
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
       COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) AS last_activity_at,
       COALESCE(photo_stats.photo_count, 0)::int AS photo_count,
-      (fsp.user_id IS NOT NULL) AS starred
+      (fsp.user_id IS NOT NULL) AS starred,
+      ${distanceMiles} AS distance_miles
     FROM deals d
     LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
     LEFT JOIN field_user_starred_projects fsp ON fsp.deal_id = d.id AND fsp.user_id = ${access.userId}::uuid
@@ -194,7 +224,7 @@ export async function listFieldProjects(
         AND f.deleted_at IS NULL
     ) photo_stats ON true
     WHERE ${where}
-    ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
+    ORDER BY ${orderBy}, d.id ASC
     LIMIT ${perPage}
     OFFSET ${offset}
   `);
@@ -204,93 +234,19 @@ export async function listFieldProjects(
   return { projects, total, page, perPage };
 }
 
-// Default per-office candidate depth for the nearby query. The cross-office route fetches a FEW more
-// than the 3 it shows from EACH office, then merges + re-sorts by distance globally and slices to 3 —
-// so the true nearest 3 OVERALL win even when they're concentrated in one office. (Fetching exactly 3
-// per office would, after merge, bias toward offices rather than true distance.)
-export const FIELD_NEARBY_DEFAULT_LIMIT = 5;
-
-/**
- * The 3-ish active projects CLOSEST to a GPS coordinate, ordered nearest-first, each carrying its
- * `distanceMiles`. Mirrors {@link listFieldProjects} (same active-project predicate, photo_stats LATERAL,
- * starred join, field-safe `mapFieldProject` shape) with three differences: it (1) requires non-null
- * coordinates, (2) selects a great-circle distance, and (3) orders by that distance instead of recency.
- * Read-only — the field module never mutates a deal.
- */
-export async function listNearbyFieldProjects(
+export async function listStarredFieldProjects(
   tenantDb: TenantDb,
   access: FieldAccessContext,
-  input: { lat: number; lng: number; limit?: number },
+  input: { lat?: number; lng?: number } = {},
 ) {
-  const { lat, lng } = input;
-  if (!Number.isFinite(lat) || lat < -90 || lat > 90 || !Number.isFinite(lng) || lng < -180 || lng > 180) {
-    throw new AppError(400, "lat and lng must be valid coordinates");
-  }
-  const limit = Math.min(50, Math.max(1, input.limit ?? FIELD_NEARBY_DEFAULT_LIMIT));
-
-  // Haversine great-circle distance in MILES (3959 = Earth radius, mi). The LEAST/GREATEST(-1,1) clamp
-  // guards acos against float drift slightly past ±1 (which would yield NaN) for a project at the exact
-  // requester coordinate.
-  const distanceMiles = sql`(
-    3959 * acos(
-      LEAST(1, GREATEST(-1,
-        cos(radians(${lat})) * cos(radians(d.property_lat))
-        * cos(radians(d.property_lng) - radians(${lng}))
-        + sin(radians(${lat})) * sin(radians(d.property_lat))
-      ))
-    )
-  )`;
-
-  // Rank + LIMIT the nearest candidates FIRST (cheap: distance is pure arithmetic over deals), THEN join
-  // the expensive per-deal photo_stats LATERAL for only those few rows. Computing photo_stats inline with
-  // the distance ranking would run a files count/max for EVERY coordinate-bearing active deal in the
-  // office (thousands in a big office) just to return the top handful.
-  const rowsResult = await tenantDb.execute(sql`
-    WITH nearest AS (
-      SELECT d.id AS deal_id, ${distanceMiles} AS distance_miles
-      FROM deals d
-      LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE ${activeProjectWhere()}
-        AND d.property_lat IS NOT NULL
-        AND d.property_lng IS NOT NULL
-      -- Tiebreak on id so equal-distance ties pick the SAME rows across requests (the LIMIT is otherwise
-      -- non-deterministic at the boundary). The cross-office merge also tiebreaks on id, so the final
-      -- order is fully stable.
-      ORDER BY distance_miles ASC, deal_id ASC
-      LIMIT ${limit}
-    )
-    SELECT
-      d.id,
-      d.name,
-      d.deal_number,
-      d.project_number,
-      d.name AS property_name,
-      NULLIF(CONCAT_WS(', ', NULLIF(d.property_address, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), NULLIF(d.property_zip, '')), '') AS property_address,
-      COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
-      COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) AS last_activity_at,
-      COALESCE(photo_stats.photo_count, 0)::int AS photo_count,
-      (fsp.user_id IS NOT NULL) AS starred,
-      nearest.distance_miles AS distance_miles
-    FROM nearest
-    JOIN deals d ON d.id = nearest.deal_id
-    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-    LEFT JOIN field_user_starred_projects fsp ON fsp.deal_id = d.id AND fsp.user_id = ${access.userId}::uuid
-    LEFT JOIN LATERAL (
-      SELECT count(*) AS photo_count, max(COALESCE(f.taken_at, f.created_at)) AS last_photo_at
-      FROM files f
-      WHERE f.deal_id = d.id
-        AND f.category = 'photo'
-        AND f.is_active = true
-        AND f.deleted_at IS NULL
-    ) photo_stats ON true
-    ORDER BY nearest.distance_miles ASC, d.id ASC
-  `);
-
-  const projects = ((rowsResult as any).rows ?? rowsResult).map(mapFieldProject);
-  return { projects };
-}
-
-export async function listStarredFieldProjects(tenantDb: TenantDb, access: FieldAccessContext) {
+  // Carry the same distance as the main list when a GPS fix is present, so a starred project shows the
+  // SAME distance pill it would in the list (and the pinned set reads nearest-first); recency otherwise.
+  const distance = distanceMilesSql(input.lat, input.lng);
+  const distanceMiles = distance ?? sql`NULL`;
+  const recency = sql`COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at)`;
+  const orderBy = distance
+    ? sql`distance_miles ASC NULLS LAST, ${recency} DESC NULLS LAST`
+    : sql`${recency} DESC NULLS LAST`;
   const result = await tenantDb.execute(sql`
     SELECT
       d.id,
@@ -302,7 +258,8 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, access: Field
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
       COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) AS last_activity_at,
       COALESCE(photo_stats.photo_count, 0)::int AS photo_count,
-      true AS starred
+      true AS starred,
+      ${distanceMiles} AS distance_miles
     FROM field_user_starred_projects fsp
     INNER JOIN deals d ON d.id = fsp.deal_id
     LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -316,7 +273,7 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, access: Field
     ) photo_stats ON true
     WHERE fsp.user_id = ${access.userId}::uuid
       AND ${activeProjectWhere()}
-    ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
+    ORDER BY ${orderBy}, d.id ASC
   `);
 
   return { projects: ((result as any).rows ?? result).map(mapFieldProject) };
@@ -617,31 +574,6 @@ export function mergeFieldCaptureTargets(
     if (rankDelta !== 0) return rankDelta;
     const recencyDelta = captureTargetUpdatedMs(right.lastUpdatedAt) - captureTargetUpdatedMs(left.lastUpdatedAt);
     if (recencyDelta !== 0) return recencyDelta;
-    return left.id.localeCompare(right.id);
-  });
-  return stamped.slice(0, Math.max(0, limit));
-}
-
-export type FieldProjectWithOffice = FieldProject & OfficeTag;
-
-/**
- * Merge per-office nearby results into the TRUE global nearest `limit`. Each office returns its own
- * nearest candidates; stamping the owning office, re-sorting by ascending distance across ALL offices,
- * and slicing yields the overall closest — NOT nearest-per-office (which would over-represent offices
- * that happen to be active). A null/absent distance sorts last (defensive; the nearby query never emits
- * one). Ties break on id for a stable order.
- */
-export function mergeNearbyProjects(
-  perOffice: Array<{ office: FieldOffice; projects: FieldProject[] }>,
-  limit: number,
-): FieldProjectWithOffice[] {
-  const stamped: FieldProjectWithOffice[] = perOffice.flatMap(({ office, projects }) =>
-    projects.map((project) => ({ ...project, ...officeTag(office) })),
-  );
-  stamped.sort((left, right) => {
-    const leftMi = left.distanceMiles ?? Infinity;
-    const rightMi = right.distanceMiles ?? Infinity;
-    if (leftMi !== rightMi) return leftMi - rightMi;
     return left.id.localeCompare(right.id);
   });
   return stamped.slice(0, Math.max(0, limit));

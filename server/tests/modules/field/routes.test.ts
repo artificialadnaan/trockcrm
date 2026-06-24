@@ -156,13 +156,17 @@ describe("field routes", () => {
       status: undefined,
       page: 1,
       perPage: 50,
+      // No GPS fix on this request → recency order (lat/lng undefined).
+      lat: undefined,
+      lng: undefined,
     });
 
     await invokeRoute("get", "/projects/starred", {});
-    expect(projectMocks.listStarredFieldProjects).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      userId: "admin-1",
-      userRole: "admin",
-    }));
+    expect(projectMocks.listStarredFieldProjects).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "admin-1", userRole: "admin" }),
+      { lat: undefined, lng: undefined },
+    );
 
     await invokeRoute("post", "/projects/:dealId/star", { params: { dealId: "deal-1" } });
     expect(projectMocks.starFieldProject).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({

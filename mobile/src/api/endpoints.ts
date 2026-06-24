@@ -4,7 +4,6 @@ import type {
   InvitePreview,
   ProjectsResponse,
   StarredProjectsResponse,
-  NearbyProjectsResponse,
   StarResponse,
   PhotosResponse,
   PendingPhotosResponse,
@@ -52,16 +51,18 @@ export const logout = (f: Fetcher) => f<void>("/auth/logout", { method: "POST" }
 export const getMe = (f: Fetcher) => f<{ user: AuthResponse["user"] }>("/field/me");
 
 // ── Projects ──────────────────────────────────────────────────────────────────
-export const getProjects = (f: Fetcher, params: { search?: string; status?: string; page?: number; perPage?: number }) =>
-  f<ProjectsResponse>("/field/projects", { query: { status: "active", ...params } });
+// When lat/lng are passed the server orders the list by proximity (closest first) and stamps each row's
+// distanceMiles; otherwise the list is recency-ordered.
+export const getProjects = (
+  f: Fetcher,
+  params: { search?: string; status?: string; page?: number; perPage?: number; lat?: number; lng?: number },
+) => f<ProjectsResponse>("/field/projects", { query: { status: "active", ...params } });
 
-export const getStarredProjects = (f: Fetcher) =>
-  f<StarredProjectsResponse>("/field/projects/starred");
-
-// The 3 active projects closest to the device. Server fans out across offices and returns the true
-// nearest 3 overall, each carrying `distanceMiles`.
-export const getNearbyProjects = (f: Fetcher, lat: number, lng: number) =>
-  f<NearbyProjectsResponse>("/field/projects/nearby", { query: { lat, lng } });
+// Accepts the same optional GPS fix as getProjects so starred rows carry matching distanceMiles.
+export const getStarredProjects = (f: Fetcher, coords?: { lat: number; lng: number } | null) =>
+  f<StarredProjectsResponse>("/field/projects/starred", {
+    query: coords ? { lat: coords.lat, lng: coords.lng } : undefined,
+  });
 
 export const starProject = (f: Fetcher, dealId: string) =>
   f<StarResponse>(`/field/projects/${dealId}/star`, { method: "POST" });
