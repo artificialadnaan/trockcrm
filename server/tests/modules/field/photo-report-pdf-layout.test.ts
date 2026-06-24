@@ -1,0 +1,76 @@
+import { describe, expect, it } from "vitest";
+import { renderFieldPhotoReportPdf, type ReportRenderSection } from "../../../src/modules/field/pdf-layout.js";
+
+// Count actual page objects in a PDF buffer (/Type /Page, NOT /Pages).
+function countPdfPages(buffer: Buffer): number {
+  return (buffer.toString("latin1").match(/\/Type\s*\/Page(?![s])/g) ?? []).length;
+}
+
+const cover = {
+  reportTitle: "University place doors",
+  creatorName: "Brett Bell",
+  companyName: "TRock Construction",
+  reportDateLabel: "June 24, 2026",
+  projectName: "Denton Student Housing Exterior",
+  photoCount: 4,
+};
+
+function photo(i: number): ReportRenderSection["photos"][number] {
+  return {
+    id: `p${i}`,
+    displayName: `Photo ${i}`,
+    description: `Door ${i}`,
+    takenAt: null,
+    createdAt: "2026-06-24T15:00:00.000Z",
+    uploaderName: "Brett Bell",
+    projectName: "Denton Student Housing Exterior",
+    tags: [],
+    r2Key: null,
+    externalUrl: null, // no buffer → draws the "Image unavailable" placeholder (no network)
+    externalThumbnailUrl: null,
+    reportIndex: i,
+  };
+}
+
+describe("renderFieldPhotoReportPdf page count", () => {
+  it("a single section of 4 photos is COVER + one photo page — no divider, no trailing blank pages", async () => {
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3), photo(4)] }],
+    });
+    // Previously this produced ~12 pages (footer text spilled onto auto-created blank pages).
+    expect(countPdfPages(buffer)).toBe(2);
+  });
+
+  it("preserves a single-section custom title compactly without adding a divider page", async () => {
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "South Stairwell Doors", photos: [photo(1), photo(2)] }],
+    });
+    // Still cover + one photo page (no divider) even though the section carries a distinct title.
+    expect(countPdfPages(buffer)).toBe(2);
+  });
+
+  it("does not spill onto blank pages when the footer project name is very long", async () => {
+    // Project names can run ~140 chars; the footer draws it bottom-aligned where any wrap would spill.
+    const longName = "Denton Student Housing Exterior Envelope and Door Hardware Punchlist Walkthrough Report Building C";
+    const buffer = await renderFieldPhotoReportPdf({
+      cover: { ...cover, projectName: longName },
+      sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3), photo(4)] }],
+    });
+    // No-wrap + ellipsis footer text keeps it at cover + one photo page.
+    expect(countPdfPages(buffer)).toBe(2);
+  });
+
+  it("keeps a divider page per section when there are multiple sections", async () => {
+    const buffer = await renderFieldPhotoReportPdf({
+      cover: { ...cover, photoCount: 2 },
+      sections: [
+        { title: "Exterior", photos: [photo(1)] },
+        { title: "Interior", photos: [photo(2)] },
+      ],
+    });
+    // cover + (divider + photo page) x 2 = 5 — and still no blank footer-spill pages.
+    expect(countPdfPages(buffer)).toBe(5);
+  });
+});
