@@ -429,7 +429,7 @@ export function useDealPhotosData({
     const fetchPage = (p: number) => {
       const params = new URLSearchParams({ page: String(p), limit: String(DEAL_PHOTO_PAGE_SIZE) });
       filterParams.forEach((value, key) => params.set(key, value));
-      return api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(
+      return api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number }; facets?: { uploaders: Array<{ id: string; name: string; avatarUrl: string | null }> } }>(
         `/files/deal/${dealId}/photos?${params}`,
       );
     };
@@ -464,6 +464,10 @@ export function useDealPhotosData({
       const mergedPhotos = Array.from(merged.values());
       setPhotos(mergedPhotos);
       setPagination(latest);
+      // The endpoint returns the deal-wide uploader facet — refresh it so a mutation that removes an
+      // uploader's last photo drops them from the filter dropdown (instead of leaving a stale option).
+      const refreshedFacets = pages.find((pageResult) => pageResult.facets?.uploaders)?.facets?.uploaders;
+      if (refreshedFacets) setUploaderFacets(refreshedFacets);
       // Freshly reloaded rows carry new batched URLs — retire stale recovery URLs for them.
       pruneRecoveryCache(mergedPhotos.map((photo) => photo.id));
       requestedPage.current = latest.page;

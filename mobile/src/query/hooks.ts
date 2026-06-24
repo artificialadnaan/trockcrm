@@ -52,13 +52,14 @@ export function useProjectPhotos(dealId: string | undefined) {
     queryKey: qk.projectPhotos(user?.id ?? "anon", dealId ?? ""),
     queryFn: async () => {
       const first = await api.getProjectPhotos(fetcher, dealId!, { page: 1, perPage: PHOTOS_PER_PAGE });
-      const totalPages = Math.min(first.pagination?.totalPages ?? 1, PHOTOS_MAX_PAGES);
+      const reportedPages = first.pagination?.totalPages ?? 1;
+      const totalPages = Math.min(reportedPages, PHOTOS_MAX_PAGES);
       const photos = [...first.photos];
 
       // `partial` tracks pages we couldn't load. We keep the non-blanking behavior (show what loaded) but
       // surface partial so the screen can block report/share — generating from an incomplete set would
-      // silently omit photos.
-      let partial = false;
+      // silently omit photos. Hitting the page cap (>10k photos) is also a truncation → partial.
+      let partial = reportedPages > PHOTOS_MAX_PAGES;
       for (let page = 2; page <= totalPages; page += PHOTOS_PAGE_CONCURRENCY) {
         const batch = [];
         for (let p = page; p < page + PHOTOS_PAGE_CONCURRENCY && p <= totalPages; p += 1) {
