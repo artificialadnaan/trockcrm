@@ -177,13 +177,13 @@ describe("field projects service", () => {
         thumbnailUrl: "https://signed.example/thumb.jpg",
         fullUrl: "https://signed.example/full.jpg",
       }],
-      pagination: { page: 1, limit: 60, total: 1, totalPages: 1 },
+      pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
     });
 
     const result = await listFieldProjectPhotos(db, { userId: "field-1", userRole: "field_contractor" }, "deal-1", { categories: ["damage"] });
 
-    // Default numbered-pages window: page 1, perPage 60.
-    expect(fileServiceMocks.getDealPhotoTimeline).toHaveBeenCalledWith(db, "deal-1", 1, 60, {
+    // Default field window: page 1, perPage 200 (the surface's prior single-load cap; no regression).
+    expect(fileServiceMocks.getDealPhotoTimeline).toHaveBeenCalledWith(db, "deal-1", 1, 200, {
       categories: ["damage"],
     });
     expect(result.photos[0]).toEqual(expect.objectContaining({

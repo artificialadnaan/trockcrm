@@ -415,9 +415,10 @@ function safePhoto(photo: any, imageUrl: string | null, fullImageUrl: string | n
   };
 }
 
-// Field photos page size — numbered pages. Clamped server-side so a client can't request an unbounded
-// page (the batch presign is bounded by this). Matches the CRM cap.
-export const FIELD_PHOTOS_DEFAULT_PER_PAGE = 60;
+// Field photos page size, clamped server-side so a client can't request an unbounded page (the batch
+// presign is bounded by this). Default 200 matches the field surface's prior single-load cap, so an
+// un-paginated client doesn't regress; clients that walk pages pass page/perPage to reach everything.
+export const FIELD_PHOTOS_DEFAULT_PER_PAGE = 200;
 export const FIELD_PHOTOS_MAX_PER_PAGE = 200;
 
 export async function listFieldProjectPhotos(
