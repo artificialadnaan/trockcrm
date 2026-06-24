@@ -11,9 +11,14 @@ import {
   FileIcon,
   FileText,
   Video,
+  Link2,
+  Check,
 } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { formatDealDisplayNumber } from "@/lib/deal-utils";
 import { api } from "@/lib/api";
 import { usePhotoFeed, type FeedFilters, type FeedPhoto } from "@/hooks/use-photo-feed";
 import { PhotoLightbox } from "@/components/photos/photo-lightbox";
@@ -507,24 +512,166 @@ interface CompanyCamProjectStat {
   recentPhotos: ProjectRecentPhoto[];
 }
 
+interface DealSearchOption {
+  id: string;
+  name: string;
+  dealNumber: string;
+  projectNumber?: string | null;
+}
+
+// "Assign to deal" control for an unassigned CompanyCam project: a popover with a searchable deal picker.
+// Picking a deal moves ALL of the project's unassigned photos onto it (server enforces the exact set).
+// Universal — any CRM user. `onAssigned` is called so the caller can drop the project from the list.
+function AssignToDealPopover({
+  companycamProjectId,
+  photoCount,
+  onAssigned,
+}: {
+  companycamProjectId: string;
+  photoCount: number;
+  onAssigned: (assignedCount: number, deal: DealSearchOption) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [deals, setDeals] = useState<DealSearchOption[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchFailed, setSearchFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [assigningId, setAssigningId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setSearching(true);
+    setSearchFailed(false);
+    const handle = setTimeout(() => {
+      const q = query.trim();
+      const qs = q ? `&search=${encodeURIComponent(q)}` : "";
+      // scope=all so ANY user can find ANY active deal — the deals route otherwise defaults to the caller's
+      // "mine" view, which would hide other people's deals even though the assign endpoint accepts any of
+      // them (the feature is universal). scope=all elevates the read office-wide (CodeRabbit/Codex).
+      api<{ deals: DealSearchOption[] }>(`/deals?scope=all&isActive=true&limit=20${qs}`)
+        // Keep a failed lookup DISTINCT from an empty result so the picker can offer a retry instead of
+        // misreporting "No deals found" when the request itself errored (CodeRabbit).
+        .then((d) => { if (!cancelled) { setDeals(d.deals ?? []); setSearchFailed(false); } })
+        .catch(() => { if (!cancelled) { setDeals([]); setSearchFailed(true); } })
+        .finally(() => { if (!cancelled) setSearching(false); });
+    }, 250);
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [query, open, reloadKey]);
+
+  async function assign(deal: DealSearchOption) {
+    setAssigningId(deal.id);
+    try {
+      const res = await api<{ assignedCount: number }>(
+        `/files/photos/unassigned-companycam/${encodeURIComponent(companycamProjectId)}/assign`,
+        { method: "POST", json: { dealId: deal.id } },
+      );
+      if (res.assignedCount > 0) {
+        toast.success(
+          `Assigned ${res.assignedCount} photo${res.assignedCount !== 1 ? "s" : ""} to ${formatDealDisplayNumber(deal).label}`,
+        );
+      } else {
+        // The race-safe server path can claim 0 rows (e.g. the project was already assigned elsewhere) and
+        // does NOT persist the deal link — don't imply a successful assignment.
+        toast.info("No photos were assigned — they may have already been assigned to a deal.");
+      }
+      setOpen(false);
+      onAssigned(res.assignedCount, deal);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to assign photos");
+    } finally {
+      setAssigningId(null);
+    }
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        render={
+          <Button variant="outline" size="sm" className="shrink-0 gap-1.5">
+            <Link2 className="h-3.5 w-3.5" />
+            Assign to deal
+          </Button>
+        }
+      />
+      <PopoverContent align="end" className="w-80 p-0">
+        <div className="border-b p-2">
+          <p className="px-1 pb-2 text-xs text-gray-500">
+            Assign {photoCount} photo{photoCount !== 1 ? "s" : ""} to:
+          </p>
+          <Input
+            autoFocus
+            placeholder="Search deals by name or number..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+        <div className="max-h-64 overflow-y-auto py-1">
+          {searching ? (
+            <div className="flex justify-center py-4">
+              <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+            </div>
+          ) : searchFailed ? (
+            <div className="px-3 py-4 text-center">
+              <p className="text-xs text-gray-500">Couldn&apos;t load deals.</p>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mt-1 h-7 text-xs"
+                onClick={() => setReloadKey((k) => k + 1)}
+              >
+                <RefreshCw className="mr-1 h-3 w-3" /> Retry
+              </Button>
+            </div>
+          ) : deals.length === 0 ? (
+            <p className="px-3 py-4 text-center text-xs text-gray-500">No deals found</p>
+          ) : (
+            deals.map((d) => (
+              <button
+                key={d.id}
+                type="button"
+                disabled={assigningId !== null}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-gray-50 disabled:opacity-50"
+                onClick={() => assign(d)}
+              >
+                {assigningId === d.id ? (
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-gray-400" />
+                ) : (
+                  <Check className="h-3.5 w-3.5 shrink-0 text-transparent" />
+                )}
+                <span className="font-mono text-xs text-gray-500">{formatDealDisplayNumber(d).label}</span>
+                <span className="truncate text-gray-900">{d.name}</span>
+              </button>
+            ))
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function CompanyCamProjectRow({
   project,
   onClick,
+  onAssigned,
 }: {
   project: CompanyCamProjectStat;
   onClick: () => void;
+  onAssigned: (assignedCount: number, deal: DealSearchOption) => void;
 }) {
   const recentPhotos = project.recentPhotos?.slice(0, 5) ?? [];
   const featurePhoto = recentPhotos[0];
   const name = project.companycamProjectName || `CompanyCam project ${project.companycamProjectId}`;
 
   return (
-    <button
-      type="button"
-      className="w-full text-left flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 hover:border-[#CC0000]/30 hover:shadow-sm transition-all cursor-pointer"
-      onClick={onClick}
-    >
-      <div className="flex items-center gap-3 min-w-0 flex-1">
+    <div className="w-full flex items-center gap-4 p-4 bg-white rounded-lg border border-gray-200 hover:border-[#CC0000]/30 hover:shadow-sm transition-all">
+      {/* Clicking the body drills into the project's photos; the Assign control sits outside this button. */}
+      <button
+        type="button"
+        className="flex items-center gap-3 min-w-0 flex-1 text-left cursor-pointer"
+        onClick={onClick}
+      >
         <div className="h-16 w-16 rounded-lg overflow-hidden bg-gray-100 shrink-0">
           {featurePhoto ? (
             <ProjectRecentMediaThumb photo={featurePhoto} alt={name} size="feature" />
@@ -544,21 +691,27 @@ function CompanyCamProjectRow({
             CompanyCam · Unassigned
           </span>
         </div>
-      </div>
+      </button>
 
       <div className="hidden md:flex flex-col items-center gap-1 shrink-0 px-4 min-w-[100px]">
         <p className="text-xs text-gray-500 font-medium">Photos</p>
         <p className="text-2xl font-bold text-gray-900">{project.photoCount}</p>
       </div>
 
-      <div className="hidden lg:flex items-center gap-1 shrink-0">
+      <div className="hidden xl:flex items-center gap-1 shrink-0">
         {recentPhotos.map((photo) => (
           <div key={photo.id} className="h-[72px] w-[72px] rounded-md overflow-hidden bg-gray-100 shrink-0">
             <ProjectRecentMediaThumb photo={photo} alt="" size="strip" />
           </div>
         ))}
       </div>
-    </button>
+
+      <AssignToDealPopover
+        companycamProjectId={project.companycamProjectId}
+        photoCount={project.photoCount}
+        onAssigned={onAssigned}
+      />
+    </div>
   );
 }
 
@@ -566,9 +719,11 @@ function CompanyCamProjectRow({
 function UnassignedProjectPhotos({
   project,
   onBack,
+  onAssigned,
 }: {
   project: CompanyCamProjectStat;
   onBack: () => void;
+  onAssigned: () => void;
 }) {
   const [photos, setPhotos] = useState<FeedPhoto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -605,10 +760,19 @@ function UnassignedProjectPhotos({
       >
         <ChevronLeft className="h-4 w-4" /> Back to unassigned projects
       </button>
-      <h2 className="text-lg font-semibold text-gray-900">{name}</h2>
-      <p className="text-xs text-gray-500 mb-4">
-        cc#{project.companycamProjectId} &bull; {total} photo{total !== 1 ? "s" : ""}
-      </p>
+      <div className="flex items-start justify-between gap-4 mb-4">
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold text-gray-900 truncate">{name}</h2>
+          <p className="text-xs text-gray-500">
+            cc#{project.companycamProjectId} &bull; {total} photo{total !== 1 ? "s" : ""}
+          </p>
+        </div>
+        <AssignToDealPopover
+          companycamProjectId={project.companycamProjectId}
+          photoCount={total || project.photoCount}
+          onAssigned={onAssigned}
+        />
+      </div>
 
       {loading ? (
         <div className="flex items-center justify-center py-20">
@@ -653,7 +817,7 @@ function UnassignedProjectPhotos({
   );
 }
 
-function UnassignedTab() {
+function UnassignedTab({ onDataChanged }: { onDataChanged: () => void }) {
   const [projects, setProjects] = useState<CompanyCamProjectStat[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -679,7 +843,18 @@ function UnassignedTab() {
 
   const totalPhotos = useMemo(() => projects.reduce((s, p) => s + p.photoCount, 0), [projects]);
 
-  if (selected) return <UnassignedProjectPhotos project={selected} onBack={() => setSelected(null)} />;
+  if (selected)
+    return (
+      <UnassignedProjectPhotos
+        project={selected}
+        onBack={() => setSelected(null)}
+        onAssigned={() => {
+          setProjects((prev) => prev.filter((p) => p.companycamProjectId !== selected.companycamProjectId));
+          setSelected(null);
+          onDataChanged();
+        }}
+      />
+    );
 
   return (
     <div className="px-6 py-4">
@@ -716,7 +891,15 @@ function UnassignedTab() {
       ) : (
         <div className="space-y-2">
           {filtered.map((project) => (
-            <CompanyCamProjectRow key={project.companycamProjectId} project={project} onClick={() => setSelected(project)} />
+            <CompanyCamProjectRow
+              key={project.companycamProjectId}
+              project={project}
+              onClick={() => setSelected(project)}
+              onAssigned={() => {
+                setProjects((prev) => prev.filter((p) => p.companycamProjectId !== project.companycamProjectId));
+                onDataChanged();
+              }}
+            />
           ))}
         </div>
       )}
@@ -741,10 +924,13 @@ export function PhotoFeedPage() {
   const [dateTo, setDateTo] = useState("");
   const [projectFilterId, setProjectFilterId] = useState("");
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
+  // Bumped after a successful unassigned-photo assignment so the Photos feed refetches (the newly-linked
+  // photos otherwise wouldn't appear until the 30s new-photo poll).
+  const [feedRefreshToken, setFeedRefreshToken] = useState(0);
 
   // Build filters for photo feed
   const feedFilters = useMemo<FeedFilters>(() => {
-    const f: FeedFilters = {};
+    const f: FeedFilters = { refreshToken: feedRefreshToken };
     if (dateFrom) f.dateFrom = new Date(dateFrom).toISOString();
     if (dateTo) {
       const end = new Date(dateTo);
@@ -753,7 +939,7 @@ export function PhotoFeedPage() {
     }
     if (projectFilterId) f.dealId = projectFilterId;
     return f;
-  }, [dateFrom, dateTo, projectFilterId]);
+  }, [dateFrom, dateTo, projectFilterId, feedRefreshToken]);
 
   const { photos, page, totalPages, total, loading, newCount, loadNewPhotos, goToPage } =
     usePhotoFeed(feedFilters);
@@ -774,6 +960,13 @@ export function PhotoFeedPage() {
       setProjectsLoading(false);
     }
   }, []);
+
+  // After photos are assigned out of the Unassigned tab, refresh the Projects stats + the Photos feed so
+  // their counts/lists aren't stale when the user switches tabs (Codex).
+  const handleUnassignedDataChanged = useCallback(() => {
+    void fetchProjectStats();
+    setFeedRefreshToken((t) => t + 1);
+  }, [fetchProjectStats]);
 
   useEffect(() => {
     fetchProjectStats();
@@ -869,7 +1062,7 @@ export function PhotoFeedPage() {
       <div className="flex-1 overflow-y-auto">
         {activeTab === "unassigned" ? (
           /* ═══════════════════ UNASSIGNED (CompanyCam) TAB ═══════════════════ */
-          <UnassignedTab />
+          <UnassignedTab onDataChanged={handleUnassignedDataChanged} />
         ) : activeTab === "projects" ? (
           /* ═══════════════════ PROJECTS TAB ═══════════════════ */
           <div className="px-6 py-4">

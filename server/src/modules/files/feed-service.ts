@@ -2,6 +2,7 @@ import { eq, and, desc, gte, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { files, deals, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -387,6 +388,108 @@ export async function getUnassignedCompanyCamPhotos(
 
   const total = Number(countResult[0]?.count ?? 0);
   return { photos: photoRows, pagination: { page: safePage, limit: safeLimit, total, totalPages: Math.ceil(total / safeLimit) } };
+}
+
+/**
+ * "Assign to deal" action on the Unassigned tab: move EVERY unassigned (deal-less) CompanyCam photo of one
+ * source project onto a deal. Sets files.deal_id for exactly the rows getUnassignedCompanyCamPhotos lists for
+ * the project (the SAME five-predicate filter), so the project drops out of the Unassigned tab and its photos
+ * appear under the deal. Idempotent: it only touches still-unassigned rows, so re-running moves nothing and
+ * never re-homes already-assigned photos. The deal must exist and be active in this tenant. Universal — the
+ * route imposes no role gate (mirrors the GET endpoints), so any CRM user can consolidate the backlog.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export async function assignUnassignedCompanyCamProjectToDeal(
+  tenantDb: TenantDb,
+  companycamProjectId: string,
+  dealId: string,
+): Promise<{ assignedCount: number; dealId: string; companycamProjectId: string }> {
+  const projectId = companycamProjectId?.trim();
+  if (!projectId) throw new AppError(400, "companycamProjectId is required");
+
+  // Validate the deal id shape HERE (not just at the route) so a malformed id from any caller fails the
+  // 400 contract instead of falling through to Postgres as a generic 500 on the uuid comparison (CodeRabbit).
+  const targetDealId = dealId?.trim();
+  if (!targetDealId || !UUID_PATTERN.test(targetDealId)) {
+    throw new AppError(400, "A valid dealId is required");
+  }
+
+  const [deal] = await tenantDb
+    .select({ id: deals.id, companycamProjectId: deals.companycamProjectId })
+    .from(deals)
+    // Exclude test-data deals (mirrors excludeTestDataCondition on the normal deals list/search): they are
+    // hidden from the picker, so a crafted/stale request must not be able to bury production photos on one.
+    .where(and(eq(deals.id, targetDealId), eq(deals.isActive, true), sql`COALESCE(${deals.isTestData}, false) = false`))
+    .limit(1);
+  if (!deal) throw new AppError(404, "Deal not found");
+
+  // Fast-fail: a deal links to at most ONE CompanyCam project, so refuse a target already linked to a
+  // DIFFERENT project (the authoritative re-check happens under the lock below).
+  if (deal.companycamProjectId && deal.companycamProjectId !== projectId) {
+    throw new AppError(409, "This deal is already linked to a different CompanyCam project");
+  }
+
+  // Serialize on BOTH the project AND the target deal (transaction-scoped advisory locks, auto-released at
+  // commit). The project lock alone is insufficient: two DIFFERENT projects assigned to the same unlinked
+  // deal would take different project locks, both move their photos, and the last writer would orphan the
+  // other project's auto-sync mapping (Codex). Acquire in sorted key order so two concurrent requests that
+  // touch the same {project, deal} pair can't deadlock.
+  for (const key of [projectId, targetDealId].sort()) {
+    await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
+  }
+
+  // Authoritative re-read UNDER the locks (the target's link may have changed since the validation read).
+  const [locked] = await tenantDb
+    .select({ companycamProjectId: deals.companycamProjectId })
+    .from(deals)
+    .where(eq(deals.id, targetDealId))
+    .limit(1);
+  if (locked?.companycamProjectId && locked.companycamProjectId !== projectId) {
+    throw new AppError(409, "This deal is already linked to a different CompanyCam project");
+  }
+
+  // Don't STEAL the project from a deal it's already linked to. The Unassigned backlog only requires
+  // deal_id IS NULL, so a project can be split (some photos synced to deal A, stragglers still unassigned);
+  // re-pointing the link to a different deal here would split the project across deals and send its future
+  // syncs to the wrong one. Require an explicit relink in that case (Codex).
+  const [linkedElsewhere] = await tenantDb
+    .select({ id: deals.id })
+    .from(deals)
+    .where(and(eq(deals.companycamProjectId, projectId), sql`${deals.id} <> ${targetDealId}`))
+    .limit(1);
+  if (linkedElsewhere) {
+    throw new AppError(409, "This CompanyCam project is already linked to another deal");
+  }
+
+  // CLAIM THE PHOTOS. The UPDATE takes row locks on the project's unassigned files, so a concurrent request
+  // blocks and then matches 0 rows (deal_id is no longer NULL). We only persist the project -> deal link when
+  // this request actually moved rows — a stale assignment that claimed 0 files must not stamp the mapping.
+  const moved = await tenantDb
+    .update(files)
+    .set({ dealId: targetDealId })
+    .where(
+      and(
+        eq(files.category, "photo"),
+        eq(files.isActive, true),
+        eq(files.subcategory, "CompanyCam"),
+        sql`${files.dealId} IS NULL`,
+        sql`${ccProjectIdExpr} = ${projectId}`,
+      ),
+    )
+    .returning({ id: files.id });
+
+  if (moved.length > 0) {
+    // Persist the project -> deal mapping so future photos auto-link here (syncAllLinkedProjects only syncs
+    // deals with a non-null companycam_project_id). Safe to set unconditionally: the checks above guarantee
+    // the target is unlinked-or-same and the project is linked nowhere else.
+    await tenantDb
+      .update(deals)
+      .set({ companycamProjectId: projectId })
+      .where(eq(deals.id, targetDealId));
+  }
+
+  return { assignedCount: moved.length, dealId: targetDealId, companycamProjectId: projectId };
 }
 
 /**

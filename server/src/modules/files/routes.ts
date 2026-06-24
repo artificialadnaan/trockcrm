@@ -32,7 +32,7 @@ import {
 import { getDealById } from "../deals/service.js";
 import { assertDealScopingWriteAllowed } from "../deals/scoping-service.js";
 import { getLeadById } from "../leads/service.js";
-import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats, getUnassignedCompanyCamProjects, getUnassignedCompanyCamPhotos } from "./feed-service.js";
+import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats, getUnassignedCompanyCamProjects, getUnassignedCompanyCamPhotos, assignUnassignedCompanyCamProjectToDeal } from "./feed-service.js";
 import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
 import { emitUploadedFileEvent, recordUploadedFileSideEffects } from "./upload-workflow.js";
 import { assertDealCollaboratorAccess, assertLeadCollaboratorAccess } from "../../lib/collaboration-access.js";
@@ -607,6 +607,26 @@ router.get("/photos/unassigned-companycam/:companycamProjectId", async (req, res
       req.params.companycamProjectId,
       req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+    );
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/files/photos/unassigned-companycam/:companycamProjectId/assign — assign EVERY unassigned photo
+// in one CompanyCam project to a deal (the "Assign to deal" action on the Unassigned tab). Universal: any
+// authenticated CRM user, no role gate — mirrors the GET endpoints on this tab so the whole team can
+// consolidate the rescued-photo backlog onto the right deals.
+router.post("/photos/unassigned-companycam/:companycamProjectId/assign", async (req, res, next) => {
+  try {
+    const dealId = typeof req.body?.dealId === "string" ? req.body.dealId.trim() : "";
+    if (!dealId) throw new AppError(400, "dealId is required");
+    const result = await assignUnassignedCompanyCamProjectToDeal(
+      req.tenantDb!,
+      req.params.companycamProjectId,
+      dealId,
     );
     await req.commitTransaction!();
     res.json(result);
