@@ -556,18 +556,18 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
       : undefined;
 
     const includeDeleted = req.query.deleted === "1" || req.query.deleted === "true";
-    const [result, uploaders] = await Promise.all([
-      getDealPhotoTimeline(req.tenantDb!, req.params.dealId, page, limit, {
-        categories,
-        tags,
-        uploaderIds,
-        from: req.query.from as string | undefined,
-        to: req.query.to as string | undefined,
-        includeDeleted,
-      }),
-      // Deal-wide uploader facet so the filter dropdown is stable across pages (not just this page's set).
-      getDealPhotoUploaders(req.tenantDb!, req.params.dealId, { includeDeleted }),
-    ]);
+    // req.tenantDb is a single transaction-bound pg client — running these two queries with Promise.all
+    // would trip "client already executing" and 500 the page. Await them sequentially on the same client.
+    const result = await getDealPhotoTimeline(req.tenantDb!, req.params.dealId, page, limit, {
+      categories,
+      tags,
+      uploaderIds,
+      from: req.query.from as string | undefined,
+      to: req.query.to as string | undefined,
+      includeDeleted,
+    });
+    // Deal-wide uploader facet so the filter dropdown is stable across pages (not just this page's set).
+    const uploaders = await getDealPhotoUploaders(req.tenantDb!, req.params.dealId, { includeDeleted });
     await req.commitTransaction!();
     res.json({ ...result, facets: { uploaders } });
   } catch (err) {

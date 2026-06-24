@@ -112,8 +112,29 @@ async function loadProjectReportPhotos(
   project: FieldProject,
   photoIds: string[],
 ): Promise<FieldReportPhoto[]> {
-  const projectPhotos = await listFieldProjectPhotos(tenantDb, access, project.id, { includeDeleted: false });
-  const photoMap = new Map(projectPhotos.photos.map((photo) => [photo.id, photo]));
+  // The field gallery now loads ALL photos (not just the first 200), so a selected id can live on a later
+  // page. Page through here until every selected id is resolved (or pages run out) instead of validating
+  // against only the first page — otherwise picking a photo beyond #200 wrongly 400s as "not available".
+  // Sequential on purpose: req.tenantDb is a single transaction-bound client (parallel reads would 500).
+  const wanted = new Set(photoIds);
+  const photoMap = new Map<string, FieldPhoto>();
+  let page = 1;
+  let totalPages = 1;
+  do {
+    const pageResult = await listFieldProjectPhotos(
+      tenantDb,
+      access,
+      project.id,
+      { includeDeleted: false },
+      { page, perPage: 200 },
+    );
+    for (const photo of pageResult.photos) {
+      if (wanted.has(photo.id)) photoMap.set(photo.id, photo);
+    }
+    totalPages = pageResult.pagination?.totalPages ?? 1;
+    page += 1;
+  } while (page <= totalPages && photoMap.size < wanted.size);
+
   const selected = photoIds.map((id) => photoMap.get(id)).filter((photo): photo is FieldPhoto => Boolean(photo));
   if (selected.length !== photoIds.length) {
     throw new AppError(400, "One or more selected photos are not available for this project.");

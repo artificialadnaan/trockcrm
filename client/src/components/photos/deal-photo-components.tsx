@@ -320,6 +320,31 @@ export function useDealPhotosData({
   // subview accumulates → [1, lastLoaded]. A mutation refresh reloads exactly this range, clamped.
   const loadedRange = React.useRef({ first: 1, last: 1 });
 
+  // Photos we've already force-refreshed once after an <img> error. Bounds the recovery to a SINGLE retry
+  // per photo so a permanently-broken object (404, deleted R2 key) can't loop onError → refetch → onError
+  // and hammer /files/:id/download until the rate limiter trips.
+  const refreshedIds = React.useRef(new Set<string>());
+
+  // When the list endpoint returns fresh photos it carries newly-signed batched URLs (6h). Drop any one-off
+  // recovery URL (1h, from a prior onError) for those ids so the fresher list URL wins — otherwise the stale
+  // recovery URL keeps being preferred and, once it expires, refreshedIds blocks another refresh (broken tile
+  // until remount). Clearing refreshedIds too re-arms recovery against the new URL.
+  const pruneRecoveryCache = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    for (const id of ids) refreshedIds.current.delete(id);
+    setDownloadUrls((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const id of ids) {
+        if (id in next) {
+          delete next[id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, []);
+
   const fetchPhotosPage = useCallback(async (page: number, options: { append?: boolean } = {}) => {
     const append = options.append ?? false;
     requestedPage.current = page;
@@ -350,6 +375,8 @@ export function useDealPhotosData({
         data.photos.forEach((photo) => merged.set(photo.id, photo));
         return Array.from(merged.values());
       });
+      // These rows just arrived with fresh batched URLs — retire any stale recovery URL for them.
+      pruneRecoveryCache(data.photos.map((photo) => photo.id));
       onCountChange?.(data.pagination.total);
     } catch (err) {
       if (requestId.current === currentRequestId) {
@@ -366,7 +393,7 @@ export function useDealPhotosData({
         setLoadingMore(false);
       }
     }
-  }, [dealId, filters, onCountChange]);
+  }, [dealId, filters, onCountChange, pruneRecoveryCache]);
 
   const fetchPhotos = useCallback(async () => {
     await fetchPhotosPage(1);
@@ -434,8 +461,11 @@ export function useDealPhotosData({
       const merged = new Map<string, DealPhotoRecord>();
       pages.forEach((pageResult) => pageResult.photos.forEach((photo) => merged.set(photo.id, photo)));
       const latest = pages[pages.length - 1]!.pagination;
-      setPhotos(Array.from(merged.values()));
+      const mergedPhotos = Array.from(merged.values());
+      setPhotos(mergedPhotos);
       setPagination(latest);
+      // Freshly reloaded rows carry new batched URLs — retire stale recovery URLs for them.
+      pruneRecoveryCache(mergedPhotos.map((photo) => photo.id));
       requestedPage.current = latest.page;
       onCountChange?.(latest.total);
     } catch (err) {
@@ -443,7 +473,7 @@ export function useDealPhotosData({
     } finally {
       if (requestId.current === currentRequestId) setLoading(false);
     }
-  }, [dealId, filters, onCountChange]);
+  }, [dealId, filters, onCountChange, pruneRecoveryCache]);
 
   // Retry the page the user last requested (the failed target), not page 1.
   const retry = useCallback(async () => {
@@ -457,8 +487,6 @@ export function useDealPhotosData({
   // Photos we've already force-refreshed once after an <img> error. Bounds the recovery to a SINGLE retry
   // per photo so a permanently-broken object (404, deleted R2 key) can't loop onError → refetch → onError
   // and hammer /files/:id/download until the rate limiter trips.
-  const refreshedIds = React.useRef(new Set<string>());
-
   const getPhotoImageUrl = useCallback((photo: DealPhotoRecord) => {
     return getImmediatePhotoPreviewUrl(photo, downloadUrls[photo.id]) ?? "";
   }, [downloadUrls]);
