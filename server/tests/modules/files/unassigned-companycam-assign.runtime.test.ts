@@ -18,6 +18,7 @@ import {
 const USER = "00000000-0000-4000-8000-000000000001";
 const DEAL = "00000000-0000-4000-8000-0000000000d1";
 const INACTIVE_DEAL = "00000000-0000-4000-8000-0000000000d2";
+const OTHER_DEAL = "00000000-0000-4000-8000-0000000000d3";
 let tdb: ReturnType<typeof drizzle>;
 let pg: PGlite;
 
@@ -34,7 +35,8 @@ beforeAll(async () => {
     INSERT INTO users (id, display_name) VALUES ('${USER}', 'Rescuer');
     INSERT INTO deals (id, name, deal_number, is_active) VALUES
       ('${DEAL}','Target Deal','D-1', true),
-      ('${INACTIVE_DEAL}','Archived Deal','D-2', false);
+      ('${INACTIVE_DEAL}','Archived Deal','D-2', false),
+      ('${OTHER_DEAL}','Other Deal','D-3', true);
   `);
 
   const base = {
@@ -119,5 +121,17 @@ describe("assignUnassignedCompanyCamProjectToDeal", () => {
     // (self-contained — does not rely on a prior test having mutated the shared DB).
     const again = await assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", DEAL);
     expect(again.assignedCount).toBe(0);
+
+    // Race-safe: assigning the now-claimed project to a DIFFERENT deal moves 0 rows and must NOT hijack the
+    // project -> deal mapping — the link stays with the deal that actually holds the photos (Codex).
+    const hijack = await assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", OTHER_DEAL);
+    expect(hijack.assignedCount).toBe(0);
+    const { rows: links } = (await pg.query(
+      `SELECT id, companycam_project_id FROM deals WHERE id IN ($1, $2)`,
+      [DEAL, OTHER_DEAL],
+    )) as { rows: Array<{ id: string; companycam_project_id: string | null }> };
+    const byId = Object.fromEntries(links.map((r) => [r.id, r.companycam_project_id]));
+    expect(byId[DEAL]).toBe("111"); // still linked to the deal that holds the photos
+    expect(byId[OTHER_DEAL]).toBeNull(); // not hijacked
   });
 });

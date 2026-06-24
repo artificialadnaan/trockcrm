@@ -422,19 +422,14 @@ export async function assignUnassignedCompanyCamProjectToDeal(
     .limit(1);
   if (!deal) throw new AppError(404, "Deal not found");
 
-  // Persist the CompanyCam project -> deal mapping (mirrors companycam linkProjectToDeal): clear it from any
-  // OTHER deal first to keep the relationship 1:1, then set it on the target. Without this, future photos for
-  // the same CompanyCam project would stay rescued/unlinked (syncAllLinkedProjects only syncs deals with a
-  // non-null companycam_project_id) and the project could later be linked to a different deal (Codex).
-  await tenantDb
-    .update(deals)
-    .set({ companycamProjectId: null })
-    .where(and(eq(deals.companycamProjectId, projectId), sql`${deals.id} <> ${targetDealId}`));
-  await tenantDb
-    .update(deals)
-    .set({ companycamProjectId: projectId })
-    .where(eq(deals.id, targetDealId));
+  // Serialize concurrent assignments of the SAME CompanyCam project (transaction-scoped, auto-released at
+  // commit) so two users can't race to relink it. Mirrors the createCompany dedup-lock pattern.
+  await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${projectId}))`);
 
+  // CLAIM THE PHOTOS FIRST. The UPDATE takes row locks on the project's unassigned files, so a concurrent
+  // request blocks and then matches 0 rows (deal_id is no longer NULL). We only persist the project -> deal
+  // link when this request actually moved rows — otherwise a stale/racing assignment that claimed 0 files
+  // would still hijack deals.companycam_project_id to its deal while the photos live on the other deal (Codex).
   const moved = await tenantDb
     .update(files)
     .set({ dealId: targetDealId })
@@ -448,6 +443,20 @@ export async function assignUnassignedCompanyCamProjectToDeal(
       ),
     )
     .returning({ id: files.id });
+
+  if (moved.length > 0) {
+    // Persist the CompanyCam project -> deal mapping (mirrors companycam linkProjectToDeal): clear it from any
+    // OTHER deal first to keep the relationship 1:1, then set it on the target — so future photos for the
+    // project auto-link here (syncAllLinkedProjects only syncs deals with a non-null companycam_project_id).
+    await tenantDb
+      .update(deals)
+      .set({ companycamProjectId: null })
+      .where(and(eq(deals.companycamProjectId, projectId), sql`${deals.id} <> ${targetDealId}`));
+    await tenantDb
+      .update(deals)
+      .set({ companycamProjectId: projectId })
+      .where(eq(deals.id, targetDealId));
+  }
 
   return { assignedCount: moved.length, dealId: targetDealId, companycamProjectId: projectId };
 }
