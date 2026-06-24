@@ -26,7 +26,7 @@ export type StarResponse = { starred: boolean };
 // ── Photos ────────────────────────────────────────────────────────────────────
 export type PhotosResponse = {
   photos: FieldPhoto[];
-  pagination?: { page: number; perPage: number; total: number };
+  pagination?: { page: number; limit: number; total: number; totalPages: number };
 };
 // Public photo-share link (POST /field/projects/:dealId/share). url = the unauthenticated viewer link.
 export type ShareLinkResponse = {

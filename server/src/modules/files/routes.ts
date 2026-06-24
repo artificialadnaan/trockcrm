@@ -26,6 +26,7 @@ import {
   getTagSuggestions,
   getDealFolderTree,
   getDealPhotoTimeline,
+  getDealPhotoUploaders,
   searchPhotoUploadTargets,
 } from "./service.js";
 import { getDealById } from "../deals/service.js";
@@ -554,16 +555,21 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
       ? req.query.uploader.split(",")
       : undefined;
 
-    const result = await getDealPhotoTimeline(req.tenantDb!, req.params.dealId, page, limit, {
-      categories,
-      tags,
-      uploaderIds,
-      from: req.query.from as string | undefined,
-      to: req.query.to as string | undefined,
-      includeDeleted: req.query.deleted === "1" || req.query.deleted === "true",
-    });
+    const includeDeleted = req.query.deleted === "1" || req.query.deleted === "true";
+    const [result, uploaders] = await Promise.all([
+      getDealPhotoTimeline(req.tenantDb!, req.params.dealId, page, limit, {
+        categories,
+        tags,
+        uploaderIds,
+        from: req.query.from as string | undefined,
+        to: req.query.to as string | undefined,
+        includeDeleted,
+      }),
+      // Deal-wide uploader facet so the filter dropdown is stable across pages (not just this page's set).
+      getDealPhotoUploaders(req.tenantDb!, req.params.dealId, { includeDeleted }),
+    ]);
     await req.commitTransaction!();
-    res.json(result);
+    res.json({ ...result, facets: { uploaders } });
   } catch (err) {
     next(err);
   }

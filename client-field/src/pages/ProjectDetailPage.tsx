@@ -454,9 +454,14 @@ function FieldPhotoViewer({ photo, onClose, onPrev, onNext }: { photo: FieldPhot
   return (
     <div
       className="fixed inset-0 z-50 bg-black text-white"
-      onTouchStart={(event) => setTouchStart(imageZoomed ? null : event.touches[0]?.clientX ?? null)}
+      // Only arm swipe-to-navigate for a genuine SINGLE-finger gesture — a pinch (2nd finger) must never
+      // navigate, even at 1x before the zoom state has updated.
+      onTouchStart={(event) => setTouchStart(imageZoomed || event.touches.length > 1 ? null : event.touches[0]?.clientX ?? null)}
+      onTouchMove={(event) => {
+        if (event.touches.length > 1) setTouchStart(null);
+      }}
       onTouchEnd={(event) => {
-        if (touchStart == null || imageZoomed) return;
+        if (touchStart == null || imageZoomed || event.touches.length > 0) return;
         const diff = (event.changedTouches[0]?.clientX ?? touchStart) - touchStart;
         if (diff > 50) onPrev?.();
         if (diff < -50) onNext?.();

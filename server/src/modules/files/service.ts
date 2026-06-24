@@ -1150,14 +1150,18 @@ export async function buildFileDownloadUrlFromRecord(file: {
   r2Key: string;
   displayName: string;
   fileExtension?: string | null;
-}): Promise<{ url: string; filename: string }> {
+}, ttlSeconds = 3600): Promise<{ url: string; filename: string }> {
   const filename = file.displayName + (file.fileExtension ?? "");
   const url = isR2Configured()
-    ? await generateDownloadUrl(file.r2Key, 3600, filename)
+    ? await generateDownloadUrl(file.r2Key, ttlSeconds, filename)
     : generateMockDownloadUrl(file.r2Key);
 
   return { url, filename };
 }
+
+// Batched LIST URLs live longer than a one-off download because a gallery can stay open a while before a
+// tile scrolls into view. 6h covers essentially any session; the client also refreshes on image error.
+const PHOTO_LIST_URL_TTL_SECONDS = 6 * 60 * 60;
 
 export async function getFileDownloadUrl(
   tenantDb: TenantDb,
@@ -1195,7 +1199,7 @@ export async function resolvePhotoDisplayUrls(photo: {
       r2Key: photo.r2Key,
       displayName: photo.displayName ?? "photo",
       fileExtension: photo.fileExtension,
-    });
+    }, PHOTO_LIST_URL_TTL_SECONDS);
     return { thumbnailUrl: url, fullUrl: url };
   }
   if (photo.externalUrl || photo.externalThumbnailUrl) {
@@ -1540,4 +1544,35 @@ export async function getDealPhotoTimeline(
     photos,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
+}
+
+/**
+ * Distinct uploaders across ALL of a deal's photos — the filter-bar's uploader facet. Derived from the
+ * whole deal (not the current page) so the option list stays stable as the user pages through, and an
+ * already-selected uploader never vanishes from the dropdown. Ignores the uploader/category/tag/date
+ * filters on purpose; only deal scope + the always-on photo/active/latest predicates apply (plus the
+ * deleted toggle), so every contributor is always offered.
+ */
+export async function getDealPhotoUploaders(
+  tenantDb: TenantDb,
+  dealId: string,
+  options: { includeDeleted?: boolean } = {},
+): Promise<Array<{ id: string; name: string; avatarUrl: string | null }>> {
+  const conditions = await buildDealPhotoTimelineConditions(tenantDb, dealId, {
+    includeDeleted: options.includeDeleted,
+  });
+
+  const rows = await tenantDb
+    .selectDistinct({
+      id: files.uploadedBy,
+      name: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
+      avatarUrl: users.avatarUrl,
+    })
+    .from(files)
+    .leftJoin(users, eq(users.id, files.uploadedBy))
+    .where(conditions);
+
+  return rows
+    .filter((row): row is { id: string; name: string; avatarUrl: string | null } => Boolean(row.id))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }

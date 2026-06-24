@@ -1,7 +1,6 @@
 import React, { useCallback, useRef, useState } from "react";
 import {
   FlatList,
-  Image,
   Modal,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -13,10 +12,12 @@ import {
   useWindowDimensions,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { Ionicons } from "@expo/vector-icons";
 import type { FieldPhoto } from "../api/types";
 import { categoryLabel } from "../projects/field-projects";
 import { theme } from "../theme/theme";
+import { ZoomablePhoto } from "./ZoomablePhoto";
 
 const ADDRESS_SOURCE_LABEL: Record<string, string> = {
   exif: "From photo",
@@ -52,6 +53,8 @@ export function PhotoViewerModal({
 }) {
   const { width, height } = useWindowDimensions();
   const [index, setIndex] = useState(initialIndex);
+  // When a photo is zoomed we disable the pager so a one-finger pan moves the image instead of paging.
+  const [zoomed, setZoomed] = useState(false);
   const listRef = useRef<FlatList<FieldPhoto>>(null);
 
   const onScrollEnd = useCallback(
@@ -83,6 +86,7 @@ export function PhotoViewerModal({
           the Close button / counter land under the Dynamic Island and the detail panel runs under
           the home indicator. (Matches the CameraCapture / ReviewTray pattern.) */}
       <SafeAreaProvider>
+      <GestureHandlerRootView style={styles.backdrop}>
       <View style={styles.backdrop}>
         <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
           <View style={styles.topBar}>
@@ -101,19 +105,23 @@ export function PhotoViewerModal({
               keyExtractor={(p) => p.id}
               horizontal
               pagingEnabled
+              scrollEnabled={!zoomed}
               showsHorizontalScrollIndicator={false}
               initialScrollIndex={initialIndex}
               getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
               onMomentumScrollEnd={onScrollEnd}
-              renderItem={({ item }) => (
-                <View style={{ width, height: height * 0.58, alignItems: "center", justifyContent: "center" }}>
-                  {item.imageUrl ? (
-                    <Image source={{ uri: item.imageUrl }} style={{ width, height: "100%" }} resizeMode="contain" />
-                  ) : (
-                    <Text style={styles.noImage}>Image unavailable</Text>
-                  )}
-                </View>
-              )}
+              renderItem={({ item }) => {
+                const uri = item.fullImageUrl ?? item.imageUrl;
+                return (
+                  <View style={{ width, height: height * 0.58, alignItems: "center", justifyContent: "center" }}>
+                    {uri ? (
+                      <ZoomablePhoto uri={uri} width={width} height={height * 0.58} onZoomChange={setZoomed} />
+                    ) : (
+                      <Text style={styles.noImage}>Image unavailable</Text>
+                    )}
+                  </View>
+                );
+              }}
             />
             {safeIndex > 0 ? (
               <Pressable
@@ -162,6 +170,7 @@ export function PhotoViewerModal({
           ) : null}
         </SafeAreaView>
       </View>
+      </GestureHandlerRootView>
       </SafeAreaProvider>
     </Modal>
   );

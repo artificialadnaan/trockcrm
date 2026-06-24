@@ -73,6 +73,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
     loadMorePhotos,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
+    refreshPhotoSignedUrl,
     patchPhoto,
     savePhotoAddress,
     deletePhoto,
@@ -184,6 +185,7 @@ export function DealFilePhotosSubview({ dealId }: { dealId: string }) {
                 photo={photo}
                 imageUrl={getPhotoImageUrl(photo)}
                 loadImageUrl={() => void ensurePhotoImageUrl(photo)}
+                onImageError={() => void refreshPhotoSignedUrl(photo)}
                 onOpen={() => setSelectedId(photo.id)}
                 onDownload={() => downloadPhoto(photo.id)}
                 onDelete={() => deletePhoto(photo.id)}
@@ -225,6 +227,7 @@ function PhotoFileRow({
   photo,
   imageUrl,
   loadImageUrl,
+  onImageError,
   onOpen,
   onDownload,
   onDelete,
@@ -233,6 +236,7 @@ function PhotoFileRow({
   photo: DealPhotoRecord;
   imageUrl: string;
   loadImageUrl: () => void;
+  onImageError?: () => void;
   onOpen: () => void;
   onDownload: () => void;
   onDelete: () => void;
@@ -254,7 +258,7 @@ function PhotoFileRow({
     <div ref={rowRef} className={`grid gap-3 px-3 py-3 transition hover:bg-accent/50 lg:grid-cols-[64px_minmax(180px,1.4fr)_120px_minmax(150px,1fr)_minmax(180px,1fr)_135px_135px_90px_92px] lg:items-center ${photo.deletedAt ? "opacity-55" : ""}`}>
       <button type="button" aria-label={`Open photo ${photo.displayName}`} className="h-12 w-12 overflow-hidden rounded border bg-muted" onClick={onOpen}>
         {imageUrl ? (
-          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" />
+          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" onError={() => onImageError?.()} />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
             {isImage ? "Photo" : <FileText className="h-4 w-4" />}

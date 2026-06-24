@@ -38,11 +38,13 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
     loading,
     error,
     pagination,
+    uploaderFacets,
     hasMorePhotos,
     goToPage,
     retry,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
+    refreshPhotoSignedUrl,
     patchPhoto,
     savePhotoAddress,
     deletePhoto,
@@ -92,9 +94,16 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
   }, [availableSuggestedTags, photos]);
   const uploaders = useMemo(() => {
     const map = new Map<string, { id: string; name: string; avatarUrl: string | null }>();
-    photos.forEach((photo) => map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl }));
+    // Deal-wide facet first (stable across pages), then any uploader on the current page as a fallback
+    // for the brief moment before the facet loads.
+    uploaderFacets.forEach((uploader) => map.set(uploader.id, uploader));
+    photos.forEach((photo) => {
+      if (!map.has(photo.uploadedBy)) {
+        map.set(photo.uploadedBy, { id: photo.uploadedBy, name: photo.uploaderName, avatarUrl: photo.uploaderAvatarUrl });
+      }
+    });
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [photos]);
+  }, [uploaderFacets, photos]);
   const groups = useMemo(() => groupDealPhotos(photos, filters), [photos, filters]);
   const flatPhotos = groups.flatMap((group) => group.photos);
 
@@ -180,6 +189,7 @@ export function DealPhotosTab({ dealId, onCountChange }: { dealId: string; onCou
                 photo={photo}
                 imageUrl={getPhotoImageUrl(photo)}
                 loadImageUrl={() => void ensurePhotoImageUrl(photo)}
+                onImageError={() => void refreshPhotoSignedUrl(photo)}
                 onOpen={() => setSelectedId(photo.id)}
                 onRestore={() => restorePhoto(photo.id)}
               />

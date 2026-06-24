@@ -69,7 +69,10 @@ export type FieldPhoto = {
   geocodedAt: string | null;
   procoreSyncStatus: "pending" | "synced" | "failed" | "skipped" | null;
   deletedAt: string | null;
+  /** Thumbnail URL for the grid. */
   imageUrl: string | null;
+  /** High-res URL for the zoomable full-screen viewer (may equal imageUrl for R2 originals). */
+  fullImageUrl?: string | null;
 };
 
 export type PhotoGrouping = "date" | "category" | "uploader" | "none";

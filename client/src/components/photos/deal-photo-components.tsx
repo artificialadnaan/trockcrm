@@ -308,11 +308,17 @@ export function useDealPhotosData({
     total: 0,
     totalPages: 0,
   });
+  // Deal-wide uploader facet from the server, so the filter dropdown lists every contributor regardless
+  // of which numbered page is shown (deriving it from the current page would drop uploaders off-page).
+  const [uploaderFacets, setUploaderFacets] = useState<Array<{ id: string; name: string; avatarUrl: string | null }>>([]);
   const [downloadUrls, setDownloadUrls] = useState<Record<string, string>>({});
   const previewRequests = React.useRef(new Map<string, Promise<string>>());
   const requestId = React.useRef(0);
   // The page the user last asked for — so the error-state Retry re-fetches THAT page, not page 1.
   const requestedPage = React.useRef(1);
+  // The page range currently displayed. Numbered pages replace → a single page [p, p]; the load-more
+  // subview accumulates → [1, lastLoaded]. A mutation refresh reloads exactly this range, clamped.
+  const loadedRange = React.useRef({ first: 1, last: 1 });
 
   const fetchPhotosPage = useCallback(async (page: number, options: { append?: boolean } = {}) => {
     const append = options.append ?? false;
@@ -331,9 +337,13 @@ export function useDealPhotosData({
       const params = new URLSearchParams({ page: String(page), limit: String(DEAL_PHOTO_PAGE_SIZE) });
       const filterParams = buildPhotoFilterSearchParams(filters);
       filterParams.forEach((value, key) => params.set(key, value));
-      const data = await api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(`/files/deal/${dealId}/photos?${params}`);
+      const data = await api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number }; facets?: { uploaders: Array<{ id: string; name: string; avatarUrl: string | null }> } }>(`/files/deal/${dealId}/photos?${params}`);
       if (requestId.current !== currentRequestId) return;
       setPagination(data.pagination);
+      if (data.facets?.uploaders) setUploaderFacets(data.facets.uploaders);
+      loadedRange.current = append
+        ? { first: Math.min(loadedRange.current.first, page), last: Math.max(loadedRange.current.last, page) }
+        : { first: page, last: page };
       setPhotos((current) => {
         if (!append) return data.photos;
         const merged = new Map(current.map((photo) => [photo.id, photo]));
@@ -375,12 +385,50 @@ export function useDealPhotosData({
     await fetchPhotosPage(target);
   }, [fetchPhotosPage, loading, pagination.page, pagination.totalPages]);
 
-  // Numbered pages: after a mutation (delete/restore) reload ONLY the current page, replacing it. Refetching
-  // pages 1..N and merging (the old load-more behavior) would re-accumulate earlier pages and desync the
-  // paginator + the page's filter/group counts.
+  // Reload exactly the currently-displayed page range after a mutation (delete/restore): one page for the
+  // numbered tab, the accumulated [1..n] span for the load-more subview. If a delete shrank the set so the
+  // range overshoots totalPages (e.g. removing the only photo on page 2), clamp/back up to the last valid
+  // page instead of replacing with an empty over-shot page.
   const refreshLoadedPhotos = useCallback(async () => {
-    await fetchPhotosPage(requestedPage.current);
-  }, [fetchPhotosPage]);
+    const currentRequestId = requestId.current + 1;
+    requestId.current = currentRequestId;
+    setLoading(true);
+    setError(null);
+    setLoadMoreError(null);
+    const filterParams = buildPhotoFilterSearchParams(filters);
+    const fetchPage = (p: number) => {
+      const params = new URLSearchParams({ page: String(p), limit: String(DEAL_PHOTO_PAGE_SIZE) });
+      filterParams.forEach((value, key) => params.set(key, value));
+      return api<{ photos: DealPhotoRecord[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(
+        `/files/deal/${dealId}/photos?${params}`,
+      );
+    };
+    const fetchRange = (lo: number, hi: number) => Promise.all(Array.from({ length: hi - lo + 1 }, (_, i) => fetchPage(lo + i)));
+    try {
+      let { first, last } = loadedRange.current;
+      let pages = await fetchRange(first, last);
+      if (requestId.current !== currentRequestId) return;
+      const totalPages = Math.max(1, pages[0]?.pagination.totalPages ?? 1);
+      if (last > totalPages) {
+        last = totalPages;
+        first = Math.min(first, totalPages); // numbered (first===last) jumps to the last valid page
+        pages = await fetchRange(first, last);
+        if (requestId.current !== currentRequestId) return;
+      }
+      loadedRange.current = { first, last };
+      const merged = new Map<string, DealPhotoRecord>();
+      pages.forEach((pageResult) => pageResult.photos.forEach((photo) => merged.set(photo.id, photo)));
+      const latest = pages[pages.length - 1]!.pagination;
+      setPhotos(Array.from(merged.values()));
+      setPagination(latest);
+      requestedPage.current = latest.page;
+      onCountChange?.(latest.total);
+    } catch (err) {
+      if (requestId.current === currentRequestId) setError(err instanceof Error ? err.message : "Failed to load photos");
+    } finally {
+      if (requestId.current === currentRequestId) setLoading(false);
+    }
+  }, [dealId, filters, onCountChange]);
 
   // Retry the page the user last requested (the failed target), not page 1.
   const retry = useCallback(async () => {
@@ -416,6 +464,25 @@ export function useDealPhotosData({
     return request;
   }, [downloadUrls]);
 
+  // Force a FRESH signed URL — used when an <img> errors (e.g. a batched R2 URL expired after a long-open
+  // gallery). Always fetches (bypasses the batched-URL short-circuit), deduped per photo. The new URL is
+  // stored in downloadUrls, and getImmediatePhoto*Url prefers a present signed URL over the stale batched one.
+  const refreshPhotoSignedUrl = useCallback(async (photo: DealPhotoRecord) => {
+    if (!isPhotoImagePreviewable(photo)) return "";
+    const pending = previewRequests.current.get(photo.id);
+    if (pending) return pending;
+    const request = api<{ url: string }>(`/files/${photo.id}/download?preview=1`)
+      .then((data) => {
+        setDownloadUrls((current) => ({ ...current, [photo.id]: data.url }));
+        return data.url;
+      })
+      .finally(() => {
+        previewRequests.current.delete(photo.id);
+      });
+    previewRequests.current.set(photo.id, request);
+    return request;
+  }, []);
+
   async function patchPhoto(photoId: string, body: Record<string, unknown>) {
     const { file } = await api<{ file: DealPhotoRecord }>(`/files/${photoId}`, { method: "PATCH", json: body });
     setPhotos((current) => current.map((photo) => (photo.id === photoId ? { ...photo, ...file } : photo)));
@@ -448,6 +515,7 @@ export function useDealPhotosData({
     error,
     loadMoreError,
     pagination,
+    uploaderFacets,
     hasMorePhotos: pagination.page < pagination.totalPages,
     fetchPhotos,
     loadMorePhotos,
@@ -455,6 +523,7 @@ export function useDealPhotosData({
     retry,
     getPhotoImageUrl,
     ensurePhotoImageUrl,
+    refreshPhotoSignedUrl,
     patchPhoto,
     savePhotoAddress,
     deletePhoto,
@@ -942,12 +1011,15 @@ export function PhotoGridTile({
   photo,
   imageUrl,
   loadImageUrl,
+  onImageError,
   onOpen,
   onRestore,
 }: {
   photo: DealPhotoRecord;
   imageUrl: string;
   loadImageUrl: () => void;
+  /** Fired when the <img> fails (e.g. a batched signed URL expired) so the parent can fetch a fresh one. */
+  onImageError?: () => void;
   onOpen: () => void;
   onRestore: () => void;
 }) {
@@ -969,7 +1041,7 @@ export function PhotoGridTile({
         onClick={onOpen}
       >
         {imageUrl ? (
-          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" />
+          <img src={imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" onError={() => onImageError?.()} />
         ) : (
           <div className="flex h-full items-center justify-center">
             {isImage ? <Camera className="h-7 w-7 text-muted-foreground" /> : <FileText className="h-7 w-7 text-muted-foreground" />}

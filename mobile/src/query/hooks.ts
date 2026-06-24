@@ -38,12 +38,34 @@ export function useToggleStar() {
   });
 }
 
-/** All photos for a project; filtering/grouping happens client-side. */
+// Server caps a photo page at 200; on a 400+ photo deal one request can't return everything, so we page
+// through and concatenate. Bounded concurrency keeps it fast without flooding the rate limiter.
+const PHOTOS_PER_PAGE = 200;
+const PHOTOS_PAGE_CONCURRENCY = 3;
+// Hard ceiling on pages fetched, so a bad totalPages can never spin forever (200 * 50 = 10k photos).
+const PHOTOS_MAX_PAGES = 50;
+
+/** ALL photos for a project (paged through server-side, concatenated); filtering/grouping is client-side. */
 export function useProjectPhotos(dealId: string | undefined) {
   const { fetcher, user } = useAuth();
   return useQuery({
     queryKey: qk.projectPhotos(user?.id ?? "anon", dealId ?? ""),
-    queryFn: () => api.getProjectPhotos(fetcher, dealId!),
+    queryFn: async () => {
+      const first = await api.getProjectPhotos(fetcher, dealId!, { page: 1, perPage: PHOTOS_PER_PAGE });
+      const totalPages = Math.min(first.pagination?.totalPages ?? 1, PHOTOS_MAX_PAGES);
+      const photos = [...first.photos];
+
+      for (let page = 2; page <= totalPages; page += PHOTOS_PAGE_CONCURRENCY) {
+        const batch = [];
+        for (let p = page; p < page + PHOTOS_PAGE_CONCURRENCY && p <= totalPages; p += 1) {
+          batch.push(api.getProjectPhotos(fetcher, dealId!, { page: p, perPage: PHOTOS_PER_PAGE }));
+        }
+        const results = await Promise.all(batch);
+        for (const result of results) photos.push(...result.photos);
+      }
+
+      return { photos, pagination: first.pagination };
+    },
     enabled: !!user && !!dealId,
   });
 }

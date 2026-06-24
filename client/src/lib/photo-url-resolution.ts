@@ -71,10 +71,12 @@ export function getImmediatePhotoPreviewUrl(
   signedUrl: string | null | undefined = null
 ): string | null {
   if (!isPhotoImagePreviewable(photo)) return null;
-  // Server-resolved thumbnail wins — no per-photo signed-URL round-trip.
+  // A freshly-fetched signed URL wins — it's only set after the batched one failed/expired (refresh path).
+  if (signedUrl) return signedUrl;
+  // Otherwise the server-resolved thumbnail — no per-photo round-trip.
   if (photo.thumbnailUrl) return photo.thumbnailUrl;
-  if (hasR2PhotoSource(photo)) return signedUrl ?? null;
-  return photo.externalThumbnailUrl ?? photo.externalUrl ?? signedUrl ?? null;
+  if (hasR2PhotoSource(photo)) return null;
+  return photo.externalThumbnailUrl ?? photo.externalUrl ?? null;
 }
 
 export function getImmediatePhotoOpenUrl(
@@ -82,10 +84,11 @@ export function getImmediatePhotoOpenUrl(
   signedUrl: string | null | undefined = null
 ): string | null {
   if (!isPhotoImagePreviewable(photo)) return null;
-  // Server-resolved full-res wins (high-res for the zoomable viewer) — no per-photo round-trip.
+  if (signedUrl) return signedUrl;
+  // Server-resolved full-res (high-res for the zoomable viewer) — no per-photo round-trip.
   if (photo.fullUrl) return photo.fullUrl;
-  if (hasR2PhotoSource(photo)) return signedUrl ?? null;
-  return photo.externalUrl ?? photo.externalThumbnailUrl ?? signedUrl ?? null;
+  if (hasR2PhotoSource(photo)) return null;
+  return photo.externalUrl ?? photo.externalThumbnailUrl ?? null;
 }
 
 export function shouldFetchSignedPhotoUrl(
