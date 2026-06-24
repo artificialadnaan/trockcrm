@@ -60,8 +60,12 @@ export function useProjectPhotos(dealId: string | undefined) {
         for (let p = page; p < page + PHOTOS_PAGE_CONCURRENCY && p <= totalPages; p += 1) {
           batch.push(api.getProjectPhotos(fetcher, dealId!, { page: p, perPage: PHOTOS_PER_PAGE }));
         }
-        const results = await Promise.all(batch);
-        for (const result of results) photos.push(...result.photos);
+        // allSettled, not all: a transient 429/5xx on one later page must not blank the whole gallery —
+        // we keep every page that did load (page 1 is already in `photos`).
+        const results = await Promise.allSettled(batch);
+        for (const result of results) {
+          if (result.status === "fulfilled") photos.push(...result.value.photos);
+        }
       }
 
       return { photos, pagination: first.pagination };

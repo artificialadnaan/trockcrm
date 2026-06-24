@@ -403,7 +403,19 @@ export function useDealPhotosData({
         `/files/deal/${dealId}/photos?${params}`,
       );
     };
-    const fetchRange = (lo: number, hi: number) => Promise.all(Array.from({ length: hi - lo + 1 }, (_, i) => fetchPage(lo + i)));
+    // Reload [lo..hi] in bounded chunks rather than one big Promise.all — the Files subview can have many
+    // pages loaded, and a delete/restore would otherwise burst dozens of simultaneous requests and trip the
+    // very rate limiter this PR exists to relieve.
+    const REFRESH_CHUNK = 4;
+    const fetchRange = async (lo: number, hi: number) => {
+      const results: Array<Awaited<ReturnType<typeof fetchPage>>> = [];
+      for (let start = lo; start <= hi; start += REFRESH_CHUNK) {
+        const end = Math.min(start + REFRESH_CHUNK - 1, hi);
+        const chunk = await Promise.all(Array.from({ length: end - start + 1 }, (_, i) => fetchPage(start + i)));
+        results.push(...chunk);
+      }
+      return results;
+    };
     try {
       let { first, last } = loadedRange.current;
       let pages = await fetchRange(first, last);
