@@ -202,6 +202,51 @@ describe("Contact Service", () => {
       expect(result.contact.companyId).toBe("company-1");
     });
 
+    it("assigns ownerId to the creating user (owner = the rep who created it)", async () => {
+      const insertedRows: Array<Record<string, unknown>> = [];
+      const tenantDb = {
+        insert() {
+          return {
+            values(row: Record<string, unknown>) {
+              insertedRows.push(row);
+              return { returning: async () => [{ id: "contact-1", ...row }] };
+            },
+          };
+        },
+      };
+
+      const result = await createContact(
+        tenantDb as never,
+        { firstName: "Ada", lastName: "Lovelace", category: "client", ownerUserId: "rep-1" },
+        true
+      );
+
+      expect(insertedRows[0]).toMatchObject({ ownerId: "rep-1" });
+      expect(result.contact.ownerId).toBe("rep-1");
+    });
+
+    it("leaves ownerId null when no creator is supplied (back-compat for owner-less callers)", async () => {
+      const insertedRows: Array<Record<string, unknown>> = [];
+      const tenantDb = {
+        insert() {
+          return {
+            values(row: Record<string, unknown>) {
+              insertedRows.push(row);
+              return { returning: async () => [{ id: "contact-1", ...row }] };
+            },
+          };
+        },
+      };
+
+      await createContact(
+        tenantDb as never,
+        { firstName: "Ada", lastName: "Lovelace", category: "client" },
+        true
+      );
+
+      expect(insertedRows[0].ownerId).toBeNull();
+    });
+
     it("creates a contact with a valid email and phone", async () => {
       const insertedRows: Array<Record<string, unknown>> = [];
       const tenantDb = {

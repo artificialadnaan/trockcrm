@@ -366,6 +366,9 @@ export async function createCompany(
     phone?: string;
     website?: string;
     notes?: string;
+    // The user creating the company becomes its account owner ("whoever creates it owns it").
+    // Optional + null-safe so non-interactive callers (imports/sync) can omit it and stay unowned.
+    ownerUserId?: string | null;
   },
   skipDedupCheck = false
 ): Promise<{ company: typeof companies.$inferSelect | null; dedupResult?: CompanyDedupResult }> {
@@ -398,6 +401,7 @@ export async function createCompany(
       phone: data.phone,
       website: data.website,
       notes: data.notes,
+      ownerId: data.ownerUserId ?? null,
     })
     .returning();
   return { company: rows[0] };

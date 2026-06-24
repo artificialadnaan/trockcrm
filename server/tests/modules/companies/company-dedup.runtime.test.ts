@@ -156,7 +156,7 @@ describe("checkCompanyDuplicates — name-alone match model (mirrors #538)", () 
 describe("createCompany — warn, do NOT hard-block", () => {
   beforeEach(async () => {
     // Remove any rows created by the create-path tests so counts are stable.
-    await pg.exec(`DELETE FROM ${T}.companies WHERE name IN ('Lone Star Exteriors', 'Acme Roofing');`);
+    await pg.exec(`DELETE FROM ${T}.companies WHERE name IN ('Lone Star Exteriors', 'Acme Roofing', 'Owner Test Co');`);
     await pg.exec(`
       INSERT INTO ${T}.companies (id, name, slug, category, address, city, state, zip) VALUES
         ('${ACME}', 'Acme Roofing', 'acme-roofing', 'client', '100 Oak Street', 'Dallas', 'TX', '75201')
@@ -189,5 +189,22 @@ describe("createCompany — warn, do NOT hard-block", () => {
     expect(result.company!.name).toBe("Lone Star Exteriors");
     expect(result.dedupResult).toBeUndefined();
     expect(await activeCompanyCount()).toBe(before + 1);
+  });
+
+  it("assigns ownerId to the creating user (owner = the rep who created it)", async () => {
+    const REP = "00000000-0000-0000-0000-0000000000a1";
+    const result = await createCompany(
+      tdb,
+      { name: "Owner Test Co", category: "client", ownerUserId: REP },
+      true
+    );
+    expect(result.company).toBeTruthy();
+    expect(result.company!.ownerId).toBe(REP);
+  });
+
+  it("leaves ownerId null when no creator is supplied (back-compat for owner-less callers)", async () => {
+    const result = await createCompany(tdb, { name: "Owner Test Co", category: "client" }, true);
+    expect(result.company).toBeTruthy();
+    expect(result.company!.ownerId).toBeNull();
   });
 });
