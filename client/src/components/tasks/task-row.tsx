@@ -144,16 +144,16 @@ export function TaskRow({ task, onUpdate }: TaskRowProps) {
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 min-w-0">
-          <p className={`text-sm font-medium truncate ${isCompleted ? "line-through" : ""}`}>
+          <p className={`text-sm font-medium truncate ${isCompleted ? "line-through" : ""}`} title={task.title}>
             {task.title}
           </p>
           <Badge variant="outline" className={`text-[10px] uppercase tracking-wide ${statusColors[task.status] ?? "bg-gray-100 text-gray-700"}`}>
             {getTaskStatusLabel(task.status)}
           </Badge>
         </div>
-        <p className="text-xs text-muted-foreground truncate">{assigneeLabel}</p>
+        <p className="text-xs text-muted-foreground truncate" title={assigneeLabel}>{assigneeLabel}</p>
         {lifecycleSummary && (
-          <p className="text-xs text-muted-foreground truncate">{lifecycleSummary}</p>
+          <p className="text-xs text-muted-foreground truncate" title={lifecycleSummary}>{lifecycleSummary}</p>
         )}
         <p className={`text-xs ${task.isOverdue ? "text-red-600 font-medium" : "text-muted-foreground"}`}>
           {timelineLabel}

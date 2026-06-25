@@ -91,7 +91,7 @@ export function KanbanDealCard({
           </p>
         ) : null}
         <div className="flex items-start justify-between gap-2">
-          <p className="truncate text-sm font-medium text-gray-900">{deal.name}</p>
+          <p className="truncate text-sm font-medium text-gray-900" title={deal.name}>{deal.name}</p>
           <DealValue
             deal={dealForValue}
             value={value}
@@ -104,7 +104,7 @@ export function KanbanDealCard({
             auto-held far-out deal can't show both badges at once. */}
         <AtRiskBadge atRisk={effectivelyHeld ? null : deal.atRisk} compact className="mt-1" />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact className="mt-1" />
-        <p className="mt-0.5 truncate text-xs text-gray-500">{metaParts.join(" · ")}</p>
+        <p className="mt-0.5 truncate text-xs text-gray-500" title={metaParts.join(" · ")}>{metaParts.join(" · ")}</p>
       </div>
     </div>
   );

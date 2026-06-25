@@ -65,7 +65,7 @@ export function DealCard({ deal, isDragging }: DealCardProps) {
               className="text-sm font-semibold"
             />
           </div>
-          <p className="text-sm font-medium truncate">{deal.name}</p>
+          <p className="text-sm font-medium truncate" title={deal.name}>{deal.name}</p>
           <AtRiskBadge atRisk={deal.atRisk} compact className="mt-1" />
           <div className="flex items-center gap-2 mt-1.5 text-[11px] text-muted-foreground">
             <span className="flex items-center gap-0.5">
