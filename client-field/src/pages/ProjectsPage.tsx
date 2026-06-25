@@ -78,7 +78,6 @@ export function ProjectsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
 
   async function loadProjects({ quiet = false } = {}) {
@@ -129,30 +128,31 @@ export function ProjectsPage() {
 
   return (
     <section className="space-y-4">
-      <header className="flex items-center justify-between gap-3">
+      <header>
         <h1 className="text-3xl font-black">Projects</h1>
-        <button
-          type="button"
-          className="flex min-h-11 min-w-11 items-center justify-center rounded-full bg-muted text-foreground"
-          aria-label={searchOpen ? "Close search" : "Search projects"}
-          onClick={() => {
-            setSearchOpen((open) => !open);
-            if (searchOpen) setSearch("");
-          }}
-        >
-          {searchOpen ? <X className="h-5 w-5" /> : <Search className="h-5 w-5" />}
-        </button>
       </header>
 
-      {searchOpen ? (
+      {/* Always-visible search at the top — a prominent field, not a tap-to-open icon. */}
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground" />
         <TextInput
-          autoFocus
           value={search}
           onInput={(event) => setSearch((event.target as HTMLInputElement).value)}
           placeholder="Search name, deal #, or address"
           aria-label="Search projects"
+          className="min-h-14 pl-12 pr-12 text-lg"
         />
-      ) : null}
+        {search ? (
+          <button
+            type="button"
+            className="absolute right-3 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground hover:bg-muted"
+            aria-label="Clear search"
+            onClick={() => setSearch("")}
+          >
+            <X className="h-5 w-5" />
+          </button>
+        ) : null}
+      </div>
 
       <Button variant="ghost" className="w-full border border-border" onClick={() => void loadProjects({ quiet: true })} disabled={refreshing}>
         {refreshing ? "Refreshing..." : "Pull to refresh"}

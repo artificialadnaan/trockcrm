@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Camera, ChevronLeft, ChevronRight, Download, Eye, FileText, Filter, Star, X } from "lucide-react";
+import { ArrowLeft, Camera, CheckCircle2, ChevronLeft, ChevronRight, Download, Eye, FileText, Filter, Star, X } from "lucide-react";
 import { api, getActiveOfficeId } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { triggerPhotoDownloads, type PhotoDownload } from "../lib/download";
 import { BrandLogo } from "../components/BrandLogo";
 import { Button, TextInput } from "../components/ui";
 import { ReportBuilder } from "../components/ReportBuilder";
@@ -20,6 +21,9 @@ import {
 } from "../lib/field-projects";
 
 const GROUP_SEQUENCE: PhotoGrouping[] = ["date", "category", "uploader", "none"];
+// The download-urls endpoint caps each request at 200 ids (shared with /share). Chunk bulk downloads so a
+// "Select all" on a large project succeeds instead of 400-ing.
+const DOWNLOAD_BATCH_SIZE = 200;
 
 // Photos are grouped by date across the whole project, so we load EVERY page (not just the first 200) —
 // the server batches each photo's display URLs, so a 400-photo deal is ~2 fast requests. Page 1 reveals
@@ -73,6 +77,52 @@ export function ProjectDetailPage() {
   // True when one or more photo pages failed to load — the gallery shows what loaded, but report/share are
   // blocked so we never generate from an incomplete set.
   const [photosPartial, setPhotosPartial] = useState(false);
+  // Multi-select mode for bulk download: tapping a photo toggles selection instead of opening the viewer.
+  const [selecting, setSelecting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [downloadingIds, setDownloadingIds] = useState<Set<string>>(() => new Set());
+
+  // Fetch presigned high-res download URLs for the given photos and save them to the computer. Used by the
+  // per-photo quick-download button (one id) and the bulk "Download (N)" action. The endpoint caps each
+  // request at 200 ids (shared with /share), so a "Select all" on a 200+ photo project is chunked here.
+  async function downloadPhotos(ids: string[]) {
+    const unique = Array.from(new Set(ids));
+    if (unique.length === 0 || !id) return;
+    setDownloadingIds((current) => new Set([...current, ...unique]));
+    try {
+      const all: PhotoDownload[] = [];
+      for (let i = 0; i < unique.length; i += DOWNLOAD_BATCH_SIZE) {
+        const batch = unique.slice(i, i + DOWNLOAD_BATCH_SIZE);
+        const { downloads } = await api<{ downloads: PhotoDownload[] }>(`/field/projects/${id}/photos/download-urls`, {
+          json: { photoIds: batch },
+        });
+        all.push(...downloads);
+      }
+      triggerPhotoDownloads(all);
+    } catch {
+      setError("Couldn't prepare the download. Please try again.");
+    } finally {
+      setDownloadingIds((current) => {
+        const next = new Set(current);
+        unique.forEach((photoId) => next.delete(photoId));
+        return next;
+      });
+    }
+  }
+
+  function toggleSelected(photoId: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(photoId)) next.delete(photoId);
+      else next.add(photoId);
+      return next;
+    });
+  }
+
+  function exitSelection() {
+    setSelecting(false);
+    setSelectedIds(new Set());
+  }
 
   async function loadDetail() {
     setLoading(true);
@@ -303,7 +353,44 @@ export function ProjectDetailPage() {
           <Filter className="h-5 w-5" />
           {(from || to || uploaderIds.length > 0) ? <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-primary" /> : null}
         </button>
+        {filteredPhotos.length > 0 ? (
+          <button
+            type="button"
+            className={`shrink-0 rounded-full px-3 py-2 text-sm font-bold ${selecting ? "bg-primary text-white" : "bg-muted"}`}
+            onClick={() => (selecting ? exitSelection() : setSelecting(true))}
+          >
+            {selecting ? "Cancel" : "Select"}
+          </button>
+        ) : null}
       </div>
+
+      {/* Bulk-download action bar — visible in selection mode. */}
+      {selecting ? (
+        <div className="sticky top-0 z-10 flex items-center justify-between gap-2 rounded-md border border-border bg-white px-3 py-2 shadow-sm">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold">{selectedIds.size} selected</span>
+            <button
+              type="button"
+              className="text-sm font-semibold text-primary"
+              onClick={() => setSelectedIds(new Set(filteredPhotos.map((photo) => photo.id)))}
+            >
+              Select all
+            </button>
+            {selectedIds.size > 0 ? (
+              <button type="button" className="text-sm font-semibold text-muted-foreground" onClick={() => setSelectedIds(new Set())}>
+                Clear
+              </button>
+            ) : null}
+          </div>
+          <Button
+            disabled={selectedIds.size === 0 || downloadingIds.size > 0}
+            onClick={() => void downloadPhotos(Array.from(selectedIds))}
+          >
+            <Download className="mr-2 h-4 w-4" aria-hidden="true" />
+            {downloadingIds.size > 0 ? "Preparing…" : `Download${selectedIds.size > 0 ? ` (${selectedIds.size})` : ""}`}
+          </Button>
+        </div>
+      ) : null}
 
       {filteredPhotos.length === 0 ? (
         <div className="rounded-md bg-muted p-5 text-center">
@@ -321,23 +408,49 @@ export function ProjectDetailPage() {
             <section key={group.label}>
               <h2 className="mb-2 text-sm font-black text-muted-foreground">{group.label}</h2>
               <div className="grid grid-cols-3 gap-2 min-[480px]:grid-cols-4">
-                {group.photos.map((photo) => (
-                  <button key={photo.id} type="button" className="text-left" onClick={() => setSelectedPhotoId(photo.id)}>
-                    <span className="relative block aspect-square overflow-hidden rounded-md bg-muted">
-                      {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" /> : null}
-                      {photo.photoCategory ? <span className="absolute bottom-1 right-1 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-bold text-white">{categoryLabel(photo.photoCategory)}</span> : null}
-                    </span>
-                    <span className="mt-1 block truncate text-xs font-semibold text-muted-foreground">{photo.description || photo.uploaderName}</span>
-                    {(photo.tags?.length ?? 0) > 0 ? (
-                      <span className="mt-1 flex flex-wrap gap-1">
-                        {photo.tags!.slice(0, 2).map((tag) => (
-                          <span key={tag} className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">#{tag}</span>
-                        ))}
-                        {photo.tags!.length > 2 ? <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-bold text-muted-foreground">+{photo.tags!.length - 2}</span> : null}
+                {group.photos.map((photo) => {
+                  const isSelected = selectedIds.has(photo.id);
+                  return (
+                    <div key={photo.id} className="text-left">
+                      <span className="relative block aspect-square overflow-hidden rounded-md bg-muted">
+                        <button
+                          type="button"
+                          className="block h-full w-full"
+                          aria-label={selecting ? `${isSelected ? "Deselect" : "Select"} ${photo.displayName}` : `Open ${photo.displayName}`}
+                          onClick={() => (selecting ? toggleSelected(photo.id) : setSelectedPhotoId(photo.id))}
+                        >
+                          {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} loading="lazy" className="h-full w-full object-cover" /> : null}
+                        </button>
+                        {photo.photoCategory ? <span className="pointer-events-none absolute bottom-1 right-1 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-bold text-white">{categoryLabel(photo.photoCategory)}</span> : null}
+                        {/* Per-photo quick download — high-res original, straight to the computer. */}
+                        {!selecting ? (
+                          <button
+                            type="button"
+                            aria-label={`Download ${photo.displayName}`}
+                            className="absolute right-1 top-1 flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white transition hover:bg-black/80 disabled:opacity-60"
+                            disabled={downloadingIds.has(photo.id)}
+                            onClick={() => void downloadPhotos([photo.id])}
+                          >
+                            <Download className="h-4 w-4" />
+                          </button>
+                        ) : (
+                          <span className={`pointer-events-none absolute left-1 top-1 flex h-6 w-6 items-center justify-center rounded-full border-2 ${isSelected ? "border-primary bg-primary text-white" : "border-white/90 bg-black/40 text-transparent"}`}>
+                            <CheckCircle2 className="h-4 w-4" />
+                          </span>
+                        )}
                       </span>
-                    ) : null}
-                  </button>
-                ))}
+                      <span className="mt-1 block truncate text-xs font-semibold text-muted-foreground">{photo.description || photo.uploaderName}</span>
+                      {(photo.tags?.length ?? 0) > 0 ? (
+                        <span className="mt-1 flex flex-wrap gap-1">
+                          {photo.tags!.slice(0, 2).map((tag) => (
+                            <span key={tag} className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">#{tag}</span>
+                          ))}
+                          {photo.tags!.length > 2 ? <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-bold text-muted-foreground">+{photo.tags!.length - 2}</span> : null}
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
             </section>
           ))}
@@ -380,6 +493,8 @@ export function ProjectDetailPage() {
         <FieldPhotoViewer
           photo={selectedPhoto}
           onClose={() => setSelectedPhotoId(null)}
+          onDownload={() => void downloadPhotos([selectedPhoto.id])}
+          downloading={downloadingIds.has(selectedPhoto.id)}
           onPrev={selectedIndex > 0 ? () => setSelectedPhotoId(filteredPhotos[selectedIndex - 1].id) : undefined}
           onNext={selectedIndex < filteredPhotos.length - 1 ? () => setSelectedPhotoId(filteredPhotos[selectedIndex + 1].id) : undefined}
         />
@@ -467,7 +582,7 @@ function FilterDrawer({
   );
 }
 
-function FieldPhotoViewer({ photo, onClose, onPrev, onNext }: { photo: FieldPhoto; onClose: () => void; onPrev?: () => void; onNext?: () => void }) {
+function FieldPhotoViewer({ photo, onClose, onDownload, downloading, onPrev, onNext }: { photo: FieldPhoto; onClose: () => void; onDownload: () => void; downloading: boolean; onPrev?: () => void; onNext?: () => void }) {
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [touchStart, setTouchStart] = useState<number | null>(null);
   // While the image is pinch-zoomed, the one-finger drag pans the photo — so suppress swipe-to-navigate.
@@ -493,6 +608,7 @@ function FieldPhotoViewer({ photo, onClose, onPrev, onNext }: { photo: FieldPhot
       }}
     >
       <button type="button" aria-label="Close photo viewer" className="absolute right-4 top-4 z-10 rounded-full bg-black/60 p-2" onClick={onClose}><X className="h-6 w-6" /></button>
+      <button type="button" aria-label={`Download ${photo.displayName}`} className="absolute right-16 top-4 z-10 rounded-full bg-black/60 p-2 disabled:opacity-60" disabled={downloading} onClick={onDownload}><Download className="h-6 w-6" /></button>
       {onPrev && !imageZoomed ? <button type="button" aria-label="Previous photo" className="absolute left-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onPrev}><ChevronLeft /></button> : null}
       {onNext && !imageZoomed ? <button type="button" aria-label="Next photo" className="absolute right-2 top-1/2 z-10 rounded-full bg-black/60 p-2" onClick={onNext}><ChevronRight /></button> : null}
       {/* A CONFIRMED single tap toggles details; pinch/double-tap/drag zoom + pan inside ZoomableImage (it

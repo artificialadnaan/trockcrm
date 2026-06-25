@@ -6,15 +6,19 @@ import { PHOTO_CATEGORIES } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { deleteObject, generateDownloadUrl, generateMockDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
 import {
+  buildFileDownloadUrlFromRecord,
   confirmUpload,
   discardPendingUpload,
+  getDealPhotoTimeline,
   getFileByClientUploadId,
   getFileDownloadUrl,
   getPendingUploadMetadata,
   requestUploadUrl,
 } from "../files/service.js";
 import { recordUploadedFileSideEffects, type UploadAuditContext } from "../files/upload-workflow.js";
-import { assertAccessibleFieldCaptureTarget, type FieldPhoto } from "./projects-service.js";
+import { logPhotoEvent } from "../files/audit-log-service.js";
+import { assertPhotosBelongToDeal } from "../public-photo-tokens/service.js";
+import { assertAccessibleFieldCaptureTarget, assertActiveFieldProject, type FieldPhoto } from "./projects-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -741,4 +745,74 @@ export async function assignPendingFieldPhotoTarget(
       deletedAt: assigned.deleted_at ?? null,
     }, imageUrl),
   };
+}
+
+// 1h is plenty for a click-to-download; the URL forces an attachment download (filename baked in).
+const FIELD_PHOTO_DOWNLOAD_TTL_SECONDS = 60 * 60;
+
+export type FieldPhotoDownload = { id: string; url: string; filename: string };
+
+/**
+ * Mint high-res DOWNLOAD urls for selected photos (browser saves the FULL-RES original, not the thumbnail).
+ *
+ * Security mirrors the public-share path exactly so it can't leak: (a) the deal must be a field-visible
+ * project, and (b) EVERY requested id must be an active photo on THIS deal — otherwise a caller could pass
+ * foreign ids and pull another project's originals. R2-backed photos (incl. CompanyCam, which we copy to
+ * R2) get a presigned `attachment`-disposition URL — self-authenticating so a plain <a download> works and
+ * the browser saves it with a real filename. Photos with no R2 copy fall back to their external URL.
+ */
+export async function buildFieldPhotoDownloadUrls(
+  tenantDb: TenantDb,
+  input: {
+    userId: string;
+    userRole: UserRole;
+    dealId: string;
+    photoIds: string[];
+    auditContext?: { ipAddress?: string | null; userAgent?: string | null };
+  },
+): Promise<FieldPhotoDownload[]> {
+  const access = { userId: input.userId, userRole: input.userRole };
+  await assertActiveFieldProject(tenantDb, access, input.dealId);
+
+  const photoIds = Array.from(new Set(input.photoIds.map(String).filter(Boolean)));
+  if (photoIds.length === 0) return [];
+  await assertPhotosBelongToDeal(tenantDb, input.dealId, photoIds);
+
+  // Same scope the validator uses — resolves r2Key/displayName/fileExtension/externalUrl in one batch.
+  const timeline = await getDealPhotoTimeline(tenantDb, input.dealId, 1, photoIds.length, {
+    photoIds,
+    includeDeleted: false,
+  });
+
+  const downloads = await Promise.all(
+    timeline.photos.map(async (photo): Promise<FieldPhotoDownload> => {
+      const filename = `${photo.displayName}${photo.fileExtension ?? ""}`;
+      if (photo.r2Key) {
+        const built = await buildFileDownloadUrlFromRecord(
+          { r2Key: photo.r2Key, displayName: photo.displayName, fileExtension: photo.fileExtension },
+          FIELD_PHOTO_DOWNLOAD_TTL_SECONDS,
+        );
+        return { id: photo.id, url: built.url, filename: built.filename };
+      }
+      // No R2 copy (rare) — hand back the external original; it won't force a filename but is still the
+      // full-res source.
+      return { id: photo.id, url: photo.externalUrl ?? photo.fullUrl ?? "", filename };
+    }),
+  );
+
+  // Audit each download, matching the authenticated /files/:id/download path so field saves still appear in
+  // a photo's history. Sequential — req.tenantDb is a single transaction-bound client. logPhotoEvent
+  // swallows its own write errors (same as the /files path), so this never fails the download.
+  for (const photo of timeline.photos) {
+    await logPhotoEvent(tenantDb, {
+      photoId: photo.id,
+      eventType: "downloaded",
+      userId: input.userId,
+      ipAddress: input.auditContext?.ipAddress ?? null,
+      userAgent: input.auditContext?.userAgent ?? null,
+      metadata: { purpose: "field_download" },
+    });
+  }
+
+  return downloads;
 }

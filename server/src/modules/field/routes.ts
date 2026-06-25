@@ -4,6 +4,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { toFieldUserResponse } from "../field-users/service.js";
 import {
+  buildFieldPhotoDownloadUrls,
   confirmFieldPhotoUpload,
   assignPendingFieldPhotoTarget,
   listPendingFieldPhotos,
@@ -321,6 +322,35 @@ fieldRoutes.post("/projects/:dealId/share", requireFieldContractor, async (req, 
       token: { id: created.token.id, expiresAt: created.token.expiresAt },
       photoCount: photoIds.length,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// High-res DOWNLOAD urls for selected photos (single or bulk). Same access + photo-belongs-to-deal gates
+// as /share, so foreign ids can't pull another project's originals. Returns self-authenticating presigned
+// attachment URLs the browser can save directly.
+fieldRoutes.post("/projects/:dealId/photos/download-urls", requireFieldContractor, async (req, res, next) => {
+  try {
+    const dealId = String(req.params.dealId);
+    assertValidUuid(dealId, "dealId");
+    const photoIds = parseSharePhotoIds(req.body?.photoIds);
+
+    const { value: downloads } = await withResolvedOffice(
+      "deal",
+      dealId,
+      (officeDb) =>
+        buildFieldPhotoDownloadUrls(officeDb, {
+          userId: req.fieldUser!.id,
+          userRole: req.fieldUser!.role,
+          dealId,
+          photoIds,
+          auditContext: requestAuditContext(req),
+        }),
+      "Project not found",
+    );
+
+    res.json({ downloads });
   } catch (err) {
     next(err);
   }
