@@ -90,15 +90,15 @@ export function ProjectDetailPage() {
     if (unique.length === 0 || !id) return;
     setDownloadingIds((current) => new Set([...current, ...unique]));
     try {
-      const all: PhotoDownload[] = [];
       for (let i = 0; i < unique.length; i += DOWNLOAD_BATCH_SIZE) {
         const batch = unique.slice(i, i + DOWNLOAD_BATCH_SIZE);
         const { downloads } = await api<{ downloads: PhotoDownload[] }>(`/field/projects/${id}/photos/download-urls`, {
           json: { photoIds: batch },
         });
-        all.push(...downloads);
+        // Trigger each batch's downloads immediately. The server already minted (and audited) these URLs, so
+        // saving them now means a LATER batch failing can't discard URLs already prepared for the user.
+        triggerPhotoDownloads(downloads);
       }
-      triggerPhotoDownloads(all);
     } catch {
       setError("Couldn't prepare the download. Please try again.");
     } finally {
@@ -191,6 +191,18 @@ export function ProjectDetailPage() {
     return LEGACY_PHOTO_CATEGORIES.filter((category) => present.has(category.value));
   }, [photos]);
   const groupedPhotos = useMemo(() => groupPhotos(filteredPhotos, grouping), [filteredPhotos, grouping]);
+
+  // Keep the selection in sync with what's visible: when filters change, drop any selected photos no longer
+  // in the filtered set, so a bulk download can't include photos the user can't currently see.
+  useEffect(() => {
+    setSelectedIds((current) => {
+      if (current.size === 0) return current;
+      const visible = new Set(filteredPhotos.map((photo) => photo.id));
+      const next = new Set([...current].filter((photoId) => visible.has(photoId)));
+      return next.size === current.size ? current : next;
+    });
+  }, [filteredPhotos]);
+
   const selectedIndex = selectedPhotoId ? filteredPhotos.findIndex((photo) => photo.id === selectedPhotoId) : -1;
   const selectedPhoto = selectedIndex >= 0 ? filteredPhotos[selectedIndex] : null;
 
