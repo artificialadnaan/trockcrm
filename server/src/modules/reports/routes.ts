@@ -1079,11 +1079,13 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
   if (regionName !== undefined && metric === "leads") {
     throw new AppError(400, "regionName is not valid for the leads metric");
   }
-  // rep × region is not a representable scope (the response header is one or the other); the region
-  // report drills by region only and the rep pack drills by rep only, so reject the combination rather
-  // than return a rep×region subset total under a region-only header.
-  if (regionName !== undefined && repId !== undefined) {
-    throw new AppError(400, "repId and regionName cannot be combined");
+  // rep × region: the region report's "top reps within region" won totals drill into a single rep WITHIN a
+  // single region, and buildWonEvidenceSql filters by both — so that combination IS reconcilable (the drawer
+  // names both axes via its title and the total equals the clicked rep×region figure). Every OTHER metric
+  // has no rep×region cohort to reconcile against, so the combination stays rejected there (never a subset
+  // total under a single-axis header).
+  if (regionName !== undefined && repId !== undefined && metric !== "won") {
+    throw new AppError(400, "repId and regionName can only be combined for the won metric");
   }
 
   // from/to: explicit period window for a region drill (paired; both or neither). Used to reconcile the

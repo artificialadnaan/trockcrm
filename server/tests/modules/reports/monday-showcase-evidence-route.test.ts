@@ -93,9 +93,24 @@ describe("assertShowcaseEvidenceAccess — the region drill's elevated surface i
     expect(() => parseShowcaseEvidenceParams({ metric: "won", from: "2026-06-13", to: "2026-06-01" })).toThrow(/on or before/);
   });
 
-  it("rejects combining repId and regionName (the scope header can only be one)", () => {
+  it("allows repId + regionName for the won metric (top-reps-within-region drill) including unassigned", () => {
     const rep = "11111111-1111-1111-1111-111111111111";
-    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: rep, regionName: "West Coast" })).toThrow(/cannot be combined/);
-    expect(() => parseShowcaseEvidenceParams({ metric: "won", repId: "__unassigned__", regionName: "Unassigned" })).toThrow(/cannot be combined/);
+    expect(parseShowcaseEvidenceParams({ metric: "won", repId: rep, regionName: "West Coast" })).toMatchObject({
+      metric: "won",
+      repId: rep,
+      regionName: "West Coast",
+    });
+    // Unassigned rep within a region is a real cohort (won deals with no assigned rep) — also allowed.
+    expect(parseShowcaseEvidenceParams({ metric: "won", repId: "__unassigned__", regionName: "Unassigned" })).toMatchObject({
+      metric: "won",
+      repId: null,
+      regionName: "Unassigned",
+    });
+  });
+
+  it("rejects repId + regionName for any NON-won metric (no rep×region cohort to reconcile)", () => {
+    const rep = "11111111-1111-1111-1111-111111111111";
+    expect(() => parseShowcaseEvidenceParams({ metric: "pipeline", repId: rep, regionName: "West Coast" })).toThrow(/only be combined for the won metric/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "projection", repId: rep, regionName: "Central" })).toThrow(/only be combined for the won metric/);
   });
 });

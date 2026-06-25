@@ -345,7 +345,7 @@ function StageHeatmap({ data, onDrill }: { data: RegionReportData; onDrill: Dril
   );
 }
 
-function TopRepsSection({ regions }: { regions: RegionRow[] }) {
+function TopRepsSection({ regions, onDrill }: { regions: RegionRow[]; onDrill: DrillFn }) {
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2">
@@ -367,7 +367,24 @@ function TopRepsSection({ regions }: { regions: RegionRow[] }) {
                       {i + 1}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-slate-700">{rep.repName}</span>
-                    <span className="tabular-nums font-semibold text-emerald-700">{usd(rep.wonValue)}</span>
+                    {/* Drill into this rep's won deals WITHIN this region — same period the totals were computed
+                        with, so the drawer total reconciles to the figure clicked. */}
+                    <button
+                      type="button"
+                      className="group cursor-pointer text-right tabular-nums font-semibold text-emerald-700"
+                      title={`See ${rep.repName}'s won deals in ${r.region}`}
+                      onClick={() =>
+                        onDrill({
+                          metric: "won",
+                          regionName: r.region,
+                          repId: rep.repId,
+                          title: `${r.region} — ${rep.repName}`,
+                          subtitle: `${int(rep.wonCount)} won · ${usd(rep.wonValue)}`,
+                        })
+                      }
+                    >
+                      <span className="group-hover:underline">{usd(rep.wonValue)}</span>
+                    </button>
                   </li>
                 ))}
               </ol>
@@ -421,7 +438,7 @@ export function RegionReportPage() {
           <RegionCards regions={data.regions} onDrill={onDrill} />
           <ForecastSection regions={data.regions} onDrill={onDrill} />
           <StageHeatmap data={data} onDrill={onDrill} />
-          <TopRepsSection regions={data.regions} />
+          <TopRepsSection regions={data.regions} onDrill={onDrill} />
         </div>
       ) : null}
 
