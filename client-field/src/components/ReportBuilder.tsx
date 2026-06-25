@@ -305,7 +305,7 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
                     onClick={() => toggleSelected(photo.id)}
                   >
                     <div className="relative aspect-square bg-muted">
-                      {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-muted-foreground"><FileText className="h-8 w-8" /></div>}
+                      {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-muted-foreground"><FileText className="h-8 w-8" /></div>}
                       <span className={`absolute right-2 top-2 rounded-full px-2 py-1 text-xs font-black ${checked ? "bg-primary text-primary-foreground" : "bg-black/70 text-white"}`}>{checked ? "Selected" : "Pick"}</span>
                     </div>
                     <div className="space-y-2 p-3">
@@ -360,7 +360,7 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
                     {section.photos.map((photo, photoIndex) => (
                       <div key={photo.id} className="grid gap-3 rounded-xl bg-muted/30 p-3 md:grid-cols-[88px_minmax(0,1fr)]">
                         <div className="aspect-square overflow-hidden rounded-xl bg-muted">
-                          {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-muted-foreground"><FileText className="h-6 w-6" /></div>}
+                          {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-muted-foreground"><FileText className="h-6 w-6" /></div>}
                         </div>
                         <div className="space-y-2">
                           <div className="flex flex-wrap items-center gap-2">
