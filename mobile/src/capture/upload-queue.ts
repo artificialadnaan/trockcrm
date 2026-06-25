@@ -66,9 +66,13 @@ async function readIndexFile(file: string): Promise<QueuedUpload[] | null> {
 
 async function readQueue(ownerKey: string): Promise<QueuedUpload[]> {
   const file = indexFile(ownerKey);
-  // Prefer the live index; if it's missing or truncated (e.g. the app was killed mid-write), fall back to
-  // the .bak from the previous successful write — so a crash during persistence never silently forgets
-  // copied photos. Only treat the queue as empty when BOTH are unreadable.
+  // A leftover .tmp only exists when a write was interrupted before its final rename — and it holds the
+  // NEWEST intended state (written in full before the rename). So prefer a VALID .tmp first (readIndexFile
+  // returns null for a partial/corrupt one, in which case we fall through). This covers the window where
+  // .tmp is the only complete copy (first write, or after the primary was cleared for the rename). Then the
+  // live index, then the .bak from the previous successful write. Empty only when ALL are unreadable.
+  const temp = await readIndexFile(`${file}.tmp`);
+  if (temp !== null) return temp;
   const primary = await readIndexFile(file);
   if (primary !== null) return primary;
   const backup = await readIndexFile(`${file}.bak`);
@@ -166,6 +170,30 @@ export async function clearUploadQueue(ownerKey: string): Promise<void> {
   const current = await readQueue(ownerKey);
   await deleteQueuedFiles(current);
   await writeQueue(ownerKey, []);
+}
+
+/**
+ * One-time migration: fold a legacy-namespaced queue into the current one. Used when the owner-key scheme
+ * changes (e.g. a primary-office queue stored under `userId:` moves to `userId:<tenantId>`), so offline
+ * captures persisted by a previous build still upload instead of being stranded in the old directory.
+ * Copies each item's file into the new owner's directory, merges (deduped) into its index, then clears the
+ * legacy queue. No-op when the keys match or the legacy queue is empty.
+ */
+export async function migrateUploadQueue(fromKey: string, toKey: string): Promise<void> {
+  if (sanitizeOwnerKey(fromKey) === sanitizeOwnerKey(toKey)) return;
+  const legacy = await readQueue(fromKey);
+  if (legacy.length === 0) return;
+  await ensureDir(toKey);
+  const toDir = ownerDir(toKey);
+  const migrated: QueuedUpload[] = [];
+  for (const item of legacy) {
+    const ext = item.uri.includes(".") ? item.uri.slice(item.uri.lastIndexOf(".")) : ".jpg";
+    const dest = `${toDir}${item.clientUploadId}${ext}`;
+    await FileSystem.copyAsync({ from: item.uri, to: dest }).catch(() => undefined);
+    migrated.push({ ...item, uri: dest });
+  }
+  await writeQueue(toKey, dedupeQueue(await readQueue(toKey), migrated));
+  await clearUploadQueue(fromKey);
 }
 
 // A drain must never run twice at once (foreground + background, or a double tap): a second caller would
