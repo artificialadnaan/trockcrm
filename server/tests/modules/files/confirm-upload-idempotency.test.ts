@@ -41,9 +41,11 @@ describe("confirmUpload idempotency (resilient upload queue)", () => {
     expect(result).toBe(existing);
   });
 
-  it("getFileByClientUploadId returns the row, or null for an empty id", async () => {
-    const row = { id: "file-9", clientUploadId: "cid-9" };
-    await expect(getFileByClientUploadId(tenantDb(row) as never, "cid-9")).resolves.toBe(row);
-    await expect(getFileByClientUploadId(tenantDb(null) as never, "")).resolves.toBeNull();
+  it("getFileByClientUploadId returns the row, or null for an empty id/uploader", async () => {
+    const row = { id: "file-9", clientUploadId: "cid-9", uploadedBy: "user-1" };
+    await expect(getFileByClientUploadId(tenantDb(row) as never, "cid-9", "user-1")).resolves.toBe(row);
+    // Missing id or uploader short-circuits to null (the lookup is scoped to the uploader).
+    await expect(getFileByClientUploadId(tenantDb(null) as never, "", "user-1")).resolves.toBeNull();
+    await expect(getFileByClientUploadId(tenantDb(row) as never, "cid-9", "")).resolves.toBeNull();
   });
 });

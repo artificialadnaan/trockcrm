@@ -13,7 +13,16 @@ import { assignPhotoTarget, getTranscriptionConfig } from "../../src/api/endpoin
 import type { FieldCaptureTarget } from "../../src/api/types";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
 import { type CaptureTargetRef } from "../../src/capture/upload";
-import { drainUploadQueue, enqueueUploads, getQueuedCount, newClientUploadId } from "../../src/capture/upload-queue";
+import {
+  clearFailedUploads,
+  drainUploadQueue,
+  enqueueUploads,
+  getFailedCount,
+  getQueuedCount,
+  getQueuedUploads,
+  newClientUploadId,
+  uploadOwnerKey,
+} from "../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
 import { applyGpsToPending, buildCaptureUploadInput, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
@@ -54,11 +63,12 @@ export default function CaptureScreen() {
     propertyAddress?: string;
   }>();
   const router = useRouter();
-  const { fetcher, user } = useAuth();
+  const { fetcher, user, activeOfficeId } = useAuth();
   const qc = useQueryClient();
-  // The upload queue is namespaced per signed-in user so one user's queued photos can never drain under
-  // the next person who signs in on this device.
-  const ownerKey = user?.id ?? "";
+  // The upload queue is namespaced per signed-in user + ACTIVE OFFICE, so one user's queued photos can
+  // never drain under another account — or under a different office after an office switch (uploads are
+  // bound to the active office).
+  const ownerKey = uploadOwnerKey(user?.id, activeOfficeId);
 
   const initialTarget: SelectedTarget | null =
     typeof params.dealId === "string" && params.dealId
@@ -92,6 +102,9 @@ export default function CaptureScreen() {
   // How many photos are durably queued but not yet uploaded (persists across app restarts). Drives the
   // "pending upload" banner + Resume action.
   const [queuedCount, setQueuedCount] = useState(0);
+  // Items that exhausted their retries — surfaced separately so the user can dismiss them (they're no
+  // longer retried automatically).
+  const [failedCount, setFailedCount] = useState(0);
   const [notice, setNotice] = useState<
     { tone: "error" | "success"; text: string; viewTarget?: SelectedTarget } | null
   >(null);
@@ -282,26 +295,40 @@ export default function CaptureScreen() {
   const refreshQueuedCount = useCallback(async () => {
     if (!ownerKey) return;
     setQueuedCount(await getQueuedCount(ownerKey));
+    setFailedCount(await getFailedCount(ownerKey));
   }, [ownerKey]);
+
+  const dismissFailedUploads = useCallback(async () => {
+    if (!ownerKey) return;
+    await clearFailedUploads(ownerKey);
+    await refreshQueuedCount();
+  }, [ownerKey, refreshQueuedCount]);
 
   // Drain the durable upload queue. Used by the Resume action, the on-mount resume of a queue left over
   // from a previous session/crash, and the return-to-foreground resume. drainUploadQueue keeps the screen
-  // awake while it runs and dedupes server-side, so this is safe to call repeatedly.
+  // awake while it runs and dedupes server-side, so this is safe to call repeatedly. Wrapped so a rejected
+  // drain/refresh can't strand the screen in "uploading" (disabled actions, hidden banner).
   const resumeQueue = useCallback(async () => {
     if (!ownerKey || status === "uploading") return;
     setStatus("uploading");
     setNotice(null);
-    const summary = await drainUploadQueue(ownerKey, fetcher);
-    await refreshQueuedCount();
-    void pendingQuery.refetch();
-    if (summary.remaining === 0) {
-      setStatus("idle");
-      if (summary.succeeded > 0) {
-        setNotice({ tone: "success", text: `${summary.succeeded} queued photo${summary.succeeded === 1 ? "" : "s"} uploaded.` });
+    try {
+      const summary = await drainUploadQueue(ownerKey, fetcher);
+      await refreshQueuedCount();
+      void pendingQuery.refetch();
+      if (summary.remaining === 0) {
+        setStatus("idle");
+        if (summary.succeeded > 0) {
+          setNotice({ tone: "success", text: `${summary.succeeded} queued photo${summary.succeeded === 1 ? "" : "s"} uploaded.` });
+        }
+      } else {
+        setStatus("failed");
+        setNotice({ tone: "error", text: `${summary.remaining} photo${summary.remaining === 1 ? "" : "s"} still queued — they'll keep retrying.` });
       }
-    } else {
+    } catch {
       setStatus("failed");
-      setNotice({ tone: "error", text: `${summary.remaining} photo${summary.remaining === 1 ? "" : "s"} still queued — they'll keep retrying.` });
+      setNotice({ tone: "error", text: "Couldn't upload the queued photos. They're saved — tap Resume to try again." });
+      await refreshQueuedCount().catch(() => undefined);
     }
   }, [fetcher, ownerKey, pendingQuery, refreshQueuedCount, status]);
 
@@ -359,8 +386,10 @@ export default function CaptureScreen() {
     const viewTarget = target?.type === "deal" ? target : undefined;
 
     // Persist the whole batch to the durable queue FIRST, so a crash/kill/connection drop can't lose it.
+    let batchIds: Set<string>;
     try {
-      await enqueueUploads(ownerKey, inputs);
+      const queuedBatch = await enqueueUploads(ownerKey, inputs);
+      batchIds = new Set(queuedBatch.map((item) => item.clientUploadId));
     } catch {
       setStatus("failed");
       setNotice({ tone: "error", text: "Couldn't save photos for upload. Please try again." });
@@ -373,31 +402,45 @@ export default function CaptureScreen() {
     setCategory(null);
     await refreshQueuedCount();
 
-    const summary = await drainUploadQueue(ownerKey, fetcher);
-    await refreshQueuedCount();
-    void pendingQuery.refetch();
-    if (target?.type === "deal" && summary.succeeded > 0) invalidateDealPhotos(target.id);
+    // drainUploadQueue uploads EVERYTHING queued (incl. any earlier backlog), but the confirmation below is
+    // scoped to THIS batch's ids — so a stale backlog for another project can't make the banner claim those
+    // were "saved to <this target>" or invalidate the wrong gallery. Guarded so a rejected drain/refresh
+    // can't strand the screen in "uploading".
+    try {
+      await drainUploadQueue(ownerKey, fetcher);
+      await refreshQueuedCount();
+      void pendingQuery.refetch();
 
-    if (summary.remaining === 0) {
-      setStatus("idle");
-      // Name the destination so the green banner is unambiguous; a deal target also gets a "View" action.
-      setNotice({
-        tone: "success",
-        text: `${summary.succeeded} photo${summary.succeeded === 1 ? "" : "s"} saved to ${destName}.`,
-        viewTarget,
-      });
-      if (target?.type === "deal") {
-        const fromAccessibleProject = typeof params.dealId === "string" && params.dealId === target.id;
-        if (fromAccessibleProject) {
-          router.replace({ pathname: "/(app)/projects/[id]", params: detailParamsFor(target) });
+      const stillQueued = await getQueuedUploads(ownerKey);
+      const remainingMine = stillQueued.filter((item) => batchIds.has(item.clientUploadId)).length;
+      const uploadedMine = batchIds.size - remainingMine;
+      if (target?.type === "deal" && uploadedMine > 0) invalidateDealPhotos(target.id);
+
+      if (remainingMine === 0) {
+        setStatus("idle");
+        // Name the destination so the green banner is unambiguous; a deal target also gets a "View" action.
+        setNotice({
+          tone: "success",
+          text: `${uploadedMine} photo${uploadedMine === 1 ? "" : "s"} saved to ${destName}.`,
+          viewTarget,
+        });
+        if (target?.type === "deal") {
+          const fromAccessibleProject = typeof params.dealId === "string" && params.dealId === target.id;
+          if (fromAccessibleProject) {
+            router.replace({ pathname: "/(app)/projects/[id]", params: detailParamsFor(target) });
+          }
         }
+      } else {
+        setStatus("failed");
+        setNotice({
+          tone: "error",
+          text: `${uploadedMine} uploaded, ${remainingMine} still queued — they'll keep retrying. Tap Resume to try now.`,
+        });
       }
-    } else {
+    } catch {
       setStatus("failed");
-      setNotice({
-        tone: "error",
-        text: `${summary.succeeded} uploaded, ${summary.remaining} still queued — they'll keep retrying. Tap Resume to try now.`,
-      });
+      setNotice({ tone: "error", text: "Photos are saved but the upload didn't finish. Tap Resume to try again." });
+      await refreshQueuedCount().catch(() => undefined);
     }
   }
 
@@ -474,6 +517,16 @@ export default function CaptureScreen() {
             message={`${queuedCount} photo${queuedCount === 1 ? "" : "s"} waiting to upload. They'll keep retrying automatically.`}
             tone="error"
             action={{ label: "Resume", onPress: () => void resumeQueue() }}
+          />
+        ) : null}
+
+        {/* Terminal failures: items that exhausted their retries. Not retried automatically — the user can
+            dismiss them so they stop occupying the queue. */}
+        {failedCount > 0 && !uploading ? (
+          <Banner
+            message={`${failedCount} photo${failedCount === 1 ? "" : "s"} couldn't be uploaded after several tries.`}
+            tone="error"
+            action={{ label: "Dismiss", onPress: () => void dismissFailedUploads() }}
           />
         ) : null}
 

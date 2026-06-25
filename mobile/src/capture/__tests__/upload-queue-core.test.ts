@@ -1,14 +1,18 @@
 import {
+  MAX_UPLOAD_ATTEMPTS,
+  bumpAttempts,
   dedupeQueue,
+  isDrainable,
   newClientUploadId,
   partitionResults,
   removeIds,
   sanitizeOwnerKey,
+  uploadOwnerKey,
   type QueuedUpload,
 } from "../upload-queue-core";
 
-// Minimal queued item — only clientUploadId matters for the pure helpers.
-function item(clientUploadId: string): QueuedUpload {
+// Minimal queued item — only clientUploadId/attempts matter for the pure helpers.
+function item(clientUploadId: string, attempts = 0): QueuedUpload {
   return {
     clientUploadId,
     uri: `file://${clientUploadId}.jpg`,
@@ -18,6 +22,7 @@ function item(clientUploadId: string): QueuedUpload {
     tags: [],
     metadata: {},
     enqueuedAt: 0,
+    attempts,
   } as QueuedUpload;
 }
 
@@ -45,6 +50,24 @@ describe("upload-queue-core", () => {
     expect(sanitizeOwnerKey("user-123_ABC")).toBe("user-123_ABC");
     expect(sanitizeOwnerKey("a/b\\c .d")).toBe("a_b_c__d");
     expect(sanitizeOwnerKey("")).toBe("anon");
+  });
+
+  it("uploadOwnerKey scopes by user + office, and is empty without a user", () => {
+    expect(uploadOwnerKey("u1", "office-a")).toBe("u1:office-a");
+    expect(uploadOwnerKey("u1", null)).toBe("u1:");
+    expect(uploadOwnerKey(null, "office-a")).toBe("");
+    expect(uploadOwnerKey("u1", "office-a")).not.toBe(uploadOwnerKey("u1", "office-b"));
+  });
+
+  it("isDrainable / bumpAttempts implement the terminal retry cap", () => {
+    expect(isDrainable(item("a", 0))).toBe(true);
+    expect(isDrainable(item("a", MAX_UPLOAD_ATTEMPTS - 1))).toBe(true);
+    expect(isDrainable(item("a", MAX_UPLOAD_ATTEMPTS))).toBe(false);
+
+    const queue = [item("a", 0), item("b", 1)];
+    const bumped = bumpAttempts(queue, ["a"], 1234);
+    expect(bumped[0]).toMatchObject({ clientUploadId: "a", attempts: 1, lastTriedAt: 1234 });
+    expect(bumped[1]).toMatchObject({ clientUploadId: "b", attempts: 1 }); // untouched
   });
 
   it("partitionResults splits succeeded vs failed by settled status (positional)", () => {

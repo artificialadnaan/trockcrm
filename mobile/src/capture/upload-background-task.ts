@@ -3,7 +3,7 @@ import * as TaskManager from "expo-task-manager";
 import { apiFetch } from "../api/client";
 import type { Fetcher } from "../api/endpoints";
 import { isTokenExpired, loadSession, type Session } from "../auth/session";
-import { drainUploadQueue, getQueuedCount } from "./upload-queue";
+import { drainUploadQueue, getQueuedCount, uploadOwnerKey } from "./upload-queue";
 
 /**
  * Best-effort BACKGROUND drain of the persistent upload queue.
@@ -27,9 +27,10 @@ TaskManager.defineTask(UPLOAD_QUEUE_TASK, async () => {
   try {
     const session = await loadSession();
     if (!session || isTokenExpired(session.token)) return BackgroundTask.BackgroundTaskResult.Success;
-    // Drain only THIS user's queue (matching the per-user namespacing in upload-queue) so the background
-    // task can never upload a different account's photos.
-    const ownerKey = session.user.id;
+    // Drain only THIS user+office's queue. The fetcher binds session.activeOfficeId, so the owner key MUST
+    // include the office too — otherwise a queue captured under a different office could drain under the
+    // current one. Matches the namespacing in upload-queue and the capture screen.
+    const ownerKey = uploadOwnerKey(session.user.id, session.activeOfficeId);
     if ((await getQueuedCount(ownerKey)) === 0) return BackgroundTask.BackgroundTaskResult.Success;
     const fetcher = buildSessionFetcher(session);
     await drainUploadQueue(ownerKey, fetcher);

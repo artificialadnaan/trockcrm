@@ -347,7 +347,7 @@ export async function confirmFieldPhotoUpload(
   // already exists for this client id, return it. The access check above still gates this, so it can't be
   // used to read another deal's photo. Decoupled from the token, so it survives a server restart too.
   if (input.clientUploadId) {
-    const existing = await getFileByClientUploadId(tenantDb, input.clientUploadId);
+    const existing = await getFileByClientUploadId(tenantDb, input.clientUploadId, input.userId);
     if (existing) {
       // Idempotent retry: the client just minted a fresh token + PUT a NEW R2 object before this call.
       // Clean up the superseded object — but ONLY the r2Key we can VALIDATE belongs to the supplied token

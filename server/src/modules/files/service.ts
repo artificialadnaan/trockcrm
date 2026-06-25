@@ -570,10 +570,12 @@ export async function confirmUpload(
   // when a resumed/background queue re-runs an upload AFTER the original confirm succeeded (token gone) —
   // including across a server restart. The partial unique index on client_upload_id is the backstop.
   if (input.clientUploadId) {
+    // Scoped to the uploader (see getFileByClientUploadId) so a leaked/replayed key can't resolve another
+    // user's row.
     const existing = await tenantDb
       .select()
       .from(files)
-      .where(eq(files.clientUploadId, input.clientUploadId))
+      .where(and(eq(files.clientUploadId, input.clientUploadId), eq(files.uploadedBy, userId)))
       .limit(1);
     if (existing[0]) {
       pendingUploads.delete(input.uploadToken);
@@ -673,10 +675,27 @@ export async function confirmUpload(
       clientUploadId: input.clientUploadId ?? null,
       uploadedBy: userId,
     })
+    // A concurrent confirm for the same clientUploadId (e.g. a double drain) could race past the early
+    // SELECT above and reach here too — let the partial unique index arbitrate without throwing (a thrown
+    // 23505 would poison this request's transaction). The skipped insert returns no row; we re-query below.
+    .onConflictDoNothing({ target: files.clientUploadId, where: isNotNull(files.clientUploadId) })
     .returning();
 
   // Fix 7: NOW delete the token — DB insert succeeded, no retry needed
   pendingUploads.delete(input.uploadToken);
+
+  if (result[0]) return result[0];
+
+  // onConflictDoNothing skipped the insert (the concurrent confirm won) — return that already-persisted
+  // row so the caller still gets the photo and never sees a duplicate or a 500.
+  if (input.clientUploadId) {
+    const winner = await tenantDb
+      .select()
+      .from(files)
+      .where(and(eq(files.clientUploadId, input.clientUploadId), eq(files.uploadedBy, userId)))
+      .limit(1);
+    if (winner[0]) return winner[0];
+  }
 
   return result[0];
 }
@@ -689,9 +708,17 @@ export async function confirmUpload(
 export async function getFileByClientUploadId(
   tenantDb: TenantDb,
   clientUploadId: string,
+  uploadedBy: string,
 ): Promise<typeof files.$inferSelect | null> {
-  if (!clientUploadId) return null;
-  const rows = await tenantDb.select().from(files).where(eq(files.clientUploadId, clientUploadId)).limit(1);
+  if (!clientUploadId || !uploadedBy) return null;
+  // Scope to the UPLOADER: an idempotent retry is always by the same user who created the row, and the
+  // clientUploadId is now also visible to anyone who can read it elsewhere — so a leaked/replayed key from
+  // another account must NOT resolve a different user's photo (or hand out its download URL).
+  const rows = await tenantDb
+    .select()
+    .from(files)
+    .where(and(eq(files.clientUploadId, clientUploadId), eq(files.uploadedBy, uploadedBy)))
+    .limit(1);
   return rows[0] ?? null;
 }
 
@@ -1527,7 +1554,9 @@ export async function getDealPhotoTimeline(
   filters: DealPhotoTimelineFilters = {}
 ): Promise<{
   photos: Array<
-    typeof files.$inferSelect & {
+    // clientUploadId is the upload queue's idempotency key — kept OUT of this (API-exposed) row so it can't
+    // be read off /api/files/deal/:dealId/photos and replayed against confirm-upload.
+    Omit<typeof files.$inferSelect, "clientUploadId"> & {
       uploaderName: string;
       uploaderAvatarUrl: string | null;
       // Display URLs resolved server-side IN-BATCH so clients never round-trip per photo (rate-limit safe).
@@ -1556,7 +1585,6 @@ export async function getDealPhotoTimeline(
       fileExtension: files.fileExtension,
       r2Key: files.r2Key,
       thumbnailR2Key: files.thumbnailR2Key,
-      clientUploadId: files.clientUploadId,
       r2Bucket: files.r2Bucket,
       dealId: files.dealId,
       leadId: files.leadId,

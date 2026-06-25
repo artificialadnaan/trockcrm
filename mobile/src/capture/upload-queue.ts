@@ -4,14 +4,16 @@ import type { Fetcher } from "../api/endpoints";
 import { runConcurrentUploads, uploadCapture, type CaptureUploadInput } from "./upload";
 import {
   UPLOAD_CONCURRENCY,
+  bumpAttempts,
   dedupeQueue,
+  isDrainable,
   partitionResults,
   removeIds,
   sanitizeOwnerKey,
   type QueuedUpload,
 } from "./upload-queue-core";
 
-export { UPLOAD_CONCURRENCY, dedupeQueue, newClientUploadId, partitionResults, removeIds, sanitizeOwnerKey, type QueuedUpload } from "./upload-queue-core";
+export { MAX_UPLOAD_ATTEMPTS, UPLOAD_CONCURRENCY, dedupeQueue, newClientUploadId, partitionResults, removeIds, sanitizeOwnerKey, uploadOwnerKey, type QueuedUpload } from "./upload-queue-core";
 
 /**
  * Durable, resumable upload queue for field photo captures.
@@ -78,8 +80,23 @@ export async function getQueuedUploads(ownerKey: string): Promise<QueuedUpload[]
   return readQueue(ownerKey);
 }
 
+/** Count of still-DRAINABLE items (excludes terminal/failed) — drives the "waiting" banner + resume. */
 export async function getQueuedCount(ownerKey: string): Promise<number> {
-  return (await readQueue(ownerKey)).length;
+  return (await readQueue(ownerKey)).filter(isDrainable).length;
+}
+
+/** Count of TERMINAL items that exhausted their retries — drives the "failed" banner. */
+export async function getFailedCount(ownerKey: string): Promise<number> {
+  return (await readQueue(ownerKey)).filter((item) => !isDrainable(item)).length;
+}
+
+/** Discard the terminal/failed items (and their files) — the UI's "Dismiss failed" action. */
+export async function clearFailedUploads(ownerKey: string): Promise<void> {
+  const current = await readQueue(ownerKey);
+  const failed = current.filter((item) => !isDrainable(item));
+  if (failed.length === 0) return;
+  await writeQueue(ownerKey, current.filter(isDrainable));
+  await deleteQueuedFiles(failed);
 }
 
 /**
@@ -97,7 +114,7 @@ export async function enqueueUploads(ownerKey: string, inputs: CaptureUploadInpu
     const ext = input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
     const dest = `${dir}${input.clientUploadId}${ext}`;
     await FileSystem.copyAsync({ from: input.uri, to: dest });
-    const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now() };
+    const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
     // Persist immediately so a crash right after this copy still recovers the item on next launch.
     current = dedupeQueue(current, [item]);
     await writeQueue(ownerKey, current);
@@ -113,6 +130,13 @@ async function removeQueuedItems(ownerKey: string, ids: string[]): Promise<void>
   const toDelete = current.filter((item) => ids.includes(item.clientUploadId));
   await writeQueue(ownerKey, removeIds(current, ids));
   await deleteQueuedFiles(toDelete);
+}
+
+/** Increment the failed-attempt counter for the given ids — moves them toward the terminal cap. */
+async function recordFailedAttempts(ownerKey: string, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const current = await readQueue(ownerKey);
+  await writeQueue(ownerKey, bumpAttempts(current, ids, Date.now()));
 }
 
 export async function clearUploadQueue(ownerKey: string): Promise<void> {
@@ -139,7 +163,9 @@ export async function drainUploadQueue(
   draining = true;
   let keptAwake = false;
   try {
-    const items = await readQueue(ownerKey);
+    // Only drain items that haven't exhausted their retries — terminal/failed items are left for the UI
+    // to surface and discard, never re-PUT.
+    const items = (await readQueue(ownerKey)).filter(isDrainable);
     if (items.length === 0) return { succeeded: 0, failed: 0, remaining: 0 };
 
     try {
@@ -149,9 +175,10 @@ export async function drainUploadQueue(
       // Keep-awake is best-effort; draining continues without it.
     }
 
-    // Drain in persisted chunks: after each chunk, remove its successes from the index. So an interrupt
-    // (app suspended / short iOS window) re-uploads at MOST one chunk's worth next time, instead of the
-    // whole snapshot — already-confirmed photos aren't re-compressed and re-PUT just to be deduped.
+    // Drain in persisted chunks: after each chunk, remove its successes from the index and bump the
+    // attempt counter on failures. So an interrupt (app suspended / short iOS window) re-uploads at MOST
+    // one chunk's worth next time, and a permanently-failing item climbs toward the terminal cap instead
+    // of retrying forever.
     let succeeded = 0;
     let failed = 0;
     for (let i = 0; i < items.length; i += DRAIN_CHUNK) {
@@ -159,6 +186,7 @@ export async function drainUploadQueue(
       const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) => uploadCapture(fetcher, item));
       const { succeededIds, failedIds } = partitionResults(chunk, results);
       await removeQueuedItems(ownerKey, succeededIds);
+      await recordFailedAttempts(ownerKey, failedIds);
       succeeded += succeededIds.length;
       failed += failedIds.length;
     }
