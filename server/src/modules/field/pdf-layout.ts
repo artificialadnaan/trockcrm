@@ -12,7 +12,6 @@ const BRAND_BLACK = "#111111";
 const BRAND_LOGO_SURFACE = BRAND_BLACK;
 const BRAND_MUTED = "#7589A3";
 const BRAND_BORDER = "#EAECEF";
-const BRAND_PANEL = "#F7F7F8";
 const LOGO_BUFFER = Buffer.from(TROCK_LOGO_PNG_BASE64, "base64");
 const BRAND_FONT_REGULAR_NAME = "Geist-Regular";
 const BRAND_FONT_BOLD_NAME = "Geist-Bold";
@@ -26,6 +25,30 @@ const COVER_LOGO_PANEL_RADIUS = 18;
 const COVER_LOGO_X = 201;
 const COVER_LOGO_Y = 334;
 const COVER_LOGO_FIT: [number, number] = [210, 210];
+
+// --- Photo grid layout (image-forward) -----------------------------------------------------------
+// Photo reports are image-first: each row is ONE large, tightly framed photo with a compact caption
+// beside it. PHOTOS_PER_PAGE drives both the chunking and the per-row height — fewer per page means
+// taller rows and bigger images. The image is fit to its exact rendered rectangle (decoded via
+// openImage) and framed tightly, so off-aspect photos sit on clean page-white instead of an oversized
+// gray panel — that dead gray gutter was the bulk of the "small image + lots of white space" problem.
+const PHOTOS_PER_PAGE = 3;
+const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
+const PHOTO_ROWS_TOP = 66;
+const PHOTO_ROWS_BOTTOM = 740; // stay clear of the footer (drawn at PAGE_HEIGHT - 44)
+const PHOTO_ROW_GAP = 16;
+const PHOTO_ROW_PITCH = (PHOTO_ROWS_BOTTOM - PHOTO_ROWS_TOP) / PHOTOS_PER_PAGE;
+const PHOTO_ROW_HEIGHT = PHOTO_ROW_PITCH - PHOTO_ROW_GAP;
+const CAPTION_WIDTH = 174;
+const CAPTION_GAP = 22;
+const IMAGE_BOX_WIDTH = CONTENT_WIDTH - CAPTION_WIDTH - CAPTION_GAP;
+const CAPTION_LEFT = PAGE_MARGIN + IMAGE_BOX_WIDTH + CAPTION_GAP;
+// Metadata is drawn as three single-line, ellipsised rows (Project/Date/Creator). Each line is capped to
+// one line so a long deal/project name (the deal schema allows up to 500 chars) can never wrap and push the
+// block past the footer / page bottom — the exact blank-page/overlap regression the report layout avoids.
+const META_FONT_SIZE = 8.5;
+const META_LINE_PITCH = 11;
+const META_BLOCK_HEIGHT = META_LINE_PITCH * 3;
 
 type ReportFontSet = {
   regular: string;
@@ -181,58 +204,108 @@ function drawSectionTitlePage(
   doc.restore();
 }
 
+type OpenedImage = { width: number; height: number; orientation?: number };
+
+// pdfkit's openImage isn't in @types/pdfkit. Decode once to get intrinsic dimensions (so we can tight-frame
+// the exact rendered rectangle) and reuse the opened image for the actual draw (no second decode). Returns
+// the EXIF-orientation-adjusted display size — pdfkit swaps w/h for orientations > 4 when it draws.
+function openImageForLayout(
+  doc: PDFKit.PDFDocument,
+  buffer: Buffer,
+): { image: OpenedImage; displayWidth: number; displayHeight: number } | null {
+  try {
+    const image = (doc as unknown as { openImage(src: Buffer): OpenedImage }).openImage(buffer);
+    if (!image || !(image.width > 0) || !(image.height > 0)) return null;
+    const rotated = (image.orientation ?? 1) > 4;
+    return {
+      image,
+      displayWidth: rotated ? image.height : image.width,
+      displayHeight: rotated ? image.width : image.height,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function drawIndexBadge(doc: PDFKit.PDFDocument, fonts: ReportFontSet, x: number, y: number, index: number) {
+  doc.roundedRect(x + 6, y + 6, 26, 22, 5).fillColor("white").fill();
+  doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(11).text(String(index), x + 6, y + 11, {
+    width: 26,
+    align: "center",
+  });
+}
+
+function drawImageUnavailable(doc: PDFKit.PDFDocument, fonts: ReportFontSet, x: number, y: number, w: number, h: number) {
+  doc.roundedRect(x, y, w, h, 6).fillColor("#F3F4F6").fill();
+  doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(12).text("Image unavailable", x, y + h / 2 - 8, {
+    width: w,
+    align: "center",
+  });
+}
+
 async function drawPhotoEntry(
   doc: PDFKit.PDFDocument,
   fonts: ReportFontSet,
   photo: ReportRenderSection["photos"][number],
   top: number,
 ) {
-  const left = PAGE_MARGIN;
-  const width = PAGE_WIDTH - PAGE_MARGIN * 2;
-  const rowHeight = 152;
-  const imagePanelWidth = 288;
-  const imageLeft = left;
-  const imageTop = top;
-  const imageWidth = 252;
-  const imageHeight = 152;
-  const textLeft = left + imagePanelWidth + 18;
-  const textWidth = width - imagePanelWidth - 18;
-
-  doc.roundedRect(imageLeft, imageTop, imagePanelWidth, rowHeight, 8).fillColor(BRAND_PANEL).fill();
-  doc.roundedRect(imageLeft + 8, imageTop + 8, 32, 32, 6).fillColor("white").fill();
-  doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(11).text(String(photo.reportIndex), imageLeft + 8, imageTop + 16, {
-    width: 32,
-    align: "center",
-  });
+  const imageLeft = PAGE_MARGIN;
+  const boxWidth = IMAGE_BOX_WIDTH;
+  const boxHeight = PHOTO_ROW_HEIGHT;
 
   const imageBuffer = await loadPhotoBuffer(photo);
-  if (imageBuffer) {
+  const opened = imageBuffer ? openImageForLayout(doc, imageBuffer) : null;
+  if (opened) {
+    // Scale to fit the box while preserving aspect, then draw + frame the EXACT rendered rectangle so a
+    // portrait or panoramic photo is bounded by a tight border on page-white — no oversized gray panel.
+    const scale = Math.min(boxWidth / opened.displayWidth, boxHeight / opened.displayHeight);
+    const drawWidth = opened.displayWidth * scale;
+    const drawHeight = opened.displayHeight * scale;
     try {
-      doc.image(imageBuffer, imageLeft + 84, imageTop, {
-        fit: [imageWidth, imageHeight],
-        align: "center",
-        valign: "center",
-      });
+      doc.image(opened.image as unknown as Buffer, imageLeft, top, { width: drawWidth, height: drawHeight });
+      doc.roundedRect(imageLeft, top, drawWidth, drawHeight, 6).lineWidth(1).strokeColor(BRAND_BORDER).stroke();
+      drawIndexBadge(doc, fonts, imageLeft, top, photo.reportIndex);
     } catch {
-      doc.roundedRect(imageLeft + 84, imageTop, imageWidth, imageHeight, 8).fillColor("#F3F4F6").fill();
-      doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(12).text("Image unavailable", imageLeft + 116, imageTop + 68, { width: imageWidth - 64, align: "center" });
+      drawImageUnavailable(doc, fonts, imageLeft, top, boxWidth, boxHeight);
+      drawIndexBadge(doc, fonts, imageLeft, top, photo.reportIndex);
     }
   } else {
-    doc.roundedRect(imageLeft + 84, imageTop, imageWidth, imageHeight, 8).fillColor("#F3F4F6").fill();
-    doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(12).text("Image unavailable", imageLeft + 116, imageTop + 68, { width: imageWidth - 64, align: "center" });
+    drawImageUnavailable(doc, fonts, imageLeft, top, boxWidth, boxHeight);
+    drawIndexBadge(doc, fonts, imageLeft, top, photo.reportIndex);
   }
 
+  // Compact, image-forward caption: smaller fonts, metadata flows directly under the (measured)
+  // description instead of a fixed offset, and the whole block is clamped to the row so it never spills.
+  // The description is height-capped + ellipsised so even a pathological caption (or a denser
+  // PHOTOS_PER_PAGE) can't push text past the page bottom and spawn the blank pages this report avoids.
   const description = clampText(photo.descriptionOverride ?? photo.description ?? "No description", 320);
-  doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(15).text(description, textLeft, top + 4, {
-    width: textWidth,
-    lineGap: 2,
-  });
-  doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(10).text(
-    `Project: ${photo.projectName}\nDate: ${formatPhotoDate(photo.takenAt, photo.createdAt)}\nCreator: ${photo.uploaderName}`,
-    textLeft,
-    top + 92,
-    { width: textWidth, align: "left", lineGap: 2 }
+  const descriptionMaxHeight = boxHeight - 40;
+  doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(12);
+  doc.text(description, CAPTION_LEFT, top, { width: CAPTION_WIDTH, lineGap: 1.5, height: descriptionMaxHeight, ellipsis: true });
+  const descriptionHeight = Math.min(
+    doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 1.5 }),
+    descriptionMaxHeight,
   );
+  const metaTop = Math.min(top + descriptionHeight + 10, top + boxHeight - META_BLOCK_HEIGHT);
+  // One line each, no-wrap + ellipsis + capped height: a long project/creator name truncates instead of
+  // wrapping, so the block stays exactly 3 lines tall and can't spill the page or collide with the footer.
+  // Every field is still rendered (Project, Date, Creator) — only an over-long single value is shortened,
+  // and the full project name still appears on the cover and in the footer.
+  const metaLines = [
+    `Project: ${photo.projectName}`,
+    `Date: ${formatPhotoDate(photo.takenAt, photo.createdAt)}`,
+    `Creator: ${photo.uploaderName}`,
+  ];
+  doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(META_FONT_SIZE);
+  metaLines.forEach((line, index) => {
+    doc.text(line, CAPTION_LEFT, metaTop + index * META_LINE_PITCH, {
+      width: CAPTION_WIDTH,
+      align: "left",
+      lineBreak: false,
+      height: META_LINE_PITCH,
+      ellipsis: true,
+    });
+  });
 }
 
 function fallbackReportFonts(): ReportFontSet {
@@ -320,9 +393,14 @@ export async function renderFieldPhotoReportPdf(input: {
       align: "center",
     });
   }
+  // Height-cap + ellipsis the cover title: the default title is `${project.name} Photo Report`, and a long
+  // deal name (capped at 140 chars upstream, still ~8 lines at 30pt) would otherwise wrap past the page
+  // bottom and spawn a blank cover-overflow page. Bounded to the band between the logo panel and footer.
   doc.fillColor(BRAND_BLACK).font(reportFonts.bold).fontSize(30).text(input.cover.reportTitle, PAGE_MARGIN, 588, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
+    height: PAGE_HEIGHT - 588 - 52,
+    ellipsis: true,
   });
   pageMeta.push({
     kind: "cover",
@@ -336,7 +414,7 @@ export async function renderFieldPhotoReportPdf(input: {
   let sectionIndex = 0;
   for (const section of input.sections) {
     sectionIndex += 1;
-    const pages = chunk(section.photos, 4);
+    const pages = chunk(section.photos, PHOTOS_PER_PAGE);
     if (useSectionDividers) {
       doc.addPage();
       pageMeta.push({
@@ -369,9 +447,8 @@ export async function renderFieldPhotoReportPdf(input: {
       if (showCompactTitle && pageIndex === 0) {
         drawCompactSectionTitle(doc, reportFonts, compactTitle!);
       }
-      const startTop = 66;
       for (const [rowIndex, photo] of photos.entries()) {
-        await drawPhotoEntry(doc, reportFonts, photo, startTop + rowIndex * 178);
+        await drawPhotoEntry(doc, reportFonts, photo, PHOTO_ROWS_TOP + rowIndex * PHOTO_ROW_PITCH);
       }
     }
   }
