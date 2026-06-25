@@ -1,5 +1,5 @@
 import { type ReactNode } from "react";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { Download, ExternalLink, Loader2 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   Dialog,
@@ -8,9 +8,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
 import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
 import { usdExact, int } from "@/pages/reports/format";
+import { downloadTextFile } from "@/lib/report-export";
+import { ScrollSyncX } from "@/pages/reports/scroll-sync-x";
 import {
   useCommissionEvidence,
   type CommissionDrillRequest,
@@ -32,6 +35,24 @@ interface DrillColumn {
   numeric: boolean;
   sort: SortColumn<Rec>;
   cell: (r: Rec) => ReactNode;
+}
+
+function csvCell(v: string | number | null | undefined): string {
+  const s = v == null ? "" : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** CSV of every record in the popup, columns matching the on-screen table (raw values, dates ISO). */
+function buildCsv(ev: CommissionEvidence): string {
+  const cols = columnsFor(ev);
+  const header = cols.map((c) => csvCell(c.header)).join(",");
+  const lines = ev.records.map((r) => cols.map((c) => csvCell(c.sort.accessor(r))).join(","));
+  return [header, ...lines].join("\n");
+}
+
+function csvFilename(ev: CommissionEvidence): string {
+  const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `commission-${ev.metric}-${slug(ev.repName) || "rep"}.csv`;
 }
 
 function columnsFor(ev: CommissionEvidence): DrillColumn[] {
@@ -89,7 +110,9 @@ function EvidenceTable({ ev }: { ev: CommissionEvidence }) {
   }
 
   return (
-    <Table className="text-sm">
+    // Bare <table> (not the ui <Table>, which adds its own overflow-x) + a min-width, so ScrollSyncX's body
+    // is the single horizontal scroller and the right-edge columns stay reachable on a narrow popup.
+    <table className="w-full min-w-[680px] caption-bottom text-sm">
       <TableHeader className="sticky top-0 z-10 bg-white">
         <TableRow className="border-b border-slate-200">
           {columns.map((col) => {
@@ -140,7 +163,7 @@ function EvidenceTable({ ev }: { ev: CommissionEvidence }) {
           );
         })}
       </TableBody>
-    </Table>
+    </table>
   );
 }
 
@@ -170,17 +193,36 @@ export function CommissionEvidenceDrawer({
           <DialogDescription>{data?.subtitle ?? "Loading the records behind this number…"}</DialogDescription>
         </DialogHeader>
 
-        <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-200">
-          {loading ? (
-            <div className="flex items-center justify-center gap-2 py-16 text-sm text-slate-400">
-              <Loader2 className="h-4 w-4 animate-spin" /> Loading records…
+        {loading ? (
+          <div className="flex flex-1 items-center justify-center gap-2 py-16 text-sm text-slate-400">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading records…
+          </div>
+        ) : error ? (
+          <div className="flex-1 px-3 py-10 text-center text-sm text-red-600">{error}</div>
+        ) : data ? (
+          <div className="flex min-h-0 flex-1 flex-col gap-2">
+            <div className="flex items-center justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                disabled={data.records.length === 0}
+                onClick={() => downloadTextFile(buildCsv(data), csvFilename(data), "text/csv;charset=utf-8;")}
+                title="Download every record in this popup as a CSV"
+              >
+                <Download className="h-4 w-4" /> Export CSV
+              </Button>
             </div>
-          ) : error ? (
-            <div className="px-3 py-10 text-center text-sm text-red-600">{error}</div>
-          ) : data ? (
-            <EvidenceTable ev={data} />
-          ) : null}
-        </div>
+            {/* ScrollSyncX adds a synced top scrollbar rail + horizontal scroll for the wide table. */}
+            <ScrollSyncX
+              className="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-200"
+              bodyClassName="min-h-0 flex-1 overflow-auto"
+            >
+              <EvidenceTable ev={data} />
+            </ScrollSyncX>
+          </div>
+        ) : null}
       </DialogContent>
     </Dialog>
   );

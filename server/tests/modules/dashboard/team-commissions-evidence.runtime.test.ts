@@ -4,6 +4,8 @@ import { drizzle } from "drizzle-orm/pglite";
 import {
   getDirectorCommissionWorkspace,
   getDirectorCommissionEvidence,
+  getCommissionOfficeTotals,
+  getRepDealPipelineSummary,
 } from "../../../src/modules/dashboard/service.js";
 
 /**
@@ -27,6 +29,7 @@ const ST = {
   leadNew: U("530"),
   leadQual: U("540"),
   leadOpp: U("550"),
+  won: U("560"),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -76,7 +79,8 @@ beforeAll(async () => {
       ('${ST.estimating}','estimating','Estimating','pipeline'),
       ('${ST.leadNew}','new_lead','New Lead','lead'),
       ('${ST.leadQual}','qualified_lead','Qualified Lead','lead'),
-      ('${ST.leadOpp}','opportunity_lead_placeholder','Opp','lead');
+      ('${ST.leadOpp}','opportunity_lead_placeholder','Opp','lead'),
+      ('${ST.won}','won','Won','pipeline');
     -- lead opportunity stage must be one of the funnel 'opportunities' slugs:
     UPDATE pipeline_stage_config SET slug='sales_validation_stage' WHERE id='${ST.leadOpp}';
 
@@ -93,6 +97,12 @@ beforeAll(async () => {
       ('${U("d05")}','D-5','Held','${REP}','${ST.opportunity}', 888888, true);
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, is_test_data) VALUES
       ('${U("d06")}','D-6','Test','${REP}','${ST.opportunity}', 777777, true);
+    -- WON·UNSIGNED: REP-owned deal in a won stage with NO signed contract -> won·unsigned $80k. Plus a
+    -- won-but-SIGNED deal (excluded from won·unsigned) to prove the unsigned gate.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount) VALUES
+      ('${U("d08")}','D-8','Won Unsigned','${REP}','${ST.won}','${CO}', 80000);
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, contract_signed_at) VALUES
+      ('${U("d09")}','D-9','Won Signed','${REP}','${ST.won}', 95000, '2026-02-01T00:00:00Z');
 
     -- EARNED: a signed deal (D-4 above, opportunity stage, not lost) with a dsc row for REP.
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
@@ -149,10 +159,12 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     // value columns: evidence.total.value === cell
     expect((await ev("pipeline")).total.value).toBe(row.pipelineValue);
     expect((await ev("earned")).total.value).toBe(row.totalEarnedCommission);
+    expect((await ev("won_unsigned")).total.value).toBe(row.wonUnsignedValue);
 
     // sanity on the concrete fixture numbers
     expect(row.activeDeals).toBe(3); // D1 + D2(estimator) + D3
     expect(row.pipelineValue).toBe(220000); // 100k + 50k(40k+10kCO) + 70k
+    expect(row.wonUnsignedValue).toBe(80000); // D8 (won stage, unsigned); D9 (signed) excluded
     expect(row.estimating).toBe(1); // D3 only
     expect(row.leads).toBe(2);
     expect(row.qualifiedLeads).toBe(1);
@@ -161,6 +173,23 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(row.emails).toBe(2);
     expect(row.meetings).toBe(1);
     expect(row.totalEarnedCommission).toBe(2500);
+  });
+
+  it("officeTotals count each deal ONCE — de-dups the estimator double-count in the row sum", async () => {
+    const ws = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    // D2 is OWNED by OTHER and ESTIMATED by REP -> it appears in BOTH rows' pipeline (involvement). So the
+    // per-rep sum double-counts it: REP 220k + OTHER 50k = 270k.
+    const perRepPipelineSum = (await getRepDealPipelineSummary(tdb)).reduce((s, r) => s + r.pipelineValue, 0);
+    expect(perRepPipelineSum).toBe(270000);
+    // The office total counts each deal once: D1 100k + D2 50k + D3 70k = 220k (NOT 270k).
+    const totals = await getCommissionOfficeTotals(tdb);
+    expect(totals.pipelineValue).toBe(220000);
+    expect(totals.pipelineValue).toBeLessThan(perRepPipelineSum);
+    expect(ws.officeTotals.pipelineValue).toBe(220000);
+    // Won·unsigned office total: only D8 ($80k); D9 (signed) excluded; counted once.
+    expect(totals.wonUnsignedValue).toBe(80000);
+    expect(totals.wonUnsignedCount).toBe(1);
+    expect(ws.officeTotals.wonUnsignedValue).toBe(80000);
   });
 
   it("potential evidence reconciles to pipeline REVENUE (cell is revenue × rate)", async () => {

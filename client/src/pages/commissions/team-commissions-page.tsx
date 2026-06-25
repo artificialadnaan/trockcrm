@@ -66,22 +66,26 @@ export function TeamCommissionsPage() {
   const [drill, setDrill] = useState<CommissionDrillRequest | null>(null);
   const onDrill = (req: CommissionDrillRequest) => setDrill({ ...req, from: range.from, to: range.to });
 
-  const totals = useMemo(() => rows.reduce(
+  // Earned + potential are ADDITIVE commission cuts (owner + estimator each earn separately) — their team
+  // total legitimately sums the rows. The deal-VALUE totals (pipeline, active, won·unsigned) come from
+  // officeTotals, which counts each deal ONCE — summing the involvement rows would double-count a deal that
+  // has a distinct owner+estimator (e.g. Sidney/Alex as estimator).
+  const additive = useMemo(() => rows.reduce(
     (a, r) => ({
       earned: a.earned + r.totalEarnedCommission,
       potential: a.potential + r.potentialCommission,
-      pipeline: a.pipeline + r.pipelineValue,
-      active: a.active + r.activeDeals,
       activities: a.activities + r.totalActivities,
     }),
-    { earned: 0, potential: 0, pipeline: 0, active: 0, activities: 0 },
+    { earned: 0, potential: 0, activities: 0 },
   ), [rows]);
+  const office = data?.officeTotals ?? { activeDeals: 0, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0 };
   const maxPipeline = useMemo(() => rows.reduce((m, r) => Math.max(m, r.pipelineValue), 0), [rows]);
 
   // Sortable columns (sort keys cover every visible figure; compound cells sort by a representative total).
   const sortCols: SortColumn<Row>[] = [
     { key: "rep", type: "text", accessor: (r) => r.repName },
     { key: "earned", type: "number", accessor: (r) => r.totalEarnedCommission },
+    { key: "wonunsigned", type: "number", accessor: (r) => r.wonUnsignedValue },
     { key: "potential", type: "number", accessor: (r) => r.potentialCommission },
     { key: "active", type: "number", accessor: (r) => r.activeDeals },
     { key: "pipeline", type: "number", accessor: (r) => r.pipelineValue },
@@ -123,8 +127,9 @@ export function TeamCommissionsPage() {
             </button>
           ))}
         </div>
-        <span className="text-[11px] text-slate-400">
-          Earned &amp; activity are windowed by the period · pipeline, potential &amp; funnel are live snapshots
+        <span className="max-w-md text-right text-[11px] text-slate-400">
+          Earned &amp; activity are period-windowed; pipeline, potential &amp; funnel are live snapshots. Deal-value
+          totals count each deal once; rep rows credit both owner and estimator, so the columns sum higher.
         </span>
       </div>
 
@@ -132,12 +137,13 @@ export function TeamCommissionsPage() {
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
       ) : null}
 
-      {/* Team totals */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <KpiCard label="Earned commission" value={usdExact(totals.earned)} tone="bg-emerald-500" />
-        <KpiCard label="Potential commission" value={usdExact(totals.potential)} tone="bg-sky-500" />
-        <KpiCard label="Open pipeline" value={usdExact(totals.pipeline)} tone="bg-violet-500" />
-        <KpiCard label="Active deals" value={int(totals.active)} tone="bg-amber-500" />
+      {/* Team totals — earned/potential sum the rows (additive cuts); pipeline/active/won·unsigned count each deal once */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <KpiCard label="Earned commission" value={usdExact(additive.earned)} tone="bg-emerald-500" />
+        <KpiCard label="Potential commission" value={usdExact(additive.potential)} tone="bg-sky-500" />
+        <KpiCard label="Won · unsigned" value={usdExact(office.wonUnsignedValue)} tone="bg-teal-500" />
+        <KpiCard label="Open pipeline" value={usdExact(office.pipelineValue)} tone="bg-violet-500" />
+        <KpiCard label="Active deals" value={int(office.activeDeals)} tone="bg-amber-500" />
       </div>
 
       <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -152,6 +158,7 @@ export function TeamCommissionsPage() {
                 <tr className="border-b border-slate-200">
                   {sortHead("rep", "Rep", false)}
                   {sortHead("earned", "Earned")}
+                  {sortHead("wonunsigned", "Won · unsigned")}
                   {sortHead("potential", "Potential")}
                   {sortHead("active", "Active")}
                   {sortHead("pipeline", "Pipeline")}
@@ -172,6 +179,9 @@ export function TeamCommissionsPage() {
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       <Drill row={row} metric="earned" money zeroDim={row.totalEarnedCommission === 0} onDrill={onDrill}>{usdExact(row.totalEarnedCommission)}</Drill>
+                    </td>
+                    <td className="px-3 py-2.5 text-right">
+                      <Drill row={row} metric="won_unsigned" money zeroDim={row.wonUnsignedValue === 0} onDrill={onDrill}>{usdExact(row.wonUnsignedValue)}</Drill>
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       <Drill row={row} metric="potential" money zeroDim={row.potentialCommission === 0} onDrill={onDrill}>{usdExact(row.potentialCommission)}</Drill>
@@ -220,14 +230,15 @@ export function TeamCommissionsPage() {
               <tfoot>
                 <tr className="border-t-2 border-slate-300 bg-slate-50 font-black tabular-nums text-slate-800">
                   <td className="px-3 py-2.5 text-left uppercase tracking-wide text-[11px] text-slate-500">Team total</td>
-                  <td className="px-3 py-2.5 text-right text-emerald-700">{usdExact(totals.earned)}</td>
-                  <td className="px-3 py-2.5 text-right">{usdExact(totals.potential)}</td>
-                  <td className="px-3 py-2.5 text-right">{int(totals.active)}</td>
-                  <td className="px-3 py-2.5 text-right">{usdExact(totals.pipeline)}</td>
+                  <td className="px-3 py-2.5 text-right text-emerald-700">{usdExact(additive.earned)}</td>
+                  <td className="px-3 py-2.5 text-right">{usdExact(office.wonUnsignedValue)}</td>
+                  <td className="px-3 py-2.5 text-right">{usdExact(additive.potential)}</td>
+                  <td className="px-3 py-2.5 text-right">{int(office.activeDeals)}</td>
+                  <td className="px-3 py-2.5 text-right">{usdExact(office.pipelineValue)}</td>
                   <td className="px-3 py-2.5" />
                   <td className="px-3 py-2.5" />
                   <td className="px-3 py-2.5" />
-                  <td className="px-3 py-2.5 text-right">{int(totals.activities)}</td>
+                  <td className="px-3 py-2.5 text-right">{int(additive.activities)}</td>
                   <td className="px-3 py-2.5" />
                 </tr>
               </tfoot>

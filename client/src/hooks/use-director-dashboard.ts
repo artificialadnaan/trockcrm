@@ -189,6 +189,8 @@ export interface DirectorCommissionWorkspaceData {
     meetsNewCustomerShare: boolean;
     activeDeals: number;
     pipelineValue: number;
+    wonUnsignedValue: number;
+    wonUnsignedCount: number;
     leads: number;
     qualifiedLeads: number;
     opportunities: number;
@@ -199,6 +201,8 @@ export interface DirectorCommissionWorkspaceData {
     notes: number;
     totalActivities: number;
   }>;
+  // Deal-VALUE totals counted once per deal (not the inflated sum of involvement rows).
+  officeTotals: { activeDeals: number; pipelineValue: number; wonUnsignedValue: number; wonUnsignedCount: number };
 }
 
 export interface RepDetailData {
@@ -439,7 +443,7 @@ export function useDirectorCommissionWorkspace(dateRange?: { from: string; to: s
 // ── Team Commissions drill-down evidence (mirrors server CommissionEvidence) ──
 
 export type CommissionEvidenceMetric =
-  | "active" | "pipeline" | "potential" | "estimating" | "earned"
+  | "active" | "pipeline" | "potential" | "won_unsigned" | "estimating" | "earned"
   | "leads" | "qualified" | "opportunities" | "calls" | "emails" | "meetings";
 
 export interface CommissionEvidenceRecord {

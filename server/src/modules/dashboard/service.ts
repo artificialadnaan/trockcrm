@@ -2049,6 +2049,8 @@ export interface DirectorCommissionWorkspaceRow {
   meetsNewCustomerShare: boolean;
   activeDeals: number;
   pipelineValue: number;
+  wonUnsignedValue: number;
+  wonUnsignedCount: number;
   leads: number;
   qualifiedLeads: number;
   opportunities: number;
@@ -2062,6 +2064,9 @@ export interface DirectorCommissionWorkspaceRow {
 
 export interface DirectorCommissionWorkspaceData {
   rows: DirectorCommissionWorkspaceRow[];
+  // Deal-VALUE totals counted ONCE per deal (not the inflated sum of involvement rows). Earned + potential
+  // totals are NOT here — they're additive commission cuts and legitimately sum the rows.
+  officeTotals: { activeDeals: number; pipelineValue: number; wonUnsignedValue: number; wonUnsignedCount: number };
 }
 
 // Active-deal count + open pipeline value per person, INVOLVEMENT-based: each deal is credited to its
@@ -2071,30 +2076,30 @@ export interface DirectorCommissionWorkspaceData {
 // counted for BOTH (the per-person team view is additive, matching the estimator commission model).
 export async function getRepDealPipelineSummary(
   tenantDb: TenantDb
-): Promise<Array<{ repId: string; activeDeals: number; pipelineValue: number }>> {
+): Promise<Array<{ repId: string; activeDeals: number; pipelineValue: number; wonUnsignedValue: number; wonUnsignedCount: number }>> {
+  const dealValue = sql`${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)`;
+  const openPredicate = sql`d.is_active = true
+    AND COALESCE(d.is_test_data, false) = false
+    AND d.contract_signed_at IS NULL
+    AND d.contract_signed_date IS NULL
+    AND ${aliasedActiveDealCountFilterSql("d")}
+    AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})`;
+  // Won but NOT signed: in a won stage with no signed contract — value is awarded but no commission row
+  // exists yet, so these are invisible in both Earned (no dsc) and Pipeline (won stage isn't a commission
+  // stage). Same active/not-test/not-on-hold guards, won slugs, unsigned.
+  const wonUnsignedPredicate = sql`d.is_active = true
+    AND COALESCE(d.is_test_data, false) = false
+    AND d.contract_signed_at IS NULL
+    AND d.contract_signed_date IS NULL
+    AND ${aliasedActiveDealCountFilterSql("d")}
+    AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})`;
   const result = await tenantDb.execute(sql`
     SELECT
       involved.rep_id AS rep_id,
-      COUNT(*) FILTER (
-        WHERE d.is_active = true
-          AND COALESCE(d.is_test_data, false) = false
-          AND d.contract_signed_at IS NULL
-          AND d.contract_signed_date IS NULL
-          AND ${aliasedActiveDealCountFilterSql("d")}
-          AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
-      )::int AS active_deals,
-      COALESCE(
-        SUM(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))
-          FILTER (
-            WHERE d.is_active = true
-              AND COALESCE(d.is_test_data, false) = false
-              AND d.contract_signed_at IS NULL
-              AND d.contract_signed_date IS NULL
-              AND ${aliasedActiveDealCountFilterSql("d")}
-              AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
-          ),
-        0
-      )::numeric AS pipeline_value
+      COUNT(*) FILTER (WHERE ${openPredicate})::int AS active_deals,
+      COALESCE(SUM(${dealValue}) FILTER (WHERE ${openPredicate}), 0)::numeric AS pipeline_value,
+      COUNT(*) FILTER (WHERE ${wonUnsignedPredicate})::int AS won_unsigned_count,
+      COALESCE(SUM(${dealValue}) FILTER (WHERE ${wonUnsignedPredicate}), 0)::numeric AS won_unsigned_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     CROSS JOIN LATERAL (
@@ -2110,7 +2115,40 @@ export async function getRepDealPipelineSummary(
     repId: String(row.rep_id),
     activeDeals: Number(row.active_deals ?? 0),
     pipelineValue: Number(row.pipeline_value ?? 0),
+    wonUnsignedCount: Number(row.won_unsigned_count ?? 0),
+    wonUnsignedValue: Number(row.won_unsigned_value ?? 0),
   }));
+}
+
+// DE-DUPLICATED office totals for the deal-VALUE columns: each deal counted ONCE (no rep grouping, no
+// involvement), so a deal with a distinct owner+estimator isn't double-counted in the team total the way
+// summing the per-rep (involvement) rows would. Earned + potential are NOT here — they're additive
+// commission cuts (owner + estimator each earn separately), so their totals legitimately sum the rows.
+export async function getCommissionOfficeTotals(
+  tenantDb: TenantDb,
+): Promise<{ activeDeals: number; pipelineValue: number; wonUnsignedValue: number; wonUnsignedCount: number }> {
+  const dealValue = sql`${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)`;
+  const base = sql`d.is_active = true
+    AND COALESCE(d.is_test_data, false) = false
+    AND d.contract_signed_at IS NULL
+    AND d.contract_signed_date IS NULL
+    AND ${aliasedActiveDealCountFilterSql("d")}`;
+  const result = await tenantDb.execute(sql`
+    SELECT
+      COUNT(*) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}))::int AS active_deals,
+      COALESCE(SUM(${dealValue}) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})), 0)::numeric AS pipeline_value,
+      COUNT(*) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}))::int AS won_unsigned_count,
+      COALESCE(SUM(${dealValue}) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})), 0)::numeric AS won_unsigned_value
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+  `);
+  const row = ((result as any).rows ?? result)[0] ?? {};
+  return {
+    activeDeals: Number(row.active_deals ?? 0),
+    pipelineValue: Number(row.pipeline_value ?? 0),
+    wonUnsignedCount: Number(row.won_unsigned_count ?? 0),
+    wonUnsignedValue: Number(row.won_unsigned_value ?? 0),
+  };
 }
 
 export function dateOnly(value: unknown): string {
@@ -2663,7 +2701,7 @@ export async function getDirectorCommissionWorkspace(
   const to = options.to ?? `${year}-12-31`;
   const officeId = options.officeId;
 
-  const [commissionRows, activityRows, funnelSummary, dealSummaryRows] = await runSequential([
+  const [commissionRows, activityRows, funnelSummary, dealSummaryRows, officeTotals] = await runSequential([
     // Scope the roster to ACTIVE-OFFICE membership (primary office or a user_office_access grant). The
     // roster drives which rows the table renders, so this is what keeps a cross-office rep — including one
     // a Bid Board estimator map points at — from being credited for this tenant's deals (owner OR
@@ -2672,6 +2710,9 @@ export async function getDirectorCommissionWorkspace(
     () => getActivitySummaryByRep(tenantDb, { from, to }),
     () => getDirectorFunnelSummary(tenantDb, officeId),
     () => getRepDealPipelineSummary(tenantDb),
+    // De-duplicated office totals (each deal once) for the deal-VALUE columns, so the team total isn't
+    // inflated by summing the per-rep involvement rows (owner + estimator counted twice).
+    () => getCommissionOfficeTotals(tenantDb),
   ]);
 
   const activityByRep = new Map(activityRows.map((row) => [row.repId, row]));
@@ -2693,6 +2734,8 @@ export async function getDirectorCommissionWorkspace(
       meetsNewCustomerShare: row.meetsNewCustomerShare,
       activeDeals: dealSummary?.activeDeals ?? 0,
       pipelineValue: dealSummary?.pipelineValue ?? 0,
+      wonUnsignedValue: dealSummary?.wonUnsignedValue ?? 0,
+      wonUnsignedCount: dealSummary?.wonUnsignedCount ?? 0,
       leads: funnel?.leads ?? 0,
       qualifiedLeads: funnel?.qualifiedLeads ?? 0,
       opportunities: funnel?.opportunities ?? 0,
@@ -2705,7 +2748,7 @@ export async function getDirectorCommissionWorkspace(
     };
   });
 
-  return { rows };
+  return { rows, officeTotals };
 }
 
 // ---------------------------------------------------------------------------
@@ -2721,6 +2764,7 @@ export type CommissionEvidenceMetric =
   | "active"
   | "pipeline"
   | "potential"
+  | "won_unsigned"
   | "estimating"
   | "earned"
   | "leads"
@@ -2731,7 +2775,7 @@ export type CommissionEvidenceMetric =
   | "meetings";
 
 const COMMISSION_EVIDENCE_METRICS: readonly CommissionEvidenceMetric[] = [
-  "active", "pipeline", "potential", "estimating", "earned",
+  "active", "pipeline", "potential", "won_unsigned", "estimating", "earned",
   "leads", "qualified", "opportunities", "calls", "emails", "meetings",
 ];
 
@@ -2841,6 +2885,20 @@ export async function getDirectorCommissionEvidence(
       metric, kind: "deal", repId, repName,
       title: `${repName} — ${labels[metric].title}`, subtitle: labels[metric].sub,
       valueLabel: "Deal value",
+      total: { count: records.length, value: totalValue },
+      records,
+    };
+  }
+
+  // --- won but NOT signed: won-stage deals with no signed contract (involvement) ---
+  if (metric === "won_unsigned") {
+    const records = await runDealQuery(WON_STAGE_SLUGS, true);
+    const totalValue = records.reduce((s, r) => s + (r.value ?? 0), 0);
+    return {
+      metric, kind: "deal", repId, repName,
+      title: `${repName} — Won, not yet signed`,
+      subtitle: "Awarded deals in a won stage with no signed contract (owner or estimator)",
+      valueLabel: "Awarded value",
       total: { count: records.length, value: totalValue },
       records,
     };
