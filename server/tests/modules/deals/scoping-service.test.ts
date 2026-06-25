@@ -1596,15 +1596,20 @@ describe("Scoping Service", () => {
       ],
     });
 
-    await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
 
     // The file is left untouched — a passive director/admin readiness check must not mutate the owner's
-    // scoping intake (no attachment linking, no persisted readiness).
+    // scoping intake (no attachment linking, no persisted readiness)...
     expect(tenantDb.state.files[0]).toMatchObject({
       id: "file-scope-doc",
       intakeRequirementKey: null,
       intakeSource: null,
     });
+    // ...yet readiness is still ACCURATE: the would-be-auto-populated file is counted in memory, so a
+    // non-owner director sees the same satisfied scope_docs requirement the owner would (button enables).
+    expect(readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "scope_docs", category: "other", satisfied: true })
+    );
   });
 
   it("auto-populates source-lead image files into the Site photos attachment bucket and attaches them to the deal", async () => {
