@@ -42,6 +42,12 @@ describe("isThumbnailableImage", () => {
       expect(isThumbnailableImage(m)).toBe(false);
     }
   });
+
+  it("ignores Content-Type parameters (e.g. charset) before matching", () => {
+    expect(isThumbnailableImage("image/jpeg; charset=utf-8")).toBe(true);
+    expect(isThumbnailableImage(" image/png ;foo=bar")).toBe(true);
+    expect(isThumbnailableImage("application/pdf; charset=binary")).toBe(false);
+  });
 });
 
 describe("generateThumbnailBuffer", () => {

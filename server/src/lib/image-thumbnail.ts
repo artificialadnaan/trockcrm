@@ -35,7 +35,9 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
 /** True for mime types sharp can rasterize into a thumbnail. Excludes PDFs/docs and SVG (untrusted). */
 export function isThumbnailableImage(mimeType: string | null | undefined): boolean {
   if (!mimeType) return false;
-  const m = mimeType.toLowerCase();
+  // Strip any Content-Type parameters (e.g. "image/jpeg; charset=utf-8" as stored from a raw fetch
+  // header) before the equality check, so a parametrized-but-valid image type isn't treated as non-image.
+  const m = mimeType.split(";")[0].trim().toLowerCase();
   return (
     m === "image/jpeg" ||
     m === "image/jpg" ||
@@ -91,6 +93,10 @@ export async function generateAndStoreThumbnail(
         if (!source) {
           const got = await getObjectBuffer(r2Key, { maxBytes: MAX_SOURCE_BYTES });
           source = got.buffer;
+        } else if (source.byteLength > MAX_SOURCE_BYTES) {
+          // A caller-supplied buffer (CompanyCam) bypasses the getObjectBuffer cap — enforce it here so an
+          // oversized original isn't handed to sharp to decode. Throwing routes to the best-effort fallback.
+          throw new Error(`source buffer ${source.byteLength} exceeds ${MAX_SOURCE_BYTES} bytes`);
         }
         const thumb = await generateThumbnailBuffer(source);
         const thumbnailKey = deriveThumbnailKey(r2Key);
