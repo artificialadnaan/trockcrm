@@ -15,9 +15,12 @@ import {
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
-import { useProjectTypes } from "@/hooks/use-pipeline-config";
+import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
+import { useProperties } from "@/hooks/use-properties";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { createServiceOpportunity, type Deal } from "@/hooks/use-deals";
+import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
+import { getSelectedOptionLabel } from "./deal-form.helpers";
 import { useAuth } from "@/lib/auth";
 import {
   buildOfficeCodePrefixOptions,
@@ -37,6 +40,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const { user } = useAuth();
   const { offices } = useAccessibleOffices();
   const { hierarchy: projectTypeHierarchy } = useProjectTypes();
+  const { regions } = useRegions();
 
   // The STABLE home office (primary office), NOT the switchable active office — the cosmetic office prefix
   // is decoupled from any session office switch, so pickers + create always use the rep's home data office.
@@ -65,7 +69,42 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
     assignedRepId: user?.role === "rep" ? user.id : "",
     officeCode: initialOfficeCode,
     expectedCloseDate: "",
+    winProbability: "",
+    regionId: "",
   });
+  const [regionManuallyOverridden, setRegionManuallyOverridden] = useState(false);
+
+  // Region auto-detects from the selected property's state (same rule + columns as the deal form), but a
+  // manual pick wins. Look up the chosen property's state from the company-scoped property list.
+  const { properties } = useProperties(
+    { companyId: formData.companyId || undefined },
+    { officeId: homeOfficeId ?? undefined }
+  );
+  const selectedPropertyState = useMemo(
+    () => properties.find((p) => p.id === formData.propertyId)?.state ?? "",
+    [properties, formData.propertyId]
+  );
+  useEffect(() => {
+    setFormData((prev) => {
+      const nextRegionId = applyDealRegionAutoSelection({
+        regions,
+        propertyState: selectedPropertyState,
+        currentRegionId: prev.regionId,
+        manualOverride: regionManuallyOverridden,
+      });
+      return nextRegionId === prev.regionId ? prev : { ...prev, regionId: nextRegionId };
+    });
+  }, [regions, selectedPropertyState, regionManuallyOverridden]);
+  // When the region was auto-derived (not manually picked), show it as a not-yet-saved suggestion.
+  const regionIsSuggestion = !regionManuallyOverridden && Boolean(formData.regionId);
+  const regionSuggestionName = regionIsSuggestion
+    ? getSelectedOptionLabel(regions, formData.regionId, "")
+    : "";
+
+  const handleRegionChange = (value: string) => {
+    setRegionManuallyOverridden(true);
+    handleChange("regionId", value);
+  };
   // The office picker is a project-number PREFIX only: pickers + create target the rep's HOME (active)
   // office, so choosing DFW vs ATL never changes which companies/properties/reps are available nor where the
   // opportunity is created — only the deal_number prefix.
@@ -122,6 +161,13 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
       setError("Cannot create opportunity: Service project type is unavailable. Contact admin.");
       return;
     }
+    if (formData.winProbability !== "") {
+      const wp = parseInt(formData.winProbability, 10);
+      if (Number.isNaN(wp) || wp < 0 || wp > 100) {
+        setError("Win probability must be between 0 and 100");
+        return;
+      }
+    }
 
     setSubmitting(true);
     setError(null);
@@ -134,6 +180,8 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
           assignedRepId: formData.assignedRepId,
           description: formData.description.trim() || null,
           expectedCloseDate: formData.expectedCloseDate || null,
+          winProbability: formData.winProbability ? parseInt(formData.winProbability, 10) : null,
+          regionId: formData.regionId || null,
           officeCode: formData.officeCode, // cosmetic prefix; the record is created on the home office below
           projectType: "service",
           projectTypeId: serviceProjectType.id,
@@ -256,6 +304,49 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
                 )}
               </SelectContent>
             </Select>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="winProbability">Win Probability (%)</Label>
+              <Input
+                id="winProbability"
+                type="number"
+                min="0"
+                max="100"
+                placeholder="0-100"
+                value={formData.winProbability}
+                onChange={(event) => handleChange("winProbability", event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="region">Region</Label>
+              <Select
+                value={formData.regionId || "none"}
+                onValueChange={(val) => handleRegionChange(val && val !== "none" ? val : "")}
+              >
+                <SelectTrigger id="region">
+                  <SelectValue placeholder="Select region">
+                    {regionIsSuggestion
+                      ? `Auto: ${regionSuggestionName}`
+                      : getSelectedOptionLabel(regions, formData.regionId, "Select region")}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Select region</SelectItem>
+                  {regions.map((r) => (
+                    <SelectItem key={r.id} value={r.id}>
+                      {r.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {regionIsSuggestion && (
+                <p className="text-xs text-amber-600">
+                  Auto-detected {regionSuggestionName} from {selectedPropertyState} — not saved yet. Create to confirm.
+                </p>
+              )}
+            </div>
           </div>
 
           <div className="space-y-2">

@@ -656,6 +656,7 @@ export type CreateServiceOpportunityInput = Partial<Pick<
   | "projectType"
   | "projectTypeId"
   | "propertyId"
+  | "regionId"
   | "source"
   | "winProbability"
 >> & { name: string };
