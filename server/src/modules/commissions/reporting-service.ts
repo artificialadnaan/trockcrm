@@ -100,6 +100,14 @@ export interface RepCommissionDashboard {
     inPipeline: number;
     totalPotential: number;
     openDealCount: number;
+    // Deals sitting in a Won stage that have NO contract-signed date yet, so they mint no commission and
+    // are absent from both `earned` (needs a signed date) and `inPipeline` (pipeline stages only). Surfaced
+    // as a distinct "awaiting contract signature" figure so won-but-unsigned value is visible, not lost.
+    wonAwaitingSignature: {
+      dealCount: number;
+      dealValue: number;
+      potentialCommission: number;
+    };
   };
   stageTotals: Array<{
     stageKey: RepCommissionDashboardDeal["stageKey"];
@@ -468,6 +476,36 @@ export async function getRepCommissionDashboard(
   const earned = Number(rows.filter((deal) => deal.isEarned).reduce((sum, deal) => sum + deal.commission, 0).toFixed(2));
   const inPipeline = Number(rows.filter((deal) => !deal.isEarned).reduce((sum, deal) => sum + deal.commission, 0).toFixed(2));
   const totalPotential = Number((earned + inPipeline).toFixed(2));
+
+  // Won-stage deals with NO contract-signed date: they mint no commission row, so they fall through both
+  // `earned` (signed only) and `inPipeline` (pipeline stages only). Aggregate them separately — same
+  // value × owner-rate basis as the pipeline-potential query — so the won-but-unsigned total is visible.
+  const wonUnsignedResult = await tenantDb.execute(sql`
+    SELECT
+      COUNT(*)::int AS deal_count,
+      COALESCE(SUM(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)), 0)::numeric AS deal_value,
+      COALESCE(SUM(
+        (${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)) * COALESCE(cs.commission_rate, 0)
+      ), 0)::numeric AS potential_commission
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
+    WHERE ${buildAliasedInvolvedRepSql("d", repId)}
+      AND d.is_active = true
+      AND COALESCE(d.is_test_data, false) = false
+      AND d.contract_signed_at IS NULL
+      AND d.contract_signed_date IS NULL
+      AND psc.slug IN ('won', 'closed_won')
+      ${notOnHoldDealSql()}
+      ${dateRange.from ? sql`AND (d.won_closed_date IS NULL OR d.won_closed_date >= ${dateRange.from}::date)` : sql``}
+      ${dateRange.to ? sql`AND (d.won_closed_date IS NULL OR d.won_closed_date <= ${dateRange.to}::date)` : sql``}
+  `);
+  const wonUnsignedRow = (((wonUnsignedResult as any).rows ?? wonUnsignedResult)[0] ?? {}) as Record<string, unknown>;
+  const wonAwaitingSignature = {
+    dealCount: numberFrom(wonUnsignedRow.deal_count),
+    dealValue: numberFrom(wonUnsignedRow.deal_value),
+    potentialCommission: numberFrom(wonUnsignedRow.potential_commission),
+  };
   const stageTotals = STAGE_ORDER.map((stageKey) => {
     const stageDeals = rows.filter((deal) => deal.stageKey === stageKey);
     const commission = Number(stageDeals.reduce((sum, deal) => sum + deal.commission, 0).toFixed(2));
@@ -492,6 +530,7 @@ export async function getRepCommissionDashboard(
       inPipeline,
       totalPotential,
       openDealCount: rows.filter((deal) => !deal.isEarned).length,
+      wonAwaitingSignature,
     },
     stageTotals,
     deals: rows,

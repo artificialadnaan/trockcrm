@@ -48,6 +48,7 @@ interface CommissionDashboard {
     inPipeline: number;
     totalPotential: number;
     openDealCount: number;
+    wonAwaitingSignature: { dealCount: number; dealValue: number; potentialCommission: number };
   };
   stageTotals: StageTotal[];
   deals: CommissionDeal[];
@@ -105,7 +106,7 @@ const EMPTY_DASHBOARD: CommissionDashboard = {
   dateRange: { from: null, to: null },
   formula: "",
   goal: { amount: 0, percentToGoal: null, source: "none" },
-  summary: { earned: 0, inPipeline: 0, totalPotential: 0, openDealCount: 0 },
+  summary: { earned: 0, inPipeline: 0, totalPotential: 0, openDealCount: 0, wonAwaitingSignature: { dealCount: 0, dealValue: 0, potentialCommission: 0 } },
   stageTotals: STAGE_ORDER.map((stageKey) => ({
     stageKey,
     stageName: STAGE_META[stageKey].label,
@@ -386,6 +387,29 @@ export function RepCommissionsPage() {
           tone="green"
         />
       </div>
+
+      {!loading && (dashboard.summary.wonAwaitingSignature?.dealCount ?? 0) > 0 ? (
+        <div className="flex flex-wrap items-baseline justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">
+              Won — awaiting contract signature
+            </p>
+            <p className="text-xs text-amber-600">
+              {dashboard.summary.wonAwaitingSignature?.dealCount ?? 0} won deal
+              {(dashboard.summary.wonAwaitingSignature?.dealCount ?? 0) === 1 ? "" : "s"} with no signed contract date
+              yet — commission books once the contract date is set.
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-lg font-black tabular-nums text-amber-900">
+              {money(dashboard.summary.wonAwaitingSignature?.dealValue ?? 0)}
+            </p>
+            <p className="text-xs text-amber-700">
+              {money(dashboard.summary.wonAwaitingSignature?.potentialCommission ?? 0)} potential commission
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <Card className="rounded-lg border-slate-200 bg-white shadow-sm">
         <CardContent className="space-y-5 p-6">
