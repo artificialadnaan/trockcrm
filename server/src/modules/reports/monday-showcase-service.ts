@@ -1013,7 +1013,16 @@ export async function getMondayShowcaseEvidence(
   };
 
   let scope: EvidenceScope;
-  if (regionName !== undefined) {
+  if (regionName !== undefined && repId !== undefined) {
+    // rep × region (the region report's "top reps within region" won drill): the records are this rep's
+    // won deals WITHIN the clicked region, and the total reconciles to that figure. The drawer header is
+    // the caller's request.title ("<region> — <rep>"), which names both axes; scope carries the rep so the
+    // CSV export is labeled by them. Allowed only for `won` (enforced in the route).
+    const repName =
+      records.find((rec) => rec.repId === (repId ?? null))?.repName ??
+      (await resolveRepName(tenantDb, repId));
+    scope = { kind: "rep", repId: repId ?? null, repName };
+  } else if (regionName !== undefined) {
     scope = { kind: "region", regionName };
   } else if (repId === undefined) {
     scope = { kind: "office" };
