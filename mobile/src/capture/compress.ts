@@ -2,14 +2,21 @@ import * as ImageManipulator from "expo-image-manipulator";
 import * as FileSystem from "expo-file-system/legacy";
 
 /**
- * Mirror of the web compress pipeline (browser-image-compression: JPEG, longest
- * edge ≤ 2048, quality 0.85). Also normalizes HEIC/HEIF gallery imports to JPEG
- * so the uploaded Content-Type is always image/jpeg, matching confirm-upload.
+ * Normalizes captures/gallery imports to JPEG (HEIC/HEIF → JPEG) so the uploaded
+ * Content-Type is always image/jpeg, matching confirm-upload, and caps the longest
+ * edge so we don't ship raw 48MP sensor frames over field cellular.
+ *
+ * The cap is the native 12MP long edge (4032) with near-lossless quality (0.92): a
+ * detail-dense shot like a printed design board stays readable when zoomed in the
+ * CRM viewer. (The web upload path stores the original uncompressed — this is the
+ * field/bandwidth-constrained sibling, not a byte-for-byte mirror of it.) The grid
+ * loads a small server-generated thumbnail, so this resolution only costs on the
+ * full-size open view, not the timeline.
  */
 export type CompressedImage = { uri: string; sizeBytes: number; contentType: "image/jpeg" };
 
-const MAX_DIMENSION = 2048;
-const QUALITY = 0.85;
+const MAX_DIMENSION = 4032;
+const QUALITY = 0.92;
 
 export async function compressForUpload(
   uri: string,

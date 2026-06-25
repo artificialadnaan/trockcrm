@@ -11,6 +11,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { getAllProjects, getProjectPhotos } from "./client.js";
 import type { CCProject, CCPhoto } from "./client.js";
 import { putObject, isR2Configured } from "../../lib/r2-client.js";
+import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
 import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -326,6 +327,10 @@ export async function syncProjectPhotos(
 
         await putObject(r2Key, buffer, mimeType);
 
+        // Grid thumbnail from the buffer we already hold (no extra R2 round-trip). Best-effort: a miss
+        // leaves thumbnailR2Key null and the grid falls back to the full original.
+        const thumbnailR2Key = await generateAndStoreThumbnail(r2Key, mimeType, buffer);
+
         const displayName = `${deal.dealNumber} CompanyCam ${dateStr} ${photo.id.slice(-6)}`;
 
         return {
@@ -342,6 +347,7 @@ export async function syncProjectPhotos(
             fileSizeBytes,
             fileExtension: ext,
             r2Key,
+            thumbnailR2Key,
             r2Bucket: bucketName,
             externalUrl: original,
             externalThumbnailUrl: thumbnail,

@@ -46,6 +46,10 @@ export const files = pgTable(
     fileSizeBytes: bigint("file_size_bytes", { mode: "number" }).notNull(),
     fileExtension: varchar("file_extension", { length: 20 }).notNull(),
     r2Key: varchar("r2_key", { length: 1000 }).unique().notNull(),
+    // Optional sibling R2 object: a small JPEG thumbnail of an image `r2Key`, generated server-side at
+    // ingest (confirm-upload + CompanyCam sync). The grid loads this; the lightbox keeps the full original.
+    // Null for non-images and for rows uploaded before thumbnails existed — callers fall back to r2Key.
+    thumbnailR2Key: varchar("thumbnail_r2_key", { length: 1000 }),
     r2Bucket: varchar("r2_bucket", { length: 100 }).notNull(),
     dealId: uuid("deal_id"),
     leadId: uuid("lead_id").references(() => leads.id),
