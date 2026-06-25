@@ -196,7 +196,7 @@ async function assertDealRouteAccess(req: any, dealId: string) {
 async function assertDealOwnerRouteAccess(
   req: any,
   dealId: string,
-  options: { allowAdmin?: boolean; message?: string } = {}
+  options: { allowAdmin?: boolean; allowDirector?: boolean; message?: string } = {}
 ) {
   return assertDealOwnerAccess(req.tenantDb!, dealId, req.user!, options);
 }
@@ -1641,7 +1641,10 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
 // GET /api/deals/:id/scoping-intake/readiness — evaluate current readiness
 router.get("/:id/scoping-intake/readiness", async (req, res, next) => {
   try {
-    await assertDealOwnerRouteAccess(req, req.params.id);
+    // Read-only readiness gate for the Trigger RFP button. Admins and directors observe it office-wide
+    // (mirroring who can trigger the RFP); reps still need to own the deal. Without the director allowance
+    // the new director button would render but stay permanently disabled (this GET would 403 → draft).
+    await assertDealOwnerRouteAccess(req, req.params.id, { allowAdmin: true, allowDirector: true });
     const readiness = await evaluateDealScopingReadiness(req.tenantDb!, req.params.id);
     await req.commitTransaction!();
     res.json({ readiness });
