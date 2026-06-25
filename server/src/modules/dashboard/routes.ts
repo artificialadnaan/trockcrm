@@ -26,7 +26,12 @@ const router = Router();
 router.get("/rep", async (req, res, next) => {
   try {
     const range = req.query.range as ActivityRange | undefined;
-    const data = await getRepDashboard(req.tenantDb!, req.user!.id, { range });
+    const data = await getRepDashboard(req.tenantDb!, req.user!.id, {
+      range,
+      // Office-scope the rep's own commission/override roll-up to their active office (same as the
+      // Team-Commissions list), so a cross-office direct report can't inflate their override total.
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
@@ -137,6 +142,9 @@ router.get(
       const data = await getRepDetail(req.tenantDb!, req.params.repId as string, {
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
+        // Scope the drill-down override base to the viewer's active office so it reconciles with the
+        // office-scoped flat Team-Commissions list (reconciliation-consistency-rule).
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       });
       await req.commitTransaction!();
       res.json({ data });

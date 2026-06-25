@@ -1507,6 +1507,9 @@ export async function getRepDashboard(
     activityDateRange?: { from?: string; to?: string };
     followUpDateRange?: { from?: string; to?: string };
     commissionDateRange?: { from?: string; to?: string };
+    // Active office for commission scoping: bounds the manager-override base to this office's reports so the
+    // rep's own page AND the director drill-down reconcile with the office-scoped flat Team-Commissions list.
+    officeId?: string;
   } = {}
 ): Promise<RepDashboardData> {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); // YYYY-MM-DD in CT
@@ -1752,7 +1755,8 @@ export async function getRepDashboard(
       tenantDb,
       userId,
       commissionDateRange.from ?? activityRangeStartDate,
-      commissionDateRange.to ?? today
+      commissionDateRange.to ?? today,
+      options.officeId
     ),
 
     // Contracts signed YTD + MTD for this rep (estimator-aware — see buildRepContractsSignedSql).
@@ -3137,7 +3141,7 @@ export async function getRepWonMissingContractDate(
 export async function getRepDetail(
   tenantDb: TenantDb,
   repId: string,
-  options: { from?: string; to?: string } = {}
+  options: { from?: string; to?: string; officeId?: string } = {}
 ) {
   const year = new Date().getFullYear();
   const from = options.from ?? `${year}-01-01`;
@@ -3148,6 +3152,10 @@ export async function getRepDetail(
       activityDateRange: { from, to },
       followUpDateRange: { from, to },
       commissionDateRange: { from, to },
+      // Scope the drill-down override base to the SAME active office as the flat Team-Commissions list so
+      // the two reconcile (reconciliation-consistency-rule); without this a cross-office direct report
+      // would inflate the drill-down total beyond the office-scoped list.
+      officeId: options.officeId,
     }),
     () => getWinLossRatioByRep(tenantDb, { from, to }),
     () => getWinRateTrend(tenantDb, { from, to, repId }),
