@@ -127,7 +127,7 @@ export function PipelineRecordCard({
               {entity === "deal" ? (
                 <ChangeOrderBadge isChangeOrder={record.isChangeOrder} compact />
               ) : null}
-              <p className="line-clamp-2 text-[15px] leading-5 font-semibold text-slate-900">{record.name}</p>
+              <p className="line-clamp-2 text-[15px] leading-5 font-semibold text-slate-900" title={record.name}>{record.name}</p>
             </div>
             {value ? (
               <span className="shrink-0 text-right text-[1.1rem] leading-none font-black tracking-tight text-slate-900">
@@ -144,13 +144,13 @@ export function PipelineRecordCard({
               <span className="inline-flex min-w-0 items-center gap-1 truncate">
                 <span className="text-slate-300">•</span>
                 <MapPin className="h-3 w-3" />
-                <span className="truncate">{location}</span>
+                <span className="truncate" title={location}>{location}</span>
               </span>
             ) : null}
             {contextLine ? (
               <span className="inline-flex min-w-0 items-center gap-1 truncate">
                 <span className="text-slate-300">•</span>
-                <span className="truncate">{contextLine}</span>
+                <span className="truncate" title={contextLine}>{contextLine}</span>
               </span>
             ) : null}
             {!location && !contextLine ? (

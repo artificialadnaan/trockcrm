@@ -29,7 +29,7 @@ export function ContactCard({ contact, onClick }: ContactCardProps) {
             <span className="flex-shrink-0 inline-flex items-center justify-center h-8 w-8 rounded-full bg-slate-200 text-slate-600 text-xs font-semibold">
               {[contact.firstName?.[0], contact.lastName?.[0]].filter(Boolean).join("").toUpperCase() || "?"}
             </span>
-            <h3 className="font-semibold truncate">{fullName(contact)}</h3>
+            <h3 className="font-semibold truncate" title={fullName(contact)}>{fullName(contact)}</h3>
           </div>
           <div className="flex items-center gap-4 mt-1 text-xs text-muted-foreground flex-wrap">
             {contact.companyName && (
