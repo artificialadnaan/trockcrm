@@ -12,7 +12,7 @@ import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/compon
 import { Button } from "@/components/ui/button";
 import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
 import { usdExact, int } from "@/pages/reports/format";
-import { downloadTextFile } from "@/lib/report-export";
+import { downloadTextFile, serializeCsvTable } from "@/lib/report-export";
 import { ScrollSyncX } from "@/pages/reports/scroll-sync-x";
 import {
   useCommissionEvidence,
@@ -37,17 +37,14 @@ interface DrillColumn {
   cell: (r: Rec) => ReactNode;
 }
 
-function csvCell(v: string | number | null | undefined): string {
-  const s = v == null ? "" : String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-
-/** CSV of every record in the popup, columns matching the on-screen table (raw values, dates ISO). */
+/** CSV of every record in the popup, columns matching the on-screen table (raw values, dates ISO). Uses
+ *  the canonical escaper (formula-injection guard + bare-CR quoting + numbers raw), like all other exports. */
 function buildCsv(ev: CommissionEvidence): string {
   const cols = columnsFor(ev);
-  const header = cols.map((c) => csvCell(c.header)).join(",");
-  const lines = ev.records.map((r) => cols.map((c) => csvCell(c.sort.accessor(r))).join(","));
-  return [header, ...lines].join("\n");
+  return serializeCsvTable(
+    cols.map((c) => c.header),
+    ev.records.map((r) => cols.map((c) => c.sort.accessor(r))),
+  );
 }
 
 function csvFilename(ev: CommissionEvidence): string {

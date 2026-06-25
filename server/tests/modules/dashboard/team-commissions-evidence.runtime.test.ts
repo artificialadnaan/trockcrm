@@ -97,6 +97,10 @@ beforeAll(async () => {
       ('${U("d05")}','D-5','Held','${REP}','${ST.opportunity}', 888888, true);
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, is_test_data) VALUES
       ('${U("d06")}','D-6','Test','${REP}','${ST.opportunity}', 777777, true);
+    -- UNASSIGNED: no owner AND no estimator — dropped from every per-rep row (involvement unnest yields
+    -- nothing), so it must NOT inflate officeTotals above the row sum either.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, awarded_amount) VALUES
+      ('${U("d10")}','D-10','Unassigned', NULL, NULL, '${ST.opportunity}', 60000);
     -- WON·UNSIGNED: REP-owned deal in a won stage with NO signed contract -> won·unsigned $80k. Plus a
     -- won-but-SIGNED deal (excluded from won·unsigned) to prove the unsigned gate.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount) VALUES

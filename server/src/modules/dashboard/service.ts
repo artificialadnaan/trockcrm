@@ -2128,10 +2128,15 @@ export async function getCommissionOfficeTotals(
   tenantDb: TenantDb,
 ): Promise<{ activeDeals: number; pipelineValue: number; wonUnsignedValue: number; wonUnsignedCount: number }> {
   const dealValue = sql`${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)`;
+  // Match the per-rep view's deal SET exactly: getRepDealPipelineSummary's CROSS JOIN LATERAL unnest drops
+  // any deal with no involved user (both assigned_rep_id AND estimator_user_id NULL), so an unassigned deal
+  // is in NO rep row. Require an involved user here too, so officeTotals is the EXACT de-dup of the rows
+  // (officeTotals <= Σ rows always) and the footer reconciles with the rep rows beneath it.
   const base = sql`d.is_active = true
     AND COALESCE(d.is_test_data, false) = false
     AND d.contract_signed_at IS NULL
     AND d.contract_signed_date IS NULL
+    AND (d.assigned_rep_id IS NOT NULL OR d.estimator_user_id IS NOT NULL)
     AND ${aliasedActiveDealCountFilterSql("d")}`;
   const result = await tenantDb.execute(sql`
     SELECT
