@@ -4,6 +4,8 @@ import { drizzle } from "drizzle-orm/pglite";
 import {
   getDirectorCommissionWorkspace,
   getDirectorCommissionEvidence,
+  getCommissionOfficeTotals,
+  getRepDealPipelineSummary,
 } from "../../../src/modules/dashboard/service.js";
 
 /**
@@ -18,6 +20,10 @@ const OTHER = U("b01"); // a co-owner so an estimator-on-REP deal is owned elsew
 const CO = U("c01"); // company
 const MGR = U("f01"); // below their OWN floor, earns ONLY manager override on a report
 const REPORT = U("f02"); // direct report of MGR with real earned commission
+const BOOKED = U("f03"); // owns a won deal that's deal-unsigned but ALREADY booked (dsc) -> in Earned, NOT won·unsigned
+const NONREP = U("f04"); // a director (NOT on the rep roster) — deals only they own must NOT inflate office totals
+const EST2 = U("f05"); // estimator on a won deal whose OWNER is booked but EST2 is not -> still in EST2's won·unsigned
+const OWN2 = U("f06"); // owner of that cross-booked deal (booked) — separate so it doesn't perturb REP's earned
 const FROM = "2026-01-01";
 const TO = "2026-12-31";
 
@@ -27,6 +33,7 @@ const ST = {
   leadNew: U("530"),
   leadQual: U("540"),
   leadOpp: U("550"),
+  won: U("560"),
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -65,18 +72,21 @@ beforeAll(async () => {
 
     INSERT INTO users (id, display_name, role, reports_to) VALUES
       ('${REP}','Kaleb','rep', NULL), ('${OTHER}','Owner','rep', NULL),
-      ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}');
+      ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}'), ('${BOOKED}','Booked','rep', NULL),
+      ('${NONREP}','Director Dana','director', NULL), ('${EST2}','Estimator Two','rep', NULL), ('${OWN2}','Owner Two','rep', NULL);
     INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP}', true, 0.05, 0, 0),
       ('${MGR}', true, 0.05, 1000000, 0.10),  -- MGR below their own $1M floor -> direct earned $0
-      ('${REPORT}', true, 0.05, 0, 0);
+      ('${REPORT}', true, 0.05, 0, 0),
+      ('${BOOKED}', true, 0.05, 0, 0);
     INSERT INTO companies (id, name) VALUES ('${CO}','Acme');
     INSERT INTO pipeline_stage_config (id, slug, name, workflow_family) VALUES
       ('${ST.opportunity}','opportunity','Opportunity','pipeline'),
       ('${ST.estimating}','estimating','Estimating','pipeline'),
       ('${ST.leadNew}','new_lead','New Lead','lead'),
       ('${ST.leadQual}','qualified_lead','Qualified Lead','lead'),
-      ('${ST.leadOpp}','opportunity_lead_placeholder','Opp','lead');
+      ('${ST.leadOpp}','opportunity_lead_placeholder','Opp','lead'),
+      ('${ST.won}','won','Won','pipeline');
     -- lead opportunity stage must be one of the funnel 'opportunities' slugs:
     UPDATE pipeline_stage_config SET slug='sales_validation_stage' WHERE id='${ST.leadOpp}';
 
@@ -93,6 +103,32 @@ beforeAll(async () => {
       ('${U("d05")}','D-5','Held','${REP}','${ST.opportunity}', 888888, true);
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, is_test_data) VALUES
       ('${U("d06")}','D-6','Test','${REP}','${ST.opportunity}', 777777, true);
+    -- UNASSIGNED: no owner AND no estimator — dropped from every per-rep row (involvement unnest yields
+    -- nothing), so it must NOT inflate officeTotals above the row sum either.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, awarded_amount) VALUES
+      ('${U("d10")}','D-10','Unassigned', NULL, NULL, '${ST.opportunity}', 60000);
+    -- NON-ROSTERED: owned solely by a director (not on the rep roster) -> in no rep row, must be excluded
+    -- from officeTotals (otherwise the footer exceeds the visible rows).
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount) VALUES
+      ('${U("d12")}','D-12','Director-owned','${NONREP}','${ST.opportunity}', 45000);
+    -- WON·UNSIGNED: REP-owned deal in a won stage with NO signed contract -> won·unsigned $80k. Plus a
+    -- won-but-SIGNED deal (excluded from won·unsigned) to prove the unsigned gate.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount) VALUES
+      ('${U("d08")}','D-8','Won Unsigned','${REP}','${ST.won}','${CO}', 80000);
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, contract_signed_at) VALUES
+      ('${U("d09")}','D-9','Won Signed','${REP}','${ST.won}', 95000, '2026-02-01T00:00:00Z');
+    -- BOOKED's won deal: deal-level UNSIGNED but a dsc row carries contract_signed_date_at_signing, so Earned
+    -- counts it -> must be EXCLUDED from won·unsigned (not awaiting signature). Owner BOOKED, $50k.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount) VALUES
+      ('${U("d11")}','D-11','Booked Unsigned','${BOOKED}','${ST.won}','${CO}', 50000);
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc3")}','${U("d11")}','${BOOKED}', 2500, 50000, 'owner', '2026-03-01');
+    -- D13: won + deal-unsigned, OWNER=OWN2 (booked) but ESTIMATOR=EST2 (NOT booked). Per-rep exclusion ->
+    -- OWN2's won·unsigned drops it (booked), EST2's won·unsigned KEEPS it ($30k), office counts it once.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, company_id, awarded_amount) VALUES
+      ('${U("d13")}','D-13','Cross Booked','${OWN2}','${EST2}','${ST.won}','${CO}', 30000);
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc4")}','${U("d13")}','${OWN2}', 1500, 30000, 'owner', '2026-03-01');
 
     -- EARNED: a signed deal (D-4 above, opportunity stage, not lost) with a dsc row for REP.
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
@@ -149,10 +185,12 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     // value columns: evidence.total.value === cell
     expect((await ev("pipeline")).total.value).toBe(row.pipelineValue);
     expect((await ev("earned")).total.value).toBe(row.totalEarnedCommission);
+    expect((await ev("won_unsigned")).total.value).toBe(row.wonUnsignedValue);
 
     // sanity on the concrete fixture numbers
     expect(row.activeDeals).toBe(3); // D1 + D2(estimator) + D3
     expect(row.pipelineValue).toBe(220000); // 100k + 50k(40k+10kCO) + 70k
+    expect(row.wonUnsignedValue).toBe(80000); // D8 (won stage, unsigned); D9 (signed) excluded
     expect(row.estimating).toBe(1); // D3 only
     expect(row.leads).toBe(2);
     expect(row.qualifiedLeads).toBe(1);
@@ -161,6 +199,49 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(row.emails).toBe(2);
     expect(row.meetings).toBe(1);
     expect(row.totalEarnedCommission).toBe(2500);
+  });
+
+  it("officeTotals count each deal ONCE — de-dups the estimator double-count in the row sum", async () => {
+    const ws = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    // D2 is OWNED by OTHER and ESTIMATED by REP -> it appears in BOTH rows' pipeline (involvement). The
+    // per-rep sum double-counts it AND includes the non-roster director's D12: REP 220k + OTHER 50k +
+    // NONREP 45k = 315k.
+    const perRepPipelineSum = (await getRepDealPipelineSummary(tdb)).reduce((s, r) => s + r.pipelineValue, 0);
+    expect(perRepPipelineSum).toBe(315000);
+    // The office total counts each deal ONCE and only deals with a ROSTERED rep involved: D1 100k + D2 50k +
+    // D3 70k = 220k — excludes the unassigned D10 AND the director-owned D12 (neither in any rep row).
+    const totals = await getCommissionOfficeTotals(tdb);
+    expect(totals.pipelineValue).toBe(220000);
+    expect(totals.pipelineValue).toBeLessThan(perRepPipelineSum);
+    expect(ws.officeTotals.pipelineValue).toBe(220000);
+    // Won·unsigned office total: D8 ($80k, via REP unbooked) + D13 ($30k, via EST2 unbooked) = $110k; D9
+    // (signed) and D11 (fully booked) excluded; each counted once.
+    expect(totals.wonUnsignedValue).toBe(110000);
+    expect(totals.wonUnsignedCount).toBe(2);
+    expect(ws.officeTotals.wonUnsignedValue).toBe(110000);
+  });
+
+  it("a won deal that's already BOOKED (dsc) is in Earned, NOT in won·unsigned", async () => {
+    const { rows, officeTotals } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    const booked = rows.find((r) => r.repId === BOOKED)!;
+    // D11 is won-stage + deal-unsigned but has a dsc booking -> Earned counts it, won·unsigned does NOT.
+    expect(booked.totalEarnedCommission).toBe(2500);
+    expect(booked.wonUnsignedValue).toBe(0);
+    expect(booked.wonUnsignedCount).toBe(0);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: BOOKED, metric: "won_unsigned", from: FROM, to: TO })).total.value).toBe(0);
+    // Office won·unsigned excludes the fully-booked D11; counts D8 ($80k) + the cross-booked D13 ($30k via EST2).
+    expect(officeTotals.wonUnsignedValue).toBe(110000);
+  });
+
+  it("won·unsigned excludes a booked deal PER REP, not deal-wide (owner booked, estimator not)", async () => {
+    const { rows } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    // D13: owner OWN2 booked, estimator EST2 not. OWN2's won·unsigned drops it; EST2's keeps it.
+    expect(rows.find((r) => r.repId === OWN2)!.wonUnsignedValue).toBe(0);
+    expect(rows.find((r) => r.repId === EST2)!.wonUnsignedValue).toBe(30000);
+    const evOwn = await getDirectorCommissionEvidence(tdb, { repId: OWN2, metric: "won_unsigned", from: FROM, to: TO });
+    const evEst = await getDirectorCommissionEvidence(tdb, { repId: EST2, metric: "won_unsigned", from: FROM, to: TO });
+    expect(evOwn.records.some((r) => r.navId === U("d13"))).toBe(false);
+    expect(evEst.records.some((r) => r.navId === U("d13"))).toBe(true);
   });
 
   it("potential evidence reconciles to pipeline REVENUE (cell is revenue × rate)", async () => {
