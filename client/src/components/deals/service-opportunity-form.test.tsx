@@ -254,4 +254,17 @@ describe("ServiceOpportunityForm", () => {
       { officeId: "office-dallas" }
     );
   });
+
+  it("blocks Create while regions are still loading for a stated property (no region-less fast create)", async () => {
+    // Cold/slow /pipeline/regions: regions empty + loading. The picked property HAS a mappable state, so
+    // creating now would save region-less — the form must wait, not submit.
+    mocks.useRegions.mockReturnValue({ regions: [], loading: true, error: null });
+    mocks.selectedProperty.value = { id: "property-1", state: "TX" };
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+    await selectAndSubmit(container);
+    expect(mocks.createServiceOpportunity).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Loading regions");
+  });
 });

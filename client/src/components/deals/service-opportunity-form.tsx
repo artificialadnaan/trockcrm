@@ -39,7 +39,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const { user } = useAuth();
   const { offices } = useAccessibleOffices();
   const { hierarchy: projectTypeHierarchy } = useProjectTypes();
-  const { regions } = useRegions();
+  const { regions, loading: regionsLoading } = useRegions();
 
   // The STABLE home office (primary office), NOT the switchable active office — the cosmetic office prefix
   // is decoupled from any session office switch, so pickers + create always use the rep's home data office.
@@ -96,6 +96,12 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const regionSuggestionName = regionIsSuggestion
     ? getSelectedOptionLabel(regions, formData.regionId, "")
     : "";
+  // A picked property has a state to map, but regions haven't loaded yet (cold/slow /pipeline/regions) and
+  // the user hasn't manually chosen a region — so auto-detect can't resolve one. Block Create until regions
+  // arrive (the effect then fills regionId), otherwise the deal would save region-less and fall out of the
+  // region reports. Once loaded-but-empty or the property has no state, this is false (no deadlock).
+  const regionPending =
+    regionsLoading && Boolean(formData.propertyState) && !regionManuallyOverridden && !formData.regionId;
 
   const handleRegionChange = (value: string) => {
     setRegionManuallyOverridden(true);
@@ -170,6 +176,12 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
         setError("Win probability must be a whole number between 0 and 100");
         return;
       }
+    }
+    // Safety net for the button guard: don't create while a region is still resolving for the selected
+    // property, or the deal would save region-less and miss the region reports.
+    if (regionPending) {
+      setError("Loading regions — one moment, then Create so the deal lands in the right region report.");
+      return;
     }
 
     setSubmitting(true);
@@ -387,8 +399,8 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
       ) : null}
 
       <div className="flex items-center gap-3">
-        <Button type="submit" disabled={submitting}>
-          {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+        <Button type="submit" disabled={submitting || regionPending} title={regionPending ? "Loading regions…" : undefined}>
+          {submitting || regionPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
           Create Service Opportunity
         </Button>
         <Button type="button" variant="outline" onClick={() => navigate(-1)}>
