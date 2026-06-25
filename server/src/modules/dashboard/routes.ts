@@ -95,6 +95,7 @@ router.get(
       const data = await getDirectorCommissionWorkspace(req.tenantDb!, {
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       });
       await req.commitTransaction!();
       res.json({ data });

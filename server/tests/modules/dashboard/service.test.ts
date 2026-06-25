@@ -729,7 +729,7 @@ describe("Dashboard Service", () => {
         execute: vi.fn().mockImplementation((query: unknown) => {
           const text = extractSqlText(query).toLowerCase();
 
-          if (text.includes("select id, display_name") && text.includes("role = 'rep'")) {
+          if (text.includes("select u.id, u.display_name") && text.includes("role = 'rep'")) {
             return Promise.resolve({ rows: [{ id: "manager-1", display_name: "Manager Rep" }] });
           }
 
@@ -804,7 +804,7 @@ describe("Dashboard Service", () => {
         execute: vi.fn().mockImplementation((query: unknown) => {
           const text = extractSqlText(query).toLowerCase();
 
-          if (text.includes("select id, display_name") && text.includes("role = 'rep'")) {
+          if (text.includes("select u.id, u.display_name") && text.includes("role = 'rep'")) {
             return Promise.resolve({ rows: [{ id: "rep-1", display_name: "Alex Rep" }] });
           }
 
@@ -892,7 +892,7 @@ describe("Dashboard Service", () => {
         execute: vi.fn().mockImplementation((query: unknown) => {
           const text = extractSqlText(query).toLowerCase();
 
-          if (text.includes("select id, display_name") && text.includes("role = 'rep'")) {
+          if (text.includes("select u.id, u.display_name") && text.includes("role = 'rep'")) {
             return Promise.resolve({ rows: [{ id: "rep-1", display_name: "Alex Rep" }] });
           }
 
@@ -1145,10 +1145,10 @@ describe("Dashboard Service", () => {
       expect(activityQuery).toContain(filter);
 
       // Commission roster (getDirectorRepCommissionRows) -> dashboard payload + commission
-      // workspace. Bare column (the query has no `u` alias). (Codex round 2)
-      const commissionQuery = queries.find((t) => t.includes("order by display_name asc"));
+      // workspace. Now `u`-aliased + active-office scoped. (Codex)
+      const commissionQuery = queries.find((t) => t.includes("order by u.display_name asc"));
       expect(commissionQuery).toBeTruthy();
-      expect(commissionQuery).toContain("coalesce(is_test_data, false) = false");
+      expect(commissionQuery).toContain(filter);
 
       // Funnel roster (getDirectorFunnelSummary repFunnelRows). (Codex round 2)
       const funnelQuery = queries.find((t) => t.includes("qualified_leads"));

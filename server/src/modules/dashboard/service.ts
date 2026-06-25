@@ -1368,19 +1368,25 @@ export async function getRepCommissionSummary(
   };
 }
 
-async function getDirectorRepCommissionRows(
+export async function getDirectorRepCommissionRows(
   tenantDb: TenantDb,
-  options: { from: string; to: string }
+  options: { from: string; to: string; officeId?: string }
 ): Promise<DirectorRepCommissionRow[]> {
+  // When an active office is known, scope the roster to its members (primary office or a
+  // user_office_access grant) — `users` is a single global table, so without this a cross-office rep
+  // (incl. one a Bid Board estimator map points at) would be credited for this tenant's deals.
+  const officeScope = options.officeId
+    ? sql` AND ${activeOfficeRepMembershipSql(options.officeId)}`
+    : sql``;
   const repsResult = await tenantDb.execute(sql`
-    SELECT id, display_name
-    FROM ${users}
-    WHERE is_active = true
+    SELECT u.id, u.display_name
+    FROM ${users} u
+    WHERE u.is_active = true
       -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
       -- commission roster (dashboard payload + commission workspace).
-      AND COALESCE(is_test_data, false) = false
-      AND role = 'rep'
-    ORDER BY display_name ASC
+      AND COALESCE(u.is_test_data, false) = false
+      AND u.role = 'rep'${officeScope}
+    ORDER BY u.display_name ASC
   `);
   const reps = (repsResult as any).rows ?? repsResult;
   if (reps.length === 0) return [];
@@ -2634,16 +2640,21 @@ async function buildDirectorScopeSummary(
 
 export async function getDirectorCommissionWorkspace(
   tenantDb: TenantDb,
-  options: { from?: string; to?: string } = {}
+  options: { from?: string; to?: string; officeId?: string } = {}
 ): Promise<DirectorCommissionWorkspaceData> {
   const year = new Date().getUTCFullYear();
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
+  const officeId = options.officeId;
 
   const [commissionRows, activityRows, funnelSummary, dealSummaryRows] = await runSequential([
-    () => getDirectorRepCommissionRows(tenantDb, { from, to }),
+    // Scope the roster to ACTIVE-OFFICE membership (primary office or a user_office_access grant). The
+    // roster drives which rows the table renders, so this is what keeps a cross-office rep — including one
+    // a Bid Board estimator map points at — from being credited for this tenant's deals (owner OR
+    // estimator). Matches the funnel's rep branch; bounds owner + estimator credit uniformly (Codex).
+    () => getDirectorRepCommissionRows(tenantDb, { from, to, officeId }),
     () => getActivitySummaryByRep(tenantDb, { from, to }),
-    () => getDirectorFunnelSummary(tenantDb),
+    () => getDirectorFunnelSummary(tenantDb, officeId),
     () => getRepDealPipelineSummary(tenantDb),
   ]);
 
@@ -2754,7 +2765,7 @@ export async function getDirectorDashboard(
       includeDealSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
     }),
     () => getDirectorFunnelSummary(tenantDb, options.officeId),
-    () => getDirectorRepCommissionRows(tenantDb, { from, to }),
+    () => getDirectorRepCommissionRows(tenantDb, { from, to, officeId: options.officeId }),
     () => getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
     // P1-7: in mine scope, narrow Recent Closes to the viewer's deals using the SAME
     // visibility options the KPI cards / canonical Won decomposition use, instead of
