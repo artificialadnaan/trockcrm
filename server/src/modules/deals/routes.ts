@@ -1338,9 +1338,13 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
 // POST /api/deals/:id/rfp-retry — enqueue a fresh RFP delivery job from the latest dead row.
 router.post("/:id/rfp-retry", async (req, res, next) => {
   try {
+    // A director can trigger an RFP office-wide, so they must also be able to retry one that lands in
+    // send_failed — otherwise a director-triggered request on another rep's deal is unrecoverable (the
+    // Retry button shows but 403s). Mirrors the trigger-rfp allowance; reps still need to own the deal.
     await assertDealOwnerRouteAccess(req, req.params.id, {
       allowAdmin: true,
-      message: "Only the assigned rep or an admin can retry this RFP delivery",
+      allowDirector: true,
+      message: "Only the assigned rep, a director, or an admin can retry this RFP delivery",
     });
     const deal = await getDealById(
       req.tenantDb!,
@@ -1641,11 +1645,17 @@ router.patch("/:id/resolved-fields", async (req, res, next) => {
 // GET /api/deals/:id/scoping-intake/readiness — evaluate current readiness
 router.get("/:id/scoping-intake/readiness", async (req, res, next) => {
   try {
-    // Read-only readiness gate for the Trigger RFP button. Admins and directors observe it office-wide
-    // (mirroring who can trigger the RFP); reps still need to own the deal. Without the director allowance
-    // the new director button would render but stay permanently disabled (this GET would 403 → draft).
-    await assertDealOwnerRouteAccess(req, req.params.id, { allowAdmin: true, allowDirector: true });
-    const readiness = await evaluateDealScopingReadiness(req.tenantDb!, req.params.id);
+    // Readiness gate for the Trigger RFP button. Admins and directors observe it office-wide (mirroring
+    // who can trigger the RFP); reps still need to own the deal. Without the director allowance the new
+    // director button would render but stay permanently disabled (this GET would 403 → draft).
+    const dealAccess = await assertDealOwnerRouteAccess(req, req.params.id, { allowAdmin: true, allowDirector: true });
+    // evaluateDealScopingReadiness writes by default (auto-links attachments, persists readiness). A
+    // non-owner (elevated director/admin) is only OBSERVING the gate, so force read-only — a passive
+    // page-load must never mutate the owning rep's scoping intake. The owner keeps the persist behavior.
+    const viewerOwnsDeal = dealAccess.assignedRepId === req.user!.id;
+    const readiness = await evaluateDealScopingReadiness(req.tenantDb!, req.params.id, {
+      readOnly: !viewerOwnsDeal,
+    });
     await req.commitTransaction!();
     res.json({ readiness });
   } catch (err) {

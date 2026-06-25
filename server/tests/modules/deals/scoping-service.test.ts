@@ -1571,6 +1571,42 @@ describe("Scoping Service", () => {
     expect(tenantDb.state.files).toHaveLength(2);
   });
 
+  it("does not auto-populate attachments (no write) when evaluated read-only for a non-owner observer", async () => {
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      files: [
+        {
+          id: "file-scope-doc",
+          dealId: "deal-1",
+          category: "rfp",
+          originalFilename: "roof-plan.pdf",
+          mimeType: "application/pdf",
+          r2Key: "deals/deal-1/roof-plan.pdf",
+          r2Bucket: "crm-files",
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+
+    // The file is left untouched — a passive director/admin readiness check must not mutate the owner's
+    // scoping intake (no attachment linking, no persisted readiness).
+    expect(tenantDb.state.files[0]).toMatchObject({
+      id: "file-scope-doc",
+      intakeRequirementKey: null,
+      intakeSource: null,
+    });
+  });
+
   it("auto-populates source-lead image files into the Site photos attachment bucket and attaches them to the deal", async () => {
     pipelineMocks.getStageById.mockResolvedValue({
       id: "stage-opportunity",

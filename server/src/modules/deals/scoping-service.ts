@@ -70,6 +70,10 @@ export interface DealScopingReadinessResult extends DealScopingReadinessSnapshot
 
 interface EvaluateDealScopingReadinessOptions {
   persist?: boolean;
+  // readOnly forbids ALL writes (attachment auto-population AND readiness persistence), not just the
+  // persist step. Used when a non-owner (an elevated director/admin observing the Trigger RFP readiness
+  // gate) evaluates another rep's intake — a passive readiness check must never mutate that rep's data.
+  readOnly?: boolean;
 }
 
 type LinkedScopingAttachmentRow = {
@@ -1123,7 +1127,7 @@ export async function evaluateDealScopingReadiness(
   const deal = resolvedDeal.deal;
   const lockState = await resolveDealScopeLockState(deal);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
-  if (shouldAutoPopulateDealScopingAttachments({ lockState, intake: existingIntake })) {
+  if (!options.readOnly && shouldAutoPopulateDealScopingAttachments({ lockState, intake: existingIntake })) {
     await populateDealScopingAttachmentsForDeal(tenantDb, deal);
   }
   const attachments = await listScopingAttachmentFiles(tenantDb, dealId);
@@ -1138,7 +1142,8 @@ export async function evaluateDealScopingReadiness(
     attachments,
   });
 
-  const shouldPersist = options.persist !== false && !lockState.locked && !isScopingIntakeActivated(existingIntake);
+  const shouldPersist =
+    !options.readOnly && options.persist !== false && !lockState.locked && !isScopingIntakeActivated(existingIntake);
   if (existingIntake && shouldPersist) {
     const user = await getUserOrThrow(tenantDb, existingIntake.lastEditedBy);
     await persistReadinessIfNeeded(
