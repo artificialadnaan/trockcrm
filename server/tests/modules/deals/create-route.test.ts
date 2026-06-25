@@ -407,4 +407,29 @@ describe("POST /api/deals create context", () => {
       })
     );
   });
+
+  it("forwards regionId and winProbability through the Service opportunity endpoint (so region/forecast reports can read them)", async () => {
+    const { res } = await invokeRoute({
+      path: "/service-opportunity",
+      body: {
+        name: "SMOKE TEST DELETE Service Opportunity",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "type-service",
+        regionId: "region-central",
+        winProbability: 65,
+      },
+    });
+
+    expect(res.statusCode).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        regionId: "region-central",
+        winProbability: 65,
+        workflowRoute: "service",
+      })
+    );
+  });
 });

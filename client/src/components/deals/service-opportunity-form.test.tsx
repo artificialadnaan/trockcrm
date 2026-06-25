@@ -13,6 +13,10 @@ const mocks = vi.hoisted(() => ({
   useAuth: vi.fn(),
   useAccessibleOffices: vi.fn(),
   useProjectTypes: vi.fn(),
+  useRegions: vi.fn(),
+  // The record PropertySelector emits via onPropertySelected when the user picks a property (mutable so
+  // each test can set the selected property's state).
+  selectedProperty: { value: { id: "property-1", state: "" } as { id: string; state: string } },
   useTaskAssignees: vi.fn(),
 }));
 
@@ -30,6 +34,7 @@ vi.mock("@/hooks/use-accessible-offices", () => ({
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   useProjectTypes: mocks.useProjectTypes,
+  useRegions: mocks.useRegions,
 }));
 
 vi.mock("@/hooks/use-task-assignees", () => ({
@@ -45,8 +50,21 @@ vi.mock("@/components/companies/company-selector", () => ({
 }));
 
 vi.mock("@/components/properties/property-selector", () => ({
-  PropertySelector: ({ onChange }: { onChange: (propertyId: string) => void }) => (
-    <button type="button" onClick={() => onChange("property-1")}>
+  PropertySelector: ({
+    onChange,
+    onPropertySelected,
+  }: {
+    onChange: (propertyId: string) => void;
+    onPropertySelected?: (property: { id: string; state: string }) => void;
+  }) => (
+    <button
+      type="button"
+      onClick={() => {
+        // Mirror the real selector: emit the full selected record FIRST, then the id.
+        onPropertySelected?.(mocks.selectedProperty.value);
+        onChange(mocks.selectedProperty.value.id);
+      }}
+    >
       Select property
     </button>
   ),
@@ -74,6 +92,16 @@ function setupCommonMocks() {
       { id: "type-roofing", name: "Roofing", slug: "roofing", children: [] },
     ],
   });
+  mocks.useRegions.mockReturnValue({
+    regions: [
+      { id: "region-central", name: "Central", slug: "central" },
+      { id: "region-east", name: "East Coast", slug: "east-coast" },
+    ],
+    loading: false,
+    error: null,
+  });
+  // Default: a property with NO state (region won't auto-derive unless a test sets a state).
+  mocks.selectedProperty.value = { id: "property-1", state: "" };
   mocks.useTaskAssignees.mockReturnValue({
     assignees: [{ id: "rep-1", displayName: "Sales Rep" }],
     loading: false,
@@ -185,5 +213,58 @@ describe("ServiceOpportunityForm", () => {
       }),
       { officeId: "office-dallas" }
     );
+  });
+
+  async function selectAndSubmit(container: HTMLElement) {
+    await act(async () => {
+      setInputValue(container.querySelector("#name") as HTMLInputElement, "SMOKE TEST DELETE Service Opportunity");
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select company")?.click();
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select property")?.click();
+    });
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+  }
+
+  it("captures region synchronously from the selected property so an immediate Create still includes it", async () => {
+    // PropertySelector emits the picked property's state via onPropertySelected at click time (no async
+    // fetch). Picking property-1 in TX (Central) must populate region even when the user Creates instantly —
+    // the regression Codex flagged: a pending by-id fetch left regionId null on fast create.
+    mocks.selectedProperty.value = { id: "property-1", state: "TX" };
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+    await selectAndSubmit(container);
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyId: "property-1", regionId: "region-central" }),
+      { officeId: "office-dallas" }
+    );
+  });
+
+  it("sends no region when the selected property has no state (nothing to derive)", async () => {
+    mocks.selectedProperty.value = { id: "property-1", state: "" };
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+    await selectAndSubmit(container);
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyId: "property-1", regionId: null }),
+      { officeId: "office-dallas" }
+    );
+  });
+
+  it("blocks Create while regions are still loading for a stated property (no region-less fast create)", async () => {
+    // Cold/slow /pipeline/regions: regions empty + loading. The picked property HAS a mappable state, so
+    // creating now would save region-less — the form must wait, not submit.
+    mocks.useRegions.mockReturnValue({ regions: [], loading: true, error: null });
+    mocks.selectedProperty.value = { id: "property-1", state: "TX" };
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+    await selectAndSubmit(container);
+    expect(mocks.createServiceOpportunity).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Loading regions");
   });
 });
