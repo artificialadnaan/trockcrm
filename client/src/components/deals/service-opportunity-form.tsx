@@ -16,7 +16,6 @@ import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
-import { usePropertyDetail } from "@/hooks/use-properties";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { createServiceOpportunity, type Deal } from "@/hooks/use-deals";
 import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
@@ -71,22 +70,16 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
     expectedCloseDate: "",
     winProbability: "",
     regionId: "",
+    // Captured SYNCHRONOUSLY from PropertySelector's onPropertySelected (the record it already loaded,
+    // including search results beyond page 1). No async by-id fetch, so a fast select-then-Create can't
+    // race: the region is derived from the property the user actually picked, never a stale/blank one.
+    propertyState: "",
   });
   const [regionManuallyOverridden, setRegionManuallyOverridden] = useState(false);
 
   // Region auto-detects from the selected property's state (same rule + columns as the deal form), but a
-  // manual pick wins. Fetch the chosen property by id — NOT the company list's first page, which can omit
-  // a property that was found via PropertySelector search beyond the default page size.
-  const { property: selectedProperty } = usePropertyDetail(
-    formData.propertyId || undefined,
-    { officeId: homeOfficeId ?? undefined }
-  );
-  // usePropertyDetail keeps the PREVIOUS property until its refetch settles after propertyId changes. Only
-  // derive region from the detail when it actually matches the currently-selected property — otherwise a
-  // fast switch-then-Create could save the OLD property's region against the NEW propertyId (wrong region
-  // bucket). While the detail is stale/loading, fall back to no state so region auto-detect waits.
-  const selectedPropertyState =
-    selectedProperty?.id === formData.propertyId ? (selectedProperty.state ?? "") : "";
+  // manual pick wins.
+  const selectedPropertyState = formData.propertyState;
   useEffect(() => {
     setFormData((prev) => {
       const nextRegionId = applyDealRegionAutoSelection({
@@ -133,6 +126,12 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
       const next = { ...prev, [field]: value };
       if (field === "companyId") {
         next.propertyId = "";
+        next.propertyState = "";
+      }
+      // Clearing the property must drop its captured state too, so region auto-detect doesn't keep deriving
+      // from a property that's no longer selected (onPropertySelected only fires on a NEW selection).
+      if (field === "propertyId" && !value) {
+        next.propertyState = "";
       }
       // officeCode is a cosmetic prefix that no longer rescopes the data, so changing it must NOT clear the
       // company/property/rep selections (the pickers stay on the home office regardless of the prefix).
@@ -256,6 +255,11 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
                 companyId={formData.companyId || null}
                 value={formData.propertyId || null}
                 onChange={(propertyId) => handleChange("propertyId", propertyId)}
+                // Capture the picked property's state synchronously (fires on click + on value resolution
+                // for search-selected properties) so region auto-detect never races a separate fetch.
+                onPropertySelected={(property) =>
+                  setFormData((prev) => ({ ...prev, propertyState: property.state ?? "" }))
+                }
                 officeId={homeOfficeId ?? undefined}
                 required
               />

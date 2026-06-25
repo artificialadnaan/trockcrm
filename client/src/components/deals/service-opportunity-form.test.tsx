@@ -14,7 +14,9 @@ const mocks = vi.hoisted(() => ({
   useAccessibleOffices: vi.fn(),
   useProjectTypes: vi.fn(),
   useRegions: vi.fn(),
-  usePropertyDetail: vi.fn(),
+  // The record PropertySelector emits via onPropertySelected when the user picks a property (mutable so
+  // each test can set the selected property's state).
+  selectedProperty: { value: { id: "property-1", state: "" } as { id: string; state: string } },
   useTaskAssignees: vi.fn(),
 }));
 
@@ -35,10 +37,6 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
   useRegions: mocks.useRegions,
 }));
 
-vi.mock("@/hooks/use-properties", () => ({
-  usePropertyDetail: mocks.usePropertyDetail,
-}));
-
 vi.mock("@/hooks/use-task-assignees", () => ({
   useTaskAssignees: mocks.useTaskAssignees,
 }));
@@ -52,8 +50,21 @@ vi.mock("@/components/companies/company-selector", () => ({
 }));
 
 vi.mock("@/components/properties/property-selector", () => ({
-  PropertySelector: ({ onChange }: { onChange: (propertyId: string) => void }) => (
-    <button type="button" onClick={() => onChange("property-1")}>
+  PropertySelector: ({
+    onChange,
+    onPropertySelected,
+  }: {
+    onChange: (propertyId: string) => void;
+    onPropertySelected?: (property: { id: string; state: string }) => void;
+  }) => (
+    <button
+      type="button"
+      onClick={() => {
+        // Mirror the real selector: emit the full selected record FIRST, then the id.
+        onPropertySelected?.(mocks.selectedProperty.value);
+        onChange(mocks.selectedProperty.value.id);
+      }}
+    >
       Select property
     </button>
   ),
@@ -89,14 +100,8 @@ function setupCommonMocks() {
     loading: false,
     error: null,
   });
-  mocks.usePropertyDetail.mockReturnValue({
-    property: null,
-    leads: [],
-    deals: [],
-    loading: false,
-    error: null,
-    refetch: vi.fn(),
-  });
+  // Default: a property with NO state (region won't auto-derive unless a test sets a state).
+  mocks.selectedProperty.value = { id: "property-1", state: "" };
   mocks.useTaskAssignees.mockReturnValue({
     assignees: [{ id: "rep-1", displayName: "Sales Rep" }],
     loading: false,
@@ -223,12 +228,11 @@ describe("ServiceOpportunityForm", () => {
     });
   }
 
-  it("auto-derives region from the SELECTED property's state when the detail matches", async () => {
-    // PropertySelector mock selects "property-1"; usePropertyDetail returns that exact property in TX (Central).
-    mocks.usePropertyDetail.mockReturnValue({
-      property: { id: "property-1", state: "TX" },
-      leads: [], deals: [], loading: false, error: null, refetch: vi.fn(),
-    });
+  it("captures region synchronously from the selected property so an immediate Create still includes it", async () => {
+    // PropertySelector emits the picked property's state via onPropertySelected at click time (no async
+    // fetch). Picking property-1 in TX (Central) must populate region even when the user Creates instantly —
+    // the regression Codex flagged: a pending by-id fetch left regionId null on fast create.
+    mocks.selectedProperty.value = { id: "property-1", state: "TX" };
     const { container, root } = await renderForm();
     containers.push(container);
     roots.push(root);
@@ -239,14 +243,8 @@ describe("ServiceOpportunityForm", () => {
     );
   });
 
-  it("ignores STALE property detail (id mismatch) so a fast switch-then-create saves no cross-bucket region", async () => {
-    // Simulate usePropertyDetail still holding the PREVIOUS property (different id, TX→Central) while the
-    // user has already selected property-1 and clicks Create before the refetch settles. Region must NOT be
-    // derived from the stale detail — otherwise property-1 would be saved with the old property's region.
-    mocks.usePropertyDetail.mockReturnValue({
-      property: { id: "OLD-property-9", state: "TX" },
-      leads: [], deals: [], loading: false, error: null, refetch: vi.fn(),
-    });
+  it("sends no region when the selected property has no state (nothing to derive)", async () => {
+    mocks.selectedProperty.value = { id: "property-1", state: "" };
     const { container, root } = await renderForm();
     containers.push(container);
     roots.push(root);
