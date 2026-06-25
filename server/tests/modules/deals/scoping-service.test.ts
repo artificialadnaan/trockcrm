@@ -1612,6 +1612,70 @@ describe("Scoping Service", () => {
     );
   });
 
+  it("read-only readiness counts a SOURCE-LEAD scope_docs file (dealId null) without attaching it to the deal", async () => {
+    // The bug this guards: required attachments that live only on the source lead (dealId null) are
+    // normally pulled onto the deal by auto-population — a WRITE. In read-only mode (a non-owner
+    // director/admin observing the gate) that write is skipped, so resolveScopedAttachmentCandidates must
+    // still reach the lead file in memory, or the director's Trigger RFP button would be stuck disabled.
+    pipelineMocks.getStageById.mockResolvedValue({
+      id: "stage-opportunity",
+      slug: "opportunity",
+      workflowFamily: "standard_deal",
+      displayOrder: 1,
+    });
+
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          name: "Converted Lead Deal",
+          stageId: "stage-opportunity",
+          workflowRoute: "normal",
+          expectedCloseDate: null,
+          propertyAddress: null,
+          propertyCity: null,
+          propertyState: null,
+          propertyZip: null,
+          description: null,
+          projectTypeId: null,
+          assignedRepId: "rep-1",
+          sourceLeadId: "lead-1",
+        },
+      ],
+      files: [
+        {
+          id: "file-lead-scope-doc",
+          dealId: null,
+          leadId: "lead-1",
+          category: "rfp",
+          originalFilename: "roof-plan.pdf",
+          mimeType: "application/pdf",
+          r2Key: "leads/lead-1/roof-plan.pdf",
+          r2Bucket: "crm-files",
+          intakeRequirementKey: null,
+          intakeSource: null,
+          isActive: true,
+        },
+      ],
+    });
+
+    const readiness = await evaluateDealScopingReadiness(tenantDb as never, "deal-1", { readOnly: true });
+
+    // The lead's file is NOT pulled onto the deal and its intake fields stay null — no write occurs, even
+    // through the source-lead path.
+    expect(tenantDb.state.files[0]).toMatchObject({
+      id: "file-lead-scope-doc",
+      dealId: null,
+      leadId: "lead-1",
+      intakeRequirementKey: null,
+      intakeSource: null,
+    });
+    // ...yet the would-be-auto-populated lead file is still counted in memory, so scope_docs is satisfied.
+    expect(readiness.attachmentRequirements).toContainEqual(
+      expect.objectContaining({ key: "scope_docs", category: "other", satisfied: true })
+    );
+  });
+
   it("auto-populates source-lead image files into the Site photos attachment bucket and attaches them to the deal", async () => {
     pipelineMocks.getStageById.mockResolvedValue({
       id: "stage-opportunity",
