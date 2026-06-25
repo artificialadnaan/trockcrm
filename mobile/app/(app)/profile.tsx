@@ -1,10 +1,13 @@
 import React from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { Linking, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../../src/auth/AuthContext";
 import { theme } from "../../src/theme/theme";
 import { Badge, Button, Card } from "../../src/components/ui";
 import { ScreenHeader } from "../../src/components/ScreenHeader";
+
+const SUPPORT_HUB_URL = "https://support-hub-production.up.railway.app/";
 
 const ROLE_LABEL: Record<string, string> = {
   admin: "Admin",
@@ -17,6 +20,12 @@ const ROLE_LABEL: Record<string, string> = {
 export default function ProfileScreen() {
   const { user, signOut } = useAuth();
   const firstName = user?.firstName?.trim();
+
+  const openSupportTicket = () => {
+    void Linking.openURL(SUPPORT_HUB_URL).catch(() => {
+      // Opening the support hub is best-effort; if no handler can take the URL there's nothing to recover.
+    });
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -34,6 +43,13 @@ export default function ProfileScreen() {
             Capture and organize jobsite photos, then build branded photo reports — all synced to T Rock CRM.
           </Text>
         </Card>
+
+        <Button
+          title="Create Support Ticket"
+          variant="ghost"
+          onPress={openSupportTicket}
+          icon={<Ionicons name="help-buoy-outline" size={18} color={theme.color.textPrimary} />}
+        />
 
         <Button title="Sign out" variant="dangerGhost" onPress={() => void signOut()} />
       </ScrollView>
