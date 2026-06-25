@@ -16,6 +16,8 @@ const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const REP = U("a01"); // owner + estimator + activities
 const OTHER = U("b01"); // a co-owner so an estimator-on-REP deal is owned elsewhere
 const CO = U("c01"); // company
+const MGR = U("f01"); // below their OWN floor, earns ONLY manager override on a report
+const REPORT = U("f02"); // direct report of MGR with real earned commission
 const FROM = "2026-01-01";
 const TO = "2026-12-31";
 
@@ -61,9 +63,13 @@ beforeAll(async () => {
       amount numeric NOT NULL, source_value_amount numeric NOT NULL, attribution_role text NOT NULL DEFAULT 'owner',
       contract_signed_date_at_signing date);
 
-    INSERT INTO users (id, display_name, role) VALUES ('${REP}','Kaleb','rep'), ('${OTHER}','Owner','rep');
-    INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate)
-      VALUES ('${REP}', true, 0.05, 0, 0);
+    INSERT INTO users (id, display_name, role, reports_to) VALUES
+      ('${REP}','Kaleb','rep', NULL), ('${OTHER}','Owner','rep', NULL),
+      ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}');
+    INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate) VALUES
+      ('${REP}', true, 0.05, 0, 0),
+      ('${MGR}', true, 0.05, 1000000, 0.10),  -- MGR below their own $1M floor -> direct earned $0
+      ('${REPORT}', true, 0.05, 0, 0);
     INSERT INTO companies (id, name) VALUES ('${CO}','Acme');
     INSERT INTO pipeline_stage_config (id, slug, name, workflow_family) VALUES
       ('${ST.opportunity}','opportunity','Opportunity','pipeline'),
@@ -91,6 +97,13 @@ beforeAll(async () => {
     -- EARNED: a signed deal (D-4 above, opportunity stage, not lost) with a dsc row for REP.
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
       VALUES ('${U("dc1")}','${U("d04")}','${REP}', 2500, 50000, 'owner', '2026-03-01');
+
+    -- REPORT's signed deal (owned by REPORT) + dsc -> REPORT direct earned $5000 (floor met). MGR earns
+    -- override 0.10 * 5000 = $500 and NOTHING direct (below their own $1M floor).
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, contract_signed_at) VALUES
+      ('${U("d07")}','D-7','Report Signed','${REPORT}','${ST.opportunity}', 100000, '2026-03-01T00:00:00Z');
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc2")}','${U("d07")}','${REPORT}', 5000, 100000, 'owner', '2026-03-01');
 
     -- LEADS (open, assigned REP): 2 new, 1 qualified, 1 opportunity.
     INSERT INTO leads (id, name, assigned_rep_id, stage_id, company_id) VALUES
@@ -161,6 +174,20 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     const ev = await getDirectorCommissionEvidence(tdb, { repId: REP, metric: "earned", from: FROM, to: TO });
     expect(ev.records).toHaveLength(1);
     expect(ev.records[0]).toMatchObject({ value: 2500, navKind: "deal", navId: U("d04"), primary: "D-4" });
+  });
+
+  it("below-floor manager's earned drawer RECONCILES to the cell via a manager-override row", async () => {
+    const { rows } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    const mgr = rows.find((r) => r.repId === MGR)!;
+    // cell = direct (held at $0 below floor) + override (0.10 * 5000) = $500
+    expect(mgr.totalEarnedCommission).toBe(500);
+
+    const ev = await getDirectorCommissionEvidence(tdb, { repId: MGR, metric: "earned", from: FROM, to: TO });
+    // drawer total equals the clicked cell (the whole point) — NOT $0
+    expect(ev.total.value).toBe(500);
+    const overrideRow = ev.records.find((r) => r.id === "manager-override");
+    expect(overrideRow).toMatchObject({ value: 500, navKind: null });
+    expect(ev.subtitle.toLowerCase()).toContain("override");
   });
 
   it("activity records navigate to the linked deal when present, else are non-navigable", async () => {

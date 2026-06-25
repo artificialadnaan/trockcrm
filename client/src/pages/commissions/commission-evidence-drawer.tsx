@@ -118,7 +118,7 @@ function EvidenceTable({ ev }: { ev: CommissionEvidence }) {
           return (
             <TableRow
               key={r.id}
-              className={navigable ? "cursor-pointer hover:bg-sky-50/60" : ""}
+              className={navigable ? "group cursor-pointer hover:bg-sky-50/60" : ""}
               onClick={navigable ? () => navigate(`/${r.navKind === "lead" ? "leads" : "deals"}/${r.navId}`) : undefined}
             >
               {columns.map((col) => (

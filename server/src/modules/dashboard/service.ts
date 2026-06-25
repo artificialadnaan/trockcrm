@@ -2853,13 +2853,36 @@ export async function getDirectorCommissionEvidence(
       date: r.lastPaidAt ? r.lastPaidAt.slice(0, 10) : null,
       companyName: r.companyName,
     }));
+    // The table cell = direct earned (floor-gated above) + manager override on direct reports. The override
+    // has no per-deal record list, so surface it as ONE summary row — otherwise the drawer would total $0
+    // for a below-floor team lead whose cell is non-zero override (the only case its earned cell is even
+    // clickable), contradicting the clicked figure. With it, Σ records === the cell in every case.
+    const override = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, from, to);
+    if (override !== 0) {
+      records.push({
+        id: "manager-override",
+        navKind: null,
+        navId: null,
+        primary: null,
+        name: "Manager override on direct reports",
+        stageLabel: "Override",
+        value: override,
+        date: null,
+        companyName: null,
+      });
+    }
     const totalValue = records.reduce((s, r) => s + (r.value ?? 0), 0);
+    const subtitle = !gate.met
+      ? override !== 0
+        ? "Below floor — direct earned held at $0; the cell is manager override on reports"
+        : "Below floor — direct earned held at $0 this period (rows shown)"
+      : override !== 0
+        ? "Direct earned + manager override on reports = this period's earned"
+        : "Direct earned this period";
     return {
       metric, kind: "deal", repId, repName,
       title: `${repName} — Earned commission`,
-      subtitle: gate.met
-        ? `Direct earned this period${config.overrideRate > 0 ? " · excludes manager override" : ""}`
-        : "Below floor — direct earned held at $0 this period (rows shown)",
+      subtitle,
       valueLabel: "Earned",
       total: { count: records.length, value: totalValue },
       records,
