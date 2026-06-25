@@ -17,8 +17,12 @@ export const UPLOAD_QUEUE_TASK = "trockcam-upload-queue-drain";
 
 /** A React-free authenticated fetcher bound to a loaded session (for the background context). */
 function buildSessionFetcher(session: Session): Fetcher {
-  // No onUnauthorized: a background 401 must not tear down the session out from under the UI.
-  return (path, opts) => apiFetch(path, { ...opts, token: session.token, officeId: session.activeOfficeId });
+  // Send the RESOLVED office (activeOfficeId ?? tenantId) as x-office-id rather than relying on the server's
+  // primary-office default — this matches the queue's owner-key office, so a primary-office queue uploads
+  // to the office it was captured under (and a stale/rehomed primary fails loudly rather than silently
+  // landing in the wrong office). No onUnauthorized: a background 401 must not tear down the UI's session.
+  const officeId = session.activeOfficeId ?? session.user.tenantId;
+  return (path, opts) => apiFetch(path, { ...opts, token: session.token, officeId });
 }
 
 // defineTask must run at module load so the OS can invoke it. Importing this module from the root layout

@@ -20,7 +20,6 @@ import {
   getFailedCount,
   getQueuedCount,
   getQueuedUploads,
-  migrateUploadQueue,
   newClientUploadId,
   uploadOwnerKey,
 } from "../../src/capture/upload-queue";
@@ -354,17 +353,7 @@ export default function CaptureScreen() {
       setFailedCount(failed);
       if (n > 0) void resumeQueueRef.current();
     };
-    void (async () => {
-      // A previous build keyed a PRIMARY-office session's queue as `userId:` (no office). Now it's
-      // `userId:<tenantId>`. On a primary session (no active-office override), fold that legacy queue into
-      // the current one so offline captures from before the update still upload — they belong to the
-      // primary office (tenantId), which is exactly this session's resolved office. Only for primary
-      // sessions: an active-office override must NOT pull a primary-office queue into a different office.
-      if (user?.id && !activeOfficeId) {
-        await migrateUploadQueue(uploadOwnerKey(user.id, null), ownerKey).catch(() => undefined);
-      }
-      if (!cancelled) await resumeIfQueued();
-    })();
+    void resumeIfQueued();
     const sub = AppState.addEventListener("change", (state) => {
       if (state === "active") void resumeIfQueued();
     });

@@ -690,20 +690,25 @@ export async function confirmUpload(
 
   if (result[0]) return { file: result[0], created: true };
 
-  // onConflictDoNothing skipped the insert (a concurrent confirm with the same clientUploadId won). The
-  // object WE just PUT (pending.r2Key + its thumbnail) is now an orphaned duplicate — delete it best-effort
-  // BEFORE returning the winner so it doesn't leak. created=false → the caller skips replaying side effects.
+  // onConflictDoNothing skipped the insert (a concurrent confirm with the same clientUploadId won). Find
+  // the winner FIRST, then delete OUR freshly-PUT object only if it's actually distinct from the winner's.
+  // When the conflict came from a retry of the SAME uploadToken, pending.r2Key == winner.r2Key — deleting it
+  // would destroy the storage the winning row points at. created=false → the caller skips side effects.
   if (input.clientUploadId) {
-    if (isR2Configured()) {
-      await deleteObject(pending.r2Key).catch(() => undefined);
-      if (thumbnailR2Key) await deleteObject(thumbnailR2Key).catch(() => undefined);
-    }
     const winner = await tenantDb
       .select()
       .from(files)
       .where(and(eq(files.clientUploadId, input.clientUploadId), eq(files.uploadedBy, userId)))
       .limit(1);
-    if (winner[0]) return { file: winner[0], created: false };
+    if (winner[0]) {
+      if (isR2Configured()) {
+        if (pending.r2Key !== winner[0].r2Key) await deleteObject(pending.r2Key).catch(() => undefined);
+        if (thumbnailR2Key && thumbnailR2Key !== winner[0].thumbnailR2Key) {
+          await deleteObject(thumbnailR2Key).catch(() => undefined);
+        }
+      }
+      return { file: winner[0], created: false };
+    }
   }
 
   // No row at all (pathological — conflict with no findable winner). Surface rather than return undefined.

@@ -172,43 +172,6 @@ export async function clearUploadQueue(ownerKey: string): Promise<void> {
   await writeQueue(ownerKey, []);
 }
 
-/**
- * One-time migration: fold a legacy-namespaced queue into the current one. Used when the owner-key scheme
- * changes (e.g. a primary-office queue stored under `userId:` moves to `userId:<tenantId>`), so offline
- * captures persisted by a previous build still upload instead of being stranded in the old directory.
- * Copies each item's file into the new owner's directory, merges (deduped) into its index, then clears the
- * legacy queue. No-op when the keys match or the legacy queue is empty.
- */
-export async function migrateUploadQueue(fromKey: string, toKey: string): Promise<void> {
-  if (sanitizeOwnerKey(fromKey) === sanitizeOwnerKey(toKey)) return;
-  const legacy = await readQueue(fromKey);
-  if (legacy.length === 0) return;
-  await ensureDir(toKey);
-  const toDir = ownerDir(toKey);
-  const migrated: QueuedUpload[] = [];
-  const remaining: QueuedUpload[] = [];
-  for (const item of legacy) {
-    const ext = item.uri.includes(".") ? item.uri.slice(item.uri.lastIndexOf(".")) : ".jpg";
-    const dest = `${toDir}${item.clientUploadId}${ext}`;
-    try {
-      // Only treat an item as migrated once its file is actually copied — otherwise a copy failure (e.g.
-      // low storage) followed by clearing the legacy queue would leave the new index pointing at a file
-      // that never existed, silently losing the offline capture. Failed copies stay in the legacy queue.
-      await FileSystem.copyAsync({ from: item.uri, to: dest });
-      migrated.push({ ...item, uri: dest });
-    } catch {
-      remaining.push(item);
-    }
-  }
-  if (migrated.length > 0) {
-    await writeQueue(toKey, dedupeQueue(await readQueue(toKey), migrated));
-    await deleteQueuedFiles(legacy.filter((item) => migrated.some((m) => m.clientUploadId === item.clientUploadId)));
-  }
-  // Keep any items that failed to copy in the legacy queue so a later attempt can retry them.
-  if (remaining.length > 0) await writeQueue(fromKey, remaining);
-  else await clearUploadQueue(fromKey);
-}
-
 // A drain must never run twice at once (foreground + background, or a double tap): a second caller would
 // re-upload in-flight items. Module-local guard — both entry points share this process.
 let draining = false;
