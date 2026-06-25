@@ -1,5 +1,6 @@
 import { eq, and, sql, gte, lte, inArray, asc, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
+import { AppError } from "../../middleware/error-handler.js";
 import {
   auditLog,
   aiDisconnectCases,
@@ -2679,6 +2680,276 @@ export async function getDirectorCommissionWorkspace(
   });
 
   return { rows };
+}
+
+// ---------------------------------------------------------------------------
+// Team Commissions drill-down evidence: the supporting records behind ONE rep's
+// number in ONE column. Each builder REPLAYS the exact predicate of its column
+// (the getDirectorCommissionWorkspace queries above) so COUNT(records) and, for $
+// columns, SUM(value) reconcile to the displayed figure. Deal / lead / activity rows
+// share one flat record shape (with per-row navKind/navId) so the client drawer can
+// render + navigate them uniformly.
+// ---------------------------------------------------------------------------
+
+export type CommissionEvidenceMetric =
+  | "active"
+  | "pipeline"
+  | "potential"
+  | "estimating"
+  | "earned"
+  | "leads"
+  | "qualified"
+  | "opportunities"
+  | "calls"
+  | "emails"
+  | "meetings";
+
+const COMMISSION_EVIDENCE_METRICS: readonly CommissionEvidenceMetric[] = [
+  "active", "pipeline", "potential", "estimating", "earned",
+  "leads", "qualified", "opportunities", "calls", "emails", "meetings",
+];
+
+export function isCommissionEvidenceMetric(v: string): v is CommissionEvidenceMetric {
+  return (COMMISSION_EVIDENCE_METRICS as readonly string[]).includes(v);
+}
+
+export interface CommissionEvidenceRecord {
+  id: string;                       // unique row key
+  navKind: "deal" | "lead" | null;  // where a row-click navigates (null = not navigable)
+  navId: string | null;
+  primary: string | null;           // left identity: deal number / activity-type badge
+  name: string;                     // deal/lead name or activity subject
+  stageLabel: string;               // pipeline/lead stage, attribution role, or linked entity
+  value: number | null;             // $ contribution (deal value / earned $); null for count-only metrics
+  date: string | null;              // ISO cohort date (stage entered / signed / occurred)
+  companyName: string | null;
+}
+
+export interface CommissionEvidence {
+  metric: CommissionEvidenceMetric;
+  kind: "deal" | "lead" | "activity";
+  repId: string;
+  repName: string;
+  title: string;
+  subtitle: string;
+  valueLabel: string | null;        // header for the $ column (null hides it — count-only metrics)
+  total: { count: number; value: number | null };
+  records: CommissionEvidenceRecord[];
+}
+
+// Funnel L/Q/O slug groups — taken VERBATIM from getDirectorFunnelSummary's lead_counts CTE (NOT the
+// top-of-file board constants, which differ), so the drill reconciles to the table's L/Q/O counts.
+const COMMISSION_LEAD_STAGE_GROUPS: Record<"leads" | "qualified" | "opportunities", readonly string[]> = {
+  leads: ["lead_new", "company_pre_qualified", "scoping_in_progress", "new_lead"],
+  qualified: ["pre_qual_value_assigned", "lead_go_no_go", "qualified_lead"],
+  opportunities: ["qualified_for_opportunity", "sales_validation_stage", "opportunity"],
+};
+
+const ACTIVITY_TYPE_BY_METRIC: Record<"calls" | "emails" | "meetings", string> = {
+  calls: "call",
+  emails: "email",
+  meetings: "meeting",
+};
+
+const commissionSlugList = (slugs: readonly string[]) => sql.join(slugs.map((s) => sql`${s}`), sql`, `);
+
+export async function getDirectorCommissionEvidence(
+  tenantDb: TenantDb,
+  options: { repId: string; metric: CommissionEvidenceMetric; from?: string; to?: string }
+): Promise<CommissionEvidence> {
+  const { repId, metric } = options;
+  const year = new Date().getUTCFullYear();
+  const from = options.from ?? `${year}-01-01`;
+  const to = options.to ?? `${year}-12-31`;
+
+  const nameResult = await tenantDb.execute(sql`SELECT display_name FROM ${users} WHERE id = ${repId}::uuid LIMIT 1`);
+  const nameRows = (nameResult as any).rows ?? nameResult;
+  const repName = nameRows[0]?.display_name ? String(nameRows[0].display_name) : "Rep";
+
+  // RAW best-estimate + change-order, matching the pipeline/potential value expr exactly (no on-hold
+  // zeroing in the value — on-hold is excluded by the WHERE row filter).
+  const dealValueSql = sql`(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))`;
+
+  async function runDealQuery(stageSlugs: readonly string[], requireUnsigned: boolean): Promise<CommissionEvidenceRecord[]> {
+    const unsigned = requireUnsigned
+      ? sql` AND d.contract_signed_at IS NULL AND d.contract_signed_date IS NULL`
+      : sql``;
+    const res = await tenantDb.execute(sql`
+      SELECT d.id, d.deal_number, d.name, COALESCE(psc.name, '') AS stage_label,
+        ${dealValueSql}::numeric AS value, (d.stage_entered_at)::date AS cohort_date,
+        COALESCE(c.name, '') AS company_name
+      FROM ${deals} d
+      JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+      LEFT JOIN ${companies} c ON c.id = d.company_id
+      WHERE ${buildAliasedInvolvedRepSql("d", repId)}
+        AND d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
+        AND ${aliasedActiveDealCountFilterSql("d")}${unsigned}
+        AND psc.slug IN (${commissionSlugList(stageSlugs)})
+      ORDER BY value DESC NULLS LAST, d.name ASC
+    `);
+    const rows = (res as any).rows ?? res;
+    return rows.map((r: any) => ({
+      id: String(r.id),
+      navKind: "deal" as const,
+      navId: String(r.id),
+      primary: r.deal_number ? String(r.deal_number) : null,
+      name: String(r.name ?? "Deal"),
+      stageLabel: String(r.stage_label ?? ""),
+      value: Number(r.value ?? 0),
+      date: r.cohort_date ? String(r.cohort_date).slice(0, 10) : null,
+      companyName: r.company_name ? String(r.company_name) : null,
+    }));
+  }
+
+  // --- deal $/count columns: active, pipeline, potential (one population) ---
+  if (metric === "active" || metric === "pipeline" || metric === "potential") {
+    const records = await runDealQuery(COMMISSION_PIPELINE_STAGE_SLUGS, true);
+    const totalValue = records.reduce((s, r) => s + (r.value ?? 0), 0);
+    const labels = {
+      active: { title: "Active deals", sub: "Open commission-stage deals (owner or estimator)" },
+      pipeline: { title: "Pipeline value", sub: "Open best-estimate + change orders (owner or estimator)" },
+      potential: { title: "Potential commission", sub: "Drawer total is pipeline revenue; the cell is revenue × rate" },
+    } as const;
+    return {
+      metric, kind: "deal", repId, repName,
+      title: `${repName} — ${labels[metric].title}`, subtitle: labels[metric].sub,
+      valueLabel: "Deal value",
+      total: { count: records.length, value: totalValue },
+      records,
+    };
+  }
+
+  // --- estimating count (no signed-null gate; involvement) ---
+  if (metric === "estimating") {
+    const records = await runDealQuery(ESTIMATING_PROGRESS_STAGE_SLUGS, false);
+    const totalValue = records.reduce((s, r) => s + (r.value ?? 0), 0);
+    return {
+      metric, kind: "deal", repId, repName,
+      title: `${repName} — Estimating`, subtitle: "Deals in an estimating stage (owner or estimator)",
+      valueLabel: "Deal value",
+      total: { count: records.length, value: totalValue },
+      records,
+    };
+  }
+
+  // --- earned commission: deal_signed_commissions rows, floor-gated ---
+  if (metric === "earned") {
+    const rawConfig = await getCommissionConfig(tenantDb, repId);
+    const config = rawConfig.isActive
+      ? rawConfig
+      : { ...rawConfig, commissionRate: 0, rollingFloor: 0, overrideRate: 0 };
+    const gate = await computeRepEarnedFloorGate(tenantDb, repId, { from, to });
+    const rollups = await getCommissionDealRollups(tenantDb, repId, config, from, to);
+    const earned = allocateDealCommissions(rollups, gate.met);
+    const records: CommissionEvidenceRecord[] = earned.map((r) => ({
+      id: `${r.dealId}-${r.attributionRole}`,
+      navKind: "deal",
+      navId: r.dealId,
+      primary: r.dealNumber,
+      name: r.dealName,
+      stageLabel: r.attributionRole === "estimator" ? "Estimator cut" : "Owner",
+      value: r.earnedCommission,
+      date: r.lastPaidAt ? r.lastPaidAt.slice(0, 10) : null,
+      companyName: r.companyName,
+    }));
+    const totalValue = records.reduce((s, r) => s + (r.value ?? 0), 0);
+    return {
+      metric, kind: "deal", repId, repName,
+      title: `${repName} — Earned commission`,
+      subtitle: gate.met
+        ? `Direct earned this period${config.overrideRate > 0 ? " · excludes manager override" : ""}`
+        : "Below floor — direct earned held at $0 this period (rows shown)",
+      valueLabel: "Earned",
+      total: { count: records.length, value: totalValue },
+      records,
+    };
+  }
+
+  // --- open leads, owner-only (leads / qualified / opportunities) ---
+  if (metric === "leads" || metric === "qualified" || metric === "opportunities") {
+    const res = await tenantDb.execute(sql`
+      SELECT l.id, l.name, COALESCE(psc.name, '') AS stage_label, (l.stage_entered_at)::date AS cohort_date,
+        COALESCE(c.name, '') AS company_name
+      FROM ${leads} l
+      JOIN ${pipelineStageConfig} psc ON psc.id = l.stage_id
+      LEFT JOIN ${companies} c ON c.id = l.company_id
+      WHERE l.assigned_rep_id = ${repId}::uuid
+        AND l.status = 'open'
+        AND l.is_active = true
+        AND psc.workflow_family = 'lead'
+        AND psc.slug IN (${commissionSlugList(COMMISSION_LEAD_STAGE_GROUPS[metric])})
+      ORDER BY l.stage_entered_at DESC NULLS LAST, l.name ASC
+    `);
+    const rows = (res as any).rows ?? res;
+    const records: CommissionEvidenceRecord[] = rows.map((r: any) => ({
+      id: String(r.id),
+      navKind: "lead",
+      navId: String(r.id),
+      primary: null,
+      name: String(r.name ?? "Lead"),
+      stageLabel: String(r.stage_label ?? ""),
+      value: null,
+      date: r.cohort_date ? String(r.cohort_date).slice(0, 10) : null,
+      companyName: r.company_name ? String(r.company_name) : null,
+    }));
+    const label = metric === "leads" ? "New leads" : metric === "qualified" ? "Qualified leads" : "Opportunities";
+    return {
+      metric, kind: "lead", repId, repName,
+      title: `${repName} — ${label}`, subtitle: `Open ${label.toLowerCase()} assigned to this rep`,
+      valueLabel: null,
+      total: { count: records.length, value: null },
+      records,
+    };
+  }
+
+  // --- activities by responsible_user_id (calls / emails / meetings) ---
+  if (metric === "calls" || metric === "emails" || metric === "meetings") {
+    const activityType = ACTIVITY_TYPE_BY_METRIC[metric];
+    const res = await tenantDb.execute(sql`
+      SELECT a.id, a.subject, (a.occurred_at)::date AS cohort_date, a.deal_id, a.lead_id,
+        d.deal_number AS deal_number, COALESCE(d.name, l.name, '') AS entity_name,
+        COALESCE(cd.name, cl.name, '') AS company_name
+      FROM activities a
+      JOIN ${users} u ON u.id = a.responsible_user_id AND COALESCE(u.is_test_data, false) = false
+      LEFT JOIN ${deals} d ON d.id = a.deal_id
+      LEFT JOIN ${leads} l ON l.id = a.lead_id
+      LEFT JOIN ${companies} cd ON cd.id = d.company_id
+      LEFT JOIN ${companies} cl ON cl.id = l.company_id
+      WHERE a.responsible_user_id = ${repId}::uuid
+        AND a.type = ${activityType}
+        AND a.occurred_at >= ${from}::timestamptz
+        AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
+      ORDER BY a.occurred_at DESC
+    `);
+    const rows = (res as any).rows ?? res;
+    const label = metric.charAt(0).toUpperCase() + metric.slice(1);
+    const records: CommissionEvidenceRecord[] = rows.map((r: any) => {
+      const navId = r.deal_id ? String(r.deal_id) : r.lead_id ? String(r.lead_id) : null;
+      const navKind = r.deal_id ? ("deal" as const) : r.lead_id ? ("lead" as const) : null;
+      const entity = r.entity_name ? String(r.entity_name) : "";
+      return {
+        id: String(r.id),
+        navKind,
+        navId,
+        primary: r.deal_number ? String(r.deal_number) : null,
+        name: r.subject ? String(r.subject) : entity || label.replace(/s$/, ""),
+        stageLabel: entity,
+        value: null,
+        date: r.cohort_date ? String(r.cohort_date).slice(0, 10) : null,
+        companyName: r.company_name ? String(r.company_name) : null,
+      };
+    });
+    return {
+      metric, kind: "activity", repId, repName,
+      title: `${repName} — ${label}`, subtitle: `${label} logged this period`,
+      valueLabel: null,
+      total: { count: records.length, value: null },
+      records,
+    };
+  }
+
+  throw new AppError(400, `Unsupported commission evidence metric: ${metric}`);
 }
 
 // P1-7: Activity Pulse is sourced from the office-wide rep_performance_snapshots roster.

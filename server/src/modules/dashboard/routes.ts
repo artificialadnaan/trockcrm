@@ -7,6 +7,8 @@ import {
   getRepDashboard,
   getDirectorDashboard,
   getDirectorCommissionWorkspace,
+  getDirectorCommissionEvidence,
+  isCommissionEvidenceMetric,
   getRepDetail,
   getRepPerformanceSnapshots,
   REP_PERFORMANCE_PERIOD_KINDS,
@@ -93,6 +95,33 @@ router.get(
   async (req, res, next) => {
     try {
       const data = await getDirectorCommissionWorkspace(req.tenantDb!, {
+        from: req.query.from as string | undefined,
+        to: req.query.to as string | undefined,
+      });
+      await req.commitTransaction!();
+      res.json({ data });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Drill-down: the supporting records behind ONE rep's number in ONE Team Commissions column.
+router.get(
+  "/director/commissions/evidence",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      const repId = req.query.repId as string | undefined;
+      const metric = req.query.metric as string | undefined;
+      const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!repId || !UUID.test(repId)) throw new AppError(400, "a valid repId is required");
+      if (!metric || !isCommissionEvidenceMetric(metric)) {
+        throw new AppError(400, "a valid metric is required");
+      }
+      const data = await getDirectorCommissionEvidence(req.tenantDb!, {
+        repId,
+        metric,
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
       });
