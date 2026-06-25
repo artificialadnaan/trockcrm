@@ -43,6 +43,12 @@ const CAPTION_WIDTH = 174;
 const CAPTION_GAP = 22;
 const IMAGE_BOX_WIDTH = CONTENT_WIDTH - CAPTION_WIDTH - CAPTION_GAP;
 const CAPTION_LEFT = PAGE_MARGIN + IMAGE_BOX_WIDTH + CAPTION_GAP;
+// Metadata is drawn as three single-line, ellipsised rows (Project/Date/Creator). Each line is capped to
+// one line so a long deal/project name (the deal schema allows up to 500 chars) can never wrap and push the
+// block past the footer / page bottom — the exact blank-page/overlap regression the report layout avoids.
+const META_FONT_SIZE = 8.5;
+const META_LINE_PITCH = 11;
+const META_BLOCK_HEIGHT = META_LINE_PITCH * 3;
 
 type ReportFontSet = {
   regular: string;
@@ -280,13 +286,26 @@ async function drawPhotoEntry(
     doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 1.5 }),
     descriptionMaxHeight,
   );
-  const metaTop = Math.min(top + descriptionHeight + 10, top + boxHeight - 32);
-  doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(8.5).text(
-    `Project: ${photo.projectName}\nDate: ${formatPhotoDate(photo.takenAt, photo.createdAt)}\nCreator: ${photo.uploaderName}`,
-    CAPTION_LEFT,
-    metaTop,
-    { width: CAPTION_WIDTH, align: "left", lineGap: 1.5 }
-  );
+  const metaTop = Math.min(top + descriptionHeight + 10, top + boxHeight - META_BLOCK_HEIGHT);
+  // One line each, no-wrap + ellipsis + capped height: a long project/creator name truncates instead of
+  // wrapping, so the block stays exactly 3 lines tall and can't spill the page or collide with the footer.
+  // Every field is still rendered (Project, Date, Creator) — only an over-long single value is shortened,
+  // and the full project name still appears on the cover and in the footer.
+  const metaLines = [
+    `Project: ${photo.projectName}`,
+    `Date: ${formatPhotoDate(photo.takenAt, photo.createdAt)}`,
+    `Creator: ${photo.uploaderName}`,
+  ];
+  doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(META_FONT_SIZE);
+  metaLines.forEach((line, index) => {
+    doc.text(line, CAPTION_LEFT, metaTop + index * META_LINE_PITCH, {
+      width: CAPTION_WIDTH,
+      align: "left",
+      lineBreak: false,
+      height: META_LINE_PITCH,
+      ellipsis: true,
+    });
+  });
 }
 
 function fallbackReportFonts(): ReportFontSet {
@@ -374,9 +393,14 @@ export async function renderFieldPhotoReportPdf(input: {
       align: "center",
     });
   }
+  // Height-cap + ellipsis the cover title: the default title is `${project.name} Photo Report`, and a long
+  // deal name (capped at 140 chars upstream, still ~8 lines at 30pt) would otherwise wrap past the page
+  // bottom and spawn a blank cover-overflow page. Bounded to the band between the logo panel and footer.
   doc.fillColor(BRAND_BLACK).font(reportFonts.bold).fontSize(30).text(input.cover.reportTitle, PAGE_MARGIN, 588, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
     align: "center",
+    height: PAGE_HEIGHT - 588 - 52,
+    ellipsis: true,
   });
   pageMeta.push({
     kind: "cover",
