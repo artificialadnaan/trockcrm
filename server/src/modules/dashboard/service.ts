@@ -950,6 +950,9 @@ async function getDirectorFunnelSummary(
           WHERE rep_id IS NOT NULL
         ) involved
         WHERE d.is_active = true
+          -- Exclude test deals so the Estimating count uses the SAME population as the pipeline/potential
+          -- columns on the same row (both already exclude test data).
+          AND COALESCE(d.is_test_data, false) = false
           AND psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
         GROUP BY involved.rep_id
       )

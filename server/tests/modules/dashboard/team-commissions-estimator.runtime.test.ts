@@ -49,6 +49,10 @@ beforeAll(async () => {
       ('${U("d14")}', '${OWNER}', '${ESTIMATOR}', '${ST}', 999999, '2026-03-01T00:00:00Z');
     INSERT INTO deals (id, assigned_rep_id, estimator_user_id, stage_id, awarded_amount, on_hold) VALUES
       ('${U("d15")}', '${OWNER}', '${ESTIMATOR}', '${ST}', 888888, true);
+    -- D16: a TEST deal (is_test_data) -> excluded from every involvement column (same population as the row's
+    -- other columns), so it never inflates OWNER's or ESTIMATOR's pipeline/potential.
+    INSERT INTO deals (id, assigned_rep_id, estimator_user_id, stage_id, awarded_amount, is_test_data) VALUES
+      ('${U("d16")}', '${OWNER}', '${ESTIMATOR}', '${ST}', 777777, true);
   `);
   tdb = drizzle(pg);
 });
