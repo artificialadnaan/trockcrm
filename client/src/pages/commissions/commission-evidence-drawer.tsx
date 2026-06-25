@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { ExternalLink, Loader2 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   Dialog,
   DialogContent,
@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
-import { usd, int } from "@/pages/reports/format";
+import { usdExact, int } from "@/pages/reports/format";
 import {
   useCommissionEvidence,
   type CommissionDrillRequest,
@@ -64,7 +64,7 @@ function columnsFor(ev: CommissionEvidence): DrillColumn[] {
     cols.push({
       key: "value", header: ev.valueLabel, numeric: true,
       sort: { key: "value", type: "number", accessor: (r) => r.value },
-      cell: (r) => <span className="font-semibold tabular-nums text-emerald-700">{usd(r.value)}</span>,
+      cell: (r) => <span className="font-semibold tabular-nums text-emerald-700">{usdExact(r.value)}</span>,
     });
   }
   cols.push({
@@ -77,6 +77,7 @@ function columnsFor(ev: CommissionEvidence): DrillColumn[] {
 
 function EvidenceTable({ ev }: { ev: CommissionEvidence }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const columns = columnsFor(ev);
   const { sortedRows, toggle, getHeaderProps } = useTableSort(
     ev.records,
@@ -119,7 +120,9 @@ function EvidenceTable({ ev }: { ev: CommissionEvidence }) {
             <TableRow
               key={r.id}
               className={navigable ? "group cursor-pointer hover:bg-sky-50/60" : ""}
-              onClick={navigable ? () => navigate(`/${r.navKind === "lead" ? "leads" : "deals"}/${r.navId}`) : undefined}
+              // Carry the current query string (notably ?officeId=) so the detail page's API calls stay
+              // scoped to the office that produced this record — matches the shared evidence drawer.
+              onClick={navigable ? () => navigate({ pathname: `/${r.navKind === "lead" ? "leads" : "deals"}/${r.navId}`, search: location.search }) : undefined}
             >
               {columns.map((col) => (
                 <TableCell key={col.key} className={col.numeric ? "py-2 text-right" : "py-2"}>
@@ -160,7 +163,7 @@ export function CommissionEvidenceDrawer({
             {data ? (
               <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-slate-600">
                 {int(data.total.count)} {data.total.count === 1 ? "record" : "records"}
-                {data.total.value != null ? ` · ${usd(data.total.value)}` : ""}
+                {data.total.value != null ? ` · ${usdExact(data.total.value)}` : ""}
               </span>
             ) : null}
           </DialogTitle>

@@ -67,14 +67,14 @@ describe("TeamCommissionsPage", () => {
     expect(container.textContent).toContain("Sidney Gibson");
     // KPI cards + footer total of the two reps' pipeline ($11,601,319 + $21,202,326.99)
     expect(container.textContent).toContain("Open pipeline");
-    expect(container.textContent).toContain("$32,803,646"); // usd() rounds to whole dollars
+    expect(container.textContent).toContain("$32,803,645.99"); // cents preserved for payout figures
     expect(container.textContent).toContain("Team total");
   });
 
   it("clicking a rep's pipeline opens the drill drawer for that rep+metric", async () => {
     await render();
     const pipelineBtn = Array.from(document.querySelectorAll("button")).find(
-      (b) => b.textContent === "$11,601,319",
+      (b) => b.textContent === "$11,601,319.00",
     ) as HTMLButtonElement;
     expect(pipelineBtn).toBeTruthy();
     await act(async () => { pipelineBtn.click(); });
@@ -88,11 +88,16 @@ describe("TeamCommissionsPage", () => {
     expect(document.body.textContent).toContain("Tower Re-Cover");
   });
 
-  it("a $0 figure is not a drill button (dimmed)", async () => {
-    await render();
-    // Kaleb earned = $0 -> rendered as plain dimmed text, never a clickable button
-    const earnedButton = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "$0.00");
-    expect(earnedButton).toBeUndefined();
+  it("a $0 figure is rendered dimmed and is NOT a drill button", async () => {
+    const { container } = await render();
+    // Both reps' earned = $0 -> rendered as plain dimmed spans ("$0.00" with usdExact), never buttons.
+    const zeroButtons = Array.from(document.querySelectorAll("button")).filter((b) => b.textContent === "$0.00");
+    expect(zeroButtons).toHaveLength(0);
+    // ...and the dimmed $0.00 cell actually exists (so the assertion above isn't vacuous).
+    const dimmed = Array.from(container.querySelectorAll("span")).find(
+      (s) => s.textContent === "$0.00" && s.className.includes("text-slate-300"),
+    );
+    expect(dimmed).toBeTruthy();
   });
 
   it("changing the period preset refetches the workspace", async () => {

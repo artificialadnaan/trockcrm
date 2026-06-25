@@ -8,7 +8,7 @@ import type {
 } from "@/hooks/use-director-dashboard";
 import { CommissionEvidenceDrawer } from "./commission-evidence-drawer";
 import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
-import { usd, int } from "@/pages/reports/format";
+import { usdExact, int } from "@/pages/reports/format";
 
 type Row = NonNullable<ReturnType<typeof useDirectorCommissionWorkspace>["data"]>["rows"][number];
 
@@ -134,9 +134,9 @@ export function TeamCommissionsPage() {
 
       {/* Team totals */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <KpiCard label="Earned commission" value={usd(totals.earned)} tone="bg-emerald-500" />
-        <KpiCard label="Potential commission" value={usd(totals.potential)} tone="bg-sky-500" />
-        <KpiCard label="Open pipeline" value={usd(totals.pipeline)} tone="bg-violet-500" />
+        <KpiCard label="Earned commission" value={usdExact(totals.earned)} tone="bg-emerald-500" />
+        <KpiCard label="Potential commission" value={usdExact(totals.potential)} tone="bg-sky-500" />
+        <KpiCard label="Open pipeline" value={usdExact(totals.pipeline)} tone="bg-violet-500" />
         <KpiCard label="Active deals" value={int(totals.active)} tone="bg-amber-500" />
       </div>
 
@@ -171,10 +171,10 @@ export function TeamCommissionsPage() {
                       </Link>
                     </td>
                     <td className="px-3 py-2.5 text-right">
-                      <Drill row={row} metric="earned" money zeroDim={row.totalEarnedCommission === 0} onDrill={onDrill}>{usd(row.totalEarnedCommission)}</Drill>
+                      <Drill row={row} metric="earned" money zeroDim={row.totalEarnedCommission === 0} onDrill={onDrill}>{usdExact(row.totalEarnedCommission)}</Drill>
                     </td>
                     <td className="px-3 py-2.5 text-right">
-                      <Drill row={row} metric="potential" money zeroDim={row.potentialCommission === 0} onDrill={onDrill}>{usd(row.potentialCommission)}</Drill>
+                      <Drill row={row} metric="potential" money zeroDim={row.potentialCommission === 0} onDrill={onDrill}>{usdExact(row.potentialCommission)}</Drill>
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       <Drill row={row} metric="active" zeroDim={row.activeDeals === 0} onDrill={onDrill}>{int(row.activeDeals)}</Drill>
@@ -184,7 +184,7 @@ export function TeamCommissionsPage() {
                         <div className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-slate-100 sm:block">
                           <div className="h-full rounded-full bg-violet-400" style={{ width: `${barPct(row.pipelineValue, maxPipeline)}%` }} />
                         </div>
-                        <Drill row={row} metric="pipeline" money zeroDim={row.pipelineValue === 0} onDrill={onDrill}>{usd(row.pipelineValue)}</Drill>
+                        <Drill row={row} metric="pipeline" money zeroDim={row.pipelineValue === 0} onDrill={onDrill}>{usdExact(row.pipelineValue)}</Drill>
                       </div>
                     </td>
                     <td className="px-3 py-2.5 text-right">
@@ -220,10 +220,10 @@ export function TeamCommissionsPage() {
               <tfoot>
                 <tr className="border-t-2 border-slate-300 bg-slate-50 font-black tabular-nums text-slate-800">
                   <td className="px-3 py-2.5 text-left uppercase tracking-wide text-[11px] text-slate-500">Team total</td>
-                  <td className="px-3 py-2.5 text-right text-emerald-700">{usd(totals.earned)}</td>
-                  <td className="px-3 py-2.5 text-right">{usd(totals.potential)}</td>
+                  <td className="px-3 py-2.5 text-right text-emerald-700">{usdExact(totals.earned)}</td>
+                  <td className="px-3 py-2.5 text-right">{usdExact(totals.potential)}</td>
                   <td className="px-3 py-2.5 text-right">{int(totals.active)}</td>
-                  <td className="px-3 py-2.5 text-right">{usd(totals.pipeline)}</td>
+                  <td className="px-3 py-2.5 text-right">{usdExact(totals.pipeline)}</td>
                   <td className="px-3 py-2.5" />
                   <td className="px-3 py-2.5" />
                   <td className="px-3 py-2.5" />
