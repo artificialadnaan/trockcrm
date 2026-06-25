@@ -107,7 +107,7 @@ describe("ProjectDetailPage", () => {
     node.querySelector<HTMLButtonElement>('[aria-label="Close filters"]')?.click();
     await vi.waitFor(() => expect(node.textContent).not.toContain("Filters"));
 
-    Array.from(node.querySelectorAll("button")).find((button) => button.textContent?.includes("damage caption"))?.click();
+    node.querySelector<HTMLButtonElement>('[aria-label="Open damage photo"]')?.click();
     await vi.waitFor(() => expect(node.textContent).toContain("Coordinates"));
     expect(node.textContent).toContain("From photo");
     expect(node.textContent).toContain("#urgent");
