@@ -442,6 +442,8 @@ describe("commission reporting service", () => {
       [],
       // Floor-gate query (qualifyingRevenue >= floor -> met, so earned is NOT gated here).
       [{ qualifying_revenue: "100000.00", earned_commission: "1500.00", floor: "0" }],
+      // Won-but-unsigned aggregate (the "awaiting contract signature" query, runs last).
+      [{ deal_count: "2", deal_value: "150000.00", potential_commission: "900.00" }],
     ]);
 
     const data = await getRepCommissionDashboard(tenantDb, {
@@ -457,6 +459,7 @@ describe("commission reporting service", () => {
       inPipeline: 4575,
       totalPotential: 6075,
       openDealCount: 1,
+      wonAwaitingSignature: { dealCount: 2, dealValue: 150000, potentialCommission: 900 },
     });
     expect(data.deals.find((deal) => deal.dealId === "deal-contract")).toMatchObject({
       stageKey: "contract",
@@ -469,8 +472,8 @@ describe("commission reporting service", () => {
       "estimating",
       "opportunity",
     ]);
-    // main commission_rows query + snapshot upsert + floor-gate query
-    expect(tenantDb.execute).toHaveBeenCalledTimes(3);
+    // main commission_rows query + snapshot upsert + floor-gate query + won-awaiting-signature query
+    expect(tenantDb.execute).toHaveBeenCalledTimes(4);
   });
 
   it("scopes snapshot reads and writes by both deal and rep", async () => {

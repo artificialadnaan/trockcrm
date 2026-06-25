@@ -27,7 +27,13 @@ function formatUsd(value: number | null | undefined): string {
 // the "View as rep" panel. Mirrors the shape rendered on /commissions (rep-commissions-page).
 interface RepCommissionView {
   period: string;
-  summary: { earned: number; inPipeline: number; totalPotential: number; openDealCount: number };
+  summary: {
+    earned: number;
+    inPipeline: number;
+    totalPotential: number;
+    openDealCount: number;
+    wonAwaitingSignature: { dealCount: number; dealValue: number; potentialCommission: number };
+  };
   stageTotals: Array<{
     stageKey: string;
     stageName: string;
@@ -467,6 +473,28 @@ function RepViewPanel({
             />
             <SplitStat label="Total potential" value={view.summary.totalPotential} sub="earned + pipeline" />
           </div>
+          {(view.summary.wonAwaitingSignature?.dealCount ?? 0) > 0 ? (
+            <div className="flex flex-wrap items-baseline justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">
+                  Won — awaiting contract signature
+                </p>
+                <p className="text-xs text-amber-600">
+                  {view.summary.wonAwaitingSignature?.dealCount ?? 0} won deal
+                  {(view.summary.wonAwaitingSignature?.dealCount ?? 0) === 1 ? "" : "s"} with no signed contract date
+                  yet — no commission is booked until the contract date is set.
+                </p>
+              </div>
+              <div className="text-right">
+                <p className="text-lg font-bold tabular-nums text-amber-900">
+                  {formatUsd(view.summary.wonAwaitingSignature?.dealValue ?? 0)}
+                </p>
+                <p className="text-xs text-amber-700">
+                  {formatUsd(view.summary.wonAwaitingSignature?.potentialCommission ?? 0)} potential commission
+                </p>
+              </div>
+            </div>
+          ) : null}
           {view.stageTotals.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="min-w-full text-sm">

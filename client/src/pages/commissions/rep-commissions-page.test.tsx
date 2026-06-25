@@ -31,6 +31,7 @@ const dashboard = {
     inPipeline: 44850,
     totalPotential: 46830,
     openDealCount: 4,
+    wonAwaitingSignature: { dealCount: 7, dealValue: 1388292, potentialCommission: 8329.75 },
   },
   stageTotals: [
     { stageKey: "won", stageName: "Won", commission: 1980, dealValue: 132000, dealCount: 2, percentOfTotal: 4.2 },
@@ -140,6 +141,14 @@ describe("RepCommissionsPage", () => {
     expect(container.textContent).toContain("Total potential");
     expect(container.textContent).toContain("$1,980.00");
     expect(Array.from(container.querySelectorAll(".bg-brand-red")).some((node) => node.textContent?.includes("Contract signed"))).toBe(true);
+    await unmount(root);
+  });
+
+  it("surfaces won-but-unsigned deals as an 'awaiting contract signature' callout", async () => {
+    const { container, root } = await renderPage();
+    expect(container.textContent).toContain("Won — awaiting contract signature");
+    expect(container.textContent).toContain("7 won deals");
+    expect(container.textContent).toContain("$1,388,292.00"); // the won value otherwise invisible
     await unmount(root);
   });
 
