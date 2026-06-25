@@ -1268,7 +1268,8 @@ async function getOverrideEarnedCommission(
   managerId: string,
   managerOverrideRate: number,
   fromDate: string,
-  toDate: string
+  toDate: string,
+  officeId?: string
 ): Promise<number> {
   if (managerOverrideRate <= 0) return 0;
 
@@ -1277,6 +1278,9 @@ async function getOverrideEarnedCommission(
   // nothing for the manager to override on that report's deals — no earned commission, nothing to
   // override. (Enumerating reports and reusing the one helper keeps the override gate from drifting
   // away from the per-rep gate; for org-sized rosters this is a handful of indexed lookups.)
+  const overrideOfficeScope = officeId
+    ? sql` AND ${activeOfficeRepMembershipSql(officeId)}`
+    : sql``;
   const reportsResult = await tenantDb.execute(sql`
     SELECT u.id::text AS id
     FROM ${users} u
@@ -1286,6 +1290,9 @@ async function getOverrideEarnedCommission(
       -- Exclude flagged smoke-test / duplicate accounts from the override base, matching the commission
       -- roster (getDirectorRepCommissionRows, P2-8 Codex round 2).
       AND COALESCE(u.is_test_data, false) = false
+      -- Bound the override base to active-office members too, so a foreign direct report (excluded from the
+      -- roster) can't inflate an in-office manager's override total (Codex).
+      ${overrideOfficeScope}
   `);
   const reportRows = ((reportsResult as any).rows ?? reportsResult) as Array<{ id: string }>;
 
@@ -1304,7 +1311,11 @@ export async function getRepCommissionSummary(
   tenantDb: TenantDb,
   repId: string,
   fromDate: string,
-  toDate: string
+  toDate: string,
+  // When set, the manager-override roll-up below only enumerates direct reports who are members of this
+  // active office — so a foreign report (hidden from the roster) can't inflate an in-office manager's
+  // override total. Omitted = global enumeration (back-compat for other callers).
+  officeId?: string
 ): Promise<{ summary: RepCommissionSummary; deals: RepCommissionDealEarning[] }> {
   const rawConfig = await getCommissionConfig(tenantDb, repId);
   const config = rawConfig.isActive
@@ -1333,7 +1344,7 @@ export async function getRepCommissionSummary(
   // on their reports (getOverrideEarnedCommission gates each report through the same helper, so a report
   // below their own floor contributes $0 to this manager's override).
   const directEarnedCommission = floorGate.met ? direct.directEarnedCommission : 0;
-  const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate);
+  const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate, officeId);
   const totalEarnedCommission = Number((directEarnedCommission + overrideEarnedCommission).toFixed(2));
   // Breakdown stays visible regardless of the gate (rows listed, per-deal earned zeroed when below floor).
   const deals = allocateDealCommissions(commissionRollups, floorGate.met);
@@ -1368,26 +1379,32 @@ export async function getRepCommissionSummary(
   };
 }
 
-async function getDirectorRepCommissionRows(
+export async function getDirectorRepCommissionRows(
   tenantDb: TenantDb,
-  options: { from: string; to: string }
+  options: { from: string; to: string; officeId?: string }
 ): Promise<DirectorRepCommissionRow[]> {
+  // When an active office is known, scope the roster to its members (primary office or a
+  // user_office_access grant) — `users` is a single global table, so without this a cross-office rep
+  // (incl. one a Bid Board estimator map points at) would be credited for this tenant's deals.
+  const officeScope = options.officeId
+    ? sql` AND ${activeOfficeRepMembershipSql(options.officeId)}`
+    : sql``;
   const repsResult = await tenantDb.execute(sql`
-    SELECT id, display_name
-    FROM ${users}
-    WHERE is_active = true
+    SELECT u.id, u.display_name
+    FROM ${users} u
+    WHERE u.is_active = true
       -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
       -- commission roster (dashboard payload + commission workspace).
-      AND COALESCE(is_test_data, false) = false
-      AND role = 'rep'
-    ORDER BY display_name ASC
+      AND COALESCE(u.is_test_data, false) = false
+      AND u.role = 'rep'${officeScope}
+    ORDER BY u.display_name ASC
   `);
   const reps = (repsResult as any).rows ?? repsResult;
   if (reps.length === 0) return [];
 
   const rows: DirectorRepCommissionRow[] = [];
   for (const rep of reps) {
-    const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id), options.from, options.to);
+    const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id), options.from, options.to, options.officeId);
     rows.push({
       repId: String(rep.id),
       repName: String(rep.display_name ?? "Rep"),
@@ -2634,16 +2651,21 @@ async function buildDirectorScopeSummary(
 
 export async function getDirectorCommissionWorkspace(
   tenantDb: TenantDb,
-  options: { from?: string; to?: string } = {}
+  options: { from?: string; to?: string; officeId?: string } = {}
 ): Promise<DirectorCommissionWorkspaceData> {
   const year = new Date().getUTCFullYear();
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
+  const officeId = options.officeId;
 
   const [commissionRows, activityRows, funnelSummary, dealSummaryRows] = await runSequential([
-    () => getDirectorRepCommissionRows(tenantDb, { from, to }),
+    // Scope the roster to ACTIVE-OFFICE membership (primary office or a user_office_access grant). The
+    // roster drives which rows the table renders, so this is what keeps a cross-office rep — including one
+    // a Bid Board estimator map points at — from being credited for this tenant's deals (owner OR
+    // estimator). Matches the funnel's rep branch; bounds owner + estimator credit uniformly (Codex).
+    () => getDirectorRepCommissionRows(tenantDb, { from, to, officeId }),
     () => getActivitySummaryByRep(tenantDb, { from, to }),
-    () => getDirectorFunnelSummary(tenantDb),
+    () => getDirectorFunnelSummary(tenantDb, officeId),
     () => getRepDealPipelineSummary(tenantDb),
   ]);
 
@@ -2754,7 +2776,7 @@ export async function getDirectorDashboard(
       includeDealSubscriptionDeletedAt: mineVisibility?.dealSubscriptionsDeletedAt,
     }),
     () => getDirectorFunnelSummary(tenantDb, options.officeId),
-    () => getDirectorRepCommissionRows(tenantDb, { from, to }),
+    () => getDirectorRepCommissionRows(tenantDb, { from, to, officeId: options.officeId }),
     () => getRepPerformanceSnapshots(tenantDb, options.officeId, options.periodKind ?? "mtd"),
     // P1-7: in mine scope, narrow Recent Closes to the viewer's deals using the SAME
     // visibility options the KPI cards / canonical Won decomposition use, instead of
