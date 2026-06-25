@@ -270,9 +270,11 @@ fieldRoutes.delete("/projects/:dealId/star", requireFieldContractor, async (req,
 // deal (works on Won/terminal projects, matching the field module's zero-deal-mutation contract). The
 // token is scoped to the resolved photo ids; the public viewer + asset/download enforce that subset.
 const SHARE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const MAX_SHARE_PHOTOS = 200;
+const MAX_PHOTO_IDS_PER_REQUEST = 200;
 
-function parseSharePhotoIds(raw: unknown): string[] {
+// Shared UUID/count validation for a photoIds array. `overLimitMessage` lets each feature give its own
+// user-facing copy (a share-link message would be wrong on the download endpoint).
+function parsePhotoIdList(raw: unknown, overLimitMessage: string): string[] {
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new AppError(400, "photoIds must be a non-empty array of photo ids.");
   }
@@ -280,11 +282,19 @@ function parseSharePhotoIds(raw: unknown): string[] {
   // canonical lowercase, so we normalize here to keep the stored subset and every downstream
   // comparison (membership validation, foundIds set) consistent regardless of client casing.
   const ids = Array.from(new Set(raw.map((value) => String(value).toLowerCase())));
-  if (ids.length > MAX_SHARE_PHOTOS) {
-    throw new AppError(400, `A share link can include at most ${MAX_SHARE_PHOTOS} photos.`);
+  if (ids.length > MAX_PHOTO_IDS_PER_REQUEST) {
+    throw new AppError(400, overLimitMessage);
   }
   ids.forEach((id) => assertValidUuid(id, "photoId"));
   return ids;
+}
+
+function parseSharePhotoIds(raw: unknown): string[] {
+  return parsePhotoIdList(raw, `A share link can include at most ${MAX_PHOTO_IDS_PER_REQUEST} photos.`);
+}
+
+function parseDownloadPhotoIds(raw: unknown): string[] {
+  return parsePhotoIdList(raw, `You can download at most ${MAX_PHOTO_IDS_PER_REQUEST} photos at a time.`);
 }
 
 fieldRoutes.post("/projects/:dealId/share", requireFieldContractor, async (req, res, next) => {
@@ -334,7 +344,7 @@ fieldRoutes.post("/projects/:dealId/photos/download-urls", requireFieldContracto
   try {
     const dealId = String(req.params.dealId);
     assertValidUuid(dealId, "dealId");
-    const photoIds = parseSharePhotoIds(req.body?.photoIds);
+    const photoIds = parseDownloadPhotoIds(req.body?.photoIds);
 
     const { value: downloads } = await withResolvedOffice(
       "deal",

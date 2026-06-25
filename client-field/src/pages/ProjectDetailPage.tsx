@@ -353,7 +353,9 @@ export function ProjectDetailPage() {
           <Filter className="h-5 w-5" />
           {(from || to || uploaderIds.length > 0) ? <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-primary" /> : null}
         </button>
-        {filteredPhotos.length > 0 ? (
+        {/* Bulk select is hidden on a partial gallery — "Download all" over an incomplete set would silently
+            grab only the photos that happened to load (same reason report/share are blocked when partial). */}
+        {filteredPhotos.length > 0 && !photosPartial ? (
           <button
             type="button"
             className={`shrink-0 rounded-full px-3 py-2 text-sm font-bold ${selecting ? "bg-primary text-white" : "bg-muted"}`}
@@ -364,8 +366,9 @@ export function ProjectDetailPage() {
         ) : null}
       </div>
 
-      {/* Bulk-download action bar — visible in selection mode. */}
-      {selecting ? (
+      {/* Bulk-download action bar — visible in selection mode. Hidden once the gallery goes partial so a
+          "Download all" can't act on an incomplete set. */}
+      {selecting && !photosPartial ? (
         <div className="sticky top-0 z-10 flex items-center justify-between gap-2 rounded-md border border-border bg-white px-3 py-2 shadow-sm">
           <div className="flex items-center gap-2">
             <span className="text-sm font-bold">{selectedIds.size} selected</span>
