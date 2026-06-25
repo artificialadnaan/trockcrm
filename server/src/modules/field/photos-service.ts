@@ -16,6 +16,7 @@ import {
   requestUploadUrl,
 } from "../files/service.js";
 import { recordUploadedFileSideEffects, type UploadAuditContext } from "../files/upload-workflow.js";
+import { logPhotoEvent } from "../files/audit-log-service.js";
 import { assertPhotosBelongToDeal } from "../public-photo-tokens/service.js";
 import { assertAccessibleFieldCaptureTarget, assertActiveFieldProject, type FieldPhoto } from "./projects-service.js";
 
@@ -762,7 +763,13 @@ export type FieldPhotoDownload = { id: string; url: string; filename: string };
  */
 export async function buildFieldPhotoDownloadUrls(
   tenantDb: TenantDb,
-  input: { userId: string; userRole: UserRole; dealId: string; photoIds: string[] },
+  input: {
+    userId: string;
+    userRole: UserRole;
+    dealId: string;
+    photoIds: string[];
+    auditContext?: { ipAddress?: string | null; userAgent?: string | null };
+  },
 ): Promise<FieldPhotoDownload[]> {
   const access = { userId: input.userId, userRole: input.userRole };
   await assertActiveFieldProject(tenantDb, access, input.dealId);
@@ -777,7 +784,7 @@ export async function buildFieldPhotoDownloadUrls(
     includeDeleted: false,
   });
 
-  return Promise.all(
+  const downloads = await Promise.all(
     timeline.photos.map(async (photo): Promise<FieldPhotoDownload> => {
       const filename = `${photo.displayName}${photo.fileExtension ?? ""}`;
       if (photo.r2Key) {
@@ -792,4 +799,20 @@ export async function buildFieldPhotoDownloadUrls(
       return { id: photo.id, url: photo.externalUrl ?? photo.fullUrl ?? "", filename };
     }),
   );
+
+  // Audit each download, matching the authenticated /files/:id/download path so field saves still appear in
+  // a photo's history. Sequential — req.tenantDb is a single transaction-bound client. logPhotoEvent
+  // swallows its own write errors (same as the /files path), so this never fails the download.
+  for (const photo of timeline.photos) {
+    await logPhotoEvent(tenantDb, {
+      photoId: photo.id,
+      eventType: "downloaded",
+      userId: input.userId,
+      ipAddress: input.auditContext?.ipAddress ?? null,
+      userAgent: input.auditContext?.userAgent ?? null,
+      metadata: { purpose: "field_download" },
+    });
+  }
+
+  return downloads;
 }

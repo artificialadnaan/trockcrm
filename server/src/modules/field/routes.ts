@@ -345,6 +345,7 @@ fieldRoutes.post("/projects/:dealId/photos/download-urls", requireFieldContracto
           userRole: req.fieldUser!.role,
           dealId,
           photoIds,
+          auditContext: requestAuditContext(req),
         }),
       "Project not found",
     );

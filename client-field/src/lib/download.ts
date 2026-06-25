@@ -16,6 +16,10 @@ export function triggerPhotoDownloads(downloads: PhotoDownload[], stepMs = 300):
         const anchor = document.createElement("a");
         anchor.href = download.url;
         anchor.download = download.filename;
+        // For R2 attachment URLs the browser downloads (target is ignored). For a rare external-only photo
+        // whose CDN URL lacks Content-Disposition: attachment, `download` is ignored cross-origin — target
+        // "_blank" then opens it in a new tab instead of NAVIGATING THE FIELD APP away.
+        anchor.target = "_blank";
         anchor.rel = "noopener";
         document.body.appendChild(anchor);
         anchor.click();

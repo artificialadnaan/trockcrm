@@ -15,14 +15,19 @@ const filesMocks = vi.hoisted(() => ({
   getDealPhotoTimeline: vi.fn(),
   // other imports used elsewhere in photos-service — stubbed so import succeeds.
   confirmUpload: vi.fn(),
+  discardPendingUpload: vi.fn(),
+  getFileByClientUploadId: vi.fn(),
   getFileDownloadUrl: vi.fn(),
   getPendingUploadMetadata: vi.fn(),
   requestUploadUrl: vi.fn(),
 }));
 
+const auditMocks = vi.hoisted(() => ({ logPhotoEvent: vi.fn() }));
+
 vi.mock("../../../src/modules/field/projects-service.js", () => projectMocks);
 vi.mock("../../../src/modules/public-photo-tokens/service.js", () => tokenMocks);
 vi.mock("../../../src/modules/files/service.js", () => filesMocks);
+vi.mock("../../../src/modules/files/audit-log-service.js", () => auditMocks);
 vi.mock("../../../src/modules/files/upload-workflow.js", () => ({ recordUploadedFileSideEffects: vi.fn() }));
 vi.mock("../../../src/lib/r2-client.js", () => ({
   generateDownloadUrl: vi.fn(),
@@ -57,6 +62,8 @@ describe("buildFieldPhotoDownloadUrls", () => {
     // Deduped to a single id, and membership is enforced against the deal.
     expect(tokenMocks.assertPhotosBelongToDeal).toHaveBeenCalledWith(db, "deal-1", ["p1"]);
     expect(result).toEqual([{ id: "p1", url: "https://r2/a.jpg?dl=1", filename: "Front.jpg" }]);
+    // Each download is audited (so field saves appear in photo history).
+    expect(auditMocks.logPhotoEvent).toHaveBeenCalledWith(db, expect.objectContaining({ photoId: "p1", eventType: "downloaded" }));
   });
 
   it("rejects when a requested id is not part of the deal (no URLs minted)", async () => {

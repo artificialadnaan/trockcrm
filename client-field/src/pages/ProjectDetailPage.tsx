@@ -21,6 +21,9 @@ import {
 } from "../lib/field-projects";
 
 const GROUP_SEQUENCE: PhotoGrouping[] = ["date", "category", "uploader", "none"];
+// The download-urls endpoint caps each request at 200 ids (shared with /share). Chunk bulk downloads so a
+// "Select all" on a large project succeeds instead of 400-ing.
+const DOWNLOAD_BATCH_SIZE = 200;
 
 // Photos are grouped by date across the whole project, so we load EVERY page (not just the first 200) —
 // the server batches each photo's display URLs, so a 400-photo deal is ~2 fast requests. Page 1 reveals
@@ -80,16 +83,22 @@ export function ProjectDetailPage() {
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(() => new Set());
 
   // Fetch presigned high-res download URLs for the given photos and save them to the computer. Used by the
-  // per-photo quick-download button (one id) and the bulk "Download (N)" action.
+  // per-photo quick-download button (one id) and the bulk "Download (N)" action. The endpoint caps each
+  // request at 200 ids (shared with /share), so a "Select all" on a 200+ photo project is chunked here.
   async function downloadPhotos(ids: string[]) {
     const unique = Array.from(new Set(ids));
     if (unique.length === 0 || !id) return;
     setDownloadingIds((current) => new Set([...current, ...unique]));
     try {
-      const { downloads } = await api<{ downloads: PhotoDownload[] }>(`/field/projects/${id}/photos/download-urls`, {
-        json: { photoIds: unique },
-      });
-      triggerPhotoDownloads(downloads);
+      const all: PhotoDownload[] = [];
+      for (let i = 0; i < unique.length; i += DOWNLOAD_BATCH_SIZE) {
+        const batch = unique.slice(i, i + DOWNLOAD_BATCH_SIZE);
+        const { downloads } = await api<{ downloads: PhotoDownload[] }>(`/field/projects/${id}/photos/download-urls`, {
+          json: { photoIds: batch },
+        });
+        all.push(...downloads);
+      }
+      triggerPhotoDownloads(all);
     } catch {
       setError("Couldn't prepare the download. Please try again.");
     } finally {
