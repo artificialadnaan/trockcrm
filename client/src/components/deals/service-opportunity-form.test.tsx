@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   useAuth: vi.fn(),
   useAccessibleOffices: vi.fn(),
   useProjectTypes: vi.fn(),
+  useRegions: vi.fn(),
+  usePropertyDetail: vi.fn(),
   useTaskAssignees: vi.fn(),
 }));
 
@@ -30,6 +32,11 @@ vi.mock("@/hooks/use-accessible-offices", () => ({
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
   useProjectTypes: mocks.useProjectTypes,
+  useRegions: mocks.useRegions,
+}));
+
+vi.mock("@/hooks/use-properties", () => ({
+  usePropertyDetail: mocks.usePropertyDetail,
 }));
 
 vi.mock("@/hooks/use-task-assignees", () => ({
@@ -73,6 +80,22 @@ function setupCommonMocks() {
       { id: "type-service", name: "Service", slug: "service", children: [] },
       { id: "type-roofing", name: "Roofing", slug: "roofing", children: [] },
     ],
+  });
+  mocks.useRegions.mockReturnValue({
+    regions: [
+      { id: "region-central", name: "Central", slug: "central" },
+      { id: "region-east", name: "East Coast", slug: "east-coast" },
+    ],
+    loading: false,
+    error: null,
+  });
+  mocks.usePropertyDetail.mockReturnValue({
+    property: null,
+    leads: [],
+    deals: [],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
   });
   mocks.useTaskAssignees.mockReturnValue({
     assignees: [{ id: "rep-1", displayName: "Sales Rep" }],
