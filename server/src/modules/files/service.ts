@@ -12,6 +12,7 @@ import {
   headObject,
   isR2Configured,
 } from "../../lib/r2-client.js";
+import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
 import {
   MAX_FILE_SIZE_BYTES,
   PRESIGNED_URL_EXPIRY_SECONDS,
@@ -588,6 +589,12 @@ export async function confirmUpload(
     : "";
 
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
+
+  // Best-effort grid thumbnail for image uploads — non-fatal (a miss falls back to the full original).
+  // The object is already verified present in R2 above, so the helper fetches it from there. Covers both
+  // web (/files/confirm-upload) and mobile (/field/photos/confirm-upload), which both route through here.
+  const thumbnailR2Key = await generateAndStoreThumbnail(pending.r2Key, pending.mimeType);
+
   const latitude = input.latitude ?? input.geoLat;
   const longitude = input.longitude ?? input.geoLng;
   const photoAddress = pending.category === "photo"
@@ -620,6 +627,7 @@ export async function confirmUpload(
       fileSizeBytes: pending.fileSizeBytes,
       fileExtension: ext,
       r2Key: pending.r2Key,
+      thumbnailR2Key,
       r2Bucket: bucketName,
       dealId: pending.dealId ?? null,
       leadId: pending.leadId ?? null,
@@ -1179,8 +1187,9 @@ export async function getFileDownloadUrl(
  * priority MATCHES the download route's durability semantics (`shouldServeExternalFileUrl`): when an R2
  * copy exists it wins — the external URL on an R2-backed import (CompanyCam writes BOTH) is metadata only
  * and can expire, so we never serve it over the durable R2 original.
- *  - R2-stored: one presigned URL to the original serves BOTH (R2 keeps no resized variant). The presign
- *    is a LOCAL HMAC op (no network), so resolving a whole page in-batch is cheap.
+ *  - R2-stored: `fullUrl` presigns the original. `thumbnailUrl` presigns the small `thumbnailR2Key`
+ *    when one exists (uploaded after thumbnails shipped), else it falls back to the original — so old
+ *    rows keep working unchanged. Presigns are LOCAL HMAC ops (no network), so the extra one is cheap.
  *  - External-only (no r2Key): thumbnail = externalThumbnailUrl (its "thumbnail"/"web" size), full =
  *    externalUrl (the original). Plain CDN URLs — no signing.
  * Computing these on the server and returning them inside the photo LIST is what lets a 400-photo deal
@@ -1188,6 +1197,7 @@ export async function getFileDownloadUrl(
  */
 export async function resolvePhotoDisplayUrls(photo: {
   r2Key?: string | null;
+  thumbnailR2Key?: string | null;
   externalUrl?: string | null;
   externalThumbnailUrl?: string | null;
   displayName?: string | null;
@@ -1195,12 +1205,22 @@ export async function resolvePhotoDisplayUrls(photo: {
 }): Promise<{ thumbnailUrl: string | null; fullUrl: string | null }> {
   // R2 copy wins (durable) — matches shouldServeExternalFileUrl / the download route.
   if (photo.r2Key) {
-    const { url } = await buildFileDownloadUrlFromRecord({
+    const { url: fullUrl } = await buildFileDownloadUrlFromRecord({
       r2Key: photo.r2Key,
       displayName: photo.displayName ?? "photo",
       fileExtension: photo.fileExtension,
     }, PHOTO_LIST_URL_TTL_SECONDS);
-    return { thumbnailUrl: url, fullUrl: url };
+    // Serve the small thumbnail to the grid when present; otherwise reuse the original (old rows).
+    let thumbnailUrl = fullUrl;
+    if (photo.thumbnailR2Key) {
+      const { url: thumbUrl } = await buildFileDownloadUrlFromRecord({
+        r2Key: photo.thumbnailR2Key,
+        displayName: photo.displayName ?? "photo",
+        fileExtension: ".jpg",
+      }, PHOTO_LIST_URL_TTL_SECONDS);
+      thumbnailUrl = thumbUrl;
+    }
+    return { thumbnailUrl, fullUrl };
   }
   if (photo.externalUrl || photo.externalThumbnailUrl) {
     const full = photo.externalUrl ?? photo.externalThumbnailUrl ?? null;
@@ -1488,6 +1508,7 @@ export async function getDealPhotoTimeline(
       fileSizeBytes: files.fileSizeBytes,
       fileExtension: files.fileExtension,
       r2Key: files.r2Key,
+      thumbnailR2Key: files.thumbnailR2Key,
       r2Bucket: files.r2Bucket,
       dealId: files.dealId,
       leadId: files.leadId,
