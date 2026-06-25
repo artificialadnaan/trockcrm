@@ -80,12 +80,18 @@ export function TeamCommissionsPage() {
   ), [rows]);
   const office = data?.officeTotals ?? { activeDeals: 0, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0 };
   const maxPipeline = useMemo(() => rows.reduce((m, r) => Math.max(m, r.pipelineValue), 0), [rows]);
+  // Won·unsigned can have $0 value but real deals (no awarded/bid/DD amount). Surface the count in the
+  // KPI + footer total so a bare "$0.00" doesn't hide N unsigned wins — mirrors the per-row cell.
+  const wonUnsignedLabel = (value: number, count: number) =>
+    value === 0 && count > 0 ? `${usdExact(value)} (${count})` : usdExact(value);
 
   // Sortable columns (sort keys cover every visible figure; compound cells sort by a representative total).
   const sortCols: SortColumn<Row>[] = [
     { key: "rep", type: "text", accessor: (r) => r.repName },
     { key: "earned", type: "number", accessor: (r) => r.totalEarnedCommission },
-    { key: "wonunsigned", type: "number", accessor: (r) => r.wonUnsignedValue },
+    // Tie-break equal values by deal count so a zero-value-but-counted won·unsigned row (a won deal with
+    // no awarded/bid/DD amount) outranks a truly-empty row instead of collapsing to the same position.
+    { key: "wonunsigned", type: "number", accessor: (r) => r.wonUnsignedValue, compare: (a, b) => (a.wonUnsignedValue - b.wonUnsignedValue) || (a.wonUnsignedCount - b.wonUnsignedCount) },
     { key: "potential", type: "number", accessor: (r) => r.potentialCommission },
     { key: "active", type: "number", accessor: (r) => r.activeDeals },
     { key: "pipeline", type: "number", accessor: (r) => r.pipelineValue },
@@ -141,7 +147,7 @@ export function TeamCommissionsPage() {
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <KpiCard label="Earned commission" value={usdExact(additive.earned)} tone="bg-emerald-500" />
         <KpiCard label="Potential commission" value={usdExact(additive.potential)} tone="bg-sky-500" />
-        <KpiCard label="Won · unsigned" value={usdExact(office.wonUnsignedValue)} tone="bg-teal-500" />
+        <KpiCard label="Won · unsigned" value={wonUnsignedLabel(office.wonUnsignedValue, office.wonUnsignedCount)} tone="bg-teal-500" />
         <KpiCard label="Open pipeline" value={usdExact(office.pipelineValue)} tone="bg-violet-500" />
         <KpiCard label="Active deals" value={int(office.activeDeals)} tone="bg-amber-500" />
       </div>
@@ -236,7 +242,7 @@ export function TeamCommissionsPage() {
                 <tr className="border-t-2 border-slate-300 bg-slate-50 font-black tabular-nums text-slate-800">
                   <td className="px-3 py-2.5 text-left uppercase tracking-wide text-[11px] text-slate-500">Team total</td>
                   <td className="px-3 py-2.5 text-right text-emerald-700">{usdExact(additive.earned)}</td>
-                  <td className="px-3 py-2.5 text-right">{usdExact(office.wonUnsignedValue)}</td>
+                  <td className="px-3 py-2.5 text-right">{wonUnsignedLabel(office.wonUnsignedValue, office.wonUnsignedCount)}</td>
                   <td className="px-3 py-2.5 text-right">{usdExact(additive.potential)}</td>
                   <td className="px-3 py-2.5 text-right">{int(office.activeDeals)}</td>
                   <td className="px-3 py-2.5 text-right">{usdExact(office.pipelineValue)}</td>
