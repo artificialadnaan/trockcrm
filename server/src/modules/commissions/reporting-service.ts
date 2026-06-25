@@ -12,6 +12,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
+import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { aliasedActiveDealCountFilterSql, aliasedDealBestEstimateSql } from "../shared/deal-value-sql.js";
 // Estimator-aware rep filter (PR 2): the DEAL filter matches assigned_rep OR estimator_user_id. This is
 // a view-filter change ONLY — commission attribution (dsc.rep_user_id) and rate (cs.user_id) are untouched.
@@ -480,6 +481,12 @@ export async function getRepCommissionDashboard(
   // Won-stage deals with NO contract-signed date: they mint no commission row, so they fall through both
   // `earned` (signed only) and `inPipeline` (pipeline stages only). Aggregate them separately — same
   // value × owner-rate basis as the pipeline-potential query — so the won-but-unsigned total is visible.
+  //  • Full Won family (WON_DEAL_STAGE_SLUGS), not just won/closed_won, so won-stage aliases count.
+  //  • Exclude deals already booked for this rep (a legacy/reconciled dsc row can carry
+  //    contract_signed_date_at_signing while deal-level signed fields are null — the earned branch already
+  //    counts those, so including them here would double-show one deal as earned AND awaiting-signature).
+  //  • When a period window applies, require a real won_closed_date (no NULL passthrough) so undated wins
+  //    don't bleed into every MTD/QTD/YTD window.
   const wonUnsignedResult = await tenantDb.execute(sql`
     SELECT
       COUNT(*)::int AS deal_count,
@@ -495,10 +502,13 @@ export async function getRepCommissionDashboard(
       AND COALESCE(d.is_test_data, false) = false
       AND d.contract_signed_at IS NULL
       AND d.contract_signed_date IS NULL
-      AND psc.slug IN ('won', 'closed_won')
+      AND psc.slug IN (${sql.join(WON_DEAL_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
       ${notOnHoldDealSql()}
-      ${dateRange.from ? sql`AND (d.won_closed_date IS NULL OR d.won_closed_date >= ${dateRange.from}::date)` : sql``}
-      ${dateRange.to ? sql`AND (d.won_closed_date IS NULL OR d.won_closed_date <= ${dateRange.to}::date)` : sql``}
+      AND NOT EXISTS (
+        SELECT 1 FROM ${dealSignedCommissions} x WHERE x.deal_id = d.id AND x.rep_user_id = ${repId}
+      )
+      ${dateRange.from ? sql`AND d.won_closed_date >= ${dateRange.from}::date` : sql``}
+      ${dateRange.to ? sql`AND d.won_closed_date <= ${dateRange.to}::date` : sql``}
   `);
   const wonUnsignedRow = (((wonUnsignedResult as any).rows ?? wonUnsignedResult)[0] ?? {}) as Record<string, unknown>;
   const wonAwaitingSignature = {

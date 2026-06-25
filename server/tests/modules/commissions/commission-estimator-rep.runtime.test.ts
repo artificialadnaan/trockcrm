@@ -41,6 +41,7 @@ beforeAll(async () => {
       company_id uuid, property_id uuid, property_address text, stage_id uuid NOT NULL,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
+      won_closed_date date,
       expected_close_date date, stage_entered_at timestamptz, updated_at timestamptz, created_at timestamptz,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric,
       change_order_total numeric
