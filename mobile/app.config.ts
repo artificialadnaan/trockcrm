@@ -58,6 +58,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     "expo-router",
     "expo-secure-store",
     "expo-font",
+    // Registers the iOS BGTaskScheduler identifier + background mode so the field upload queue can drain
+    // opportunistically after the app is backgrounded mid-batch (best-effort; iOS grants short windows).
+    "expo-background-task",
     [
       "expo-image-picker",
       {

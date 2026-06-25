@@ -16,6 +16,12 @@ export type CaptureUploadInput = {
   caption: string | null;
   tags: string[];
   metadata: PhotoMetadata;
+  /**
+   * Stable per-photo idempotency key. Sent on confirm-upload so a resumed/background re-run of an upload
+   * that already succeeded returns the existing photo instead of creating a duplicate. Required — the
+   * upload queue always assigns one.
+   */
+  clientUploadId: string;
 };
 
 function onlyDefinedTarget(t: CaptureTargetRef): CaptureTargetRef {
@@ -60,6 +66,7 @@ export async function uploadCapture(f: Fetcher, input: CaptureUploadInput): Prom
     ...target,
     objectKey: upload.objectKey,
     uploadToken: upload.uploadToken,
+    clientUploadId: input.clientUploadId,
     latitude: input.metadata.latitude,
     longitude: input.metadata.longitude,
     addressSource: input.metadata.addressSource,

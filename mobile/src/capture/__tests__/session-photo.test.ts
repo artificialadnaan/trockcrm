@@ -35,7 +35,7 @@ describe("effectiveCaption (individual overrides batch)", () => {
 });
 
 describe("applyGpsToPending (geotag early burst shots when GPS arrives late)", () => {
-  const photo = (key: string, takenAt: string): SessionPhoto => ({ key, uri: `u-${key}`, metadata: { takenAt }, caption: "" });
+  const photo = (key: string, takenAt: string): SessionPhoto => ({ key, clientUploadId: `cu-${key}`, uri: `u-${key}`, metadata: { takenAt }, caption: "" });
   const fix = { latitude: 32.7, longitude: -96.8, addressSource: "live_gps" as const, takenAt: "later" };
 
   it("adds the fix's coordinates to pending photos while preserving each shot's own takenAt", () => {
@@ -60,6 +60,7 @@ describe("reconcileUploadGps (scope the upload fix to the shot's camera session)
   const fix = { latitude: 32.7, longitude: -96.8, addressSource: "live_gps" as const, takenAt: "x" };
   const shot = (cameraSession: number | undefined, geotagged = false): SessionPhoto => ({
     key: "k",
+    clientUploadId: "cu-k",
     uri: "u",
     caption: "",
     cameraSession,
@@ -100,6 +101,7 @@ describe("reconcileUploadGps (scope the upload fix to the shot's camera session)
 describe("buildCaptureUploadInput (per-photo note attaches to the RIGHT photo)", () => {
   const photo = (over: Partial<SessionPhoto>): SessionPhoto => ({
     key: "k",
+    clientUploadId: "cu-k",
     uri: "file://x.jpg",
     metadata: { takenAt: "t" },
     caption: "",

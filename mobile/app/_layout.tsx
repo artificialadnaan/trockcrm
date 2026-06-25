@@ -12,6 +12,9 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { AuthProvider } from "../src/auth/AuthContext";
+// Side-effect import: registers the background upload-drain task at startup so the OS can invoke it even
+// when the app is cold-launched in the background (before the capture screen mounts).
+import "../src/capture/upload-background-task";
 
 // retry once, treat data as fresh for 30s — same defaults as the reference app.
 const queryClient = new QueryClient({

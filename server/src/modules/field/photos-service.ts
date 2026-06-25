@@ -7,6 +7,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { generateDownloadUrl, generateMockDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
 import {
   confirmUpload,
+  getFileByClientUploadId,
   getFileDownloadUrl,
   getPendingUploadMetadata,
   requestUploadUrl,
@@ -320,6 +321,8 @@ export async function confirmFieldPhotoUpload(
     opportunityId?: string;
     uploadToken: string;
     objectKey: string;
+    /** Idempotency key from the resilient upload queue — see ConfirmUploadInput.clientUploadId. */
+    clientUploadId?: string;
     latitude?: number;
     longitude?: number;
     addressSource?: "exif" | "live_gps";
@@ -338,6 +341,18 @@ export async function confirmFieldPhotoUpload(
       userRole: input.userRole,
     });
   }
+  // Idempotency (resilient upload queue): a resumed/background upload may re-confirm one that already
+  // succeeded — by then the single-use token is gone, so the check below would wrongly 400. If a row
+  // already exists for this client id, return it. The access check above still gates this, so it can't be
+  // used to read another deal's photo. Decoupled from the token, so it survives a server restart too.
+  if (input.clientUploadId) {
+    const existing = await getFileByClientUploadId(tenantDb, input.clientUploadId);
+    if (existing) {
+      const existingUrl = (await getFileDownloadUrl(tenantDb, existing.id)).url;
+      return { photo: toFieldUploadedPhoto(existing, existingUrl) };
+    }
+  }
+
   const pending = getPendingUploadMetadata(input.uploadToken);
   if (!pending) throw new AppError(400, "Invalid or expired upload token");
   if (pending.r2Key !== input.objectKey) throw new AppError(400, "objectKey does not match the issued upload.");
@@ -358,6 +373,7 @@ export async function confirmFieldPhotoUpload(
 
   const file = await confirmUpload(tenantDb, input.userId, {
     uploadToken: input.uploadToken,
+    clientUploadId: input.clientUploadId,
     latitude: input.latitude,
     longitude: input.longitude,
     addressSource: cleanAddressSource(input.addressSource),

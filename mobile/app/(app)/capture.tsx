@@ -1,5 +1,5 @@
-import React, { Suspense, useEffect, useRef, useState } from "react";
-import { Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { AppState, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -12,7 +12,9 @@ import { qk } from "../../src/query/keys";
 import { assignPhotoTarget, getTranscriptionConfig } from "../../src/api/endpoints";
 import type { FieldCaptureTarget } from "../../src/api/types";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
-import { runConcurrentUploads, uploadCapture, type CaptureTargetRef } from "../../src/capture/upload";
+import { type CaptureTargetRef } from "../../src/capture/upload";
+import { drainUploadQueue, enqueueUploads, getQueuedCount, newClientUploadId } from "../../src/capture/upload-queue";
+import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
 import { applyGpsToPending, buildCaptureUploadInput, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
 import { DEFAULT_CAPTURE_MODE, loadCaptureMode, saveCaptureMode, type CaptureMode } from "../../src/capture/capture-mode";
@@ -84,6 +86,9 @@ export default function CaptureScreen() {
   const [category, setCategory] = useState<string | null>(null);
   const [tags, setTags] = useState<string[]>([]);
   const [status, setStatus] = useState<UploadStatus>("idle");
+  // How many photos are durably queued but not yet uploaded (persists across app restarts). Drives the
+  // "pending upload" banner + Resume action.
+  const [queuedCount, setQueuedCount] = useState(0);
   const [notice, setNotice] = useState<
     { tone: "error" | "success"; text: string; viewTarget?: SelectedTarget } | null
   >(null);
@@ -169,7 +174,7 @@ export default function CaptureScreen() {
       const metadata: PhotoMetadata = hasCoords(exifMeta)
         ? exifMeta
         : { ...(live ?? {}), takenAt: exifMeta.takenAt ?? live?.takenAt ?? new Date().toISOString() };
-      return { key: nextKey(), uri: asset.uri, width: asset.width, height: asset.height, metadata, caption: "" };
+      return { key: nextKey(), clientUploadId: newClientUploadId(), uri: asset.uri, width: asset.width, height: asset.height, metadata, caption: "" };
     });
     setPhotos((prev) => [...prev, ...next]);
   }
@@ -220,7 +225,7 @@ export default function CaptureScreen() {
     }
     setPhotos((prev) => [
       ...prev,
-      { key, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: cameraSessionRef.current },
+      { key, clientUploadId: newClientUploadId(), uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: cameraSessionRef.current },
     ]);
   }
 
@@ -271,6 +276,57 @@ export default function CaptureScreen() {
     router.setParams({ dealId: "", targetName: "", projectNumber: "", stage: "", propertyAddress: "" });
   }
 
+  const refreshQueuedCount = useCallback(async () => {
+    setQueuedCount(await getQueuedCount());
+  }, []);
+
+  // Drain the durable upload queue. Used by the Resume action, the on-mount resume of a queue left over
+  // from a previous session/crash, and the return-to-foreground resume. drainUploadQueue keeps the screen
+  // awake while it runs and dedupes server-side, so this is safe to call repeatedly.
+  const resumeQueue = useCallback(async () => {
+    if (status === "uploading") return;
+    setStatus("uploading");
+    setNotice(null);
+    const summary = await drainUploadQueue(fetcher);
+    await refreshQueuedCount();
+    void pendingQuery.refetch();
+    if (summary.remaining === 0) {
+      setStatus("idle");
+      if (summary.succeeded > 0) {
+        setNotice({ tone: "success", text: `${summary.succeeded} queued photo${summary.succeeded === 1 ? "" : "s"} uploaded.` });
+      }
+    } else {
+      setStatus("failed");
+      setNotice({ tone: "error", text: `${summary.remaining} photo${summary.remaining === 1 ? "" : "s"} still queued — they'll keep retrying.` });
+    }
+  }, [fetcher, pendingQuery, refreshQueuedCount, status]);
+
+  // On mount: schedule the background drain and resume any queue left over from a previous run; also resume
+  // whenever the app returns to the foreground. Run once — the latest resumeQueue is read via a ref so the
+  // listener never goes stale.
+  const resumeQueueRef = useRef(resumeQueue);
+  useEffect(() => {
+    resumeQueueRef.current = resumeQueue;
+  }, [resumeQueue]);
+  useEffect(() => {
+    void registerUploadBackgroundTask();
+    let cancelled = false;
+    const resumeIfQueued = async () => {
+      const n = await getQueuedCount();
+      if (cancelled) return;
+      setQueuedCount(n);
+      if (n > 0) void resumeQueueRef.current();
+    };
+    void resumeIfQueued();
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") void resumeIfQueued();
+    });
+    return () => {
+      cancelled = true;
+      sub.remove();
+    };
+  }, []);
+
   async function upload() {
     if (photos.length === 0 || status === "uploading") return;
     setStatus("uploading");
@@ -291,47 +347,52 @@ export default function CaptureScreen() {
     // resolved session GPS reconciles only into still-ungeotagged shots FROM THAT session
     // (an earlier session's shot is never geotagged with it). The note a crew dictated for
     // a shot rides with THAT shot — see session-photo.buildCaptureUploadInput.
-    const results = await runConcurrentUploads(photos, 3, (sp) =>
-      uploadCapture(
-        fetcher,
-        buildCaptureUploadInput(sp, { target: ref, category, tags, batchCaption, sessionGps, gpsSession }),
-      ),
+    const inputs = photos.map((sp) =>
+      buildCaptureUploadInput(sp, { target: ref, category, tags, batchCaption, sessionGps, gpsSession }),
     );
+    const destName = target ? target.name : "Pending";
+    const viewTarget = target?.type === "deal" ? target : undefined;
 
-    const failedKeys = photos.filter((_, i) => results[i]?.status === "rejected").map((p) => p.key);
-    const succeeded = results.filter((r) => r.status === "fulfilled").length;
+    // Persist the whole batch to the durable queue FIRST, so a crash/kill/connection drop can't lose it.
+    try {
+      await enqueueUploads(inputs);
+    } catch {
+      setStatus("failed");
+      setNotice({ tone: "error", text: "Couldn't save photos for upload. Please try again." });
+      return;
+    }
+    // The batch is durable now — clear the in-memory tray so the crew can keep capturing while it uploads.
+    setPhotos([]);
+    setBatchCaption("");
+    setTags([]);
+    setCategory(null);
+    await refreshQueuedCount();
 
-    if (failedKeys.length === 0) {
-      setPhotos([]);
-      setBatchCaption("");
-      setTags([]);
-      setCategory(null);
+    const summary = await drainUploadQueue(fetcher);
+    await refreshQueuedCount();
+    void pendingQuery.refetch();
+    if (target?.type === "deal" && summary.succeeded > 0) invalidateDealPhotos(target.id);
+
+    if (summary.remaining === 0) {
       setStatus("idle");
-      // Name the destination so the green banner is unambiguous (vs. the kept target +
-      // empty state); a deal target also gets a "View" action to the project gallery.
-      const destName = target ? target.name : "Pending";
+      // Name the destination so the green banner is unambiguous; a deal target also gets a "View" action.
       setNotice({
         tone: "success",
-        text: `${succeeded} photo${succeeded === 1 ? "" : "s"} saved to ${destName}.`,
-        viewTarget: target?.type === "deal" ? target : undefined,
+        text: `${summary.succeeded} photo${summary.succeeded === 1 ? "" : "s"} saved to ${destName}.`,
+        viewTarget,
       });
-      void pendingQuery.refetch();
       if (target?.type === "deal") {
-        invalidateDealPhotos(target.id);
         const fromAccessibleProject = typeof params.dealId === "string" && params.dealId === target.id;
         if (fromAccessibleProject) {
           router.replace({ pathname: "/(app)/projects/[id]", params: detailParamsFor(target) });
         }
       }
     } else {
-      setPhotos((prev) => prev.filter((p) => failedKeys.includes(p.key)));
       setStatus("failed");
       setNotice({
         tone: "error",
-        text: `${succeeded} uploaded, ${failedKeys.length} failed. Tap upload to retry the rest.`,
+        text: `${summary.succeeded} uploaded, ${summary.remaining} still queued — they'll keep retrying. Tap Resume to try now.`,
       });
-      void pendingQuery.refetch();
-      if (target?.type === "deal" && succeeded > 0) invalidateDealPhotos(target.id);
     }
   }
 
@@ -398,6 +459,16 @@ export default function CaptureScreen() {
                   }
                 : undefined
             }
+          />
+        ) : null}
+
+        {/* Durable queue: photos saved on-device but not yet uploaded (survives restarts). Auto-resumes,
+            but a manual Resume is offered for an immediate retry. Hidden while a drain is in progress. */}
+        {queuedCount > 0 && !uploading ? (
+          <Banner
+            message={`${queuedCount} photo${queuedCount === 1 ? "" : "s"} waiting to upload. They'll keep retrying automatically.`}
+            tone="error"
+            action={{ label: "Resume", onPress: () => void resumeQueue() }}
           />
         ) : null}
 

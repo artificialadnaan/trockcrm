@@ -14,6 +14,9 @@ export type SessionPhoto = {
   height?: number;
   metadata: PhotoMetadata;
   caption: string;
+  // Stable idempotency key, assigned at capture time and carried through enqueue → confirm-upload, so a
+  // resumed/background re-upload of this exact shot can never create a duplicate server-side.
+  clientUploadId: string;
   // Camera-session token the shot was captured in (undefined for library imports).
   // GPS reconciliation is scoped to this so a later session's fix can't geotag an
   // earlier session's shot with the wrong location.
@@ -94,5 +97,6 @@ export function buildCaptureUploadInput(
     caption: effectiveCaption(photo.caption, ctx.batchCaption),
     tags: ctx.tags,
     metadata: reconcileUploadGps(photo, ctx.sessionGps, ctx.gpsSession),
+    clientUploadId: photo.clientUploadId,
   };
 }

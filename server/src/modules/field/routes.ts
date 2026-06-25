@@ -372,6 +372,7 @@ fieldRoutes.post("/photos/confirm-upload", requireFieldContractor, async (req, r
         ...target,
         uploadToken: String(req.body.uploadToken),
         objectKey: String(req.body.objectKey),
+        clientUploadId: typeof req.body.clientUploadId === "string" ? req.body.clientUploadId : undefined,
         latitude: req.body.latitude !== undefined ? Number(req.body.latitude) : undefined,
         longitude: req.body.longitude !== undefined ? Number(req.body.longitude) : undefined,
         addressSource: req.body.addressSource,

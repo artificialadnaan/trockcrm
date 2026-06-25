@@ -114,6 +114,13 @@ export interface RequestUploadInput {
 export interface ConfirmUploadInput {
   /** The upload token returned from the presigned URL request */
   uploadToken: string;
+  /**
+   * Idempotency key for the resilient field upload queue. A stable, client-generated id per captured
+   * photo. If a row already exists with this id (a resumed/background queue re-running an upload that
+   * already succeeded), confirmUpload returns that row instead of creating a duplicate. Optional — legacy
+   * and web upload paths omit it.
+   */
+  clientUploadId?: string;
   /** EXIF data extracted client-side (optional, server also extracts for images) */
   takenAt?: string;
   geoLat?: number;
@@ -558,6 +565,22 @@ export async function confirmUpload(
   userId: string,
   input: ConfirmUploadInput
 ): Promise<typeof files.$inferSelect> {
+  // Idempotency (resilient upload queue): if this client upload already produced a row, return it instead
+  // of creating a duplicate. This is decoupled from the single-use in-memory token, so it still dedupes
+  // when a resumed/background queue re-runs an upload AFTER the original confirm succeeded (token gone) —
+  // including across a server restart. The partial unique index on client_upload_id is the backstop.
+  if (input.clientUploadId) {
+    const existing = await tenantDb
+      .select()
+      .from(files)
+      .where(eq(files.clientUploadId, input.clientUploadId))
+      .limit(1);
+    if (existing[0]) {
+      pendingUploads.delete(input.uploadToken);
+      return existing[0];
+    }
+  }
+
   // Fix 2: Consume the pending upload token — don't trust client-supplied values
   // Fix 7: Don't delete token until after DB insert succeeds — allows retry on
   // transient failures. NOTE: pendingUploads is process-local (in-memory Map).
@@ -647,6 +670,7 @@ export async function confirmUpload(
       address: photoAddress.address,
       addressSource: photoAddress.addressSource,
       geocodedAt: photoAddress.geocodedAt,
+      clientUploadId: input.clientUploadId ?? null,
       uploadedBy: userId,
     })
     .returning();
@@ -655,6 +679,20 @@ export async function confirmUpload(
   pendingUploads.delete(input.uploadToken);
 
   return result[0];
+}
+
+/**
+ * Look up an already-confirmed file by its client idempotency key, or null. Used by the field confirm
+ * path to short-circuit a resumed/background upload whose original confirm already succeeded (the
+ * single-use token is long gone), so it returns the existing photo instead of erroring or duplicating.
+ */
+export async function getFileByClientUploadId(
+  tenantDb: TenantDb,
+  clientUploadId: string,
+): Promise<typeof files.$inferSelect | null> {
+  if (!clientUploadId) return null;
+  const rows = await tenantDb.select().from(files).where(eq(files.clientUploadId, clientUploadId)).limit(1);
+  return rows[0] ?? null;
 }
 
 export function getPendingUploadMetadata(uploadToken: string): Readonly<PendingUpload> | null {
@@ -1509,6 +1547,7 @@ export async function getDealPhotoTimeline(
       fileExtension: files.fileExtension,
       r2Key: files.r2Key,
       thumbnailR2Key: files.thumbnailR2Key,
+      clientUploadId: files.clientUploadId,
       r2Bucket: files.r2Bucket,
       dealId: files.dealId,
       leadId: files.leadId,
