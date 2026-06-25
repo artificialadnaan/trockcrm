@@ -501,14 +501,19 @@ export function DealDetailPage() {
   const requestedFocus = searchParams.get("focus");
 
   useEffect(() => {
+    // Only auto-open the Opportunity Scope tab for the deal OWNER — that's their editing workspace.
+    // A non-owner (a director/admin who can now trigger RFP office-wide) would otherwise be dropped onto
+    // the scope panel, which immediately GETs the owner-only /scoping-intake route and 403s. They default
+    // to Overview instead, where the Trigger RFP button + readiness gate live; the Scoping tab is still
+    // reachable by an explicit click.
     const nextTab =
       requestedTab && availableTabs.includes(requestedTab as Tab)
         ? (requestedTab as Tab)
-        : isOpportunityStage
+        : isOpportunityStage && viewerOwnsDeal
           ? "scoping"
           : "overview";
     setActiveTab((current) => (current === nextTab ? current : nextTab));
-  }, [availableTabs, isOpportunityStage, requestedTab]);
+  }, [availableTabs, isOpportunityStage, viewerOwnsDeal, requestedTab]);
 
   useEffect(() => {
     if (activeTab !== "overview" || requestedFocus !== "copilot") {
