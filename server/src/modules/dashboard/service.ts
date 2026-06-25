@@ -2130,17 +2130,26 @@ export async function getRepDealPipelineSummary(
 // commission cuts (owner + estimator each earn separately), so their totals legitimately sum the rows.
 export async function getCommissionOfficeTotals(
   tenantDb: TenantDb,
+  officeId?: string,
 ): Promise<{ activeDeals: number; pipelineValue: number; wonUnsignedValue: number; wonUnsignedCount: number }> {
   const dealValue = sql`${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)`;
-  // Match the per-rep view's deal SET exactly: getRepDealPipelineSummary's CROSS JOIN LATERAL unnest drops
-  // any deal with no involved user (both assigned_rep_id AND estimator_user_id NULL), so an unassigned deal
-  // is in NO rep row. Require an involved user here too, so officeTotals is the EXACT de-dup of the rows
-  // (officeTotals <= Σ rows always) and the footer reconciles with the rep rows beneath it.
+  // Match the per-rep view's deal SET EXACTLY. A deal only appears in a rep row when one of its involved
+  // users (owner or estimator) is on the ROSTER — the same predicate getDirectorRepCommissionRows uses:
+  // active, non-test, role='rep', and (when office-scoped) an active-office member. Requiring a rostered
+  // involved user here keeps officeTotals the exact de-dup of the visible rows (officeTotals <= Σ rows) and
+  // excludes deals attributable only to a foreign/inactive/test/non-rep user, which no row could contain.
+  const rostered = sql`EXISTS (
+    SELECT 1 FROM ${users} u
+    WHERE u.id IN (d.assigned_rep_id, d.estimator_user_id)
+      AND u.is_active = true
+      AND COALESCE(u.is_test_data, false) = false
+      AND u.role = 'rep'${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``}
+  )`;
   const base = sql`d.is_active = true
     AND COALESCE(d.is_test_data, false) = false
     AND d.contract_signed_at IS NULL
     AND d.contract_signed_date IS NULL
-    AND (d.assigned_rep_id IS NOT NULL OR d.estimator_user_id IS NOT NULL)
+    AND ${rostered}
     AND ${aliasedActiveDealCountFilterSql("d")}`;
   const result = await tenantDb.execute(sql`
     SELECT
@@ -2720,8 +2729,9 @@ export async function getDirectorCommissionWorkspace(
     () => getDirectorFunnelSummary(tenantDb, officeId),
     () => getRepDealPipelineSummary(tenantDb),
     // De-duplicated office totals (each deal once) for the deal-VALUE columns, so the team total isn't
-    // inflated by summing the per-rep involvement rows (owner + estimator counted twice).
-    () => getCommissionOfficeTotals(tenantDb),
+    // inflated by summing the per-rep involvement rows (owner + estimator counted twice). Same officeId
+    // roster scope as the rows, so the footer reconciles with exactly the visible reps.
+    () => getCommissionOfficeTotals(tenantDb, officeId),
   ]);
 
   const activityByRep = new Map(activityRows.map((row) => [row.repId, row]));

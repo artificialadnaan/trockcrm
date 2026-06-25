@@ -21,6 +21,7 @@ const CO = U("c01"); // company
 const MGR = U("f01"); // below their OWN floor, earns ONLY manager override on a report
 const REPORT = U("f02"); // direct report of MGR with real earned commission
 const BOOKED = U("f03"); // owns a won deal that's deal-unsigned but ALREADY booked (dsc) -> in Earned, NOT won·unsigned
+const NONREP = U("f04"); // a director (NOT on the rep roster) — deals only they own must NOT inflate office totals
 const FROM = "2026-01-01";
 const TO = "2026-12-31";
 
@@ -69,7 +70,8 @@ beforeAll(async () => {
 
     INSERT INTO users (id, display_name, role, reports_to) VALUES
       ('${REP}','Kaleb','rep', NULL), ('${OTHER}','Owner','rep', NULL),
-      ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}'), ('${BOOKED}','Booked','rep', NULL);
+      ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}'), ('${BOOKED}','Booked','rep', NULL),
+      ('${NONREP}','Director Dana','director', NULL);
     INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP}', true, 0.05, 0, 0),
       ('${MGR}', true, 0.05, 1000000, 0.10),  -- MGR below their own $1M floor -> direct earned $0
@@ -103,6 +105,10 @@ beforeAll(async () => {
     -- nothing), so it must NOT inflate officeTotals above the row sum either.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, awarded_amount) VALUES
       ('${U("d10")}','D-10','Unassigned', NULL, NULL, '${ST.opportunity}', 60000);
+    -- NON-ROSTERED: owned solely by a director (not on the rep roster) -> in no rep row, must be excluded
+    -- from officeTotals (otherwise the footer exceeds the visible rows).
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount) VALUES
+      ('${U("d12")}','D-12','Director-owned','${NONREP}','${ST.opportunity}', 45000);
     -- WON·UNSIGNED: REP-owned deal in a won stage with NO signed contract -> won·unsigned $80k. Plus a
     -- won-but-SIGNED deal (excluded from won·unsigned) to prove the unsigned gate.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount) VALUES
@@ -189,11 +195,13 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
 
   it("officeTotals count each deal ONCE — de-dups the estimator double-count in the row sum", async () => {
     const ws = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
-    // D2 is OWNED by OTHER and ESTIMATED by REP -> it appears in BOTH rows' pipeline (involvement). So the
-    // per-rep sum double-counts it: REP 220k + OTHER 50k = 270k.
+    // D2 is OWNED by OTHER and ESTIMATED by REP -> it appears in BOTH rows' pipeline (involvement). The
+    // per-rep sum double-counts it AND includes the non-roster director's D12: REP 220k + OTHER 50k +
+    // NONREP 45k = 315k.
     const perRepPipelineSum = (await getRepDealPipelineSummary(tdb)).reduce((s, r) => s + r.pipelineValue, 0);
-    expect(perRepPipelineSum).toBe(270000);
-    // The office total counts each deal once: D1 100k + D2 50k + D3 70k = 220k (NOT 270k).
+    expect(perRepPipelineSum).toBe(315000);
+    // The office total counts each deal ONCE and only deals with a ROSTERED rep involved: D1 100k + D2 50k +
+    // D3 70k = 220k — excludes the unassigned D10 AND the director-owned D12 (neither in any rep row).
     const totals = await getCommissionOfficeTotals(tdb);
     expect(totals.pipelineValue).toBe(220000);
     expect(totals.pipelineValue).toBeLessThan(perRepPipelineSum);
