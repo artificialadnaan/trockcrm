@@ -350,13 +350,17 @@ export async function confirmFieldPhotoUpload(
     const existing = await getFileByClientUploadId(tenantDb, input.clientUploadId);
     if (existing) {
       // Idempotent retry: the client just minted a fresh token + PUT a NEW R2 object before this call.
-      // Clean both up so the retry doesn't orphan storage or leak the pending token, then return the row.
-      // Guard: never delete the canonical object (only the freshly-PUT duplicate, which has a different key).
-      if (isR2Configured() && input.objectKey && input.objectKey !== existing.r2Key) {
-        await deleteObject(input.objectKey).catch(() => undefined);
+      // Clean up the superseded object — but ONLY the r2Key we can VALIDATE belongs to the supplied token
+      // (NEVER a client-supplied objectKey, which an authenticated caller could point at someone else's
+      // object). If the token is gone/invalid there's nothing safe to delete. Guard against the canonical key.
+      const pendingRetry = getPendingUploadMetadata(input.uploadToken);
+      if (pendingRetry && isR2Configured() && pendingRetry.r2Key !== existing.r2Key) {
+        await deleteObject(pendingRetry.r2Key).catch(() => undefined);
       }
       discardPendingUpload(input.uploadToken);
-      const existingUrl = (await getFileDownloadUrl(tenantDb, existing.id)).url;
+      // If the row was soft-deleted after it confirmed, don't presign it — inactive files 404 on download,
+      // which would make the queue retry forever. Return it as terminal (null url) so the client clears it.
+      const existingUrl = existing.isActive ? (await getFileDownloadUrl(tenantDb, existing.id)).url : null;
       return { photo: toFieldUploadedPhoto(existing, existingUrl) };
     }
   }

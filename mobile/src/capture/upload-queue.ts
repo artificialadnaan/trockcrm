@@ -29,6 +29,8 @@ export { UPLOAD_CONCURRENCY, dedupeQueue, newClientUploadId, partitionResults, r
 
 const ROOT_DIR = `${FileSystem.documentDirectory ?? ""}upload-queue/`;
 const KEEP_AWAKE_TAG = "trockcam-upload-queue";
+// Persist progress every this-many uploads so an interrupted drain re-runs at most one chunk on resume.
+const DRAIN_CHUNK = 10;
 
 function ownerDir(ownerKey: string): string {
   return `${ROOT_DIR}${sanitizeOwnerKey(ownerKey)}/`;
@@ -147,14 +149,22 @@ export async function drainUploadQueue(
       // Keep-awake is best-effort; draining continues without it.
     }
 
-    const results = await runConcurrentUploads(items, UPLOAD_CONCURRENCY, (item) => uploadCapture(fetcher, item));
-    const { succeededIds, failedIds } = partitionResults(items, results);
-    // Single index rewrite (re-reads current state) so items enqueued mid-drain aren't lost. Items that
-    // succeeded but aren't removed (e.g. the app died here) re-run next time and dedupe server-side.
-    await removeQueuedItems(ownerKey, succeededIds);
+    // Drain in persisted chunks: after each chunk, remove its successes from the index. So an interrupt
+    // (app suspended / short iOS window) re-uploads at MOST one chunk's worth next time, instead of the
+    // whole snapshot — already-confirmed photos aren't re-compressed and re-PUT just to be deduped.
+    let succeeded = 0;
+    let failed = 0;
+    for (let i = 0; i < items.length; i += DRAIN_CHUNK) {
+      const chunk = items.slice(i, i + DRAIN_CHUNK);
+      const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) => uploadCapture(fetcher, item));
+      const { succeededIds, failedIds } = partitionResults(chunk, results);
+      await removeQueuedItems(ownerKey, succeededIds);
+      succeeded += succeededIds.length;
+      failed += failedIds.length;
+    }
 
     const remaining = await getQueuedCount(ownerKey);
-    const summary = { succeeded: succeededIds.length, failed: failedIds.length, remaining };
+    const summary = { succeeded, failed, remaining };
     opts.onProgress?.(summary);
     return summary;
   } finally {
