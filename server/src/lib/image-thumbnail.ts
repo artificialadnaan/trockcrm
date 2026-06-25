@@ -16,6 +16,21 @@ const THUMBNAIL_QUALITY = 70;
 // Don't pull originals larger than this into memory just to thumbnail them (defends against a rogue
 // huge upload). A miss here is non-fatal — the grid falls back to the original.
 const MAX_SOURCE_BYTES = 40 * 1024 * 1024;
+// Hard ceiling on how long thumbnailing may add to the caller. confirmUpload() awaits this on the
+// request path, so a slow R2 fetch/decode/resize must not stall an upload — past this we give up and
+// the grid falls back to the original. (The in-flight work may still finish and write the thumb object;
+// that's a harmless orphan a future backfill can re-link via the deterministic key.)
+const THUMBNAIL_TIMEOUT_MS = 2500;
+
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+    work.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
 
 /** True for mime types sharp can rasterize into a thumbnail. Excludes PDFs/docs and SVG (untrusted). */
 export function isThumbnailableImage(mimeType: string | null | undefined): boolean {
@@ -69,18 +84,24 @@ export async function generateAndStoreThumbnail(
   if (!isThumbnailableImage(mimeType)) return null;
   if (!isR2Configured()) return null;
   try {
-    let source = sourceBuffer;
-    if (!source) {
-      const got = await getObjectBuffer(r2Key, { maxBytes: MAX_SOURCE_BYTES });
-      source = got.buffer;
-    }
-    const thumb = await generateThumbnailBuffer(source);
-    const thumbnailKey = deriveThumbnailKey(r2Key);
-    await putObject(thumbnailKey, thumb, "image/jpeg");
-    return thumbnailKey;
+    // Best-effort AND time-bounded: never block an upload on a thumbnail, even on a slow fetch/decode.
+    return await withTimeout(
+      (async () => {
+        let source = sourceBuffer;
+        if (!source) {
+          const got = await getObjectBuffer(r2Key, { maxBytes: MAX_SOURCE_BYTES });
+          source = got.buffer;
+        }
+        const thumb = await generateThumbnailBuffer(source);
+        const thumbnailKey = deriveThumbnailKey(r2Key);
+        await putObject(thumbnailKey, thumb, "image/jpeg");
+        return thumbnailKey;
+      })(),
+      THUMBNAIL_TIMEOUT_MS,
+    );
   } catch (err) {
-    // Best-effort: log and fall back to the original. Never block an upload on a thumbnail.
-    console.error(`[thumbnail] failed to generate for ${r2Key}:`, err);
+    // Log and fall back to the original (heavier grid tile, never a broken upload).
+    console.error(`[thumbnail] skipped for ${r2Key}:`, err);
     return null;
   }
 }
