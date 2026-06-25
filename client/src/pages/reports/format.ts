@@ -5,6 +5,11 @@
 export const usd = (n: number | null | undefined): string =>
   n == null ? "—" : n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
+// Exact-cents currency — for PAYOUT figures (earned/potential commission) where the $0.01 matters and a
+// rounded-to-whole-dollar display would misstate what a rep is owed. Use over `usd` for money amounts.
+export const usdExact = (n: number | null | undefined): string =>
+  n == null ? "—" : n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 export const int = (n: number | null | undefined): string => (n == null ? "—" : n.toLocaleString("en-US"));
 
 export const signed = (n: number | null | undefined): string =>

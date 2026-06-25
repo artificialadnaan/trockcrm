@@ -436,6 +436,73 @@ export function useDirectorCommissionWorkspace(dateRange?: { from: string; to: s
   return { data, loading, error, refetch: fetchData };
 }
 
+// ── Team Commissions drill-down evidence (mirrors server CommissionEvidence) ──
+
+export type CommissionEvidenceMetric =
+  | "active" | "pipeline" | "potential" | "estimating" | "earned"
+  | "leads" | "qualified" | "opportunities" | "calls" | "emails" | "meetings";
+
+export interface CommissionEvidenceRecord {
+  id: string;
+  navKind: "deal" | "lead" | null;
+  navId: string | null;
+  primary: string | null;
+  name: string;
+  stageLabel: string;
+  value: number | null;
+  date: string | null;
+  companyName: string | null;
+}
+
+export interface CommissionEvidence {
+  metric: CommissionEvidenceMetric;
+  kind: "deal" | "lead" | "activity";
+  repId: string;
+  repName: string;
+  title: string;
+  subtitle: string;
+  valueLabel: string | null;
+  total: { count: number; value: number | null };
+  records: CommissionEvidenceRecord[];
+}
+
+export interface CommissionDrillRequest {
+  repId: string;
+  repName: string;
+  metric: CommissionEvidenceMetric;
+  from?: string;
+  to?: string;
+}
+
+/** Fetches the supporting records behind one rep's number in one Team Commissions column. */
+export function useCommissionEvidence(request: CommissionDrillRequest | null) {
+  const [data, setData] = useState<CommissionEvidence | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!request) {
+      setData(null);
+      setError(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setData(null);
+    const params = new URLSearchParams({ repId: request.repId, metric: request.metric });
+    if (request.from) params.set("from", request.from);
+    if (request.to) params.set("to", request.to);
+    api<{ data: CommissionEvidence }>(`/dashboard/director/commissions/evidence?${params.toString()}`)
+      .then((res) => { if (!cancelled) setData(res.data); })
+      .catch((err: unknown) => { if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load records"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [request?.repId, request?.metric, request?.from, request?.to]);
+
+  return { data, loading, error };
+}
+
 export function useRepDetail(repId: string | undefined, dateRange?: { from: string; to: string }) {
   const [data, setData] = useState<RepDetailData | null>(null);
   const [loading, setLoading] = useState(true);
