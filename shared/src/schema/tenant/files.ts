@@ -50,6 +50,11 @@ export const files = pgTable(
     // ingest (confirm-upload + CompanyCam sync). The grid loads this; the lightbox keeps the full original.
     // Null for non-images and for rows uploaded before thumbnails existed — callers fall back to r2Key.
     thumbnailR2Key: varchar("thumbnail_r2_key", { length: 1000 }),
+    // Idempotency key for the resilient field-photo upload queue (migration 0170). The mobile app sends a
+    // stable id per captured photo on confirm-upload; a resumed/background re-run of an already-confirmed
+    // upload returns the existing row instead of duplicating it. Null for non-field/legacy uploads.
+    // A partial unique index (WHERE NOT NULL) enforces the dedup at the DB level.
+    clientUploadId: varchar("client_upload_id", { length: 64 }),
     r2Bucket: varchar("r2_bucket", { length: 100 }).notNull(),
     dealId: uuid("deal_id"),
     leadId: uuid("lead_id").references(() => leads.id),

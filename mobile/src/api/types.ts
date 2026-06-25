@@ -67,6 +67,8 @@ export type ConfirmUploadRequest = {
   opportunityId?: string;
   uploadToken: string;
   objectKey: string;
+  /** Stable idempotency key so a resumed/background re-upload returns the existing photo, never a dup. */
+  clientUploadId?: string;
   latitude?: number;
   longitude?: number;
   addressSource?: "exif" | "live_gps";

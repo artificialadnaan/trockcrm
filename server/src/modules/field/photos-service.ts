@@ -4,9 +4,11 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { PhotoCategory, UserRole } from "@trock-crm/shared/types";
 import { PHOTO_CATEGORIES } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { generateDownloadUrl, generateMockDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
+import { deleteObject, generateDownloadUrl, generateMockDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
 import {
   confirmUpload,
+  discardPendingUpload,
+  getFileByClientUploadId,
   getFileDownloadUrl,
   getPendingUploadMetadata,
   requestUploadUrl,
@@ -320,6 +322,8 @@ export async function confirmFieldPhotoUpload(
     opportunityId?: string;
     uploadToken: string;
     objectKey: string;
+    /** Idempotency key from the resilient upload queue — see ConfirmUploadInput.clientUploadId. */
+    clientUploadId?: string;
     latitude?: number;
     longitude?: number;
     addressSource?: "exif" | "live_gps";
@@ -338,6 +342,29 @@ export async function confirmFieldPhotoUpload(
       userRole: input.userRole,
     });
   }
+  // Idempotency (resilient upload queue): a resumed/background upload may re-confirm one that already
+  // succeeded — by then the single-use token is gone, so the check below would wrongly 400. If a row
+  // already exists for this client id, return it. The access check above still gates this, so it can't be
+  // used to read another deal's photo. Decoupled from the token, so it survives a server restart too.
+  if (input.clientUploadId) {
+    const existing = await getFileByClientUploadId(tenantDb, input.clientUploadId, input.userId);
+    if (existing) {
+      // Idempotent retry: the client just minted a fresh token + PUT a NEW R2 object before this call.
+      // Clean up the superseded object — but ONLY the r2Key we can VALIDATE belongs to the supplied token
+      // (NEVER a client-supplied objectKey, which an authenticated caller could point at someone else's
+      // object). If the token is gone/invalid there's nothing safe to delete. Guard against the canonical key.
+      const pendingRetry = getPendingUploadMetadata(input.uploadToken);
+      if (pendingRetry && isR2Configured() && pendingRetry.r2Key !== existing.r2Key) {
+        await deleteObject(pendingRetry.r2Key).catch(() => undefined);
+      }
+      discardPendingUpload(input.uploadToken);
+      // If the row was soft-deleted after it confirmed, don't presign it — inactive files 404 on download,
+      // which would make the queue retry forever. Return it as terminal (null url) so the client clears it.
+      const existingUrl = existing.isActive ? (await getFileDownloadUrl(tenantDb, existing.id)).url : null;
+      return { photo: toFieldUploadedPhoto(existing, existingUrl) };
+    }
+  }
+
   const pending = getPendingUploadMetadata(input.uploadToken);
   if (!pending) throw new AppError(400, "Invalid or expired upload token");
   if (pending.r2Key !== input.objectKey) throw new AppError(400, "objectKey does not match the issued upload.");
@@ -358,6 +385,7 @@ export async function confirmFieldPhotoUpload(
 
   const file = await confirmUpload(tenantDb, input.userId, {
     uploadToken: input.uploadToken,
+    clientUploadId: input.clientUploadId,
     latitude: input.latitude,
     longitude: input.longitude,
     addressSource: cleanAddressSource(input.addressSource),
