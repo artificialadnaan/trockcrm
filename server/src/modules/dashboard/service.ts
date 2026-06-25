@@ -932,17 +932,26 @@ async function getDirectorFunnelSummary(
         GROUP BY l.assigned_rep_id
       ),
       deal_counts AS (
+        -- Estimating-stage deal counts, INVOLVEMENT-based: credit each deal to its assigned rep AND (if
+        -- distinct) its assigned estimator, so an estimator's "Estimating" column reflects the deals they
+        -- are actively estimating. Lead counts above stay owner-only — leads carry no estimator. The
+        -- lateral unnest dedups when one person is both owner and estimator (counted once).
         SELECT
-          d.assigned_rep_id AS rep_id,
+          involved.rep_id AS rep_id,
           COUNT(*) FILTER (
             WHERE psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
               AND ${aliasedActiveDealCountFilterSql("d")}
           )::int AS estimating
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
+        CROSS JOIN LATERAL (
+          SELECT DISTINCT rep_id
+          FROM unnest(ARRAY[d.assigned_rep_id, d.estimator_user_id]) AS t(rep_id)
+          WHERE rep_id IS NOT NULL
+        ) involved
         WHERE d.is_active = true
           AND psc.slug IN (${sql.join(ESTIMATING_PROGRESS_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
-        GROUP BY d.assigned_rep_id
+        GROUP BY involved.rep_id
       )
       SELECT
         u.id AS rep_id,
@@ -1219,13 +1228,16 @@ export function buildRepContractsSignedSql(
   `;
 }
 
-// Open-pipeline potential revenue for one rep — ASSIGNED-rep only (NOT estimator-aware). The result
-// feeds getRepCommissionSummary's potentialCommission = (revenue − floor) × the REP's OWN rate, so an
-// estimator-OR would price deals the rep doesn't own at the wrong rate (and double-count the office
-// total when this is looped per-rep by the director table). A rep's potential commission is inherently
-// what they OWN. (getCommissionPotential, which prices each deal at its assigned rep's rate, IS
-// estimator-aware; this flat-rate projection cannot be.)
-async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promise<number> {
+// Open-pipeline potential revenue for one rep — INVOLVEMENT-based (deals they OWN as assigned rep OR are
+// the assigned ESTIMATOR on), so a pure estimator (e.g. Sidney Gibson, Alex Kock — they own no deals)
+// gets a non-zero potential reflecting the projects they estimate, matching how earned commission already
+// credits estimators (an additive dsc row). The result feeds potentialCommission = revenue × the REP's
+// OWN rate; the estimated portion is therefore a flat-rate projection at this person's rate (this number
+// is already a flat-rate projection, not the exact per-deal estimator cut). Because the director table
+// loops this per rep, a deal with a distinct owner+estimator is intentionally counted toward BOTH — the
+// per-person team view is additive (mirrors the additive estimator commission model), so its column sum
+// can exceed the raw office pipeline.
+export async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promise<number> {
   const result = await tenantDb.execute(sql`
     SELECT
       COALESCE(
@@ -1236,7 +1248,7 @@ async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promis
       )::numeric AS potential_revenue
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-    WHERE d.assigned_rep_id = ${repId}
+    WHERE ${buildAliasedInvolvedRepSql("d", repId)}
       AND d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       AND d.contract_signed_at IS NULL
@@ -2027,12 +2039,17 @@ export interface DirectorCommissionWorkspaceData {
   rows: DirectorCommissionWorkspaceRow[];
 }
 
-async function getRepDealPipelineSummary(
+// Active-deal count + open pipeline value per person, INVOLVEMENT-based: each deal is credited to its
+// assigned rep AND (if distinct) its assigned estimator, so pure estimators get a real pipeline. The
+// lateral unnest expands a deal into one row per DISTINCT non-null involved user — same person as both
+// owner and estimator collapses to one row (no self-double-count), but a distinct owner+estimator deal is
+// counted for BOTH (the per-person team view is additive, matching the estimator commission model).
+export async function getRepDealPipelineSummary(
   tenantDb: TenantDb
 ): Promise<Array<{ repId: string; activeDeals: number; pipelineValue: number }>> {
   const result = await tenantDb.execute(sql`
     SELECT
-      d.assigned_rep_id AS rep_id,
+      involved.rep_id AS rep_id,
       COUNT(*) FILTER (
         WHERE d.is_active = true
           AND COALESCE(d.is_test_data, false) = false
@@ -2055,7 +2072,12 @@ async function getRepDealPipelineSummary(
       )::numeric AS pipeline_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-    GROUP BY d.assigned_rep_id
+    CROSS JOIN LATERAL (
+      SELECT DISTINCT rep_id
+      FROM unnest(ARRAY[d.assigned_rep_id, d.estimator_user_id]) AS t(rep_id)
+      WHERE rep_id IS NOT NULL
+    ) involved
+    GROUP BY involved.rep_id
   `);
 
   const rows = (result as any).rows ?? result;
