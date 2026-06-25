@@ -181,7 +181,12 @@ export function TeamCommissionsPage() {
                       <Drill row={row} metric="earned" money zeroDim={row.totalEarnedCommission === 0} onDrill={onDrill}>{usdExact(row.totalEarnedCommission)}</Drill>
                     </td>
                     <td className="px-3 py-2.5 text-right">
-                      <Drill row={row} metric="won_unsigned" money zeroDim={row.wonUnsignedValue === 0} onDrill={onDrill}>{usdExact(row.wonUnsignedValue)}</Drill>
+                      {/* Drill on COUNT, not value: a won·unsigned deal can lack an awarded/bid/DD amount
+                          (value 0) yet still exist — gating on value would hide it, and this is its only surface. */}
+                      <Drill row={row} metric="won_unsigned" money zeroDim={row.wonUnsignedCount === 0} onDrill={onDrill}>
+                        {usdExact(row.wonUnsignedValue)}
+                        {row.wonUnsignedValue === 0 && row.wonUnsignedCount > 0 ? <span className="ml-1 text-[10px] font-normal text-slate-400">({row.wonUnsignedCount})</span> : null}
+                      </Drill>
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       <Drill row={row} metric="potential" money zeroDim={row.potentialCommission === 0} onDrill={onDrill}>{usdExact(row.potentialCommission)}</Drill>

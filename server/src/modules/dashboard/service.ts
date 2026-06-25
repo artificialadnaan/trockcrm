@@ -2084,15 +2084,19 @@ export async function getRepDealPipelineSummary(
     AND d.contract_signed_date IS NULL
     AND ${aliasedActiveDealCountFilterSql("d")}
     AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})`;
-  // Won but NOT signed: in a won stage with no signed contract — value is awarded but no commission row
-  // exists yet, so these are invisible in both Earned (no dsc) and Pipeline (won stage isn't a commission
-  // stage). Same active/not-test/not-on-hold guards, won slugs, unsigned.
+  // Won but NOT signed: in a won stage with no signed contract AND no commission booked yet — value is
+  // awarded but invisible in both Earned (no dsc) and Pipeline (won stage isn't a commission stage). The
+  // NOT EXISTS guard excludes a legacy/reconciled deal whose dsc row carries contract_signed_date_at_signing
+  // (so Earned already counts it via dashboardEarnedSignedDateSql) while the deal-level signed fields are
+  // still null — otherwise the same deal would show in BOTH Earned and Won·unsigned. Mirrors the
+  // commissions report's won-unsigned exclusion.
   const wonUnsignedPredicate = sql`d.is_active = true
     AND COALESCE(d.is_test_data, false) = false
     AND d.contract_signed_at IS NULL
     AND d.contract_signed_date IS NULL
     AND ${aliasedActiveDealCountFilterSql("d")}
-    AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})`;
+    AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
+    AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id)`;
   const result = await tenantDb.execute(sql`
     SELECT
       involved.rep_id AS rep_id,
@@ -2142,8 +2146,8 @@ export async function getCommissionOfficeTotals(
     SELECT
       COUNT(*) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}))::int AS active_deals,
       COALESCE(SUM(${dealValue}) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})), 0)::numeric AS pipeline_value,
-      COUNT(*) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}))::int AS won_unsigned_count,
-      COALESCE(SUM(${dealValue}) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})), 0)::numeric AS won_unsigned_value
+      COUNT(*) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}) AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id))::int AS won_unsigned_count,
+      COALESCE(SUM(${dealValue}) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}) AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id)), 0)::numeric AS won_unsigned_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
   `);
@@ -2845,9 +2849,13 @@ export async function getDirectorCommissionEvidence(
   // zeroing in the value — on-hold is excluded by the WHERE row filter).
   const dealValueSql = sql`(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))`;
 
-  async function runDealQuery(stageSlugs: readonly string[], requireUnsigned: boolean): Promise<CommissionEvidenceRecord[]> {
+  async function runDealQuery(stageSlugs: readonly string[], requireUnsigned: boolean, excludeBooked = false): Promise<CommissionEvidenceRecord[]> {
     const unsigned = requireUnsigned
       ? sql` AND d.contract_signed_at IS NULL AND d.contract_signed_date IS NULL`
+      : sql``;
+    // Won·unsigned excludes deals with a booked commission row (Earned already counts those).
+    const notBooked = excludeBooked
+      ? sql` AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id)`
       : sql``;
     const res = await tenantDb.execute(sql`
       SELECT d.id, d.deal_number, d.name, COALESCE(psc.name, '') AS stage_label,
@@ -2859,7 +2867,7 @@ export async function getDirectorCommissionEvidence(
       WHERE ${buildAliasedInvolvedRepSql("d", repId)}
         AND d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
-        AND ${aliasedActiveDealCountFilterSql("d")}${unsigned}
+        AND ${aliasedActiveDealCountFilterSql("d")}${unsigned}${notBooked}
         AND psc.slug IN (${commissionSlugList(stageSlugs)})
       ORDER BY value DESC NULLS LAST, d.name ASC
     `);
@@ -2895,9 +2903,9 @@ export async function getDirectorCommissionEvidence(
     };
   }
 
-  // --- won but NOT signed: won-stage deals with no signed contract (involvement) ---
+  // --- won but NOT signed: won-stage deals, no signed contract, no booked commission (involvement) ---
   if (metric === "won_unsigned") {
-    const records = await runDealQuery(WON_STAGE_SLUGS, true);
+    const records = await runDealQuery(WON_STAGE_SLUGS, true, true);
     const totalValue = records.reduce((s, r) => s + (r.value ?? 0), 0);
     return {
       metric, kind: "deal", repId, repName,

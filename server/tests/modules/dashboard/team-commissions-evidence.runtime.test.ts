@@ -20,6 +20,7 @@ const OTHER = U("b01"); // a co-owner so an estimator-on-REP deal is owned elsew
 const CO = U("c01"); // company
 const MGR = U("f01"); // below their OWN floor, earns ONLY manager override on a report
 const REPORT = U("f02"); // direct report of MGR with real earned commission
+const BOOKED = U("f03"); // owns a won deal that's deal-unsigned but ALREADY booked (dsc) -> in Earned, NOT won·unsigned
 const FROM = "2026-01-01";
 const TO = "2026-12-31";
 
@@ -68,11 +69,12 @@ beforeAll(async () => {
 
     INSERT INTO users (id, display_name, role, reports_to) VALUES
       ('${REP}','Kaleb','rep', NULL), ('${OTHER}','Owner','rep', NULL),
-      ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}');
+      ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}'), ('${BOOKED}','Booked','rep', NULL);
     INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP}', true, 0.05, 0, 0),
       ('${MGR}', true, 0.05, 1000000, 0.10),  -- MGR below their own $1M floor -> direct earned $0
-      ('${REPORT}', true, 0.05, 0, 0);
+      ('${REPORT}', true, 0.05, 0, 0),
+      ('${BOOKED}', true, 0.05, 0, 0);
     INSERT INTO companies (id, name) VALUES ('${CO}','Acme');
     INSERT INTO pipeline_stage_config (id, slug, name, workflow_family) VALUES
       ('${ST.opportunity}','opportunity','Opportunity','pipeline'),
@@ -107,6 +109,12 @@ beforeAll(async () => {
       ('${U("d08")}','D-8','Won Unsigned','${REP}','${ST.won}','${CO}', 80000);
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, contract_signed_at) VALUES
       ('${U("d09")}','D-9','Won Signed','${REP}','${ST.won}', 95000, '2026-02-01T00:00:00Z');
+    -- BOOKED's won deal: deal-level UNSIGNED but a dsc row carries contract_signed_date_at_signing, so Earned
+    -- counts it -> must be EXCLUDED from won·unsigned (not awaiting signature). Owner BOOKED, $50k.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount) VALUES
+      ('${U("d11")}','D-11','Booked Unsigned','${BOOKED}','${ST.won}','${CO}', 50000);
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc3")}','${U("d11")}','${BOOKED}', 2500, 50000, 'owner', '2026-03-01');
 
     -- EARNED: a signed deal (D-4 above, opportunity stage, not lost) with a dsc row for REP.
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
@@ -194,6 +202,18 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(totals.wonUnsignedValue).toBe(80000);
     expect(totals.wonUnsignedCount).toBe(1);
     expect(ws.officeTotals.wonUnsignedValue).toBe(80000);
+  });
+
+  it("a won deal that's already BOOKED (dsc) is in Earned, NOT in won·unsigned", async () => {
+    const { rows, officeTotals } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    const booked = rows.find((r) => r.repId === BOOKED)!;
+    // D11 is won-stage + deal-unsigned but has a dsc booking -> Earned counts it, won·unsigned does NOT.
+    expect(booked.totalEarnedCommission).toBe(2500);
+    expect(booked.wonUnsignedValue).toBe(0);
+    expect(booked.wonUnsignedCount).toBe(0);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: BOOKED, metric: "won_unsigned", from: FROM, to: TO })).total.value).toBe(0);
+    // Office won·unsigned total excludes the booked deal — still just D8 ($80k), not $130k.
+    expect(officeTotals.wonUnsignedValue).toBe(80000);
   });
 
   it("potential evidence reconciles to pipeline REVENUE (cell is revenue × rate)", async () => {
