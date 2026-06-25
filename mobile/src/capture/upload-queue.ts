@@ -186,14 +186,27 @@ export async function migrateUploadQueue(fromKey: string, toKey: string): Promis
   await ensureDir(toKey);
   const toDir = ownerDir(toKey);
   const migrated: QueuedUpload[] = [];
+  const remaining: QueuedUpload[] = [];
   for (const item of legacy) {
     const ext = item.uri.includes(".") ? item.uri.slice(item.uri.lastIndexOf(".")) : ".jpg";
     const dest = `${toDir}${item.clientUploadId}${ext}`;
-    await FileSystem.copyAsync({ from: item.uri, to: dest }).catch(() => undefined);
-    migrated.push({ ...item, uri: dest });
+    try {
+      // Only treat an item as migrated once its file is actually copied — otherwise a copy failure (e.g.
+      // low storage) followed by clearing the legacy queue would leave the new index pointing at a file
+      // that never existed, silently losing the offline capture. Failed copies stay in the legacy queue.
+      await FileSystem.copyAsync({ from: item.uri, to: dest });
+      migrated.push({ ...item, uri: dest });
+    } catch {
+      remaining.push(item);
+    }
   }
-  await writeQueue(toKey, dedupeQueue(await readQueue(toKey), migrated));
-  await clearUploadQueue(fromKey);
+  if (migrated.length > 0) {
+    await writeQueue(toKey, dedupeQueue(await readQueue(toKey), migrated));
+    await deleteQueuedFiles(legacy.filter((item) => migrated.some((m) => m.clientUploadId === item.clientUploadId)));
+  }
+  // Keep any items that failed to copy in the legacy queue so a later attempt can retry them.
+  if (remaining.length > 0) await writeQueue(fromKey, remaining);
+  else await clearUploadQueue(fromKey);
 }
 
 // A drain must never run twice at once (foreground + background, or a double tap): a second caller would
