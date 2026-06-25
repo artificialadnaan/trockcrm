@@ -174,7 +174,7 @@ describe("photo audit route wiring", () => {
       folderPath: "Photos",
       uploadToken: "upload-token-1",
     });
-    serviceMocks.confirmUpload.mockResolvedValue(existingPhoto);
+    serviceMocks.confirmUpload.mockResolvedValue({ file: existingPhoto, created: true });
     serviceMocks.uploadNewVersion.mockResolvedValue({ file: { id: "version-2", parentFileId: "photo-1" } });
     serviceMocks.getFileDownloadUrl.mockResolvedValue({ url: "https://example.test/photo.jpg", filename: "photo.jpg" });
     serviceMocks.updateFile.mockResolvedValue({ ...existingPhoto, photoCategory: "safety", description: "New caption", deletedAt: null });

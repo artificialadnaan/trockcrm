@@ -432,13 +432,16 @@ describe("estimating workflow routes", () => {
       reviewEvent: { id: "evt-clear", eventType: "market_override_cleared" },
     });
     fileServiceMocks.confirmUpload.mockResolvedValue({
-      id: "file-1",
-      dealId: "deal-1",
-      parentFileId: null,
-      originalFilename: "plans.pdf",
-      mimeType: "application/pdf",
-      fileSizeBytes: 1024,
-      r2Key: "r2/doc-1.pdf",
+      file: {
+        id: "file-1",
+        dealId: "deal-1",
+        parentFileId: null,
+        originalFilename: "plans.pdf",
+        mimeType: "application/pdf",
+        fileSizeBytes: 1024,
+        r2Key: "r2/doc-1.pdf",
+      },
+      created: true,
     });
     fileServiceMocks.getPendingUploadMetadata.mockReturnValue({
       dealId: "deal-1",

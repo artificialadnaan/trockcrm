@@ -9,7 +9,8 @@ import { theme } from "../../src/theme/theme";
 import { useAuth } from "../../src/auth/AuthContext";
 import { usePendingPhotos } from "../../src/query/hooks";
 import { qk } from "../../src/query/keys";
-import { assignPhotoTarget, getTranscriptionConfig } from "../../src/api/endpoints";
+import { assignPhotoTarget, getTranscriptionConfig, type Fetcher } from "../../src/api/endpoints";
+import { apiFetch } from "../../src/api/client";
 import type { FieldCaptureTarget } from "../../src/api/types";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
 import { type CaptureTargetRef } from "../../src/capture/upload";
@@ -63,12 +64,24 @@ export default function CaptureScreen() {
     propertyAddress?: string;
   }>();
   const router = useRouter();
-  const { fetcher, user, activeOfficeId } = useAuth();
+  const { fetcher, user, activeOfficeId, token, signOut } = useAuth();
   const qc = useQueryClient();
-  // The upload queue is namespaced per signed-in user + ACTIVE OFFICE, so one user's queued photos can
-  // never drain under another account — or under a different office after an office switch (uploads are
-  // bound to the active office).
-  const ownerKey = uploadOwnerKey(user?.id, activeOfficeId);
+  // The upload queue is namespaced per signed-in user + RESOLVED OFFICE so one user's queued photos can
+  // never drain under another account, or under a different office. Use activeOfficeId ?? tenantId (the
+  // primary office) so a primary-office session is also office-bound — otherwise a primary-office rehome
+  // would let old queued items drain against the new primary office.
+  const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
+  const ownerKey = uploadOwnerKey(user?.id, resolvedOfficeId ?? undefined);
+
+  // Drains MUST send the RESOLVED office as x-office-id (the AuthContext fetcher omits it for primary
+  // sessions, letting the server fall back to the CURRENT primary). Binding to the queue's office keeps a
+  // primary-office queue uploading to the office it was captured under — matching the owner key + the
+  // background task's fetcher.
+  const queueFetcher = useCallback<Fetcher>(
+    (path, opts) =>
+      apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
+    [token, resolvedOfficeId, signOut],
+  );
 
   const initialTarget: SelectedTarget | null =
     typeof params.dealId === "string" && params.dealId
@@ -313,7 +326,7 @@ export default function CaptureScreen() {
     setStatus("uploading");
     setNotice(null);
     try {
-      const summary = await drainUploadQueue(ownerKey, fetcher);
+      const summary = await drainUploadQueue(ownerKey, queueFetcher);
       await refreshQueuedCount();
       void pendingQuery.refetch();
       if (summary.remaining === 0) {
@@ -344,9 +357,12 @@ export default function CaptureScreen() {
     void registerUploadBackgroundTask();
     let cancelled = false;
     const resumeIfQueued = async () => {
-      const n = await getQueuedCount(ownerKey);
+      // Refresh BOTH counts: on a restart/foreground with only terminal failures persisted, the failed
+      // banner must show (and be dismissible) even though there's nothing drainable to trigger a refresh.
+      const [n, failed] = await Promise.all([getQueuedCount(ownerKey), getFailedCount(ownerKey)]);
       if (cancelled) return;
       setQueuedCount(n);
+      setFailedCount(failed);
       if (n > 0) void resumeQueueRef.current();
     };
     void resumeIfQueued();
@@ -407,7 +423,7 @@ export default function CaptureScreen() {
     // were "saved to <this target>" or invalidate the wrong gallery. Guarded so a rejected drain/refresh
     // can't strand the screen in "uploading".
     try {
-      await drainUploadQueue(ownerKey, fetcher);
+      await drainUploadQueue(ownerKey, queueFetcher);
       await refreshQueuedCount();
       void pendingQuery.refetch();
 

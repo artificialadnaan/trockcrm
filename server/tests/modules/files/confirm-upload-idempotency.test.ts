@@ -38,7 +38,8 @@ describe("confirmUpload idempotency (resilient upload queue)", () => {
       uploadToken: "tok-gone", // token already consumed by the original confirm
       clientUploadId: "cid-1",
     });
-    expect(result).toBe(existing);
+    // Deduped → returns the existing row with created=false so the caller skips replaying side effects.
+    expect(result).toEqual({ file: existing, created: false });
   });
 
   it("getFileByClientUploadId returns the row, or null for an empty id/uploader", async () => {

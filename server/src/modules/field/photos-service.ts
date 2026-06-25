@@ -387,7 +387,7 @@ export async function confirmFieldPhotoUpload(
     throw new AppError(400, "Upload token does not match this project photo upload.");
   }
 
-  const file = await confirmUpload(tenantDb, input.userId, {
+  const { file, created } = await confirmUpload(tenantDb, input.userId, {
     uploadToken: input.uploadToken,
     clientUploadId: input.clientUploadId,
     latitude: input.latitude,
@@ -396,13 +396,17 @@ export async function confirmFieldPhotoUpload(
     takenAt: input.takenAt,
   });
 
-  await recordUploadedFileSideEffects(tenantDb, {
-    file,
-    userId: input.userId,
-    officeId: input.officeId,
-    addressSource: input.addressSource,
-    auditContext: input.auditContext,
-  });
+  // Only replay side effects for a FRESHLY created row. A deduped row (idempotent retry or a lost concurrent
+  // race) already recorded them — re-running would double the audit event + domain_event job.
+  if (created) {
+    await recordUploadedFileSideEffects(tenantDb, {
+      file,
+      userId: input.userId,
+      officeId: input.officeId,
+      addressSource: input.addressSource,
+      auditContext: input.auditContext,
+    });
+  }
 
   const imageUrl = (await getFileDownloadUrl(tenantDb, file.id)).url;
   return { photo: toFieldUploadedPhoto(file, imageUrl) };

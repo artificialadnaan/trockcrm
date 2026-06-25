@@ -2485,9 +2485,10 @@ router.post("/:id/estimating/documents", async (req, res, next) => {
       if (pendingUpload.dealId !== req.params.id) {
         throw new AppError(400, "Uploaded file must belong to the same deal");
       }
-      uploadedFile = await confirmUpload(req.tenantDb!, req.user!.id, {
+      // Token-only confirm (no clientUploadId) → never dedupes, so `.file` is always the freshly created row.
+      uploadedFile = (await confirmUpload(req.tenantDb!, req.user!.id, {
         uploadToken: req.body.uploadToken,
-      });
+      })).file;
     } else {
       throw new AppError(400, "Either uploadToken or fileId is required");
     }

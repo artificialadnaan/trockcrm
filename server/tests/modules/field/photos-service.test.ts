@@ -131,7 +131,7 @@ describe("field photo upload service", () => {
       dealId: DEAL_ID,
       category: "photo",
     });
-    fileMocks.confirmUpload.mockResolvedValue(confirmedFile);
+    fileMocks.confirmUpload.mockResolvedValue({ file: confirmedFile, created: true });
     fileMocks.updateFile.mockResolvedValue(confirmedFile);
     fileMocks.getFileDownloadUrl.mockResolvedValue({ url: "https://signed.example/photo.jpg" });
     workflowMocks.recordUploadedFileSideEffects.mockResolvedValue(undefined);
