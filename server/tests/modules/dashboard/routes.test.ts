@@ -96,7 +96,11 @@ describe("dashboard routes", () => {
 
     expect(response.status).toBe(200);
     expect(getRepDashboardMock).toHaveBeenCalledOnce();
-    expect(getRepDashboardMock).toHaveBeenCalledWith(expect.anything(), "rep-1", { range: undefined });
+    expect(getRepDashboardMock).toHaveBeenCalledWith(expect.anything(), "rep-1", {
+      range: undefined,
+      // The rep's own dashboard now office-scopes the commission/override roll-up to their active office.
+      officeId: "office-1",
+    });
     expect(commitTransactionMock).toHaveBeenCalledOnce();
     expect(response.body).toEqual({
       data: {
