@@ -81,7 +81,12 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
     formData.propertyId || undefined,
     { officeId: homeOfficeId ?? undefined }
   );
-  const selectedPropertyState = selectedProperty?.state ?? "";
+  // usePropertyDetail keeps the PREVIOUS property until its refetch settles after propertyId changes. Only
+  // derive region from the detail when it actually matches the currently-selected property — otherwise a
+  // fast switch-then-Create could save the OLD property's region against the NEW propertyId (wrong region
+  // bucket). While the detail is stale/loading, fall back to no state so region auto-detect waits.
+  const selectedPropertyState =
+    selectedProperty?.id === formData.propertyId ? (selectedProperty.state ?? "") : "";
   useEffect(() => {
     setFormData((prev) => {
       const nextRegionId = applyDealRegionAutoSelection({

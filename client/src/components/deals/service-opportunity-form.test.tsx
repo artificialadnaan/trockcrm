@@ -209,4 +209,51 @@ describe("ServiceOpportunityForm", () => {
       { officeId: "office-dallas" }
     );
   });
+
+  async function selectAndSubmit(container: HTMLElement) {
+    await act(async () => {
+      setInputValue(container.querySelector("#name") as HTMLInputElement, "SMOKE TEST DELETE Service Opportunity");
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select company")?.click();
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select property")?.click();
+    });
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+  }
+
+  it("auto-derives region from the SELECTED property's state when the detail matches", async () => {
+    // PropertySelector mock selects "property-1"; usePropertyDetail returns that exact property in TX (Central).
+    mocks.usePropertyDetail.mockReturnValue({
+      property: { id: "property-1", state: "TX" },
+      leads: [], deals: [], loading: false, error: null, refetch: vi.fn(),
+    });
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+    await selectAndSubmit(container);
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyId: "property-1", regionId: "region-central" }),
+      { officeId: "office-dallas" }
+    );
+  });
+
+  it("ignores STALE property detail (id mismatch) so a fast switch-then-create saves no cross-bucket region", async () => {
+    // Simulate usePropertyDetail still holding the PREVIOUS property (different id, TX→Central) while the
+    // user has already selected property-1 and clicks Create before the refetch settles. Region must NOT be
+    // derived from the stale detail — otherwise property-1 would be saved with the old property's region.
+    mocks.usePropertyDetail.mockReturnValue({
+      property: { id: "OLD-property-9", state: "TX" },
+      leads: [], deals: [], loading: false, error: null, refetch: vi.fn(),
+    });
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+    await selectAndSubmit(container);
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyId: "property-1", regionId: null }),
+      { officeId: "office-dallas" }
+    );
+  });
 });
