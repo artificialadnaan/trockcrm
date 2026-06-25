@@ -35,7 +35,7 @@ beforeAll(async () => {
       change_order_total numeric
     );
     -- getRepDealPipelineSummary's won·unsigned predicate references this table (empty here).
-    CREATE TABLE deal_signed_commissions (id uuid, deal_id uuid);
+    CREATE TABLE deal_signed_commissions (id uuid, deal_id uuid, rep_user_id uuid);
     INSERT INTO pipeline_stage_config (id, slug) VALUES ('${ST}', 'estimating');
     -- D1: OWNER owns, ESTIMATOR estimates (distinct) -> both get it ($100k)
     INSERT INTO deals (id, assigned_rep_id, estimator_user_id, stage_id, awarded_amount) VALUES

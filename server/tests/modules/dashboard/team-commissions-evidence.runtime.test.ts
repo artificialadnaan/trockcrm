@@ -22,6 +22,8 @@ const MGR = U("f01"); // below their OWN floor, earns ONLY manager override on a
 const REPORT = U("f02"); // direct report of MGR with real earned commission
 const BOOKED = U("f03"); // owns a won deal that's deal-unsigned but ALREADY booked (dsc) -> in Earned, NOT won·unsigned
 const NONREP = U("f04"); // a director (NOT on the rep roster) — deals only they own must NOT inflate office totals
+const EST2 = U("f05"); // estimator on a won deal whose OWNER is booked but EST2 is not -> still in EST2's won·unsigned
+const OWN2 = U("f06"); // owner of that cross-booked deal (booked) — separate so it doesn't perturb REP's earned
 const FROM = "2026-01-01";
 const TO = "2026-12-31";
 
@@ -71,7 +73,7 @@ beforeAll(async () => {
     INSERT INTO users (id, display_name, role, reports_to) VALUES
       ('${REP}','Kaleb','rep', NULL), ('${OTHER}','Owner','rep', NULL),
       ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}'), ('${BOOKED}','Booked','rep', NULL),
-      ('${NONREP}','Director Dana','director', NULL);
+      ('${NONREP}','Director Dana','director', NULL), ('${EST2}','Estimator Two','rep', NULL), ('${OWN2}','Owner Two','rep', NULL);
     INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP}', true, 0.05, 0, 0),
       ('${MGR}', true, 0.05, 1000000, 0.10),  -- MGR below their own $1M floor -> direct earned $0
@@ -121,6 +123,12 @@ beforeAll(async () => {
       ('${U("d11")}','D-11','Booked Unsigned','${BOOKED}','${ST.won}','${CO}', 50000);
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
       VALUES ('${U("dc3")}','${U("d11")}','${BOOKED}', 2500, 50000, 'owner', '2026-03-01');
+    -- D13: won + deal-unsigned, OWNER=OWN2 (booked) but ESTIMATOR=EST2 (NOT booked). Per-rep exclusion ->
+    -- OWN2's won·unsigned drops it (booked), EST2's won·unsigned KEEPS it ($30k), office counts it once.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, company_id, awarded_amount) VALUES
+      ('${U("d13")}','D-13','Cross Booked','${OWN2}','${EST2}','${ST.won}','${CO}', 30000);
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc4")}','${U("d13")}','${OWN2}', 1500, 30000, 'owner', '2026-03-01');
 
     -- EARNED: a signed deal (D-4 above, opportunity stage, not lost) with a dsc row for REP.
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
@@ -206,10 +214,11 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(totals.pipelineValue).toBe(220000);
     expect(totals.pipelineValue).toBeLessThan(perRepPipelineSum);
     expect(ws.officeTotals.pipelineValue).toBe(220000);
-    // Won·unsigned office total: only D8 ($80k); D9 (signed) excluded; counted once.
-    expect(totals.wonUnsignedValue).toBe(80000);
-    expect(totals.wonUnsignedCount).toBe(1);
-    expect(ws.officeTotals.wonUnsignedValue).toBe(80000);
+    // Won·unsigned office total: D8 ($80k, via REP unbooked) + D13 ($30k, via EST2 unbooked) = $110k; D9
+    // (signed) and D11 (fully booked) excluded; each counted once.
+    expect(totals.wonUnsignedValue).toBe(110000);
+    expect(totals.wonUnsignedCount).toBe(2);
+    expect(ws.officeTotals.wonUnsignedValue).toBe(110000);
   });
 
   it("a won deal that's already BOOKED (dsc) is in Earned, NOT in won·unsigned", async () => {
@@ -220,8 +229,19 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(booked.wonUnsignedValue).toBe(0);
     expect(booked.wonUnsignedCount).toBe(0);
     expect((await getDirectorCommissionEvidence(tdb, { repId: BOOKED, metric: "won_unsigned", from: FROM, to: TO })).total.value).toBe(0);
-    // Office won·unsigned total excludes the booked deal — still just D8 ($80k), not $130k.
-    expect(officeTotals.wonUnsignedValue).toBe(80000);
+    // Office won·unsigned excludes the fully-booked D11; counts D8 ($80k) + the cross-booked D13 ($30k via EST2).
+    expect(officeTotals.wonUnsignedValue).toBe(110000);
+  });
+
+  it("won·unsigned excludes a booked deal PER REP, not deal-wide (owner booked, estimator not)", async () => {
+    const { rows } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    // D13: owner OWN2 booked, estimator EST2 not. OWN2's won·unsigned drops it; EST2's keeps it.
+    expect(rows.find((r) => r.repId === OWN2)!.wonUnsignedValue).toBe(0);
+    expect(rows.find((r) => r.repId === EST2)!.wonUnsignedValue).toBe(30000);
+    const evOwn = await getDirectorCommissionEvidence(tdb, { repId: OWN2, metric: "won_unsigned", from: FROM, to: TO });
+    const evEst = await getDirectorCommissionEvidence(tdb, { repId: EST2, metric: "won_unsigned", from: FROM, to: TO });
+    expect(evOwn.records.some((r) => r.navId === U("d13"))).toBe(false);
+    expect(evEst.records.some((r) => r.navId === U("d13"))).toBe(true);
   });
 
   it("potential evidence reconciles to pipeline REVENUE (cell is revenue × rate)", async () => {

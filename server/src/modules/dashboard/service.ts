@@ -2084,19 +2084,18 @@ export async function getRepDealPipelineSummary(
     AND d.contract_signed_date IS NULL
     AND ${aliasedActiveDealCountFilterSql("d")}
     AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})`;
-  // Won but NOT signed: in a won stage with no signed contract AND no commission booked yet — value is
-  // awarded but invisible in both Earned (no dsc) and Pipeline (won stage isn't a commission stage). The
-  // NOT EXISTS guard excludes a legacy/reconciled deal whose dsc row carries contract_signed_date_at_signing
-  // (so Earned already counts it via dashboardEarnedSignedDateSql) while the deal-level signed fields are
-  // still null — otherwise the same deal would show in BOTH Earned and Won·unsigned. Mirrors the
-  // commissions report's won-unsigned exclusion.
+  // Won but NOT signed: in a won stage with no signed contract AND no commission booked FOR THIS REP — the
+  // value is awarded but invisible in both Earned (no dsc for them) and Pipeline (won stage isn't a
+  // commission stage). The NOT EXISTS is correlated to involved.rep_id (NOT deal-wide), matching Earned's
+  // per-rep dsc.rep_user_id and the commissions report: a deal booked for the owner but not the estimator
+  // still shows in the ESTIMATOR's won·unsigned (their cut isn't booked), not just dropped deal-wide.
   const wonUnsignedPredicate = sql`d.is_active = true
     AND COALESCE(d.is_test_data, false) = false
     AND d.contract_signed_at IS NULL
     AND d.contract_signed_date IS NULL
     AND ${aliasedActiveDealCountFilterSql("d")}
     AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
-    AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id)`;
+    AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id AND dsc.rep_user_id = involved.rep_id)`;
   const result = await tenantDb.execute(sql`
     SELECT
       involved.rep_id AS rep_id,
@@ -2138,25 +2137,35 @@ export async function getCommissionOfficeTotals(
   // active, non-test, role='rep', and (when office-scoped) an active-office member. Requiring a rostered
   // involved user here keeps officeTotals the exact de-dup of the visible rows (officeTotals <= Σ rows) and
   // excludes deals attributable only to a foreign/inactive/test/non-rep user, which no row could contain.
+  const rosterMembership = officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``;
+  // A rostered involved user exists (owner or estimator on the roster) — the deal appears in some rep row.
   const rostered = sql`EXISTS (
     SELECT 1 FROM ${users} u
     WHERE u.id IN (d.assigned_rep_id, d.estimator_user_id)
-      AND u.is_active = true
-      AND COALESCE(u.is_test_data, false) = false
-      AND u.role = 'rep'${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``}
+      AND u.is_active = true AND COALESCE(u.is_test_data, false) = false AND u.role = 'rep'${rosterMembership}
   )`;
-  const base = sql`d.is_active = true
+  // For won·unsigned: a rostered involved user exists who has NOT booked this deal — so it's awaiting
+  // signature in THAT rep's row. Counting the deal once when ANY such rep exists makes the office total the
+  // exact de-dup of the per-rep (per-rep-correlated) won·unsigned cells.
+  const rosteredUnbooked = sql`EXISTS (
+    SELECT 1 FROM ${users} u
+    WHERE u.id IN (d.assigned_rep_id, d.estimator_user_id)
+      AND u.is_active = true AND COALESCE(u.is_test_data, false) = false AND u.role = 'rep'${rosterMembership}
+      AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id AND dsc.rep_user_id = u.id)
+  )`;
+  const baseCommon = sql`d.is_active = true
     AND COALESCE(d.is_test_data, false) = false
     AND d.contract_signed_at IS NULL
     AND d.contract_signed_date IS NULL
-    AND ${rostered}
     AND ${aliasedActiveDealCountFilterSql("d")}`;
+  const openFilter = sql`${baseCommon} AND ${rostered} AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})`;
+  const wonUnsignedFilter = sql`${baseCommon} AND ${rosteredUnbooked} AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})`;
   const result = await tenantDb.execute(sql`
     SELECT
-      COUNT(*) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}))::int AS active_deals,
-      COALESCE(SUM(${dealValue}) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})), 0)::numeric AS pipeline_value,
-      COUNT(*) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}) AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id))::int AS won_unsigned_count,
-      COALESCE(SUM(${dealValue}) FILTER (WHERE ${base} AND psc.slug IN (${sql.join(WON_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)}) AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id)), 0)::numeric AS won_unsigned_value
+      COUNT(*) FILTER (WHERE ${openFilter})::int AS active_deals,
+      COALESCE(SUM(${dealValue}) FILTER (WHERE ${openFilter}), 0)::numeric AS pipeline_value,
+      COUNT(*) FILTER (WHERE ${wonUnsignedFilter})::int AS won_unsigned_count,
+      COALESCE(SUM(${dealValue}) FILTER (WHERE ${wonUnsignedFilter}), 0)::numeric AS won_unsigned_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
   `);
@@ -2863,9 +2872,10 @@ export async function getDirectorCommissionEvidence(
     const unsigned = requireUnsigned
       ? sql` AND d.contract_signed_at IS NULL AND d.contract_signed_date IS NULL`
       : sql``;
-    // Won·unsigned excludes deals with a booked commission row (Earned already counts those).
+    // Won·unsigned excludes deals already booked FOR THIS REP (Earned counts those), correlated to repId so
+    // a deal booked for another involved rep still shows here if it isn't booked for the displayed rep.
     const notBooked = excludeBooked
-      ? sql` AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id)`
+      ? sql` AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id AND dsc.rep_user_id = ${repId})`
       : sql``;
     const res = await tenantDb.execute(sql`
       SELECT d.id, d.deal_number, d.name, COALESCE(psc.name, '') AS stage_label,
