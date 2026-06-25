@@ -4,9 +4,10 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { PhotoCategory, UserRole } from "@trock-crm/shared/types";
 import { PHOTO_CATEGORIES } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { generateDownloadUrl, generateMockDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
+import { deleteObject, generateDownloadUrl, generateMockDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
 import {
   confirmUpload,
+  discardPendingUpload,
   getFileByClientUploadId,
   getFileDownloadUrl,
   getPendingUploadMetadata,
@@ -348,6 +349,13 @@ export async function confirmFieldPhotoUpload(
   if (input.clientUploadId) {
     const existing = await getFileByClientUploadId(tenantDb, input.clientUploadId);
     if (existing) {
+      // Idempotent retry: the client just minted a fresh token + PUT a NEW R2 object before this call.
+      // Clean both up so the retry doesn't orphan storage or leak the pending token, then return the row.
+      // Guard: never delete the canonical object (only the freshly-PUT duplicate, which has a different key).
+      if (isR2Configured() && input.objectKey && input.objectKey !== existing.r2Key) {
+        await deleteObject(input.objectKey).catch(() => undefined);
+      }
+      discardPendingUpload(input.uploadToken);
       const existingUrl = (await getFileDownloadUrl(tenantDb, existing.id)).url;
       return { photo: toFieldUploadedPhoto(existing, existingUrl) };
     }

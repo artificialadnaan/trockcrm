@@ -3,6 +3,7 @@ import {
   newClientUploadId,
   partitionResults,
   removeIds,
+  sanitizeOwnerKey,
   type QueuedUpload,
 } from "../upload-queue-core";
 
@@ -38,6 +39,12 @@ describe("upload-queue-core", () => {
     const queue = [item("a"), item("b"), item("c")];
     expect(removeIds(queue, ["b"]).map((i) => i.clientUploadId)).toEqual(["a", "c"]);
     expect(removeIds(queue, ["a", "c"]).map((i) => i.clientUploadId)).toEqual(["b"]);
+  });
+
+  it("sanitizeOwnerKey makes a path-safe segment and never collapses to a shared empty path", () => {
+    expect(sanitizeOwnerKey("user-123_ABC")).toBe("user-123_ABC");
+    expect(sanitizeOwnerKey("a/b\\c .d")).toBe("a_b_c__d");
+    expect(sanitizeOwnerKey("")).toBe("anon");
   });
 
   it("partitionResults splits succeeded vs failed by settled status (positional)", () => {

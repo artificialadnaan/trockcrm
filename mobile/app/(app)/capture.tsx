@@ -56,6 +56,9 @@ export default function CaptureScreen() {
   const router = useRouter();
   const { fetcher, user } = useAuth();
   const qc = useQueryClient();
+  // The upload queue is namespaced per signed-in user so one user's queued photos can never drain under
+  // the next person who signs in on this device.
+  const ownerKey = user?.id ?? "";
 
   const initialTarget: SelectedTarget | null =
     typeof params.dealId === "string" && params.dealId
@@ -277,17 +280,18 @@ export default function CaptureScreen() {
   }
 
   const refreshQueuedCount = useCallback(async () => {
-    setQueuedCount(await getQueuedCount());
-  }, []);
+    if (!ownerKey) return;
+    setQueuedCount(await getQueuedCount(ownerKey));
+  }, [ownerKey]);
 
   // Drain the durable upload queue. Used by the Resume action, the on-mount resume of a queue left over
   // from a previous session/crash, and the return-to-foreground resume. drainUploadQueue keeps the screen
   // awake while it runs and dedupes server-side, so this is safe to call repeatedly.
   const resumeQueue = useCallback(async () => {
-    if (status === "uploading") return;
+    if (!ownerKey || status === "uploading") return;
     setStatus("uploading");
     setNotice(null);
-    const summary = await drainUploadQueue(fetcher);
+    const summary = await drainUploadQueue(ownerKey, fetcher);
     await refreshQueuedCount();
     void pendingQuery.refetch();
     if (summary.remaining === 0) {
@@ -299,20 +303,21 @@ export default function CaptureScreen() {
       setStatus("failed");
       setNotice({ tone: "error", text: `${summary.remaining} photo${summary.remaining === 1 ? "" : "s"} still queued — they'll keep retrying.` });
     }
-  }, [fetcher, pendingQuery, refreshQueuedCount, status]);
+  }, [fetcher, ownerKey, pendingQuery, refreshQueuedCount, status]);
 
-  // On mount: schedule the background drain and resume any queue left over from a previous run; also resume
-  // whenever the app returns to the foreground. Run once — the latest resumeQueue is read via a ref so the
-  // listener never goes stale.
+  // On mount (per signed-in user): schedule the background drain and resume any queue left over from a
+  // previous run; also resume whenever the app returns to the foreground. The latest resumeQueue is read
+  // via a ref so the listener never goes stale.
   const resumeQueueRef = useRef(resumeQueue);
   useEffect(() => {
     resumeQueueRef.current = resumeQueue;
   }, [resumeQueue]);
   useEffect(() => {
+    if (!ownerKey) return;
     void registerUploadBackgroundTask();
     let cancelled = false;
     const resumeIfQueued = async () => {
-      const n = await getQueuedCount();
+      const n = await getQueuedCount(ownerKey);
       if (cancelled) return;
       setQueuedCount(n);
       if (n > 0) void resumeQueueRef.current();
@@ -325,10 +330,10 @@ export default function CaptureScreen() {
       cancelled = true;
       sub.remove();
     };
-  }, []);
+  }, [ownerKey]);
 
   async function upload() {
-    if (photos.length === 0 || status === "uploading") return;
+    if (!ownerKey || photos.length === 0 || status === "uploading") return;
     setStatus("uploading");
     setNotice(null);
     // Don't let a quick burst→Upload race the non-blocking GPS fix: if early shots
@@ -355,7 +360,7 @@ export default function CaptureScreen() {
 
     // Persist the whole batch to the durable queue FIRST, so a crash/kill/connection drop can't lose it.
     try {
-      await enqueueUploads(inputs);
+      await enqueueUploads(ownerKey, inputs);
     } catch {
       setStatus("failed");
       setNotice({ tone: "error", text: "Couldn't save photos for upload. Please try again." });
@@ -368,7 +373,7 @@ export default function CaptureScreen() {
     setCategory(null);
     await refreshQueuedCount();
 
-    const summary = await drainUploadQueue(fetcher);
+    const summary = await drainUploadQueue(ownerKey, fetcher);
     await refreshQueuedCount();
     void pendingQuery.refetch();
     if (target?.type === "deal" && summary.succeeded > 0) invalidateDealPhotos(target.id);

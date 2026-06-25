@@ -2,7 +2,7 @@ import * as BackgroundTask from "expo-background-task";
 import * as TaskManager from "expo-task-manager";
 import { apiFetch } from "../api/client";
 import type { Fetcher } from "../api/endpoints";
-import { isTokenExpired, loadSession } from "../auth/session";
+import { isTokenExpired, loadSession, type Session } from "../auth/session";
 import { drainUploadQueue, getQueuedCount } from "./upload-queue";
 
 /**
@@ -15,10 +15,8 @@ import { drainUploadQueue, getQueuedCount } from "./upload-queue";
  */
 export const UPLOAD_QUEUE_TASK = "trockcam-upload-queue-drain";
 
-/** A React-free authenticated fetcher for the background context, or null if there's no usable session. */
-async function backgroundFetcher(): Promise<Fetcher | null> {
-  const session = await loadSession();
-  if (!session || isTokenExpired(session.token)) return null;
+/** A React-free authenticated fetcher bound to a loaded session (for the background context). */
+function buildSessionFetcher(session: Session): Fetcher {
   // No onUnauthorized: a background 401 must not tear down the session out from under the UI.
   return (path, opts) => apiFetch(path, { ...opts, token: session.token, officeId: session.activeOfficeId });
 }
@@ -27,10 +25,14 @@ async function backgroundFetcher(): Promise<Fetcher | null> {
 // registers the handler; registerUploadBackgroundTask() then schedules it.
 TaskManager.defineTask(UPLOAD_QUEUE_TASK, async () => {
   try {
-    if ((await getQueuedCount()) === 0) return BackgroundTask.BackgroundTaskResult.Success;
-    const fetcher = await backgroundFetcher();
-    if (!fetcher) return BackgroundTask.BackgroundTaskResult.Success;
-    await drainUploadQueue(fetcher);
+    const session = await loadSession();
+    if (!session || isTokenExpired(session.token)) return BackgroundTask.BackgroundTaskResult.Success;
+    // Drain only THIS user's queue (matching the per-user namespacing in upload-queue) so the background
+    // task can never upload a different account's photos.
+    const ownerKey = session.user.id;
+    if ((await getQueuedCount(ownerKey)) === 0) return BackgroundTask.BackgroundTaskResult.Success;
+    const fetcher = buildSessionFetcher(session);
+    await drainUploadQueue(ownerKey, fetcher);
     return BackgroundTask.BackgroundTaskResult.Success;
   } catch {
     return BackgroundTask.BackgroundTaskResult.Failed;

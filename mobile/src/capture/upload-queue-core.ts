@@ -8,6 +8,15 @@ export const UPLOAD_CONCURRENCY = 5;
 
 export type QueuedUpload = CaptureUploadInput & { enqueuedAt: number };
 
+/**
+ * Make an owner id safe for use as a directory name (the queue is namespaced per signed-in user). Falls
+ * back to "anon" for an empty key so a missing id can never collapse two users into a shared path.
+ */
+export function sanitizeOwnerKey(ownerKey: string): string {
+  const safe = ownerKey.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return safe.length > 0 ? safe : "anon";
+}
+
 /** A collision-resistant id for the idempotency key + on-disk filename (no uuid/crypto dep available). */
 export function newClientUploadId(): string {
   return `cu-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}${Math.random()

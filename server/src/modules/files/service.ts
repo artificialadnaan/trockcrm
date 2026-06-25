@@ -695,6 +695,15 @@ export async function getFileByClientUploadId(
   return rows[0] ?? null;
 }
 
+/**
+ * Drop a pending upload token without confirming it. Used when an idempotent retry supersedes a freshly
+ * minted token (the row was already created under a prior token), so the in-memory pending entry doesn't
+ * leak. No-op if the token is already gone.
+ */
+export function discardPendingUpload(uploadToken: string): void {
+  pendingUploads.delete(uploadToken);
+}
+
 export function getPendingUploadMetadata(uploadToken: string): Readonly<PendingUpload> | null {
   const pending = pendingUploads.get(uploadToken);
   if (!pending || pending.expiresAt < new Date()) return null;
