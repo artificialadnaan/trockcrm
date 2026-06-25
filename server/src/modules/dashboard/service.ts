@@ -1268,7 +1268,8 @@ async function getOverrideEarnedCommission(
   managerId: string,
   managerOverrideRate: number,
   fromDate: string,
-  toDate: string
+  toDate: string,
+  officeId?: string
 ): Promise<number> {
   if (managerOverrideRate <= 0) return 0;
 
@@ -1277,6 +1278,9 @@ async function getOverrideEarnedCommission(
   // nothing for the manager to override on that report's deals — no earned commission, nothing to
   // override. (Enumerating reports and reusing the one helper keeps the override gate from drifting
   // away from the per-rep gate; for org-sized rosters this is a handful of indexed lookups.)
+  const overrideOfficeScope = officeId
+    ? sql` AND ${activeOfficeRepMembershipSql(officeId)}`
+    : sql``;
   const reportsResult = await tenantDb.execute(sql`
     SELECT u.id::text AS id
     FROM ${users} u
@@ -1286,6 +1290,9 @@ async function getOverrideEarnedCommission(
       -- Exclude flagged smoke-test / duplicate accounts from the override base, matching the commission
       -- roster (getDirectorRepCommissionRows, P2-8 Codex round 2).
       AND COALESCE(u.is_test_data, false) = false
+      -- Bound the override base to active-office members too, so a foreign direct report (excluded from the
+      -- roster) can't inflate an in-office manager's override total (Codex).
+      ${overrideOfficeScope}
   `);
   const reportRows = ((reportsResult as any).rows ?? reportsResult) as Array<{ id: string }>;
 
@@ -1304,7 +1311,11 @@ export async function getRepCommissionSummary(
   tenantDb: TenantDb,
   repId: string,
   fromDate: string,
-  toDate: string
+  toDate: string,
+  // When set, the manager-override roll-up below only enumerates direct reports who are members of this
+  // active office — so a foreign report (hidden from the roster) can't inflate an in-office manager's
+  // override total. Omitted = global enumeration (back-compat for other callers).
+  officeId?: string
 ): Promise<{ summary: RepCommissionSummary; deals: RepCommissionDealEarning[] }> {
   const rawConfig = await getCommissionConfig(tenantDb, repId);
   const config = rawConfig.isActive
@@ -1333,7 +1344,7 @@ export async function getRepCommissionSummary(
   // on their reports (getOverrideEarnedCommission gates each report through the same helper, so a report
   // below their own floor contributes $0 to this manager's override).
   const directEarnedCommission = floorGate.met ? direct.directEarnedCommission : 0;
-  const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate);
+  const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate, officeId);
   const totalEarnedCommission = Number((directEarnedCommission + overrideEarnedCommission).toFixed(2));
   // Breakdown stays visible regardless of the gate (rows listed, per-deal earned zeroed when below floor).
   const deals = allocateDealCommissions(commissionRollups, floorGate.met);
@@ -1393,7 +1404,7 @@ export async function getDirectorRepCommissionRows(
 
   const rows: DirectorRepCommissionRow[] = [];
   for (const rep of reps) {
-    const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id), options.from, options.to);
+    const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id), options.from, options.to, options.officeId);
     rows.push({
       repId: String(rep.id),
       repName: String(rep.display_name ?? "Rep"),

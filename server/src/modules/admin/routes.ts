@@ -1241,7 +1241,9 @@ router.get(
             const workspace = await withOfficeTenantContext(
               user,
               office.id,
-              async (tenantDb) => getDirectorCommissionWorkspace(tenantDb)
+              // Scope each office's roster to THAT office's members so a cross-office rep isn't
+              // duplicated/cross-credited across office iterations (Codex).
+              async (tenantDb) => getDirectorCommissionWorkspace(tenantDb, { officeId: office.id })
             );
 
             return workspace.rows.map((row) => ({
