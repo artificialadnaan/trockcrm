@@ -65,10 +65,11 @@ export default function CaptureScreen() {
   const router = useRouter();
   const { fetcher, user, activeOfficeId } = useAuth();
   const qc = useQueryClient();
-  // The upload queue is namespaced per signed-in user + ACTIVE OFFICE, so one user's queued photos can
-  // never drain under another account — or under a different office after an office switch (uploads are
-  // bound to the active office).
-  const ownerKey = uploadOwnerKey(user?.id, activeOfficeId);
+  // The upload queue is namespaced per signed-in user + RESOLVED OFFICE so one user's queued photos can
+  // never drain under another account, or under a different office. Use activeOfficeId ?? tenantId (the
+  // primary office) so a primary-office session is also office-bound — otherwise a primary-office rehome
+  // would let old queued items drain against the new primary office.
+  const ownerKey = uploadOwnerKey(user?.id, activeOfficeId ?? user?.tenantId);
 
   const initialTarget: SelectedTarget | null =
     typeof params.dealId === "string" && params.dealId
@@ -344,9 +345,12 @@ export default function CaptureScreen() {
     void registerUploadBackgroundTask();
     let cancelled = false;
     const resumeIfQueued = async () => {
-      const n = await getQueuedCount(ownerKey);
+      // Refresh BOTH counts: on a restart/foreground with only terminal failures persisted, the failed
+      // banner must show (and be dismissible) even though there's nothing drainable to trigger a refresh.
+      const [n, failed] = await Promise.all([getQueuedCount(ownerKey), getFailedCount(ownerKey)]);
       if (cancelled) return;
       setQueuedCount(n);
+      setFailedCount(failed);
       if (n > 0) void resumeQueueRef.current();
     };
     void resumeIfQueued();

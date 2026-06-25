@@ -280,17 +280,19 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
     }
 
     // Confirm the upload (creates the file record)
-    const file = await confirmUpload(req.tenantDb!, req.user!.id, {
+    const { file, created } = await confirmUpload(req.tenantDb!, req.user!.id, {
       uploadToken: result.uploadToken,
     });
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
-    await recordUploadedFileSideEffects(req.tenantDb!, {
-      file,
-      userId: req.user!.id,
-      officeId,
-      auditContext: requestAuditContext(req),
-    });
+    if (created) {
+      await recordUploadedFileSideEffects(req.tenantDb!, {
+        file,
+        userId: req.user!.id,
+        officeId,
+        auditContext: requestAuditContext(req),
+      });
+    }
 
     await req.commitTransaction!();
     res.status(201).json({ file });
@@ -315,7 +317,7 @@ router.post("/confirm-upload", async (req, res, next) => {
       throw new AppError(400, "addressSource must be either exif or live_gps.");
     }
 
-    const file = await confirmUpload(req.tenantDb!, req.user!.id, {
+    const { file, created } = await confirmUpload(req.tenantDb!, req.user!.id, {
       uploadToken,
       takenAt,
       geoLat: geoLat !== undefined ? Number(geoLat) : undefined,
@@ -326,17 +328,19 @@ router.post("/confirm-upload", async (req, res, next) => {
     });
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
-    await recordUploadedFileSideEffects(req.tenantDb!, {
-      file,
-      userId: req.user!.id,
-      officeId,
-      addressSource,
-      auditContext: requestAuditContext(req),
-    });
+    if (created) {
+      await recordUploadedFileSideEffects(req.tenantDb!, {
+        file,
+        userId: req.user!.id,
+        officeId,
+        addressSource,
+        auditContext: requestAuditContext(req),
+      });
+    }
 
     await req.commitTransaction!();
 
-    emitUploadedFileEvent({ file, userId: req.user!.id, officeId });
+    if (created) emitUploadedFileEvent({ file, userId: req.user!.id, officeId });
 
     res.status(201).json({ file });
   } catch (err) {

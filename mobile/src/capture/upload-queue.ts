@@ -51,23 +51,46 @@ async function ensureDir(ownerKey: string): Promise<void> {
   if (!info.exists) await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
 }
 
-async function readQueue(ownerKey: string): Promise<QueuedUpload[]> {
+// Read+parse one index file, or null if it's missing / truncated / unparseable.
+async function readIndexFile(file: string): Promise<QueuedUpload[] | null> {
   try {
-    const file = indexFile(ownerKey);
     const info = await FileSystem.getInfoAsync(file);
-    if (!info.exists) return [];
+    if (!info.exists) return null;
     const raw = await FileSystem.readAsStringAsync(file);
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as QueuedUpload[]) : [];
+    return Array.isArray(parsed) ? (parsed as QueuedUpload[]) : null;
   } catch {
-    // A corrupt/unreadable index must never crash capture — treat as empty.
-    return [];
+    return null;
   }
 }
 
+async function readQueue(ownerKey: string): Promise<QueuedUpload[]> {
+  const file = indexFile(ownerKey);
+  // Prefer the live index; if it's missing or truncated (e.g. the app was killed mid-write), fall back to
+  // the .bak from the previous successful write — so a crash during persistence never silently forgets
+  // copied photos. Only treat the queue as empty when BOTH are unreadable.
+  const primary = await readIndexFile(file);
+  if (primary !== null) return primary;
+  const backup = await readIndexFile(`${file}.bak`);
+  return backup ?? [];
+}
+
+// Crash-safe index write: serialize to a temp file FIRST (so the live index is never observed
+// half-written), keep the prior index as .bak, then atomically rename the temp into place.
 async function writeQueue(ownerKey: string, items: QueuedUpload[]): Promise<void> {
   await ensureDir(ownerKey);
-  await FileSystem.writeAsStringAsync(indexFile(ownerKey), JSON.stringify(items));
+  const file = indexFile(ownerKey);
+  const tmp = `${file}.tmp`;
+  const bak = `${file}.bak`;
+  await FileSystem.writeAsStringAsync(tmp, JSON.stringify(items));
+  const current = await FileSystem.getInfoAsync(file);
+  if (current.exists) {
+    // Preserve a recoverable backup, then clear the slot so the rename can't fail on an existing dest.
+    await FileSystem.deleteAsync(bak, { idempotent: true }).catch(() => undefined);
+    await FileSystem.copyAsync({ from: file, to: bak }).catch(() => undefined);
+    await FileSystem.deleteAsync(file, { idempotent: true });
+  }
+  await FileSystem.moveAsync({ from: tmp, to: file });
 }
 
 async function deleteQueuedFiles(items: QueuedUpload[]): Promise<void> {

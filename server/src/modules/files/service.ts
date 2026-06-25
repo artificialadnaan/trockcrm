@@ -5,6 +5,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { FileCategory, PhotoCategory } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import {
+  deleteObject,
   generateUploadUrl,
   generateDownloadUrl,
   generateMockUploadUrl,
@@ -564,7 +565,10 @@ export async function confirmUpload(
   tenantDb: TenantDb,
   userId: string,
   input: ConfirmUploadInput
-): Promise<typeof files.$inferSelect> {
+  // `created` is false when this call DEDUPED to an existing row (idempotent retry or lost a concurrent
+  // race) — callers must then SKIP upload side effects (audit event, domain_event job) to avoid replaying
+  // them for one photo.
+): Promise<{ file: typeof files.$inferSelect; created: boolean }> {
   // Idempotency (resilient upload queue): if this client upload already produced a row, return it instead
   // of creating a duplicate. This is decoupled from the single-use in-memory token, so it still dedupes
   // when a resumed/background queue re-runs an upload AFTER the original confirm succeeded (token gone) —
@@ -579,7 +583,7 @@ export async function confirmUpload(
       .limit(1);
     if (existing[0]) {
       pendingUploads.delete(input.uploadToken);
-      return existing[0];
+      return { file: existing[0], created: false };
     }
   }
 
@@ -684,20 +688,26 @@ export async function confirmUpload(
   // Fix 7: NOW delete the token — DB insert succeeded, no retry needed
   pendingUploads.delete(input.uploadToken);
 
-  if (result[0]) return result[0];
+  if (result[0]) return { file: result[0], created: true };
 
-  // onConflictDoNothing skipped the insert (the concurrent confirm won) — return that already-persisted
-  // row so the caller still gets the photo and never sees a duplicate or a 500.
+  // onConflictDoNothing skipped the insert (a concurrent confirm with the same clientUploadId won). The
+  // object WE just PUT (pending.r2Key + its thumbnail) is now an orphaned duplicate — delete it best-effort
+  // BEFORE returning the winner so it doesn't leak. created=false → the caller skips replaying side effects.
   if (input.clientUploadId) {
+    if (isR2Configured()) {
+      await deleteObject(pending.r2Key).catch(() => undefined);
+      if (thumbnailR2Key) await deleteObject(thumbnailR2Key).catch(() => undefined);
+    }
     const winner = await tenantDb
       .select()
       .from(files)
       .where(and(eq(files.clientUploadId, input.clientUploadId), eq(files.uploadedBy, userId)))
       .limit(1);
-    if (winner[0]) return winner[0];
+    if (winner[0]) return { file: winner[0], created: false };
   }
 
-  return result[0];
+  // No row at all (pathological — conflict with no findable winner). Surface rather than return undefined.
+  throw new AppError(409, "Upload could not be confirmed. Please retry.");
 }
 
 /**
