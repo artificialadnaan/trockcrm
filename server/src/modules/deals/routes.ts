@@ -1195,8 +1195,16 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     const deal = await loadTriggerRfpDeal(req.tenantDb!, req.params.id);
     if (!deal) throw new AppError(404, "Deal not found");
 
-    if (userRole !== "admin" && !(userRole === "rep" && deal.assignedRepId === userId)) {
-      throw new AppError(403, "Only the assigned rep or an admin can trigger RFP review.", "RFP_UNAUTHORIZED");
+    // Directors trigger RFP office-wide (like admins) — the route runs against the active office's
+    // tenantDb, so a director can only reach deals in the office they're acting in. The rep-only branch
+    // still owner-scopes reps to their own deals (see updateConditions below). Who triggered is recorded
+    // via rfpApprovalRequestedBy, so a director acting on another rep's deal is audited on the deal.
+    const canTriggerRfp =
+      userRole === "admin" ||
+      userRole === "director" ||
+      (userRole === "rep" && deal.assignedRepId === userId);
+    if (!canTriggerRfp) {
+      throw new AppError(403, "Only the assigned rep, a director, or an admin can trigger RFP review.", "RFP_UNAUTHORIZED");
     }
 
     const stageSlug = await loadDealStageSlug(req.tenantDb!, deal.stageId);

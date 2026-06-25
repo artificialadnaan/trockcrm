@@ -462,6 +462,7 @@ export function DealDetailPage() {
     null;
   const canTriggerRfp =
     user?.role === "admin" ||
+    user?.role === "director" ||
     (user?.role === "rep" && deal?.assignedRepId === user.id);
   const showTriggerRfpButton = Boolean(
       deal &&

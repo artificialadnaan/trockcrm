@@ -1498,7 +1498,8 @@ describe("DealDetailPage", () => {
     expect(renderPage()).not.toContain("Trigger RFP");
   });
 
-  it("hides Trigger RFP from directors and non-assigned reps", () => {
+  it("shows Trigger RFP to a director on an Opportunity deal owned by another rep", () => {
+    // Default auth is a director (director-1); the deal is owned by rep-1. Directors trigger office-wide.
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
       error: null,
@@ -1513,8 +1514,10 @@ describe("DealDetailPage", () => {
         rfpApprovalRequestedAt: null,
       }),
     });
-    expect(renderPage()).not.toContain("Trigger RFP");
+    expect(renderPage()).toContain("Trigger RFP");
+  });
 
+  it("hides Trigger RFP from a non-assigned rep", () => {
     mocks.useAuthMock.mockReturnValueOnce({
       user: {
         id: "rep-2",
