@@ -8,8 +8,9 @@ import { buildRepContractsSignedSql } from "../../../src/modules/dashboard/servi
  * (PR 2): it now counts contracts on deals the person ESTIMATED, not only ones they own. It is a
  * count + awarded-value KPI for the single rep (no commission rate applied, no per-rep grouping), so
  * estimator-awareness scopes the view to the person's involved deals without misattribution or
- * commission-math impact. (getRepPotentialRevenue stays assigned-only — it feeds a flat-rate commission
- * projection, so estimator-awareness would price deals the rep doesn't own at the wrong rate.)
+ * commission-math impact. (getRepPotentialRevenue is ALSO involvement-based now — see
+ * team-commissions-estimator.runtime.test.ts — so a pure estimator's Team Commissions columns are no
+ * longer all-zero; the estimated portion is a flat-rate projection at that person's own rate.)
  */
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const REP_A = U("a01"); // owner
