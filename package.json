@@ -6,7 +6,8 @@
     "server",
     "worker",
     "client",
-    "client-field"
+    "client-field",
+    "apps/ai-demo"
   ],
   "scripts": {
     "dev:shared": "npm run build --workspace=shared",
