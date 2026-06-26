@@ -7,6 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -b tsconfig.build.json --clean && tsc -b tsconfig.build.json --force && node ./scripts/copy-pdf-assets.mjs",
     "start": "node dist/index.js",
+    "start:ai-demo": "node dist/mcp/index.js",
+    "dev:ai-demo": "tsx watch src/mcp/index.ts",
     "test": "vitest run",
     "test:ci": "vitest run --config vitest.ci.config.ts",
     "test:runtime": "vitest run runtime.test --passWithNoTests=false",
