@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpAuthContext } from "./auth/contract.js";
+import { registerTools } from "./tools/index.js";
 
 /**
  * Builds the MCP server instance for ONE request, bound to that request's auth context.
@@ -16,10 +17,8 @@ export function createMcpServer(context: McpAuthContext): McpServer {
     version: "0.1.0",
   });
 
-  // Phase 3 (RED): register read-only tools here, e.g.
-  //   registerPipelineSummary(server, context);
-  // Every tool computes numbers in SQL and scopes to `context.office`.
-  void context;
+  // Read-only tools, bound to the validated office. Every tool computes numbers in SQL.
+  registerTools(server, context);
 
   return server;
 }
