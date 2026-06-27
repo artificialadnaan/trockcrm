@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpAuthContext } from "../auth/contract.js";
 import { registerDescribeCapabilities } from "./describeCapabilities.js";
+import { registerGetPipelineSummary } from "./getPipelineSummary.js";
 
 /**
  * Registers all read-only MCP tools on a per-request server, bound to the validated auth context.
@@ -9,9 +10,8 @@ import { registerDescribeCapabilities } from "./describeCapabilities.js";
  */
 export function registerTools(server: McpServer, context: McpAuthContext): void {
   registerDescribeCapabilities(server);
+  registerGetPipelineSummary(server, context);
   // Phase 3 (continued):
-  //   registerPipelineSummary(server, context);
   //   registerListDeals(server, context);
   //   registerBidAwardVariance(server, context);
-  void context;
 }

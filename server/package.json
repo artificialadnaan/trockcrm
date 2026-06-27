@@ -41,7 +41,8 @@
     "resend": "^6.10.0",
     "sanitize-html": "^2.13.0",
     "sharp": "^0.33.5",
-    "swagger-ui-express": "^5.0.1"
+    "swagger-ui-express": "^5.0.1",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.4.6",
