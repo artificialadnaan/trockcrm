@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import vegaEmbed from "vega-embed";
-import { Card } from "@/components/ui/card";
 
 /**
  * Renders a server-validated Vega-Lite spec (its data.values were injected server-side from verbatim
@@ -31,8 +30,8 @@ export default function ChartBlock({ spec }: { spec: unknown }) {
   }, [spec]);
 
   return (
-    <Card className="my-2 p-4">
-      <div ref={ref} className="w-full overflow-x-auto" />
-    </Card>
+    <div className="lt-chart">
+      <div ref={ref} className="lt-chart-canvas" />
+    </div>
   );
 }

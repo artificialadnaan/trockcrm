@@ -1,25 +1,39 @@
 import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { GreenChatPanel } from "@/components/ai/green-chat-panel";
+import { LittleTAvatar } from "@/components/ai/little-t-avatar";
 import { isDemoSessionResponse } from "@/components/ai/demo-session";
+import "@/components/ai/little-t.css";
+
+/** Load the Little T webfonts only on this page (and only once). */
+function useLittleTFonts() {
+  useEffect(() => {
+    if (document.getElementById("little-t-fonts")) return;
+    const pre1 = Object.assign(document.createElement("link"), { rel: "preconnect", href: "https://fonts.googleapis.com" });
+    const pre2 = Object.assign(document.createElement("link"), { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" });
+    const css = Object.assign(document.createElement("link"), {
+      id: "little-t-fonts",
+      rel: "stylesheet",
+      href: "https://fonts.googleapis.com/css2?family=Saira:wght@400;500;600;700&family=Saira+Condensed:wght@600;700&display=swap",
+    });
+    document.head.append(pre1, pre2, css);
+  }, []);
+}
 
 /**
- * The T Rock AI demo page. Self-contained page gate: checks the demo session, shows the
- * DEMO_PASSWORD form until authenticated, then the chat. This is gated by the demo password (not
- * CRM auth), so it lives outside the CRM AppShell.
+ * Little T — the T Rock assistant. Self-contained page gate: checks the demo session, shows the
+ * DEMO_PASSWORD form until authenticated, then the chat. Gated by the demo password (not CRM auth),
+ * so it lives outside the CRM AppShell. Everything is scoped under `.little-t`.
  */
 export function AiDemoPage() {
   const [authed, setAuthed] = useState<boolean | null>(null); // null = still checking
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  useLittleTFonts();
 
   useEffect(() => {
     let active = true;
     fetch("/api/session", { credentials: "include" })
-      // Require the demo service's exact JSON, not just a 200 (see isDemoSessionResponse).
       .then(isDemoSessionResponse)
       .then((ok) => active && setAuthed(ok))
       .catch(() => active && setAuthed(false));
@@ -50,19 +64,29 @@ export function AiDemoPage() {
   };
 
   if (authed === null) {
-    return <div className="p-8 text-center text-muted-foreground">Loading…</div>;
+    return (
+      <div className="little-t">
+        <div className="lt-gate">
+          <div style={{ textAlign: "center", color: "var(--lt-muted)" }}>
+            <LittleTAvatar size="lg" />
+            <div style={{ marginTop: 10, fontSize: 14 }}>Waking up Little T…</div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   if (!authed) {
     return (
-      <div className="flex min-h-screen items-center justify-center p-4">
-        <Card className="w-full max-w-sm">
-          <CardHeader>
-            <CardTitle>T Rock AI</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <p className="text-sm text-muted-foreground">Enter the demo password to continue.</p>
-            <Input
+      <div className="little-t">
+        <div className="lt-gate">
+          <div className="lt-gate-card">
+            <LittleTAvatar size="lg" />
+            <h1 className="lt-display">Little&nbsp;<span style={{ color: "var(--lt-red)" }}>T</span></h1>
+            <div className="lt-tag2">The T Rock Assistant</div>
+            <p>Enter the demo password to talk to Little T about the Dallas pipeline.</p>
+            <input
+              className="lt-field"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -70,18 +94,18 @@ export function AiDemoPage() {
               placeholder="Demo password"
               autoFocus
             />
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button className="w-full" onClick={login} disabled={submitting || password.length === 0}>
-              {submitting ? "Checking…" : "Enter"}
-            </Button>
-          </CardContent>
-        </Card>
+            {error && <div className="lt-gate-err">{error}</div>}
+            <button className="lt-btn" onClick={login} disabled={submitting || password.length === 0}>
+              {submitting ? "Checking…" : "Enter →"}
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen">
+    <div className="little-t" style={{ height: "100vh" }}>
       <GreenChatPanel />
     </div>
   );

@@ -48,7 +48,9 @@ export function createMcpDemoApp(): Express {
       contentSecurityPolicy: {
         directives: {
           scriptSrc: ["'self'", "'unsafe-eval'"],
-          styleSrc: ["'self'", "'unsafe-inline'"],
+          // 'unsafe-inline' for Vega's injected <style>; fonts.googleapis.com for the Little T webfont CSS.
+          styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+          fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
           imgSrc: ["'self'", "data:"],
         },
       },

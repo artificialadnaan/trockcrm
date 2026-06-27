@@ -149,6 +149,13 @@ export async function streamAiChat(res: Response, opts: StreamAiChatOptions): Pr
   writeSse(res, buildSsePaddingComment()); // warm proxies
   writeSse(res, frame("meta", { turnId: cryptoRandomId() }));
 
+  // Heartbeat: multi-tool turns can have multi-second gaps between Anthropic frames (tool round-trips).
+  // A periodic SSE comment keeps the connection from looking dead to proxies/clients (the client's
+  // parser ignores comment lines). Cleared in finally.
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded && !res.destroyed) writeSse(res, buildSsePaddingComment());
+  }, 12000);
+
   try {
     for (let continuation = 0; continuation < MAX_CONTINUATIONS; continuation += 1) {
       const resp = await fetchImpl(ANTHROPIC_URL, {
@@ -226,6 +233,7 @@ export async function streamAiChat(res: Response, opts: StreamAiChatOptions): Pr
       writeSse(res, frame("done", { stopReason: processor.stopReason }));
     }
   } finally {
+    clearInterval(heartbeat);
     if (!res.writableEnded && !res.destroyed) res.end();
   }
 }
