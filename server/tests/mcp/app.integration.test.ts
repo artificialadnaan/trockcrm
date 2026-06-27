@@ -93,6 +93,12 @@ describe("T Rock AI demo app (page gate + MCP mount)", () => {
   // The SPA catch-all serves index.html for any non-API GET so client-side routes (e.g. /ai-demo)
   // load on a hard refresh. sendFile uses the { root } form so a parent dir with a dot-segment (a
   // .claude worktree) doesn't trip send()'s dotfile guard and 500. Only runs when the client is built.
+  it.skipIf(!clientDistBuilt)("redirects the root to /ai-demo (dedicated demo service, not the CRM login)", async () => {
+    const res = await request(app).get("/").redirects(0);
+    expect(res.status).toBe(302);
+    expect(res.headers["location"]).toBe("/ai-demo");
+  });
+
   it.skipIf(!clientDistBuilt)("serves the SPA shell (index.html) for a deep link, not a JSON error", async () => {
     const res = await request(app).get("/ai-demo");
     expect(res.status).toBe(200);

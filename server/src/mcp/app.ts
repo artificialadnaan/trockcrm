@@ -100,6 +100,10 @@ export function createMcpDemoApp(): Express {
   // demo session; the static shell is public. Mounted AFTER the API routes so they take precedence.
   const clientDist = join(dirname(fileURLToPath(import.meta.url)), "../../../client/dist");
   if (existsSync(clientDist)) {
+    // This is a dedicated DEMO service: send the root to the demo page, not the shared SPA's default
+    // (the CRM "Sign in to your CRM" screen — which has no auth backend here and just fails). Must
+    // run before express.static, which would otherwise serve index.html (the CRM shell) at "/".
+    app.get("/", (_req, res) => res.redirect(302, "/ai-demo"));
     app.use(express.static(clientDist));
     // Use the { root } form (not an absolute path): send() then validates only "index.html", so a
     // parent dir with a dot-segment (e.g. a .claude worktree) doesn't trip its dotfile guard.
