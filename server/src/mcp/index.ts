@@ -1,5 +1,9 @@
+import path from "path";
 import dotenv from "dotenv";
-dotenv.config();
+// `npm run start:ai-demo -w @trock-crm/server` runs with PWD in server/ but INIT_CWD at the repo
+// root, where the .env actually lives. Resolve from INIT_CWD (like the connectivity check) so a
+// repo-root .env is honored and the service isn't reported unconfigured when the vars are present.
+dotenv.config({ path: path.resolve(process.env.INIT_CWD ?? process.cwd(), ".env") });
 
 import { createMcpDemoApp } from "./app.js";
 import { getAnthropicApiKey, getDemoPassword, getPublicBaseUrl } from "./gate/env.js";

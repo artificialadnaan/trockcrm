@@ -4,6 +4,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import request from "supertest";
 import { createMcpDemoApp } from "../../src/mcp/app.js";
+import { mintSessionToken } from "../../src/mcp/auth/mintSessionToken.js";
 
 const DEMO_PW = "integration-demo-pw";
 
@@ -78,6 +79,15 @@ describe("T Rock AI demo app (page gate + MCP mount)", () => {
       .set("Accept", "application/json, text/event-stream")
       .send({ jsonrpc: "2.0", id: 1, method: "ping" });
     expect(res.status).toBe(401);
+  });
+
+  it("405s a non-POST method on /mcp (authenticated) instead of falling through to the SPA shell", async () => {
+    const res = await request(app).get("/mcp").set("Authorization", `Bearer ${mintSessionToken()}`);
+    expect(res.status).toBe(405);
+    expect(res.headers["allow"]).toBe("POST");
+    // a proper JSON-RPC error, NOT the index.html the SPA catch-all would serve
+    expect(res.headers["content-type"]).toMatch(/application\/json/);
+    expect(res.body?.error?.code).toBe(-32000);
   });
 
   // The SPA catch-all serves index.html for any non-API GET so client-side routes (e.g. /ai-demo)

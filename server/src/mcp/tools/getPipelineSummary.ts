@@ -7,7 +7,7 @@ import { withOfficeSchema, type TenantDb } from "../data/withOfficeSchema.js";
 import { applyBaseDealFilters, wonStageSlugFilterSql } from "../data/applyBaseDealFilters.js";
 import { WON_WINDOW_PRESETS, wonWindowConditionSql, type WonWindowPreset } from "../data/wonWindow.js";
 import { dealValueSqlForBasis } from "../../modules/reports/foundations.js";
-import { getAtRiskWatchlist } from "../../modules/reports/at-risk-service.js";
+import { getAtRiskSummary } from "../../modules/reports/at-risk-service.js";
 
 const { deals, pipelineStageConfig } = schema;
 
@@ -66,12 +66,14 @@ export async function computePipelineSummary(
     `)
   )[0];
 
-  const atRisk = await getAtRiskWatchlist(db);
+  // Stalled via the SQL aggregate (not the watchlist's TS-reduced summary) so all three segments are
+  // SQL-computed — same predicate as getAtRiskWatchlist, so it still reconciles with the CRM surface.
+  const stalled = await getAtRiskSummary(db);
 
   return [
     { segment: "Won", count: num(wonRow?.count), value: num(wonRow?.value) },
     { segment: "Active", count: num(activeRow?.count), value: num(activeRow?.value) },
-    { segment: "Stalled", count: atRisk.summary.count, value: atRisk.summary.valueAtRisk },
+    { segment: "Stalled", count: stalled.count, value: stalled.valueAtRisk },
   ];
 }
 

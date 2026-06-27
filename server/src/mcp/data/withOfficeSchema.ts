@@ -27,6 +27,18 @@ export async function withOfficeSchema<T>(
     await client.query("BEGIN");
     await client.query("SET LOCAL transaction_read_only = on");
     await client.query("SET LOCAL statement_timeout = '15s'");
+
+    // Fail CLOSED if the tenant schema is missing (e.g. a public-only / pre-tenant DB). Otherwise
+    // search_path silently falls back to `public` and unqualified tables resolve to the WRONG dataset
+    // instead of erroring — mirrors the CRM tenant middleware's existence check.
+    const schemaCheck = await client.query(
+      "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
+      [office]
+    );
+    if (schemaCheck.rows.length === 0) {
+      throw new Error(`Office schema does not exist: ${office}`);
+    }
+
     await client.query("SELECT set_config('search_path', $1, true)", [`${office},public`]);
 
     const tenantDb = drizzle(client, { schema });

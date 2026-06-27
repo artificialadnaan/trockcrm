@@ -45,5 +45,18 @@ export function createMcpRouter(): Router {
     }
   });
 
+  // This stateless, JSON-response server supports POST JSON-RPC only — it has no GET SSE side channel
+  // and no session to DELETE. Answer other methods with a proper 405 HERE so an authenticated GET
+  // (e.g. a spec-compliant client opening the server-to-client stream) doesn't fall through to the
+  // SPA catch-all and get index.html back.
+  router.all("/", (_req, res) => {
+    res.set("Allow", "POST");
+    res.status(405).json({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32000, message: "Method Not Allowed: this MCP endpoint is stateless and accepts POST only." },
+    });
+  });
+
   return router;
 }

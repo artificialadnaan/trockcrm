@@ -47,8 +47,26 @@ export interface AtRiskRecord {
 }
 
 /**
+ * The shared FROM/WHERE for the at-risk set, so the listed rows, their SQL summary, and any other
+ * consumer apply the IDENTICAL predicate (reconciliation). Same scope as buildProjectionCoverageSql,
+ * plus `NOT (future-dated)`, so COUNT(rows) === M − N.
+ */
+function buildAtRiskFromWhereSql(repId?: string | null): SQL {
+  return sql`
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
+      AND d.is_active = true
+      AND psc.is_terminal = false
+      AND NOT (${futureDatedCloseDatePredicateSql("d.expected_close_date")})${repScopeSql("d", repId)}
+  `;
+}
+
+/**
  * Open deals that are NOT future-dated -- the exact complement of the projection's N within the same M
- * scope. Same FROM/WHERE as buildProjectionCoverageSql, plus `NOT (future-dated)`, so COUNT(rows) === M − N.
+ * scope.
  */
 export function buildAtRiskDealsSql(repId?: string | null): SQL {
   return sql`
@@ -62,15 +80,17 @@ export function buildAtRiskDealsSql(repId?: string | null): SQL {
            d.expected_close_date AS expected_close_date,
            CASE WHEN d.expected_close_date IS NULL THEN 'no_date' ELSE 'stale_dated' END AS reason,
            (${sql.raw(BUSINESS_TODAY_SQL)} - d.stage_entered_at::date)::int AS days_in_stage
-    FROM ${deals} d
-    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
-    WHERE COALESCE(d.is_test_data, false) = false
-      AND ${aliasedReportableDealFilterSql("d")}
-      AND d.is_active = true
-      AND psc.is_terminal = false
-      AND NOT (${futureDatedCloseDatePredicateSql("d.expected_close_date")})${repScopeSql("d", repId)}
+    ${buildAtRiskFromWhereSql(repId)}
     ORDER BY value DESC, days_in_stage DESC NULLS LAST
+  `;
+}
+
+/** COUNT(*) + SUM(value) over the SAME at-risk predicate — the SQL aggregate behind the TS summary. */
+export function buildAtRiskSummarySql(repId?: string | null): SQL {
+  return sql`
+    SELECT COUNT(*)::int AS count,
+           COALESCE(SUM(COALESCE(${openValueSql("d")}, 0)), 0)::numeric AS value
+    ${buildAtRiskFromWhereSql(repId)}
   `;
 }
 
@@ -141,6 +161,19 @@ export async function getAtRiskWatchlist(tenantDb: TenantDb, options: AtRiskOpti
   }
 
   return { scope, summary, byReason, records };
+}
+
+/**
+ * SQL-computed at-risk summary (count + value-at-risk) over the SAME predicate as the watchlist —
+ * so it reconciles exactly with getAtRiskWatchlist().summary, but every number comes from the
+ * database (no TypeScript reduction). Used by the demo's get_pipeline_summary Stalled segment, where
+ * the SQL-only-number guarantee matters.
+ */
+export async function getAtRiskSummary(tenantDb: TenantDb, options: AtRiskOptions = {}): Promise<AtRiskSummary> {
+  const row = rowsFromExecute<{ count: unknown; value: unknown }>(
+    await tenantDb.execute(buildAtRiskSummarySql(options.repId))
+  )[0];
+  return { count: num(row?.count), valueAtRisk: num(row?.value) };
 }
 
 async function resolveRepName(tenantDb: TenantDb, repId: string | null): Promise<string> {
