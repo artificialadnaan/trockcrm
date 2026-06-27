@@ -17,9 +17,11 @@ API. It differs from the CRM service only in the **start command** and its **env
 |---|---|
 | Root Directory | repo root (`/`) — required so `npm ci` installs the workspaces and the `@trock-crm/shared` symlink resolves |
 | Install | `npm ci` (Nixpacks default) |
-| Build Command | `npm run build -w @trock-crm/shared && npm run build -w @trock-crm/server` |
+| Build Command | `npm run build -w @trock-crm/shared && npm run build -w @trock-crm/server && npm run build -w @trock-crm/client` |
 | Start Command | `npm run start:ai-demo -w @trock-crm/server` (= `node server/dist/mcp/index.js`) |
 | Health check path | `/api/health` |
+
+The demo service serves the built React client too, so the demo UI is at **`${PUBLIC_BASE_URL}/ai-demo`** (the page prompts for `DEMO_PASSWORD`, then chats). Building the client is why the build command includes the `client` workspace.
 
 > The CRM API service in the same repo keeps Start = `node server/dist/index.js`. Same build output,
 > two start commands — that's the whole separation.

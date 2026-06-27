@@ -84,6 +84,7 @@ import { PipelineHygienePage } from "@/pages/pipeline/pipeline-hygiene-page";
 import { ProjectDetailPage } from "@/pages/projects/project-detail-page";
 import { PublicPhotoViewerPage } from "@/pages/public/photo-viewer-page";
 import { DailySummaryPage } from "@/pages/public/daily-summary-page";
+import { AiDemoPage } from "@/pages/ai-demo-page";
 import { Toaster } from "@/components/ui/sonner";
 
 const HomeDashboardPage = lazy(() =>
@@ -204,6 +205,7 @@ export function App() {
             <Route path="/daily-summary/:date" element={<DailySummaryPage />} />
             <Route path="/photos/capture" element={<PhotoCapturePage />} />
             <Route path="/onboarding-required" element={<OnboardingRequiredPage />} />
+            <Route path="/ai-demo" element={<AiDemoPage />} />
             <Route element={<AppShell />}>
               <Route path="/" element={<HomeDashboardPage />} />
               <Route path="/dashboard" element={<HomeDashboardPage />} />

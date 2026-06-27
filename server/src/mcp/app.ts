@@ -1,6 +1,9 @@
 import express, { type Express } from "express";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
+import { existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { errorHandler } from "../middleware/error-handler.js";
 import { apiLimiter } from "../middleware/rate-limit.js";
 import {
@@ -75,6 +78,16 @@ export function createMcpDemoApp(): Express {
 
   // Demo-gated AI chat (SSE). requireDemoSession also enforces CSRF on this POST.
   app.use("/api/ai-chat", requireDemoSession, createAiChatRouter());
+
+  // Serve the built React client (the /ai-demo page + login UI). The page itself is gated by the
+  // demo session; the static shell is public. Mounted AFTER the API routes so they take precedence.
+  const clientDist = join(dirname(fileURLToPath(import.meta.url)), "../../../client/dist");
+  if (existsSync(clientDist)) {
+    app.use(express.static(clientDist));
+    app.get("/{*path}", (_req, res) => {
+      res.sendFile(join(clientDist, "index.html"));
+    });
+  }
 
   app.use(errorHandler);
   return app;
