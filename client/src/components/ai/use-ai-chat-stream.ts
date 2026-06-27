@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCsrfToken } from "@/lib/api";
 import {
   applyChatFrame,
@@ -38,10 +38,24 @@ export function useAiChatStream() {
   const [streaming, setStreaming] = useState(false);
   const turnsRef = useRef<ChatTurn[]>([]);
   turnsRef.current = turns;
+  const inFlightRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+
+  // Abort an in-flight stream on unmount so the request + server-side Anthropic session stop and no
+  // late chunk updates state after disposal.
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      abortRef.current?.abort();
+    };
+  }, []);
 
   const sendMessage = useCallback(async (text: string) => {
     const trimmed = text.trim();
-    if (!trimmed || streaming) return;
+    // Ref guard (not render-state): two presses in one render can't both start a request.
+    if (!trimmed || inFlightRef.current) return;
+    inFlightRef.current = true;
 
     const history: ChatTurn[] = [...turnsRef.current, { role: "user", text: trimmed }];
     let assistant: ChatTurnState = emptyTurn();
@@ -50,9 +64,11 @@ export function useAiChatStream() {
 
     const pushAssistant = (next: ChatTurnState) => {
       assistant = next;
-      setTurns([...history, { role: "assistant", state: next }]);
+      if (mountedRef.current) setTurns([...history, { role: "assistant", state: next }]);
     };
 
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
       const csrf = getCsrfToken();
       const resp = await fetch("/api/ai-chat", {
@@ -60,6 +76,7 @@ export function useAiChatStream() {
         credentials: "include",
         headers: { "Content-Type": "application/json", ...(csrf ? { [CSRF_HEADER]: csrf } : {}) },
         body: JSON.stringify({ messages: toApiMessages(history) }),
+        signal: controller.signal,
       });
       if (!resp.ok || !resp.body) {
         pushAssistant({ ...assistant, error: `Chat failed (${resp.status})`, done: true });
@@ -76,12 +93,20 @@ export function useAiChatStream() {
         buffer = rest;
         for (const f of frames) pushAssistant(applyChatFrame(assistant, f));
       }
+      // Flush any UTF-8 tail buffered by the streaming decoder, then parse a final frame.
+      buffer += decoder.decode();
+      const { frames } = parseSseBuffer(`${buffer}\n\n`);
+      for (const f of frames) pushAssistant(applyChatFrame(assistant, f));
     } catch (err) {
-      pushAssistant({ ...assistant, error: err instanceof Error ? err.message : "stream error", done: true });
+      if (mountedRef.current && (err as { name?: string })?.name !== "AbortError") {
+        pushAssistant({ ...assistant, error: err instanceof Error ? err.message : "stream error", done: true });
+      }
     } finally {
-      setStreaming(false);
+      inFlightRef.current = false;
+      abortRef.current = null;
+      if (mountedRef.current) setStreaming(false);
     }
-  }, [streaming]);
+  }, []);
 
   return { turns, streaming, sendMessage };
 }

@@ -7,7 +7,8 @@ import { streamAiChat, type AiChatMessage } from "./anthropic-stream.js";
 function isMessage(value: unknown): value is AiChatMessage {
   if (!value || typeof value !== "object") return false;
   const m = value as Record<string, unknown>;
-  return (m.role === "user" || m.role === "assistant") && m.content !== undefined;
+  // Browser-sent messages carry plain string content only.
+  return (m.role === "user" || m.role === "assistant") && typeof m.content === "string";
 }
 
 /**
@@ -39,6 +40,10 @@ export function createAiChatRouter(): Router {
     // Token minted server-side, per turn — never exposed to the browser, never a model tool input.
     const mcpToken = mintSessionToken();
 
+    // Abort the upstream Anthropic request if the client disconnects mid-stream.
+    const controller = new AbortController();
+    req.on("close", () => controller.abort());
+
     res.status(200);
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -52,6 +57,7 @@ export function createAiChatRouter(): Router {
       mcpUrl,
       mcpToken,
       apiKey,
+      signal: controller.signal,
     });
   });
 

@@ -76,8 +76,9 @@ export function createMcpDemoApp(): Express {
     res.json({ authenticated: true });
   });
 
-  // Demo-gated AI chat (SSE). requireDemoSession also enforces CSRF on this POST.
-  app.use("/api/ai-chat", requireDemoSession, createAiChatRouter());
+  // Demo-gated AI chat (SSE). requireDemoSession also enforces CSRF on this POST; apiLimiter caps
+  // turn volume per client so the Anthropic + DB load can't be driven unbounded.
+  app.use("/api/ai-chat", requireDemoSession, apiLimiter, createAiChatRouter());
 
   // Serve the built React client (the /ai-demo page + login UI). The page itself is gated by the
   // demo session; the static shell is public. Mounted AFTER the API routes so they take precedence.

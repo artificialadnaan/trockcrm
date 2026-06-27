@@ -111,6 +111,27 @@ describe("streamAiChat", () => {
     expect(evs.at(-1)?.data.stopReason).toBe("end_turn");
   });
 
+  it("fails loudly (error + done) when the pause_turn continuation cap is exhausted", async () => {
+    const paused = sse([
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "..." } },
+      { type: "message_delta", delta: { stop_reason: "pause_turn" } },
+    ]);
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      return { ok: true, status: 200, body: bodyFrom(paused) };
+    }) as unknown as typeof fetch;
+    const { res, events } = fakeRes();
+
+    await streamAiChat(res, { ...baseOpts, fetchImpl });
+
+    expect(calls).toBeGreaterThan(1); // it kept continuing until the cap
+    const evs = events();
+    expect(evs.some((e) => e.event === "error")).toBe(true);
+    expect(evs.at(-1)?.event).toBe("done");
+    expect(evs.at(-1)?.data.stopReason).toBe("pause_turn");
+  });
+
   it("emits an error frame + done when the API responds non-OK", async () => {
     const fetchImpl = (async () => ({ ok: false, status: 401, body: null })) as unknown as typeof fetch;
     const { res, events } = fakeRes();

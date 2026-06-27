@@ -36,7 +36,9 @@ export function AiDemoPage() {
         body: JSON.stringify({ password }),
       });
       if (r.ok) setAuthed(true);
-      else setError("Incorrect password.");
+      else if (r.status === 401) setError("Incorrect password.");
+      else if (r.status === 429) setError("Too many attempts — wait a minute and try again.");
+      else setError("Login failed — please try again.");
     } catch {
       setError("Login failed — please try again.");
     } finally {

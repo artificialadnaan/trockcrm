@@ -20,12 +20,22 @@ export interface StreamAiChatOptions {
   /** Minted scoped MCP session token — handed to Anthropic as the connector authorization. */
   mcpToken: string;
   apiKey: string;
+  /** Aborts the upstream Anthropic request (e.g. when the SSE client disconnects). */
+  signal?: AbortSignal;
   /** Injectable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch;
 }
 
 function frame(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function blockText(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((c) => (c as { type?: string }).type === "text" && typeof (c as { text?: unknown }).text === "string")
+    .map((c) => (c as { text: string }).text)
+    .join("");
 }
 
 async function* readableToChunks(body: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
@@ -78,6 +88,7 @@ export async function* parseAnthropicSse(
 class AssistantContentAccumulator {
   private readonly byIndex = new Map<number, Record<string, unknown>>();
   private readonly inputJson = new Map<number, string>();
+  private readonly resultText = new Map<number, string>();
 
   observe(evt: AnthropicStreamEvent): void {
     if (evt.type === "content_block_start") {
@@ -86,22 +97,32 @@ class AssistantContentAccumulator {
       if (cb.type === "text") this.byIndex.set(idx, { type: "text", text: (cb.text as string) ?? "" });
       else this.byIndex.set(idx, { ...cb });
       if (cb.type === "mcp_tool_use") this.inputJson.set(idx, "");
+      // Seed tool-result text from any whole-at-start content; deltas append to it below.
+      if (cb.type === "mcp_tool_result") this.resultText.set(idx, blockText(cb.content));
     } else if (evt.type === "content_block_delta") {
       const idx = evt.index ?? -1;
       const block = this.byIndex.get(idx);
       const delta = (evt.delta ?? {}) as { type?: string; text?: string; partial_json?: string };
-      if (block?.type === "text" && delta.type === "text_delta") block.text = `${block.text as string}${delta.text ?? ""}`;
-      else if (delta.type === "input_json_delta") this.inputJson.set(idx, (this.inputJson.get(idx) ?? "") + (delta.partial_json ?? ""));
+      if (delta.type === "text_delta" && block?.type === "text") {
+        block.text = `${block.text as string}${delta.text ?? ""}`;
+      } else if (delta.type === "text_delta" && block?.type === "mcp_tool_result") {
+        this.resultText.set(idx, (this.resultText.get(idx) ?? "") + (delta.text ?? ""));
+      } else if (delta.type === "input_json_delta") {
+        this.inputJson.set(idx, (this.inputJson.get(idx) ?? "") + (delta.partial_json ?? ""));
+      }
     } else if (evt.type === "content_block_stop") {
       const idx = evt.index ?? -1;
       const block = this.byIndex.get(idx);
-      const raw = this.inputJson.get(idx);
-      if (block?.type === "mcp_tool_use" && raw != null) {
+      if (block?.type === "mcp_tool_use") {
+        const raw = this.inputJson.get(idx);
         try {
           block.input = raw ? JSON.parse(raw) : {};
         } catch {
           block.input = {};
         }
+      } else if (block?.type === "mcp_tool_result") {
+        // Reconstruct the full result content for the pause_turn replay (whole-at-start OR via deltas).
+        block.content = [{ type: "text", text: this.resultText.get(idx) ?? "" }];
       }
     }
   }
@@ -143,6 +164,7 @@ export async function streamAiChat(res: Response, opts: StreamAiChatOptions): Pr
           mcp_servers: [{ type: "url", url: opts.mcpUrl, name: "trock-data", authorization_token: opts.mcpToken }],
           tools: [{ type: "mcp_toolset", mcp_server_name: "trock-data" }],
         }),
+        signal: opts.signal,
       });
 
       if (!resp.ok || !resp.body) {
@@ -163,6 +185,10 @@ export async function streamAiChat(res: Response, opts: StreamAiChatOptions): Pr
       break;
     }
 
+    // If we exhausted MAX_CONTINUATIONS while still paused, say so rather than emitting a clean done.
+    if (processor.stopReason === "pause_turn") {
+      writeSse(res, frame("error", { message: "Chat reached the maximum tool-loop length; stopping early." }));
+    }
     for (const ce of processor.finish()) writeSse(res, frame(ce.type, ce.data));
     writeSse(res, frame("done", { stopReason: processor.stopReason }));
   } catch (err) {

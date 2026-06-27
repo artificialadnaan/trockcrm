@@ -26,5 +26,16 @@ export function getAnthropicApiKey(): string {
 export function getPublicBaseUrl(): string {
   const url = process.env.PUBLIC_BASE_URL;
   if (!url) throw new Error("PUBLIC_BASE_URL is not set");
-  return url.replace(/\/+$/, "");
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("PUBLIC_BASE_URL must be a valid URL");
+  }
+  const isLocal = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+  if (parsed.protocol !== "https:" && !isLocal) {
+    // Anthropic's connector requires https; allow http only for local dev.
+    throw new Error("PUBLIC_BASE_URL must be an https origin");
+  }
+  return `${parsed.protocol}//${parsed.host}`;
 }
