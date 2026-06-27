@@ -1,0 +1,34 @@
+# T Rock AI demo image — same build as the CRM API Dockerfile (shared+server+client), but its CMD
+# runs the demo entry point (server/dist/mcp/index.js) and does NOT run migrations (read-only demo).
+# Selected per-service via RAILWAY_DOCKERFILE_PATH=Dockerfile.ai-demo on the demo's Railway service;
+# the CRM API keeps using the root Dockerfile.
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY . .
+ENV NODE_ENV=development
+RUN npm ci
+RUN npm run build --workspace=shared
+RUN npm run build --workspace=server
+RUN npm run build --workspace=client
+
+FROM node:20-alpine
+WORKDIR /app
+
+# Copy package manifests for all workspaces
+COPY package.json package-lock.json ./
+COPY shared/package.json ./shared/
+COPY server/package.json ./server/
+COPY client/package.json ./client/
+
+# Install only the runtime deps the demo container executes (server + shared, like the API image).
+RUN npm ci --omit=dev --workspace=shared --workspace=server
+
+# Compiled output: server (incl. dist/mcp) + shared, and the built SPA the demo serves at /ai-demo.
+COPY --from=builder /app/shared/dist ./shared/dist
+COPY --from=builder /app/server/dist ./server/dist
+COPY --from=builder /app/client/dist ./client/dist
+
+ENV NODE_ENV=production
+EXPOSE 3002
+# Demo entry point — NO migration runner (the demo is read-only). Listens on $PORT (Railway-injected).
+CMD ["node", "server/dist/mcp/index.js"]
