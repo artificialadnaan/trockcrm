@@ -4,7 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as schema from "@trock-crm/shared/schema";
 import type { McpAuthContext } from "../auth/contract.js";
 import { withOfficeSchema, type TenantDb } from "../data/withOfficeSchema.js";
-import { applyBaseDealFilters } from "../data/applyBaseDealFilters.js";
+import { applyBaseDealFilters, wonStageSlugFilterSql } from "../data/applyBaseDealFilters.js";
 import { aliasedDealBestEstimateSql } from "../../modules/shared/deal-value-sql.js";
 
 const { deals, pipelineStageConfig, users } = schema;
@@ -79,7 +79,13 @@ export async function computeListDeals(db: TenantDb, filters: ListDealsFilters):
   const conds: SQL[] = [applyBaseDealFilters("d")];
 
   if (filters.stage) {
-    conds.push(sql`(psc.slug = ${filters.stage} OR psc.name ILIKE ${"%" + filters.stage + "%"})`);
+    if (filters.stage.trim().toLowerCase() === "won") {
+      // "won" means the canonical 6-slug Won family, so list_deals reconciles with the aggregate
+      // Won tools (get_pipeline_summary / get_bid_award_variance) — not just the literal "won" slug.
+      conds.push(wonStageSlugFilterSql("psc.slug"));
+    } else {
+      conds.push(sql`(psc.slug = ${filters.stage} OR psc.name ILIKE ${"%" + filters.stage + "%"})`);
+    }
   }
   if (filters.owner) {
     conds.push(sql`u.display_name ILIKE ${"%" + filters.owner + "%"}`);
@@ -148,8 +154,8 @@ export function registerListDeals(server: McpServer, context: McpAuthContext): v
           .string()
           .optional()
           .describe(
-            "Raw stage slug or name fragment (e.g. 'estimating'). NOTE: this is a literal match, not " +
-              "the canonical Won family — for Won totals use get_pipeline_summary."
+            "Stage slug or name fragment (e.g. 'estimating'). The special value 'won' matches the " +
+              "canonical Won family (consistent with get_pipeline_summary), not just the literal 'won' slug."
           ),
         owner: z.string().optional().describe("Rep name fragment (case-insensitive)."),
         minValue: z.number().optional().describe("Minimum deal value (USD)."),

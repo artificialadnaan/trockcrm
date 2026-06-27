@@ -60,11 +60,6 @@ beforeAll(async () => {
       ('${u(23)}', 'A3 past',   '${REP}', '${ST_OPEN}', DATE '2020-01-01',                                   false, true,  false, 40000, NULL,  '2026-01-01'),
       ('${u(24)}', 'A4 on-hold','${REP}', '${ST_OPEN}', NULL,                                                true,  true,  false, 11111, NULL,  '2026-01-01'),
       ('${u(25)}', 'A5 test',   '${REP}', '${ST_OPEN}', NULL,                                                false, true,  true,  22222, NULL,  '2026-01-01');
-
-    -- A7: open CRM stage but its bid-board mirror is terminal (closed_won) -> must be EXCLUDED from
-    -- Active. Near-future close date so it is not also flagged as at-risk/Stalled.
-    INSERT INTO office_test.deals (id, name, assigned_rep_id, stage_id, expected_close_date, bid_board_stage_slug, awarded_amount) VALUES
-      ('${u(27)}', 'A7 bb-terminal', '${REP}', '${ST_OPEN}', (now() AT TIME ZONE 'America/Chicago')::date + 7, 'closed_won', 99000);
   `);
   db = drizzle(pg, { schema }) as unknown as TenantDb;
 });
@@ -97,10 +92,10 @@ describe("computePipelineSummary (PGlite, synthetic Dallas data)", () => {
     expect(won.value).toBe(150000);
   });
 
-  it("Active: open non-terminal deals, excluding on-hold/test AND terminal bid-board mirrors", async () => {
+  it("Active: open non-terminal deals (excludes on-hold/test), open best-estimate value", async () => {
     const active = seg(await computePipelineSummary(db, "all"), "Active");
-    expect(active.count).toBe(3); // A1, A2, A3 — A7 (bid-board mirror closed_won) is excluded
-    expect(active.value).toBe(90000); // 30000 + 20000 + 40000 (A7's 99000 not counted)
+    expect(active.count).toBe(3); // A1, A2, A3
+    expect(active.value).toBe(90000); // 30000 + 20000 + 40000
   });
 
   it("Stalled: reuses the at-risk watchlist (missing/past close date), not a new threshold", async () => {

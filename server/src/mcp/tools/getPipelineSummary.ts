@@ -7,7 +7,6 @@ import { withOfficeSchema, type TenantDb } from "../data/withOfficeSchema.js";
 import { applyBaseDealFilters, wonStageSlugFilterSql } from "../data/applyBaseDealFilters.js";
 import { WON_WINDOW_PRESETS, wonWindowConditionSql, type WonWindowPreset } from "../data/wonWindow.js";
 import { dealValueSqlForBasis } from "../../modules/reports/foundations.js";
-import { aliasedBidBoardTerminalSql } from "../../modules/shared/deal-value-sql.js";
 import { getAtRiskWatchlist } from "../../modules/reports/at-risk-service.js";
 
 const { deals, pipelineStageConfig } = schema;
@@ -51,8 +50,11 @@ export async function computePipelineSummary(
     `)
   )[0];
 
-  // Active = open pipeline: non-terminal CRM stage AND the bid-board mirror is not terminal either
-  // (a BB-owned deal can be won/lost in bid_board_stage_slug while its CRM stage is still open).
+  // Active = open pipeline (non-terminal CRM stage) — the SAME open-set the at-risk/Stalled helper
+  // (getAtRiskWatchlist) and the CRM active-count predicate use, so Active and Stalled reconcile and
+  // Stalled is a clean subset of Active. (Making the open-set bid-board-terminal-aware would have to
+  // happen in the shared getAtRiskWatchlist helper to keep the two segments consistent — out of
+  // scope for this demo.)
   const activeRow = rowsOf<{ count: unknown; value: unknown }>(
     await db.execute(sql`
       SELECT COUNT(*)::int AS count,
@@ -61,7 +63,6 @@ export async function computePipelineSummary(
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       WHERE ${applyBaseDealFilters("d")}
         AND psc.is_terminal = false
-        AND NOT ${aliasedBidBoardTerminalSql("d")}
     `)
   )[0];
 
