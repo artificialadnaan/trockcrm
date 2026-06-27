@@ -30,7 +30,7 @@ API. It differs from the CRM service only in the **start command** and its **env
 |---|---|---|
 | `DEMO_PASSWORD` | ✅ | Single shared page-gate password (`POST /api/login`). |
 | `MCP_SESSION_SECRET` | ✅ | Signs the scoped MCP token + the demo session cookie. **MUST differ from the CRM's `JWT_SECRET`** — startup fails fast if it equals it. |
-| `ANTHROPIC_API_KEY` | ✅ | Anthropic Messages API key for the `/api/ai-chat` connector (Phase 4). |
+| `ANTHROPIC_API_KEY` | Phase 4 | Needed only once the `/api/ai-chat` connector ships. The read-only MCP demo boots and passes its direct checks without it (the connectivity check skips its Anthropic step when unset). |
 | `DATABASE_URL` | ✅ | **Same Postgres as the CRM.** The demo reads `office_dallas` read-only. |
 | `PUBLIC_BASE_URL` | ✅ | This service's own public **https** origin (the Railway domain). Used to build the MCP connector URL `${PUBLIC_BASE_URL}/mcp` handed to Anthropic. |
 | `DB_POOL_MAX` | optional | Cap the demo's DB pool low (e.g. `5`) so demo load can't starve the CRM's shared-Postgres connection budget. |

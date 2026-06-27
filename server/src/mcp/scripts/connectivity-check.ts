@@ -1,5 +1,8 @@
+import path from "path";
 import dotenv from "dotenv";
-dotenv.config();
+// Run via `npm run ... -w @trock-crm/server`, process.cwd() is the server workspace, so a bare
+// dotenv.config() would miss the repo-root .env. INIT_CWD is the dir `npm run` was invoked from.
+dotenv.config({ path: path.resolve(process.env.INIT_CWD ?? process.cwd(), ".env") });
 
 import { mintSessionToken } from "../auth/mintSessionToken.js";
 
@@ -16,7 +19,8 @@ import { mintSessionToken } from "../auth/mintSessionToken.js";
  */
 
 const ANTHROPIC_BETA = "mcp-client-2025-11-20";
-const MODEL = "claude-sonnet-4-6";
+// Configurable so a model-entitlement issue doesn't fail step 3 before it can exercise /mcp.
+const MODEL = process.env.MCP_CHECK_MODEL ?? "claude-sonnet-4-6";
 const ACCEPT = "application/json, text/event-stream";
 const TIMEOUT_MS = 20_000; // bound every outbound call so a stalled path fails the step, not hangs
 

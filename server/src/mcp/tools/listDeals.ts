@@ -78,17 +78,22 @@ export async function computeListDeals(db: TenantDb, filters: ListDealsFilters):
   const value = aliasedDealBestEstimateSql("d");
   const conds: SQL[] = [applyBaseDealFilters("d")];
 
-  if (filters.stage) {
-    if (filters.stage.trim().toLowerCase() === "won") {
+  // Normalize text filters up front so surrounding whitespace can't break a slug/name match
+  // (and " won " still routes to the canonical Won family).
+  const stage = filters.stage?.trim();
+  const owner = filters.owner?.trim();
+
+  if (stage) {
+    if (stage.toLowerCase() === "won") {
       // "won" means the canonical 6-slug Won family, so list_deals reconciles with the aggregate
       // Won tools (get_pipeline_summary / get_bid_award_variance) — not just the literal "won" slug.
       conds.push(wonStageSlugFilterSql("psc.slug"));
     } else {
-      conds.push(sql`(psc.slug = ${filters.stage} OR psc.name ILIKE ${"%" + filters.stage + "%"})`);
+      conds.push(sql`(psc.slug = ${stage} OR psc.name ILIKE ${"%" + stage + "%"})`);
     }
   }
-  if (filters.owner) {
-    conds.push(sql`u.display_name ILIKE ${"%" + filters.owner + "%"}`);
+  if (owner) {
+    conds.push(sql`u.display_name ILIKE ${"%" + owner + "%"}`);
   }
   if (filters.minValue != null) conds.push(sql`${value} >= ${filters.minValue}`);
   if (filters.maxValue != null) conds.push(sql`${value} <= ${filters.maxValue}`);
