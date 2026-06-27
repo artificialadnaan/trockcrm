@@ -99,7 +99,7 @@ export async function computeListDeals(db: TenantDb, filters: ListDealsFilters):
     dealNumber: r.deal_number == null ? null : String(r.deal_number),
     name: r.name,
     stage: r.stage_name,
-    owner: r.owner || (r.owner === "" ? "Unassigned" : r.owner),
+    owner: r.owner || "Unassigned",
     value: num(r.value),
     expectedCloseDate: r.expected_close_date == null ? null : String(r.expected_close_date).slice(0, 10),
     wonClosedDate: r.won_closed_date == null ? null : String(r.won_closed_date).slice(0, 10),

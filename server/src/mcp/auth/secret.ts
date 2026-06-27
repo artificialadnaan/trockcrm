@@ -10,5 +10,11 @@ export function getMcpSessionSecret(): string {
   if (!secret && !isLocalDevEnv) {
     throw new Error("MCP_SESSION_SECRET must be set outside local development/test");
   }
+  // Fail fast on the misconfiguration that silently breaks the documented isolation: if the MCP
+  // secret equals JWT_SECRET, the two token families share a key and compromising/rotating one
+  // affects the other.
+  if (secret && secret === process.env.JWT_SECRET) {
+    throw new Error("MCP_SESSION_SECRET must be distinct from JWT_SECRET (separate token families)");
+  }
   return secret || "dev-mcp-secret-change-in-production";
 }

@@ -2,6 +2,8 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { createMcpDemoApp } from "./app.js";
+import { getDemoPassword } from "./gate/env.js";
+import { getMcpSessionSecret } from "./auth/secret.js";
 
 /**
  * Entry point for the T Rock AI demo service. Deployed as a SEPARATE Railway service from the
@@ -9,6 +11,13 @@ import { createMcpDemoApp } from "./app.js";
  * (dist/index.js) and this demo run the same build but different start commands.
  */
 const PORT = parseInt(process.env.PORT || "3002", 10);
+
+// Fail fast at boot, not on the first request: these throw if DEMO_PASSWORD / MCP_SESSION_SECRET
+// are missing outside dev, or if MCP_SESSION_SECRET reuses JWT_SECRET. Surfacing it here keeps the
+// failure immediate and traceable to startup.
+getDemoPassword();
+getMcpSessionSecret();
+
 const app = createMcpDemoApp();
 
 app.listen(PORT, () => {

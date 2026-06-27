@@ -5,7 +5,7 @@ import * as schema from "@trock-crm/shared/schema";
 import type { McpAuthContext } from "../auth/contract.js";
 import { withOfficeSchema, type TenantDb } from "../data/withOfficeSchema.js";
 import { applyBaseDealFilters, wonStageSlugFilterSql } from "../data/applyBaseDealFilters.js";
-import { WON_WINDOW_PRESETS, wonWindowStartSql, type WonWindowPreset } from "../data/wonWindow.js";
+import { WON_WINDOW_PRESETS, wonWindowConditionSql, type WonWindowPreset } from "../data/wonWindow.js";
 
 const { deals, pipelineStageConfig, users } = schema;
 
@@ -60,8 +60,7 @@ export async function computeBidAwardVariance(
   db: TenantDb,
   preset: WonWindowPreset
 ): Promise<BidAwardVarianceResult> {
-  const start = wonWindowStartSql(preset);
-  const wonWindow = start ? sql` AND d.won_closed_date >= ${sql.raw(start)}` : sql``;
+  const wonWindow = wonWindowConditionSql(preset, "d.won_closed_date");
 
   const perRep = rowsOf<{
     rep_name: string;
@@ -82,8 +81,7 @@ export async function computeBidAwardVariance(
         JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
         LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
         WHERE ${applyBaseDealFilters("d")}
-          AND ${wonStageSlugFilterSql("psc.slug")}
-          AND d.won_closed_date IS NOT NULL${wonWindow}
+          AND ${wonStageSlugFilterSql("psc.slug")}${wonWindow}
           AND d.bid_estimate IS NOT NULL AND d.bid_estimate > 0
           AND d.awarded_amount IS NOT NULL AND d.awarded_amount > 0
       )
@@ -110,8 +108,7 @@ export async function computeBidAwardVariance(
       FROM ${deals} d
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       WHERE ${applyBaseDealFilters("d")}
-        AND ${wonStageSlugFilterSql("psc.slug")}
-        AND d.won_closed_date IS NOT NULL${wonWindow}
+        AND ${wonStageSlugFilterSql("psc.slug")}${wonWindow}
     `)
   )[0];
 

@@ -42,4 +42,12 @@ describe("getMcpSessionSecret", () => {
     // distinct from the user-auth module's own dev fallback ("dev-secret-change-in-production")
     expect(getMcpSessionSecret()).not.toBe("dev-secret-change-in-production");
   });
+
+  it("fails fast when MCP_SESSION_SECRET is set equal to JWT_SECRET", () => {
+    process.env.NODE_ENV = "production";
+    const shared = "the-same-secret-for-both";
+    process.env.MCP_SESSION_SECRET = shared;
+    process.env.JWT_SECRET = shared;
+    expect(() => getMcpSessionSecret()).toThrow(/distinct from JWT_SECRET/);
+  });
 });

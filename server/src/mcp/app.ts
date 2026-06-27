@@ -53,7 +53,8 @@ export function createMcpDemoApp(): Express {
     res.json({ status: "ok" });
   });
 
-  // Public bootstrap: page-password login.
+  // Public bootstrap: page-password login. The router self-throttles (authLimiter) so the demo's
+  // only access gate can't be brute-forced against the shared DEMO_PASSWORD.
   app.use("/api/login", createLoginRouter());
 
   // Machine-facing MCP endpoint (its own Bearer auth, not the page cookie).

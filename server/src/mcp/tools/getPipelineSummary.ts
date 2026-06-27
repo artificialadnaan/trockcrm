@@ -5,8 +5,9 @@ import * as schema from "@trock-crm/shared/schema";
 import type { McpAuthContext } from "../auth/contract.js";
 import { withOfficeSchema, type TenantDb } from "../data/withOfficeSchema.js";
 import { applyBaseDealFilters, wonStageSlugFilterSql } from "../data/applyBaseDealFilters.js";
-import { WON_WINDOW_PRESETS, wonWindowStartSql, type WonWindowPreset } from "../data/wonWindow.js";
+import { WON_WINDOW_PRESETS, wonWindowConditionSql, type WonWindowPreset } from "../data/wonWindow.js";
 import { dealValueSqlForBasis } from "../../modules/reports/foundations.js";
+import { aliasedBidBoardTerminalSql } from "../../modules/shared/deal-value-sql.js";
 import { getAtRiskWatchlist } from "../../modules/reports/at-risk-service.js";
 
 const { deals, pipelineStageConfig } = schema;
@@ -39,9 +40,6 @@ export async function computePipelineSummary(
   db: TenantDb,
   preset: PipelinePreset
 ): Promise<PipelineSummaryRow[]> {
-  const start = wonWindowStartSql(preset);
-  const wonWindow = start ? sql` AND d.won_closed_date >= ${sql.raw(start)}` : sql``;
-
   const wonRow = rowsOf<{ count: unknown; value: unknown }>(
     await db.execute(sql`
       SELECT COUNT(*)::int AS count,
@@ -49,11 +47,12 @@ export async function computePipelineSummary(
       FROM ${deals} d
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       WHERE ${applyBaseDealFilters("d")}
-        AND ${wonStageSlugFilterSql("psc.slug")}
-        AND d.won_closed_date IS NOT NULL${wonWindow}
+        AND ${wonStageSlugFilterSql("psc.slug")}${wonWindowConditionSql(preset, "d.won_closed_date")}
     `)
   )[0];
 
+  // Active = open pipeline: non-terminal CRM stage AND the bid-board mirror is not terminal either
+  // (a BB-owned deal can be won/lost in bid_board_stage_slug while its CRM stage is still open).
   const activeRow = rowsOf<{ count: unknown; value: unknown }>(
     await db.execute(sql`
       SELECT COUNT(*)::int AS count,
@@ -62,6 +61,7 @@ export async function computePipelineSummary(
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       WHERE ${applyBaseDealFilters("d")}
         AND psc.is_terminal = false
+        AND NOT ${aliasedBidBoardTerminalSql("d")}
     `)
   )[0];
 

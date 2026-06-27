@@ -74,6 +74,19 @@ describe("validateSessionToken", () => {
     expect(errorOf(run(`Bearer ${token}`).next)?.statusCode).toBe(401);
   });
 
+  it("401s for an allowlisted office that is NOT Dallas (single-tenant demo)", () => {
+    const token = sign({ office: "office_atlanta", scope: "read_all" });
+    expect(errorOf(run(`Bearer ${token}`).next)?.statusCode).toBe(401);
+  });
+
+  it("401s for a token with no expiry claim", () => {
+    const noExp = jwt.sign({ office: "office_dallas", scope: "read_all" }, SECRET, {
+      algorithm: "HS256",
+      audience: MCP_AUDIENCE,
+    });
+    expect(errorOf(run(`Bearer ${noExp}`).next)?.statusCode).toBe(401);
+  });
+
   it("401s when the scope claim is not read_all", () => {
     const token = sign({ office: "office_dallas", scope: "write" });
     expect(errorOf(run(`Bearer ${token}`).next)?.statusCode).toBe(401);

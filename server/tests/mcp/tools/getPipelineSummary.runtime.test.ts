@@ -27,7 +27,8 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, name text, deal_number text, assigned_rep_id uuid, stage_id uuid,
       won_closed_date date, expected_close_date date, stage_entered_at timestamptz,
       on_hold boolean DEFAULT false, is_active boolean DEFAULT true, is_test_data boolean DEFAULT false,
-      awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric
+      awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric,
+      bid_board_stage_slug text
     );
     SET search_path TO office_test, public;
 
@@ -38,7 +39,8 @@ beforeAll(async () => {
       ('${ST_OPEN}', 'opportunity',           'Opportunity', false),
       ('${ST_LOST}', 'closed_lost',           'Lost', true);
 
-    -- WON: W1/W2 won today (in every window); W6 won in 2000 (only in "all").
+    -- WON: W1/W2 won today (in every window); W6 won in 2000 (only in "all"); W7 undated win
+    -- (counts only in "all"); W8 future-dated win (excluded from "to date" windows by the upper bound).
     -- W3 on-hold, W4 test-data, W5 inactive -> all excluded by applyBaseDealFilters.
     INSERT INTO office_test.deals (id, name, assigned_rep_id, stage_id, won_closed_date, on_hold, is_active, is_test_data, awarded_amount, bid_estimate, stage_entered_at) VALUES
       ('${u(11)}', 'W1 awarded',  '${REP}', '${ST_WON}', (now() AT TIME ZONE 'America/Chicago')::date, false, true,  false, 100000, NULL,  '2026-01-01'),
@@ -46,16 +48,23 @@ beforeAll(async () => {
       ('${u(13)}', 'W3 on-hold',  '${REP}', '${ST_WON}', (now() AT TIME ZONE 'America/Chicago')::date, true,  true,  false, 88888,  NULL,  '2026-01-01'),
       ('${u(14)}', 'W4 test',     '${REP}', '${ST_WON}', (now() AT TIME ZONE 'America/Chicago')::date, false, true,  true,  77777,  NULL,  '2026-01-01'),
       ('${u(15)}', 'W5 inactive', '${REP}', '${ST_WON}', (now() AT TIME ZONE 'America/Chicago')::date, false, false, false, 66666,  NULL,  '2026-01-01'),
-      ('${u(16)}', 'W6 year2000', '${REP}', '${ST_WON}', DATE '2000-01-01',                             false, true,  false, 999,    NULL,  '2026-01-01');
+      ('${u(16)}', 'W6 year2000', '${REP}', '${ST_WON}', DATE '2000-01-01', false, true, false, 999, NULL, '2026-01-01'),
+      ('${u(17)}', 'W7 undated',  '${REP}', '${ST_WON}', NULL, false, true, false, 5000, NULL, '2026-01-01'),
+      ('${u(18)}', 'W8 future',   '${REP}', '${ST_WON}', (now() AT TIME ZONE 'America/Chicago')::date + 30, false, true, false, 7000, NULL, '2026-01-01');
 
     -- ACTIVE (open / non-terminal). A2 (no date) + A3 (past date) are also STALLED (at-risk).
-    -- A1 has a far-future date -> active but not stalled. A4 on-hold, A5 test -> excluded everywhere.
+    -- A1 has a near-future date -> active but not stalled. A4 on-hold, A5 test -> excluded everywhere.
     INSERT INTO office_test.deals (id, name, assigned_rep_id, stage_id, expected_close_date, on_hold, is_active, is_test_data, awarded_amount, bid_estimate, stage_entered_at) VALUES
       ('${u(21)}', 'A1 future', '${REP}', '${ST_OPEN}', (now() AT TIME ZONE 'America/Chicago')::date + 7, false, true,  false, 30000, NULL,  '2026-01-01'),
       ('${u(22)}', 'A2 no-date','${REP}', '${ST_OPEN}', NULL,                                                false, true,  false, NULL,  20000, '2026-01-01'),
       ('${u(23)}', 'A3 past',   '${REP}', '${ST_OPEN}', DATE '2020-01-01',                                   false, true,  false, 40000, NULL,  '2026-01-01'),
       ('${u(24)}', 'A4 on-hold','${REP}', '${ST_OPEN}', NULL,                                                true,  true,  false, 11111, NULL,  '2026-01-01'),
       ('${u(25)}', 'A5 test',   '${REP}', '${ST_OPEN}', NULL,                                                false, true,  true,  22222, NULL,  '2026-01-01');
+
+    -- A7: open CRM stage but its bid-board mirror is terminal (closed_won) -> must be EXCLUDED from
+    -- Active. Near-future close date so it is not also flagged as at-risk/Stalled.
+    INSERT INTO office_test.deals (id, name, assigned_rep_id, stage_id, expected_close_date, bid_board_stage_slug, awarded_amount) VALUES
+      ('${u(27)}', 'A7 bb-terminal', '${REP}', '${ST_OPEN}', (now() AT TIME ZONE 'America/Chicago')::date + 7, 'closed_won', 99000);
   `);
   db = drizzle(pg, { schema }) as unknown as TenantDb;
 });
@@ -76,22 +85,22 @@ describe("computePipelineSummary (PGlite, synthetic Dallas data)", () => {
     expect(rows.map((r) => r.segment)).toEqual(["Won", "Active", "Stalled"]);
   });
 
-  it("Won: excludes on-hold / test-data / inactive; values via awarded-first chain (all-time)", async () => {
+  it("Won (all-time): excludes on-hold/test/inactive; INCLUDES undated + future wins", async () => {
     const won = seg(await computePipelineSummary(db, "all"), "Won");
-    expect(won.count).toBe(3); // W1, W2, W6
-    expect(won.value).toBe(150999); // 100000 + 50000 (bid fallback) + 999
+    expect(won.count).toBe(5); // W1, W2, W6, W7 (undated), W8 (future)
+    expect(won.value).toBe(162999); // 100000 + 50000 (bid fallback) + 999 + 5000 + 7000
   });
 
-  it("Won: the won_closed_date window drops the year-2000 deal under ytd", async () => {
+  it("Won (ytd): window drops year-2000, undated, AND future-dated wins", async () => {
     const won = seg(await computePipelineSummary(db, "ytd"), "Won");
-    expect(won.count).toBe(2); // W1, W2 (W6 is out of window)
+    expect(won.count).toBe(2); // only W1, W2 (W6 old, W7 undated, W8 future all out of window)
     expect(won.value).toBe(150000);
   });
 
-  it("Active: open non-terminal deals only (on-hold/test excluded), open best-estimate value", async () => {
+  it("Active: open non-terminal deals, excluding on-hold/test AND terminal bid-board mirrors", async () => {
     const active = seg(await computePipelineSummary(db, "all"), "Active");
-    expect(active.count).toBe(3); // A1, A2, A3
-    expect(active.value).toBe(90000); // 30000 + 20000 + 40000
+    expect(active.count).toBe(3); // A1, A2, A3 — A7 (bid-board mirror closed_won) is excluded
+    expect(active.value).toBe(90000); // 30000 + 20000 + 40000 (A7's 99000 not counted)
   });
 
   it("Stalled: reuses the at-risk watchlist (missing/past close date), not a new threshold", async () => {
