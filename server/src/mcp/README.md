@@ -43,7 +43,8 @@ Startup validates config before listening (fail fast). `DEMO_PASSWORD` and `MCP_
 checked on every boot (including dev/test): a missing value fails outside local dev/test — which fall
 back to placeholders — and a set `MCP_SESSION_SECRET` that equals `JWT_SECRET` is rejected in any
 environment. Outside local dev it ALSO requires the chat connector config — `PUBLIC_BASE_URL` and
-`ANTHROPIC_API_KEY` — so a deploy can't go green (health passing) while every `/api/ai-chat` 503s.
+`ANTHROPIC_API_KEY` — plus `DATABASE_URL`, so a deploy can't go green (health passing) while every
+`/api/ai-chat` 503s or every tool call fails on `pool.connect()`.
 
 ## How the "every number is SQL" guarantee works
 

@@ -4,12 +4,15 @@ import { authLimiter } from "../../middleware/rate-limit.js";
 import { getDemoPassword } from "./env.js";
 import { DEMO_SESSION_COOKIE, demoSessionCookieOptions, signDemoSession } from "./demoSession.js";
 
-/** Length-independent constant-time string compare. */
+/**
+ * Length-independent constant-time string compare. Hash both inputs to fixed-length SHA-256 digests
+ * first, so neither the comparison nor its timing depends on the submitted password's length — a raw
+ * timingSafeEqual needs an equal-length precheck that would leak DEMO_PASSWORD's length.
+ */
 function timingSafeEqualStr(a: string, b: string): boolean {
-  const ab = Buffer.from(a, "utf8");
-  const bb = Buffer.from(b, "utf8");
-  if (ab.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ab, bb);
+  const ah = crypto.createHash("sha256").update(a, "utf8").digest();
+  const bh = crypto.createHash("sha256").update(b, "utf8").digest();
+  return crypto.timingSafeEqual(ah, bh);
 }
 
 /**
