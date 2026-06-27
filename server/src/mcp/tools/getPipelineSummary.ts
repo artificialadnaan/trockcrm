@@ -5,37 +5,20 @@ import * as schema from "@trock-crm/shared/schema";
 import type { McpAuthContext } from "../auth/contract.js";
 import { withOfficeSchema, type TenantDb } from "../data/withOfficeSchema.js";
 import { applyBaseDealFilters, wonStageSlugFilterSql } from "../data/applyBaseDealFilters.js";
+import { WON_WINDOW_PRESETS, wonWindowStartSql, type WonWindowPreset } from "../data/wonWindow.js";
 import { dealValueSqlForBasis } from "../../modules/reports/foundations.js";
 import { getAtRiskWatchlist } from "../../modules/reports/at-risk-service.js";
 
 const { deals, pipelineStageConfig } = schema;
 
-export const PIPELINE_PRESETS = ["mtd", "qtd", "ytd", "last_90d", "all"] as const;
-export type PipelinePreset = (typeof PIPELINE_PRESETS)[number];
+export const PIPELINE_PRESETS = WON_WINDOW_PRESETS;
+export type PipelinePreset = WonWindowPreset;
 
 /** Flat, chartable row (segment vs count/value). */
 export interface PipelineSummaryRow {
   segment: "Won" | "Active" | "Stalled";
   count: number;
   value: number;
-}
-
-const CT_TODAY = "(now() AT TIME ZONE 'America/Chicago')::date";
-
-/** Inclusive lower bound on won_closed_date for the preset, or null for all-time. */
-function wonWindowStartSql(preset: PipelinePreset): string | null {
-  switch (preset) {
-    case "mtd":
-      return `date_trunc('month', ${CT_TODAY})::date`;
-    case "qtd":
-      return `date_trunc('quarter', ${CT_TODAY})::date`;
-    case "ytd":
-      return `date_trunc('year', ${CT_TODAY})::date`;
-    case "last_90d":
-      return `(${CT_TODAY} - INTERVAL '90 days')::date`;
-    case "all":
-      return null;
-  }
 }
 
 const num = (v: unknown): number => Number(v ?? 0);
