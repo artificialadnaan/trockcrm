@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "start:ai-demo": "node dist/mcp/index.js",
     "dev:ai-demo": "tsx watch src/mcp/index.ts",
+    "mcp:connectivity-check": "tsx src/mcp/scripts/connectivity-check.ts",
     "test": "vitest run",
     "test:ci": "vitest run --config vitest.ci.config.ts",
     "test:runtime": "vitest run runtime.test --passWithNoTests=false",
