@@ -140,4 +140,56 @@ describe("streamAiChat", () => {
     expect(evs.some((e) => e.event === "error")).toBe(true);
     expect(evs.at(-1)?.event).toBe("done");
   });
+
+  it("surfaces an Anthropic SSE error event (200 then event: error) as an error frame, not a silent done", async () => {
+    const stream = sse([
+      { type: "content_block_start", index: 0, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial" } },
+      { type: "error", error: { type: "overloaded_error", message: "Overloaded" } },
+    ]);
+    const fetchImpl = (async () => ({ ok: true, status: 200, body: bodyFrom(stream) })) as unknown as typeof fetch;
+    const { res, events } = fakeRes();
+    await streamAiChat(res, { ...baseOpts, fetchImpl });
+    const evs = events();
+    const err = evs.find((e) => e.event === "error");
+    expect(err?.data.message).toMatch(/overloaded_error/);
+    expect(evs.at(-1)?.event).toBe("done");
+  });
+
+  it("keeps the real continuation error (429) — does not mask it with the max-tool-loop message", async () => {
+    const paused = sse([
+      { type: "content_block_start", index: 0, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "working..." } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "pause_turn" } },
+    ]);
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      return calls === 1
+        ? { ok: true, status: 200, body: bodyFrom(paused) }
+        : { ok: false, status: 429, body: null };
+    }) as unknown as typeof fetch;
+    const { res, events } = fakeRes();
+    await streamAiChat(res, { ...baseOpts, fetchImpl });
+    const errs = events().filter((e) => e.event === "error").map((e) => String(e.data.message));
+    expect(errs.some((m) => /429/.test(m))).toBe(true);
+    expect(errs.some((m) => /maximum tool-loop/.test(m))).toBe(false);
+  });
+
+  it("flags a max_tokens truncation with a visible error frame before done", async () => {
+    const stream = sse([
+      { type: "content_block_start", index: 0, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "a long, truncated answer" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "message_delta", delta: { stop_reason: "max_tokens" } },
+    ]);
+    const fetchImpl = (async () => ({ ok: true, status: 200, body: bodyFrom(stream) })) as unknown as typeof fetch;
+    const { res, events } = fakeRes();
+    await streamAiChat(res, { ...baseOpts, fetchImpl });
+    const evs = events();
+    expect(evs.some((e) => e.event === "error" && /cut off/.test(String(e.data.message)))).toBe(true);
+    expect(evs.at(-1)?.event).toBe("done");
+    expect(evs.at(-1)?.data.stopReason).toBe("max_tokens");
+  });
 });

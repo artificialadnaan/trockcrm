@@ -141,6 +141,10 @@ export async function streamAiChat(res: Response, opts: StreamAiChatOptions): Pr
   const fetchImpl = opts.fetchImpl ?? fetch;
   const processor = new StreamProcessor();
   let messages = [...opts.messages];
+  // Track whether the loop emitted its own error frame, so the post-loop degraded-state messages
+  // (max tool-loop / max_tokens) can't mask the real failure.
+  let apiError = false;
+  let streamError = false;
 
   writeSse(res, buildSsePaddingComment()); // warm proxies
   writeSse(res, frame("meta", { turnId: cryptoRandomId() }));
@@ -169,14 +173,25 @@ export async function streamAiChat(res: Response, opts: StreamAiChatOptions): Pr
 
       if (!resp.ok || !resp.body) {
         writeSse(res, frame("error", { message: `Anthropic API error (${resp.status})` }));
+        apiError = true;
         break;
       }
 
       const accumulator = new AssistantContentAccumulator();
       for await (const evt of parseAnthropicSse(readableToChunks(resp.body))) {
+        // Anthropic can return 200 then emit an SSE `error` event (e.g. overloaded_error). The
+        // processor ignores unknown event types, so surface it explicitly as a (retryable) failure
+        // instead of letting the turn end with a clean — silently truncated — done.
+        if (evt.type === "error") {
+          const detail = (evt as { error?: { type?: string; message?: string } }).error;
+          writeSse(res, frame("error", { message: `Anthropic stream error${detail?.type ? ` (${detail.type})` : ""}` }));
+          streamError = true;
+          break;
+        }
         for (const ce of processor.process(evt)) writeSse(res, frame(ce.type, ce.data));
         accumulator.observe(evt);
       }
+      if (streamError) break;
 
       if (processor.stopReason === "pause_turn") {
         messages = [...messages, { role: "assistant", content: accumulator.content() }];
@@ -185,9 +200,16 @@ export async function streamAiChat(res: Response, opts: StreamAiChatOptions): Pr
       break;
     }
 
-    // If we exhausted MAX_CONTINUATIONS while still paused, say so rather than emitting a clean done.
-    if (processor.stopReason === "pause_turn") {
-      writeSse(res, frame("error", { message: "Chat reached the maximum tool-loop length; stopping early." }));
+    // Surface degraded terminal states that aren't a real answer — but NOT when the loop already
+    // emitted an API/stream error frame (that's the failure the client must keep, unmasked).
+    if (!apiError && !streamError) {
+      if (processor.stopReason === "pause_turn") {
+        // The continuation cap was exhausted while still paused — not a clean completion.
+        writeSse(res, frame("error", { message: "Chat reached the maximum tool-loop length; stopping early." }));
+      } else if (processor.stopReason === "max_tokens") {
+        // The model hit the response-length cap mid-answer; tell the user it was cut off.
+        writeSse(res, frame("error", { message: "The answer was cut off at the response length limit." }));
+      }
     }
     for (const ce of processor.finish()) writeSse(res, frame(ce.type, ce.data));
     writeSse(res, frame("done", { stopReason: processor.stopReason }));
