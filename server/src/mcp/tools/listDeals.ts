@@ -54,13 +54,27 @@ export function clampLimit(limit: number | undefined): number {
   return Math.min(MAX_LIMIT, Math.max(1, Math.trunc(limit)));
 }
 
+export interface ListDealsResult {
+  rows: DealRow[];
+  /** Real SQL COUNT(*) of ALL deals matching the filters (not just the returned page). */
+  totalMatching: number;
+  /** rows.length — the size of this page. */
+  returned: number;
+  /** true when totalMatching exceeds what was returned (the page was capped). */
+  truncated: boolean;
+}
+
 /**
  * Lists individual Dallas deals (reportable: applyBaseDealFilters) filtered by stage / owner /
  * value / close-date, newest-value first, bounded to 25 (max 100). Value is the raw awarded-first
- * headline estimate (awarded > bid_board > bid), so it reads sensibly across stages. All numbers and
- * filters are SQL; every filter value is bound as a parameter.
+ * headline estimate (awarded > bid_board > bid), so it reads sensibly across stages.
+ *
+ * Returns the page of rows PLUS `totalMatching` — a real SQL COUNT(*) over the same WHERE — so a
+ * "how many" question has an actual SQL answer rather than the LIMIT page size, and `truncated`
+ * signals when the result set was capped. All numbers and filters are SQL; every filter value is a
+ * bound parameter.
  */
-export async function computeListDeals(db: TenantDb, filters: ListDealsFilters): Promise<DealRow[]> {
+export async function computeListDeals(db: TenantDb, filters: ListDealsFilters): Promise<ListDealsResult> {
   const value = aliasedDealBestEstimateSql("d");
   const conds: SQL[] = [applyBaseDealFilters("d")];
 
@@ -75,8 +89,20 @@ export async function computeListDeals(db: TenantDb, filters: ListDealsFilters):
   if (filters.closeDateFrom) conds.push(sql`d.expected_close_date >= ${filters.closeDateFrom}::date`);
   if (filters.closeDateTo) conds.push(sql`d.expected_close_date <= ${filters.closeDateTo}::date`);
 
-  const limit = clampLimit(filters.limit);
+  // Shared FROM + WHERE so the COUNT and the page apply IDENTICAL filtering.
+  const fromWhere = sql`
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    WHERE ${sql.join(conds, sql` AND `)}
+  `;
 
+  const totalRow = rowsOf<{ count: unknown }>(
+    await db.execute(sql`SELECT COUNT(*)::int AS count ${fromWhere}`)
+  )[0];
+  const totalMatching = num(totalRow?.count);
+
+  const limit = clampLimit(filters.limit);
   const raw = rowsOf<RawDealRow>(
     await db.execute(sql`
       SELECT d.deal_number AS deal_number,
@@ -86,16 +112,13 @@ export async function computeListDeals(db: TenantDb, filters: ListDealsFilters):
              ${value}::numeric AS value,
              d.expected_close_date AS expected_close_date,
              d.won_closed_date AS won_closed_date
-      FROM ${deals} d
-      JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-      LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
-      WHERE ${sql.join(conds, sql` AND `)}
+      ${fromWhere}
       ORDER BY value DESC NULLS LAST, d.name ASC
       LIMIT ${limit}
     `)
   );
 
-  return raw.map((r) => ({
+  const rows = raw.map((r) => ({
     dealNumber: r.deal_number == null ? null : String(r.deal_number),
     name: r.name,
     stage: r.stage_name,
@@ -104,6 +127,8 @@ export async function computeListDeals(db: TenantDb, filters: ListDealsFilters):
     expectedCloseDate: r.expected_close_date == null ? null : String(r.expected_close_date).slice(0, 10),
     wonClosedDate: r.won_closed_date == null ? null : String(r.won_closed_date).slice(0, 10),
   }));
+
+  return { rows, totalMatching, returned: rows.length, truncated: totalMatching > rows.length };
 }
 
 export function registerListDeals(server: McpServer, context: McpAuthContext): void {
@@ -113,10 +138,19 @@ export function registerListDeals(server: McpServer, context: McpAuthContext): v
       title: "List deals",
       description:
         "Lists individual Dallas deals filtered by stage, owner, value range, or expected close " +
-        "date, ordered by value (highest first). Returns at most 25 rows (max 100). Each row: " +
-        "dealNumber, name, stage, owner, value, expectedCloseDate, wonClosedDate.",
+        "date, ordered by value (highest first). Returns a PAGE of at most 25 rows (max 100) plus " +
+        "`totalMatching` (a real SQL count of ALL matching deals) and `truncated`. For a 'how many' " +
+        "question use `totalMatching` (never the page length); for Won/pipeline counts prefer " +
+        "get_pipeline_summary. Each row: dealNumber, name, stage, owner, value, expectedCloseDate, " +
+        "wonClosedDate.",
       inputSchema: {
-        stage: z.string().optional().describe("Stage slug or name fragment (e.g. 'won', 'estimating')."),
+        stage: z
+          .string()
+          .optional()
+          .describe(
+            "Raw stage slug or name fragment (e.g. 'estimating'). NOTE: this is a literal match, not " +
+              "the canonical Won family — for Won totals use get_pipeline_summary."
+          ),
         owner: z.string().optional().describe("Rep name fragment (case-insensitive)."),
         minValue: z.number().optional().describe("Minimum deal value (USD)."),
         maxValue: z.number().optional().describe("Maximum deal value (USD)."),
@@ -126,9 +160,9 @@ export function registerListDeals(server: McpServer, context: McpAuthContext): v
       },
     },
     async (filters) => {
-      const rows = await withOfficeSchema(context.office, (db) => computeListDeals(db, filters));
+      const result = await withOfficeSchema(context.office, (db) => computeListDeals(db, filters));
       return {
-        content: [{ type: "text" as const, text: JSON.stringify({ count: rows.length, rows }, null, 2) }],
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       };
     }
   );

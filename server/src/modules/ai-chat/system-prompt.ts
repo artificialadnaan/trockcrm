@@ -50,7 +50,6 @@ export function buildSystemPrompt(): string {
             y: { field: "value", type: "quantitative", title: "Pipeline value" },
           },
         },
-        title: "Pipeline value by segment",
       },
       null,
       2

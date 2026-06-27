@@ -27,8 +27,10 @@ export function buildCapabilitiesManifest(): CapabilitiesManifest {
     office: "Dallas (single tenant — this demo cannot see any other office)",
     readOnly: true,
     numbersPolicy:
-      "Every number is computed by a SQL tool. The assistant must never compute, estimate, or " +
-      "infer a figure on its own — if no tool returns it, the number is not available.",
+      "Every figure in an ANSWER is computed by a SQL tool. The assistant must never compute, " +
+      "estimate, or infer a figure on its own — if no tool returns it, the number is not available. " +
+      "(The coverage percentages below are approximate, point-in-time data-coverage facts from the " +
+      "data inventory — cite them only as caveats about coverage, never as live statistics.)",
     answerable: [
       {
         domain: "Pipeline summary",

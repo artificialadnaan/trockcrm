@@ -193,7 +193,9 @@ export function buildChartFromModelBlock(
   const firstRow = rows[0];
   for (const channel of Object.values(encoding)) {
     const field = channel.field;
-    if (typeof field === "string" && !(field in firstRow)) {
+    // OWN-property check (not `in`): a field like "toString"/"constructor" is inherited, not a real
+    // column, and must NOT pass as a valid field.
+    if (typeof field === "string" && !Object.hasOwn(firstRow, field)) {
       return { ok: false, reason: "unknown_field" };
     }
   }

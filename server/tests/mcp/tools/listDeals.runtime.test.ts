@@ -59,36 +59,43 @@ describe("clampLimit", () => {
 });
 
 describe("computeListDeals (PGlite, synthetic Dallas data)", () => {
-  it("lists reportable deals (excludes on-hold/test/inactive), value DESC", async () => {
-    const rows = await computeListDeals(db, {});
+  it("lists reportable deals (excludes on-hold/test/inactive), value DESC; reports total", async () => {
+    const { rows, totalMatching, returned, truncated } = await computeListDeals(db, {});
     expect(rows.map((r) => r.name)).toEqual(["D3 Tower", "D1 Anthem", "D2 Haskell"]);
     expect(rows[0]).toMatchObject({ stage: "Won", owner: "Kaleb Marshall", value: 200000 });
+    expect(totalMatching).toBe(3);
+    expect(returned).toBe(3);
+    expect(truncated).toBe(false);
   });
 
   it("filters by stage (slug or name fragment)", async () => {
-    const rows = await computeListDeals(db, { stage: "won" });
+    const { rows } = await computeListDeals(db, { stage: "won" });
     expect(rows.map((r) => r.name)).toEqual(["D3 Tower"]);
   });
 
   it("filters by owner name fragment (case-insensitive)", async () => {
-    const rows = await computeListDeals(db, { owner: "sidney" });
+    const { rows } = await computeListDeals(db, { owner: "sidney" });
     expect(rows.map((r) => r.name)).toEqual(["D2 Haskell"]);
   });
 
   it("filters by value range", async () => {
-    expect((await computeListDeals(db, { minValue: 60000 })).map((r) => r.name)).toEqual([
+    expect((await computeListDeals(db, { minValue: 60000 })).rows.map((r) => r.name)).toEqual([
       "D3 Tower",
       "D1 Anthem",
     ]);
-    expect((await computeListDeals(db, { maxValue: 60000 })).map((r) => r.name)).toEqual(["D2 Haskell"]);
+    expect((await computeListDeals(db, { maxValue: 60000 })).rows.map((r) => r.name)).toEqual(["D2 Haskell"]);
   });
 
   it("filters by expected close-date window", async () => {
-    const rows = await computeListDeals(db, { closeDateFrom: "2026-06-01" });
+    const { rows } = await computeListDeals(db, { closeDateFrom: "2026-06-01" });
     expect(rows.map((r) => r.name)).toEqual(["D2 Haskell"]); // only D2 closes after Jun 1
   });
 
-  it("respects the limit", async () => {
-    expect(await computeListDeals(db, { limit: 1 })).toHaveLength(1);
+  it("a real SQL total is reported even when the page is capped (truncated)", async () => {
+    const { rows, totalMatching, returned, truncated } = await computeListDeals(db, { limit: 1 });
+    expect(rows).toHaveLength(1);
+    expect(returned).toBe(1);
+    expect(totalMatching).toBe(3); // the count is the full match set, not the page size
+    expect(truncated).toBe(true);
   });
 });

@@ -82,8 +82,9 @@ export function registerGetPipelineSummary(server: McpServer, context: McpAuthCo
       description:
         "Counts and dollar value for Won / Active / Stalled deals in the Dallas pipeline. Won is " +
         "windowed by won_closed_date over the chosen preset; Active = open (non-terminal) deals; " +
-        "Stalled = the at-risk watchlist (open deals with a missing or past close date). Returns a " +
-        "flat { segment, count, value } row array suitable for charting.",
+        "Stalled = the at-risk watchlist (open deals with a missing or past close date). NOTE: " +
+        "Stalled is a SUBSET of Active (a risk lens), not a separate additive segment — do not sum " +
+        "the three. Returns a flat { segment, count, value } row array suitable for charting.",
       inputSchema: {
         preset: z
           .enum(PIPELINE_PRESETS)

@@ -114,6 +114,14 @@ describe("buildChartFromModelBlock — the invariant", () => {
     expect(res).toEqual({ ok: false, reason: "unknown_field" });
   });
 
+  it("rejects an inherited-property field name like 'toString' (own-property check, not `in`)", () => {
+    const res = buildChartFromModelBlock(
+      block({ dataRef: { tool: "get_pipeline_summary" }, spec: { mark: "bar", encoding: { x: { field: "toString" } } } }),
+      [captured()]
+    );
+    expect(res).toEqual({ ok: false, reason: "unknown_field" });
+  });
+
   it("multi-result: requires a valid resultIndex; uses the indexed dataset", () => {
     const a = captured({ toolUseId: "a", rows: [{ segment: "Won", value: 1 }] });
     const b = captured({ toolUseId: "b", rows: [{ segment: "Active", value: 2 }] });

@@ -2,6 +2,7 @@ import express, { type Express } from "express";
 import cookieParser from "cookie-parser";
 import helmet from "helmet";
 import { errorHandler } from "../middleware/error-handler.js";
+import { apiLimiter } from "../middleware/rate-limit.js";
 import {
   CSRF_COOKIE_NAME,
   createCsrfToken,
@@ -27,6 +28,10 @@ import { createMcpRouter } from "./router.js";
  */
 export function createMcpDemoApp(): Express {
   const app = express();
+
+  // Behind Railway's edge proxy: trust one hop so req.ip is the real client (matching the CRM app),
+  // otherwise the IP-keyed rate limiters collapse to a single global bucket.
+  app.set("trust proxy", 1);
 
   app.use(helmet());
   app.use(cookieParser());
@@ -57,8 +62,10 @@ export function createMcpDemoApp(): Express {
   // only access gate can't be brute-forced against the shared DEMO_PASSWORD.
   app.use("/api/login", createLoginRouter());
 
-  // Machine-facing MCP endpoint (its own Bearer auth, not the page cookie).
-  app.use("/mcp", createMcpRouter());
+  // Machine-facing MCP endpoint (its own Bearer auth, not the page cookie). Rate-limited so demo
+  // tool-call load can't starve the shared Postgres connection budget (also cap DB_POOL_MAX low on
+  // the demo service — see .env.example).
+  app.use("/mcp", apiLimiter, createMcpRouter());
 
   // Demo-gated probe so the UI can check whether the viewer is logged in.
   app.get("/api/session", requireDemoSession, (_req, res) => {

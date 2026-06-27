@@ -34,7 +34,9 @@ export function createMcpRouter(): Router {
     try {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
-    } catch {
+    } catch (err) {
+      // Log server-side (the generic client response leaks nothing), mirroring errorHandler.
+      console.error("[MCP] request failed", err);
       if (!res.headersSent) {
         res.status(500).json({ error: { message: "MCP request failed" } });
       }
