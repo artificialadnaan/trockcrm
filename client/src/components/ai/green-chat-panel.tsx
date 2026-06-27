@@ -37,8 +37,9 @@ export function GreenChatPanel() {
       <div className="flex-1 space-y-4 overflow-y-auto">
         {turns.length === 0 && (
           <p className="text-center text-sm text-muted-foreground">
-            Ask about the Dallas pipeline — e.g. “Won revenue this year by stage”, “reps with the
-            biggest bid-to-award variance”, or “list our largest open deals”.
+            Ask about the Dallas pipeline — e.g. “How do our Won, Active, and Stalled deals compare
+            this year?”, “Which reps have the biggest bid-to-award variance?”, or “List our largest
+            deals by value”.
           </p>
         )}
         {turns.map((turn, i) =>

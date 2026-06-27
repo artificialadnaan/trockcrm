@@ -214,11 +214,19 @@ export async function streamAiChat(res: Response, opts: StreamAiChatOptions): Pr
     for (const ce of processor.finish()) writeSse(res, frame(ce.type, ce.data));
     writeSse(res, frame("done", { stopReason: processor.stopReason }));
   } catch (err) {
-    console.error(`[ai-chat] stream failed: ${err instanceof Error ? err.message : "unknown"}`);
-    writeSse(res, frame("error", { message: "Chat stream failed" }));
-    writeSse(res, frame("done", { stopReason: processor.stopReason }));
+    // A client disconnect aborts the upstream fetch and lands here with the response already closed —
+    // that's expected, not a failure. Don't log the abort, and never write to a closed socket
+    // (write-after-close errors / noisy logs on a normal refresh or navigation).
+    const aborted = (err as { name?: string })?.name === "AbortError";
+    if (!aborted) {
+      console.error(`[ai-chat] stream failed: ${err instanceof Error ? err.message : "unknown"}`);
+    }
+    if (!res.writableEnded && !res.destroyed) {
+      writeSse(res, frame("error", { message: "Chat stream failed" }));
+      writeSse(res, frame("done", { stopReason: processor.stopReason }));
+    }
   } finally {
-    res.end();
+    if (!res.writableEnded && !res.destroyed) res.end();
   }
 }
 

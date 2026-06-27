@@ -177,6 +177,26 @@ describe("streamAiChat", () => {
     expect(errs.some((m) => /maximum tool-loop/.test(m))).toBe(false);
   });
 
+  it("does not write error/done frames after a client disconnect (response already closed)", async () => {
+    const fetchImpl = (async () => {
+      const e = new Error("aborted");
+      e.name = "AbortError";
+      throw e;
+    }) as unknown as typeof fetch;
+    const writes: string[] = [];
+    const res = {
+      write: (s: string) => { writes.push(s); return true; },
+      flush: () => {},
+      end: () => {},
+      writableEnded: true, // the client already closed the SSE
+      destroyed: true,
+    } as unknown as Response;
+    await streamAiChat(res, { ...baseOpts, fetchImpl });
+    const frames = writes.filter((w) => w.startsWith("event:")).map((w) => w.match(/^event: (.*)$/m)?.[1]);
+    expect(frames).not.toContain("error");
+    expect(frames).not.toContain("done");
+  });
+
   it("flags a max_tokens truncation with a visible error frame before done", async () => {
     const stream = sse([
       { type: "content_block_start", index: 0, content_block: { type: "text" } },

@@ -11,11 +11,13 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toMatch(/describe_capabilities/);
   });
 
-  it("ships the verbatim chart contract: trock-chart fence, dataRef/spec, no numbers rule", () => {
+  it("ships the chart contract: trock-chart fence, dataRef/spec, spec-no-numbers rule (resultIndex carved out)", () => {
     expect(prompt).toContain("`trock-chart`");
     expect(prompt).toContain("`dataRef`");
-    expect(prompt).toContain("NEVER write numeric values anywhere in the chart block");
-    expect(prompt).toContain("A chart block containing any number will be discarded.");
+    expect(prompt).toContain("The `spec` must contain NO numbers");
+    expect(prompt).toContain("A spec containing any number will be discarded.");
+    // the no-numbers rule must NOT forbid the one number the seam needs to disambiguate repeats
+    expect(prompt).toContain("dataRef.resultIndex");
   });
 
   it("includes a one-shot example that is itself number-free", () => {
