@@ -68,7 +68,7 @@ export function AiDemoPage() {
       <div className="little-t">
         <div className="lt-gate">
           <div style={{ textAlign: "center", color: "var(--lt-muted)" }}>
-            <LittleTAvatar size="lg" />
+            <LittleTAvatar size="hero" />
             <div style={{ marginTop: 10, fontSize: 14 }}>Waking up Little T…</div>
           </div>
         </div>
@@ -81,7 +81,7 @@ export function AiDemoPage() {
       <div className="little-t">
         <div className="lt-gate">
           <div className="lt-gate-card">
-            <LittleTAvatar size="lg" />
+            <LittleTAvatar size="hero" />
             <h1 className="lt-display">Little&nbsp;<span style={{ color: "var(--lt-red)" }}>T</span></h1>
             <div className="lt-tag2">The T Rock Assistant</div>
             <p>Enter the demo password to talk to Little T about the Dallas pipeline.</p>

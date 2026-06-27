@@ -132,7 +132,7 @@ export function GreenChatPanel() {
       <div className="lt-transcript" ref={scrollRef}>
         {turns.length === 0 && (
           <div className="lt-empty">
-            <LittleTAvatar size="lg" />
+            <LittleTAvatar size="hero" />
             <h1>Hey, I'm Little T</h1>
             <p>
               Your read-only analyst for the T Rock <strong>Dallas</strong> pipeline. Every number I
