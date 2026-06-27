@@ -136,6 +136,49 @@ describe("buildChartFromModelBlock — the invariant", () => {
     if (res.ok) expect((res.spec.data as { values: unknown }).values).toEqual(b.rows);
   });
 
+  it("multi-result: resultIndex counts ANALYTICS results only, skipping non-analytics/invalid entries", () => {
+    // describe_capabilities (not analytics) is captured first and pushed as invalid; the model's
+    // resultIndex is 0-based among ANALYTICS results, so resultIndex:1 must resolve to the SECOND
+    // valid pipeline result — not full-array index 1 (which is the first pipeline result).
+    const cap: CapturedAnalyticsResult = { toolUseId: "cap", toolName: "describe_capabilities", rows: null, valid: false };
+    const p1 = captured({ toolUseId: "p1", rows: [{ segment: "Won", value: 1 }] });
+    const p2 = captured({ toolUseId: "p2", rows: [{ segment: "Active", value: 2 }] });
+    const spec = { mark: "bar", encoding: { x: { field: "segment" }, y: { field: "value" } } };
+
+    const res = buildChartFromModelBlock(
+      block({ dataRef: { tool: "get_pipeline_summary", resultIndex: 1 }, spec }),
+      [cap, p1, p2]
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) expect((res.spec.data as { values: unknown }).values).toEqual(p2.rows);
+  });
+
+  it("drops a digit-bearing channel title (model number as a string) but keeps a clean title", () => {
+    const withDigits = buildChartFromModelBlock(
+      block({
+        dataRef: { tool: "get_pipeline_summary" },
+        spec: { mark: "bar", encoding: { x: { field: "segment" }, y: { field: "value", title: "Won revenue: $123,456" } } },
+      }),
+      [captured()]
+    );
+    expect(withDigits.ok).toBe(true);
+    if (!withDigits.ok) return;
+    // chart still renders, but the model-authored numeric title never reaches the surface
+    expect((withDigits.spec.encoding as Record<string, Record<string, unknown>>).y).not.toHaveProperty("title");
+
+    const clean = buildChartFromModelBlock(
+      block({
+        dataRef: { tool: "get_pipeline_summary" },
+        spec: { mark: "bar", encoding: { x: { field: "segment" }, y: { field: "value", title: "Won revenue" } } },
+      }),
+      [captured()]
+    );
+    expect(clean.ok).toBe(true);
+    if (clean.ok) {
+      expect((clean.spec.encoding as Record<string, Record<string, unknown>>).y.title).toBe("Won revenue");
+    }
+  });
+
   it("allowlist-rebuild strips transform / params / layer / datasets from output", () => {
     const res = buildChartFromModelBlock(
       block({

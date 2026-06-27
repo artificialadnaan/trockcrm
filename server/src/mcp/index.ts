@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { createMcpDemoApp } from "./app.js";
-import { getDemoPassword } from "./gate/env.js";
+import { getAnthropicApiKey, getDemoPassword, getPublicBaseUrl } from "./gate/env.js";
 import { getMcpSessionSecret } from "./auth/secret.js";
 
 /**
@@ -17,6 +17,15 @@ const PORT = parseInt(process.env.PORT || "3002", 10);
 // failure immediate and traceable to startup.
 getDemoPassword();
 getMcpSessionSecret();
+
+// This service SHIPS the chat UI, so outside local dev also require the chat connector config —
+// otherwise a deploy can go green (health passes) while every /api/ai-chat returns 503. Skipped in
+// dev/test so the gate + MCP + static shell can be booted locally without an Anthropic key.
+const isLocalDevEnv = process.env.NODE_ENV === "development" || process.env.NODE_ENV === "test";
+if (!isLocalDevEnv) {
+  getPublicBaseUrl();
+  getAnthropicApiKey();
+}
 
 const app = createMcpDemoApp();
 

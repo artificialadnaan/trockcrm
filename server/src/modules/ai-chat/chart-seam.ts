@@ -118,7 +118,13 @@ function rebuildEncoding(encoding: unknown): Record<string, Record<string, strin
     for (const key of ALLOWED_CHANNEL_KEYS) {
       const val = source[key];
       // Only string-typed channel props survive — drops sort-objects, numeric value/scale, etc.
-      if (typeof val === "string") cleanChannel[key] = val;
+      if (typeof val !== "string") continue;
+      // `title` is free model-authored display text — the one channel prop that could smuggle a
+      // model number onto the chart AS A STRING (isNumberFree only catches numeric JSON values).
+      // Drop a digit-bearing title so no model-typed number reaches the chart surface; the column
+      // name then serves as the default axis/legend label.
+      if (key === "title" && /\d/.test(val)) continue;
+      cleanChannel[key] = val;
     }
     out[channel] = cleanChannel;
   }
@@ -175,13 +181,17 @@ export function buildChartFromModelBlock(
   } else if (candidates.length === 1) {
     resolved = candidates[0];
   } else {
-    // Ambiguous: require an explicit, in-range, matching global resultIndex — never guess.
+    // Ambiguous: require an explicit, in-range resultIndex — never guess. The prompt defines it as
+    // the 0-based position among the ANALYTICS results received this turn, so index the chartable
+    // (valid) results — NOT the full captured array, which also holds describe_capabilities /
+    // errored / unparseable entries that would shift the index off the model's intended target.
+    const chartable = analyticsResults.filter((r) => r.valid && r.rows);
     const idx = ref.resultIndex;
-    if (typeof idx !== "number" || !Number.isInteger(idx) || idx < 0 || idx >= analyticsResults.length) {
+    if (typeof idx !== "number" || !Number.isInteger(idx) || idx < 0 || idx >= chartable.length) {
       return { ok: false, reason: "unresolved_dataRef" };
     }
-    const entry = analyticsResults[idx];
-    if (!entry || entry.toolName !== tool || !entry.valid || !entry.rows) {
+    const entry = chartable[idx];
+    if (entry.toolName !== tool) {
       return { ok: false, reason: "unresolved_dataRef" };
     }
     resolved = entry;

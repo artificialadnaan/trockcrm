@@ -61,6 +61,17 @@ describe("T Rock AI demo app (page gate + MCP mount)", () => {
     expect(res.status).toBe(401);
   });
 
+  it("sets a CSP that allows Vega charts to run (unsafe-eval script-src, inline styles)", async () => {
+    const res = await request(app).get("/api/health");
+    const csp = res.headers["content-security-policy"] ?? "";
+    // Vega's expression runtime compiles via Function() and vega-embed injects <style> elements;
+    // without these the demo's charts render blank under helmet's default CSP.
+    expect(csp).toMatch(/script-src[^;]*'unsafe-eval'/);
+    expect(csp).toMatch(/style-src[^;]*'unsafe-inline'/);
+    // default-src stays locked to 'self' — the loosening is scoped, not a blanket disable.
+    expect(csp).toMatch(/default-src[^;]*'self'/);
+  });
+
   it("401s the /mcp endpoint without a Bearer MCP token", async () => {
     const res = await request(app)
       .post("/mcp")

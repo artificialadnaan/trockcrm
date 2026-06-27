@@ -37,7 +37,23 @@ export function createMcpDemoApp(): Express {
   // otherwise the IP-keyed rate limiters collapse to a single global bucket.
   app.set("trust proxy", 1);
 
-  app.use(helmet());
+  // The demo serves its own Vite bundle (one external module script — covered by 'self') plus Vega
+  // charts. Vega's expression runtime compiles via Function() (needs 'unsafe-eval') and vega-embed
+  // injects <style> elements at runtime (needs 'unsafe-inline' style) — under bare helmet() defaults
+  // every chart renders blank. Scope the loosening to a trusted, password-gated, single-purpose demo
+  // that loads only its OWN bundle: default-src stays 'self', so no third-party script origin is
+  // allowed; the rest of helmet's hardened defaults are kept.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          scriptSrc: ["'self'", "'unsafe-eval'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          imgSrc: ["'self'", "data:"],
+        },
+      },
+    })
+  );
   app.use(cookieParser());
   app.use(express.json({ limit: "1mb" }));
 
