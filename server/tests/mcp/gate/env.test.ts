@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { getDemoPassword } from "../../../src/mcp/gate/env.js";
+import { getDemoPassword, getPublicBaseUrl } from "../../../src/mcp/gate/env.js";
 
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 const ORIGINAL_DEMO = process.env.DEMO_PASSWORD;
+const ORIGINAL_BASE_URL = process.env.PUBLIC_BASE_URL;
 
 describe("getDemoPassword", () => {
   beforeEach(() => {
@@ -29,5 +30,37 @@ describe("getDemoPassword", () => {
   it("falls back to a dev placeholder in development/test", () => {
     process.env.NODE_ENV = "test";
     expect(getDemoPassword()).toBeTruthy();
+  });
+});
+
+describe("getPublicBaseUrl", () => {
+  afterEach(() => {
+    process.env.NODE_ENV = ORIGINAL_NODE_ENV;
+    if (ORIGINAL_BASE_URL === undefined) delete process.env.PUBLIC_BASE_URL;
+    else process.env.PUBLIC_BASE_URL = ORIGINAL_BASE_URL;
+  });
+
+  it("accepts a public https origin and normalizes to the origin", () => {
+    process.env.NODE_ENV = "production";
+    process.env.PUBLIC_BASE_URL = "https://demo.up.railway.app/whatever";
+    expect(getPublicBaseUrl()).toBe("https://demo.up.railway.app");
+  });
+
+  it("rejects a non-https public origin", () => {
+    process.env.NODE_ENV = "production";
+    process.env.PUBLIC_BASE_URL = "http://demo.up.railway.app";
+    expect(() => getPublicBaseUrl()).toThrow(/https/);
+  });
+
+  it("rejects localhost outside local dev/test (Anthropic would hit its own machine)", () => {
+    process.env.NODE_ENV = "production";
+    process.env.PUBLIC_BASE_URL = "http://localhost:3002";
+    expect(() => getPublicBaseUrl()).toThrow(/localhost/);
+  });
+
+  it("allows http://localhost in local dev/test", () => {
+    process.env.NODE_ENV = "development";
+    process.env.PUBLIC_BASE_URL = "http://localhost:3002";
+    expect(getPublicBaseUrl()).toBe("http://localhost:3002");
   });
 });
