@@ -112,3 +112,43 @@ describe("StreamProcessor — text + chart seam", () => {
     expect(tail.some((e) => e.type === "chart_dropped" && e.data.reason === "unclosed_fence")).toBe(true);
   });
 });
+
+describe("StreamProcessor — ungrounded-prose backstop (no-tool fabrication only)", () => {
+  const proseTurn = (text: string): StreamProcessor => {
+    const p = new StreamProcessor();
+    feed(p, [textStart(0), textDelta(0, text)]);
+    return p;
+  };
+  const flagged = (events: ContentEvent[]) =>
+    events.some((e) => e.type === "text" && /not grounded/.test((e as { data: { delta: string } }).data.delta));
+
+  it("flags a money figure stated with no analytics tool grounding this turn", () => {
+    expect(flagged(proseTurn("Won revenue was $1,250,000 this year.").finish())).toBe(true);
+  });
+
+  it("flags a thousands-grouped figure with no tool grounding", () => {
+    expect(flagged(proseTurn("We have 1,234 open deals.").finish())).toBe(true);
+  });
+
+  it("does NOT flag when an analytics tool returned data this turn (prompt + chart seam own that path)", () => {
+    const p = new StreamProcessor();
+    feed(p, [
+      toolUse(0, "tu1", "get_pipeline_summary"),
+      toolResultStart(1, "tu1", RESULT_TEXT),
+      blockStop(1),
+      textStart(2),
+      textDelta(2, "Won revenue was $1,250,000."),
+    ]);
+    expect(flagged(p.finish())).toBe(false);
+  });
+
+  it("does NOT flag years, percentages, ordinals, or small counts (false-positive guard)", () => {
+    expect(
+      flagged(proseTurn("In 2024 the top 3 reps closed about 60% of deals; the 1st was strongest.").finish())
+    ).toBe(false);
+  });
+
+  it("does NOT flag a tool-less answer with no figures", () => {
+    expect(flagged(proseTurn("I can summarize the pipeline once I call a data tool.").finish())).toBe(false);
+  });
+});

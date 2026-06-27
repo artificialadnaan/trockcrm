@@ -44,6 +44,24 @@ local dev, or if `MCP_SESSION_SECRET` reuses `JWT_SECRET`. Outside local dev it 
 chat connector config — `PUBLIC_BASE_URL` and `ANTHROPIC_API_KEY` — so a deploy can't go green
 (health passing) while every `/api/ai-chat` request 503s.
 
+## How the "every number is SQL" guarantee works
+
+Two tiers, deliberately:
+
+- **Charts — hard, deterministic.** A chart's data can ONLY be verbatim rows from an allowlisted
+  analytics tool result. The model authors a number-free skeleton; the chart seam allowlist-rebuilds
+  it (no data slot), rejects any numeric literal, strips `aggregate`/`timeUnit` (no client-side
+  computation), and injects the real rows last. The model literally cannot put a number on a chart.
+- **Prose — grounded source + a no-grounding backstop.** The model's only data source is the tools,
+  and the system prompt forbids fabricating figures. This is NOT a per-number proof: when a tool DID
+  return data we trust the model to cite it (matching individual prose numbers to cells is
+  false-positive-prone and intentionally not done). The deterministic backstop covers only the
+  egregious case — if the model states a money or thousands-grouped figure while **zero** analytics
+  tools returned data that turn, the reply gets a visible "not grounded in the CRM data" note. Years,
+  small counts, ordinals, and percentages never trigger it.
+
+The `tool_debug` strip in the UI shows which tools ran (and row counts), so grounding is visible.
+
 ## Post-deploy live verification
 
 Run the connectivity check against the deployed service (the one thing that can't be validated until

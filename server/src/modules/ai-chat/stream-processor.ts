@@ -68,6 +68,8 @@ export class StreamProcessor {
   private readonly blocks = new Map<number, BlockState>();
   private readonly toolUseById = new Map<string, string>();
   private chartSeq = 0;
+  /** Visible prose emitted this turn (excludes chart-fence JSON) — scanned by the ungrounded backstop. */
+  private proseText = "";
 
   process(evt: AnthropicStreamEvent): ContentEvent[] {
     switch (evt.type) {
@@ -125,7 +127,33 @@ export class StreamProcessor {
 
   /** Terminal flush: an unclosed chart fence is dropped (never emitted as text). */
   finish(): ContentEvent[] {
-    return this.mapFenceEvents(this.fence.end());
+    const out = this.mapFenceEvents(this.fence.end());
+    if (this.shouldFlagUngroundedProse()) {
+      out.push({
+        type: "text",
+        data: {
+          delta:
+            "\n\n⚠️ No data tool returned results this turn, so any figures above are not grounded in the CRM data.",
+        },
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Prose-number BACKSTOP — not the hard guarantee (that's the chart seam, which is deterministically
+   * model-number-free). This flags only the egregious no-grounding case: the model stated a money or
+   * large (thousands-grouped) figure in prose while ZERO analytics tools returned data this turn.
+   *
+   * Deliberately narrow to keep false positives near zero: it triggers ONLY on currency / grouped
+   * magnitudes (years, small counts, ordinals, and percentages never match), and ONLY when no tool
+   * produced data. It does NOT try to match individual prose numbers against tool cells when a tool
+   * DID run — that path is left to the strong tool-only system prompt (charts remain the hard proof).
+   */
+  private shouldFlagUngroundedProse(): boolean {
+    const hasToolData = this.analyticsResults.some((r) => r.valid && r.rows);
+    if (hasToolData) return false;
+    return /\$\s?\d|\d{1,3}(,\d{3})+/.test(this.proseText);
   }
 
   private feedText(text: string): ContentEvent[] {
@@ -136,6 +164,7 @@ export class StreamProcessor {
     const out: ContentEvent[] = [];
     for (const e of events) {
       if (e.type === "text") {
+        this.proseText += e.text;
         out.push({ type: "text", data: { delta: e.text } });
       } else if (e.type === "chart") {
         const result = buildChartFromModelBlock(e.raw, this.analyticsResults);
