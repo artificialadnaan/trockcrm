@@ -122,6 +122,20 @@ describe("buildChartFromModelBlock — the invariant", () => {
     expect(res).toEqual({ ok: false, reason: "unknown_field" });
   });
 
+  it("resolves a namespaced dataRef.tool (connector prefix) to the captured analytics result", () => {
+    // Anthropic's MCP connector surfaces the tool as e.g. "trock-data__get_pipeline_summary"; the
+    // model echoes that into dataRef.tool. A tolerant (normalized-suffix) match must still resolve it.
+    const res = buildChartFromModelBlock(
+      block({
+        dataRef: { tool: "trock-data__get_pipeline_summary" },
+        spec: { mark: "bar", encoding: { x: { field: "segment" }, y: { field: "value" } } },
+      }),
+      [captured()]
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) expect((res.spec.data as { values: unknown }).values).toEqual(pipelineRows);
+  });
+
   it("multi-result: requires a valid resultIndex; uses the indexed dataset", () => {
     const a = captured({ toolUseId: "a", rows: [{ segment: "Won", value: 1 }] });
     const b = captured({ toolUseId: "b", rows: [{ segment: "Active", value: 2 }] });

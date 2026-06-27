@@ -174,30 +174,39 @@ export function buildChartFromModelBlock(
   if (!mark || !encoding) return { ok: false, reason: "parse_failed" };
   const rebuiltSpec: Record<string, unknown> = { mark, encoding };
 
-  // Resolve dataRef → a real, allowlisted, valid captured analytics result.
+  // Resolve dataRef → a real, allowlisted, valid captured analytics result. The captured result must
+  // still be a genuine analytics tool (isAnalyticsTool — the PII/allowlist guard, unchanged), but the
+  // model's dataRef.tool is matched TOLERANTLY: the Anthropic MCP connector surfaces tool names
+  // namespaced (e.g. "trock-data__get_pipeline_summary"), so an exact-string compare would drop every
+  // chart. Compare on a normalized suffix instead. The data is always a verbatim captured result, so
+  // the number-free guarantee is unaffected by how the name is matched.
   const ref = dataRef as Record<string, unknown>;
-  const tool = ref.tool;
-  if (typeof tool !== "string" || !isAnalyticsTool(tool)) {
-    return { ok: false, reason: "unresolved_dataRef" };
-  }
-  const candidates = analyticsResults.filter((r) => r.toolName === tool && r.valid && r.rows);
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const wanted = typeof ref.tool === "string" ? norm(ref.tool) : "";
+  const nameMatch = (toolName: string): boolean => {
+    if (!wanted) return false;
+    const have = norm(toolName);
+    return have === wanted || have.endsWith(wanted) || wanted.endsWith(have);
+  };
+  const candidates = analyticsResults.filter(
+    (r) => r.valid && r.rows && isAnalyticsTool(r.toolName) && nameMatch(r.toolName)
+  );
   let resolved: CapturedAnalyticsResult;
   if (candidates.length === 0) {
     return { ok: false, reason: "unresolved_dataRef" };
   } else if (candidates.length === 1) {
     resolved = candidates[0];
   } else {
-    // Ambiguous: require an explicit, in-range resultIndex — never guess. The prompt defines it as
-    // the 0-based position among the ANALYTICS results received this turn, so index the chartable
-    // (valid) results — NOT the full captured array, which also holds describe_capabilities /
-    // errored / unparseable entries that would shift the index off the model's intended target.
-    const chartable = analyticsResults.filter((r) => r.valid && r.rows);
+    // Ambiguous (same tool more than once): require an explicit, in-range resultIndex — never guess.
+    // The prompt defines it as the 0-based position among the ANALYTICS results received this turn, so
+    // index the chartable (valid analytics) results, and it must land on a name-matching result.
+    const chartable = analyticsResults.filter((r) => r.valid && r.rows && isAnalyticsTool(r.toolName));
     const idx = ref.resultIndex;
     if (typeof idx !== "number" || !Number.isInteger(idx) || idx < 0 || idx >= chartable.length) {
       return { ok: false, reason: "unresolved_dataRef" };
     }
     const entry = chartable[idx];
-    if (entry.toolName !== tool) {
+    if (!nameMatch(entry.toolName)) {
       return { ok: false, reason: "unresolved_dataRef" };
     }
     resolved = entry;
