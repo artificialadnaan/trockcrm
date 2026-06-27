@@ -14,3 +14,17 @@ export function getDemoPassword(): string {
   }
   return password || "dev-demo-password";
 }
+
+/** Anthropic Messages API key for the /api/ai-chat connector. Throws if unset (no dev fallback). */
+export function getAnthropicApiKey(): string {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) throw new Error("ANTHROPIC_API_KEY is not set");
+  return key;
+}
+
+/** This service's own public https origin, used to build the MCP connector URL handed to Anthropic. */
+export function getPublicBaseUrl(): string {
+  const url = process.env.PUBLIC_BASE_URL;
+  if (!url) throw new Error("PUBLIC_BASE_URL is not set");
+  return url.replace(/\/+$/, "");
+}

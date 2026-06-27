@@ -47,6 +47,11 @@ describe("T Rock AI demo app (page gate + MCP mount)", () => {
     expect(after.body.authenticated).toBe(true);
   });
 
+  it("401s /api/ai-chat without a demo session (page gate wraps the chat)", async () => {
+    const res = await request(app).post("/api/ai-chat").send({ messages: [{ role: "user", content: "hi" }] });
+    expect(res.status).toBe(401);
+  });
+
   it("401s the /mcp endpoint without a Bearer MCP token", async () => {
     const res = await request(app)
       .post("/mcp")

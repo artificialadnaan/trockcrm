@@ -11,6 +11,7 @@ import {
 import { createLoginRouter } from "./gate/loginRoute.js";
 import { requireDemoSession } from "./gate/requireDemoSession.js";
 import { createMcpRouter } from "./router.js";
+import { createAiChatRouter } from "../modules/ai-chat/routes.js";
 
 /**
  * The T Rock AI demo Express app.
@@ -71,6 +72,9 @@ export function createMcpDemoApp(): Express {
   app.get("/api/session", requireDemoSession, (_req, res) => {
     res.json({ authenticated: true });
   });
+
+  // Demo-gated AI chat (SSE). requireDemoSession also enforces CSRF on this POST.
+  app.use("/api/ai-chat", requireDemoSession, createAiChatRouter());
 
   app.use(errorHandler);
   return app;
