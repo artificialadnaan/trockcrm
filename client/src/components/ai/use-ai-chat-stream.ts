@@ -43,8 +43,10 @@ export function useAiChatStream() {
   const mountedRef = useRef(true);
 
   // Abort an in-flight stream on unmount so the request + server-side Anthropic session stop and no
-  // late chunk updates state after disposal.
+  // late chunk updates state after disposal. Set mounted=true at setup so StrictMode's
+  // mount→cleanup→mount replay doesn't leave the live instance flagged as unmounted.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       abortRef.current?.abort();
