@@ -35,8 +35,10 @@ export function createMcpRouter(): Router {
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
-      // Log server-side (the generic client response leaks nothing), mirroring errorHandler.
-      console.error("[MCP] request failed", err);
+      // Log a redacted summary (name + message) — NOT the raw exception object, which could carry
+      // client-supplied params / backend detail. Restores visibility without leaking.
+      const summary = err instanceof Error ? `${err.name}: ${err.message}` : "non-Error thrown";
+      console.error(`[MCP] request failed: ${summary}`);
       if (!res.headersSent) {
         res.status(500).json({ error: { message: "MCP request failed" } });
       }
