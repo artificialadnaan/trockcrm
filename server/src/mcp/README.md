@@ -4,7 +4,7 @@ A password-gated, **read-only** AI chat over the Dallas CRM tenant, exposed to A
 scoped MCP server. It runs as a **separate Railway service from the existing `server` workspace** —
 same repo, same build, a **distinct start command**. The CRM `createApp()` is untouched.
 
-- Browser surface (page gate + chat) → `POST /api/login`, `GET /api/session`, (Phase 4) `POST /api/ai-chat`
+- Browser surface (page gate + chat) → `POST /api/login`, `GET /api/session`, `POST /api/ai-chat`
 - Machine surface (Anthropic connector) → `/mcp` (Bearer MCP session token, `validateSessionToken`)
 - Entry point: `server/src/mcp/index.ts` → built to `server/dist/mcp/index.js`
 
@@ -32,7 +32,7 @@ The demo service serves the built React client too, so the demo UI is at **`${PU
 |---|---|---|
 | `DEMO_PASSWORD` | ✅ | Single shared page-gate password (`POST /api/login`). |
 | `MCP_SESSION_SECRET` | ✅ | Signs the scoped MCP token + the demo session cookie. **MUST differ from the CRM's `JWT_SECRET`** — startup fails fast if it equals it. |
-| `ANTHROPIC_API_KEY` | Phase 4 | Needed only once the `/api/ai-chat` connector ships. The read-only MCP demo boots and passes its direct checks without it (the connectivity check skips its Anthropic step when unset). |
+| `ANTHROPIC_API_KEY` | ✅ | Anthropic Messages API key for the shipped `/api/ai-chat` connector. **Required outside local dev — boot fails fast without it** (this service IS the chat demo). The connectivity check skips its Anthropic step when unset; in dev/test the service still boots without it. |
 | `DATABASE_URL` | ✅ | **Same Postgres as the CRM.** The demo reads `office_dallas` read-only. |
 | `PUBLIC_BASE_URL` | ✅ | This service's own public **https** origin (the Railway domain). Used to build the MCP connector URL `${PUBLIC_BASE_URL}/mcp` handed to Anthropic. |
 | `DB_POOL_MAX` | optional | Cap the demo's DB pool low (e.g. `5`) so demo load can't starve the CRM's shared-Postgres connection budget. |
@@ -40,7 +40,9 @@ The demo service serves the built React client too, so the demo UI is at **`${PU
 | `PORT` | auto | Set by Railway; the entry point reads it. |
 
 Startup fails fast (before listening) if `DEMO_PASSWORD` / `MCP_SESSION_SECRET` are missing outside
-local dev, or if `MCP_SESSION_SECRET` reuses `JWT_SECRET`.
+local dev, or if `MCP_SESSION_SECRET` reuses `JWT_SECRET`. Outside local dev it ALSO requires the
+chat connector config — `PUBLIC_BASE_URL` and `ANTHROPIC_API_KEY` — so a deploy can't go green
+(health passing) while every `/api/ai-chat` request 503s.
 
 ## Post-deploy live verification
 

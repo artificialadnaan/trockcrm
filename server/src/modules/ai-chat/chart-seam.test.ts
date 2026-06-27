@@ -179,6 +179,29 @@ describe("buildChartFromModelBlock — the invariant", () => {
     }
   });
 
+  it("strips aggregate/timeUnit so Vega can't compute client-side numbers (SQL-owns-numbers guarantee)", () => {
+    const res = buildChartFromModelBlock(
+      block({
+        dataRef: { tool: "get_pipeline_summary" },
+        spec: {
+          mark: "bar",
+          encoding: {
+            x: { field: "segment", type: "nominal", timeUnit: "yearmonth" },
+            y: { field: "value", type: "quantitative", aggregate: "sum" },
+          },
+        },
+      }),
+      [captured()]
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    const enc = res.spec.encoding as Record<string, Record<string, unknown>>;
+    expect(enc.y).not.toHaveProperty("aggregate");
+    expect(enc.x).not.toHaveProperty("timeUnit");
+    // the verbatim tool rows still flow through — the chart renders, it just can't re-compute
+    expect((res.spec.data as { values: unknown }).values).toEqual(pipelineRows);
+  });
+
   it("allowlist-rebuild strips transform / params / layer / datasets from output", () => {
     const res = buildChartFromModelBlock(
       block({

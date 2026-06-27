@@ -35,8 +35,14 @@ export type BuildChartResult =
 const MAX_ROWS = 1000;
 const MAX_CELLS = 20_000;
 
-/** Vega-Lite encoding-channel keys we copy — all string-typed, so numbers can't ride in via a channel. */
-const ALLOWED_CHANNEL_KEYS = ["field", "type", "aggregate", "timeUnit", "sort", "title"] as const;
+/**
+ * Vega-Lite encoding-channel keys we copy — all string-typed. `aggregate` and `timeUnit` are
+ * deliberately EXCLUDED: both make Vega compute/group numbers in the browser (e.g. `aggregate:"sum"`
+ * over a capped list_deals page), putting a number on the chart that no SQL tool produced. Charts
+ * therefore render only the verbatim rows a tool returned; any totaling/grouping must come from the
+ * tool (= SQL).
+ */
+const ALLOWED_CHANNEL_KEYS = ["field", "type", "sort", "title"] as const;
 
 /** Server-owned spec constants (trusted, may contain numbers — added AFTER the number-free check). */
 const CHART_CONFIG = { view: { stroke: null } } as const;

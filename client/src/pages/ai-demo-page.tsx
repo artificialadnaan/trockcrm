@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { GreenChatPanel } from "@/components/ai/green-chat-panel";
+import { isDemoSessionResponse } from "@/components/ai/demo-session";
 
 /**
  * The T Rock AI demo page. Self-contained page gate: checks the demo session, shows the
@@ -18,7 +19,9 @@ export function AiDemoPage() {
   useEffect(() => {
     let active = true;
     fetch("/api/session", { credentials: "include" })
-      .then((r) => active && setAuthed(r.ok))
+      // Require the demo service's exact JSON, not just a 200 (see isDemoSessionResponse).
+      .then(isDemoSessionResponse)
+      .then((ok) => active && setAuthed(ok))
       .catch(() => active && setAuthed(false));
     return () => {
       active = false;
