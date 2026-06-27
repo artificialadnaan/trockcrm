@@ -132,6 +132,7 @@ function AuthGate({ children }: { children: ReactNode }) {
 
   if (location.pathname.startsWith("/p/")) return <>{children}</>;
   if (location.pathname.startsWith("/daily-summary/")) return <>{children}</>; // token-guarded public page
+  if (location.pathname.startsWith("/ai-demo")) return <>{children}</>; // gated by DEMO_PASSWORD, not CRM auth
 
   if (loading) {
     return (

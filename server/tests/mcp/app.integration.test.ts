@@ -1,8 +1,17 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import { existsSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import request from "supertest";
 import { createMcpDemoApp } from "../../src/mcp/app.js";
 
 const DEMO_PW = "integration-demo-pw";
+
+// The static-serve block only mounts when the built client exists; mirror the app's own resolution
+// so the SPA-fallback test runs in CI (client built) and skips cleanly when it hasn't been built.
+const clientDistBuilt = existsSync(
+  join(dirname(fileURLToPath(import.meta.url)), "../../../client/dist/index.html")
+);
 
 let app: ReturnType<typeof createMcpDemoApp>;
 
@@ -58,5 +67,22 @@ describe("T Rock AI demo app (page gate + MCP mount)", () => {
       .set("Accept", "application/json, text/event-stream")
       .send({ jsonrpc: "2.0", id: 1, method: "ping" });
     expect(res.status).toBe(401);
+  });
+
+  // The SPA catch-all serves index.html for any non-API GET so client-side routes (e.g. /ai-demo)
+  // load on a hard refresh. sendFile uses the { root } form so a parent dir with a dot-segment (a
+  // .claude worktree) doesn't trip send()'s dotfile guard and 500. Only runs when the client is built.
+  it.skipIf(!clientDistBuilt)("serves the SPA shell (index.html) for a deep link, not a JSON error", async () => {
+    const res = await request(app).get("/ai-demo");
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/text\/html/);
+    expect(res.text).toContain("<!DOCTYPE html>");
+  });
+
+  it.skipIf(!clientDistBuilt)("keeps API routes ahead of the SPA catch-all", async () => {
+    const res = await request(app).get("/api/health");
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/application\/json/);
+    expect(res.body.status).toBe("ok");
   });
 });

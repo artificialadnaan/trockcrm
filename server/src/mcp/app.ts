@@ -85,8 +85,10 @@ export function createMcpDemoApp(): Express {
   const clientDist = join(dirname(fileURLToPath(import.meta.url)), "../../../client/dist");
   if (existsSync(clientDist)) {
     app.use(express.static(clientDist));
+    // Use the { root } form (not an absolute path): send() then validates only "index.html", so a
+    // parent dir with a dot-segment (e.g. a .claude worktree) doesn't trip its dotfile guard.
     app.get("/{*path}", (_req, res) => {
-      res.sendFile(join(clientDist, "index.html"));
+      res.sendFile("index.html", { root: clientDist });
     });
   }
 
