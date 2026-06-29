@@ -57,6 +57,7 @@ import { DealEstimatesTab } from "./deal-estimates-tab";
 import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
+import { BidDueDateBanner } from "./bid-due-date-banner";
 import { DealProposalCard } from "./deal-proposal-card";
 import { DealContractSignedCard } from "./deal-contract-signed-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
@@ -897,6 +898,7 @@ export function DealDetailPage() {
   );
   const tabContent = (
     <div className="space-y-4">
+      <BidDueDateBanner bidDueDate={deal.bidDueDate} />
       {!viewerOwnsDeal ? (
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">
           Assigned to {deal.assignedRepName ?? deal.assignedRepId ?? "another rep"}. You can collaborate with notes, activity, files, photos, and emails, but only the assigned rep can edit.
