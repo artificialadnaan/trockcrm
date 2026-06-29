@@ -330,7 +330,7 @@ describe("deal lineage resolver field ownership", () => {
       deal: { sourceLeadId: null, bidDueDate: null } as never,
     });
 
-    await writeResolvedDealFields(
+    const resolved = await writeResolvedDealFields(
       tenantDb as never,
       "deal-1",
       { bidDueDate: "2026-07-03" },
@@ -341,6 +341,9 @@ describe("deal lineage resolver field ownership", () => {
     expect((tenantDb.state.deals[0]?.bidDueDate as Date).toISOString()).toBe(
       "2026-07-03T00:00:00.000Z"
     );
+    // The resolver now reflects the deal-owned value as a date-only string (symmetric with the write),
+    // so the PATCH /resolved-fields response + scoping/readiness reads don't see it as "missing".
+    expect(resolved.resolved.bidDueDate).toBe("2026-07-03");
     // No source lead, so the orphaned lead row is never written by this path.
     expect(tenantDb.state.leads[0]?.bidDueDate).toBe("2026-06-01");
   });

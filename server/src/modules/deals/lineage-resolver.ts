@@ -180,6 +180,20 @@ async function getQuestionAnswersByKey(tenantDb: TenantDb, leadId: string) {
   return Object.fromEntries(rows.map((row) => [row.key, row.valueJson]));
 }
 
+/**
+ * deals.bid_due_date is a timestamptz stored at UTC midnight; leads.bid_due_date is a date-only column
+ * serialized as "YYYY-MM-DD". When a deal has NO source lead the deal column is the authoritative value,
+ * so the resolver must surface it in the SAME date-only string shape lead-backed deals produce —
+ * consumers (scoping-service, the PATCH /resolved-fields response) guard on `typeof === "string"`. Read
+ * the UTC calendar day so there's no off-by-one against the UTC-midnight storage.
+ */
+function dealBidDueDateToDateOnly(value: unknown): string | null {
+  if (value == null) return null;
+  const date = value instanceof Date ? value : new Date(value as string);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
 export async function getResolvedDeal(
   tenantDb: TenantDb,
   dealId: string
@@ -223,7 +237,7 @@ export async function getResolvedDeal(
       assignedRepId: sourceLead?.assignedRepId ?? deal.assignedRepId,
       workflowRoute,
       description: sourceLead?.description ?? deal.description ?? null,
-      bidDueDate: sourceLead?.bidDueDate ?? null,
+      bidDueDate: sourceLead?.bidDueDate ?? dealBidDueDateToDateOnly(deal.bidDueDate) ?? null,
     },
     ownership: DEAL_FIELD_OWNERSHIP,
   };

@@ -5,11 +5,14 @@
 // observable when the runner's zone is behind UTC. The CI runner defaults to UTC, where a
 // local-time fallback would still pass — so we force America/Chicago (UTC-5/6) here. Node applies
 // process.env.TZ at runtime via tzset(); the guard test below fails loudly if it ever doesn't.
+// Capture the prior value and restore it in afterAll so this global mutation doesn't leak into other
+// date-sensitive specs that run later in the same Vitest worker.
+const previousTZ = process.env.TZ;
 process.env.TZ = "America/Chicago";
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BidDueDateBanner } from "./bid-due-date-banner";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -29,6 +32,15 @@ describe("BidDueDateBanner", () => {
       root.unmount();
     });
     container.remove();
+  });
+
+  afterAll(() => {
+    // Restore the worker's original timezone so this spec doesn't leak America/Chicago into others.
+    if (previousTZ === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = previousTZ;
+    }
   });
 
   async function render(bidDueDate: string | null | undefined) {
