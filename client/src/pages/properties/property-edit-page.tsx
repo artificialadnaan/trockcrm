@@ -76,15 +76,14 @@ export function PropertyEditPage() {
     // blank required address part, a build year of 1500, a unit count of 0) would reject an otherwise
     // valid edit to a different field. Diffing also surfaces the real server error when a user clears
     // a required field, instead of silently keeping the old value.
+    // Compare RAW form values (which mirror the loaded property) against the raw property values, so a
+    // whitespace-padded or whitespace-only legacy field isn't mistaken for a change. Trim only when
+    // assigning, so a genuine edit is still normalized before it's sent.
     const patch: Parameters<typeof updateProperty>[1] = {};
-    const address = formData.address.trim();
-    const city = formData.city.trim();
-    const state = formData.state.trim();
-    const zip = formData.zip.trim();
-    if (address !== (property.address ?? "")) patch.address = address || null;
-    if (city !== (property.city ?? "")) patch.city = city || null;
-    if (state !== (property.state ?? "")) patch.state = state || null;
-    if (zip !== (property.zip ?? "")) patch.zip = zip || null;
+    if (formData.address !== (property.address ?? "")) patch.address = formData.address.trim() || null;
+    if (formData.city !== (property.city ?? "")) patch.city = formData.city.trim() || null;
+    if (formData.state !== (property.state ?? "")) patch.state = formData.state.trim() || null;
+    if (formData.zip !== (property.zip ?? "")) patch.zip = formData.zip.trim() || null;
     if (buildYear !== property.buildYear) patch.buildYear = buildYear;
     if (unitCount !== property.unitCount) patch.unitCount = unitCount;
 
@@ -113,7 +112,11 @@ export function PropertyEditPage() {
     return (
       <div className="text-center py-12">
         <p className="text-red-600">{error ?? "Property not found"}</p>
-        <Button variant="outline" className="mt-4" onClick={() => navigate("/properties")}>
+        <Button
+          variant="outline"
+          className="mt-4"
+          onClick={() => navigate(`/properties${location.search}`)}
+        >
           Back to Properties
         </Button>
       </div>

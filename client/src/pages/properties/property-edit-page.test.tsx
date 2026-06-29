@@ -118,6 +118,20 @@ describe("PropertyEditPage", () => {
     expect(mocks.updateProperty).toHaveBeenCalledWith("property-1", { address: "456 Oak Ave" });
   });
 
+  // A whitespace-only legacy field must not be treated as "changed" on an untouched save (raw compare),
+  // or it would be sent as null and 400 on "<Field> cannot be blank when provided".
+  it("does not resend a whitespace-only legacy field on an unrelated save", async () => {
+    mocks.usePropertyDetail.mockReturnValue({
+      property: { ...PROPERTY, city: "  " },
+      loading: false,
+      error: null,
+    });
+    mount();
+    await act(async () => setInput("buildYear", "2010"));
+    await act(async () => submit());
+    expect(mocks.updateProperty).toHaveBeenCalledWith("property-1", { buildYear: 2010 });
+  });
+
   // api() resolves the office from the URL, so a cross-office save must return with ?officeId intact —
   // otherwise the director lands in the wrong office and sees a not-found view.
   it("preserves the ?officeId query param when returning to the detail page after save", async () => {
