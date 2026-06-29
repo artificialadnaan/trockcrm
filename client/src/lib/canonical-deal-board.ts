@@ -1,5 +1,5 @@
 import type { Deal, DealBoardColumn } from "@/hooks/use-deals";
-import { getEffectiveDealValue } from "@trock-crm/shared/types";
+import { getEffectiveDealValue, pendingRfpSubStateForStatus } from "@trock-crm/shared/types";
 import {
   getDealBoardStageSlugs,
   getDealStageLabelBySlug,
@@ -145,24 +145,33 @@ export function buildCanonicalDealBoardColumns(
 ): DealBoardColumn[] {
   const deals = dedupeDealsById((rawColumns ?? []).flatMap((column) => column.cards));
 
-  return getDealBoardStageSlugs().map((slug) => {
+  const dealCanonicalSlug = (deal: Deal) =>
+    getDealStageMetadata(
+      {
+        stageId: deal.stageId,
+        workflowRoute: deal.workflowRoute ?? "normal",
+        isBidBoardOwned: deal.isBidBoardOwned,
+        bidBoardStageSlug: deal.bidBoardStageSlug,
+        readOnlySyncedAt: deal.readOnlySyncedAt,
+      },
+      stages,
+    ).slug;
+  const isPendingRfpCard = (deal: Deal) =>
+    dealCanonicalSlug(deal) === "opportunity" &&
+    !deal.isBidBoardOwned &&
+    pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null;
+  const pendingRfpCards = deals.filter(isPendingRfpCard);
+
+  const columns: DealBoardColumn[] = getDealBoardStageSlugs().map((slug) => {
     const matchingRawColumns = (rawColumns ?? []).filter((column) => {
       const rawSlug = column.stage.slug;
       const columnRoute = workflowRouteFromColumn(column as RawColumnRouteLike);
       return normalizeDealStageSlug(rawSlug, columnRoute) === slug;
     });
     const cards = deals.filter((deal) => {
-      const workflowRoute = deal.workflowRoute ?? "normal";
-      return getDealStageMetadata(
-        {
-          stageId: deal.stageId,
-          workflowRoute,
-          isBidBoardOwned: deal.isBidBoardOwned,
-          bidBoardStageSlug: deal.bidBoardStageSlug,
-          readOnlySyncedAt: deal.readOnlySyncedAt,
-        },
-        stages
-      ).slug === slug;
+      if (dealCanonicalSlug(deal) !== slug) return false;
+      if (slug === "opportunity" && isPendingRfpCard(deal)) return false;
+      return true;
     });
 
     const matchingStage =
@@ -210,6 +219,28 @@ export function buildCanonicalDealBoardColumns(
       cards,
     };
   });
+
+  const oppIndex = columns.findIndex((column) => column.stage.slug === "opportunity");
+  if (oppIndex !== -1 && pendingRfpCards.length > 0) {
+    const opp = columns[oppIndex];
+    columns.splice(oppIndex + 1, 0, {
+      stage: {
+        id: "canonical-pending_rfp",
+        name: "Pending RFP",
+        slug: "pending_rfp",
+        color: null,
+        displayOrder: (opp.stage.displayOrder ?? 0) + 1,
+        isActivePipeline: false,
+        isTerminal: false,
+      },
+      count: pendingRfpCards.length,
+      totalValue: pendingRfpCards
+        .filter((deal) => !deal.onHold)
+        .reduce((sum, deal) => sum + getDealValue(deal, "opportunity"), 0),
+      cards: pendingRfpCards,
+    });
+  }
+  return columns;
 }
 
 function getDealValue(deal: Deal, canonicalStageSlug: string) {

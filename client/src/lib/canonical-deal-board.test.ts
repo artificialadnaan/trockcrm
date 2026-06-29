@@ -1071,4 +1071,65 @@ describe("buildCanonicalDealBoardColumns", () => {
       .filter((deal) => deal.id === "deal-lost-dup");
     expect(renders).toHaveLength(1);
   });
+
+  it("pulls pending-RFP opportunity deals into a synthetic Pending RFP column placed immediately after the opportunity column", () => {
+    // p1 is in the opportunity stage with a pending RFP status and is NOT bid-board-owned → should be
+    // lifted out of "opportunity" and placed in the synthetic "pending_rfp" column.
+    // o1 is a plain opportunity deal (no rfpApprovalStatus) → stays in "opportunity".
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 2,
+          totalValue: 200000,
+          cards: [
+            {
+              id: "p1",
+              stageId: "opp-stage",
+              workflowRoute: "normal",
+              isBidBoardOwned: false,
+              bidBoardStageSlug: null,
+              readOnlySyncedAt: null,
+              rfpApprovalStatus: "pending",
+              bidEstimate: "100000",
+              ddEstimate: null,
+              awardedAmount: null,
+              onHold: false,
+            },
+            {
+              id: "o1",
+              stageId: "opp-stage",
+              workflowRoute: "normal",
+              isBidBoardOwned: false,
+              bidBoardStageSlug: null,
+              readOnlySyncedAt: null,
+              rfpApprovalStatus: null,
+              bidEstimate: "100000",
+              ddEstimate: null,
+              awardedAmount: null,
+              onHold: false,
+            },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    // (a) pending_rfp column exists with the correct name and is immediately after opportunity
+    expect(prfpIndex).not.toBe(-1);
+    expect(columns[prfpIndex]!.stage.name).toBe("Pending RFP");
+    expect(prfpIndex).toBe(oppIndex + 1);
+
+    // (b) p1 is in the pending_rfp column
+    expect(columns[prfpIndex]!.cards.map((d) => d.id)).toContain("p1");
+
+    // (c) p1 is NOT in the opportunity column
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).not.toContain("p1");
+
+    // (d) o1 IS in the opportunity column
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).toContain("o1");
+  });
 });
