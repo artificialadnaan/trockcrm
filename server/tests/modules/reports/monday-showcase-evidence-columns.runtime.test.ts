@@ -43,7 +43,7 @@ beforeAll(async () => {
     CREATE TABLE region_config (id uuid PRIMARY KEY, name text NOT NULL);
     CREATE TABLE project_type_config (id uuid PRIMARY KEY, name text NOT NULL);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
+      id uuid PRIMARY KEY, deal_number text, project_number text, name text NOT NULL, stage_id uuid NOT NULL,
       assigned_rep_id uuid, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, won_closed_date date, expected_close_date date,
       dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric,

@@ -18,7 +18,7 @@ function ladder(b: [number, number, number, number], n: number, m: number) {
       { band: "61_90", count: b[2], value: b[2] * 110000 },
       { band: "beyond_90", count: b[3], value: b[3] * 100000 },
     ],
-    coverage: { n, m },
+    coverage: { n, m, undatedValue: Math.max(0, m - n) * 100000 },
     coverageCaption: `${n} of ${m} open deals have a maintained (future-dated) expected close date.`,
   };
 }

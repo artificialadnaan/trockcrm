@@ -11,12 +11,21 @@ vi.mock("@/hooks/use-reports", () => ({
   useShowcaseEvidence: () => ({ data: hookState.data, loading: false, error: null }),
 }));
 
+// Controllable auth mock — the undated list's "Set close date" action is gated on the viewer OWNING the
+// deal (the inline write hits the owner-only PATCH /deals/:id), so the tests drive who the viewer is.
+const authState: { user: { id: string; role: string } | null } = { user: { id: "viewer", role: "rep" } };
+vi.mock("@/lib/auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/auth")>();
+  return { ...actual, useAuth: () => ({ user: authState.user }) };
+});
+
 import { EvidenceDrawer } from "./evidence-drawer";
 
 function record(over: Partial<EvidenceRecord>): EvidenceRecord {
   return {
     id: "d1",
     dealNumber: "1001",
+    projectNumber: null,
     name: "Deal One",
     repId: "r1",
     repName: "Alice",
@@ -53,6 +62,7 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
+  authState.user = { id: "viewer", role: "rep" };
 });
 afterEach(() => {
   act(() => root.unmount());
@@ -69,6 +79,12 @@ function mount(metric: EvidenceMetric, records: EvidenceRecord[]) {
       </MemoryRouter>
     );
   });
+}
+
+function setCloseDateButtons(): HTMLButtonElement[] {
+  return Array.from(document.querySelectorAll("button")).filter((b) =>
+    (b.textContent ?? "").includes("Set close date")
+  ) as HTMLButtonElement[];
 }
 
 describe("evidence drawer Win % column", () => {
@@ -105,6 +121,26 @@ describe("evidence drawer Win % column", () => {
     }
     // No data rows, but the empty-state row is present.
     expect(document.querySelectorAll("tbody tr").length).toBe(1);
+  });
+});
+
+describe("evidence drawer deal-number resolution (canonical, never the HubSpot id)", () => {
+  it("shows the canonical DFW/ATL project number, not the raw HubSpot deal id", () => {
+    mount("won", [record({ id: "a", name: "Acme Reroof", dealNumber: "HS-318651319000", projectNumber: "DFW-1-09026-af" })]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("#DFW-1-09026-af");
+    expect(text).not.toContain("HS-318651319000");
+    expect(text).not.toContain("318651319000");
+  });
+
+  it("omits the identifier line entirely when no canonical number resolves (Pending) — never the HS id", () => {
+    mount("won", [record({ id: "b", name: "Mystery Deal", dealNumber: "HS-999000111222", projectNumber: null })]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Mystery Deal"); // the name still renders
+    expect(text).not.toContain("HS-999000111222");
+    expect(text).not.toContain("999000111222");
+    expect(text).not.toContain("Pending"); // no "#Pending" chip — the line is omitted
+    expect(text).not.toContain("#"); // the whole identifier line (the only "#" source) is gone
   });
 });
 
@@ -178,5 +214,64 @@ describe("evidence drawer column alignment", () => {
     expect(textCells.length).toBeGreaterThan(0);
     expect(numericCells.every((c) => c.className.includes("tabular-nums"))).toBe(true);
     expect(textCells.every((c) => c.className.includes("text-left"))).toBe(true);
+  });
+});
+
+describe("evidence drawer 'Set close date' action is owner-gated (CodeRabbit P2)", () => {
+  // The inline close-date write hits the OWNER-ONLY PATCH /deals/:id (the same gate the deal detail uses:
+  // canMoveCloseDate={viewerOwnsDeal}). The Monday Showcase is rep-accessible and its office-wide undated
+  // drawer lists EVERY rep's undated deals, so the action must be offered only on rows the viewer owns —
+  // otherwise a rep clicking a coworker's row is taken into the modal only to 403.
+
+  it("does NOT render the action for a rep viewing the office-wide undated list (coworkers' deals)", () => {
+    authState.user = { id: "rep-self", role: "rep" };
+    // Office-wide undated list: every row is owned by ANOTHER rep.
+    mount("undated", [
+      record({ id: "x", repId: "rep-other", repName: "Other A" }),
+      record({ id: "y", repId: "rep-other2", repName: "Other B" }),
+    ]);
+    // No editable rows → the whole Action column is suppressed (header included), never a show-then-403 button.
+    expect(setCloseDateButtons()).toHaveLength(0);
+    const heads = Array.from(document.querySelectorAll("thead th")).map((h) => h.textContent ?? "");
+    expect(heads.some((t) => t.includes("Action"))).toBe(false);
+  });
+
+  it("renders the action for the viewer's OWN-scope undated list (rows they own)", () => {
+    authState.user = { id: "rep-self", role: "rep" };
+    // The rep's own undated list: both rows are assigned to them.
+    mount("undated", [
+      record({ id: "x", repId: "rep-self", repName: "Self" }),
+      record({ id: "y", repId: "rep-self", repName: "Self" }),
+    ]);
+    expect(setCloseDateButtons()).toHaveLength(2);
+    const heads = Array.from(document.querySelectorAll("thead th")).map((h) => h.textContent ?? "");
+    expect(heads.some((t) => t.includes("Action"))).toBe(true);
+  });
+
+  it("on a MIXED office-wide list, renders the action ONLY on the row the viewer owns (per-row gate)", () => {
+    authState.user = { id: "rep-self", role: "rep" };
+    mount("undated", [
+      record({ id: "mine", repId: "rep-self", repName: "Self" }),
+      record({ id: "theirs", repId: "rep-other", repName: "Other" }),
+    ]);
+    // Column appears (the viewer owns one row) but exactly one button renders.
+    expect(setCloseDateButtons()).toHaveLength(1);
+  });
+
+  it("is owner-gated for a DIRECTOR too — the field PATCH has no leadership bypass", () => {
+    // A director viewing the office-wide list owns none of these rows. The owner-only PATCH /deals/:id would
+    // 403 on every one, so the action stays hidden for directors exactly as it does for reps.
+    authState.user = { id: "director-1", role: "director" };
+    mount("undated", [
+      record({ id: "x", repId: "rep-other", repName: "Other A" }),
+      record({ id: "y", repId: "rep-other2", repName: "Other B" }),
+    ]);
+    expect(setCloseDateButtons()).toHaveLength(0);
+  });
+
+  it("still renders the action for a director on a row they OWN (role doesn't block; ownership is the gate)", () => {
+    authState.user = { id: "director-1", role: "director" };
+    mount("undated", [record({ id: "own", repId: "director-1", repName: "Director" })]);
+    expect(setCloseDateButtons()).toHaveLength(1);
   });
 });

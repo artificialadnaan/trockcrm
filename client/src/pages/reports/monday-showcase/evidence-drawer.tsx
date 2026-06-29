@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ChevronsUpDown, Download, ExternalLink, Loader2 } from "lucide-react";
+import { useCallback, useState, type ReactNode } from "react";
+import { ArrowDown, ArrowUp, CalendarClock, ChevronsUpDown, Download, ExternalLink, Loader2 } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   Dialog,
@@ -11,7 +11,10 @@ import {
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { resolveDealDisplayNumber } from "@/lib/deal-utils";
 import { useShowcaseEvidence } from "@/hooks/use-reports";
+import { MoveCloseDateDialog } from "@/components/deals/move-close-date-dialog";
+import { useAuth } from "@/lib/auth";
 import { downloadTextFile } from "@/lib/report-export";
 import { usd, int, winPct } from "../format";
 import { ScrollSyncX } from "../scroll-sync-x";
@@ -83,15 +86,20 @@ function sortRecords(records: EvidenceRecord[], sort: SortState): EvidenceRecord
 // the column SET + order + headers + show-filter live in evidence-columns.ts (shared with the CSV), and
 // these are only how each cell looks on screen.
 const RENDERERS: Record<SortKey, (r: EvidenceRecord) => ReactNode> = {
-  name: (r) => (
-    <div className="flex min-w-0 items-center gap-1.5">
-      <div className="min-w-0">
-        <div className="max-w-[260px] truncate font-medium text-sky-700 group-hover:underline">{r.name}</div>
-        {r.dealNumber ? <div className="text-xs text-slate-400">#{r.dealNumber}</div> : null}
+  name: (r) => {
+    // Canonical DFW/ATL number via the shared resolver — never the meaningless HubSpot id. Null = no real
+    // number (Pending): omit the identifier line entirely rather than show a chip or the HS id.
+    const displayNumber = resolveDealDisplayNumber({ projectNumber: r.projectNumber, dealNumber: r.dealNumber });
+    return (
+      <div className="flex min-w-0 items-center gap-1.5">
+        <div className="min-w-0">
+          <div className="max-w-[260px] truncate font-medium text-sky-700 group-hover:underline">{r.name}</div>
+          {displayNumber ? <div className="text-xs text-slate-400">#{displayNumber}</div> : null}
+        </div>
+        <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-300 opacity-0 transition group-hover:opacity-100" />
       </div>
-      <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-300 opacity-0 transition group-hover:opacity-100" />
-    </div>
-  ),
+    );
+  },
   company: (r) => <span className="text-slate-700">{r.companyName ?? "—"}</span>,
   owner: (r) => <span className="text-slate-600">{r.repName}</span>,
   value: (r) => (r.value == null ? "—" : usd(r.value)),
@@ -157,7 +165,20 @@ function ReconciliationBanner({ ev }: { ev: MondayShowcaseEvidence }) {
   );
 }
 
-function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpenRecord: (r: EvidenceRecord) => void }) {
+function EvidenceTable({
+  ev,
+  onOpenRecord,
+  onSetDate,
+  canEditRecord,
+}: {
+  ev: MondayShowcaseEvidence;
+  onOpenRecord: (r: EvidenceRecord) => void;
+  /** present only for the `undated` metric: opens the inline close-date editor for that deal. */
+  onSetDate?: (r: EvidenceRecord) => void;
+  /** Per-row edit gate: the inline close-date write hits the OWNER-ONLY PATCH /deals/:id, so the action
+   *  is offered only on rows the viewer owns. Mirrors deal-detail's canMoveCloseDate={viewerOwnsDeal}. */
+  canEditRecord?: (r: EvidenceRecord) => boolean;
+}) {
   const hasValue = ev.metric !== "leads";
   const [sort, setSort] = useState<SortState>({
     key: hasValue ? "value" : "age",
@@ -165,10 +186,19 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
   });
   const columns = columnsFor(ev);
   const rows = sortRecords(ev.records, sort);
-  // Sum of the visible columns' floor widths. Applied as the table's min-width so the columns keep their
-  // legible widths and the table OVERFLOWS the dialog instead of compressing — which is what gives
-  // ScrollSyncX's body something to scroll (the right-edge columns, e.g. Region, become reachable).
-  const tableMinWidth = columns.reduce((sum, col) => sum + col.minWidth, 0);
+  const canEdit = canEditRecord ?? (() => false);
+  // The undated ("No future close date") list gets a trailing action column to set a close date inline.
+  // It lives OUTSIDE the shared EVIDENCE_COLUMNS (so the CSV export is unaffected) — a display-only column.
+  // The inline write hits the owner-only PATCH /deals/:id, and the office-wide undated drawer (which a rep
+  // can open on the rep-accessible Showcase) lists EVERY rep's undated deals — so the column appears only
+  // when the viewer owns at least one row here, and the button renders per-row only on owned rows. This
+  // prevents the "click a coworker's row → 403" trap (hide the action rather than show-then-403).
+  const showAction = ev.metric === "undated" && !!onSetDate && ev.records.some((r) => canEdit(r));
+  const ACTION_COL_WIDTH = 150;
+  // Sum of the visible columns' floor widths (+ the action column when present). Applied as the table's
+  // min-width so the columns keep their legible widths and the table OVERFLOWS the dialog instead of
+  // compressing — which is what gives ScrollSyncX's body something to scroll (right-edge columns reachable).
+  const tableMinWidth = columns.reduce((sum, col) => sum + col.minWidth, 0) + (showAction ? ACTION_COL_WIDTH : 0);
 
   function toggleSort(key: SortKey) {
     setSort((cur) =>
@@ -207,6 +237,11 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
               </button>
             </TableHead>
           ))}
+          {showAction ? (
+            <TableHead style={{ minWidth: ACTION_COL_WIDTH }} className="whitespace-nowrap px-3 text-right">
+              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Action</span>
+            </TableHead>
+          ) : null}
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -215,7 +250,7 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
           // set — including Win % — stays consistent with non-empty cohorts, and show the empty-state
           // copy as a single spanning row instead of swapping the whole table out.
           <TableRow className="hover:bg-transparent">
-            <TableCell colSpan={columns.length} className="px-3 py-6 text-center text-sm text-muted-foreground">
+            <TableCell colSpan={columns.length + (showAction ? 1 : 0)} className="px-3 py-6 text-center text-sm text-muted-foreground">
               No supporting records for this number in this period.
             </TableCell>
           </TableRow>
@@ -236,6 +271,26 @@ function EvidenceTable({ ev, onOpenRecord }: { ev: MondayShowcaseEvidence; onOpe
                   {col.render(r)}
                 </TableCell>
               ))}
+              {showAction ? (
+                <TableCell style={{ minWidth: ACTION_COL_WIDTH }} className="whitespace-nowrap px-3 text-right">
+                  {/* Owner-only: a non-owned row (e.g. a coworker's deal on the office-wide undated list)
+                      gets a blank action cell — the close-date write would 403, so don't offer the button. */}
+                  {canEdit(r) ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation(); // don't also navigate to the deal — this is the inline edit
+                        onSetDate!(r);
+                      }}
+                      className="inline-flex items-center gap-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-800 transition hover:bg-amber-100"
+                      title="Set a close date for this deal"
+                    >
+                      <CalendarClock className="h-3.5 w-3.5" />
+                      Set close date
+                    </button>
+                  ) : null}
+                </TableCell>
+              ) : null}
             </TableRow>
           ))
         )}
@@ -248,14 +303,33 @@ export function EvidenceDrawer({
   request,
   mode,
   onClose,
+  onMutated,
 }: {
   request: EvidenceRequest | null;
   mode: WeekMode;
   onClose: () => void;
+  /** Called after an inline edit lands (a close-date move on the undated list) so the parent showcase
+   *  can refetch — the edited deal then re-bands and leaves the "No future close date" card. */
+  onMutated?: () => void | Promise<void>;
 }) {
   const navigate = useNavigate();
   const { search } = useLocation();
-  const { data, loading, error } = useShowcaseEvidence(request, mode);
+  const { user } = useAuth();
+  const { data, loading, error, refetch } = useShowcaseEvidence(request, mode);
+  // The row whose close date is being set inline (undated list only); null = the editor is closed.
+  const [editing, setEditing] = useState<EvidenceRecord | null>(null);
+  // The inline close-date editor writes through the OWNER-ONLY PATCH /deals/:id (the same gate the deal
+  // detail uses: canMoveCloseDate={viewerOwnsDeal}). The Monday Showcase is rep-accessible and its
+  // office-wide undated drawer lists EVERY rep's undated deals, so offer "Set close date" only on rows the
+  // viewer owns — a coworker's row would only 403. Directors/admins are not special here: the field PATCH
+  // has no leadership bypass, so the gate is ownership for everyone. (CodeRabbit P2)
+  const canEditRecord = useCallback(
+    (r: EvidenceRecord) => user?.id != null && r.repId === user.id,
+    [user?.id]
+  );
+  // The office the report is scoped to (cross-office views carry ?officeId=); thread it into the PATCH so
+  // the write targets the same tenant the evidence was read from — matching openRecord's navigation.
+  const officeId = new URLSearchParams(search).get("officeId");
 
   function openRecord(r: EvidenceRecord) {
     if (!data) return;
@@ -273,6 +347,7 @@ export function EvidenceDrawer({
   }
 
   return (
+    <>
     <Dialog
       open={request != null}
       onOpenChange={(open) => {
@@ -320,7 +395,12 @@ export function EvidenceDrawer({
               className="flex min-h-0 flex-1 flex-col rounded-lg border border-slate-100"
               bodyClassName="min-h-0 flex-1 overflow-auto"
             >
-              <EvidenceTable ev={data} onOpenRecord={openRecord} />
+              <EvidenceTable
+                ev={data}
+                onOpenRecord={openRecord}
+                onSetDate={data.metric === "undated" ? setEditing : undefined}
+                canEditRecord={canEditRecord}
+              />
             </ScrollSyncX>
             <p className="px-1 text-xs text-muted-foreground">
               Shown on the {data.dateAxisLabel.toLowerCase()} axis — the cohort this number is defined on.
@@ -330,5 +410,24 @@ export function EvidenceDrawer({
         ) : null}
       </DialogContent>
     </Dialog>
+
+    {/* Inline close-date editor for the undated list. Reuses the deal detail's MoveCloseDateDialog so the
+        write path + activity-note audit are identical. On save we refetch the evidence list (the now-dated
+        deal drops out of this M − N set) AND notify the parent so the showcase re-bands it; the dialog
+        closes itself via onOpenChange. */}
+      <MoveCloseDateDialog
+        open={editing != null}
+        onOpenChange={(open) => {
+          if (!open) setEditing(null);
+        }}
+        dealId={editing?.id ?? ""}
+        currentDate={editing?.cohortDate ?? null}
+        officeId={officeId}
+        onSaved={async () => {
+          await refetch?.();
+          await onMutated?.();
+        }}
+      />
+    </>
   );
 }

@@ -38,7 +38,7 @@ beforeAll(async () => {
     CREATE TABLE companies (id uuid PRIMARY KEY, name text, region text);
     CREATE TABLE project_type_config (id uuid PRIMARY KEY, name text);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, assigned_rep_id uuid, company_id uuid,
+      id uuid PRIMARY KEY, name text, deal_number text, project_number text, assigned_rep_id uuid, company_id uuid,
       region_id uuid, project_type_id uuid, stage_id uuid NOT NULL,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, won_closed_date date, expected_close_date date,
@@ -183,7 +183,7 @@ describe("region Won CARD ↔ DRAWER reconcile — soft-deleted (is_active=false
         is_terminal boolean NOT NULL DEFAULT false
       );
       CREATE TABLE deals (
-        id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
+        id uuid PRIMARY KEY, deal_number text, project_number text, name text NOT NULL, stage_id uuid NOT NULL,
         assigned_rep_id uuid, company_id uuid, region_id uuid, project_type_id uuid, project_type text,
         on_hold boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true,
         is_test_data boolean NOT NULL DEFAULT false, win_probability int,

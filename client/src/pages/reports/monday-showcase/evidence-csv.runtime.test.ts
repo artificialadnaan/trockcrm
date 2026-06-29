@@ -11,6 +11,7 @@ function record(over: Partial<EvidenceRecord>): EvidenceRecord {
   return {
     id: "d1",
     dealNumber: "1001",
+    projectNumber: null,
     name: "Deal One",
     repId: "r1",
     repName: "Alice",
@@ -107,6 +108,23 @@ describe("buildEvidenceCsv — columns + values", () => {
     const dealIdx = cells(lines(withNum)[0]).indexOf("Deal");
     expect(cells(lines(withNum)[1])[dealIdx]).toBe("Acme Reroof #1042");
     expect(cells(lines(withoutNum)[1])[dealIdx]).toBe("Acme Reroof");
+  });
+
+  it("carries the canonical project number (never the HubSpot id) in the Deal column", () => {
+    // HubSpot-imported deal: deal_number is the meaningless HS id, project_number is the real DFW number.
+    // The CSV must show the DFW number and never leak the HS id.
+    const csv = buildEvidenceCsv(evidence("projection", [record({ name: "Acme Reroof", dealNumber: "HS-318651319000", projectNumber: "DFW-1-09026-af" })]));
+    const dealIdx = cells(lines(csv)[0]).indexOf("Deal");
+    expect(cells(lines(csv)[1])[dealIdx]).toBe("Acme Reroof #DFW-1-09026-af");
+    expect(csv).not.toContain("HS-318651319000");
+    expect(csv).not.toContain("318651319000");
+  });
+
+  it("falls back to just the name when no canonical number resolves (Pending HubSpot-only deal)", () => {
+    const csv = buildEvidenceCsv(evidence("projection", [record({ name: "Acme Reroof", dealNumber: "HS-999000111222", projectNumber: null })]));
+    const dealIdx = cells(lines(csv)[0]).indexOf("Deal");
+    expect(cells(lines(csv)[1])[dealIdx]).toBe("Acme Reroof");
+    expect(csv).not.toContain("HS-999000111222");
   });
 
   it("renders null cells as empty (the UI's em dash becomes a blank cell)", () => {

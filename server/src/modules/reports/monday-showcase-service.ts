@@ -200,7 +200,7 @@ const DEPARTMENT_NOTES = [
 
 function emptyLadder(): ProjectionLadder {
   const bands = projectionBandKeys().map((band) => ({ band, count: 0, value: 0 }));
-  return { bands, coverage: { n: 0, m: 0 }, coverageCaption: formatProjectionCoverageCaption({ n: 0, m: 0 }) };
+  return { bands, coverage: { n: 0, m: 0, undatedValue: 0 }, coverageCaption: formatProjectionCoverageCaption({ n: 0, m: 0 }) };
 }
 
 export function projectionBandKeys(): ProjectionBand[] {
@@ -364,12 +364,20 @@ export function buildProjectionBandsSql(): SQL {
   `;
 }
 
-/** Per-rep N/M coverage (F2): N = future-dated open deals, M = ALL open deals (incl. NULL-dated). */
+/**
+ * Per-rep N/M coverage (F2): N = future-dated open deals, M = ALL open deals (incl. NULL-dated). Also
+ * sums the open best-estimate $ over the (M − N) undated complement (never-dated + stale-past-dated) so
+ * the B4 "No future close date" card can show $ alongside its M − N count — both reconcile to the same
+ * scope these N/M counts are taken over. The FILTER predicate is the EXACT negation of the future-dated
+ * predicate (the same one buildAtRiskDealsSql lists as the M − N complement), so undated_value is the $
+ * of precisely the rows buildUndatedEvidenceSql returns.
+ */
 export function buildProjectionCoverageSql(): SQL {
   return sql`
     SELECT d.assigned_rep_id AS rep_id,
            COUNT(*) FILTER (WHERE ${futureDatedCloseDatePredicateSql("d.expected_close_date")})::int AS n,
-           COUNT(*)::int AS m
+           COUNT(*)::int AS m,
+           COALESCE(SUM(${openValueSql("d")}) FILTER (WHERE NOT (${futureDatedCloseDatePredicateSql("d.expected_close_date")})), 0)::numeric AS undated_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE COALESCE(d.is_test_data, false) = false
@@ -484,7 +492,7 @@ export async function computeWeeklyTrend(
 }
 
 function emptyRepProjection(): RepProjection {
-  return { bands: projectionBandKeys().map((band) => ({ band, count: 0, value: 0 })), coverage: { n: 0, m: 0 } };
+  return { bands: projectionBandKeys().map((band) => ({ band, count: 0, value: 0 })), coverage: { n: 0, m: 0, undatedValue: 0 } };
 }
 
 /**
@@ -497,6 +505,9 @@ export function foldOfficeProjection(repProjection: Map<string | null, RepProjec
   for (const p of repProjection.values()) {
     office.coverage.n += p.coverage.n;
     office.coverage.m += p.coverage.m;
+    // the undated complement's $ (M − N rows) sums per-rep → office, the same way N/M do, so the office
+    // "No future close date" card's $ equals Σ of the per-rep cards by construction.
+    office.coverage.undatedValue += p.coverage.undatedValue;
     for (const cell of p.bands) {
       const officeCell = office.bands.find((b) => b.band === cell.band)!;
       officeCell.count += cell.count;
@@ -584,8 +595,8 @@ export async function getMondayShowcaseData(
       cell.value += num(r.val);
     }
   }
-  for (const r of rowsFromExecute<{ rep_id: string | null; n: unknown; m: unknown }>(projCovRows)) {
-    ensureRep(r.rep_id).coverage = { n: num(r.n), m: num(r.m) };
+  for (const r of rowsFromExecute<{ rep_id: string | null; n: unknown; m: unknown; undated_value: unknown }>(projCovRows)) {
+    ensureRep(r.rep_id).coverage = { n: num(r.n), m: num(r.m), undatedValue: num(r.undated_value) };
   }
   const officeProjection = foldOfficeProjection(repProjection);
 
@@ -630,13 +641,15 @@ export async function getMondayShowcaseData(
 // count, by construction. Locked by monday-showcase-evidence-sql.test.ts (predicate identity) and
 // monday-showcase-evidence-reconciliation.runtime.test.ts (real-SQL: evidence === aggregate).
 
-export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads";
+export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads" | "undated";
 
 /** A single supporting record (a deal, or a lead for the `leads` metric). */
 export interface EvidenceRecord {
   id: string;
-  /** deal number (null for leads). */
+  /** raw deal number (null for leads); the HubSpot id for HS-imported deals -- the client resolves it. */
   dealNumber: string | null;
+  /** the canonical DFW/ATL project number when present (null for leads / when unset). */
+  projectNumber: string | null;
   name: string;
   repId: string | null;
   repName: string;
@@ -722,6 +735,7 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
   return sql`
     d.id AS id,
     d.deal_number AS deal_number,
+    d.project_number AS project_number,
     d.name AS name,
     d.assigned_rep_id AS rep_id,
     COALESCE(u.display_name, '') AS rep_name,
@@ -824,6 +838,35 @@ export function buildProjectionEvidenceSql(repId?: string | null, band?: Project
 }
 
 /**
+ * Undated evidence ("No future close date"): the open deals that are NOT future-dated — the EXACT
+ * complement of the projection's N within the SAME open M scope (active, non-terminal, reportable,
+ * non-test). This is byte-identical to buildAtRiskDealsSql's predicate (the no_date + stale_dated
+ * blind-spot set): same open scope + `NOT (future-dated)`, the single shared future-dated definition
+ * from foundations.ts negated. So COUNT(rows) === M − N === the coverage card's count, and SUM(value)
+ * === buildProjectionCoverageSql's undated_value — the card's count + $ reconcile by construction, and
+ * `office M == Σ band counts (= N) + undated`. The additive 1:1 LEFT JOINs (company/region/type) only
+ * enrich the evidence columns; they never change the row set. NOT a region drill (the region report has
+ * no undated section), so it carries no regionName param.
+ */
+export function buildUndatedEvidenceSql(repId?: string | null): SQL {
+  return sql`
+    SELECT ${dealEvidenceSelectSql(openValueSql("d"), "d.expected_close_date")}
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
+      AND d.is_active = true
+      AND psc.is_terminal = false
+      AND NOT (${futureDatedCloseDatePredicateSql("d.expected_close_date")})${repScopeSql("d", repId)}
+    ORDER BY value DESC, d.name
+  `;
+}
+
+/**
  * Pipeline evidence: ALL open deals (active, non-terminal, reportable) with the SAME open best-estimate $
  * basis as the Reports-by-Region "Open Pipeline" number — so the drill reconciles to that snapshot. This is
  * deliberately NOT the projection metric, which is future-dated-only and would undercount the pipeline. An
@@ -856,6 +899,7 @@ export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string):
   return sql`
     SELECT l.id AS id,
            NULL AS deal_number,
+           NULL AS project_number,
            l.name AS name,
            l.assigned_rep_id AS rep_id,
            COALESCE(u.display_name, '') AS rep_name,
@@ -888,6 +932,7 @@ const EVIDENCE_METRIC_LABEL: Record<EvidenceMetric, string> = {
   projection: "Projected (open)",
   pipeline: "Open pipeline",
   leads: "Active leads",
+  undated: "No future close date",
 };
 
 const EVIDENCE_DATE_AXIS_LABEL: Record<EvidenceMetric, string> = {
@@ -897,6 +942,9 @@ const EVIDENCE_DATE_AXIS_LABEL: Record<EvidenceMetric, string> = {
   projection: "Expected close date",
   pipeline: "Open — expected close date",
   leads: "Lead created",
+  // the undated cohort's date axis IS the missing/stale close date — null for never-dated, a past date
+  // for stale-dated; both render honestly (an em dash / the old date) so the blind spot is legible.
+  undated: "Expected close date (missing or stale)",
 };
 
 export interface MondayShowcaseEvidenceOptions {
@@ -924,6 +972,7 @@ export interface MondayShowcaseEvidenceOptions {
 interface EvidenceRow {
   id: string;
   deal_number: string | null;
+  project_number: string | null;
   name: string;
   rep_id: string | null;
   rep_name: string;
@@ -970,6 +1019,11 @@ export async function getMondayShowcaseEvidence(
     case "projection":
       query = buildProjectionEvidenceSql(repId, band, regionName);
       break;
+    case "undated":
+      // The B4 "No future close date" card's complement (M − N): open deals lacking a future-dated close
+      // date, scoped office-wide or to one rep — never a region drill, so regionName is intentionally unused.
+      query = buildUndatedEvidenceSql(repId);
+      break;
     case "pipeline":
       query = buildPipelineEvidenceSql(repId, regionName, stageSlug);
       break;
@@ -989,6 +1043,7 @@ export async function getMondayShowcaseEvidence(
   const records: EvidenceRecord[] = rows.map((r) => ({
     id: String(r.id),
     dealNumber: r.deal_number == null ? null : String(r.deal_number),
+    projectNumber: r.project_number == null ? null : String(r.project_number),
     name: r.name,
     repId: r.rep_id == null ? null : String(r.rep_id),
     repName: r.rep_name || (r.rep_id ? "Unknown rep" : "Unassigned"),

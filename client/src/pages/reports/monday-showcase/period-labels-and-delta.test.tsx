@@ -34,7 +34,7 @@ const dataFor = (mode: WeekMode): MondayShowcaseData => ({
     estimated: { count: 5, value: { amount: 50, basisLabel: "Best current estimate" } },
   },
   reps: [],
-  officeProjection: { bands: [], coverage: { n: 0, m: 0 }, coverageCaption: "" },
+  officeProjection: { bands: [], coverage: { n: 0, m: 0, undatedValue: 0 }, coverageCaption: "" },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
   notes: [],

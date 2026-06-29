@@ -30,7 +30,10 @@ export interface ProjectionBandCell {
 
 export interface ProjectionLadder {
   bands: ProjectionBandCell[];
-  coverage: { n: number; m: number };
+  // n = future-dated open deals; m = ALL open deals. The undated complement is the M − N count, and
+  // undatedValue is that complement's open best-estimate $ — together they back the B4 "No future close
+  // date" card so office M == Σ band counts (= n) + (m − n).
+  coverage: { n: number; m: number; undatedValue: number };
   coverageCaption: string;
 }
 
@@ -89,11 +92,12 @@ export interface MondayShowcaseData {
 // Client mirror of the server MondayShowcaseEvidence payload (monday-showcase-service.ts). Every showcase
 // number is clickable; the drawer shows these records and their total EQUALS the clicked number.
 
-export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads";
+export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads" | "undated";
 
 export interface EvidenceRecord {
   id: string;
   dealNumber: string | null;
+  projectNumber: string | null;
   name: string;
   repId: string | null;
   repName: string;

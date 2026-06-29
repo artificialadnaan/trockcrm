@@ -22,7 +22,9 @@ function ladder(b0: number, b1: number, b2: number, b3: number, n: number, m: nu
       { band: "61_90", count: b2, value: b2 * 110000 },
       { band: "beyond_90", count: b3, value: b3 * 100000 },
     ],
-    coverage: { n, m },
+    // undatedValue = the open $ of the M − N complement (the "No future close date" card). Synthesized
+    // for the mock so the B4 undated card renders a plausible $ alongside its M − N count.
+    coverage: { n, m, undatedValue: Math.max(0, m - n) * 100000 },
     coverageCaption: `${n} of ${m} open deals have a maintained (future-dated) expected close date.`,
   };
 }

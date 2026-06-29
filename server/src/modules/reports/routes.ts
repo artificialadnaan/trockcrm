@@ -1027,7 +1027,7 @@ router.get("/monday-showcase", requireAnyRole, async (req, res, next) => {
 
 // Reports Part 3 -- drill-to-evidence. Returns the supporting records behind ONE showcase number
 // (metric x scope x band/lead-stage), with a total that EQUALS that number (same canonical cohort).
-const EVIDENCE_METRICS = ["won", "sent", "estimated", "projection", "pipeline", "leads"] as const;
+const EVIDENCE_METRICS = ["won", "sent", "estimated", "projection", "pipeline", "leads", "undated"] as const;
 const PROJECTION_BANDS = ["0_30", "31_60", "61_90", "beyond_90"] as const;
 const UNASSIGNED_SENTINEL = "__unassigned__";
 
@@ -1076,8 +1076,11 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
   // no region and the region report has no leads section, so a region-scoped leads drill has no cohort to
   // reconcile against and is rejected — never returned as unfiltered rows under a region scope header.
   const regionName = pickQueryValue(query.regionName);
-  if (regionName !== undefined && metric === "leads") {
-    throw new AppError(400, "regionName is not valid for the leads metric");
+  if (regionName !== undefined && (metric === "leads" || metric === "undated")) {
+    // Leads have no region, and the undated card is a showcase-only blind-spot list with no region-report
+    // section to reconcile against — reject regionName rather than silently ignore it (the records would
+    // otherwise come back unfiltered under a region header). buildUndatedEvidenceSql takes no regionName.
+    throw new AppError(400, `regionName is not valid for the ${metric} metric`);
   }
   // rep × region: the region report's "top reps within region" won totals drill into a single rep WITHIN a
   // single region, and buildWonEvidenceSql filters by both — so that combination IS reconcilable (the drawer
