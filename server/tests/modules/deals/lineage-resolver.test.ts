@@ -322,6 +322,29 @@ describe("deal lineage resolver field ownership", () => {
     );
   });
 
+  it("writes bid due date to the deal column at UTC midnight for a deal with no source lead", async () => {
+    // Regression: a manually-created deal (sourceLeadId null) owns bidDueDate directly via the
+    // target:"deal" path. The edit must land on the authoritative deals.bid_due_date column at UTC
+    // midnight — not silently no-op the way it did before this fix.
+    const tenantDb = createLineageTenantDb({
+      deal: { sourceLeadId: null, bidDueDate: null } as never,
+    });
+
+    await writeResolvedDealFields(
+      tenantDb as never,
+      "deal-1",
+      { bidDueDate: "2026-07-03" },
+      { userId: "user-1", officeId: "office-1", role: "director", now: new Date("2026-05-01T00:00:00.000Z") }
+    );
+
+    expect(tenantDb.state.deals[0]?.bidDueDate).toEqual(new Date("2026-07-03T00:00:00.000Z"));
+    expect((tenantDb.state.deals[0]?.bidDueDate as Date).toISOString()).toBe(
+      "2026-07-03T00:00:00.000Z"
+    );
+    // No source lead, so the orphaned lead row is never written by this path.
+    expect(tenantDb.state.leads[0]?.bidDueDate).toBe("2026-06-01");
+  });
+
   it("writes company fill-in through the resolved-fields lineage path", async () => {
     const tenantDb = createLineageTenantDb({
       deal: { companyId: null },

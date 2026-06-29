@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
 
+// Pin a non-UTC ambient timezone for this spec. The off-by-one regression these tests guard
+// (formatting a UTC-midnight bid date in LOCAL time renders the previous calendar day) is only
+// observable when the runner's zone is behind UTC. The CI runner defaults to UTC, where a
+// local-time fallback would still pass — so we force America/Chicago (UTC-5/6) here. Node applies
+// process.env.TZ at runtime via tzset(); the guard test below fails loudly if it ever doesn't.
+process.env.TZ = "America/Chicago";
+
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -29,6 +36,14 @@ describe("BidDueDateBanner", () => {
       root.render(<BidDueDateBanner bidDueDate={bidDueDate} />);
     });
   }
+
+  it("runs under a non-UTC ambient timezone so the off-by-one assertions are not vacuous", () => {
+    // If the TZ pin above failed to take effect (e.g. a UTC runner), UTC midnight Jul 3 stays Jul 3
+    // locally and the off-by-one tests below would pass even with a broken local-time formatter. Under
+    // America/Chicago, UTC midnight Jul 3 is the evening of Jul 2 — so the local day MUST be "2".
+    const localDay = new Date("2026-07-03T00:00:00.000Z").toLocaleDateString("en-US", { day: "numeric" });
+    expect(localDay).toBe("2");
+  });
 
   it("renders the UTC-midnight timestamptz on its intended calendar day (no off-by-one)", async () => {
     // deals.bid_due_date is a timestamptz stamped at UTC midnight; the source value was Jul 3, 2026.

@@ -434,6 +434,10 @@ export async function writeResolvedDealFields(
       if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
       if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";
       if (field === "description") dealUpdates.description = normalizeOptionalText(value);
+      // A deal with no source lead owns bidDueDate directly — write it to the authoritative
+      // deals.bid_due_date column (timestamptz, UTC-midnight) via the SAME normalizer the
+      // lead-mirror path uses (line ~417), so non-lead edits actually persist instead of no-op'ing.
+      if (field === "bidDueDate") dealUpdates.bidDueDate = normalizeOptionalDealBidDueDate(value);
     }
   }
 
