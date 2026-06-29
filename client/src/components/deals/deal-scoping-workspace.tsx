@@ -459,7 +459,7 @@ export function DealScopingWorkspace({
   );
   const siteVisitCompletedLabel = getSelectDisplayLabel(
     getSectionValue(sectionData, "opportunity", "siteVisitCompleted"),
-    { completed: "Completed" },
+    { scheduled: "Scheduled", completed: "Completed" },
     "Pending"
   );
   const readOnlyModeActive = mode === "readonly" && !forceEditingReadOnlyScope;
@@ -1167,6 +1167,7 @@ export function DealScopingWorkspace({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__unset__">Pending</SelectItem>
+                  <SelectItem value="scheduled">Scheduled</SelectItem>
                   <SelectItem value="completed">Completed</SelectItem>
                 </SelectContent>
               </Select>
