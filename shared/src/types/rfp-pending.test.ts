@@ -42,4 +42,9 @@ describe("isPendingRfpDeal", () => {
     expect(isPendingRfpDeal({ ...base, rfpApprovalStatus: "approved" })).toBe(false);
     expect(isPendingRfpDeal({ ...base, rfpApprovalStatus: null })).toBe(false);
   });
+  it("is false when isBidBoardOwned is undefined or null (omitted/unknown flag must not grant eligibility)", () => {
+    // Uses strict === false check, so an absent/undefined flag is treated as ineligible.
+    expect(isPendingRfpDeal({ stageSlug: "opportunity", isBidBoardOwned: undefined, rfpApprovalStatus: "pending" })).toBe(false);
+    expect(isPendingRfpDeal({ stageSlug: "opportunity", isBidBoardOwned: null, rfpApprovalStatus: "pending" })).toBe(false);
+  });
 });

@@ -1082,7 +1082,6 @@ export function usePendingRfp() {
         return r.deals;
       })
       .catch((e: unknown) => {
-        setDeals(null);
         setError(e instanceof Error ? e.message : "Failed to load pending RFPs");
         throw e;
       })

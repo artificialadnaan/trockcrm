@@ -465,6 +465,10 @@ export function DealDetailPage() {
   const canTriggerRfp =
     user?.role === "admin" ||
     (user?.role === "rep" && deal?.assignedRepId === user.id);
+  const canCancelRfp =
+    user?.role === "admin" ||
+    user?.role === "director" ||
+    (user?.role === "rep" && deal?.assignedRepId === user.id);
   const showTriggerRfpButton = Boolean(
       deal &&
       canTriggerRfp &&
@@ -653,10 +657,16 @@ export function DealDetailPage() {
     setRfpCancelling(true);
     try {
       await api(`/deals/${deal.id}/cancel-rfp`, { method: "POST" });
-      toast.success("Returned to Opportunity");
-      await refetch();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to cancel the RFP");
+      setRfpCancelling(false);
+      return;
+    }
+    toast.success("Returned to Opportunity");
+    try {
+      await refetch();
+    } catch {
+      toast.info("RFP cancelled. Refresh page to see updated status.");
     } finally {
       setRfpCancelling(false);
     }
@@ -932,7 +942,7 @@ export function DealDetailPage() {
         onRetry={handleRfpRetry}
         retrying={rfpRetrying}
         onCancel={handleCancelRfp}
-        canCancel={canTriggerRfp}
+        canCancel={canCancelRfp}
         cancelling={rfpCancelling}
       />
       {isBidBoardOwned && !deal.isHubspotSourced && <BidBoardProjectSummaryPanel deal={deal} />}
@@ -1537,7 +1547,7 @@ function RfpApprovalStatusBlock({
               {retrying ? "Retrying..." : "Retry"}
             </Button>
           )}
-          {canCancel && pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null && (
+          {canCancel && pendingRfpSubStateForStatus(deal.rfpApprovalStatus) === "attention" && (
             <Button type="button" size="sm" variant="outline" onClick={onCancel} disabled={cancelling}>
               {cancelling ? "Cancelling..." : "Return to Opportunity"}
             </Button>

@@ -79,11 +79,11 @@ const FIXTURE_DEALS = [
   },
 ];
 
-function renderRoute(container: HTMLElement) {
+function renderRoute(container: HTMLElement, path = "/deals/pending-rfp") {
   const root = createRoot(container);
   act(() => {
     root.render(
-      <MemoryRouter initialEntries={["/deals/pending-rfp"]}>
+      <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route path="/deals/pending-rfp" element={<PendingRfpPage />} />
         </Routes>
@@ -173,7 +173,7 @@ describe("PendingRfpPage", () => {
     expect(container.textContent).toContain("No deals");
   });
 
-  it("renders the error state when error is set", () => {
+  it("renders the error state when error is set and does NOT show the empty-queue message", () => {
     mocks.usePendingRfpMock.mockReturnValue({
       deals: null,
       loading: false,
@@ -184,5 +184,45 @@ describe("PendingRfpPage", () => {
     root = renderRoute(container);
 
     expect(container.textContent).toContain("Network error");
+    // Error state must not fall through to the empty-queue message — that would mislead
+    // the user into thinking there are simply no pending RFPs when the fetch failed.
+    expect(container.textContent).not.toContain("No deals");
+  });
+
+  it("continues showing stale rows after a refresh failure (error banner + table, not empty queue)", () => {
+    // Simulates fix #4 in use-deals.ts: on refresh error, deals retains previous rows.
+    mocks.usePendingRfpMock.mockReturnValue({
+      deals: FIXTURE_DEALS,
+      loading: false,
+      error: "Refresh failed",
+      refetch: vi.fn(),
+    });
+
+    root = renderRoute(container);
+
+    // Error banner visible
+    expect(container.textContent).toContain("Refresh failed");
+    // Stale rows still rendered
+    expect(container.textContent).toContain("Sunset Ridge Apartments");
+    expect(container.textContent).toContain("Riverside Commons Phase 2");
+    // No misleading empty message
+    expect(container.textContent).not.toContain("No deals");
+  });
+
+  it("appends the current query string to deal links so a cross-office viewer keeps their office context", () => {
+    mocks.usePendingRfpMock.mockReturnValue({
+      deals: FIXTURE_DEALS,
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    root = renderRoute(container, "/deals/pending-rfp?officeId=office-atlanta");
+
+    const links = Array.from(container.querySelectorAll("a"));
+    const dealLink = links.find((a) => a.href.includes("deal-stale-111"));
+    expect(dealLink).toBeTruthy();
+    // Link must carry the original query string so the cross-office context is preserved.
+    expect(dealLink?.getAttribute("href")).toContain("officeId=office-atlanta");
   });
 });

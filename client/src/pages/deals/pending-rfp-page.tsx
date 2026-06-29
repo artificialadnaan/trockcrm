@@ -1,5 +1,5 @@
 import { Hourglass, RefreshCw } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { usePendingRfp } from "@/hooks/use-deals";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,6 +34,7 @@ function subStateLabel(subState: "awaiting" | "attention", rfpApprovalStatus: st
 
 export function PendingRfpPage() {
   const { deals, loading, error, refetch } = usePendingRfp();
+  const location = useLocation();
 
   return (
     <div className="space-y-6">
@@ -47,7 +48,7 @@ export function PendingRfpPage() {
             Deals awaiting RFP approval — visible to everyone in your office.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={loading}>
+        <Button variant="outline" size="sm" onClick={() => { void refetch().catch(() => undefined); }} disabled={loading}>
           <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
           Refresh
         </Button>
@@ -66,11 +67,7 @@ export function PendingRfpPage() {
         <CardContent className="p-0">
           {loading ? (
             <p className="p-4 text-sm text-muted-foreground">Loading pending RFPs...</p>
-          ) : !deals || deals.length === 0 ? (
-            <p className="p-4 text-sm text-muted-foreground">
-              No deals are currently awaiting RFP approval.
-            </p>
-          ) : (
+          ) : deals && deals.length > 0 ? (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -103,7 +100,7 @@ export function PendingRfpPage() {
                       >
                         <td className="px-4 py-3">
                           <Link
-                            to={`/deals/${deal.id}`}
+                            to={`/deals/${deal.id}${location.search}`}
                             className="font-semibold text-slate-900 hover:text-brand-red hover:underline"
                           >
                             {deal.name}
@@ -148,7 +145,11 @@ export function PendingRfpPage() {
                 </tbody>
               </table>
             </div>
-          )}
+          ) : !error ? (
+            <p className="p-4 text-sm text-muted-foreground">
+              No deals are currently awaiting RFP approval.
+            </p>
+          ) : null}
         </CardContent>
       </Card>
     </div>

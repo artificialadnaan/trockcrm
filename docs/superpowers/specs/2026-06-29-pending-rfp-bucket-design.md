@@ -41,7 +41,7 @@ approved — acting as a shared "pending RFP dashboard" visible to everyone.
 
 **Net:** "RFP triggered, awaiting approval" deals are exactly
 `stage = opportunity` AND `rfp_approval_status ∈ {pending_outbox, pending}` (plus
-`declined`/`failed`/`conflict` for ones needing attention), AND `is_bid_board_owned = false`.
+`declined`/`send_failed`/`conflict` for ones needing attention), AND `is_bid_board_owned = false`.
 This is a clean, well-defined set to build the bucket from with **no schema change**.
 
 ## Approach
@@ -69,7 +69,7 @@ transitions, and a migration. Deferred; B can be promoted to A later if reportin
   - **Awaiting approval** sub-state = `{pending_outbox, pending}`
   - **Needs attention** sub-state = `{declined, conflict, send_failed}`
 - **Auto-entry** the moment an RFP is triggered; **auto-exit** on approval (deal advances to
-  Estimating/Service Estimating). **Declined/failed/conflict stay** in the bucket, flagged.
+  Estimating/Service Estimating). **Declined/send_failed/conflict stay** in the bucket, flagged.
 - **Two surfaces:** (1) a synthetic column on the deals pipeline board, right after
   Opportunity; (2) a dedicated shared **Pending RFP dashboard** page.
 - **Visibility:** office-scoped, **cross-rep** — everyone in the office sees all pending-RFP
@@ -149,7 +149,7 @@ board's Opportunity-column exclusion, and any count badge — so they cannot dri
 | Trigger RFP | `pending_outbox` → `pending` | opportunity | **Yes** (Awaiting) |
 | Approved (bid-board-created) | `approved` | estimating / service_estimating | No → Estimating |
 | Declined | `declined` | opportunity | **Yes** (Needs attention) |
-| Failed / conflict | `failed` / `conflict` | opportunity | **Yes** (Needs attention) |
+| Failed / conflict | `send_failed` / `conflict` | opportunity | **Yes** (Needs attention) |
 | Cancel RFP (escape hatch) | cleared | opportunity | No → plain Opportunity |
 
 ## Edge cases

@@ -1131,5 +1131,19 @@ describe("buildCanonicalDealBoardColumns", () => {
 
     // (d) o1 IS in the opportunity column
     expect(columns[oppIndex]!.cards.map((d) => d.id)).toContain("o1");
+
+    // (e) opportunity column's count and totalValue EXCLUDE the moved pending deal:
+    // original backend aggregate was count=2 / totalValue=200000; one deal (p1, bid=$100k)
+    // was moved out, so opportunity should be count=1 / totalValue=100000.
+    const preSpitOppCount = 2;
+    expect(columns[oppIndex]!.count).toBe(1);
+    expect(columns[oppIndex]!.totalValue).toBe(100000);
+
+    // (f) pending_rfp column's count/totalValue match the moved deal's contribution (p1: $100k)
+    expect(columns[prfpIndex]!.count).toBe(1);
+    expect(columns[prfpIndex]!.totalValue).toBe(100000);
+
+    // (g) the two columns' counts sum to the pre-split opportunity count (no double-counting)
+    expect(columns[oppIndex]!.count + columns[prfpIndex]!.count).toBe(preSpitOppCount);
   });
 });

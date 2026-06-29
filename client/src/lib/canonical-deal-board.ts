@@ -158,7 +158,7 @@ export function buildCanonicalDealBoardColumns(
     ).slug;
   const isPendingRfpCard = (deal: Deal) =>
     dealCanonicalSlug(deal) === "opportunity" &&
-    !deal.isBidBoardOwned &&
+    deal.isBidBoardOwned === false &&
     pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null;
   const pendingRfpCards = deals.filter(isPendingRfpCard);
 
@@ -220,9 +220,20 @@ export function buildCanonicalDealBoardColumns(
     };
   });
 
+  const pendingRfpValue = pendingRfpCards
+    .filter((d) => !d.onHold)
+    .reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0);
+
   const oppIndex = columns.findIndex((column) => column.stage.slug === "opportunity");
   if (oppIndex !== -1 && pendingRfpCards.length > 0) {
-    const opp = columns[oppIndex];
+    const opp = columns[oppIndex]!;
+    // Subtract the moved pending-RFP cards from the opportunity column's backend aggregate so
+    // the two columns don't double-count (opportunity header would over-report otherwise).
+    columns[oppIndex] = {
+      ...opp,
+      count: Math.max(0, opp.count - pendingRfpCards.length),
+      totalValue: opp.totalValue - pendingRfpValue,
+    };
     columns.splice(oppIndex + 1, 0, {
       stage: {
         id: "canonical-pending_rfp",
@@ -234,9 +245,7 @@ export function buildCanonicalDealBoardColumns(
         isTerminal: false,
       },
       count: pendingRfpCards.length,
-      totalValue: pendingRfpCards
-        .filter((deal) => !deal.onHold)
-        .reduce((sum, deal) => sum + getDealValue(deal, "opportunity"), 0),
+      totalValue: pendingRfpValue,
       cards: pendingRfpCards,
     });
   }

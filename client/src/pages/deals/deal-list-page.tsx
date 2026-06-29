@@ -1205,6 +1205,10 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   }, [selectedPeriod]);
 
   const openStage = (column: DealBoardColumn) => {
+    if (column.stage.slug === "pending_rfp") {
+      navigate("/deals/pending-rfp");
+      return;
+    }
     navigate(buildDealStageNavigationPath(column, scope, stageNavTerminalFilters, searchParams));
   };
 

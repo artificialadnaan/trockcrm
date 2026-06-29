@@ -2003,7 +2003,33 @@ describe("DealDetailPage", () => {
     expect(mounted.container.textContent).toContain("Return to Opportunity");
   });
 
-  it("renders Return to Opportunity button for admin on a pending-outbox RFP deal", async () => {
+  it("renders Return to Opportunity button for admin on a declined RFP deal (attention states only)", async () => {
+    mocks.useAuthMock.mockReturnValue({ user: { id: "admin-1", role: "admin" } });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: "declined",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+        assignedRepId: "rep-1",
+      }),
+    });
+
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mounted.container.textContent).toContain("Return to Opportunity");
+  });
+
+  it("does NOT render Return to Opportunity for pending-outbox (awaiting sub-state, not attention)", async () => {
     mocks.useAuthMock.mockReturnValue({ user: { id: "admin-1", role: "admin" } });
     mocks.useDealDetailMock.mockReturnValue({
       loading: false,
@@ -2016,6 +2042,35 @@ describe("DealDetailPage", () => {
         readOnlySyncedAt: null,
         bidBoardOwnership: null,
         rfpApprovalStatus: "pending_outbox",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+        assignedRepId: "rep-1",
+      }),
+    });
+
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Cancel is only offered for attention states (declined/conflict/send_failed),
+    // not for awaiting states — the server only allows cancel on attention states.
+    expect(mounted.container.textContent).not.toContain("Return to Opportunity");
+  });
+
+  it("renders Return to Opportunity button for director on a declined RFP deal", async () => {
+    // Director is in canCancelRfp but NOT in canTriggerRfp — separate predicates.
+    mocks.useAuthMock.mockReturnValue({ user: { id: "director-1", role: "director" } });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: "declined",
         rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
         assignedRepId: "rep-1",
       }),
@@ -2053,6 +2108,55 @@ describe("DealDetailPage", () => {
     });
 
     expect(mounted.container.textContent).not.toContain("Return to Opportunity");
+  });
+
+  it("keeps cancel-rfp success separate from a later refetch failure (no error toast after successful cancel)", async () => {
+    const refetch = vi.fn().mockRejectedValue(new Error("refresh failed"));
+    mocks.useAuthMock.mockReturnValue({ user: { id: "rep-1", role: "rep" } });
+    mocks.apiMock.mockImplementation((url: string, options?: { method?: string }) => {
+      if (url.includes("/photos")) return Promise.resolve({ pagination: { total: 0 } });
+      if (url.includes("/scoping-intake/readiness")) return Promise.resolve({ readiness: { status: "draft" } });
+      if (url.includes("/cancel-rfp") && options?.method === "POST") return Promise.resolve({});
+      return Promise.resolve({});
+    });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch,
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: "declined",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+        assignedRepId: "rep-1",
+      }),
+    });
+
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    mounted = mountPage();
+    await act(async () => { await Promise.resolve(); });
+
+    const cancelButton = Array.from(mounted.container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Return to Opportunity")
+    ) as HTMLButtonElement | undefined;
+    expect(cancelButton).toBeTruthy();
+
+    await act(async () => {
+      cancelButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Cancel POST succeeded → success toast
+    expect(mocks.toastSuccessMock).toHaveBeenCalledWith("Returned to Opportunity");
+    // Refetch failed → info toast, NOT error toast
+    expect(mocks.toastInfoMock).toHaveBeenCalledWith(
+      "RFP cancelled. Refresh page to see updated status."
+    );
+    expect(mocks.toastErrorMock).not.toHaveBeenCalled();
   });
 
   it("clicking Return to Opportunity calls cancel-rfp API and triggers refetch", async () => {

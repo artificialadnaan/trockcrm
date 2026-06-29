@@ -28,7 +28,7 @@ export function isPendingRfpDeal(deal: {
 }): boolean {
   return (
     deal.stageSlug === "opportunity" &&
-    !deal.isBidBoardOwned &&
+    deal.isBidBoardOwned === false &&
     pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null
   );
 }
