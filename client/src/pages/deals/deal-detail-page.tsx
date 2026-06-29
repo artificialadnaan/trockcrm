@@ -1547,11 +1547,16 @@ function RfpApprovalStatusBlock({
               {retrying ? "Retrying..." : "Retry"}
             </Button>
           )}
-          {canCancel && pendingRfpSubStateForStatus(deal.rfpApprovalStatus) === "attention" && (
-            <Button type="button" size="sm" variant="outline" onClick={onCancel} disabled={cancelling}>
-              {cancelling ? "Cancelling..." : "Return to Opportunity"}
-            </Button>
-          )}
+          {canCancel &&
+            pendingRfpSubStateForStatus(deal.rfpApprovalStatus) === "attention" &&
+            // Mirror the cancel route + board predicate: a re-confirmed denial or an in-flight override
+            // approval is no longer cancellable, so don't offer an action that can only 409.
+            deal.rfpOverrideDecision !== "denial_reconfirmed" &&
+            deal.rfpOverrideState !== "approving" && (
+              <Button type="button" size="sm" variant="outline" onClick={onCancel} disabled={cancelling}>
+                {cancelling ? "Cancelling..." : "Return to Opportunity"}
+              </Button>
+            )}
         </div>
       </div>
     </section>

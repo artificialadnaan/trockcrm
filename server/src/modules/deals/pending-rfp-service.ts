@@ -132,9 +132,13 @@ function reasonForPendingRfpRow(r: {
 // Return a deal to plain Opportunity. Only the "needs attention" states (declined/conflict/send_failed)
 // are cancellable — never an in-flight pending_outbox/pending request (which would race the delivery
 // worker / approval callbacks). Clears the WHOLE RFP cycle (incl. request id + token + override
-// fields) so a late callback or queued job can't resurrect/approve a cancelled deal. The status guard
-// is in the WHERE for atomicity: returns null if the row changed concurrently.
+// fields) so a late callback or queued job can't resurrect/approve a cancelled deal. The status, stage,
+// and override guards are ALL in the WHERE for atomicity: if the row advanced out of Opportunity or
+// changed state between the route's read and this update, nothing matches and it returns null (the
+// route then 409s) rather than clearing the RFP cycle on a deal that is no longer a pending-RFP row.
 export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{ id: string } | null> {
+  const oppStageIds = await opportunityStageIds(tenantDb);
+  if (oppStageIds.length === 0) return null;
   const [updated] = await tenantDb
     .update(deals)
     .set({
@@ -160,6 +164,7 @@ export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{
       and(
         eq(deals.id, dealId),
         eq(deals.isBidBoardOwned, false),
+        inArray(deals.stageId, oppStageIds),
         inArray(deals.rfpApprovalStatus, [...PENDING_RFP_ATTENTION_STATUSES]),
         NOT_RECONFIRMED_DENIAL,
         NOT_OVERRIDE_APPROVING,

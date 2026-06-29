@@ -2029,6 +2029,60 @@ describe("DealDetailPage", () => {
     expect(mounted.container.textContent).toContain("Return to Opportunity");
   });
 
+  it("does NOT render Return to Opportunity for a re-confirmed denial (resolved, cancel route would 409)", async () => {
+    mocks.useAuthMock.mockReturnValue({ user: { id: "admin-1", role: "admin" } });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: "declined",
+        rfpOverrideDecision: "denial_reconfirmed",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+        assignedRepId: "rep-1",
+      }),
+    });
+
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mounted.container.textContent).not.toContain("Return to Opportunity");
+  });
+
+  it("does NOT render Return to Opportunity while an override approval is in flight (rfpOverrideState='approving')", async () => {
+    mocks.useAuthMock.mockReturnValue({ user: { id: "admin-1", role: "admin" } });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: "declined",
+        rfpOverrideState: "approving",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+        assignedRepId: "rep-1",
+      }),
+    });
+
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mounted.container.textContent).not.toContain("Return to Opportunity");
+  });
+
   it("does NOT render Return to Opportunity for pending-outbox (awaiting sub-state, not attention)", async () => {
     mocks.useAuthMock.mockReturnValue({ user: { id: "admin-1", role: "admin" } });
     mocks.useDealDetailMock.mockReturnValue({

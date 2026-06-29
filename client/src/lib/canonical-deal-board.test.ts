@@ -1201,4 +1201,36 @@ describe("buildCanonicalDealBoardColumns", () => {
     expect(columns[oppIndex]!.count).toBe(1);
     expect(columns[oppIndex]!.totalValue).toBe(80000);
   });
+
+  it("does not carry totalCount on canonical columns, so the visibleCount rollup uses the adjusted active count", () => {
+    // buildCanonicalDealBoardColumns rebuilds columns and intentionally omits totalCount (the backend
+    // aggregate is dropped), so the Active Pipeline visibleCount rollup falls back to `count`. The split
+    // must therefore reconcile on the COUNT axis alone: opp.count + synthetic.count == pre-split active.
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 2, // active (non-on-hold): p1 + o1
+          totalCount: 4, // backend incl on-hold — must NOT survive onto the canonical column
+          totalValue: 170000,
+          cards: [
+            { id: "p1", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "pending", rfpOverrideDecision: null, bidEstimate: "100000", ddEstimate: null, awardedAmount: null, onHold: false },
+            { id: "p2", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "pending", rfpOverrideDecision: null, bidEstimate: "50000", ddEstimate: null, awardedAmount: null, onHold: true },
+            { id: "o1", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: null, bidEstimate: "70000", ddEstimate: null, awardedAmount: null, onHold: false },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    // totalCount is dropped on BOTH columns → the rollup uses `totalCount ?? count` == count.
+    expect(columns[oppIndex]!.totalCount).toBeUndefined();
+    expect(columns[prfpIndex]!.totalCount).toBeUndefined();
+    // Count axis reconciles: opp loses the active pending (2→1), synthetic gets it (1), sum == pre-split.
+    expect(columns[oppIndex]!.count).toBe(1);
+    expect(columns[prfpIndex]!.count).toBe(1);
+    expect(columns[oppIndex]!.count + columns[prfpIndex]!.count).toBe(2);
+  });
 });
