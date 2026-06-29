@@ -25,6 +25,7 @@ import { LeadEditPage } from "@/pages/leads/lead-edit-page";
 import { LeadNewPage } from "@/pages/leads/lead-new-page";
 import { PropertyListPage } from "@/pages/properties/property-list-page";
 import { PropertyDetailPage } from "@/pages/properties/property-detail-page";
+import { PropertyEditPage } from "@/pages/properties/property-edit-page";
 import { MergeQueuePage } from "@/pages/admin/merge-queue-page";
 import { DirectoryMergeQueuePage } from "@/pages/admin/directory-merge-queue-page";
 import { LeadDueDiligenceQueuePage } from "@/pages/admin/lead-due-diligence-queue-page";
@@ -224,6 +225,7 @@ export function App() {
               <Route path="/leads/:id/edit" element={<LeadEditPage />} />
               <Route path="/leads/:id" element={<LeadDetailPage />} />
               <Route path="/properties" element={<PropertyListPage />} />
+              <Route path="/properties/:id/edit" element={<PropertyEditPage />} />
               <Route path="/properties/:id" element={<PropertyDetailPage />} />
               {/* The standalone Pipeline page mirrored the Deals dashboard and was removed (product
                   decision). /pipeline redirects to the canonical Deals board, carrying the search string
