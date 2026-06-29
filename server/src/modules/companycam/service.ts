@@ -289,6 +289,11 @@ export async function linkProjectToDeal(
   // the single-project case; deal_companycam_projects is the source of truth. #830 migrates those readers
   // and drops the column. For a multi-project deal the scalar holds the most-recent link — an accepted
   // interim (the import-time guard already prevents mis-routing).
+  //
+  // On a RELINK the PREVIOUS owner's scalar still points at ccProjectId (the join row moved, but the scalar
+  // didn't), leaving a stale phantom link that legacy readers would still honor. Clear ANY deal's scalar for
+  // this project BEFORE stamping the target, so exactly one deal mirrors the link.
+  await tenantDb.update(deals).set({ companycamProjectId: null }).where(eq(deals.companycamProjectId, ccProjectId));
   await tenantDb.update(deals).set({ companycamProjectId: ccProjectId }).where(eq(deals.id, dealId));
 }
 
@@ -299,6 +304,13 @@ export async function unlinkProject(
   tenantDb: TenantDb,
   ccProjectId: string
 ): Promise<void> {
+  // Serialize against concurrent (re)links/assigns of the SAME project. unlinkProject mutates the join table
+  // AND clears the scalar mirror; without the lock it could interleave with linkProjectToDeal/assign (which
+  // take the same project-scoped lock) and leave the join row and scalar out of sync. Same mechanism +
+  // request-transaction reasoning as linkProjectToDeal: pg_advisory_xact_lock holds for the rest of the
+  // request and auto-releases at commit.
+  await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${ccProjectId}))`);
+
   await tenantDb
     .delete(dealCompanycamProjects)
     .where(eq(dealCompanycamProjects.companycamProjectId, ccProjectId));

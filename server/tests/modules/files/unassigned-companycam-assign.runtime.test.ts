@@ -83,6 +83,10 @@ beforeAll(async () => {
     ins({ category: "photo", subcategory: "CompanyCam", deal_id: null, r2_key: "u/222/c.jpg", display_name: "c", mime_type: "image/jpeg", notes: meta("222", "Bravo CC"), taken_at: "2026-06-22T10:00:00Z", uploaded_by: USER, is_active: "true" }),
     // Non-CompanyCam unassigned file with plain-text notes: must NOT move
     ins({ category: "photo", subcategory: "Upload", deal_id: null, r2_key: "u/plain.jpg", display_name: "plain", mime_type: "image/jpeg", notes: "plain text", taken_at: "2026-06-18T10:00:00Z", uploaded_by: USER, is_active: "true" }),
+    // Project 999 — a photo already owned by LINKED_DEAL (999's rightful deal, per the join row above). Lets
+    // the project-linked-elsewhere (409) path prove the REJECTED project's photos are NOT re-homed onto the
+    // wrong deal. (Assigned, so it never shows on the Unassigned tab and doesn't perturb the backlog asserts.)
+    ins({ category: "photo", subcategory: "CompanyCam", deal_id: LINKED_DEAL, r2_key: "u/999/x.jpg", display_name: "x", mime_type: "image/jpeg", notes: meta("999", "Linked CC"), taken_at: "2026-06-17T10:00:00Z", uploaded_by: USER, is_active: "true" }),
   ].join("\n"));
 
   tdb = drizzle(pg);
@@ -140,7 +144,10 @@ describe("assignUnassignedCompanyCamProjectToDeal", () => {
     expect(await linkedProjects(LINKED_DEAL)).toEqual(["999"]); // not stolen
     expect(await linkedProjects(DEAL)).toEqual([]); // nothing added to DEAL
 
-    // No photos moved by any rejection.
+    // No photos moved by any rejection. The 409 path targeted project "999", so prove ITS photo stayed put
+    // with its rightful owner (LINKED_DEAL) rather than being re-homed onto DEAL.
+    expect(await dealIdFor("u/999/x.jpg")).toBe(LINKED_DEAL);
+    // ...and the 400/404 rejections (which targeted project "111") left 111's unassigned photo untouched.
     expect(await dealIdFor("u/111/a.jpg")).toBeNull();
   });
 

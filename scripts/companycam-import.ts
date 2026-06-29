@@ -155,7 +155,7 @@ export function validateCompanyCamMatchConflicts(
   options: Pick<CompanyCamImportOptions, "execute" | "strictOneToOne">
 ) {
   if (options.execute && options.strictOneToOne !== false && conflicts.length > 0) {
-    throw new Error(`Refusing to import with ${conflicts.length} duplicate CompanyCam deal matches. Review companycam-match-conflicts CSV or pass --no-strict-one-to-one to continue with only the highest-confidence match per deal.`);
+    throw new Error(`Refusing to import with ${conflicts.length} duplicate CompanyCam deal matches. Review companycam-match-conflicts CSV or pass --no-strict-one-to-one to import ALL of each deal's reliable same-deal CompanyCam projects (a deal may own several projects; each becomes a deal_companycam_projects row).`);
   }
 }
 
@@ -370,11 +370,12 @@ export async function runCompanyCamImport(argv = process.argv.slice(2)) {
       if (!deal || !row.matchedDealId) continue;
       await client.query("BEGIN");
       try {
-        // Serialize this project's link write with the UI flows (feed-service.assignUnassignedCompanyCamProjectToDeal
-        // and service.linkProjectToDeal both take pg_advisory_xact_lock(hashtext(projectId))), so a concurrent UI
-        // assign of the SAME project can't race the import. Transaction-scoped: the per-row BEGIN/COMMIT releases it.
-        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [row.companyCamProjectId]);
         if (options.execute) {
+          // Serialize this project's link write with the UI flows (feed-service.assignUnassignedCompanyCamProjectToDeal
+          // and service.linkProjectToDeal both take pg_advisory_xact_lock(hashtext(projectId))), so a concurrent UI
+          // assign of the SAME project can't race the import. Transaction-scoped: the per-row BEGIN/COMMIT releases it.
+          // Taken ONLY on the execute/write path — a dry-run must not hold locks that could block a live assign/link.
+          await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [row.companyCamProjectId]);
           // Record the deal <-> CompanyCam-project link in the join table (single source of truth; a deal
           // can own many projects, a project is 1:1 to a deal). ON CONFLICT keeps a re-run idempotent and
           // RETURNS deal_id ONLY when WE actually inserted the link.

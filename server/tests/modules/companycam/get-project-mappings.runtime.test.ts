@@ -126,7 +126,11 @@ async function scalarFor(dealId: string): Promise<string | null> {
 
 describe("linkProjectToDeal — relink under advisory lock (B-4)", () => {
   it("moves an already-linked project to the target deal (last writer wins) leaving one row", async () => {
-    // cc-1 currently belongs to FOO (seeded above). Relink it to BAR.
+    // cc-1 currently belongs to FOO (seeded above). Stamp FOO's legacy scalar mirror too, so we can prove the
+    // relink CLEARS the prior owner's scalar (not just stamps the new owner's).
+    await pg.query(`UPDATE deals SET companycam_project_id = 'cc-1' WHERE id = $1`, [FOO]);
+    expect(await scalarFor(FOO)).toBe("cc-1");
+
     await linkProjectToDeal(tdb as never, "cc-1", BAR);
 
     const { rows } = (await pg.query(
@@ -137,6 +141,8 @@ describe("linkProjectToDeal — relink under advisory lock (B-4)", () => {
 
     // The legacy scalar mirror is stamped on the target deal so un-migrated readers still see the link.
     expect(await scalarFor(BAR)).toBe("cc-1");
+    // ...and the PRIOR owner's scalar is cleared — no stale phantom link left pointing at cc-1 on FOO.
+    expect(await scalarFor(FOO)).toBeNull();
   });
 
   it("rejects a link to a non-existent deal with 404 (not a raw FK 500)", async () => {
@@ -152,7 +158,13 @@ describe("linkProjectToDeal — relink under advisory lock (B-4)", () => {
   });
 
   it("unlink clears the stale scalar mirror alongside deleting the join row", async () => {
-    // cc-1 is currently linked to BAR (relinked above) with the scalar stamped on BAR.
+    // Self-contained setup (so this passes under `vitest -t`, independent of the relink test above): seed
+    // cc-1 -> BAR in the join table and stamp BAR's scalar mirror directly, clearing the project off any
+    // other deal first.
+    await pg.query(`DELETE FROM deal_companycam_projects WHERE companycam_project_id = 'cc-1'`);
+    await pg.query(`INSERT INTO deal_companycam_projects (deal_id, companycam_project_id) VALUES ($1, 'cc-1')`, [BAR]);
+    await pg.query(`UPDATE deals SET companycam_project_id = NULL WHERE companycam_project_id = 'cc-1'`);
+    await pg.query(`UPDATE deals SET companycam_project_id = 'cc-1' WHERE id = $1`, [BAR]);
     expect(await scalarFor(BAR)).toBe("cc-1");
 
     await unlinkProject(tdb as never, "cc-1");
