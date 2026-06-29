@@ -22,6 +22,9 @@ import { getProjectMappings, linkProjectToDeal } from "../../../src/modules/comp
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const FOO = U("f00"); // owns project "cc-1" already; name shared with unlinked project "cc-2"
 const BAR = U("ba2"); // no link yet — sanity check the normal auto path still works
+// Two ACTIVE deals sharing a normalized name ("Dup Site") — an ambiguous collision that must NOT auto-link.
+const DUP_A = U("d0a");
+const DUP_B = U("d0b");
 
 let pg: PGlite;
 let tdb: ReturnType<typeof drizzle>;
@@ -56,7 +59,10 @@ beforeAll(async () => {
     );
     INSERT INTO deals (id, name, deal_number, is_active) VALUES
       ('${FOO}', 'Foo Tower', 'D-1', true),
-      ('${BAR}', 'Bar Plaza', 'D-2', true);
+      ('${BAR}', 'Bar Plaza', 'D-2', true),
+      -- Two ACTIVE deals share the same normalized name -> ambiguous, must stay manual.
+      ('${DUP_A}', 'Dup Site', 'D-3', true),
+      ('${DUP_B}', 'Dup Site', 'D-4', true);
     -- FOO already owns CompanyCam project "cc-1".
     INSERT INTO deal_companycam_projects (deal_id, companycam_project_id) VALUES ('${FOO}', 'cc-1');
   `);
@@ -67,6 +73,7 @@ beforeAll(async () => {
     ccProject("cc-2", "Foo Tower", 3), // SAME name as FOO, unlinked -> must auto-match FOO (B-3)
     ccProject("cc-3", "Bar Plaza", 2), // unlinked, matches BAR -> normal auto path
     ccProject("cc-4", "Bar Plaza", 1), // ANOTHER unlinked same-named project -> must ALSO auto-match BAR (1:many)
+    ccProject("cc-5", "Dup Site", 4), // name shared by TWO active deals -> ambiguous -> 'unmatched' (manual)
   ]);
 });
 
@@ -93,6 +100,13 @@ describe("getProjectMappings — 1:many auto-match (B-3)", () => {
     // snapshot — the deal is no longer dropped from the index after its first match (1:many), so
     // autoLinkAndSync can link all of a deal's projects in one run.
     expect(byId.get("cc-4")).toMatchObject({ matchType: "auto", dealId: BAR });
+
+    // FINDING A: a normalized name held by TWO active deals (DUP_A + DUP_B) is ambiguous. The project
+    // must fall through to 'unmatched' (manual review) — NOT auto-link to whichever deal Postgres
+    // happened to return last. Assert it links to NEITHER candidate.
+    expect(byId.get("cc-5")).toMatchObject({ matchType: "unmatched", dealId: null });
+    expect(byId.get("cc-5")?.dealId).not.toBe(DUP_A);
+    expect(byId.get("cc-5")?.dealId).not.toBe(DUP_B);
   });
 });
 

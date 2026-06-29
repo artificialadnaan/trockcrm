@@ -161,9 +161,21 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
   // 1:many to CompanyCam projects, so a deal that already owns ONE project must stay a candidate for OTHER
   // same-named projects (otherwise its 2nd/3rd project can never auto-link). Projects already linked to a
   // deal still surface as matchType 'linked' via linkedMap above; only the DEAL remains a candidate here.
+  //
+  // BUT a normalized name held by >1 active deal is AMBIGUOUS: auto-linking would silently pick whichever
+  // row Postgres returned last (no ORDER BY) and then attach EVERY same-named CompanyCam project to that
+  // arbitrary deal. Mirror the CLI import planner (companycam-inventory.ts: exact-name match is reliable
+  // ONLY when exactly one deal carries that name) — track ambiguous names in a Set and exclude them from
+  // auto-matching so those projects fall through to 'unmatched' (manual review) instead.
   const dealsByNormName = new Map<string, typeof dealRows[0]>();
+  const ambiguousNormNames = new Set<string>();
   for (const deal of dealRows) {
-    dealsByNormName.set(normalizeName(deal.name), deal);
+    const norm = normalizeName(deal.name);
+    if (dealsByNormName.has(norm)) {
+      ambiguousNormNames.add(norm);
+    } else {
+      dealsByNormName.set(norm, deal);
+    }
   }
 
   const mappings: ProjectMapping[] = [];
@@ -188,8 +200,12 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
 
     const normProjName = normalizeName(proj.name);
     // Skip auto-matching a null/blank-named project (normalizes to "") — it would otherwise tie with
-    // any deal whose name also normalizes to "" (e.g. "Project"/"Photos").
-    const fuzzyMatch = normProjName ? dealsByNormName.get(normProjName) : undefined;
+    // any deal whose name also normalizes to "" (e.g. "Project"/"Photos"). Also skip an AMBIGUOUS name
+    // (held by >1 active deal): there's no single correct deal, so it goes to manual review ('unmatched').
+    const fuzzyMatch =
+      normProjName && !ambiguousNormNames.has(normProjName)
+        ? dealsByNormName.get(normProjName)
+        : undefined;
     if (fuzzyMatch) {
       mappings.push({
         ccProjectId: proj.id,

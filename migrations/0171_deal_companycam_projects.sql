@@ -67,7 +67,7 @@ BEGIN
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I.deal_companycam_projects (
          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-         deal_id uuid NOT NULL REFERENCES %I.deals(id),
+         deal_id uuid NOT NULL REFERENCES %I.deals(id) ON DELETE CASCADE,
          companycam_project_id varchar(50) NOT NULL,
          project_name text,
          created_at timestamptz NOT NULL DEFAULT now(),
@@ -99,7 +99,7 @@ END $tenant$;
 -- TENANT_SCHEMA_START
 CREATE TABLE IF NOT EXISTS office_dallas.deal_companycam_projects (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  deal_id uuid NOT NULL REFERENCES office_dallas.deals(id),
+  deal_id uuid NOT NULL REFERENCES office_dallas.deals(id) ON DELETE CASCADE,
   companycam_project_id varchar(50) NOT NULL,
   project_name text,
   created_at timestamptz NOT NULL DEFAULT now(),
