@@ -61,4 +61,25 @@ describe("migration 0171 — drifted tenant (deals without companycam_project_id
     await expect(pg.exec(migrationSql)).resolves.toBeDefined();
     expect((await one(`SELECT count(*)::int c FROM office_normal.deal_companycam_projects`)).c).toBe(1);
   });
+
+  it("repairs the scalar for a NEWLY PROVISIONED office via the TENANT_SCHEMA block", async () => {
+    // Simulate provisionOfficeSchema (office/service.ts): a new office whose deals (built from earlier
+    // tenant blocks) lacks companycam_project_id; the provisioner runs ONLY the TENANT_SCHEMA block with
+    // office_dallas replaced by the new schema. Without the ALTER in that block, the new office would miss
+    // the scalar and the runtime CompanyCam mirror writes would 42703.
+    await pg.exec(`CREATE SCHEMA office_newoffice; CREATE TABLE office_newoffice.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid());`);
+    const START = "-- TENANT_SCHEMA_START";
+    const END = "-- TENANT_SCHEMA_END";
+    const start = migrationSql.indexOf(START);
+    const end = migrationSql.indexOf(END);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const tenantSql = migrationSql.substring(start + START.length, end).replace(/office_dallas/g, "office_newoffice");
+
+    await expect(pg.exec(tenantSql)).resolves.toBeDefined();
+    // Scalar repaired → runtime mirror writes won't 42703 on the new office.
+    expect((await one(`SELECT count(*)::int c FROM information_schema.columns WHERE table_schema='office_newoffice' AND table_name='deals' AND column_name='companycam_project_id'`)).c).toBe(1);
+    // Join table provisioned for the new office.
+    expect((await one(`SELECT to_regclass('office_newoffice.deal_companycam_projects')::text r`)).r).toBe("office_newoffice.deal_companycam_projects");
+  });
 });

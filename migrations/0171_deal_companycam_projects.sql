@@ -109,6 +109,11 @@ END $tenant$;
 -- office_dallas at migration time too (redundant with the DO-loop above, guarded by IF NOT EXISTS). A
 -- freshly provisioned schema has no deals yet, so no backfill is needed here.
 -- TENANT_SCHEMA_START
+-- Repair the deprecated scalar for NEW offices too: migration 0007 added companycam_project_id only via a
+-- DO-loop (no tenant block), and the provisioner runs ONLY this TENANT_SCHEMA block — so without this a
+-- freshly provisioned office would lack the column and the runtime CompanyCam mirror writes (feed-service
+-- assign, link/unlink) would 42703. (deals already exists from earlier tenant blocks at provision time.)
+ALTER TABLE office_dallas.deals ADD COLUMN IF NOT EXISTS companycam_project_id varchar(50);
 CREATE TABLE IF NOT EXISTS office_dallas.deal_companycam_projects (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL REFERENCES office_dallas.deals(id) ON DELETE CASCADE,
