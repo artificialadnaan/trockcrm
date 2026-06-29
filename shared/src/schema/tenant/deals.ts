@@ -229,6 +229,11 @@ export const deals = pgTable(
     stageEnteredAt: timestamp("stage_entered_at", { withTimezone: true }).defaultNow().notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     hubspotDealId: varchar("hubspot_deal_id", { length: 50 }),
+    /**
+     * @deprecated Single-project link. Superseded by the `dealCompanycamProjects` join table (a deal can
+     * own many CompanyCam projects). No longer read or written as of migration 0171; kept to avoid a
+     * data-losing column drop in the same PR and dropped in a later migration.
+     */
     companycamProjectId: varchar("companycam_project_id", { length: 50 }),
     createdByUserId: uuid("created_by_user_id"),
     propertyLat: numeric("property_lat", { precision: 10, scale: 7 }),

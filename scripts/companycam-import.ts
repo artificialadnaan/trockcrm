@@ -357,8 +357,12 @@ export async function runCompanyCamImport(argv = process.argv.slice(2)) {
       await client.query("BEGIN");
       try {
         if (options.execute) {
+          // Record the deal <-> CompanyCam-project link in the join table (single source of truth; a deal
+          // can own many projects, a project is 1:1 to a deal). ON CONFLICT keeps a re-run idempotent.
           await client.query(
-            `UPDATE ${quoteIdent(options.tenant)}.deals SET companycam_project_id = $1 WHERE id = $2::uuid AND companycam_project_id IS DISTINCT FROM $1`,
+            `INSERT INTO ${quoteIdent(options.tenant)}.deal_companycam_projects (deal_id, companycam_project_id)
+             VALUES ($2::uuid, $1)
+             ON CONFLICT (companycam_project_id) DO NOTHING`,
             [row.companyCamProjectId, row.matchedDealId]
           );
         }

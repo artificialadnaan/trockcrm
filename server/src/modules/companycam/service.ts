@@ -6,7 +6,7 @@
 
 import { eq, and, sql, isNull, isNotNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, files } from "@trock-crm/shared/schema";
+import { deals, files, dealCompanycamProjects } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { getAllProjects, getProjectPhotos } from "./client.js";
 import type { CCProject, CCPhoto } from "./client.js";
@@ -123,29 +123,42 @@ type PreparedCompanyCamPhoto = {
  * Get all CompanyCam projects with their match status against deals.
  */
 export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMapping[]> {
-  const [ccProjects, dealRows] = await Promise.all([
+  const [ccProjects, dealRows, linkRows] = await Promise.all([
     getAllProjects(),
     tenantDb
       .select({
         id: deals.id,
         dealNumber: deals.dealNumber,
         name: deals.name,
-        companycamProjectId: deals.companycamProjectId,
       })
       .from(deals)
       .where(eq(deals.isActive, true)),
+    // Every deal <-> CompanyCam-project link (a deal may own many projects). Join to deals so off-deal /
+    // inactive-deal links are dropped, mirroring the isActive filter on the deal list above.
+    tenantDb
+      .select({
+        companycamProjectId: dealCompanycamProjects.companycamProjectId,
+        dealId: dealCompanycamProjects.dealId,
+      })
+      .from(dealCompanycamProjects)
+      .innerJoin(
+        deals,
+        and(eq(deals.id, dealCompanycamProjects.dealId), eq(deals.isActive, true)),
+      ),
   ]);
 
-  // Index deals by companycam_project_id for linked matches
+  // Index deals by companycam_project_id for linked matches (from the join table — the source of truth).
+  const dealById = new Map(dealRows.map((deal) => [deal.id, deal]));
   const linkedMap = new Map<string, typeof dealRows[0]>();
-  const unlinkedDeals: typeof dealRows = [];
-  for (const deal of dealRows) {
-    if (deal.companycamProjectId) {
-      linkedMap.set(deal.companycamProjectId, deal);
-    } else {
-      unlinkedDeals.push(deal);
-    }
+  const linkedDealIds = new Set<string>();
+  for (const link of linkRows) {
+    const deal = dealById.get(link.dealId);
+    if (!deal) continue;
+    linkedMap.set(link.companycamProjectId, deal);
+    linkedDealIds.add(link.dealId);
   }
+  // Unlinked deals (no CompanyCam project at all) are the fuzzy-match candidates.
+  const unlinkedDeals = dealRows.filter((deal) => !linkedDealIds.has(deal.id));
 
   // Build normalized name index for fuzzy matching
   const dealsByNormName = new Map<string, typeof dealRows[0]>();
@@ -211,7 +224,9 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
 }
 
 /**
- * Link a CompanyCam project to a deal.
+ * Link a CompanyCam project to a deal. Additive: a deal can own many projects, but a project is 1:1 with a
+ * deal, so we first clear any prior mapping of THIS project (it may have pointed at a different deal) and
+ * then map it to the target deal. Other projects already linked to the target deal are left untouched.
  */
 export async function linkProjectToDeal(
   tenantDb: TenantDb,
@@ -219,27 +234,25 @@ export async function linkProjectToDeal(
   dealId: string
 ): Promise<void> {
   await tenantDb
-    .update(deals)
-    .set({ companycamProjectId: null })
-    .where(eq(deals.companycamProjectId, ccProjectId));
+    .delete(dealCompanycamProjects)
+    .where(eq(dealCompanycamProjects.companycamProjectId, ccProjectId));
 
   await tenantDb
-    .update(deals)
-    .set({ companycamProjectId: ccProjectId })
-    .where(eq(deals.id, dealId));
+    .insert(dealCompanycamProjects)
+    .values({ dealId, companycamProjectId: ccProjectId })
+    .onConflictDoNothing({ target: dealCompanycamProjects.companycamProjectId });
 }
 
 /**
- * Unlink a CompanyCam project from its deal.
+ * Unlink a CompanyCam project from whatever deal it maps to (deletes the join row for that project).
  */
 export async function unlinkProject(
   tenantDb: TenantDb,
   ccProjectId: string
 ): Promise<void> {
   await tenantDb
-    .update(deals)
-    .set({ companycamProjectId: null })
-    .where(eq(deals.companycamProjectId, ccProjectId));
+    .delete(dealCompanycamProjects)
+    .where(eq(dealCompanycamProjects.companycamProjectId, ccProjectId));
 }
 
 /**
@@ -256,10 +269,11 @@ export async function syncProjectPhotos(
 ): Promise<SyncResult> {
   const [deal] = await tenantDb
     .select({ id: deals.id, dealNumber: deals.dealNumber, name: deals.name })
-    .from(deals)
+    .from(dealCompanycamProjects)
+    .innerJoin(deals, eq(deals.id, dealCompanycamProjects.dealId))
     .where(
       and(
-        eq(deals.companycamProjectId, ccProjectId),
+        eq(dealCompanycamProjects.companycamProjectId, ccProjectId),
         eq(deals.isActive, true)
       )
     )
@@ -440,31 +454,30 @@ export async function syncAllLinkedProjects(
   officeSlug: string = "default",
   onProgress?: ProgressCallback
 ): Promise<SyncResult[]> {
-  const linkedDeals = await tenantDb
-    .select({ companycamProjectId: deals.companycamProjectId })
-    .from(deals)
-    .where(
-      and(
-        isNotNull(deals.companycamProjectId),
-        eq(deals.isActive, true)
-      )
+  // Every CompanyCam project mapped to an active deal (a deal may own many; a project is 1:1 to a deal, so
+  // the project ids are already distinct via the join table's UNIQUE on companycam_project_id).
+  const linkedProjects = await tenantDb
+    .selectDistinct({ companycamProjectId: dealCompanycamProjects.companycamProjectId })
+    .from(dealCompanycamProjects)
+    .innerJoin(
+      deals,
+      and(eq(deals.id, dealCompanycamProjects.dealId), eq(deals.isActive, true)),
     );
 
   const results: SyncResult[] = [];
 
-  for (let i = 0; i < linkedDeals.length; i++) {
-    const deal = linkedDeals[i];
-    if (!deal.companycamProjectId) continue;
+  for (let i = 0; i < linkedProjects.length; i++) {
+    const projectId = linkedProjects[i].companycamProjectId;
 
-    onProgress?.(`Project ${i + 1}/${linkedDeals.length}: syncing...`);
+    onProgress?.(`Project ${i + 1}/${linkedProjects.length}: syncing...`);
 
     try {
-      const result = await syncProjectPhotos(tenantDb, deal.companycamProjectId, systemUserId, officeSlug, onProgress);
+      const result = await syncProjectPhotos(tenantDb, projectId, systemUserId, officeSlug, onProgress);
       results.push(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       results.push({
-        projectId: deal.companycamProjectId,
+        projectId,
         projectName: "Unknown",
         dealId: "",
         photosImported: 0,
