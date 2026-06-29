@@ -1361,7 +1361,11 @@ router.post("/:id/cancel-rfp", async (req, res, next) => {
     if (canonicalStage !== "opportunity" || deal.isBidBoardOwned) {
       throw new AppError(409, "This deal is no longer a pending RFP.", "RFP_CANCEL_WRONG_STATE");
     }
-    if (pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== "attention" || deal.rfpOverrideDecision === "denial_reconfirmed") {
+    if (
+      pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== "attention" ||
+      deal.rfpOverrideDecision === "denial_reconfirmed" ||
+      deal.rfpOverrideState === "approving"
+    ) {
       throw new AppError(409, "Only a declined, failed, or conflicting RFP can be returned to Opportunity.", "RFP_CANCEL_NOT_CANCELLABLE");
     }
 

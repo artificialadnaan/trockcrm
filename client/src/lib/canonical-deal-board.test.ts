@@ -1146,4 +1146,32 @@ describe("buildCanonicalDealBoardColumns", () => {
     // (g) the two columns' counts sum to the pre-split opportunity count (no double-counting)
     expect(columns[oppIndex]!.count + columns[prfpIndex]!.count).toBe(preSpitOppCount);
   });
+
+  it("keeps re-confirmed denials in Opportunity and excludes on-hold pending RFPs from the counts", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 1, // backend active count already excludes the on-hold card
+          totalValue: 0,
+          cards: [
+            // re-confirmed denial = resolved terminal → must STAY in opportunity, never pending_rfp
+            { id: "rd", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "declined", rfpOverrideDecision: "denial_reconfirmed", bidEstimate: "50000", ddEstimate: null, awardedAmount: null, onHold: false },
+            // on-hold pending RFP → shown in the pending_rfp column but NOT counted (reportable count excludes on-hold)
+            { id: "hp", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "pending", rfpOverrideDecision: null, bidEstimate: "70000", ddEstimate: null, awardedAmount: null, onHold: true },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).toContain("rd");
+    expect(prfpIndex === -1 ? [] : columns[prfpIndex]!.cards.map((d) => d.id)).not.toContain("rd");
+    expect(columns[prfpIndex]!.cards.map((d) => d.id)).toContain("hp");
+    expect(columns[prfpIndex]!.count).toBe(0);
+    expect(columns[prfpIndex]!.totalValue).toBe(0);
+    expect(columns[oppIndex]!.count).toBe(1);
+  });
 });

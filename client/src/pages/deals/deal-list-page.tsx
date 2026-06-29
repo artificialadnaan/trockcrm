@@ -1206,7 +1206,9 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
 
   const openStage = (column: DealBoardColumn) => {
     if (column.stage.slug === "pending_rfp") {
-      navigate("/deals/pending-rfp");
+      // Preserve office context (?officeId=…) so a cross-office viewer stays in the same office.
+      const qs = searchParams.toString();
+      navigate(qs ? `/deals/pending-rfp?${qs}` : "/deals/pending-rfp");
       return;
     }
     navigate(buildDealStageNavigationPath(column, scope, stageNavTerminalFilters, searchParams));

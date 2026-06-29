@@ -28,6 +28,9 @@ export interface PendingRfpDeal {
 // A re-confirmed denial (the override flow's upheld no-go) is a resolved terminal state, not a
 // pending RFP — it must not appear in the queue nor be cancellable.
 const NOT_RECONFIRMED_DENIAL = sql`coalesce(${deals.rfpOverrideDecision}, '') <> 'denial_reconfirmed'`;
+// A declined RFP whose override-approval is in flight (rfp_override_state='approving') is being turned
+// into a Bid Board project right now — it must not be cancelled (would orphan the external creation).
+const NOT_OVERRIDE_APPROVING = sql`coalesce(${deals.rfpOverrideState}, '') <> 'approving'`;
 
 // All stage ids that canonicalize to Opportunity (incl. legacy aliases like `dd`), matching what the
 // trigger route accepts and how the board buckets cards.
@@ -78,6 +81,7 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
         eq(deals.isBidBoardOwned, false),
         inArray(deals.rfpApprovalStatus, [...PENDING_RFP_STATUSES]),
         NOT_RECONFIRMED_DENIAL,
+        NOT_OVERRIDE_APPROVING,
         eq(deals.isActive, true),
         sql`coalesce(${deals.isTestData}, false) = false`,
       ),
@@ -134,6 +138,7 @@ export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{
         eq(deals.isBidBoardOwned, false),
         inArray(deals.rfpApprovalStatus, [...PENDING_RFP_ATTENTION_STATUSES]),
         NOT_RECONFIRMED_DENIAL,
+        NOT_OVERRIDE_APPROVING,
       ),
     )
     .returning({ id: deals.id });

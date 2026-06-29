@@ -43,6 +43,8 @@ beforeAll(async () => {
     INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_override_decision) VALUES ('00000000-0000-0000-0000-00000000d008','Reconfirmed','00000000-0000-0000-0000-0000000000aa','declined','denial_reconfirmed');
     -- pending RFP whose stage is the legacy "dd" alias (canonicalizes to opportunity) → must be included
     INSERT INTO deals (id,name,workflow_route,stage_id,rfp_approval_status,rfp_approval_requested_at) VALUES ('00000000-0000-0000-0000-00000000d009','Legacy DD','normal','00000000-0000-0000-0000-0000000000dd','pending','2026-06-20T00:00:00Z');
+    -- declined but override-approval is in flight (being created on Bid Board) → not actionable, excluded
+    INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_override_state) VALUES ('00000000-0000-0000-0000-00000000d010','OverrideApproving','00000000-0000-0000-0000-0000000000aa','declined','approving');
   `);
   tdb = drizzle(pg);
 });
@@ -57,6 +59,7 @@ describe("getPendingRfpDeals", () => {
       "00000000-0000-0000-0000-00000000d009", // legacy "dd" alias is included
     ]);
     expect(rows.map((r) => r.id)).not.toContain("00000000-0000-0000-0000-00000000d008"); // reconfirmed denial excluded
+    expect(rows.map((r) => r.id)).not.toContain("00000000-0000-0000-0000-00000000d010"); // override-approving excluded
     expect(rows[0]).toMatchObject({
       name: "Older Pending", workflowRoute: "normal", subState: "awaiting",
       assignedRepName: "Rep One", triggeredByName: "Director One",
@@ -91,5 +94,9 @@ describe("cancelPendingRfp", () => {
 
   it("refuses to cancel a re-confirmed denial", async () => {
     expect(await cancelPendingRfp(tdb, "00000000-0000-0000-0000-00000000d008")).toBeNull();
+  });
+
+  it("refuses to cancel a deal whose override-approval is in flight", async () => {
+    expect(await cancelPendingRfp(tdb, "00000000-0000-0000-0000-00000000d010")).toBeNull();
   });
 });

@@ -159,6 +159,7 @@ export function buildCanonicalDealBoardColumns(
   const isPendingRfpCard = (deal: Deal) =>
     dealCanonicalSlug(deal) === "opportunity" &&
     deal.isBidBoardOwned === false &&
+    deal.rfpOverrideDecision !== "denial_reconfirmed" &&
     pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null;
   const pendingRfpCards = deals.filter(isPendingRfpCard);
 
@@ -220,9 +221,12 @@ export function buildCanonicalDealBoardColumns(
     };
   });
 
-  const pendingRfpValue = pendingRfpCards
-    .filter((d) => !d.onHold)
-    .reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0);
+  // Board `count`/`totalValue` are the active/reportable figures (on-hold cards are excluded), so the
+  // moved-card adjustment + the synthetic column must count active cards only — otherwise an on-hold
+  // pending RFP would be double-counted out of opportunity and shown as active here.
+  const activePendingRfp = pendingRfpCards.filter((d) => !d.onHold);
+  const pendingRfpCount = activePendingRfp.length;
+  const pendingRfpValue = activePendingRfp.reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0);
 
   const oppIndex = columns.findIndex((column) => column.stage.slug === "opportunity");
   if (oppIndex !== -1 && pendingRfpCards.length > 0) {
@@ -231,7 +235,7 @@ export function buildCanonicalDealBoardColumns(
     // the two columns don't double-count (opportunity header would over-report otherwise).
     columns[oppIndex] = {
       ...opp,
-      count: Math.max(0, opp.count - pendingRfpCards.length),
+      count: Math.max(0, opp.count - pendingRfpCount),
       totalValue: opp.totalValue - pendingRfpValue,
     };
     columns.splice(oppIndex + 1, 0, {
@@ -244,7 +248,7 @@ export function buildCanonicalDealBoardColumns(
         isActivePipeline: false,
         isTerminal: false,
       },
-      count: pendingRfpCards.length,
+      count: pendingRfpCount,
       totalValue: pendingRfpValue,
       cards: pendingRfpCards,
     });

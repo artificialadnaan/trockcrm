@@ -208,6 +208,7 @@ export interface Deal {
   rfpLastAttemptError?: string | null;
   rfpDeclinedReason?: string | null;
   rfpDeclinedAt?: string | null;
+  rfpOverrideDecision?: string | null;
   isRfpTriggerEnabled?: boolean;
   lastActivityAt: string | null;
   stageEnteredAt: string;
