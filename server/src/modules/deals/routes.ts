@@ -93,6 +93,7 @@ import {
   getScopeLockedDealPatchFields,
   getScopeLockedResolvedFields,
   normalizeStagePageSort,
+  pendingRfpSubStateForStatus,
   toCanonicalDealStageSlug,
   type DealOpportunityEnteredEventPayload,
   type RfpRequestDeliveryPayload,
@@ -107,7 +108,7 @@ import {
 } from "./scoping-service.js";
 import { getResolvedDeal, writeResolvedDealFields } from "./lineage-resolver.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
-import { getPendingRfpDeals } from "./pending-rfp-service.js";
+import { getPendingRfpDeals, cancelPendingRfp } from "./pending-rfp-service.js";
 import { confirmUpload, getFileById, getPendingUploadMetadata } from "../files/service.js";
 import {
   createEstimateSourceDocument,
@@ -1334,6 +1335,52 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       eventId,
       jobId,
     }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/cancel-rfp — escape hatch: clear all RFP request fields so the deal returns to plain Opportunity.
+router.post("/:id/cancel-rfp", async (req, res, next) => {
+  try {
+    const dealId = req.params.id;
+    const userRole = req.user!.role;
+    const userId = req.user!.id;
+    const [deal] = await req.tenantDb!.select().from(deals).where(eq(deals.id, dealId)).limit(1);
+    if (!deal) throw new AppError(404, "Deal not found.");
+
+    const canCancel =
+      userRole === "admin" || userRole === "director" ||
+      (userRole === "rep" && deal.assignedRepId === userId);
+    if (!canCancel) {
+      throw new AppError(403, "Only the assigned rep, a director, or an admin can cancel a pending RFP.", "RFP_CANCEL_UNAUTHORIZED");
+    }
+
+    const stageSlug = await loadDealStageSlug(req.tenantDb!, deal.stageId);
+    const canonicalStage = stageSlug ? toCanonicalDealStageSlug(stageSlug, deal.workflowRoute) : null;
+    if (canonicalStage !== "opportunity" || deal.isBidBoardOwned) {
+      throw new AppError(409, "This deal is no longer a pending RFP.", "RFP_CANCEL_WRONG_STATE");
+    }
+    if (pendingRfpSubStateForStatus(deal.rfpApprovalStatus) === null) {
+      throw new AppError(409, "This deal has no pending RFP to cancel.", "RFP_CANCEL_NOT_PENDING");
+    }
+
+    const previousStatus = deal.rfpApprovalStatus;
+    const updated = await cancelPendingRfp(req.tenantDb!, deal.id);
+
+    await writeAuditLog(req.tenantDb!, {
+      tableName: "deals",
+      recordId: deal.id,
+      action: "update",
+      changedBy: userId,
+      actorName: req.user!.displayName ?? req.user!.email ?? userId,
+      actorRole: userRole,
+      entityType: "deal",
+      changes: { rfpApprovalStatus: { from: previousStatus, to: null } },
+    });
+
+    await req.commitTransaction!();
+    res.json(toJsonSafe({ success: true, dealId: updated?.id ?? dealId }));
   } catch (err) {
     next(err);
   }

@@ -81,6 +81,7 @@ vi.mock("../../../src/modules/deals/pending-rfp-service.js", () => ({
   getPendingRfpDeals: vi.fn().mockResolvedValue([{ id: "d1", name: "X", subState: "awaiting" }]),
   cancelPendingRfp: vi.fn(),
 }));
+vi.mock("../../../src/lib/audit-log.js", () => ({ writeAuditLog: vi.fn() }));
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
@@ -129,5 +130,51 @@ describe("GET /pending-rfp", () => {
     expect(err).toBeUndefined();
     expect(commitTransaction).toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith({ deals: [{ id: "d1", name: "X", subState: "awaiting" }] });
+  });
+});
+
+function stubDb(deal: any, stageSlug = "opportunity") {
+  return {
+    select: () => ({ from: () => ({ where: () => ({ limit: () => Promise.resolve([deal]) }) }) }),
+    execute: () => Promise.resolve([{ slug: stageSlug }]),
+  };
+}
+
+const declinedDeal = {
+  id: "deal-1",
+  assignedRepId: "rep-1",
+  stageId: "s1",
+  isBidBoardOwned: false,
+  rfpApprovalStatus: "declined",
+  name: "D1",
+};
+
+describe("POST /:id/cancel-rfp", () => {
+  it("rejects a non-owner rep (403)", async () => {
+    const res = makeRes();
+    const err = await runRoute("post", "/:id/cancel-rfp", {
+      params: { id: "deal-1" },
+      user: { id: "rep-2", role: "rep" },
+      tenantDb: stubDb(declinedDeal),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+    }, res);
+    expect(err).toMatchObject({ statusCode: 403 });
+  });
+
+  it("clears the RFP for the owning rep and commits", async () => {
+    const svc = await import("../../../src/modules/deals/pending-rfp-service.js");
+    (svc.cancelPendingRfp as any).mockResolvedValue({ id: "deal-1" });
+    const res = makeRes();
+    const commitTransaction = vi.fn().mockResolvedValue(undefined);
+    const err = await runRoute("post", "/:id/cancel-rfp", {
+      params: { id: "deal-1" },
+      user: { id: "rep-1", role: "rep", displayName: "Rep One" },
+      tenantDb: stubDb(declinedDeal),
+      commitTransaction,
+    }, res);
+    expect(err).toBeUndefined();
+    expect(svc.cancelPendingRfp).toHaveBeenCalled();
+    expect(commitTransaction).toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
   });
 });

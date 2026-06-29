@@ -77,3 +77,19 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
     declineReason: r.rfpDeclinedReason ?? null,
   }));
 }
+
+export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{ id: string } | null> {
+  const [updated] = await tenantDb
+    .update(deals)
+    .set({
+      rfpApprovalStatus: null,
+      rfpApprovalRequestedAt: null,
+      rfpApprovalRequestedBy: null,
+      rfpApprovalRequestEventId: null,
+      rfpDeclinedReason: null,
+      rfpDeclinedAt: null,
+    })
+    .where(and(eq(deals.id, dealId), eq(deals.isBidBoardOwned, false)))
+    .returning({ id: deals.id });
+  return updated ?? null;
+}

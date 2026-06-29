@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { getPendingRfpDeals } from "../../../src/modules/deals/pending-rfp-service.js";
+import { getPendingRfpDeals, cancelPendingRfp } from "../../../src/modules/deals/pending-rfp-service.js";
 
 let tdb: any;
 let pg: PGlite;
@@ -16,7 +16,8 @@ beforeAll(async () => {
       stage_id uuid, is_bid_board_owned boolean DEFAULT false, is_active boolean DEFAULT true,
       is_test_data boolean DEFAULT false, assigned_rep_id uuid,
       rfp_approval_status text, rfp_approval_requested_at timestamptz, rfp_approval_requested_by uuid,
-      rfp_declined_reason text
+      rfp_declined_reason text,
+      rfp_approval_request_event_id uuid, rfp_declined_at timestamptz
     );
     INSERT INTO pipeline_stage_config (id, slug) VALUES
       ('00000000-0000-0000-0000-0000000000aa','opportunity'),
@@ -50,5 +51,16 @@ describe("getPendingRfpDeals", () => {
       assignedRepName: "Rep One", triggeredByName: "Director One",
     });
     expect(rows[1]).toMatchObject({ subState: "attention", declineReason: "missing docs" });
+  });
+});
+
+describe("cancelPendingRfp", () => {
+  it("cancelPendingRfp clears the rfp fields so the deal leaves the bucket", async () => {
+    const before = await getPendingRfpDeals(tdb);
+    expect(before.map((r) => r.id)).toContain("00000000-0000-0000-0000-00000000d002");
+    const result = await cancelPendingRfp(tdb, "00000000-0000-0000-0000-00000000d002");
+    expect(result).toMatchObject({ id: "00000000-0000-0000-0000-00000000d002" });
+    const after = await getPendingRfpDeals(tdb);
+    expect(after.map((r) => r.id)).not.toContain("00000000-0000-0000-0000-00000000d002");
   });
 });
