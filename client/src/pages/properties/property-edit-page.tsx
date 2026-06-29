@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/textarea";
 import { usePropertyDetail, updateProperty } from "@/hooks/use-properties";
 
 /** Parse an optional whole-number field: "" -> null, a non-negative integer -> number, anything else -> "invalid". */
@@ -22,8 +23,8 @@ export function PropertyEditPage() {
   const location = useLocation();
   const { property, loading, error } = usePropertyDetail(id);
 
-  // Only the fields the API actually accepts (PATCH /api/properties/:id): address, city, state,
-  // zip, buildYear, unitCount. Name/company aren't editable here.
+  // Only the fields the API accepts (PATCH /api/properties/:id): address, city, state, zip,
+  // buildYear, unitCount, notes. Name/company aren't editable here.
   const [formData, setFormData] = useState({
     address: "",
     city: "",
@@ -31,6 +32,7 @@ export function PropertyEditPage() {
     zip: "",
     buildYear: "",
     unitCount: "",
+    notes: "",
   });
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -44,6 +46,7 @@ export function PropertyEditPage() {
         zip: property.zip ?? "",
         buildYear: property.buildYear != null ? String(property.buildYear) : "",
         unitCount: property.unitCount != null ? String(property.unitCount) : "",
+        notes: property.notes ?? "",
       });
     }
   }, [property]);
@@ -86,6 +89,7 @@ export function PropertyEditPage() {
     if (formData.zip !== (property.zip ?? "")) patch.zip = formData.zip.trim() || null;
     if (buildYear !== property.buildYear) patch.buildYear = buildYear;
     if (unitCount !== property.unitCount) patch.unitCount = unitCount;
+    if (formData.notes !== (property.notes ?? "")) patch.notes = formData.notes.trim() || null;
 
     try {
       await updateProperty(id, patch);
@@ -220,6 +224,22 @@ export function PropertyEditPage() {
                 placeholder="e.g. 120"
               />
             </div>
+          </CardContent>
+        </Card>
+
+        {/* Notes */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Notes</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Textarea
+              id="notes"
+              placeholder="Internal notes about this property..."
+              value={formData.notes}
+              onChange={(e) => handleChange("notes", e.target.value)}
+              rows={4}
+            />
           </CardContent>
         </Card>
 

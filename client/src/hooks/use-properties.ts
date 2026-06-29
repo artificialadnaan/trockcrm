@@ -261,6 +261,7 @@ export async function updateProperty(
     zip?: string | null;
     buildYear?: number | null;
     unitCount?: number | null;
+    notes?: string | null;
   },
   options: OfficeRequestOptions = {}
 ) {

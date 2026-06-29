@@ -115,6 +115,7 @@ export interface UpdatePropertyInput {
   zip?: string | null;
   buildYear?: number | string | null;
   unitCount?: number | string | null;
+  notes?: string | null;
 }
 
 const US_STATE_PATTERN = /^[A-Z]{2}$/;
@@ -266,6 +267,11 @@ export function buildPropertyUpdatePatch(input: UpdatePropertyInput): Partial<ty
   }
   if (Object.prototype.hasOwnProperty.call(input, "unitCount")) {
     patch.unitCount = validateOptionalPropertyUnitCount(input.unitCount);
+  }
+  if (Object.prototype.hasOwnProperty.call(input, "notes")) {
+    // Notes is optional free text: trim, and treat blank/null as cleared (null).
+    const trimmed = typeof input.notes === "string" ? input.notes.trim() : "";
+    patch.notes = trimmed.length > 0 ? trimmed : null;
   }
 
   return patch;

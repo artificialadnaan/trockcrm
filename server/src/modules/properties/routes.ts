@@ -60,7 +60,7 @@ router.post("/", async (req, res, next) => {
 
 router.patch("/:id", async (req, res, next) => {
   try {
-    const allowedFields = ["address", "city", "state", "zip", "buildYear", "unitCount"] as const;
+    const allowedFields = ["address", "city", "state", "zip", "buildYear", "unitCount", "notes"] as const;
     const input: Parameters<typeof updateProperty>[2] = {};
     for (const field of allowedFields) {
       if (Object.prototype.hasOwnProperty.call(req.body, field)) {

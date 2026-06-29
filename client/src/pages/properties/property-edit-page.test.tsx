@@ -31,6 +31,7 @@ const PROPERTY = {
   zip: "75001",
   buildYear: 2005,
   unitCount: 120,
+  notes: "Roof inspected 2023",
   isActive: true,
 };
 
@@ -61,10 +62,11 @@ function input(id: string) {
   return container.querySelector(`#${id}`) as HTMLInputElement;
 }
 
-// Set a controlled input's value the way React detects it (native setter + input event).
+// Set a controlled input/textarea's value the way React detects it (native setter + input event).
 function setInput(id: string, value: string) {
-  const el = input(id);
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+  const el = container.querySelector(`#${id}`) as HTMLInputElement | HTMLTextAreaElement;
+  const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!;
   setter.call(el, value);
   el.dispatchEvent(new Event("input", { bubbles: true }));
 }
@@ -102,6 +104,13 @@ describe("PropertyEditPage", () => {
     await act(async () => setInput("buildYear", "2010"));
     await act(async () => submit());
     expect(mocks.updateProperty).toHaveBeenCalledWith("property-1", { buildYear: 2010 });
+  });
+
+  it("saves edited notes", async () => {
+    mount();
+    await act(async () => setInput("notes", "Updated note"));
+    await act(async () => submit());
+    expect(mocks.updateProperty).toHaveBeenCalledWith("property-1", { notes: "Updated note" });
   });
 
   // L78: a property carrying legacy-invalid building data (unitCount 0 is rejected server-side) must

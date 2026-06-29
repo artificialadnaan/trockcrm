@@ -29,4 +29,10 @@ describe("property update patch validation", () => {
     expect(() => buildPropertyUpdatePatch({ state: "" })).toThrow("State cannot be blank when provided");
     expect(() => buildPropertyUpdatePatch({ zip: null })).toThrow("ZIP cannot be blank when provided");
   });
+
+  it("updates notes as optional free text, trimming and clearing blank/null to null", () => {
+    expect(buildPropertyUpdatePatch({ notes: "  Roof replaced 2024  " })).toEqual({ notes: "Roof replaced 2024" });
+    expect(buildPropertyUpdatePatch({ notes: "" })).toEqual({ notes: null });
+    expect(buildPropertyUpdatePatch({ notes: null })).toEqual({ notes: null });
+  });
 });
