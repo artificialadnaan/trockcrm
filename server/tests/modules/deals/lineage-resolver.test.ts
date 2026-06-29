@@ -252,6 +252,21 @@ describe("deal lineage resolver field ownership", () => {
     expect(resolved.answersByKey).not.toHaveProperty("bid_due_date");
   });
 
+  it("reports a cleared lead bid due date as null, never the stale deal snapshot", async () => {
+    // A lead-backed deal whose lead.bid_due_date was cleared to null, but the deal snapshot still
+    // holds an older value (a pre-write-through scoping clear). The resolver must surface the lead's
+    // cleared null — NOT the stale deal date — so scoping/readiness sees the required field as missing.
+    const tenantDb = createLineageTenantDb({
+      lead: { bidDueDate: null },
+      deal: { bidDueDate: new Date("2026-01-01T00:00:00.000Z") } as never,
+      questionAnswers: [],
+    });
+
+    const resolved = await getResolvedDeal(tenantDb as never, "deal-1");
+
+    expect(resolved.resolved.bidDueDate).toBeNull();
+  });
+
   it("resolves bid due date from the lead column when the V2 answer is stale", async () => {
     const tenantDb = createLineageTenantDb({
       lead: { bidDueDate: "2026-06-01" },

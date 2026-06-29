@@ -237,7 +237,13 @@ export async function getResolvedDeal(
       assignedRepId: sourceLead?.assignedRepId ?? deal.assignedRepId,
       workflowRoute,
       description: sourceLead?.description ?? deal.description ?? null,
-      bidDueDate: sourceLead?.bidDueDate ?? dealBidDueDateToDateOnly(deal.bidDueDate) ?? null,
+      // A lead-backed deal's bid due date is owned by the lead — INCLUDING when it's been cleared to
+      // null. Only fall back to the deal column when there's NO source lead at all, so a deliberately
+      // cleared lead value isn't masked by a stale pre-write-through deal snapshot (scoping/readiness
+      // must see the clear). No source lead → the deal column is authoritative (UTC date-only).
+      bidDueDate: sourceLead
+        ? sourceLead.bidDueDate ?? null
+        : dealBidDueDateToDateOnly(deal.bidDueDate) ?? null,
     },
     ownership: DEAL_FIELD_OWNERSHIP,
   };
