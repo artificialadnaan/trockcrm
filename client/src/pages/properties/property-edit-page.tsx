@@ -54,7 +54,7 @@ export function PropertyEditPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!id) return;
+    if (!id || !property) return;
 
     const buildYear = parseOptionalCount(formData.buildYear);
     const unitCount = parseOptionalCount(formData.unitCount);
@@ -70,20 +70,23 @@ export function PropertyEditPage() {
     setSubmitting(true);
     setSubmitError(null);
 
-    // address/city/state/zip are required-when-present server-side (a provided blank/null is a 400,
-    // not a no-op), so only send the ones that actually have a value. This lets a rep edit build year
-    // or unit count — or fill in a missing address part — on an incomplete property without tripping
-    // "<Field> cannot be blank when provided". buildYear/unitCount are optional and always sent so
-    // they can be cleared.
-    const patch: Parameters<typeof updateProperty>[1] = { buildYear, unitCount };
+    // Send only the fields the user actually changed. The server validates every key present in the
+    // payload (buildPropertyUpdatePatch) — address/city/state/zip are required-when-present, buildYear
+    // is bounded to 1800..now+2, unitCount must be > 0 — so re-sending an unchanged legacy value (a
+    // blank required address part, a build year of 1500, a unit count of 0) would reject an otherwise
+    // valid edit to a different field. Diffing also surfaces the real server error when a user clears
+    // a required field, instead of silently keeping the old value.
+    const patch: Parameters<typeof updateProperty>[1] = {};
     const address = formData.address.trim();
     const city = formData.city.trim();
     const state = formData.state.trim();
     const zip = formData.zip.trim();
-    if (address) patch.address = address;
-    if (city) patch.city = city;
-    if (state) patch.state = state;
-    if (zip) patch.zip = zip;
+    if (address !== (property.address ?? "")) patch.address = address || null;
+    if (city !== (property.city ?? "")) patch.city = city || null;
+    if (state !== (property.state ?? "")) patch.state = state || null;
+    if (zip !== (property.zip ?? "")) patch.zip = zip || null;
+    if (buildYear !== property.buildYear) patch.buildYear = buildYear;
+    if (unitCount !== property.unitCount) patch.unitCount = unitCount;
 
     try {
       await updateProperty(id, patch);
@@ -112,6 +115,23 @@ export function PropertyEditPage() {
         <p className="text-red-600">{error ?? "Property not found"}</p>
         <Button variant="outline" className="mt-4" onClick={() => navigate("/properties")}>
           Back to Properties
+        </Button>
+      </div>
+    );
+  }
+
+  // Soft-deleted properties are read-only — editing one would silently revive stale data. getPropertyDetail
+  // returns inactive rows, and the route is reachable by deep link, so guard here before the form.
+  if (!property.isActive) {
+    return (
+      <div className="text-center py-12">
+        <p className="text-red-600">This property has been deleted and can&apos;t be edited.</p>
+        <Button
+          variant="outline"
+          className="mt-4"
+          onClick={() => navigate(`/properties/${id}${location.search}`)}
+        >
+          Back to Property
         </Button>
       </div>
     );

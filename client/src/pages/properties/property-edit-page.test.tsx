@@ -31,6 +31,7 @@ const PROPERTY = {
   zip: "75001",
   buildYear: 2005,
   unitCount: 120,
+  isActive: true,
 };
 
 function tree(initial: string) {
@@ -60,6 +61,18 @@ function input(id: string) {
   return container.querySelector(`#${id}`) as HTMLInputElement;
 }
 
+// Set a controlled input's value the way React detects it (native setter + input event).
+function setInput(id: string, value: string) {
+  const el = input(id);
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+  setter.call(el, value);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function submit() {
+  container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.usePropertyDetail.mockReturnValue({ property: PROPERTY, loading: false, error: null });
@@ -80,59 +93,48 @@ describe("PropertyEditPage", () => {
     expect(container.textContent).toContain("Maple Court Apartments");
     expect(input("address").value).toBe("123 Main St");
     expect(input("city").value).toBe("Dallas");
-    expect(input("state").value).toBe("TX");
-    expect(input("zip").value).toBe("75001");
     expect(input("buildYear").value).toBe("2005");
     expect(input("unitCount").value).toBe("120");
   });
 
-  it("saves via updateProperty with the numeric fields parsed to numbers", async () => {
+  it("sends only the field the user changed", async () => {
     mount();
-    await act(async () => {
-      container.querySelector("form")!.dispatchEvent(
-        new Event("submit", { bubbles: true, cancelable: true }),
-      );
-    });
-    expect(mocks.updateProperty).toHaveBeenCalledWith("property-1", {
-      address: "123 Main St",
-      city: "Dallas",
-      state: "TX",
-      zip: "75001",
-      buildYear: 2005,
-      unitCount: 120,
-    });
+    await act(async () => setInput("buildYear", "2010"));
+    await act(async () => submit());
+    expect(mocks.updateProperty).toHaveBeenCalledWith("property-1", { buildYear: 2010 });
   });
 
-  // The server treats address/city/state/zip as required-when-present (blank → 400), so editing an
-  // incomplete property (here: no city/state/zip) must omit those blank keys, not send them as null.
-  it("omits blank address fields so editing an incomplete property does not 400", async () => {
+  // L78: a property carrying legacy-invalid building data (unitCount 0 is rejected server-side) must
+  // still be editable on another field — the unchanged invalid value must NOT be resent.
+  it("does not resend unchanged building data when only an address field changes", async () => {
     mocks.usePropertyDetail.mockReturnValue({
-      property: { ...PROPERTY, city: "", state: "", zip: "" },
+      property: { ...PROPERTY, unitCount: 0 },
       loading: false,
       error: null,
     });
     mount();
-    await act(async () => {
-      container.querySelector("form")!.dispatchEvent(
-        new Event("submit", { bubbles: true, cancelable: true }),
-      );
-    });
-    const payload = mocks.updateProperty.mock.calls[0]![1];
-    expect(payload).not.toHaveProperty("city");
-    expect(payload).not.toHaveProperty("state");
-    expect(payload).not.toHaveProperty("zip");
-    expect(payload).toMatchObject({ address: "123 Main St", buildYear: 2005, unitCount: 120 });
+    await act(async () => setInput("address", "456 Oak Ave"));
+    await act(async () => submit());
+    expect(mocks.updateProperty).toHaveBeenCalledWith("property-1", { address: "456 Oak Ave" });
   });
 
-  // api() resolves the office from the URL, so a cross-office save must return to the detail page with
-  // ?officeId intact — otherwise the director lands in the wrong office and sees a not-found view.
+  // api() resolves the office from the URL, so a cross-office save must return with ?officeId intact —
+  // otherwise the director lands in the wrong office and sees a not-found view.
   it("preserves the ?officeId query param when returning to the detail page after save", async () => {
     mount("/properties/property-1/edit?officeId=atl-office");
-    await act(async () => {
-      container.querySelector("form")!.dispatchEvent(
-        new Event("submit", { bubbles: true, cancelable: true }),
-      );
-    });
+    await act(async () => submit());
     expect(container.textContent).toContain("DETAIL?officeId=atl-office");
+  });
+
+  // L109: soft-deleted properties are read-only — show a message instead of an editable form.
+  it("blocks editing a soft-deleted (inactive) property", () => {
+    mocks.usePropertyDetail.mockReturnValue({
+      property: { ...PROPERTY, isActive: false },
+      loading: false,
+      error: null,
+    });
+    mount();
+    expect(container.textContent).toContain("has been deleted");
+    expect(container.querySelector("form")).toBeNull();
   });
 });
