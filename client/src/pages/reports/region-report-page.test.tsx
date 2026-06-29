@@ -26,6 +26,13 @@ vi.mock("@/hooks/use-reports", () => ({
   },
 }));
 
+// The drill-down EvidenceDrawer this page renders calls useAuth (added in #827), so mock it — like
+// evidence-drawer.test.tsx does — to let the page render without an AuthProvider.
+vi.mock("@/lib/auth", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/auth")>();
+  return { ...actual, useAuth: () => ({ user: { id: "viewer", role: "director" } }) };
+});
+
 const EMPTY: RegionReportData = {
   period: { from: "2026-05-01", to: "2026-05-31", label: "2026-05-01 → 2026-05-31" },
   summary: { totalWon: { value: 0, count: 0 }, openPipeline: { value: 0, count: 0 }, winRate: null, unassignedPct: null },
