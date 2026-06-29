@@ -152,8 +152,9 @@ const fieldProjectMiddleware = [requireFieldContractor, tenantMiddleware] as con
 
 // Cross-office (field is office-agnostic): fan out the active-project list over ALL active offices,
 // stamp each project with its owning office (dealNumber/name are unique per-schema only, so cross-office
-// rows can be visually identical), merge by recency, and paginate over the merged set. One office
-// failing degrades gracefully — its slug is surfaced in `degradedOffices`, the rest still return.
+// rows can be visually identical), merge photos-first then by recency (via mergeFieldProjects), and
+// paginate over the merged set. One office failing degrades gracefully — its slug is surfaced in
+// `degradedOffices`, the rest still return.
 fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
   try {
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };

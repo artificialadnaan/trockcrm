@@ -198,10 +198,12 @@ export async function listFieldProjects(
     ) photo_stats ON true
     WHERE ${where}
     -- Photos-first: surface projects that actually have photos above recently-touched-but-empty deals,
-    -- then most-recent activity within each group. Mirrored by mergeFieldProjects for the cross-office
-    -- merge so the order stays consistent under pagination.
+    -- then most-recent activity within each group, with a final d.id tiebreak for a deterministic total
+    -- order. Mirrored EXACTLY by mergeFieldProjects (incl. the id tiebreak) so the cross-office
+    -- fetch-top-N → merge → slice scheme stays consistent across pages even under exact ties.
     ORDER BY (COALESCE(photo_stats.photo_count, 0) > 0) DESC,
-             COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
+             COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST,
+             d.id ASC
     LIMIT ${perPage}
     OFFSET ${offset}
   `);

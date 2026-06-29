@@ -158,6 +158,8 @@ describe("field routes", () => {
       page: 1,
       perPage: 50,
     });
+    // The cross-office order is produced by mergeFieldProjects (photos-first), not an inline route sort.
+    expect(projectMocks.mergeFieldProjects).toHaveBeenCalled();
 
     await invokeRoute("get", "/projects/starred", {});
     expect(projectMocks.listStarredFieldProjects).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({

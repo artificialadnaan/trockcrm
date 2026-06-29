@@ -95,14 +95,22 @@ describe("field projects service", () => {
     expect(JSON.stringify(result)).not.toContain("source");
   });
 
-  it("orders the active-projects list PHOTOS-FIRST (has-photos key ahead of the recency key)", async () => {
+  it("orders the active-projects list PHOTOS-FIRST, then recency, with a stable d.id tiebreak", async () => {
     const db = tenantDb([[{ total: 0 }], []]);
     await listFieldProjects(db, { userId: "field-1", userRole: "field_contractor" });
     const rowsSql = extractSqlText(db.execute.mock.calls[1][0]);
     const orderBy = rowsSql.slice(rowsSql.indexOf("ORDER BY"));
-    // The photos-first key (photo_count > 0) DESC must precede the recency COALESCE in ORDER BY.
+    // The photos-first key (photo_count > 0) DESC must be present and precede the recency COALESCE.
     expect(orderBy).toMatch(/photo_count[\s\S]*>\s*0\)\s*DESC/);
-    expect(orderBy.indexOf("photo_count")).toBeLessThan(orderBy.indexOf("last_activity_at"));
+    const photoIdx = orderBy.indexOf("photo_count");
+    const recencyIdx = orderBy.indexOf("last_activity_at");
+    expect(photoIdx).toBeGreaterThanOrEqual(0);
+    expect(photoIdx).toBeLessThan(recencyIdx);
+    // A final deterministic d.id tiebreak keeps the per-office SQL order identical to mergeFieldProjects
+    // under exact ties (else the fetch-top-N-then-merge-then-slice scheme could drop/shift rows across
+    // pages). Mirrors the nearby query's id tiebreak.
+    expect(orderBy).toMatch(/d\.id\s+ASC/);
+    expect(orderBy.lastIndexOf("d.id")).toBeGreaterThan(recencyIdx);
   });
 
   it("lists starred projects sorted by recent project photo activity", async () => {
