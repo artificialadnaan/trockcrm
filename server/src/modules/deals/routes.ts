@@ -1409,6 +1409,13 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
     );
     if (!deal) throw new AppError(404, "Deal not found");
 
+    // Retry is a send-failed-only action; require the current state up front so a stale Retry click
+    // (e.g. from another tab after the RFP was cancelled via Return to Opportunity) is rejected before
+    // any work, instead of resurrecting a cleared RFP from its still-present dead job.
+    if (deal.rfpApprovalStatus !== "send_failed") {
+      throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
+    }
+
     const deadJobResult = await req.tenantDb!.execute(sql`
       SELECT id, payload
         FROM public.job_queue
@@ -1434,6 +1441,21 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       body: { ...deadJob.payload.body, attachments: freshAttachments },
     };
     delete payload.dealHandled;
+    // Atomically re-claim the send-failed state BEFORE enqueuing, so a Return to Opportunity that lands
+    // between the read above and here (clearing the RFP fields but leaving the dead job) can't have this
+    // retry resurrect the cancelled RFP: if the status already changed, nothing matches and we 409
+    // without enqueuing. Same transaction, so a later insert failure rolls the status back.
+    const [reclaimed] = await req.tenantDb!
+      .update(deals)
+      .set({
+        rfpApprovalStatus: "pending_outbox",
+        rfpLastAttemptError: null,
+      })
+      .where(and(eq(deals.id, deal.id), eq(deals.rfpApprovalStatus, "send_failed")))
+      .returning({ id: deals.id });
+    if (!reclaimed) {
+      throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
+    }
     await req.tenantDb!.insert(jobQueue).values({
       jobType: "rfp_request_delivery",
       payload,
@@ -1443,13 +1465,6 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       runAfter: new Date(),
       maxAttempts: 8,
     });
-    await req.tenantDb!
-      .update(deals)
-      .set({
-        rfpApprovalStatus: "pending_outbox",
-        rfpLastAttemptError: null,
-      })
-      .where(eq(deals.id, deal.id));
 
     await req.commitTransaction!();
     res.status(202).json({ success: true, status: "pending_outbox" });

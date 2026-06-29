@@ -1548,9 +1548,13 @@ function RfpApprovalStatusBlock({
             </Button>
           )}
           {canCancel &&
+            // Mirror the cancel route's full guard so the button only shows when the deal is actually
+            // cancellable: still an Opportunity-family stage, not Bid Board owned, in an attention state,
+            // and neither a re-confirmed denial nor an in-flight override approval. Otherwise the route
+            // rejects (RFP_CANCEL_WRONG_STATE / NOT_CANCELLABLE) and the action can only 409.
+            toCanonicalDealStageSlug(deal.stageSlug ?? "", deal.workflowRoute ?? "normal") === "opportunity" &&
+            deal.isBidBoardOwned !== true &&
             pendingRfpSubStateForStatus(deal.rfpApprovalStatus) === "attention" &&
-            // Mirror the cancel route + board predicate: a re-confirmed denial or an in-flight override
-            // approval is no longer cancellable, so don't offer an action that can only 409.
             deal.rfpOverrideDecision !== "denial_reconfirmed" &&
             deal.rfpOverrideState !== "approving" && (
               <Button type="button" size="sm" variant="outline" onClick={onCancel} disabled={cancelling}>

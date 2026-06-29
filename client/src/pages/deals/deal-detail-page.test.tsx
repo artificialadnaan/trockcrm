@@ -1985,6 +1985,7 @@ describe("DealDetailPage", () => {
       refetch: vi.fn(),
       deal: makeDealDetail({
         stageId: "stage-opportunity",
+        stageSlug: "opportunity",
         isBidBoardOwned: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
@@ -2011,6 +2012,7 @@ describe("DealDetailPage", () => {
       refetch: vi.fn(),
       deal: makeDealDetail({
         stageId: "stage-opportunity",
+        stageSlug: "opportunity",
         isBidBoardOwned: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
@@ -2037,6 +2039,7 @@ describe("DealDetailPage", () => {
       refetch: vi.fn(),
       deal: makeDealDetail({
         stageId: "stage-opportunity",
+        stageSlug: "opportunity",
         isBidBoardOwned: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
@@ -2064,12 +2067,67 @@ describe("DealDetailPage", () => {
       refetch: vi.fn(),
       deal: makeDealDetail({
         stageId: "stage-opportunity",
+        stageSlug: "opportunity",
         isBidBoardOwned: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
         bidBoardOwnership: null,
         rfpApprovalStatus: "declined",
         rfpOverrideState: "approving",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+        assignedRepId: "rep-1",
+      }),
+    });
+
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mounted.container.textContent).not.toContain("Return to Opportunity");
+  });
+
+  it("does NOT render Return to Opportunity once the deal has advanced out of Opportunity", async () => {
+    mocks.useAuthMock.mockReturnValue({ user: { id: "admin-1", role: "admin" } });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-estimating",
+        stageSlug: "estimating",
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: "declined",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+        assignedRepId: "rep-1",
+      }),
+    });
+
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mounted.container.textContent).not.toContain("Return to Opportunity");
+  });
+
+  it("does NOT render Return to Opportunity for a Bid Board owned deal", async () => {
+    mocks.useAuthMock.mockReturnValue({ user: { id: "admin-1", role: "admin" } });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        stageSlug: "opportunity",
+        isBidBoardOwned: true,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: "declined",
         rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
         assignedRepId: "rep-1",
       }),
@@ -2120,6 +2178,7 @@ describe("DealDetailPage", () => {
       refetch: vi.fn(),
       deal: makeDealDetail({
         stageId: "stage-opportunity",
+        stageSlug: "opportunity",
         isBidBoardOwned: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
@@ -2146,6 +2205,7 @@ describe("DealDetailPage", () => {
       refetch: vi.fn(),
       deal: makeDealDetail({
         stageId: "stage-opportunity",
+        stageSlug: "opportunity",
         isBidBoardOwned: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
@@ -2179,6 +2239,7 @@ describe("DealDetailPage", () => {
       refetch,
       deal: makeDealDetail({
         stageId: "stage-opportunity",
+        stageSlug: "opportunity",
         isBidBoardOwned: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
@@ -2228,6 +2289,7 @@ describe("DealDetailPage", () => {
       refetch,
       deal: makeDealDetail({
         stageId: "stage-opportunity",
+        stageSlug: "opportunity",
         isBidBoardOwned: false,
         bidBoardStageSlug: null,
         readOnlySyncedAt: null,
