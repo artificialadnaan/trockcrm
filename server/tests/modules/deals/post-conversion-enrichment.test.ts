@@ -14,7 +14,7 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => {
-  const [dealsModule, approvalsModule, changeOrdersModule, dealChangeOrdersModule, historyModule, pipelineStageModule, usersModule, companiesModule, contactsModule, projectTypeConfigModule] =
+  const [dealsModule, approvalsModule, changeOrdersModule, dealChangeOrdersModule, historyModule, pipelineStageModule, usersModule, companiesModule, contactsModule, projectTypeConfigModule, leadsModule] =
     await Promise.all([
       import("../../../../shared/src/schema/tenant/deals.js"),
       import("../../../../shared/src/schema/tenant/deal-approvals.js"),
@@ -26,6 +26,7 @@ vi.mock("@trock-crm/shared/schema", async () => {
       import("../../../../shared/src/schema/tenant/companies.js"),
       import("../../../../shared/src/schema/tenant/contacts.js"),
       import("../../../../shared/src/schema/public/project-type-config.js"),
+      import("../../../../shared/src/schema/tenant/leads.js"), // getDealDetail now resolves the lead's bid due date
     ]);
 
   return {
@@ -39,6 +40,7 @@ vi.mock("@trock-crm/shared/schema", async () => {
     ...companiesModule,
     ...contactsModule,
     ...projectTypeConfigModule,
+    ...leadsModule,
   };
 });
 
