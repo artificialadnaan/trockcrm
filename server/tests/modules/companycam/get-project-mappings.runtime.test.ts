@@ -11,7 +11,7 @@ vi.mock("../../../src/modules/companycam/client.js", () => ({
 }));
 
 import * as client from "../../../src/modules/companycam/client.js";
-import { getProjectMappings, linkProjectToDeal } from "../../../src/modules/companycam/service.js";
+import { getProjectMappings, linkProjectToDeal, unlinkProject } from "../../../src/modules/companycam/service.js";
 
 /**
  * REAL-SQL proof for the 1:many auto-match (B-3): a deal that ALREADY owns one CompanyCam project must stay a
@@ -47,7 +47,9 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, is_active boolean NOT NULL DEFAULT true
+      id uuid PRIMARY KEY, name text, deal_number text, is_active boolean NOT NULL DEFAULT true,
+      -- Legacy scalar mirror: link/unlink keep it in sync for un-migrated readers (#830 drops it).
+      companycam_project_id varchar(50)
     );
     CREATE TABLE deal_companycam_projects (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -98,7 +100,7 @@ describe("getProjectMappings — 1:many auto-match (B-3)", () => {
 
     // A SECOND unlinked project with the same name ALSO auto-matches the same deal in this single
     // snapshot — the deal is no longer dropped from the index after its first match (1:many), so
-    // autoLinkAndSync can link all of a deal's projects in one run.
+    // autoLinkProjects can link all of a deal's projects in one run.
     expect(byId.get("cc-4")).toMatchObject({ matchType: "auto", dealId: BAR });
 
     // FINDING A: a normalized name held by TWO active deals (DUP_A + DUP_B) is ambiguous. The project
@@ -114,6 +116,14 @@ describe("getProjectMappings — 1:many auto-match (B-3)", () => {
 // then delete-then-inserts so the LAST writer wins. A real cross-connection race isn't reproducible on a
 // single PGlite connection, but this exercises the new lock statement against real SQL and proves the
 // relink/steal semantics survive: the project moves to the target deal and stays exactly one (UNIQUE) row.
+async function scalarFor(dealId: string): Promise<string | null> {
+  const { rows } = (await pg.query(
+    `SELECT companycam_project_id FROM deals WHERE id = $1`,
+    [dealId],
+  )) as { rows: Array<{ companycam_project_id: string | null }> };
+  return rows[0]?.companycam_project_id ?? null;
+}
+
 describe("linkProjectToDeal — relink under advisory lock (B-4)", () => {
   it("moves an already-linked project to the target deal (last writer wins) leaving one row", async () => {
     // cc-1 currently belongs to FOO (seeded above). Relink it to BAR.
@@ -124,6 +134,9 @@ describe("linkProjectToDeal — relink under advisory lock (B-4)", () => {
     )) as { rows: Array<{ deal_id: string }> };
     expect(rows).toHaveLength(1); // UNIQUE(companycam_project_id) holds — not split across deals
     expect(rows[0].deal_id).toBe(BAR); // last writer won
+
+    // The legacy scalar mirror is stamped on the target deal so un-migrated readers still see the link.
+    expect(await scalarFor(BAR)).toBe("cc-1");
   });
 
   it("rejects a link to a non-existent deal with 404 (not a raw FK 500)", async () => {
@@ -136,5 +149,20 @@ describe("linkProjectToDeal — relink under advisory lock (B-4)", () => {
       `SELECT 1 FROM deal_companycam_projects WHERE companycam_project_id = 'cc-ghost'`,
     )) as { rows: unknown[] };
     expect(rows).toHaveLength(0);
+  });
+
+  it("unlink clears the stale scalar mirror alongside deleting the join row", async () => {
+    // cc-1 is currently linked to BAR (relinked above) with the scalar stamped on BAR.
+    expect(await scalarFor(BAR)).toBe("cc-1");
+
+    await unlinkProject(tdb as never, "cc-1");
+
+    // Join row is gone...
+    const { rows } = (await pg.query(
+      `SELECT 1 FROM deal_companycam_projects WHERE companycam_project_id = 'cc-1'`,
+    )) as { rows: unknown[] };
+    expect(rows).toHaveLength(0);
+    // ...and the legacy scalar mirror on BAR is cleared, so legacy readers don't see a phantom link.
+    expect(await scalarFor(BAR)).toBeNull();
   });
 });

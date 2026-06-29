@@ -107,6 +107,14 @@ async function linkedProjects(dealId: string): Promise<string[]> {
   return rows.map((r) => r.companycam_project_id);
 }
 
+// Legacy scalar mirror on the deals row (deals.companycam_project_id) — kept in sync for un-migrated readers.
+async function scalarFor(dealId: string): Promise<string | null> {
+  const { rows } = (await pg.query(`SELECT companycam_project_id FROM deals WHERE id = $1`, [dealId])) as {
+    rows: Array<{ companycam_project_id: string | null }>;
+  };
+  return rows[0]?.companycam_project_id ?? null;
+}
+
 describe("assignUnassignedCompanyCamProjectToDeal", () => {
   it("rejects with the right status: malformed (400), unknown (404), inactive (404), project-linked-elsewhere (409)", async () => {
     const expectStatus = async (dealId: string, status: number) => {
@@ -149,6 +157,8 @@ describe("assignUnassignedCompanyCamProjectToDeal", () => {
     expect(await dealIdFor("u/plain.jpg")).toBeNull();
     // The project -> deal link is persisted in the join table (so future photos auto-link here).
     expect(await linkedProjects(DEAL)).toEqual(["111"]);
+    // The legacy scalar mirror is stamped on the deal so un-migrated readers still detect the link.
+    expect(await scalarFor(DEAL)).toBe("111");
     // Project 111 is gone from the Unassigned tab; 222 remains.
     {
       const { projects } = await getUnassignedCompanyCamProjects(tdb as never);
@@ -160,6 +170,8 @@ describe("assignUnassignedCompanyCamProjectToDeal", () => {
     expect(second.assignedCount).toBe(1);
     expect(await dealIdFor("u/222/c.jpg")).toBe(DEAL);
     expect(await linkedProjects(DEAL)).toEqual(["111", "222"]); // deal now owns BOTH projects
+    // The scalar mirror holds the MOST-RECENT link for a multi-project deal (accepted interim).
+    expect(await scalarFor(DEAL)).toBe("222");
     {
       const { projects } = await getUnassignedCompanyCamProjects(tdb as never);
       expect(projects.map((p) => p.companycamProjectId)).toEqual([]); // backlog cleared
@@ -169,6 +181,8 @@ describe("assignUnassignedCompanyCamProjectToDeal", () => {
     const again = await assignUnassignedCompanyCamProjectToDeal(tdb as never, "111", DEAL);
     expect(again.assignedCount).toBe(0);
     expect(await linkedProjects(DEAL)).toEqual(["111", "222"]);
+    // Idempotent re-run moved 0 rows, so the mirror is NOT re-stamped — it still holds the last real link.
+    expect(await scalarFor(DEAL)).toBe("222");
 
     // A project stays 1:1 with a deal: now that 111 is linked to DEAL, assigning it to a DIFFERENT deal is
     // rejected (409) rather than silently splitting it across deals — and the original link is untouched.

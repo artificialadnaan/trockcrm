@@ -15,7 +15,7 @@ import {
   unlinkProject,
   syncProjectPhotos,
   syncAllLinkedProjects,
-  autoLinkAndSync,
+  autoLinkProjects,
 } from "./service.js";
 
 const router = Router();
@@ -226,17 +226,44 @@ router.post("/auto-import", async (req, res, next) => {
     await req.commitTransaction!();
     res.json({ message: "Auto-import started in background. Poll /sync-status for progress." });
 
-    const { tenantDb: bgDb, release } = await acquireBackgroundDb(officeSlug);
-    autoLinkAndSync(bgDb, userId, officeSlug, (progress) => {
-      syncStatus.progress = progress;
-    })
-      .then(({ linked, results }) => {
-        syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: `Complete — ${linked} projects linked`, results, error: null };
-      })
-      .catch((err) => {
-        syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
-      })
-      .finally(() => release());
+    // Two-phase background flow. autoLinkProjects takes a per-project advisory lock for each link; running
+    // it in its OWN transaction and COMMITting BEFORE the long photo sync RELEASES those locks promptly, so
+    // a concurrent link/assign of the same project isn't blocked through the whole sync (and its statement
+    // timeout). Semantic change (acceptable/better): the links commit independently of the sync, so a sync
+    // failure leaves the links persisted — they sync on the next run. acquireBackgroundDb re-applies the
+    // transaction-local search_path each time, so the sync phase stays correctly tenant-scoped.
+    void (async () => {
+      // Phase 1 — LINK ONLY, in its own transaction; COMMIT releases the per-project advisory locks.
+      let linked = 0;
+      {
+        const { tenantDb: linkDb, release } = await acquireBackgroundDb(officeSlug);
+        try {
+          linked = await autoLinkProjects(linkDb, (progress) => {
+            syncStatus.progress = progress;
+          });
+          await release(); // COMMIT — frees the advisory locks before the sync starts
+        } catch (err) {
+          await release(true); // ROLLBACK this phase's connection
+          syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
+          return;
+        }
+      }
+
+      // Phase 2 — PHOTO SYNC, in a FRESH transaction (no link locks held).
+      {
+        const { tenantDb: syncDb, release } = await acquireBackgroundDb(officeSlug);
+        try {
+          const results = await syncAllLinkedProjects(syncDb, userId, officeSlug, (progress) => {
+            syncStatus.progress = progress;
+          });
+          await release(); // COMMIT
+          syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: `Complete — ${linked} projects linked`, results, error: null };
+        } catch (err) {
+          await release(true); // ROLLBACK this phase's connection
+          syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+    })();
   } catch (err) {
     if (syncStatus.running && !syncStatus.results && !syncStatus.error) {
       syncStatus.running = false;

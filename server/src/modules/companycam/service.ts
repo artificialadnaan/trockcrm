@@ -219,7 +219,7 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
       });
       // Keep the deal in the index: a deal can own MANY projects (1:many), so additional unlinked
       // projects with the same normalized name should also auto-match it within this one snapshot
-      // (autoLinkAndSync consumes a single getProjectMappings() result).
+      // (autoLinkProjects consumes a single getProjectMappings() result).
       continue;
     }
 
@@ -283,6 +283,13 @@ export async function linkProjectToDeal(
     .insert(dealCompanycamProjects)
     .values({ dealId, companycamProjectId: ccProjectId })
     .onConflictDoNothing({ target: dealCompanycamProjects.companycamProjectId });
+
+  // Mirror the link onto the legacy scalar deals.companycam_project_id. This scalar is a DENORMALIZED
+  // MIRROR kept only so un-migrated legacy readers (companycam-import/inventory) still detect the link for
+  // the single-project case; deal_companycam_projects is the source of truth. #830 migrates those readers
+  // and drops the column. For a multi-project deal the scalar holds the most-recent link — an accepted
+  // interim (the import-time guard already prevents mis-routing).
+  await tenantDb.update(deals).set({ companycamProjectId: ccProjectId }).where(eq(deals.id, dealId));
 }
 
 /**
@@ -295,6 +302,15 @@ export async function unlinkProject(
   await tenantDb
     .delete(dealCompanycamProjects)
     .where(eq(dealCompanycamProjects.companycamProjectId, ccProjectId));
+
+  // Clear the stale legacy scalar mirror (deals.companycam_project_id) for any deal that still points at
+  // this project, so un-migrated legacy readers (companycam-import/inventory) don't keep seeing a link the
+  // join table no longer has. The join table is the source of truth; #830 migrates the readers + drops the
+  // column. (No-op for a multi-project deal where the scalar already holds a different, more-recent link.)
+  await tenantDb
+    .update(deals)
+    .set({ companycamProjectId: null })
+    .where(eq(deals.companycamProjectId, ccProjectId));
 }
 
 /**
@@ -533,14 +549,18 @@ export async function syncAllLinkedProjects(
 }
 
 /**
- * Auto-link projects by name match and then sync all.
+ * Auto-link projects by name match — the LINK phase ONLY (no photo sync).
+ *
+ * Split out from the photo sync so the per-project advisory locks taken by linkProjectToDeal
+ * (pg_advisory_xact_lock) release as soon as THIS phase's transaction commits. The /auto-import route runs
+ * the long syncAllLinkedProjects in a SEPARATE transaction afterwards, so those link locks are NOT held
+ * across the entire photo sync (which would otherwise block any concurrent link/assign of those projects
+ * until the statement timeout). Returns the number of projects linked.
  */
-export async function autoLinkAndSync(
+export async function autoLinkProjects(
   tenantDb: TenantDb,
-  systemUserId: string,
-  officeSlug: string = "default",
   onProgress?: ProgressCallback
-): Promise<{ linked: number; results: SyncResult[] }> {
+): Promise<number> {
   onProgress?.("Matching CompanyCam projects to deals...");
   const mappings = await getProjectMappings(tenantDb);
 
@@ -553,9 +573,7 @@ export async function autoLinkAndSync(
     }
   }
 
-  onProgress?.(`Linked ${linkedCount} projects. Starting photo sync...`);
+  onProgress?.(`Linked ${linkedCount} projects.`);
 
-  const results = await syncAllLinkedProjects(tenantDb, systemUserId, officeSlug, onProgress);
-
-  return { linked: linkedCount, results };
+  return linkedCount;
 }

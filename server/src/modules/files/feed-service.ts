@@ -480,6 +480,15 @@ export async function assignUnassignedCompanyCamProjectToDeal(
       .insert(dealCompanycamProjects)
       .values({ dealId: targetDealId, companycamProjectId: projectId })
       .onConflictDoNothing({ target: dealCompanycamProjects.companycamProjectId });
+
+    // Mirror the link onto the legacy scalar deals.companycam_project_id. The scalar is a DENORMALIZED
+    // MIRROR kept only so un-migrated legacy readers (companycam-import/inventory) still detect the link for
+    // the single-project case; deal_companycam_projects is the source of truth. #830 migrates those readers
+    // and drops the column. For a multi-project deal the scalar holds the most-recent link (accepted interim).
+    await tenantDb
+      .update(deals)
+      .set({ companycamProjectId: projectId })
+      .where(eq(deals.id, targetDealId));
   }
 
   return { assignedCount: moved.length, dealId: targetDealId, companycamProjectId: projectId };

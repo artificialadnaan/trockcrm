@@ -370,6 +370,10 @@ export async function runCompanyCamImport(argv = process.argv.slice(2)) {
       if (!deal || !row.matchedDealId) continue;
       await client.query("BEGIN");
       try {
+        // Serialize this project's link write with the UI flows (feed-service.assignUnassignedCompanyCamProjectToDeal
+        // and service.linkProjectToDeal both take pg_advisory_xact_lock(hashtext(projectId))), so a concurrent UI
+        // assign of the SAME project can't race the import. Transaction-scoped: the per-row BEGIN/COMMIT releases it.
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [row.companyCamProjectId]);
         if (options.execute) {
           // Record the deal <-> CompanyCam-project link in the join table (single source of truth; a deal
           // can own many projects, a project is 1:1 to a deal). ON CONFLICT keeps a re-run idempotent and
@@ -404,6 +408,15 @@ export async function runCompanyCamImport(argv = process.argv.slice(2)) {
               continue;
             }
           }
+          // Mirror the link onto the legacy scalar deals.companycam_project_id. The scalar is a DENORMALIZED
+          // MIRROR kept only so un-migrated legacy readers (this import's loadDeals + companycam-inventory)
+          // still detect the link for the single-project case; deal_companycam_projects is the source of
+          // truth. #830 migrates those readers and drops the column. For a multi-project deal the scalar
+          // holds the most-recent link (accepted interim).
+          await client.query(
+            `UPDATE ${quoteIdent(options.tenant)}.deals SET companycam_project_id = $1 WHERE id = $2::uuid`,
+            [row.companyCamProjectId, row.matchedDealId]
+          );
         }
         const photos = await getProjectPhotos(row.companyCamProjectId);
         for (const photo of photos) {
