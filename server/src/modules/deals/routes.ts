@@ -107,6 +107,7 @@ import {
 } from "./scoping-service.js";
 import { getResolvedDeal, writeResolvedDealFields } from "./lineage-resolver.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
+import { getPendingRfpDeals } from "./pending-rfp-service.js";
 import { confirmUpload, getFileById, getPendingUploadMetadata } from "../files/service.js";
 import {
   createEstimateSourceDocument,
@@ -932,6 +933,17 @@ router.get("/", async (req, res, next) => {
         })
       ),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/pending-rfp — all deals in the Pending-RFP bucket (office-scoped via tenant schema)
+router.get("/pending-rfp", async (req, res, next) => {
+  try {
+    const deals = await getPendingRfpDeals(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json({ deals });
   } catch (err) {
     next(err);
   }
