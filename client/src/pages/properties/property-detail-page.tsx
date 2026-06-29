@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useLocation } from "react-router-dom";
 import {
   Activity,
   Building2,
@@ -144,6 +144,7 @@ function getInitials(value: string) {
 
 export function PropertyDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const location = useLocation();
   const { property, leads, deals, loading, error } = usePropertyDetail(id);
   const [activeTab, setActiveTab] = useState<PropertyTab>("overview");
 
@@ -281,7 +282,7 @@ export function PropertyDetailPage() {
       actionsSlot={
         <>
           <Link
-            to={`/properties/${property.id}/edit`}
+            to={`/properties/${property.id}/edit${location.search}`}
             className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-h-[44px] md:min-h-0")}
           >
             <Edit className="h-4 w-4" />

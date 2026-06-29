@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,6 +19,7 @@ function parseOptionalCount(value: string): number | null | "invalid" {
 export function PropertyEditPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const { property, loading, error } = usePropertyDetail(id);
 
   // Only the fields the API actually accepts (PATCH /api/properties/:id): address, city, state,
@@ -69,16 +70,26 @@ export function PropertyEditPage() {
     setSubmitting(true);
     setSubmitError(null);
 
+    // address/city/state/zip are required-when-present server-side (a provided blank/null is a 400,
+    // not a no-op), so only send the ones that actually have a value. This lets a rep edit build year
+    // or unit count — or fill in a missing address part — on an incomplete property without tripping
+    // "<Field> cannot be blank when provided". buildYear/unitCount are optional and always sent so
+    // they can be cleared.
+    const patch: Parameters<typeof updateProperty>[1] = { buildYear, unitCount };
+    const address = formData.address.trim();
+    const city = formData.city.trim();
+    const state = formData.state.trim();
+    const zip = formData.zip.trim();
+    if (address) patch.address = address;
+    if (city) patch.city = city;
+    if (state) patch.state = state;
+    if (zip) patch.zip = zip;
+
     try {
-      await updateProperty(id, {
-        address: formData.address.trim() || null,
-        city: formData.city.trim() || null,
-        state: formData.state.trim() || null,
-        zip: formData.zip.trim() || null,
-        buildYear,
-        unitCount,
-      });
-      navigate(`/properties/${id}`);
+      await updateProperty(id, patch);
+      // Preserve the query string (e.g. ?officeId=…) so a cross-office save returns to the detail
+      // page in the same office context (api() resolves the office from the URL).
+      navigate(`/properties/${id}${location.search}`);
     } catch (err: unknown) {
       setSubmitError(err instanceof Error ? err.message : "Failed to save property");
     } finally {
@@ -194,7 +205,7 @@ export function PropertyEditPage() {
           <Button
             type="button"
             variant="outline"
-            onClick={() => navigate(`/properties/${id}`)}
+            onClick={() => navigate(`/properties/${id}${location.search}`)}
           >
             Cancel
           </Button>

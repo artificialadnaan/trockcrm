@@ -2,9 +2,15 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PropertyEditPage } from "./property-edit-page";
+
+// Detail-route probe: echoes the URL query so a test can assert ?officeId survived the save navigate.
+function DetailProbe() {
+  const loc = useLocation();
+  return <div>DETAIL{loc.search}</div>;
+}
 
 const mocks = vi.hoisted(() => ({
   usePropertyDetail: vi.fn(),
@@ -32,7 +38,7 @@ function tree(initial: string) {
     <MemoryRouter initialEntries={[initial]}>
       <Routes>
         <Route path="/properties/:id/edit" element={<PropertyEditPage />} />
-        <Route path="/properties/:id" element={<div>DETAIL PAGE</div>} />
+        <Route path="/properties/:id" element={<DetailProbe />} />
       </Routes>
     </MemoryRouter>
   );
@@ -95,5 +101,38 @@ describe("PropertyEditPage", () => {
       buildYear: 2005,
       unitCount: 120,
     });
+  });
+
+  // The server treats address/city/state/zip as required-when-present (blank → 400), so editing an
+  // incomplete property (here: no city/state/zip) must omit those blank keys, not send them as null.
+  it("omits blank address fields so editing an incomplete property does not 400", async () => {
+    mocks.usePropertyDetail.mockReturnValue({
+      property: { ...PROPERTY, city: "", state: "", zip: "" },
+      loading: false,
+      error: null,
+    });
+    mount();
+    await act(async () => {
+      container.querySelector("form")!.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    const payload = mocks.updateProperty.mock.calls[0]![1];
+    expect(payload).not.toHaveProperty("city");
+    expect(payload).not.toHaveProperty("state");
+    expect(payload).not.toHaveProperty("zip");
+    expect(payload).toMatchObject({ address: "123 Main St", buildYear: 2005, unitCount: 120 });
+  });
+
+  // api() resolves the office from the URL, so a cross-office save must return to the detail page with
+  // ?officeId intact — otherwise the director lands in the wrong office and sees a not-found view.
+  it("preserves the ?officeId query param when returning to the detail page after save", async () => {
+    mount("/properties/property-1/edit?officeId=atl-office");
+    await act(async () => {
+      container.querySelector("form")!.dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(container.textContent).toContain("DETAIL?officeId=atl-office");
   });
 });
