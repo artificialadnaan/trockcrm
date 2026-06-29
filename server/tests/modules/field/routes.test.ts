@@ -53,6 +53,7 @@ const projectMocks = vi.hoisted(() => ({
   listNearbyFieldCaptureTargets: vi.fn(),
   searchFieldCaptureTargets: vi.fn(),
   mergeFieldCaptureTargets: vi.fn(() => []),
+  mergeFieldProjects: vi.fn((perOffice: Array<{ projects: unknown[] }>) => perOffice.flatMap((o) => o.projects)),
   assertAccessibleFieldCaptureTarget: vi.fn(),
   starFieldProject: vi.fn(),
   unstarFieldProject: vi.fn(),

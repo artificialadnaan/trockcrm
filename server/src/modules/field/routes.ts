@@ -37,6 +37,7 @@ import {
   listNearbyFieldProjects,
   listStarredFieldProjects,
   mergeFieldCaptureTargets,
+  mergeFieldProjects,
   mergeNearbyProjects,
   searchFieldCaptureTargets,
   starFieldProject,
@@ -179,10 +180,11 @@ fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
         }),
       ),
     );
-    const merged = results.flatMap(({ office, value }) =>
-      value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })),
+    // Photos-first cross-office order (mirrors the per-office SQL ORDER BY); the page slice is applied
+    // to the merged set below.
+    const merged = mergeFieldProjects(
+      results.map(({ office, value }) => ({ office, projects: value.projects })),
     );
-    merged.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
     const total = results.reduce((sum, { value }) => sum + value.total, 0);
     res.json({
       projects: merged.slice(offset, offset + perPage),

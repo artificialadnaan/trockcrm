@@ -95,6 +95,16 @@ describe("field projects service", () => {
     expect(JSON.stringify(result)).not.toContain("source");
   });
 
+  it("orders the active-projects list PHOTOS-FIRST (has-photos key ahead of the recency key)", async () => {
+    const db = tenantDb([[{ total: 0 }], []]);
+    await listFieldProjects(db, { userId: "field-1", userRole: "field_contractor" });
+    const rowsSql = extractSqlText(db.execute.mock.calls[1][0]);
+    const orderBy = rowsSql.slice(rowsSql.indexOf("ORDER BY"));
+    // The photos-first key (photo_count > 0) DESC must precede the recency COALESCE in ORDER BY.
+    expect(orderBy).toMatch(/photo_count[\s\S]*>\s*0\)\s*DESC/);
+    expect(orderBy.indexOf("photo_count")).toBeLessThan(orderBy.indexOf("last_activity_at"));
+  });
+
   it("lists starred projects sorted by recent project photo activity", async () => {
     const db = tenantDb([
       [{

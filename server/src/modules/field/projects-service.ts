@@ -197,7 +197,11 @@ export async function listFieldProjects(
         AND f.deleted_at IS NULL
     ) photo_stats ON true
     WHERE ${where}
-    ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
+    -- Photos-first: surface projects that actually have photos above recently-touched-but-empty deals,
+    -- then most-recent activity within each group. Mirrored by mergeFieldProjects for the cross-office
+    -- merge so the order stays consistent under pagination.
+    ORDER BY (COALESCE(photo_stats.photo_count, 0) > 0) DESC,
+             COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
     LIMIT ${perPage}
     OFFSET ${offset}
   `);
@@ -660,4 +664,30 @@ export function mergeNearbyProjects(
     return left.id.localeCompare(right.id);
   });
   return stamped.slice(0, Math.max(0, limit));
+}
+
+/**
+ * Merge per-office active-project results into ONE company-wide list, ordered PHOTOS-FIRST: projects
+ * with at least one photo rank above projects with none, and within each group the most-recent activity
+ * comes first (cross-office-comparable ISO `lastActivityAt`, which already folds in the latest photo
+ * time). This mirrors the per-office SQL ORDER BY so paginating over the merged set stays consistent —
+ * the photo'd projects land in the first window instead of being buried under recently-touched-but-empty
+ * deals. A null/absent `lastActivityAt` sorts last; ties break on id for a stable order. The caller
+ * applies the page/perPage slice.
+ */
+export function mergeFieldProjects(
+  perOffice: Array<{ office: FieldOffice; projects: FieldProject[] }>,
+): FieldProjectWithOffice[] {
+  const stamped: FieldProjectWithOffice[] = perOffice.flatMap(({ office, projects }) =>
+    projects.map((project) => ({ ...project, ...officeTag(office) })),
+  );
+  stamped.sort((left, right) => {
+    const leftHasPhotos = left.photoCount > 0 ? 1 : 0;
+    const rightHasPhotos = right.photoCount > 0 ? 1 : 0;
+    if (leftHasPhotos !== rightHasPhotos) return rightHasPhotos - leftHasPhotos; // has-photos first
+    const recencyDelta = (right.lastActivityAt ?? "").localeCompare(left.lastActivityAt ?? ""); // recent first, nulls last
+    if (recencyDelta !== 0) return recencyDelta;
+    return left.id.localeCompare(right.id);
+  });
+  return stamped;
 }
