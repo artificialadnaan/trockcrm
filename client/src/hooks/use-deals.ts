@@ -1052,3 +1052,44 @@ export async function activateServiceHandoff(dealId: string) {
     method: "POST",
   });
 }
+
+export interface PendingRfpDeal {
+  id: string;
+  name: string;
+  projectNumber: string | null;
+  dealNumber: string | null;
+  workflowRoute: string;
+  assignedRepId: string | null;
+  assignedRepName: string | null;
+  rfpApprovalStatus: string;
+  subState: "awaiting" | "attention";
+  triggeredById: string | null;
+  triggeredByName: string | null;
+  triggeredAt: string | null;
+  declineReason: string | null;
+}
+
+export function usePendingRfp() {
+  const [deals, setDeals] = useState<PendingRfpDeal[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const refetch = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    return api<{ deals: PendingRfpDeal[] }>("/deals/pending-rfp")
+      .then((r) => {
+        setDeals(r.deals);
+        return r.deals;
+      })
+      .catch((e: unknown) => {
+        setDeals(null);
+        setError(e instanceof Error ? e.message : "Failed to load pending RFPs");
+        throw e;
+      })
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => {
+    void refetch().catch(() => undefined);
+  }, [refetch]);
+  return { deals, loading, error, refetch };
+}

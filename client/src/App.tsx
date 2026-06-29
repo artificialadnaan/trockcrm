@@ -7,6 +7,7 @@ import { RequireRole, RequireGlobalAdmin } from "@/components/auth/require-role"
 import { AppShell } from "@/components/layout/app-shell";
 import { BoardAliasRedirect } from "@/components/shared/board-alias-redirect";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
+import { PendingRfpPage } from "@/pages/deals/pending-rfp-page";
 import { RfpReviewPage } from "@/pages/rfp-review/rfp-review-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
@@ -214,6 +215,7 @@ export function App() {
               <Route path="/deals/stages/:stageId" element={<DealStagePage />} />
               <Route path="/deals/service-opportunity/new" element={<ServiceOpportunityNewPage />} />
               <Route path="/deals/new" element={<DealNewPage />} />
+              <Route path="/deals/pending-rfp" element={<PendingRfpPage />} />
               <Route path="/deals/:id/photos" element={<DealDetailPage />} />
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />

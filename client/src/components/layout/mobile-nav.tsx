@@ -17,6 +17,7 @@ import {
   DollarSign,
   Ticket,
   Shield,
+  Hourglass,
   type LucideIcon,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
@@ -81,6 +82,7 @@ const moreNavItems: MobileNavItem[] = [
     ariaLabel: "Open Tickets in a new tab",
     roles: FIELD_ROLES,
   },
+  { to: "/deals/pending-rfp", icon: Hourglass, label: "Pending RFP", roles: CRM_ROLES },
 ];
 
 function getNavItemKey(item: { label: string; to: string }) {
