@@ -385,7 +385,9 @@ describe("DealScopingWorkspace lineage routing helpers", () => {
     expect(source).toContain('{ value: "completed", label: "Completed" }');
     expect(preBidBlock).toContain("OPPORTUNITY_PROGRESS_OPTIONS");
     expect(siteDecisionBlock).toContain("OPPORTUNITY_PROGRESS_OPTIONS");
-    expect(siteCompletedBlock).not.toContain("Scheduled");
+    // "Scheduled" is a valid Site Visit Completed answer (a scheduled-but-not-yet-done visit) that
+    // satisfies the opportunity gate so the RFP can still be triggered. "Reviewing" stays excluded.
+    expect(siteCompletedBlock).toContain("Scheduled");
     expect(siteCompletedBlock).not.toContain("Reviewing");
     expect(siteCompletedBlock).toContain("Completed");
   });
