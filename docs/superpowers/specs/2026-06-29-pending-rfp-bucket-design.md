@@ -62,9 +62,12 @@ transitions, and a migration. Deferred; B can be promoted to A later if reportin
 
 - **Bucket predicate (single source of truth):** a deal is "Pending RFP" iff
   `stage = opportunity` AND `is_bid_board_owned = false` AND
-  `rfp_approval_status ∈ {pending_outbox, pending, declined, failed, conflict}`.
+  `rfp_approval_status ∈ {pending_outbox, pending, declined, conflict, send_failed}`.
+  (Note: the codebase stores the failed-delivery status as **`send_failed`**, not `failed`;
+  `approved` leaves the bucket via the stage advance; `cancelled_source_ineligible` is a
+  terminal cancellation and is **excluded**.)
   - **Awaiting approval** sub-state = `{pending_outbox, pending}`
-  - **Needs attention** sub-state = `{declined, failed, conflict}`
+  - **Needs attention** sub-state = `{declined, conflict, send_failed}`
 - **Auto-entry** the moment an RFP is triggered; **auto-exit** on approval (deal advances to
   Estimating/Service Estimating). **Declined/failed/conflict stay** in the bucket, flagged.
 - **Two surfaces:** (1) a synthetic column on the deals pipeline board, right after
@@ -84,9 +87,9 @@ A single helper defining bucket membership + sub-state, used by the read endpoin
 board's Opportunity-column exclusion, and any count badge — so they cannot drift
 (reconciliation-consistency rule).
 
-- Named status constants: `PENDING_RFP_STATUSES = [pending_outbox, pending, declined, failed, conflict]`,
+- Named status constants: `PENDING_RFP_STATUSES = [pending_outbox, pending, declined, conflict, send_failed]`,
   `PENDING_RFP_AWAITING_STATUSES = [pending_outbox, pending]`,
-  `PENDING_RFP_ATTENTION_STATUSES = [declined, failed, conflict]`.
+  `PENDING_RFP_ATTENTION_STATUSES = [declined, conflict, send_failed]`.
 - `isPendingRfp(deal)` (membership) and `pendingRfpSubState(deal)` (`'awaiting' | 'attention'`),
   plus a SQL predicate builder for queries. Placed in `shared/` (so client and server share it)
   with the SQL builder in the server deals module.
@@ -179,9 +182,11 @@ board's Opportunity-column exclusion, and any count badge — so they cannot dri
 
 ## Decisions locked for the plan
 
-- Predicate statuses: `{pending_outbox, pending, declined, failed, conflict}`; sub-states as above.
+- Predicate statuses: `{pending_outbox, pending, declined, conflict, send_failed}`; sub-states as above.
 - Visibility: office-scoped, cross-rep, for both the column and the dashboard.
 - Escape hatch in v1; permissions director/admin or owning rep.
 - Staleness threshold default `PENDING_RFP_STALE_DAYS = 2` (tunable).
-- Endpoint names: `GET /deals/pending-rfp`, `POST /deals/:id/cancel-rfp` (finalize in plan).
-- Board column wiring: prefer server-assembled; finalize in plan.
+- Endpoint names: `GET /deals/pending-rfp`, `POST /deals/:id/cancel-rfp`.
+- Board column wiring: **client-merge** — the board page passes the `/deals/pending-rfp`
+  data to `buildCanonicalDealBoardColumns`, which renders the cross-rep "Pending RFP" column
+  and excludes those deals from Opportunity. No change to the board endpoint/service.
