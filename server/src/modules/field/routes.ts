@@ -252,6 +252,9 @@ fieldRoutes.get("/projects/:dealId", requireFieldContractor, async (req, res, ne
   try {
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
     const dealId = String(req.params.dealId);
+    // Validate FORMAT before resolving the office: a non-uuid would otherwise reach the resolver's
+    // per-office `::uuid` cast, fail in every office, and surface as a misleading 503 instead of a 400.
+    assertValidUuid(dealId, "dealId");
     const { value, office } = await withResolvedOffice(
       "deal",
       dealId,

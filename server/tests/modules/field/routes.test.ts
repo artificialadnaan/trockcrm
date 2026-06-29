@@ -184,6 +184,9 @@ describe("field routes", () => {
 
     // By-id metadata path (so the detail page never depends on the list window / photos-first ordering).
     const byId = await invokeRoute("get", "/projects/:dealId", { params: { dealId: "deal-1" } });
+    // dealId format is validated BEFORE office resolution (a non-uuid must be a clean 400, not a swallowed
+    // ::uuid cast surfacing as a 503).
+    expect(photoMocks.assertValidUuid).toHaveBeenCalledWith("deal-1", "dealId");
     expect(projectMocks.getFieldProject).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       userId: "admin-1",
       userRole: "admin",

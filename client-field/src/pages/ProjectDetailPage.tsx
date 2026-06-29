@@ -136,8 +136,13 @@ export function ProjectDetailPage() {
         fetchAllProjectPhotos(id),
         api<{ reports: Array<{ id: string; title: string; createdAt: string; description: string | null }> }>(`/field/projects/${id}/reports`),
       ]);
-      if (projectResult.status !== "fulfilled" || photosResult.status !== "fulfilled") {
-        throw new Error("Failed to load project");
+      // Surface the underlying API error (e.g. a 404 "Project not found") rather than collapsing it into
+      // a generic message, so the UI can distinguish a missing project from a transient failure.
+      if (projectResult.status !== "fulfilled") {
+        throw projectResult.reason instanceof Error ? projectResult.reason : new Error("Failed to load project");
+      }
+      if (photosResult.status !== "fulfilled") {
+        throw photosResult.reason instanceof Error ? photosResult.reason : new Error("Failed to load project");
       }
       setProject(projectResult.value.project ?? null);
       setPhotos(photosResult.value.photos);
