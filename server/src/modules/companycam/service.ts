@@ -12,6 +12,7 @@ import { getAllProjects, getProjectPhotos } from "./client.js";
 import type { CCProject, CCPhoto } from "./client.js";
 import { putObject, isR2Configured } from "../../lib/r2-client.js";
 import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
+import { AppError } from "../../middleware/error-handler.js";
 import crypto from "node:crypto";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -200,7 +201,9 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
         dealName: fuzzyMatch.name,
         matchType: "auto",
       });
-      dealsByNormName.delete(normProjName);
+      // Keep the deal in the index: a deal can own MANY projects (1:many), so additional unlinked
+      // projects with the same normalized name should also auto-match it within this one snapshot
+      // (autoLinkAndSync consumes a single getProjectMappings() result).
       continue;
     }
 
@@ -246,6 +249,15 @@ export async function linkProjectToDeal(
   // the insert always lands its own row — the relink/steal semantics (move the project to the target deal)
   // are preserved.
   await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${ccProjectId}))`);
+
+  // The join table's deal_id FK would turn a well-formed-but-stale/deleted dealId into a raw 500.
+  // Reject it cleanly (404) — the route only validates UUID shape, so verify the deal exists here.
+  const [target] = await tenantDb
+    .select({ id: deals.id })
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1);
+  if (!target) throw new AppError(404, "Deal not found");
 
   await tenantDb
     .delete(dealCompanycamProjects)

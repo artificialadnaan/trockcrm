@@ -95,12 +95,26 @@ function compareMatches(left: CompanyCamImportPlanRow, right: CompanyCamImportPl
 
 export function prepareCompanyCamImportRows(
   planRows: CompanyCamImportPlanRow[],
-  options: Pick<CompanyCamImportOptions, "projectId" | "limit"> = {}
+  options: Pick<CompanyCamImportOptions, "projectId" | "limit" | "strictOneToOne"> = {}
 ) {
   // Auto-seed ONLY the reliable tiers (existing link, project-number, exact-AND-unique name), never an
   // on-hold deal — i.e. the "auto" disposition. Ambiguous-exact collisions, sub-1.0 fuzzy guesses, and
   // unmatched projects are left for the manual worklist.
   const candidates = planRows.filter((row) => row.matchedDealId && companyCamPlanDisposition(row) === "auto");
+
+  // 1:many: when strict-one-to-one is DISABLED, a deal may legitimately own several reliable CompanyCam
+  // projects, so keep ALL auto candidates (they each become a row in deal_companycam_projects) rather than
+  // collapsing same-deal matches to the single highest-confidence one. Same-deal multiples are no longer
+  // "conflicts" in this mode.
+  if (options.strictOneToOne === false) {
+    return {
+      rows: candidates
+        .filter((row) => !options.projectId || row.companyCamProjectId === options.projectId)
+        .slice(0, options.limit),
+      conflicts: [],
+    };
+  }
+
   const byDealId = new Map<string, CompanyCamImportPlanRow[]>();
   for (const row of candidates) {
     byDealId.set(row.matchedDealId!, [...(byDealId.get(row.matchedDealId!) ?? []), row]);

@@ -66,6 +66,7 @@ beforeAll(async () => {
     ccProject("cc-1", "Foo Tower", 5), // already linked to FOO -> matchType 'linked'
     ccProject("cc-2", "Foo Tower", 3), // SAME name as FOO, unlinked -> must auto-match FOO (B-3)
     ccProject("cc-3", "Bar Plaza", 2), // unlinked, matches BAR -> normal auto path
+    ccProject("cc-4", "Bar Plaza", 1), // ANOTHER unlinked same-named project -> must ALSO auto-match BAR (1:many)
   ]);
 });
 
@@ -87,6 +88,11 @@ describe("getProjectMappings — 1:many auto-match (B-3)", () => {
 
     // Sanity: a normal unlinked deal still auto-matches its same-named project.
     expect(byId.get("cc-3")).toMatchObject({ matchType: "auto", dealId: BAR });
+
+    // A SECOND unlinked project with the same name ALSO auto-matches the same deal in this single
+    // snapshot — the deal is no longer dropped from the index after its first match (1:many), so
+    // autoLinkAndSync can link all of a deal's projects in one run.
+    expect(byId.get("cc-4")).toMatchObject({ matchType: "auto", dealId: BAR });
   });
 });
 
@@ -104,5 +110,17 @@ describe("linkProjectToDeal — relink under advisory lock (B-4)", () => {
     )) as { rows: Array<{ deal_id: string }> };
     expect(rows).toHaveLength(1); // UNIQUE(companycam_project_id) holds — not split across deals
     expect(rows[0].deal_id).toBe(BAR); // last writer won
+  });
+
+  it("rejects a link to a non-existent deal with 404 (not a raw FK 500)", async () => {
+    const GHOST = U("9999"); // valid UUID, no such deal row
+    await expect(
+      linkProjectToDeal(tdb as never, "cc-ghost", GHOST),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    // And nothing was linked for that project.
+    const { rows } = (await pg.query(
+      `SELECT 1 FROM deal_companycam_projects WHERE companycam_project_id = 'cc-ghost'`,
+    )) as { rows: unknown[] };
+    expect(rows).toHaveLength(0);
   });
 });
