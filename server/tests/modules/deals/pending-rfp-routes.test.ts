@@ -177,4 +177,17 @@ describe("POST /:id/cancel-rfp", () => {
     expect(commitTransaction).toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
   });
+
+  it("returns 409 when the RFP state changed concurrently (cancel returns null)", async () => {
+    const svc = await import("../../../src/modules/deals/pending-rfp-service.js");
+    (svc.cancelPendingRfp as any).mockResolvedValue(null);
+    const res = makeRes();
+    const err = await runRoute("post", "/:id/cancel-rfp", {
+      params: { id: "deal-1" },
+      user: { id: "rep-1", role: "rep", displayName: "Rep One" },
+      tenantDb: stubDb(declinedDeal),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+    }, res);
+    expect(err).toMatchObject({ statusCode: 409 });
+  });
 });

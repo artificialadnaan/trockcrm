@@ -1,7 +1,13 @@
 import { alias } from "drizzle-orm/pg-core";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { deals, users, pipelineStageConfig } from "@trock-crm/shared/schema";
-import { PENDING_RFP_STATUSES, pendingRfpSubStateForStatus, type PendingRfpSubState } from "@trock-crm/shared/types";
+import {
+  PENDING_RFP_STATUSES,
+  PENDING_RFP_ATTENTION_STATUSES,
+  pendingRfpSubStateForStatus,
+  toCanonicalDealStageSlug,
+  type PendingRfpSubState,
+} from "@trock-crm/shared/types";
 
 export interface PendingRfpDeal {
   id: string;
@@ -19,14 +25,30 @@ export interface PendingRfpDeal {
   declineReason: string | null;
 }
 
+// A re-confirmed denial (the override flow's upheld no-go) is a resolved terminal state, not a
+// pending RFP — it must not appear in the queue nor be cancellable.
+const NOT_RECONFIRMED_DENIAL = sql`coalesce(${deals.rfpOverrideDecision}, '') <> 'denial_reconfirmed'`;
+
+// All stage ids that canonicalize to Opportunity (incl. legacy aliases like `dd`), matching what the
+// trigger route accepts and how the board buckets cards.
+async function opportunityStageIds(tenantDb: any): Promise<string[]> {
+  const stages = await tenantDb
+    .select({ id: pipelineStageConfig.id, slug: pipelineStageConfig.slug })
+    .from(pipelineStageConfig);
+  return stages
+    .filter(
+      (s: { slug: string | null }) =>
+        s.slug != null &&
+        (toCanonicalDealStageSlug(s.slug, "normal") === "opportunity" ||
+          toCanonicalDealStageSlug(s.slug, "service") === "opportunity"),
+    )
+    .map((s: { id: string }) => s.id);
+}
+
 // Cross-rep, office-scoped (office isolation is enforced by the tenant schema → NO owner filter,
 // NO office WHERE). Returns the Pending-RFP bucket oldest-first.
 export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[]> {
-  const oppStages = await tenantDb
-    .select({ id: pipelineStageConfig.id })
-    .from(pipelineStageConfig)
-    .where(eq(pipelineStageConfig.slug, "opportunity"));
-  const oppStageIds = oppStages.map((s: { id: string }) => s.id);
+  const oppStageIds = await opportunityStageIds(tenantDb);
   if (oppStageIds.length === 0) return [];
 
   const triggeredBy = alias(users, "triggered_by");
@@ -55,6 +77,7 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
         inArray(deals.stageId, oppStageIds),
         eq(deals.isBidBoardOwned, false),
         inArray(deals.rfpApprovalStatus, [...PENDING_RFP_STATUSES]),
+        NOT_RECONFIRMED_DENIAL,
         eq(deals.isActive, true),
         sql`coalesce(${deals.isTestData}, false) = false`,
       ),
@@ -78,6 +101,11 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
   }));
 }
 
+// Return a deal to plain Opportunity. Only the "needs attention" states (declined/conflict/send_failed)
+// are cancellable — never an in-flight pending_outbox/pending request (which would race the delivery
+// worker / approval callbacks). Clears the WHOLE RFP cycle (incl. request id + token + override
+// fields) so a late callback or queued job can't resurrect/approve a cancelled deal. The status guard
+// is in the WHERE for atomicity: returns null if the row changed concurrently.
 export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{ id: string } | null> {
   const [updated] = await tenantDb
     .update(deals)
@@ -86,10 +114,28 @@ export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{
       rfpApprovalRequestedAt: null,
       rfpApprovalRequestedBy: null,
       rfpApprovalRequestEventId: null,
+      rfpApprovalRequestId: null,
+      rfpApprovalToken: null,
       rfpDeclinedReason: null,
       rfpDeclinedAt: null,
+      rfpConflictReason: null,
+      rfpConflictWith: null,
+      rfpLastAttemptError: null,
+      rfpOverrideState: null,
+      rfpOverrideDecision: null,
+      rfpOverrideError: null,
+      rfpOverrideNote: null,
+      rfpOverrideReviewedAt: null,
+      rfpOverrideReviewedBy: null,
     })
-    .where(and(eq(deals.id, dealId), eq(deals.isBidBoardOwned, false)))
+    .where(
+      and(
+        eq(deals.id, dealId),
+        eq(deals.isBidBoardOwned, false),
+        inArray(deals.rfpApprovalStatus, [...PENDING_RFP_ATTENTION_STATUSES]),
+        NOT_RECONFIRMED_DENIAL,
+      ),
+    )
     .returning({ id: deals.id });
   return updated ?? null;
 }
