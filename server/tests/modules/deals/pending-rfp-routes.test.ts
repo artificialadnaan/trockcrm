@@ -131,6 +131,18 @@ describe("GET /pending-rfp", () => {
     expect(commitTransaction).toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith({ deals: [{ id: "d1", name: "X", subState: "awaiting" }] });
   });
+
+  it("rejects a non-sales CRM role (construction) with 403", async () => {
+    const res = makeRes();
+    const commitTransaction = vi.fn().mockResolvedValue(undefined);
+    const err = await runRoute("get", "/pending-rfp", {
+      user: { id: "c1", role: "construction", officeId: "o1" },
+      tenantDb: {},
+      commitTransaction,
+    }, res);
+    expect(err).toMatchObject({ statusCode: 403 });
+    expect(commitTransaction).not.toHaveBeenCalled();
+  });
 });
 
 function stubDb(deal: any, stageSlug = "opportunity") {

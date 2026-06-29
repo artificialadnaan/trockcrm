@@ -1174,4 +1174,31 @@ describe("buildCanonicalDealBoardColumns", () => {
     expect(columns[prfpIndex]!.totalValue).toBe(0);
     expect(columns[oppIndex]!.count).toBe(1);
   });
+
+  it("keeps an in-flight override approval (rfpOverrideState='approving') in Opportunity, out of pending_rfp", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 1, // backend active count includes the approving card (it is still in opportunity)
+          totalValue: 80000,
+          cards: [
+            // override approval in flight: status stays "declined" + rfpOverrideState "approving" until the
+            // SyncHub callback lands. The server queue/cancel route exclude it, so the board must keep it in
+            // Opportunity and NOT surface it as an actionable pending_rfp card.
+            { id: "ia", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "declined", rfpOverrideDecision: null, rfpOverrideState: "approving", bidEstimate: "80000", ddEstimate: null, awardedAmount: null, onHold: false },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    // No pending RFP cards → no synthetic column is inserted, and opportunity is untouched.
+    expect(prfpIndex).toBe(-1);
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).toContain("ia");
+    expect(columns[oppIndex]!.count).toBe(1);
+    expect(columns[oppIndex]!.totalValue).toBe(80000);
+  });
 });

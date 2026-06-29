@@ -939,8 +939,9 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// GET /api/deals/pending-rfp — all deals in the Pending-RFP bucket (office-scoped via tenant schema)
-router.get("/pending-rfp", async (req, res, next) => {
+// GET /api/deals/pending-rfp — all deals in the Pending-RFP bucket (office-scoped via tenant schema).
+// Sales-role gated: this is a cross-rep read, so keep non-sales CRM roles (e.g. construction) out.
+router.get("/pending-rfp", requireRole("admin", "director", "rep"), async (req, res, next) => {
   try {
     const deals = await getPendingRfpDeals(req.tenantDb!);
     await req.commitTransaction!();

@@ -160,6 +160,10 @@ export function buildCanonicalDealBoardColumns(
     dealCanonicalSlug(deal) === "opportunity" &&
     deal.isBidBoardOwned === false &&
     deal.rfpOverrideDecision !== "denial_reconfirmed" &&
+    // An in-flight override approval (rfpOverrideState === "approving") stays rfpApprovalStatus
+    // "declined" until the SyncHub callback lands; the server queue + cancel route both exclude
+    // it, so the board must too — otherwise it shows as an actionable Pending RFP card.
+    deal.rfpOverrideState !== "approving" &&
     pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null;
   const pendingRfpCards = deals.filter(isPendingRfpCard);
 
