@@ -33,6 +33,16 @@ BEGIN
       CONTINUE;
     END IF;
 
+    -- Skip drifted/legacy tenants (e.g. office_pwauditoffice) whose deals never got the
+    -- companycam_project_id column (migration 0007). There are no scalar links there to dedupe, and
+    -- querying the column would error 42703 and abort the whole migration/deploy.
+    IF NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = schema_name AND table_name = 'deals' AND column_name = 'companycam_project_id'
+    ) THEN
+      CONTINUE;
+    END IF;
+
     EXECUTE format(
       'SELECT count(*) FROM (
          SELECT companycam_project_id
@@ -81,15 +91,22 @@ BEGIN
       schema_name
     );
 
-    -- Backfill the deprecated scalar link. The pre-flight guard above already RAISEd if any
-    -- companycam_project_id is shared by two deals, so this is now guaranteed conflict-free for the dup case;
-    -- ON CONFLICT DO NOTHING remains only to keep replays idempotent (re-running can't double-insert a link).
-    EXECUTE format(
-      'INSERT INTO %I.deal_companycam_projects (deal_id, companycam_project_id)
-         SELECT id, companycam_project_id FROM %I.deals WHERE companycam_project_id IS NOT NULL
-         ON CONFLICT (companycam_project_id) DO NOTHING',
-      schema_name, schema_name
-    );
+    -- Backfill the deprecated scalar link — ONLY for tenants that actually have the column. Drifted/legacy
+    -- schemas (e.g. office_pwauditoffice) never got companycam_project_id, so there's nothing to backfill;
+    -- the empty join table created above is still correct for them (new links go straight to it). The
+    -- pre-flight guard already RAISEd on any cross-deal duplicate, so this is conflict-free for the dup case;
+    -- ON CONFLICT DO NOTHING keeps replays idempotent.
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = schema_name AND table_name = 'deals' AND column_name = 'companycam_project_id'
+    ) THEN
+      EXECUTE format(
+        'INSERT INTO %I.deal_companycam_projects (deal_id, companycam_project_id)
+           SELECT id, companycam_project_id FROM %I.deals WHERE companycam_project_id IS NOT NULL
+           ON CONFLICT (companycam_project_id) DO NOTHING',
+        schema_name, schema_name
+      );
+    END IF;
   END LOOP;
 END $tenant$;
 
