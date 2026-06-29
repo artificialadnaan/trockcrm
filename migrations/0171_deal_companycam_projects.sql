@@ -33,15 +33,16 @@ BEGIN
       CONTINUE;
     END IF;
 
-    -- Skip drifted/legacy tenants (e.g. office_pwauditoffice) whose deals never got the
-    -- companycam_project_id column (migration 0007). There are no scalar links there to dedupe, and
-    -- querying the column would error 42703 and abort the whole migration/deploy.
-    IF NOT EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_schema = schema_name AND table_name = 'deals' AND column_name = 'companycam_project_id'
-    ) THEN
-      CONTINUE;
-    END IF;
+    -- Repair drift FIRST: ensure the deprecated scalar column exists on EVERY tenant. office_pwauditoffice
+    -- (and any other drifted/legacy tenant) never got companycam_project_id from migration 0007. Without it,
+    -- not only does the dup-check below error 42703 — the deployed runtime CompanyCam flows that still mirror
+    -- to this column (feed-service assign, link/unlink) would 42703 on that tenant after deploy. ADD it
+    -- (nullable, empty) so the column is universal again. The join table remains the source of truth; this
+    -- scalar is the deprecated mirror, dropped in a later migration. ADD COLUMN IF NOT EXISTS is idempotent.
+    EXECUTE format(
+      'ALTER TABLE %I.deals ADD COLUMN IF NOT EXISTS companycam_project_id varchar(50)',
+      schema_name
+    );
 
     EXECUTE format(
       'SELECT count(*) FROM (
@@ -91,22 +92,16 @@ BEGIN
       schema_name
     );
 
-    -- Backfill the deprecated scalar link — ONLY for tenants that actually have the column. Drifted/legacy
-    -- schemas (e.g. office_pwauditoffice) never got companycam_project_id, so there's nothing to backfill;
-    -- the empty join table created above is still correct for them (new links go straight to it). The
-    -- pre-flight guard already RAISEd on any cross-deal duplicate, so this is conflict-free for the dup case;
-    -- ON CONFLICT DO NOTHING keeps replays idempotent.
-    IF EXISTS (
-      SELECT 1 FROM information_schema.columns
-      WHERE table_schema = schema_name AND table_name = 'deals' AND column_name = 'companycam_project_id'
-    ) THEN
-      EXECUTE format(
-        'INSERT INTO %I.deal_companycam_projects (deal_id, companycam_project_id)
-           SELECT id, companycam_project_id FROM %I.deals WHERE companycam_project_id IS NOT NULL
-           ON CONFLICT (companycam_project_id) DO NOTHING',
-        schema_name, schema_name
-      );
-    END IF;
+    -- Backfill the deprecated scalar link. The column is guaranteed to exist (repaired above for drifted
+    -- tenants), and the pre-flight guard already RAISEd on any cross-deal duplicate, so this is conflict-free
+    -- for the dup case; ON CONFLICT DO NOTHING keeps replays idempotent. Drifted tenants just added an empty
+    -- column, so they backfill zero rows — the empty join table is correct (new links go straight to it).
+    EXECUTE format(
+      'INSERT INTO %I.deal_companycam_projects (deal_id, companycam_project_id)
+         SELECT id, companycam_project_id FROM %I.deals WHERE companycam_project_id IS NOT NULL
+         ON CONFLICT (companycam_project_id) DO NOTHING',
+      schema_name, schema_name
+    );
   END LOOP;
 END $tenant$;
 

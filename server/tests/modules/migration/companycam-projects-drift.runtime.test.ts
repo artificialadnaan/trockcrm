@@ -28,6 +28,7 @@ beforeAll(async () => {
     CREATE TABLE office_normal.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), companycam_project_id varchar(50));
     CREATE TABLE office_pwauditoffice.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
     INSERT INTO office_normal.deals (companycam_project_id) VALUES ('cc-100'), (NULL);
+    INSERT INTO office_pwauditoffice.deals DEFAULT VALUES; -- a deal exists, but with no companycam_project_id column yet
   `);
 }, 30000);
 
@@ -46,11 +47,17 @@ describe("migration 0171 — drifted tenant (deals without companycam_project_id
     expect((await one(`SELECT to_regclass('office_dallas.deal_companycam_projects')::text r`)).r).toBe("office_dallas.deal_companycam_projects");
     expect((await one(`SELECT to_regclass('office_pwauditoffice.deal_companycam_projects')::text r`)).r).toBe("office_pwauditoffice.deal_companycam_projects");
 
-    // Backfill only where the scalar column exists: the non-null link in office_normal, nothing in the drifted office.
+    // Drift REPAIRED: the deprecated scalar column now exists on the drifted tenant, so the deployed runtime
+    // CompanyCam mirror writes (UPDATE deals SET companycam_project_id ...) won't 42703 after deploy.
+    expect((await one(`SELECT count(*)::int c FROM information_schema.columns WHERE table_schema='office_pwauditoffice' AND table_name='deals' AND column_name='companycam_project_id'`)).c).toBe(1);
+    // Prove a runtime-style mirror write actually succeeds on the repaired tenant.
+    await expect(pg.exec(`UPDATE office_pwauditoffice.deals SET companycam_project_id = 'cc-rt' WHERE id = (SELECT id FROM office_pwauditoffice.deals LIMIT 1)`)).resolves.toBeDefined();
+
+    // Backfill: the non-null link in office_normal; the freshly-added (empty) column in the drifted office backfills nothing.
     expect((await one(`SELECT count(*)::int c FROM office_normal.deal_companycam_projects`)).c).toBe(1);
     expect((await one(`SELECT count(*)::int c FROM office_pwauditoffice.deal_companycam_projects`)).c).toBe(0);
 
-    // Idempotent replay — no error, no double-insert.
+    // Idempotent replay — no error, no double-insert (ADD COLUMN IF NOT EXISTS + ON CONFLICT DO NOTHING).
     await expect(pg.exec(migrationSql)).resolves.toBeDefined();
     expect((await one(`SELECT count(*)::int c FROM office_normal.deal_companycam_projects`)).c).toBe(1);
   });
