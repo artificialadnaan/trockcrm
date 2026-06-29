@@ -13,6 +13,45 @@
 --
 -- Per-tenant (office_*) + the TENANT_SCHEMA block for new tenants. Idempotent / replayable.
 
+-- Pre-flight duplicate guard (FAIL LOUD). The old scalar deals.companycam_project_id had NO unique
+-- constraint, so the same CompanyCam project id could sit on two deals. The backfill below uses
+-- ON CONFLICT DO NOTHING (needed for idempotent replay), which would SILENTLY DROP one of those links and
+-- quietly send that project's future photos to the wrong deal. Scan every office_* schema (skip any without
+-- a deals table) for a non-null companycam_project_id shared by more than one deal — using the SAME source
+-- predicate as the backfill so we catch exactly the rows it would insert — and RAISE EXCEPTION naming the
+-- schema + count if any exist. This stops the deploy so a human resolves the duplicate before any link is
+-- lost, instead of discovering missing photos later.
+DO $preflight$
+DECLARE
+  schema_name text;
+  dup_count integer;
+BEGIN
+  FOR schema_name IN
+    SELECT nspname FROM pg_namespace WHERE nspname LIKE 'office\_%' ESCAPE '\' ORDER BY nspname
+  LOOP
+    IF to_regclass(format('%I.deals', schema_name)) IS NULL THEN
+      CONTINUE;
+    END IF;
+
+    EXECUTE format(
+      'SELECT count(*) FROM (
+         SELECT companycam_project_id
+         FROM %I.deals
+         WHERE companycam_project_id IS NOT NULL
+         GROUP BY companycam_project_id
+         HAVING count(*) > 1
+       ) dup',
+      schema_name
+    ) INTO dup_count;
+
+    IF dup_count > 0 THEN
+      RAISE EXCEPTION
+        'Migration 0171 aborted: schema % has % companycam_project_id value(s) shared by more than one deal. The join-table backfill would silently drop a link for each duplicate. Resolve these duplicate scalar links (pick the owning deal, clear the other) before deploying.',
+        schema_name, dup_count;
+    END IF;
+  END LOOP;
+END $preflight$;
+
 -- Existing tenants.
 DO $tenant$
 DECLARE
@@ -42,9 +81,9 @@ BEGIN
       schema_name
     );
 
-    -- Backfill the deprecated scalar link. ON CONFLICT DO NOTHING is safe for a clean source (a project is
-    -- 1:1 with a deal), but it would SILENTLY drop a row if the same companycam_project_id is on two deals —
-    -- run the pre-deploy duplicate census before deploying (see PR notes).
+    -- Backfill the deprecated scalar link. The pre-flight guard above already RAISEd if any
+    -- companycam_project_id is shared by two deals, so this is now guaranteed conflict-free for the dup case;
+    -- ON CONFLICT DO NOTHING remains only to keep replays idempotent (re-running can't double-insert a link).
     EXECUTE format(
       'INSERT INTO %I.deal_companycam_projects (deal_id, companycam_project_id)
          SELECT id, companycam_project_id FROM %I.deals WHERE companycam_project_id IS NOT NULL

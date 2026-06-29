@@ -358,13 +358,38 @@ export async function runCompanyCamImport(argv = process.argv.slice(2)) {
       try {
         if (options.execute) {
           // Record the deal <-> CompanyCam-project link in the join table (single source of truth; a deal
-          // can own many projects, a project is 1:1 to a deal). ON CONFLICT keeps a re-run idempotent.
-          await client.query(
+          // can own many projects, a project is 1:1 to a deal). ON CONFLICT keeps a re-run idempotent and
+          // RETURNS deal_id ONLY when WE actually inserted the link.
+          const linkResult = await client.query(
             `INSERT INTO ${quoteIdent(options.tenant)}.deal_companycam_projects (deal_id, companycam_project_id)
              VALUES ($2::uuid, $1)
-             ON CONFLICT (companycam_project_id) DO NOTHING`,
+             ON CONFLICT (companycam_project_id) DO NOTHING
+             RETURNING deal_id::text`,
             [row.companyCamProjectId, row.matchedDealId]
           );
+          // No row returned => the project is ALREADY linked and the conflict was ignored. The join table is
+          // the source of truth, so resolve which deal actually owns it. If that's a DIFFERENT deal than the
+          // one this plan targets (e.g. a 2nd project was assigned via the new 1:many flow while loadDeals()
+          // still planned from the legacy scalar), importing photos to row.matchedDealId would split the
+          // source-of-truth link from the files. Skip the project entirely rather than land photos on a deal
+          // the link doesn't point to.
+          if (linkResult.rows.length === 0) {
+            const existing = await client.query(
+              `SELECT deal_id::text AS deal_id
+                 FROM ${quoteIdent(options.tenant)}.deal_companycam_projects
+                 WHERE companycam_project_id = $1`,
+              [row.companyCamProjectId]
+            );
+            const linkedDealId: string | null = existing.rows[0]?.deal_id ?? null;
+            if (linkedDealId && linkedDealId !== row.matchedDealId) {
+              await client.query("ROLLBACK");
+              console.warn(
+                `CompanyCam project ${row.companyCamProjectId} already linked to deal ${linkedDealId}; ` +
+                  `skipping (plan targeted deal ${row.matchedDealId}) to avoid splitting the link from its photos.`
+              );
+              continue;
+            }
+          }
         }
         const photos = await getProjectPhotos(row.companyCamProjectId);
         for (const photo of photos) {

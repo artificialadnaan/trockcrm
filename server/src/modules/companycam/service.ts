@@ -150,19 +150,18 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
   // Index deals by companycam_project_id for linked matches (from the join table — the source of truth).
   const dealById = new Map(dealRows.map((deal) => [deal.id, deal]));
   const linkedMap = new Map<string, typeof dealRows[0]>();
-  const linkedDealIds = new Set<string>();
   for (const link of linkRows) {
     const deal = dealById.get(link.dealId);
     if (!deal) continue;
     linkedMap.set(link.companycamProjectId, deal);
-    linkedDealIds.add(link.dealId);
   }
-  // Unlinked deals (no CompanyCam project at all) are the fuzzy-match candidates.
-  const unlinkedDeals = dealRows.filter((deal) => !linkedDealIds.has(deal.id));
 
-  // Build normalized name index for fuzzy matching
+  // Build the fuzzy-match name index from ALL active deals — NOT just deals with no link yet. A deal is
+  // 1:many to CompanyCam projects, so a deal that already owns ONE project must stay a candidate for OTHER
+  // same-named projects (otherwise its 2nd/3rd project can never auto-link). Projects already linked to a
+  // deal still surface as matchType 'linked' via linkedMap above; only the DEAL remains a candidate here.
   const dealsByNormName = new Map<string, typeof dealRows[0]>();
-  for (const deal of unlinkedDeals) {
+  for (const deal of dealRows) {
     dealsByNormName.set(normalizeName(deal.name), deal);
   }
 
@@ -233,6 +232,21 @@ export async function linkProjectToDeal(
   ccProjectId: string,
   dealId: string
 ): Promise<void> {
+  // Serialize concurrent (re)links of the SAME project so the LAST writer wins deterministically and no
+  // caller is falsely told their link took. Without this, two admins linking the same project to different
+  // deals both pass the delete; one insert wins the UNIQUE and the other hits ON CONFLICT DO NOTHING but
+  // STILL returns success. We MIRROR the proven mechanism in
+  // feed-service.assignUnassignedCompanyCamProjectToDeal: a transaction-scoped advisory lock keyed on the
+  // project id (hashtext(ccProjectId)). The lock holds because req.tenantDb is already bound to the
+  // request's open transaction — the tenant middleware issues BEGIN and the route commits via
+  // commitTransaction — so pg_advisory_xact_lock persists for the rest of the request and auto-releases at
+  // commit, exactly as the assign flow relies on. (Deliberately NOT wrapped in tenantDb.transaction():
+  // that would issue a nested BEGIN/COMMIT against the already-open request transaction and commit it
+  // prematurely.) With the lock held, the delete-then-insert below is atomic relative to other writers, so
+  // the insert always lands its own row — the relink/steal semantics (move the project to the target deal)
+  // are preserved.
+  await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${ccProjectId}))`);
+
   await tenantDb
     .delete(dealCompanycamProjects)
     .where(eq(dealCompanycamProjects.companycamProjectId, ccProjectId));
