@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { listFieldProjects } from "../../../src/modules/field/projects-service.js";
+import { getFieldProject, listFieldProjects } from "../../../src/modules/field/projects-service.js";
 
 /**
  * REAL-SQL (PGlite) proof of the PHOTOS-FIRST ordering for the active-projects list: projects that have
@@ -112,5 +112,21 @@ describe("listFieldProjects stable order under identical recency (d.id tiebreak)
   it("returns tied rows in ascending id order", async () => {
     const { projects } = await listFieldProjects(tieDb, ACCESS);
     expect(projects.map((p) => p.id)).toEqual([T.lo, T.hi]);
+  });
+});
+
+describe("getFieldProject — open by id regardless of list ordering", () => {
+  it("returns a zero-photo project by id (which photos-first ordering buries past the list window)", async () => {
+    const project = await getFieldProject(tdb, ACCESS, D.emptyOld);
+    expect(project).toMatchObject({ id: D.emptyOld, photoCount: 0 });
+  });
+
+  it("returns an accurate photoCount for a photo'd project", async () => {
+    const project = await getFieldProject(tdb, ACCESS, D.photosRecent);
+    expect(project.photoCount).toBe(2);
+  });
+
+  it("throws 404 for an unknown id", async () => {
+    await expect(getFieldProject(tdb, ACCESS, U("zz"))).rejects.toThrow(/not found/i);
   });
 });

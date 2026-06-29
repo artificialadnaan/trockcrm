@@ -128,15 +128,18 @@ export function ProjectDetailPage() {
     setLoading(true);
     setError(null);
     try {
-      const [projectsResult, photosResult, reportsResult] = await Promise.allSettled([
-        api<{ projects: FieldProject[] }>("/field/projects?status=active&page=1&perPage=100"),
+      const [projectResult, photosResult, reportsResult] = await Promise.allSettled([
+        // Fetch this one project by id — NOT a scan of the active list. Photos-first ordering pushes
+        // zero-photo projects past the list window, so a list scan would 404 them (and drop the office
+        // context the off-office write guard depends on).
+        api<{ project: FieldProject }>(`/field/projects/${id}`),
         fetchAllProjectPhotos(id),
         api<{ reports: Array<{ id: string; title: string; createdAt: string; description: string | null }> }>(`/field/projects/${id}/reports`),
       ]);
-      if (projectsResult.status !== "fulfilled" || photosResult.status !== "fulfilled") {
+      if (projectResult.status !== "fulfilled" || photosResult.status !== "fulfilled") {
         throw new Error("Failed to load project");
       }
-      setProject(projectsResult.value.projects.find((item) => item.id === id) ?? null);
+      setProject(projectResult.value.project ?? null);
       setPhotos(photosResult.value.photos);
       setPhotosPartial(photosResult.value.partial);
       setReports(reportsResult.status === "fulfilled" ? reportsResult.value.reports : []);

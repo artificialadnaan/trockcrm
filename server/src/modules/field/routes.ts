@@ -33,6 +33,7 @@ import {
   FIELD_PROJECTS_MAX_FETCH,
   listFieldProjects,
   listFieldProjectPhotos,
+  getFieldProject,
   listNearbyFieldCaptureTargets,
   listNearbyFieldProjects,
   listStarredFieldProjects,
@@ -237,6 +238,27 @@ fieldRoutes.get("/projects/nearby", requireFieldContractor, async (req, res, nex
       3,
     );
     res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Single-project metadata by id. Registered AFTER the literal /projects/starred and /projects/nearby
+// routes so `:dealId` doesn't shadow them. The detail page uses this instead of scanning the paginated
+// list, so opening a project never depends on it being inside the list window — photos-first ordering
+// pushes zero-photo projects past the first page in large offices, and a list scan would 404 them (and
+// drop the office context the off-office write guard relies on).
+fieldRoutes.get("/projects/:dealId", requireFieldContractor, async (req, res, next) => {
+  try {
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const dealId = String(req.params.dealId);
+    const { value, office } = await withResolvedOffice(
+      "deal",
+      dealId,
+      (officeDb) => getFieldProject(officeDb, access, dealId),
+      "Project not found",
+    );
+    res.json({ project: { ...value, ...officeTag(office) } });
   } catch (err) {
     next(err);
   }
