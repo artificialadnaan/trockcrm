@@ -89,6 +89,7 @@ import {
   getDealAtRiskResult,
   getCanonicalEstimatingBoundaryStageSlug,
   getOwnerInitialColor,
+  pendingRfpSubStateForStatus,
   resolveEffectiveStageEnteredAt,
   toCanonicalDealStageSlug,
   type AtRiskResult,
@@ -319,6 +320,7 @@ export function DealDetailPage() {
   const [rfpRetrying, setRfpRetrying] = useState(false);
   const [rfpTriggering, setRfpTriggering] = useState(false);
   const [rfpTriggerError, setRfpTriggerError] = useState<string | null>(null);
+  const [rfpCancelling, setRfpCancelling] = useState(false);
   const [rfpReadinessStatus, setRfpReadinessStatus] = useState<"draft" | "ready" | "activated" | null>(null);
   const [rfpReadinessLoading, setRfpReadinessLoading] = useState(false);
   const [rfpReadinessRefreshKey, setRfpReadinessRefreshKey] = useState(0);
@@ -645,6 +647,21 @@ export function DealDetailPage() {
       setRfpTriggering(false);
     }
   };
+  const handleCancelRfp = async () => {
+    if (!deal?.id) return;
+    if (!window.confirm("Return this deal to Opportunity and cancel the pending RFP?")) return;
+    setRfpCancelling(true);
+    try {
+      await api(`/deals/${deal.id}/cancel-rfp`, { method: "POST" });
+      toast.success("Returned to Opportunity");
+      await refetch();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to cancel the RFP");
+    } finally {
+      setRfpCancelling(false);
+    }
+  };
+
   const handleScopingReadinessChanged = () => {
     setRfpReadinessRefreshKey((key) => key + 1);
   };
@@ -910,7 +927,14 @@ export function DealDetailPage() {
           onRefresh={refetch}
         />
       )}
-      <RfpApprovalStatusBlock deal={deal} onRetry={handleRfpRetry} retrying={rfpRetrying} />
+      <RfpApprovalStatusBlock
+        deal={deal}
+        onRetry={handleRfpRetry}
+        retrying={rfpRetrying}
+        onCancel={handleCancelRfp}
+        canCancel={canTriggerRfp}
+        cancelling={rfpCancelling}
+      />
       {isBidBoardOwned && !deal.isHubspotSourced && <BidBoardProjectSummaryPanel deal={deal} />}
       {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
@@ -1420,10 +1444,16 @@ function RfpApprovalStatusBlock({
   deal,
   onRetry,
   retrying,
+  onCancel,
+  canCancel,
+  cancelling,
 }: {
   deal: DealDetail;
   onRetry: () => void;
   retrying: boolean;
+  onCancel?: () => void;
+  canCancel?: boolean;
+  cancelling?: boolean;
 }) {
   if (!deal.rfpApprovalStatus) return null;
 
@@ -1501,11 +1531,18 @@ function RfpApprovalStatusBlock({
             <p className="mt-1 text-sm">Declined {formatDate(deal.rfpDeclinedAt)}</p>
           )}
         </div>
-        {deal.rfpApprovalStatus === "send_failed" && (
-          <Button type="button" size="sm" variant="outline" onClick={onRetry} disabled={retrying}>
-            {retrying ? "Retrying..." : "Retry"}
-          </Button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {deal.rfpApprovalStatus === "send_failed" && (
+            <Button type="button" size="sm" variant="outline" onClick={onRetry} disabled={retrying}>
+              {retrying ? "Retrying..." : "Retry"}
+            </Button>
+          )}
+          {canCancel && pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null && (
+            <Button type="button" size="sm" variant="outline" onClick={onCancel} disabled={cancelling}>
+              {cancelling ? "Cancelling..." : "Return to Opportunity"}
+            </Button>
+          )}
+        </div>
       </div>
     </section>
   );
