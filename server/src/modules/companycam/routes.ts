@@ -15,7 +15,7 @@ import {
   unlinkProject,
   syncProjectPhotos,
   syncAllLinkedProjects,
-  autoLinkAndSync,
+  autoLinkProjects,
 } from "./service.js";
 
 const router = Router();
@@ -63,12 +63,18 @@ async function acquireBackgroundDb(officeSlug: string) {
   return {
     tenantDb,
     release: async (rollback = false) => {
-      if (rollback) {
-        await client.query("ROLLBACK").catch(() => {});
-      } else {
-        await client.query("COMMIT").catch(() => {});
+      try {
+        if (rollback) {
+          await client.query("ROLLBACK").catch(() => {});
+        } else {
+          // Propagate COMMIT failures (fail-closed): a failed commit must be treated as a failure, never
+          // swallowed and reported as success. Callers translate the throw into a Failed sync status.
+          await client.query("COMMIT");
+        }
+      } finally {
+        // Always return the connection to the pool, even when COMMIT throws, to avoid leaking it.
+        client.release();
       }
-      client.release();
     },
   };
 }
@@ -164,7 +170,13 @@ router.post("/sync/:projectId", async (req, res, next) => {
         syncFailed = true;
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
       })
-      .finally(() => release(syncFailed));
+      .finally(() =>
+        // release() now THROWS on a failed COMMIT; treat that as a sync failure (fail-closed) instead of
+        // letting it surface as an unhandled rejection or leave a "Complete" status standing after a bad commit.
+        release(syncFailed).catch((err) => {
+          syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
+        }),
+      );
   } catch (err) {
     if (syncStatus.running && !syncStatus.results && !syncStatus.error) {
       syncStatus.running = false;
@@ -201,7 +213,13 @@ router.post("/sync-all", async (req, res, next) => {
         syncAllFailed = true;
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
       })
-      .finally(() => release(syncAllFailed));
+      .finally(() =>
+        // release() now THROWS on a failed COMMIT; treat that as a sync failure (fail-closed) instead of
+        // letting it surface as an unhandled rejection or leave a "Complete" status standing after a bad commit.
+        release(syncAllFailed).catch((err) => {
+          syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
+        }),
+      );
   } catch (err) {
     if (syncStatus.running && !syncStatus.results && !syncStatus.error) {
       syncStatus.running = false;
@@ -226,17 +244,55 @@ router.post("/auto-import", async (req, res, next) => {
     await req.commitTransaction!();
     res.json({ message: "Auto-import started in background. Poll /sync-status for progress." });
 
-    const { tenantDb: bgDb, release } = await acquireBackgroundDb(officeSlug);
-    autoLinkAndSync(bgDb, userId, officeSlug, (progress) => {
-      syncStatus.progress = progress;
-    })
-      .then(({ linked, results }) => {
-        syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: `Complete — ${linked} projects linked`, results, error: null };
-      })
-      .catch((err) => {
+    // Two-phase background flow. autoLinkProjects takes a per-project advisory lock for each link; running
+    // it in its OWN transaction and COMMITting BEFORE the long photo sync RELEASES those locks promptly, so
+    // a concurrent link/assign of the same project isn't blocked through the whole sync (and its statement
+    // timeout). Semantic change (acceptable/better): the links commit independently of the sync, so a sync
+    // failure leaves the links persisted — they sync on the next run. acquireBackgroundDb re-applies the
+    // transaction-local search_path each time, so the sync phase stays correctly tenant-scoped.
+    void (async () => {
+      // Fail-closed wrapper: ANY failure below (acquireBackgroundDb throwing, a phase throwing, or a
+      // release/COMMIT throwing) lands in this single catch and sets running:false + an error. The IIFE can
+      // NEVER leave syncStatus stuck at running:true, and the "Complete" status is only ever set AFTER the
+      // phase-2 COMMIT succeeds — so a failed commit is never reported as success.
+      try {
+        // Phase 1 — LINK ONLY, in its own transaction; COMMIT releases the per-project advisory locks.
+        let linked = 0;
+        {
+          const { tenantDb: linkDb, release } = await acquireBackgroundDb(officeSlug);
+          try {
+            linked = await autoLinkProjects(linkDb, (progress) => {
+              syncStatus.progress = progress;
+            });
+          } catch (err) {
+            await release(true); // ROLLBACK this phase's connection, then fail
+            throw err;
+          }
+          // COMMIT is OUTSIDE the inner try so a COMMIT failure isn't double-released by the catch's
+          // ROLLBACK (release() already returned the connection); it propagates to the outer catch instead.
+          await release(); // COMMIT — frees the advisory locks before the sync starts
+        }
+
+        // Phase 2 — PHOTO SYNC, in a FRESH transaction (no link locks held). Reached ONLY after phase 1's
+        // acquire + COMMIT both succeeded.
+        {
+          const { tenantDb: syncDb, release } = await acquireBackgroundDb(officeSlug);
+          let results: Awaited<ReturnType<typeof syncAllLinkedProjects>>;
+          try {
+            results = await syncAllLinkedProjects(syncDb, userId, officeSlug, (progress) => {
+              syncStatus.progress = progress;
+            });
+          } catch (err) {
+            await release(true); // ROLLBACK this phase's connection, then fail
+            throw err;
+          }
+          await release(); // COMMIT — a commit failure propagates to the outer catch (never reports Complete)
+          syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: `Complete — ${linked} projects linked`, results, error: null };
+        }
+      } catch (err) {
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
-      })
-      .finally(() => release());
+      }
+    })();
   } catch (err) {
     if (syncStatus.running && !syncStatus.results && !syncStatus.error) {
       syncStatus.running = false;

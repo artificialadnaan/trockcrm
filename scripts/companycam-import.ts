@@ -95,12 +95,26 @@ function compareMatches(left: CompanyCamImportPlanRow, right: CompanyCamImportPl
 
 export function prepareCompanyCamImportRows(
   planRows: CompanyCamImportPlanRow[],
-  options: Pick<CompanyCamImportOptions, "projectId" | "limit"> = {}
+  options: Pick<CompanyCamImportOptions, "projectId" | "limit" | "strictOneToOne"> = {}
 ) {
   // Auto-seed ONLY the reliable tiers (existing link, project-number, exact-AND-unique name), never an
   // on-hold deal — i.e. the "auto" disposition. Ambiguous-exact collisions, sub-1.0 fuzzy guesses, and
   // unmatched projects are left for the manual worklist.
   const candidates = planRows.filter((row) => row.matchedDealId && companyCamPlanDisposition(row) === "auto");
+
+  // 1:many: when strict-one-to-one is DISABLED, a deal may legitimately own several reliable CompanyCam
+  // projects, so keep ALL auto candidates (they each become a row in deal_companycam_projects) rather than
+  // collapsing same-deal matches to the single highest-confidence one. Same-deal multiples are no longer
+  // "conflicts" in this mode.
+  if (options.strictOneToOne === false) {
+    return {
+      rows: candidates
+        .filter((row) => !options.projectId || row.companyCamProjectId === options.projectId)
+        .slice(0, options.limit),
+      conflicts: [],
+    };
+  }
+
   const byDealId = new Map<string, CompanyCamImportPlanRow[]>();
   for (const row of candidates) {
     byDealId.set(row.matchedDealId!, [...(byDealId.get(row.matchedDealId!) ?? []), row]);
@@ -141,7 +155,7 @@ export function validateCompanyCamMatchConflicts(
   options: Pick<CompanyCamImportOptions, "execute" | "strictOneToOne">
 ) {
   if (options.execute && options.strictOneToOne !== false && conflicts.length > 0) {
-    throw new Error(`Refusing to import with ${conflicts.length} duplicate CompanyCam deal matches. Review companycam-match-conflicts CSV or pass --no-strict-one-to-one to continue with only the highest-confidence match per deal.`);
+    throw new Error(`Refusing to import with ${conflicts.length} duplicate CompanyCam deal matches. Review companycam-match-conflicts CSV or pass --no-strict-one-to-one to import ALL of each deal's reliable same-deal CompanyCam projects (a deal may own several projects; each becomes a deal_companycam_projects row).`);
   }
 }
 
@@ -357,8 +371,51 @@ export async function runCompanyCamImport(argv = process.argv.slice(2)) {
       await client.query("BEGIN");
       try {
         if (options.execute) {
+          // Serialize this project's link write with the UI flows (feed-service.assignUnassignedCompanyCamProjectToDeal
+          // and service.linkProjectToDeal both take pg_advisory_xact_lock(hashtext(projectId))), so a concurrent UI
+          // assign of the SAME project can't race the import. Transaction-scoped: the per-row BEGIN/COMMIT releases it.
+          // Taken ONLY on the execute/write path — a dry-run must not hold locks that could block a live assign/link.
+          await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [row.companyCamProjectId]);
+          // Record the deal <-> CompanyCam-project link in the join table (single source of truth; a deal
+          // can own many projects, a project is 1:1 to a deal). ON CONFLICT keeps a re-run idempotent and
+          // RETURNS deal_id ONLY when WE actually inserted the link.
+          const linkResult = await client.query(
+            `INSERT INTO ${quoteIdent(options.tenant)}.deal_companycam_projects (deal_id, companycam_project_id)
+             VALUES ($2::uuid, $1)
+             ON CONFLICT (companycam_project_id) DO NOTHING
+             RETURNING deal_id::text`,
+            [row.companyCamProjectId, row.matchedDealId]
+          );
+          // No row returned => the project is ALREADY linked and the conflict was ignored. The join table is
+          // the source of truth, so resolve which deal actually owns it. If that's a DIFFERENT deal than the
+          // one this plan targets (e.g. a 2nd project was assigned via the new 1:many flow while loadDeals()
+          // still planned from the legacy scalar), importing photos to row.matchedDealId would split the
+          // source-of-truth link from the files. Skip the project entirely rather than land photos on a deal
+          // the link doesn't point to.
+          if (linkResult.rows.length === 0) {
+            const existing = await client.query(
+              `SELECT deal_id::text AS deal_id
+                 FROM ${quoteIdent(options.tenant)}.deal_companycam_projects
+                 WHERE companycam_project_id = $1`,
+              [row.companyCamProjectId]
+            );
+            const linkedDealId: string | null = existing.rows[0]?.deal_id ?? null;
+            if (linkedDealId && linkedDealId !== row.matchedDealId) {
+              await client.query("ROLLBACK");
+              console.warn(
+                `CompanyCam project ${row.companyCamProjectId} already linked to deal ${linkedDealId}; ` +
+                  `skipping (plan targeted deal ${row.matchedDealId}) to avoid splitting the link from its photos.`
+              );
+              continue;
+            }
+          }
+          // Mirror the link onto the legacy scalar deals.companycam_project_id. The scalar is a DENORMALIZED
+          // MIRROR kept only so un-migrated legacy readers (this import's loadDeals + companycam-inventory)
+          // still detect the link for the single-project case; deal_companycam_projects is the source of
+          // truth. #830 migrates those readers and drops the column. For a multi-project deal the scalar
+          // holds the most-recent link (accepted interim).
           await client.query(
-            `UPDATE ${quoteIdent(options.tenant)}.deals SET companycam_project_id = $1 WHERE id = $2::uuid AND companycam_project_id IS DISTINCT FROM $1`,
+            `UPDATE ${quoteIdent(options.tenant)}.deals SET companycam_project_id = $1 WHERE id = $2::uuid`,
             [row.companyCamProjectId, row.matchedDealId]
           );
         }

@@ -79,6 +79,22 @@ describe("companycam-import", () => {
     ]);
   });
 
+  it("keeps ALL of a deal's reliable projects when strict-one-to-one is disabled (1:many)", () => {
+    const result = prepareCompanyCamImportRows(
+      [
+        planRow({ companyCamProjectId: "cc-low", matchedDealId: "deal-1", confidence: 0.91 }),
+        planRow({ companyCamProjectId: "cc-high", matchedDealId: "deal-1", confidence: 0.99 }),
+        planRow({ companyCamProjectId: "cc-other", matchedDealId: "deal-2", confidence: 0.95 }),
+      ],
+      { strictOneToOne: false }
+    );
+
+    // Both projects mapped to deal-1 are kept (each becomes a deal_companycam_projects row) — the old
+    // 1:1 dedup no longer silently drops the deal's additional projects, and they aren't conflicts.
+    expect(result.rows.map((row) => row.companyCamProjectId).sort()).toEqual(["cc-high", "cc-low", "cc-other"]);
+    expect(result.conflicts).toEqual([]);
+  });
+
   it("refuses strict one-to-one imports when duplicate project matches exist", () => {
     const result = prepareCompanyCamImportRows([
       planRow({ companyCamProjectId: "cc-a", matchedDealId: "deal-1", confidence: 0.91 }),

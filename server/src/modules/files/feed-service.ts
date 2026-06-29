@@ -1,6 +1,6 @@
 import { eq, and, desc, gte, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { files, deals, users } from "@trock-crm/shared/schema";
+import { files, deals, users, dealCompanycamProjects } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -416,7 +416,7 @@ export async function assignUnassignedCompanyCamProjectToDeal(
   }
 
   const [deal] = await tenantDb
-    .select({ id: deals.id, companycamProjectId: deals.companycamProjectId })
+    .select({ id: deals.id })
     .from(deals)
     // Exclude test-data deals (mirrors excludeTestDataCondition on the normal deals list/search): they are
     // hidden from the picker, so a crafted/stale request must not be able to bury production photos on one.
@@ -424,39 +424,31 @@ export async function assignUnassignedCompanyCamProjectToDeal(
     .limit(1);
   if (!deal) throw new AppError(404, "Deal not found");
 
-  // Fast-fail: a deal links to at most ONE CompanyCam project, so refuse a target already linked to a
-  // DIFFERENT project (the authoritative re-check happens under the lock below).
-  if (deal.companycamProjectId && deal.companycamProjectId !== projectId) {
-    throw new AppError(409, "This deal is already linked to a different CompanyCam project");
-  }
+  // A deal can now own MANY CompanyCam projects (the link lives in deal_companycam_projects, a project
+  // stays 1:1 to a deal via the UNIQUE on companycam_project_id). So a 2nd/3rd different project ADDS a
+  // link instead of being rejected — there is no "different project" guard anymore.
 
   // Serialize on BOTH the project AND the target deal (transaction-scoped advisory locks, auto-released at
-  // commit). The project lock alone is insufficient: two DIFFERENT projects assigned to the same unlinked
-  // deal would take different project locks, both move their photos, and the last writer would orphan the
-  // other project's auto-sync mapping (Codex). Acquire in sorted key order so two concurrent requests that
-  // touch the same {project, deal} pair can't deadlock.
+  // commit). The project lock alone is insufficient: two DIFFERENT projects assigned to the same deal would
+  // take different project locks, both move their photos, and a concurrent uniqueness re-check could race.
+  // Acquire in sorted key order so two concurrent requests that touch the same {project, deal} pair can't
+  // deadlock.
   for (const key of [projectId, targetDealId].sort()) {
     await tenantDb.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`);
   }
 
-  // Authoritative re-read UNDER the locks (the target's link may have changed since the validation read).
-  const [locked] = await tenantDb
-    .select({ companycamProjectId: deals.companycamProjectId })
-    .from(deals)
-    .where(eq(deals.id, targetDealId))
-    .limit(1);
-  if (locked?.companycamProjectId && locked.companycamProjectId !== projectId) {
-    throw new AppError(409, "This deal is already linked to a different CompanyCam project");
-  }
-
-  // Don't STEAL the project from a deal it's already linked to. The Unassigned backlog only requires
-  // deal_id IS NULL, so a project can be split (some photos synced to deal A, stragglers still unassigned);
-  // re-pointing the link to a different deal here would split the project across deals and send its future
-  // syncs to the wrong one. Require an explicit relink in that case (Codex).
+  // Don't STEAL the project from a deal it's already linked to. A project is 1:1 with a deal, so if the join
+  // table already maps this project to a DIFFERENT deal, refuse rather than split the project across deals
+  // (its future syncs would go to the wrong one). Require an explicit relink in that case (Codex).
   const [linkedElsewhere] = await tenantDb
-    .select({ id: deals.id })
-    .from(deals)
-    .where(and(eq(deals.companycamProjectId, projectId), sql`${deals.id} <> ${targetDealId}`))
+    .select({ dealId: dealCompanycamProjects.dealId })
+    .from(dealCompanycamProjects)
+    .where(
+      and(
+        eq(dealCompanycamProjects.companycamProjectId, projectId),
+        sql`${dealCompanycamProjects.dealId} <> ${targetDealId}`,
+      ),
+    )
     .limit(1);
   if (linkedElsewhere) {
     throw new AppError(409, "This CompanyCam project is already linked to another deal");
@@ -480,9 +472,19 @@ export async function assignUnassignedCompanyCamProjectToDeal(
     .returning({ id: files.id });
 
   if (moved.length > 0) {
-    // Persist the project -> deal mapping so future photos auto-link here (syncAllLinkedProjects only syncs
-    // deals with a non-null companycam_project_id). Safe to set unconditionally: the checks above guarantee
-    // the target is unlinked-or-same and the project is linked nowhere else.
+    // Persist the project -> deal link in the join table so future photos auto-link here
+    // (syncAllLinkedProjects syncs every project mapped to an active deal). ON CONFLICT DO NOTHING makes a
+    // re-assign of the same project idempotent; the uniqueness check above already guaranteed the project is
+    // mapped nowhere else (so the conflict, if any, is this same {deal, project} pair).
+    await tenantDb
+      .insert(dealCompanycamProjects)
+      .values({ dealId: targetDealId, companycamProjectId: projectId })
+      .onConflictDoNothing({ target: dealCompanycamProjects.companycamProjectId });
+
+    // Mirror the link onto the legacy scalar deals.companycam_project_id. The scalar is a DENORMALIZED
+    // MIRROR kept only so un-migrated legacy readers (companycam-import/inventory) still detect the link for
+    // the single-project case; deal_companycam_projects is the source of truth. #830 migrates those readers
+    // and drops the column. For a multi-project deal the scalar holds the most-recent link (accepted interim).
     await tenantDb
       .update(deals)
       .set({ companycamProjectId: projectId })
