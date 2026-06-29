@@ -41,6 +41,16 @@ describe("BidDueDateBanner", () => {
     expect(text).not.toContain("Jul 2");
   });
 
+  it("renders a date-only 'YYYY-MM-DD' (the lead-backed resolved value) on its intended day", async () => {
+    // For lead-backed deals the resolved bid due date is leads.bid_due_date — a `date` column that
+    // serializes date-only as "2026-07-03" (no time/zone). new Date("2026-07-03") parses as UTC
+    // midnight, so formatting in UTC must still surface Jul 3 (NOT Jul 2) under TZ=America/Chicago.
+    await render("2026-07-03");
+    const text = container.textContent ?? "";
+    expect(text).toContain("Bid due date: Jul 3, 2026");
+    expect(text).not.toContain("Jul 2");
+  });
+
   it("renders nothing when bidDueDate is null", async () => {
     await render(null);
     expect(container.textContent).toBe("");

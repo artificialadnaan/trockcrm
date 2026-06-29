@@ -2026,8 +2026,27 @@ export async function getDealDetail(
   const dealChangeOrderRows = await listDealChangeOrders(tenantDb, dealId);
   const dealChangeOrderTotal = await sumDealChangeOrders(tenantDb, dealId);
 
+  // Authoritative bid due date for the banner. For a LEAD-BACKED deal the bid due date's lineage
+  // source is the lead (lineage-resolver: bidDueDate -> "lead"), and scoping edits write
+  // leads.bid_due_date WITHOUT mirroring it into deals.bid_due_date (bidDueDate is absent from the
+  // compatibilityWriteThrough block) — so deals.bid_due_date is a stale conversion-time snapshot.
+  // Read the lead's value directly (date-only "YYYY-MM-DD", nullable if the lead cleared it). For a
+  // non-lead deal there is no lead row, so the deal's own column (timestamptz ISO) is canonical.
+  // Read-side only — deliberately NOT a dual-write (drift-free). Sequential because tenantDb is a
+  // single transaction client in prod (parallel reads fail with "client already executing").
+  let resolvedBidDueDate: unknown = dealWithMetadata.bidDueDate ?? null;
+  if (dealWithMetadata.sourceLeadId) {
+    const [lead] = await tenantDb
+      .select({ bidDueDate: leads.bidDueDate })
+      .from(leads)
+      .where(eq(leads.id, dealWithMetadata.sourceLeadId))
+      .limit(1);
+    resolvedBidDueDate = lead?.bidDueDate ?? null;
+  }
+
   return {
     ...dealWithMetadata,
+    resolvedBidDueDate,
     // Deal DETAIL re-derives at-risk here (overriding getDealById's), so it must opt into the
     // close-target suppression too — otherwise the detail page that hosts "Move Close Date" would
     // still read threshold_reached after a future date is set.
