@@ -25,6 +25,12 @@ vi.mock("@/hooks/use-reports", () => ({
     return { data: null, loading: false, error: null };
   },
 }));
+// RegionReportPage always mounts <EvidenceDrawer>, which calls useAuth() to gate its inline "Set close
+// date" editor (PR #827). This is a pure unit test that wraps only <MemoryRouter>, so stub useAuth here
+// rather than depend on a real <AuthProvider> in the render tree.
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "test-user", email: "test@trock.dev" } }),
+}));
 
 const EMPTY: RegionReportData = {
   period: { from: "2026-05-01", to: "2026-05-31", label: "2026-05-01 → 2026-05-31" },
