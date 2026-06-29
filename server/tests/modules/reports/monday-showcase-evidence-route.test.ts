@@ -46,6 +46,25 @@ describe("parseShowcaseEvidenceParams", () => {
     expect(parseShowcaseEvidenceParams({ metric: "pipeline", stageSlug: "estimating" }).stageSlug).toBe("estimating");
     expect(() => parseShowcaseEvidenceParams({ metric: "won", stageSlug: "estimating" })).toThrow(/stageSlug/);
   });
+
+  it("accepts the undated metric office-wide and per-rep, but rejects band/stageSlug/regionName on it", () => {
+    // The B4 "No future close date" card: a snapshot complement, scoped like projection (office or one rep).
+    expect(parseShowcaseEvidenceParams({ metric: "undated" }).metric).toBe("undated");
+    expect(parseShowcaseEvidenceParams({ metric: "undated" }).repId).toBeUndefined(); // office-wide
+    const uuid = "11111111-1111-1111-1111-111111111111";
+    expect(parseShowcaseEvidenceParams({ metric: "undated", repId: uuid }).repId).toBe(uuid);
+    expect(parseShowcaseEvidenceParams({ metric: "undated", repId: "__unassigned__" }).repId).toBeNull();
+    // it has no band/stage/region axis (the card is M − N over the open scope, not a region drill)
+    expect(() => parseShowcaseEvidenceParams({ metric: "undated", band: "31_60" })).toThrow(/band/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "undated", stageSlug: "estimating" })).toThrow(/stageSlug/);
+    expect(() => parseShowcaseEvidenceParams({ metric: "undated", regionName: "West Coast" })).toThrow(/regionName/);
+  });
+
+  it("undated is NOT a director-gated surface — a rep may open their own / the office undated list", () => {
+    // Scoped like projection: not pipeline, no from/to, no regionName → assertShowcaseEvidenceAccess lets reps through.
+    expect(() => assertShowcaseEvidenceAccess({ metric: "undated", mode: "to_date" }, false)).not.toThrow();
+    expect(() => assertShowcaseEvidenceAccess({ metric: "undated", mode: "to_date", repId: "11111111-1111-1111-1111-111111111111" }, false)).not.toThrow();
+  });
 });
 
 describe("assertShowcaseEvidenceAccess — the region drill's elevated surface is director-only", () => {

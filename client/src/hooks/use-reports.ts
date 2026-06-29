@@ -1407,7 +1407,9 @@ export function useShowcaseEvidence(
   const [error, setError] = useState<string | null>(null);
   const latestRequest = useRef(0);
 
-  useEffect(() => {
+  // The fetch is a stable callback so the drawer can REFETCH it after an inline edit (a close-date move on
+  // the undated list) — the edited deal then drops out of the reconciling set without reopening the drawer.
+  const fetchEvidence = useCallback(async () => {
     if (!request) {
       setData(null);
       setError(null);
@@ -1433,21 +1435,25 @@ export function useShowcaseEvidence(
     if (request.to) params.set("to", request.to);
     if (request.stageSlug) params.set("stageSlug", request.stageSlug);
 
-    api<{ data: MondayShowcaseEvidence }>(`/reports/monday-showcase/evidence?${params.toString()}`)
-      .then((result) => {
-        if (requestId === latestRequest.current) setData(result.data);
-      })
-      .catch((err: unknown) => {
-        if (requestId !== latestRequest.current) return;
-        setError(err instanceof Error ? err.message : "Failed to load the supporting records");
-        setData(null);
-      })
-      .finally(() => {
-        if (requestId === latestRequest.current) setLoading(false);
-      });
+    try {
+      const result = await api<{ data: MondayShowcaseEvidence }>(
+        `/reports/monday-showcase/evidence?${params.toString()}`
+      );
+      if (requestId === latestRequest.current) setData(result.data);
+    } catch (err: unknown) {
+      if (requestId !== latestRequest.current) return;
+      setError(err instanceof Error ? err.message : "Failed to load the supporting records");
+      setData(null);
+    } finally {
+      if (requestId === latestRequest.current) setLoading(false);
+    }
   }, [request, mode]);
 
-  return { data, loading, error };
+  useEffect(() => {
+    void fetchEvidence();
+  }, [fetchEvidence]);
+
+  return { data, loading, error, refetch: fetchEvidence };
 }
 
 // Reports Part 4 -- B·1 Rep 1:1 Pack. repId undefined lets the server default to the top rep.

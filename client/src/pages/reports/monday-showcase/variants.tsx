@@ -7,6 +7,7 @@ import {
   type ProjectionLadder,
   type RepShowcaseRow,
   type EvidenceMetric,
+  type EvidenceRequest,
 } from "./types";
 import { DrillNumber, DRILL_UNDERLINE } from "./drill";
 import { usd, int, signed, ACCENT, BAND_BAR, DeltaChip, Sparkline, type AccentKey } from "../evidence-kit";
@@ -31,6 +32,43 @@ function basisLabel(metric: { value: { basisLabel: string } | null }) {
 
 function CoverageCaption({ ladder }: { ladder: ProjectionLadder }) {
   return <p className="mt-1 text-[11px] text-slate-400">{ladder.coverageCaption}</p>;
+}
+
+/**
+ * The B4 "No future close date" card — the M − N complement of the four dated bands. Count = m − n (open
+ * deals lacking a future-dated close date), $ = coverage.undatedValue (the open best-estimate of exactly
+ * those deals). Together with the four bands this makes the forecast row partition EXACTLY: office M ==
+ * Σ band counts (the dated Total = N) + undated (M − N). Clicking drills into the `undated` evidence list,
+ * where each row can set a close date inline (the deal then leaves this card and re-bands). Amber marks it
+ * a blind spot, distinct from the violet dated bands.
+ */
+function UndatedCard({
+  coverage,
+  request,
+  emphasis,
+}: {
+  coverage: ProjectionLadder["coverage"];
+  request: EvidenceRequest;
+  emphasis: "office" | "rep";
+}) {
+  // Clamp at 0 so a transient/garbled payload can never render a negative count; usd() already guards $.
+  const undatedCount = Math.max(0, coverage.m - coverage.n);
+  const office = emphasis === "office";
+  return (
+    <DrillNumber request={request} className="block">
+      <div className={`rounded-lg border ${office ? "border-amber-300" : "border-amber-200"} border-l-4 border-l-amber-500 bg-amber-50/70 p-2 text-center`}>
+        <div className="flex items-center justify-center gap-1">
+          <span className="text-[10px] font-bold uppercase tracking-wide text-amber-700">No date</span>
+        </div>
+        <div className={`mt-0.5 text-sm tabular-nums text-slate-900 ${office ? "font-black" : "font-bold"}`}>
+          {usd(coverage.undatedValue)}
+        </div>
+        <div className="mt-1 inline-block rounded bg-amber-200 px-1.5 py-0.5 text-[10px] tabular-nums text-amber-800">
+          {int(undatedCount)} undated
+        </div>
+      </div>
+    </DrillNumber>
+  );
 }
 
 // First load now defaults to "last full week" (completed), so any "this week" copy must follow the mode —
@@ -369,7 +407,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
             {usd(officeTotalValue)} projected
           </span>
         </div>
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-6 gap-2">
           {data.officeProjection.bands.map((b) => (
             <DrillNumber
               key={b.band}
@@ -406,6 +444,14 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
               </div>
             </div>
           </DrillNumber>
+          {/* No future close date (the M − N complement): the open deals NOT in any dated band, so the row
+              partitions exactly — office M == Σ band counts (= dated Total) + undated. Count = m − n, $ =
+              coverage.undatedValue (the SAFE usd). Drills into the undated evidence list (set a date inline). */}
+          <UndatedCard
+            coverage={data.officeProjection.coverage}
+            request={{ metric: "undated", title: "No future close date — office" }}
+            emphasis="office"
+          />
         </div>
       </div>
 
@@ -425,7 +471,7 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                 · <span className="tabular-nums">{usd(rep.closed.value.amount)}</span>
               </span>
             </div>
-            <div className="grid grid-cols-5 gap-2">
+            <div className="grid grid-cols-6 gap-2">
               {rep.projection.bands.map((b) => (
                 <DrillNumber
                   key={b.band}
@@ -462,6 +508,13 @@ export function VariantB4ForecastLadder({ data }: { data: MondayShowcaseData }) 
                   </div>
                 </div>
               </DrillNumber>
+              {/* Per-rep blind spot (M − N): this rep's open deals with no future-dated close date. Sums
+                  to the office card by construction (officeProjection = Σ per-rep). */}
+              <UndatedCard
+                coverage={rep.projection.coverage}
+                request={{ metric: "undated", repId: rep.repId, title: `${rep.repName} — No future close date` }}
+                emphasis="rep"
+              />
             </div>
             <p className="mt-2 text-[10px] text-slate-400">{rep.projection.coverageCaption}</p>
           </div>

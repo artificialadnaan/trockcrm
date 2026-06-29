@@ -4,6 +4,7 @@ import {
   buildStageEntryEvidenceSql,
   buildProjectionEvidenceSql,
   buildPipelineEvidenceSql,
+  buildUndatedEvidenceSql,
   buildLeadEvidenceSql,
 } from "../../../src/modules/reports/monday-showcase-service.js";
 import { SENT_STAGE_SLUGS, ESTIMATED_STAGE_SLUGS } from "../../../src/modules/reports/foundations.js";
@@ -127,6 +128,33 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
     expect(text).toContain("COALESCE(NULLIF(rc.name, ''), 'Unassigned') ="); // region key still applied
   });
 
+  it("undated evidence: the EXACT complement of projection (open scope + NOT future-dated), same as buildAtRiskDealsSql", () => {
+    const undated = extractSqlText(buildUndatedEvidenceSql());
+    const projection = extractSqlText(buildProjectionEvidenceSql());
+    // same open M scope as the projection/coverage aggregate
+    expect(undated).toContain("d.is_active = true");
+    expect(undated).toContain("is_terminal = false");
+    const filter = extractSqlText(aliasedReportableDealFilterSql("d"));
+    expect(undated).toContain(filter);
+    expect(undated).toContain("is_test_data");
+    // open best-estimate $ (same basis as the undated_value the card shows)
+    expect(undated.toLowerCase()).toContain("bid_board_total_sales");
+    // the load-bearing difference: projection KEEPS the future-dated cohort; undated NEGATES it (the M − N
+    // complement). Both reference the SAME `expected_close_date >= today` predicate from foundations.ts.
+    expect(projection).toMatch(/expected_close_date\s*>=/i);
+    expect(undated).toMatch(/NOT \(.*expected_close_date\s*>=/is);
+    // carries the standard evidence columns (incl. the Item-4 project_number) so the drawer + CSV match
+    expect(undated).toContain("d.project_number AS project_number");
+    expect(undated).toContain("company_name");
+    expect(undated).toContain("days_in_stage");
+  });
+
+  it("undated evidence: per-rep scope adds an assigned_rep filter; office scope does not", () => {
+    expect(extractSqlText(buildUndatedEvidenceSql())).not.toContain("assigned_rep_id =");
+    expect(extractSqlText(buildUndatedEvidenceSql("rep-9"))).toContain("assigned_rep_id =");
+    expect(extractSqlText(buildUndatedEvidenceSql(null))).toContain("assigned_rep_id IS NULL");
+  });
+
   it("projection evidence: a band scope narrows to exactly that 30/60/90 rung", () => {
     const text = extractSqlText(buildProjectionEvidenceSql(undefined, "31_60"));
     expect(text).toContain("31_60");
@@ -156,6 +184,9 @@ describe("Monday showcase EVIDENCE builders reuse the aggregate cohort predicate
       expect(text).toContain("AS region");
       expect(text).toContain("deal_type");
       expect(text).toContain("days_in_stage");
+      // the canonical project number rides alongside the raw deal_number so the client resolver can show
+      // the DFW/ATL number (never the HubSpot id) in the drawer + CSV
+      expect(text).toContain("d.project_number AS project_number");
       // age anchored to the America/Chicago business date (not raw session-TZ CURRENT_DATE)
       expect(text).toContain("America/Chicago");
       expect(text).toContain("LEFT JOIN companies c ON c.id = d.company_id");

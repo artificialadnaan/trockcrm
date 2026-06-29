@@ -65,13 +65,16 @@ export interface ProjectionCoverage {
   n: number;
   /** ALL open deals in scope, incl. Bid-Board-mirror NULL-dated deals. */
   m: number;
+  /** open best-estimate $ over the (M − N) undated complement (never-dated + stale-past-dated). The
+   *  count of that complement is M − N; this is its $ so the "No future close date" card shows both. */
+  undatedValue: number;
 }
 
 /**
  * The mandatory honesty caption shown wherever a projection appears -- never a bare projected number.
  * Per-rep n/m sum to the office n/m by construction (same predicate over disjoint rep slices).
  */
-export function formatProjectionCoverageCaption({ n, m }: ProjectionCoverage): string {
+export function formatProjectionCoverageCaption({ n, m }: { n: number; m: number }): string {
   if (m <= 0) return "No open deals in scope.";
   const dealWord = m === 1 ? "deal" : "deals";
   const haveWord = n === 1 ? "has" : "have";

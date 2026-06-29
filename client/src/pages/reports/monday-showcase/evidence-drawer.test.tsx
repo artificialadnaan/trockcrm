@@ -17,6 +17,7 @@ function record(over: Partial<EvidenceRecord>): EvidenceRecord {
   return {
     id: "d1",
     dealNumber: "1001",
+    projectNumber: null,
     name: "Deal One",
     repId: "r1",
     repName: "Alice",
@@ -105,6 +106,26 @@ describe("evidence drawer Win % column", () => {
     }
     // No data rows, but the empty-state row is present.
     expect(document.querySelectorAll("tbody tr").length).toBe(1);
+  });
+});
+
+describe("evidence drawer deal-number resolution (canonical, never the HubSpot id)", () => {
+  it("shows the canonical DFW/ATL project number, not the raw HubSpot deal id", () => {
+    mount("won", [record({ id: "a", name: "Acme Reroof", dealNumber: "HS-318651319000", projectNumber: "DFW-1-09026-af" })]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("#DFW-1-09026-af");
+    expect(text).not.toContain("HS-318651319000");
+    expect(text).not.toContain("318651319000");
+  });
+
+  it("omits the identifier line entirely when no canonical number resolves (Pending) — never the HS id", () => {
+    mount("won", [record({ id: "b", name: "Mystery Deal", dealNumber: "HS-999000111222", projectNumber: null })]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Mystery Deal"); // the name still renders
+    expect(text).not.toContain("HS-999000111222");
+    expect(text).not.toContain("999000111222");
+    expect(text).not.toContain("Pending"); // no "#Pending" chip — the line is omitted
+    expect(text).not.toContain("#"); // the whole identifier line (the only "#" source) is gone
   });
 });
 

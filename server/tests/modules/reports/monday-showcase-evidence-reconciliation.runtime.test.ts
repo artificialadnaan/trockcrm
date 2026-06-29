@@ -9,10 +9,12 @@ import {
 import {
   buildStageEntryCohortSql,
   buildProjectionBandsSql,
+  buildProjectionCoverageSql,
   buildLeadStatusSql,
   buildWonEvidenceSql,
   buildStageEntryEvidenceSql,
   buildProjectionEvidenceSql,
+  buildUndatedEvidenceSql,
   buildLeadEvidenceSql,
 } from "../../../src/modules/reports/monday-showcase-service.js";
 import { SENT_STAGE_SLUGS, ESTIMATED_STAGE_SLUGS, type ProjectionBand } from "../../../src/modules/reports/foundations.js";
@@ -80,7 +82,7 @@ beforeAll(async () => {
       workflow_family text NOT NULL DEFAULT 'standard_deal', is_terminal boolean NOT NULL DEFAULT false
     );
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
+      id uuid PRIMARY KEY, deal_number text, project_number text, name text NOT NULL, stage_id uuid NOT NULL,
       assigned_rep_id uuid, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, won_closed_date date, expected_close_date date,
       dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric,
@@ -115,13 +117,13 @@ beforeAll(async () => {
       ('${ST.leadContacted}','Contacted',  'lead_contacted',           'lead', false);
 
     -- ===== WON: close-date cohort. In-window non-test non-hold deals count; others excluded. =====
-    INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, won_closed_date, awarded_amount, is_test_data, on_hold) VALUES
-      ('${D.w1}','W-1','Won A1','${ST.won}','${REP_A}','2026-05-25', 100000, false, false),
-      ('${D.w2}','W-2','Won B1','${ST.won}','${REP_B}','2026-05-26', 200000, false, false),
-      ('${D.w3}','W-3','Won unassigned','${ST.won}',NULL,'2026-05-25', 50000, false, false),
-      ('${D.w4}','W-4','Won onhold (excl)','${ST.won}','${REP_A}','2026-05-25', 999, false, true),
-      ('${D.w5}','W-5','Won test (excl)','${ST.won}','${REP_A}','2026-05-25', 888, true, false),
-      ('${D.w6}','W-6','Won out-of-window (excl)','${ST.won}','${REP_A}','2026-05-20', 777, false, false);
+    INSERT INTO deals (id, deal_number, project_number, name, stage_id, assigned_rep_id, won_closed_date, awarded_amount, is_test_data, on_hold) VALUES
+      ('${D.w1}','HS-318651319000','DFW-1-09026-af','Won A1','${ST.won}','${REP_A}','2026-05-25', 100000, false, false),
+      ('${D.w2}','W-2',NULL,'Won B1','${ST.won}','${REP_B}','2026-05-26', 200000, false, false),
+      ('${D.w3}','W-3',NULL,'Won unassigned','${ST.won}',NULL,'2026-05-25', 50000, false, false),
+      ('${D.w4}','W-4',NULL,'Won onhold (excl)','${ST.won}','${REP_A}','2026-05-25', 999, false, true),
+      ('${D.w5}','W-5',NULL,'Won test (excl)','${ST.won}','${REP_A}','2026-05-25', 888, true, false),
+      ('${D.w6}','W-6',NULL,'Won out-of-window (excl)','${ST.won}','${REP_A}','2026-05-20', 777, false, false);
 
     -- ===== SENT / ESTIMATED: stage-entry cohort on deal_stage_history within the CT window. =====
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, bid_board_total_sales, on_hold, is_test_data) VALUES
@@ -177,6 +179,11 @@ describe("Won evidence reconciles to the protected getWonCloseSummary", () => {
     expect(nums).not.toContain("W-4"); // on-hold
     expect(nums).not.toContain("W-5"); // test
     expect(nums).not.toContain("W-6"); // out of window
+    // the new project_number column surfaces in the row payload: the canonical DFW number rides alongside
+    // the raw HubSpot deal_number, so the client resolver can show the DFW number and hide the HS id
+    const w1 = rows.find((r) => r.project_number === "DFW-1-09026-af");
+    expect(w1).toBeTruthy();
+    expect(w1?.deal_number).toBe("HS-318651319000");
   });
 
   it("per-rep Won: each rep's evidence === getCanonicalRepWonSummary row, and per-rep sums to office", async () => {
@@ -267,6 +274,59 @@ describe("Projection evidence reconciles to the bands aggregate (per band, per r
     expect(numbers).not.toContain("P-5"); // past-dated
     expect(numbers).not.toContain("P-6"); // on-hold
     expect(numbers).not.toContain("P-4"); // null-dated (M only, not a band)
+  });
+});
+
+describe("Undated evidence reconciles to the projection coverage complement (M − N)", () => {
+  it("office: COUNT(undated) === M − N === M − Σ band counts, and SUM($) === coverage.undated_value", async () => {
+    // M / N (and the undated $) over the SAME open scope buildProjectionCoverageSql counts.
+    const covRows = await execRows(buildProjectionCoverageSql());
+    const officeM = covRows.reduce((s, r) => s + n(r.m), 0);
+    const officeN = covRows.reduce((s, r) => s + n(r.n), 0);
+    const officeUndatedValue = covRows.reduce((s, r) => s + n(r.undated_value), 0);
+
+    // Σ band counts == the future-dated N (the four dated bands), surfaced by the bands aggregate.
+    const bandRows = await execRows(buildProjectionBandsSql());
+    const sumBandCounts = bandRows.reduce((s, r) => s + n(r.cnt), 0);
+
+    const undated = await execRows(buildUndatedEvidenceSql());
+
+    // The FULL complement: ALL open deals lacking a future-dated close date — not just the projection
+    // deals, but every open deal whose expected_close_date is null/stale (the sent/estimated deals carry
+    // no close date, so they sit here too). Non-trivial: > the dated bands, and reconciles three ways.
+    expect(officeM - officeN).toBeGreaterThan(0);
+    expect(sumBandCounts).toBe(officeN); // bands carry ONLY future-dated deals (Σ bands == N)
+    expect(undated.length).toBe(officeM - officeN); // COUNT(undated) == M − N
+    expect(undated.length).toBe(officeM - sumBandCounts); // == M − Σ band counts
+    expect(undated.length).toBeGreaterThan(sumBandCounts); // the blind spot is the larger slice here
+    // the undated card's $ === SUM($) of exactly these rows (buildProjectionCoverageSql's FILTERed sum)
+    expect(sumVal(undated)).toBeCloseTo(officeUndatedValue, 2);
+    expect(officeUndatedValue).toBeGreaterThan(0);
+
+    // includes both blind-spot kinds (never-dated P-4 + stale-past-dated P-5) AND the no-close-date open
+    // deals (a sent/estimated deal); future-dated bands + the on-hold deal are absent.
+    const numbers = undated.map((r) => r.deal_number);
+    expect(numbers).toContain("P-4"); // null-dated (no_date)
+    expect(numbers).toContain("P-5"); // stale past-dated (stale_dated)
+    expect(numbers).toContain("S-1"); // an open (sent) deal with no close date — full complement
+    expect(numbers).not.toContain("P-1"); // future-dated (a band)
+    expect(numbers).not.toContain("P-2");
+    expect(numbers).not.toContain("P-3");
+    expect(numbers).not.toContain("P-6"); // on-hold → not reportable, never in M
+    expect(numbers).not.toContain("S-4"); // on-hold sent deal → not in M either
+  });
+
+  it("per-rep undated === that rep's M − N, and the per-rep slices sum to the office set", async () => {
+    const covRows = await execRows(buildProjectionCoverageSql());
+    let perRepSum = 0;
+    for (const r of covRows) {
+      const repId = (r.rep_id as string | null) ?? null;
+      const rows = await execRows(buildUndatedEvidenceSql(repId));
+      expect(rows.length).toBe(n(r.m) - n(r.n));
+      perRepSum += rows.length;
+    }
+    const office = await execRows(buildUndatedEvidenceSql());
+    expect(perRepSum).toBe(office.length);
   });
 });
 

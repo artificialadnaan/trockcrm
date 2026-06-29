@@ -26,7 +26,7 @@ const fixture: MondayShowcaseData = {
       closed: { count: 3, value: { amount: 400_000, basisLabel: "Awarded-first won value" } },
       projection: {
         bands: [band("0_30", 1, 4000), band("31_60", 2, 2000), band("61_90", 0, 0), band("beyond_90", 0, 0)],
-        coverage: { n: 3, m: 5 },
+        coverage: { n: 3, m: 5, undatedValue: 2222 }, // M − N = 2 undated
         coverageCaption: "3 of 5 open deals have a maintained (future-dated) expected close date.",
       },
       sentThisWeek: { count: 2, value: { amount: 2000, basisLabel: "Best current estimate" } },
@@ -38,7 +38,7 @@ const fixture: MondayShowcaseData = {
       closed: { count: 2, value: { amount: 300_000, basisLabel: "Awarded-first won value" } },
       projection: {
         bands: [band("0_30", 1, 5999), band("31_60", 1, 500), band("61_90", 1, 3000), band("beyond_90", 0, 0)],
-        coverage: { n: 3, m: 4 },
+        coverage: { n: 3, m: 4, undatedValue: 3333 }, // M − N = 1 undated
         coverageCaption: "3 of 4 open deals have a maintained (future-dated) expected close date.",
       },
       sentThisWeek: { count: 2, value: { amount: 1500, basisLabel: "Best current estimate" } },
@@ -48,7 +48,7 @@ const fixture: MondayShowcaseData = {
   // Σ of the two rep ladders, band by band (what the server emits as officeProjection):
   officeProjection: {
     bands: [band("0_30", 2, 9999), band("31_60", 3, 2500), band("61_90", 1, 3000), band("beyond_90", 0, 0)],
-    coverage: { n: 6, m: 9 },
+    coverage: { n: 6, m: 9, undatedValue: 5555 }, // M − N = 3 undated; $ = Σ per-rep (2222 + 3333)
     coverageCaption: "6 of 9 open deals have a maintained (future-dated) expected close date.",
   },
   weeklyTrend: [],
@@ -183,6 +183,64 @@ describe("B4 Forecast Ladder — Total of all timelines column", () => {
     const req = open.mock.calls[0][0];
     expect(req.metric).toBe("projection");
     expect(req.band).toBeUndefined(); // all timelines
+    expect(req.repId).toBe("rep-1");
+  });
+});
+
+describe("B4 Forecast Ladder — 'No future close date' (undated) card", () => {
+  it("renders the office undated card with the M − N count and its $ (the SAFE usd)", () => {
+    render();
+    const text = container.textContent ?? "";
+    // office undated count = m − n = 9 − 6 = 3 (rendered "3 undated"); $ = coverage.undatedValue (5555).
+    expect(text).toContain("3 undated");
+    expect(text).toContain("$5,555");
+    expect(text.toLowerCase()).toContain("no date"); // the card label
+    expect(text).not.toContain("NaN");
+    expect(text).not.toContain("$NaN");
+  });
+
+  it("renders a per-rep undated card with that rep's M − N count and $ (sums to the office card)", () => {
+    render();
+    const text = container.textContent ?? "";
+    expect(text).toContain("2 undated"); // Alice: m − n = 5 − 3
+    expect(text).toContain("$2,222"); // Alice undatedValue
+    expect(text).toContain("1 undated"); // Bailey: m − n = 4 − 3
+    expect(text).toContain("$3,333"); // Bailey undatedValue
+    // the partition holds: office undated (3) == Σ per-rep undated (2 + 1); $ sums too (2222 + 3333 = 5555)
+    expect(fixture.officeProjection.coverage.m - fixture.officeProjection.coverage.n).toBe(
+      (fixture.reps[0].projection.coverage.m - fixture.reps[0].projection.coverage.n) +
+        (fixture.reps[1].projection.coverage.m - fixture.reps[1].projection.coverage.n),
+    );
+    expect(fixture.officeProjection.coverage.undatedValue).toBe(
+      fixture.reps[0].projection.coverage.undatedValue + fixture.reps[1].projection.coverage.undatedValue,
+    );
+  });
+
+  it("the OFFICE forecast row partitions EXACTLY: M == Σ band counts (dated) + undated (M − N)", () => {
+    const cov = fixture.officeProjection.coverage;
+    const datedCount = fixture.officeProjection.bands.reduce((s, b) => s + b.count, 0); // = N
+    const undatedCount = cov.m - cov.n;
+    expect(datedCount).toBe(cov.n); // bands hold only the future-dated deals
+    expect(datedCount + undatedCount).toBe(cov.m); // exact partition — no deal double-counted or dropped
+    expect(Number.isFinite(undatedCount)).toBe(true);
+  });
+
+  it("the office undated card drills into the OFFICE undated evidence list (no repId)", () => {
+    const open = render();
+    clickButtonContaining("$5,555"); // the office undated card $
+    expect(open).toHaveBeenCalledTimes(1);
+    const req = open.mock.calls[0][0];
+    expect(req.metric).toBe("undated");
+    expect(req.repId).toBeUndefined(); // office-wide
+    expect(req.band).toBeUndefined(); // undated has no band
+  });
+
+  it("a per-rep undated card drills into that rep's undated evidence list (repId set)", () => {
+    const open = render();
+    clickButtonContaining("$2,222"); // Alice undated card $
+    expect(open).toHaveBeenCalledTimes(1);
+    const req = open.mock.calls[0][0];
+    expect(req.metric).toBe("undated");
     expect(req.repId).toBe("rep-1");
   });
 });

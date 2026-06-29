@@ -3,6 +3,7 @@
 // has the exact same columns (same set, order, headers, show-filter) as the popup it came from — they
 // reconcile by construction. This file is pure (no JSX) so the CSV builder + its tests stay React-free;
 // the drawer attaches the per-column React `render` separately.
+import { resolveDealDisplayNumber } from "@/lib/deal-utils";
 import type { EvidenceRecord, MondayShowcaseEvidence } from "./types";
 
 export type SortKey =
@@ -41,9 +42,13 @@ const always = () => true;
 // Order MUST match the on-screen table. Header labels MUST match the table's headers (the date header is
 // the cohort's dateAxisLabel; the name header is Deal/Lead). minWidths are display floors only.
 export const EVIDENCE_COLUMNS: readonly EvidenceColumn[] = [
-  // The Deal cell shows the name with the "#<dealNumber>" identifier beneath it, so the CSV carries both
-  // (in the one column the table uses) — otherwise the export drops the CRM number users match rows by.
-  { key: "name", header: (ev) => (ev.metric === "leads" ? "Lead" : "Deal"), minWidth: 220, show: always, csv: (r) => (r.dealNumber ? `${r.name} #${r.dealNumber}` : r.name) },
+  // The Deal cell shows the name with the canonical "#<number>" identifier beneath it (resolved via the
+  // shared resolver — the DFW/ATL project number, never the HubSpot id), so the CSV carries both (in the
+  // one column the table uses). When no real number resolves (Pending) the CSV is just the name.
+  { key: "name", header: (ev) => (ev.metric === "leads" ? "Lead" : "Deal"), minWidth: 220, show: always, csv: (r) => {
+    const num = resolveDealDisplayNumber({ projectNumber: r.projectNumber, dealNumber: r.dealNumber });
+    return num ? `${r.name} #${num}` : r.name;
+  } },
   { key: "company", header: () => "Company", minWidth: 160, show: always, csv: (r) => r.companyName },
   { key: "owner", header: () => "Owner", minWidth: 130, show: always, csv: (r) => r.repName },
   { key: "value", header: () => "Value", numeric: true, minWidth: 110, show: hasValue, csv: (r) => r.value },

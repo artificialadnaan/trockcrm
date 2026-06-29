@@ -28,8 +28,13 @@ import { type ProjectionBand } from "../../../src/modules/reports/foundations.js
 function bands(cells: Array<[ProjectionBand, number, number]>): ProjectionBandCell[] {
   return cells.map(([band, count, value]) => ({ band, count, value }));
 }
-function repProj(n: number, m: number, cells: Array<[ProjectionBand, number, number]>): RepProjection {
-  return { bands: bands(cells), coverage: { n, m } };
+function repProj(
+  n: number,
+  m: number,
+  cells: Array<[ProjectionBand, number, number]>,
+  undatedValue = 0,
+): RepProjection {
+  return { bands: bands(cells), coverage: { n, m, undatedValue } };
 }
 
 // Per-rep ladders, including a wins-less rep (rep-c, seeded ONLY via projection) and the Unassigned
@@ -98,7 +103,7 @@ describe("B4 Forecast Ladder — office column totals reconcile with the per-rep
       expect(cellOf(office, band).value).toBe(EXPECTED[band].value);
       expect(cellOf(office, band).count).toBe(EXPECTED[band].count);
     }
-    expect(office.coverage).toEqual({ n: 17, m: 359 }); // Σ per-rep coverage (9+6+2+0 , 180+120+40+19)
+    expect(office.coverage).toEqual({ n: 17, m: 359, undatedValue: 0 }); // Σ per-rep coverage (9+6+2+0 , 180+120+40+19)
   });
 
   it("an empty window totals $0 / 0 dated (not NaN/blank)", () => {

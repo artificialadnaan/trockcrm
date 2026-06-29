@@ -17,8 +17,13 @@ function bands(cells: Array<[ProjectionBandCell["band"], number, number]>): Proj
   return cells.map(([band, count, value]) => ({ band, count, value }));
 }
 
-function repProj(n: number, m: number, cells: Array<[ProjectionBandCell["band"], number, number]>): RepProjection {
-  return { bands: bands(cells), coverage: { n, m } };
+function repProj(
+  n: number,
+  m: number,
+  cells: Array<[ProjectionBandCell["band"], number, number]>,
+  undatedValue = 0,
+): RepProjection {
+  return { bands: bands(cells), coverage: { n, m, undatedValue } };
 }
 
 // Per-rep Won that sums to the protected office aggregate BY CONSTRUCTION (getCanonicalRepWonSummary
@@ -51,16 +56,17 @@ function makeInput(): AssembleInput {
         ["rep-b", { count: 9, value: 1_500_000 }],
       ]),
     },
+    // undated $ (the M − N complement): per-rep values sum to the office (1.5M + 0.9M + 0.1M = 2.5M).
     officeProjection: repProj(15, 319, [
       ["0_30", 6, 900_000],
       ["31_60", 5, 700_000],
       ["61_90", 4, 500_000],
       ["beyond_90", 0, 0],
-    ]),
+    ], 2_500_000),
     repProjection: new Map<string | null, RepProjection>([
-      ["rep-a", repProj(9, 180, [["0_30", 4, 600_000], ["31_60", 3, 400_000], ["61_90", 2, 250_000], ["beyond_90", 0, 0]])],
-      ["rep-b", repProj(6, 120, [["0_30", 2, 300_000], ["31_60", 2, 300_000], ["61_90", 2, 250_000], ["beyond_90", 0, 0]])],
-      [null, repProj(0, 19, [["0_30", 0, 0], ["31_60", 0, 0], ["61_90", 0, 0], ["beyond_90", 0, 0]])],
+      ["rep-a", repProj(9, 180, [["0_30", 4, 600_000], ["31_60", 3, 400_000], ["61_90", 2, 250_000], ["beyond_90", 0, 0]], 1_500_000)],
+      ["rep-b", repProj(6, 120, [["0_30", 2, 300_000], ["31_60", 2, 300_000], ["61_90", 2, 250_000], ["beyond_90", 0, 0]], 900_000)],
+      [null, repProj(0, 19, [["0_30", 0, 0], ["31_60", 0, 0], ["61_90", 0, 0], ["beyond_90", 0, 0]], 100_000)],
     ]),
     leadStatus: new Map([
       ["rep-a", [{ stageLabel: "Qualified Lead", count: 4 }, { stageLabel: "Sales Validation", count: 2 }]],
@@ -111,7 +117,24 @@ describe("Monday showcase cross-variant reconciliation", () => {
     const sumM = data.reps.reduce((s, r) => s + r.projection.coverage.m, 0);
     expect(sumN).toBe(data.officeProjection.coverage.n);
     expect(sumM).toBe(data.officeProjection.coverage.m);
-    expect(data.officeProjection.coverage).toEqual({ n: 15, m: 319 });
+    expect(data.officeProjection.coverage).toEqual({ n: 15, m: 319, undatedValue: 2_500_000 });
+  });
+
+  it("UNDATED partition: office M == Σ band counts (dated = N) + undated (M − N); undated $ sums per-rep → office", () => {
+    const cov = data.officeProjection.coverage;
+    // the four dated bands count EXACTLY the future-dated N, so the B4 row partitions exactly:
+    const datedCount = data.officeProjection.bands.reduce((s, b) => s + b.count, 0);
+    const undatedCount = cov.m - cov.n; // what the "No future close date" card renders
+    expect(datedCount).toBe(cov.n); // bands carry only future-dated deals
+    expect(datedCount + undatedCount).toBe(cov.m); // partition is exact (M)
+    expect(undatedCount).toBe(304); // 319 − 15
+    // no NaN can reach the card's count or $ inputs
+    expect(Number.isFinite(undatedCount)).toBe(true);
+    expect(Number.isFinite(cov.undatedValue)).toBe(true);
+    // the undated $ folds per-rep → office the same way N/M do (the card's $ is reconcilable)
+    const sumUndatedValue = data.reps.reduce((s, r) => s + r.projection.coverage.undatedValue, 0);
+    expect(sumUndatedValue).toBe(cov.undatedValue);
+    expect(cov.undatedValue).toBe(2_500_000);
   });
 
   it("VALUE BASES are kept distinct and labeled (Won awarded-first vs open best-estimate, never summed)", () => {
@@ -157,7 +180,7 @@ describe("Monday showcase cross-variant reconciliation", () => {
     expect(repC!.repName).toBe("Casey Rep");
     expect(repC!.closed.count).toBe(0); // zero wins -> still present, just no Closed
     expect(repC!.sentThisWeek.count).toBe(3);
-    expect(repC!.projection.coverage).toEqual({ n: 2, m: 40 });
+    expect(repC!.projection.coverage).toEqual({ n: 2, m: 40, undatedValue: 0 });
     // Won still reconciles (a zero-win rep contributes 0 to the office Won total).
     expect(d.reps.reduce((s, r) => s + r.closed.count, 0)).toBe(OFFICE_WON.count);
   });

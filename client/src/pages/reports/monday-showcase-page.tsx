@@ -120,7 +120,12 @@ export function MondayShowcasePage() {
         </div>
       )}
 
-      <EvidenceDrawer request={evidence} mode={mode} onClose={() => setEvidence(null)} />
+      <EvidenceDrawer
+        request={evidence}
+        mode={mode}
+        onClose={() => setEvidence(null)}
+        onMutated={refetch}
+      />
     </div>
   );
 }
