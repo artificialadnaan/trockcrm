@@ -22,7 +22,8 @@ export interface PendingRfpDeal {
   triggeredById: string | null;
   triggeredByName: string | null;
   triggeredAt: string | null;
-  declineReason: string | null;
+  /** Status-specific attention reason: decline note / conflict reason / send-failure error (null while awaiting). */
+  reason: string | null;
 }
 
 // A re-confirmed denial (the override flow's upheld no-go) is a resolved terminal state, not a
@@ -69,6 +70,8 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
       rfpApprovalRequestedAt: deals.rfpApprovalRequestedAt,
       rfpApprovalRequestedBy: deals.rfpApprovalRequestedBy,
       rfpDeclinedReason: deals.rfpDeclinedReason,
+      rfpConflictReason: deals.rfpConflictReason,
+      rfpLastAttemptError: deals.rfpLastAttemptError,
       assignedRepName: users.displayName,
       triggeredByName: triggeredBy.displayName,
     })
@@ -101,8 +104,29 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
     triggeredById: r.rfpApprovalRequestedBy ?? null,
     triggeredByName: r.triggeredByName ?? null,
     triggeredAt: r.rfpApprovalRequestedAt ? new Date(r.rfpApprovalRequestedAt).toISOString() : null,
-    declineReason: r.rfpDeclinedReason ?? null,
+    // Status-specific "why this needs attention" reason, matching what the deal detail page shows:
+    // declined → decline note, conflict → conflict reason, send_failed → last attempt error. Awaiting
+    // states (pending_outbox/pending) have no reason yet.
+    reason: reasonForPendingRfpRow(r),
   }));
+}
+
+function reasonForPendingRfpRow(r: {
+  rfpApprovalStatus: string;
+  rfpDeclinedReason?: string | null;
+  rfpConflictReason?: string | null;
+  rfpLastAttemptError?: string | null;
+}): string | null {
+  switch (r.rfpApprovalStatus) {
+    case "declined":
+      return r.rfpDeclinedReason ?? null;
+    case "conflict":
+      return r.rfpConflictReason ?? null;
+    case "send_failed":
+      return r.rfpLastAttemptError ?? null;
+    default:
+      return null;
+  }
 }
 
 // Return a deal to plain Opportunity. Only the "needs attention" states (declined/conflict/send_failed)

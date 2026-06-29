@@ -1068,7 +1068,8 @@ export interface PendingRfpDeal {
   triggeredById: string | null;
   triggeredByName: string | null;
   triggeredAt: string | null;
-  declineReason: string | null;
+  /** Status-specific attention reason: decline note / conflict reason / send-failure error (null while awaiting). */
+  reason: string | null;
 }
 
 export function usePendingRfp() {

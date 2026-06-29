@@ -60,7 +60,7 @@ const FIXTURE_DEALS = [
     triggeredById: "rep-1",
     triggeredByName: "Jordan Smith",
     triggeredAt: STALE_TRIGGERED_AT,
-    declineReason: null,
+    reason: null,
   },
   {
     id: "deal-fresh-222",
@@ -75,7 +75,7 @@ const FIXTURE_DEALS = [
     triggeredById: "rep-2",
     triggeredByName: "Alex Johnson",
     triggeredAt: FRESH_TRIGGERED_AT,
-    declineReason: "Price too high",
+    reason: "Price too high",
   },
 ];
 

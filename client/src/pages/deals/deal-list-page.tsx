@@ -1542,7 +1542,14 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
                   regions: regions.map((region) => ({ value: region.id, label: region.name })),
                   projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
                   stages: boardColumns
-                    .filter((column) => isBoardVisibleStage(column.stage.slug, true))
+                    // Exclude the synthetic Pending RFP column: its id ("canonical-pending_rfp") is not a
+                    // real deals.stage_id, so offering it as a stage filter would send stageIds the server
+                    // matches against nothing and return an empty list. Its deals stay reachable via the
+                    // Opportunity option (they share that real stage_id) and the dedicated /deals/pending-rfp page.
+                    .filter(
+                      (column) =>
+                        column.stage.slug !== "pending_rfp" && isBoardVisibleStage(column.stage.slug, true)
+                    )
                     .map((column) => ({ value: column.stage.id, label: column.stage.name })),
                   sortOptions: DEAL_LIST_SORT_OPTIONS,
                 },

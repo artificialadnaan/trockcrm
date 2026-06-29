@@ -64,7 +64,28 @@ describe("getPendingRfpDeals", () => {
       name: "Older Pending", workflowRoute: "normal", subState: "awaiting",
       assignedRepName: "Rep One", triggeredByName: "Director One",
     });
-    expect(rows[1]).toMatchObject({ subState: "attention", declineReason: "missing docs" });
+    // d002 is declined AND carries a lingering rfp_last_attempt_error="boom"; the reason must be the
+    // status-specific decline note, not the stale send-failure error.
+    expect(rows[1]).toMatchObject({ subState: "attention", reason: "missing docs" });
+  });
+
+  it("surfaces a status-specific reason for conflict (rfp_conflict_reason) and send_failed (rfp_last_attempt_error)", async () => {
+    await pg.exec(`
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_approval_requested_at,rfp_conflict_reason,rfp_last_attempt_error)
+        VALUES ('00000000-0000-0000-0000-00000000d020','Conflicted','00000000-0000-0000-0000-0000000000aa','conflict','2026-06-30T00:00:00Z','already linked elsewhere','stale-err');
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_approval_requested_at,rfp_last_attempt_error)
+        VALUES ('00000000-0000-0000-0000-00000000d021','SendFailed','00000000-0000-0000-0000-0000000000aa','send_failed','2026-07-01T00:00:00Z','SMTP 550 rejected');
+    `);
+    const rows = await getPendingRfpDeals(tdb);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    // conflict → conflict reason (never the lingering last_attempt_error)
+    expect(byId.get("00000000-0000-0000-0000-00000000d020")).toMatchObject({
+      subState: "attention", reason: "already linked elsewhere",
+    });
+    // send_failed → last attempt error
+    expect(byId.get("00000000-0000-0000-0000-00000000d021")).toMatchObject({
+      subState: "attention", reason: "SMTP 550 rejected",
+    });
   });
 });
 
