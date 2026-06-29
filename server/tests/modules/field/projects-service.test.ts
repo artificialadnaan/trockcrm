@@ -17,6 +17,7 @@ const {
   listFieldProjectPhotos,
   listStarredFieldProjects,
   listNearbyFieldCaptureTargets,
+  getFieldProject,
   starFieldProject,
   unstarFieldProject,
 } = await import("../../../src/modules/field/projects-service.js");
@@ -93,6 +94,58 @@ describe("field projects service", () => {
     });
     expect(JSON.stringify(result)).not.toContain("awarded");
     expect(JSON.stringify(result)).not.toContain("source");
+  });
+
+  it("orders the active-projects list PHOTOS-FIRST, then recency, with a stable d.id tiebreak", async () => {
+    const db = tenantDb([[{ total: 0 }], []]);
+    await listFieldProjects(db, { userId: "field-1", userRole: "field_contractor" });
+    const rowsSql = extractSqlText(db.execute.mock.calls[1][0]);
+    const orderBy = rowsSql.slice(rowsSql.indexOf("ORDER BY"));
+    // The photos-first key (photo_count > 0) DESC must be present and precede the recency COALESCE.
+    expect(orderBy).toMatch(/photo_count[\s\S]*>\s*0\)\s*DESC/);
+    const photoIdx = orderBy.indexOf("photo_count");
+    const recencyIdx = orderBy.indexOf("last_activity_at");
+    expect(photoIdx).toBeGreaterThanOrEqual(0);
+    expect(photoIdx).toBeLessThan(recencyIdx);
+    // A final deterministic d.id tiebreak keeps the per-office SQL order identical to mergeFieldProjects
+    // under exact ties (else the fetch-top-N-then-merge-then-slice scheme could drop/shift rows across
+    // pages). Mirrors the nearby query's id tiebreak.
+    expect(orderBy).toMatch(/d\.id\s+ASC/);
+    expect(orderBy.lastIndexOf("d.id")).toBeGreaterThan(recencyIdx);
+    // Sort the recency key at the SAME millisecond precision the JS merge sees (mapFieldProject converts
+    // timestamps via Date -> ISO, which is ms). Without this, two rows differing only below ms order by
+    // full timestamptz in SQL but tie in JS (falling to id), so the per-office order and mergeFieldProjects
+    // could disagree at the fetch boundary and skip/shift rows across pages.
+    expect(orderBy).toMatch(/date_trunc\('milliseconds'/);
+  });
+
+  it("fetches a single active project by id with real photoCount and starred (not the list window)", async () => {
+    const db = tenantDb([
+      [{
+        id: "deal-9",
+        name: "Zero Photo Job",
+        deal_number: "TR-9",
+        property_name: "Zero Photo Job",
+        property_address: null,
+        stage_name: "Estimating",
+        last_activity_at: "2026-06-15T00:00:00.000Z",
+        photo_count: 0,
+        starred: true,
+      }],
+    ]);
+    const result = await getFieldProject(db, { userId: "field-1", userRole: "field_contractor" }, "deal-9");
+    expect(result).toMatchObject({ id: "deal-9", photoCount: 0, starred: true, stage: "Estimating" });
+    const sqlText = extractSqlText(db.execute.mock.calls[0][0]);
+    expect(sqlText).toContain("d.id ="); // by-id, not a list scan
+    expect(sqlText).toContain("photo_stats"); // real photo count
+    expect(sqlText).toContain("field_user_starred_projects"); // real starred state
+  });
+
+  it("throws 404 when the id is not an active field project", async () => {
+    const db = tenantDb([[]]);
+    await expect(
+      getFieldProject(db, { userId: "field-1", userRole: "field_contractor" }, "missing"),
+    ).rejects.toThrow(/not found/i);
   });
 
   it("lists starred projects sorted by recent project photo activity", async () => {

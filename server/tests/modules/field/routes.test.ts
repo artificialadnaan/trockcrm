@@ -48,11 +48,18 @@ vi.mock("../../../src/modules/field/cross-office.js", async (importOriginal) => 
 const projectMocks = vi.hoisted(() => ({
   FIELD_PROJECTS_MAX_FETCH: 500,
   listFieldProjects: vi.fn(),
+  getFieldProject: vi.fn(),
   listFieldProjectPhotos: vi.fn(),
   listStarredFieldProjects: vi.fn(),
   listNearbyFieldCaptureTargets: vi.fn(),
   searchFieldCaptureTargets: vi.fn(),
   mergeFieldCaptureTargets: vi.fn(() => []),
+  mergeFieldProjects: vi.fn(
+    (perOffice: Array<{ office: { id: string; slug: string }; projects: Array<Record<string, unknown>> }>) =>
+      perOffice.flatMap(({ office, projects }) =>
+        projects.map((project) => ({ ...project, officeId: office.id, officeSlug: office.slug })),
+      ),
+  ),
   assertAccessibleFieldCaptureTarget: vi.fn(),
   starFieldProject: vi.fn(),
   unstarFieldProject: vi.fn(),
@@ -105,6 +112,7 @@ describe("field routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     projectMocks.listFieldProjects.mockResolvedValue({ projects: [], total: 0, page: 1, perPage: 50 });
+    projectMocks.getFieldProject.mockResolvedValue({ id: "deal-1", name: "Roof", photoCount: 0, starred: false });
     projectMocks.listStarredFieldProjects.mockResolvedValue({ projects: [] });
     projectMocks.listNearbyFieldCaptureTargets.mockResolvedValue({ targets: [] });
     projectMocks.searchFieldCaptureTargets.mockResolvedValue({ targets: [] });
@@ -157,12 +165,33 @@ describe("field routes", () => {
       page: 1,
       perPage: 50,
     });
+    // The cross-office order is produced by mergeFieldProjects (photos-first), not an inline route sort,
+    // and the route must forward each office's context so the merged rows can be office-stamped.
+    expect(projectMocks.mergeFieldProjects).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          office: expect.objectContaining({ id: expect.any(String), slug: expect.any(String) }),
+          projects: expect.any(Array),
+        }),
+      ]),
+    );
 
     await invokeRoute("get", "/projects/starred", {});
     expect(projectMocks.listStarredFieldProjects).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       userId: "admin-1",
       userRole: "admin",
     }));
+
+    // By-id metadata path (so the detail page never depends on the list window / photos-first ordering).
+    const byId = await invokeRoute("get", "/projects/:dealId", { params: { dealId: "deal-1" } });
+    // dealId format is validated BEFORE office resolution (a non-uuid must be a clean 400, not a swallowed
+    // ::uuid cast surfacing as a 503).
+    expect(photoMocks.assertValidUuid).toHaveBeenCalledWith("deal-1", "dealId");
+    expect(projectMocks.getFieldProject).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      userId: "admin-1",
+      userRole: "admin",
+    }), "deal-1");
+    expect(byId.body.project).toMatchObject({ id: "deal-1", officeId: "office-1", officeSlug: "trock" });
 
     await invokeRoute("post", "/projects/:dealId/star", { params: { dealId: "deal-1" } });
     expect(projectMocks.starFieldProject).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
