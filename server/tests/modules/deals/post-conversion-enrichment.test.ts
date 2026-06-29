@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { deals } from "../../../../shared/src/schema/tenant/deals.js";
+import { leads } from "../../../../shared/src/schema/tenant/leads.js";
 import { dealApprovals } from "../../../../shared/src/schema/tenant/deal-approvals.js";
 import { changeOrders } from "../../../../shared/src/schema/tenant/change-orders.js";
 import { dealStageHistory } from "../../../../shared/src/schema/tenant/deal-stage-history.js";
@@ -14,7 +15,7 @@ vi.mock("../../../src/modules/pipeline/service.js", () => ({
 }));
 
 vi.mock("@trock-crm/shared/schema", async () => {
-  const [dealsModule, approvalsModule, changeOrdersModule, dealChangeOrdersModule, historyModule, pipelineStageModule, usersModule, companiesModule, contactsModule, projectTypeConfigModule] =
+  const [dealsModule, approvalsModule, changeOrdersModule, dealChangeOrdersModule, historyModule, pipelineStageModule, usersModule, companiesModule, contactsModule, projectTypeConfigModule, leadsModule] =
     await Promise.all([
       import("../../../../shared/src/schema/tenant/deals.js"),
       import("../../../../shared/src/schema/tenant/deal-approvals.js"),
@@ -26,6 +27,7 @@ vi.mock("@trock-crm/shared/schema", async () => {
       import("../../../../shared/src/schema/tenant/companies.js"),
       import("../../../../shared/src/schema/tenant/contacts.js"),
       import("../../../../shared/src/schema/public/project-type-config.js"),
+      import("../../../../shared/src/schema/tenant/leads.js"),
     ]);
 
   return {
@@ -39,6 +41,7 @@ vi.mock("@trock-crm/shared/schema", async () => {
     ...companiesModule,
     ...contactsModule,
     ...projectTypeConfigModule,
+    ...leadsModule,
   };
 });
 
@@ -47,6 +50,7 @@ import { evaluatePostConversionEnrichment } from "../../../src/modules/deals/pos
 
 function createFakeTenantDb(state: {
   deals: Array<Record<string, unknown>>;
+  leads?: Array<Record<string, unknown>>;
   projectTypes?: Array<Record<string, unknown>>;
   dealStageHistory?: Array<Record<string, unknown>>;
   dealApprovals?: Array<Record<string, unknown>>;
@@ -54,6 +58,7 @@ function createFakeTenantDb(state: {
 }) {
   const tableRows = new Map<unknown, Array<Record<string, unknown>>>([
     [deals, state.deals],
+    [leads, state.leads ?? []],
     [dealStageHistory, state.dealStageHistory ?? []],
     [dealApprovals, state.dealApprovals ?? []],
     [changeOrders, state.changeOrders ?? []],
@@ -340,5 +345,81 @@ describe("getDealDetail", () => {
     const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
 
     expect(detail?.projectType).toBe("Exterior Renovation");
+  });
+
+  it("resolves the bid due date from the source lead, not the stale deal snapshot", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [{ id: "lead-1", bidDueDate: "2026-07-03" }],
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          name: "Palm Villas repaint",
+          stageId: "stage-opportunity",
+          assignedRepId: "rep-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: "lead-1",
+          workflowRoute: "normal",
+          isActive: true,
+          // Stale snapshot from before the write-through; must NOT win over the lead's current value.
+          bidDueDate: new Date("2026-01-01T00:00:00.000Z"),
+        },
+      ],
+    });
+
+    const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
+
+    expect(detail?.bidDueDate).toBe("2026-07-03");
+  });
+
+  it("reports a cleared lead bid due date as null on the detail, never the stale snapshot", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [{ id: "lead-1", bidDueDate: null }],
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          name: "Palm Villas repaint",
+          stageId: "stage-opportunity",
+          assignedRepId: "rep-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: "lead-1",
+          workflowRoute: "normal",
+          isActive: true,
+          bidDueDate: new Date("2026-01-01T00:00:00.000Z"),
+        },
+      ],
+    });
+
+    const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
+
+    expect(detail?.bidDueDate).toBeNull();
+  });
+
+  it("uses the deal column for a manual deal with no source lead", async () => {
+    const dealBid = new Date("2026-08-20T00:00:00.000Z");
+    const tenantDb = createFakeTenantDb({
+      deals: [
+        {
+          id: "deal-1",
+          dealNumber: "TR-2026-0001",
+          name: "Manual Deal",
+          stageId: "stage-opportunity",
+          assignedRepId: "rep-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          sourceLeadId: null,
+          workflowRoute: "normal",
+          isActive: true,
+          bidDueDate: dealBid,
+        },
+      ],
+    });
+
+    const detail = await getDealDetail(tenantDb as never, "deal-1", "director", "director-1");
+
+    expect(detail?.bidDueDate).toEqual(dealBid);
   });
 });
