@@ -231,11 +231,6 @@ export interface Deal {
 }
 
 export interface DealDetail extends Deal {
-  // The AUTHORITATIVE bid due date for the banner, resolved server-side (getDealDetail). For
-  // lead-backed deals this is leads.bid_due_date (date-only "YYYY-MM-DD" — the scoping-editable
-  // source); for non-lead deals it is deals.bid_due_date (timestamptz ISO). Distinct from the raw
-  // `bidDueDate` column on Deal, which can be a stale conversion snapshot. Detail-only.
-  resolvedBidDueDate?: string | null;
   proposalStatus: string | null;
   proposalDraftStartedAt: string | null;
   proposalSentAt: string | null;

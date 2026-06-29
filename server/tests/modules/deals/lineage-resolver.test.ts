@@ -182,12 +182,12 @@ describe("deal lineage resolver field ownership", () => {
     });
   });
 
-  it("routes bid due date to the source lead column", () => {
+  it("routes bid due date to the source lead column with deal snapshot write-through", () => {
     expect(planDealFieldWrite({ field: "bidDueDate", hasSourceLead: true })).toEqual({
       field: "bidDueDate",
       ownership: "lead",
       target: "source_lead",
-      compatibilityWriteThrough: false,
+      compatibilityWriteThrough: true,
     });
   });
 
@@ -298,6 +298,28 @@ describe("deal lineage resolver field ownership", () => {
 
     expect(tenantDb.state.leads[0]?.bidDueDate).toBe("2026-08-20");
     expect(tenantDb.state.leadQuestionAnswers).toEqual([]);
+  });
+
+  it("write-throughs a scoping bid due date edit to BOTH leads and deals at UTC midnight", async () => {
+    const tenantDb = createLineageTenantDb({
+      lead: { bidDueDate: "2026-06-01" },
+      questionAnswers: [],
+    });
+
+    await writeResolvedDealFields(
+      tenantDb as never,
+      "deal-1",
+      { bidDueDate: "2026-07-03" },
+      { userId: "user-1", officeId: "office-1", role: "director", now: new Date("2026-05-01T00:00:00.000Z") }
+    );
+
+    // Lead keeps the date-only string (the lineage owner column).
+    expect(tenantDb.state.leads[0]?.bidDueDate).toBe("2026-07-03");
+    // Deal mirror is normalized to UTC midnight for the SAME calendar day — not the prior day.
+    expect(tenantDb.state.deals[0]?.bidDueDate).toEqual(new Date("2026-07-03T00:00:00.000Z"));
+    expect((tenantDb.state.deals[0]?.bidDueDate as Date).toISOString()).toBe(
+      "2026-07-03T00:00:00.000Z"
+    );
   });
 
   it("writes company fill-in through the resolved-fields lineage path", async () => {

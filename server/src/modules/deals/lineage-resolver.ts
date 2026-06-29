@@ -11,7 +11,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { applyProjectTypeChange } from "./service.js";
+import { applyProjectTypeChange, normalizeOptionalDealBidDueDate } from "./service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -116,6 +116,7 @@ const DEAL_COMPATIBILITY_SNAPSHOT_FIELDS = new Set<ResolvedDealField>([
   "assignedRepId",
   "workflowRoute",
   "description",
+  "bidDueDate",
 ]);
 
 function workflowRouteFromLeadPipeline(pipelineType: string | null | undefined): WorkflowRoute | null {
@@ -410,6 +411,10 @@ export async function writeResolvedDealFields(
         if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
         if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";
         if (field === "description") dealUpdates.description = normalizeOptionalText(value);
+        // deals.bid_due_date is timestamptz and the create/conversion path stores it at UTC midnight
+        // (normalizeOptionalDealBidDueDate). Normalize identically here so the deal mirror matches the
+        // lead's date-only "YYYY-MM-DD" with no off-by-one — single normalizer, no divergent inline.
+        if (field === "bidDueDate") dealUpdates.bidDueDate = normalizeOptionalDealBidDueDate(value);
       }
       continue;
     }
