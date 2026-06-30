@@ -183,7 +183,11 @@ describe("photo reports service", () => {
     }));
     expect(result.report.id).toBe("report-1");
     expect(result.report.pdfUrl).toBe("https://example.test/report.pdf");
-    expect(result.report.expiresAt).toEqual(expect.any(String));
+    // Reports stay available for 90 days after generation (expiresAt = now + 90d).
+    const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
+    const retentionMs = new Date(result.report.expiresAt).getTime() - Date.now();
+    expect(retentionMs).toBeGreaterThan(NINETY_DAYS_MS - 60_000); // ~90 days, allow a minute of execution skew
+    expect(retentionMs).toBeLessThanOrEqual(NINETY_DAYS_MS);
   });
 
   it("renders selected lead-origin photos in the final report output", async () => {

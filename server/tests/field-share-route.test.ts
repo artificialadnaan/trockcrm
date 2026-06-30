@@ -78,7 +78,7 @@ beforeEach(() => {
 });
 
 describe("POST /api/field/projects/:dealId/share", () => {
-  it("mints a 7-day, photos-only subset share link for a field-visible project", async () => {
+  it("mints a 90-day, photos-only subset share link for a field-visible project", async () => {
     withResolvedOfficeMock.mockImplementation(resolveOfficeRunning(FIELD_VISIBLE_DEAL));
     generatePublicTokenMock.mockResolvedValue({ rawToken: "RAW-TOKEN", token: { id: "token-1", expiresAt: "2026-06-19T00:00:00.000Z" } });
 
@@ -100,8 +100,8 @@ describe("POST /api/field/projects/:dealId/share", () => {
     expect(assertPhotosBelongToDealMock).toHaveBeenCalledWith(expect.anything(), VALID_DEAL, [PHOTO_A]);
     const { expiresAt } = generatePublicTokenMock.mock.calls[0][0];
     const ttlMs = (expiresAt as Date).getTime() - Date.now();
-    expect(ttlMs).toBeGreaterThan(6.9 * 24 * 3600 * 1000);
-    expect(ttlMs).toBeLessThanOrEqual(7 * 24 * 3600 * 1000);
+    expect(ttlMs).toBeGreaterThan(89.9 * 24 * 3600 * 1000);
+    expect(ttlMs).toBeLessThanOrEqual(90 * 24 * 3600 * 1000);
   });
 
   it("canonicalizes uppercase photo UUIDs to lowercase before validating/minting", async () => {

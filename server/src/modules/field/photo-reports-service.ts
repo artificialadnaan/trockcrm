@@ -17,7 +17,11 @@ const REPORT_TAG = "photo-report";
 const REPORT_EXPIRY_TAG_PREFIX = "photo-report-exp:";
 const REPORT_FILE_SUBCATEGORY = "Photo Report";
 const REPORT_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
-const REPORT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+// How long a generated photo report stays available after creation. The report's expiresAt is stamped
+// now + this window; past it the report drops out of the list and re-downloads return 410. The per-download
+// presigned URL stays short-lived (REPORT_DOWNLOAD_EXPIRY_SECONDS) and is re-minted on each access, so the
+// report is re-downloadable through the app for this whole window without exposing a long-lived bearer URL.
+const REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 type ReportGroupBy = "tag" | "date" | "none";
 
