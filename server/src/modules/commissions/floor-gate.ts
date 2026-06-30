@@ -13,13 +13,22 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface RepEarnedFloorGate {
   /**
-   * The rep's booked SIGNED book — SUM of source value (awarded_amount → bid_estimate → dd_estimate,
-   * matching the commission writer's resolver) over deals the rep OWNS (assigned_rep_id) that are signed,
-   * non-lost, non-on-hold, non-test, in the period. This is what the floor gates against.
+   * The rep's booked SIGNED book that the floor gates against. SUM over TWO owner-scoped paths:
+   *   1. Deals the rep CURRENTLY owns (assigned_rep_id), valued at the live deal value
+   *      (awarded_amount → bid_estimate → dd_estimate, matching the commission writer's resolver).
+   *   2. Deals reassigned AWAY / legacy rows where the rep no longer owns the deal but still holds its OWNER
+   *      commission row (deal_signed_commissions, attribution_role 'owner' → oq.owner_signed_date). These are
+   *      valued at the BOOKED source_value_amount the earned commission was computed from (NOT the now-mutable
+   *      deal value), so a later edit to the reassigned deal can't move the original rep's floor credit off
+   *      their commission basis. This leg reconciles qualifying with earned after a reassignment — the deal's
+   *      earned commission stays booked to the original rep, so its value must keep counting toward THEIR floor.
+   * Either path counts only signed — the deal contract date, OR (for a legacy/reassigned owner row with null
+   * deal-level dates) the dsc snapshot signing date, the SAME fallback the earned side uses so the gate's two
+   * sides stay aligned — and only non-lost, non-on-hold, non-test deals in the period.
    *
-   * Deliberately OWNER-based, NOT commission-attribution (dsc.rep_user_id): HubSpot-imported signed deals
-   * often have contract_signed_date set without ever running calculateCommissionForDeal, so they carry no
-   * commission row — dsc-attributed revenue badly undercounts an owner-rep's real book (e.g. an owner with
+   * Path 1 is deliberately OWNER-based, NOT commission-attribution, for the value: HubSpot-imported signed
+   * deals often have contract_signed_date set without ever running calculateCommissionForDeal, so they carry
+   * no commission row — dsc-attributed revenue badly undercounts an owner-rep's real book (e.g. an owner with
    * a ~$300k signed book but only two change-order commission rows). The floor is a hurdle on the book.
    */
   qualifyingRevenue: number;
@@ -57,23 +66,62 @@ export async function computeRepEarnedFloorGate(
 ): Promise<RepEarnedFloorGate> {
   // Owner-book signed date (no commission row to fall back on); earned uses the dsc fallback to match how
   // the earned surfaces date their rows (earnedSignedDateSql / dashboardEarnedSignedDateSql).
-  const ownedSignedDate = sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date)`;
+  // Qualifying-side signing date: the deal's contract date, else the rep's OWNER commission-row snapshot
+  // date (oq) — the SAME fallback the earned side uses, so a reassigned / legacy owner row with null
+  // deal-level contract dates still contributes its value to qualifying and the gate's two sides stay
+  // consistent (its earned would otherwise count while its revenue never qualifies).
+  const qualifyingSignedDate = sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, oq.owner_signed_date)`;
   const earnedSignedDate = sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)`;
   const notLost = sql`psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')`;
 
   const result = await tenantDb.execute(sql`
     SELECT
       COALESCE((
-        SELECT SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
+        SELECT SUM(
+          -- Deals the rep CURRENTLY owns count at their live deal value (awarded → bid → dd) — this also
+          -- covers signed deals with no commission row (the HubSpot-import case). For a deal reassigned
+          -- AWAY (counted only via the owner commission row), use the BOOKED source_value_amount that
+          -- produced the earned commission instead of the now-mutable deal amount: a director editing or
+          -- clearing awarded/bid/DD on the reassigned deal must not move the ORIGINAL rep's floor credit
+          -- off the value their commission row was computed from. Falls back to the deal amount if the
+          -- booked value is somehow null.
+          CASE
+            WHEN d.assigned_rep_id = ${repId}
+              THEN COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+            ELSE COALESCE(oq.owner_source_value, d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+          END
+        )
         FROM ${deals} d
         JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-        WHERE d.assigned_rep_id = ${repId}
+        -- The rep's OWNER commission row for this deal (if any), exposing its snapshot signing date so the
+        -- owner-row leg can apply the same date fallback the earned side uses, and its booked source value
+        -- so the reassigned-away leg credits the floor with the value the commission was computed from.
+        LEFT JOIN LATERAL (
+          SELECT
+            MIN(dq.contract_signed_date_at_signing) AS owner_signed_date,
+            MAX(dq.source_value_amount) AS owner_source_value
+          FROM ${dealSignedCommissions} dq
+          WHERE dq.deal_id = d.id AND dq.rep_user_id = ${repId} AND dq.attribution_role = 'owner'
+        ) oq ON true
+        WHERE (
+            -- A deal counts toward the rep's floor if the rep CURRENTLY owns it (the owner book, which
+            -- also covers signed deals with no commission row — the HubSpot-import case), OR the rep holds
+            -- the OWNER commission row on it. The second leg reconciles qualifying with earned after a
+            -- reassignment: a deal moved to a new owner keeps its earned commission booked to the ORIGINAL
+            -- rep, so its value must keep counting toward THAT rep's floor — otherwise their real earned
+            -- commission is held at $0 against a floor their own booked revenue no longer reaches.
+            -- Owner-role ONLY: an additive estimator cut must not pull a whole deal's value into the
+            -- estimator's floor book (the floor is a hurdle on the rep's OWN book, not deals they estimated).
+            d.assigned_rep_id = ${repId}
+            OR oq.owner_signed_date IS NOT NULL
+          )
           AND COALESCE(d.is_test_data, false) = false
-          AND (d.contract_signed_at IS NOT NULL OR d.contract_signed_date IS NOT NULL)
+          -- "Signed" = a deal contract date OR (for a reassigned/legacy owner row) the dsc snapshot date.
+          AND ${qualifyingSignedDate} IS NOT NULL
           AND ${notLost}
           AND ${aliasedActiveDealCountFilterSql("d")}
-          ${dateRange.from ? sql`AND ${ownedSignedDate} >= ${dateRange.from}::date` : sql``}
-          ${dateRange.to ? sql`AND ${ownedSignedDate} <= ${dateRange.to}::date` : sql``}
+          ${dateRange.from ? sql`AND ${qualifyingSignedDate} >= ${dateRange.from}::date` : sql``}
+          ${dateRange.to ? sql`AND ${qualifyingSignedDate} <= ${dateRange.to}::date` : sql``}
       ), 0)::numeric AS qualifying_revenue,
       COALESCE((
         SELECT SUM(dsc.amount)

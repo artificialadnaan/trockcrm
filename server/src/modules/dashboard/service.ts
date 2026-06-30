@@ -515,6 +515,10 @@ export interface RepCommissionSummary {
   // exactly (rather than deriving it from floorRemaining, which is 0 once met).
   qualifyingRevenue: number;
   floorMet: boolean;
+  // The direct earned commission that is currently WITHHELD by the floor (the gross that would be released
+  // the moment qualifying revenue clears the floor). 0 when the floor is met. Lets surfaces show
+  // "$X earned · held" instead of a bare $0 that reads as "earned nothing".
+  heldEarnedCommission: number;
 }
 
 export interface RepCommissionDealEarning {
@@ -552,6 +556,10 @@ export interface DirectorRepCommissionRow {
   floorRemaining: number;
   newCustomerShare: number;
   meetsNewCustomerShare: boolean;
+  // Floor-hold context so the list can show "$X held · below floor" rather than a bare $0 that reads as
+  // "earned nothing": floorMet=false with heldEarnedCommission>0 means real earned commission is withheld.
+  floorMet: boolean;
+  heldEarnedCommission: number;
 }
 
 export interface StaleLeadDashboardRow {
@@ -1375,6 +1383,8 @@ export async function getRepCommissionSummary(
       potentialCommission,
       qualifyingRevenue: floorGate.qualifyingRevenue,
       floorMet: floorGate.met,
+      // Gross direct earned withheld below floor (complement of directEarnedCommission's gate above).
+      heldEarnedCommission: floorGate.met ? 0 : direct.directEarnedCommission,
     },
     deals,
   };
@@ -1414,6 +1424,8 @@ export async function getDirectorRepCommissionRows(
       floorRemaining: summary.floorRemaining,
       newCustomerShare: summary.newCustomerShare,
       meetsNewCustomerShare: summary.meetsNewCustomerShare,
+      floorMet: summary.floorMet,
+      heldEarnedCommission: summary.heldEarnedCommission,
     });
   }
 
@@ -2047,6 +2059,10 @@ export interface DirectorCommissionWorkspaceRow {
   floorRemaining: number;
   newCustomerShare: number;
   meetsNewCustomerShare: boolean;
+  // Floor-hold context: floorMet=false with heldEarnedCommission>0 means the rep has real earned
+  // commission withheld below floor — surfaced so the list shows "held" instead of a misleading $0.
+  floorMet: boolean;
+  heldEarnedCommission: number;
   activeDeals: number;
   pipelineValue: number;
   wonUnsignedValue: number;
@@ -2760,6 +2776,8 @@ export async function getDirectorCommissionWorkspace(
       floorRemaining: row.floorRemaining,
       newCustomerShare: row.newCustomerShare,
       meetsNewCustomerShare: row.meetsNewCustomerShare,
+      floorMet: row.floorMet,
+      heldEarnedCommission: row.heldEarnedCommission,
       activeDeals: dealSummary?.activeDeals ?? 0,
       pipelineValue: dealSummary?.pipelineValue ?? 0,
       wonUnsignedValue: dealSummary?.wonUnsignedValue ?? 0,
@@ -2853,9 +2871,9 @@ const commissionSlugList = (slugs: readonly string[]) => sql.join(slugs.map((s) 
 
 export async function getDirectorCommissionEvidence(
   tenantDb: TenantDb,
-  options: { repId: string; metric: CommissionEvidenceMetric; from?: string; to?: string }
+  options: { repId: string; metric: CommissionEvidenceMetric; from?: string; to?: string; officeId?: string }
 ): Promise<CommissionEvidence> {
-  const { repId, metric } = options;
+  const { repId, metric, officeId } = options;
   const year = new Date().getUTCFullYear();
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
@@ -2958,7 +2976,22 @@ export async function getDirectorCommissionEvidence(
       : { ...rawConfig, commissionRate: 0, rollingFloor: 0, overrideRate: 0 };
     const gate = await computeRepEarnedFloorGate(tenantDb, repId, { from, to });
     const rollups = await getCommissionDealRollups(tenantDb, repId, config, from, to);
-    const earned = allocateDealCommissions(rollups, gate.met);
+    // Office-scoped to match the team row: getDirectorCommissionWorkspace computes this rep's override (and
+    // thus its held-only state) over the ACTIVE office's roster only. Without the same officeId here, a
+    // below-floor manager whose only report overrides are CROSS-office would read held-only on the row but
+    // override !== 0 in the drawer — flipping heldOnly off and surfacing a foreign override instead of the
+    // held amount the director clicked. Same scope on both sides keeps the drawer reconciled.
+    const override = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, from, to, officeId);
+    // Reconcile the drawer with the EXACT figure the director clicked on the team table:
+    //  • floor met -> per-deal earned is released (gross) + the override summary row below.
+    //  • below floor WITH a payable override -> per-deal earned held at $0; the cell IS the override, shown
+    //    as the one summary row (Σ records === override).
+    //  • below floor with NO override (the held-only cell) -> the team table shows the HELD GROSS earned
+    //    (heldEarnedCommission), so the drawer must sum the gross per-deal amounts too — NOT the gated $0,
+    //    which would contradict the clicked held figure. Σ(gross rollups) === heldEarnedCommission by
+    //    construction (both are SUM(dsc.amount) over the same predicate via getDirectCommissionMetrics).
+    const heldOnly = !gate.met && override === 0;
+    const earned = allocateDealCommissions(rollups, gate.met || heldOnly);
     const records: CommissionEvidenceRecord[] = earned.map((r) => ({
       id: `${r.dealId}-${r.attributionRole}`,
       navKind: "deal",
@@ -2970,11 +3003,9 @@ export async function getDirectorCommissionEvidence(
       date: r.lastPaidAt ? r.lastPaidAt.slice(0, 10) : null,
       companyName: r.companyName,
     }));
-    // The table cell = direct earned (floor-gated above) + manager override on direct reports. The override
-    // has no per-deal record list, so surface it as ONE summary row — otherwise the drawer would total $0
-    // for a below-floor team lead whose cell is non-zero override (the only case its earned cell is even
-    // clickable), contradicting the clicked figure. With it, Σ records === the cell in every case.
-    const override = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, from, to);
+    // The override has no per-deal record list, so surface it as ONE summary row when it's the payable cell —
+    // otherwise the drawer would total $0 for a below-floor team lead whose cell is non-zero override (Σ
+    // records === the cell in every case).
     if (override !== 0) {
       records.push({
         id: "manager-override",
@@ -2992,7 +3023,7 @@ export async function getDirectorCommissionEvidence(
     const subtitle = !gate.met
       ? override !== 0
         ? "Below floor — direct earned held at $0; the cell is manager override on reports"
-        : "Below floor — direct earned held at $0 this period (rows shown)"
+        : "Below floor — earned commission HELD (shown gross); released when booked revenue reaches the floor"
       : override !== 0
         ? "Direct earned + manager override on reports = this period's earned"
         : "Direct earned this period";
