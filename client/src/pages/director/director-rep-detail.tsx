@@ -535,7 +535,8 @@ export function DirectorRepDetail() {
       .join("")
       .toUpperCase() || "?";
   const cs = data.commissionSummary;
-  const repRatePct = cs.commissionRate > 0 ? `${(cs.commissionRate * 100).toFixed(2).replace(/\.?0+$/, "")}%` : null;
+  // Always render the rate — a 0% (uncommissioned) rep should read "0% commission", not have it hidden.
+  const repRatePct = `${(cs.commissionRate * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
   const activityBreakdown = [
     {
       label: "Calls",
@@ -580,20 +581,26 @@ export function DirectorRepDetail() {
               </h2>
               <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm text-slate-500">
                 <span className="font-medium text-slate-600">Sales rep</span>
-                {repRatePct ? (
-                  <>
-                    <span className="text-slate-300">·</span>
-                    <span>{repRatePct} commission</span>
-                  </>
-                ) : null}
-                {cs.rollingFloor > 0 ? (
-                  <>
-                    <span className="text-slate-300">·</span>
-                    <span className={cs.floorMet ? "font-semibold text-emerald-700" : "font-semibold text-amber-700"}>
-                      {cs.floorMet ? "Floor cleared" : `${formatCurrency(cs.floorRemaining)} to floor`}
-                    </span>
-                  </>
-                ) : null}
+                <span className="text-slate-300">·</span>
+                <span>{repRatePct} commission</span>
+                <span className="text-slate-300">·</span>
+                {/* Always show floor status (three honest states: no floor / cleared / remaining) rather
+                    than suppressing the badge for zero-floor reps. */}
+                <span
+                  className={
+                    cs.rollingFloor === 0
+                      ? "font-medium text-slate-500"
+                      : cs.floorMet
+                        ? "font-semibold text-emerald-700"
+                        : "font-semibold text-amber-700"
+                  }
+                >
+                  {cs.rollingFloor === 0
+                    ? "No floor"
+                    : cs.floorMet
+                      ? "Floor cleared"
+                      : `${formatCurrency(cs.floorRemaining)} to floor`}
+                </span>
               </div>
             </div>
           </div>
