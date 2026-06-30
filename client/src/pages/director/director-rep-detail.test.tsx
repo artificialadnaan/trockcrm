@@ -398,6 +398,39 @@ describe("DirectorRepDetail", () => {
     expect(html).toContain("Deals and Leads");
   });
 
+  it("header renders '0% commission' for a 0% rate and 'No floor' for a zero rolling floor", () => {
+    // The always-render branches (#5/#6): a 0% (uncommissioned) rep reads "0% commission" instead of a
+    // hidden chip, and a no-floor rep reads "No floor" instead of a suppressed badge.
+    const base = buildRepDetailData();
+    mocks.useRepDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      data: {
+        ...base,
+        commissionSummary: {
+          ...base.commissionSummary,
+          commissionRate: 0,
+          rollingFloor: 0,
+          floorMet: false,
+          floorRemaining: 0,
+        },
+      },
+    });
+    const html = renderPageHtml();
+    expect(html).toContain("0% commission");
+    expect(html).toContain("No floor");
+    expect(html).not.toContain("to floor"); // not the remaining-to-floor branch
+    expect(html).not.toContain("Floor cleared"); // not the met branch
+  });
+
+  it("header renders the real rate + a remaining-to-floor badge when both are set (non-zero branch)", () => {
+    // Default mock: 8% rate, $5M floor unmet — the complementary side of #5/#6 (must NOT read "No floor").
+    const html = renderPageHtml();
+    expect(html).toContain("8% commission");
+    expect(html).toContain("to floor");
+    expect(html).not.toContain("No floor");
+  });
+
   it("pre-filters the deals and leads lists to the rep and dashboard date window", () => {
     renderPageHtml("/director/rep/rep-1?preset=qtd");
 
