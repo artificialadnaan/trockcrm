@@ -189,8 +189,10 @@ describe("PendingRfpPage", () => {
     expect(container.textContent).not.toContain("No deals");
   });
 
-  it("continues showing stale rows after a refresh failure (error banner + table, not empty queue)", () => {
-    // Simulates fix #4 in use-deals.ts: on refresh error, deals retains previous rows.
+  it("suppresses rows when the latest fetch errored (no stale/cross-office rows under an error banner)", () => {
+    // The hook still RETAINS `deals` across a transient error (so a successful retry restores them without
+    // a flash), but the PAGE must not render those rows beneath an error banner — after a failed ?officeId
+    // switch they could be the previous office's rows. Error banner stands alone (no rows, no empty message).
     mocks.usePendingRfpMock.mockReturnValue({
       deals: FIXTURE_DEALS,
       loading: false,
@@ -202,10 +204,10 @@ describe("PendingRfpPage", () => {
 
     // Error banner visible
     expect(container.textContent).toContain("Refresh failed");
-    // Stale rows still rendered
-    expect(container.textContent).toContain("Sunset Ridge Apartments");
-    expect(container.textContent).toContain("Riverside Commons Phase 2");
-    // No misleading empty message
+    // Rows suppressed — not shown under the error (could be stale / wrong-office data)
+    expect(container.textContent).not.toContain("Sunset Ridge Apartments");
+    expect(container.textContent).not.toContain("Riverside Commons Phase 2");
+    // But NOT the misleading "no pending RFPs" empty message either — the fetch failed, it isn't empty
     expect(container.textContent).not.toContain("No deals");
   });
 

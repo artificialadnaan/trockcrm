@@ -67,7 +67,10 @@ export function PendingRfpPage() {
         <CardContent className="p-0">
           {loading ? (
             <p className="p-4 text-sm text-muted-foreground">Loading pending RFPs...</p>
-          ) : deals && deals.length > 0 ? (
+          ) : !error && deals && deals.length > 0 ? (
+            // Suppress rows when the latest fetch errored: the hook keeps the prior `deals` (so a transient
+            // blip doesn't blank the list), but rendering them under an error banner could show stale rows
+            // from a previous ?officeId after a failed office switch. Error banner above stands alone.
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>

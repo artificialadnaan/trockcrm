@@ -166,6 +166,7 @@ export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{
     .where(
       and(
         eq(deals.id, dealId),
+        eq(deals.isActive, true),
         eq(deals.isBidBoardOwned, false),
         inArray(deals.stageId, oppStageIds),
         inArray(deals.rfpApprovalStatus, [...PENDING_RFP_ATTENTION_STATUSES]),

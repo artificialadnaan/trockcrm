@@ -124,6 +124,20 @@ describe("cancelPendingRfp", () => {
     expect(await cancelPendingRfp(tdb, "00000000-0000-0000-0000-00000000d010")).toBeNull();
   });
 
+  it("refuses to clear a soft-deleted (is_active=false) declined deal", async () => {
+    await pg.exec(`
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_declined_reason,is_active)
+        VALUES ('00000000-0000-0000-0000-00000000d031','DeletedDeclined','00000000-0000-0000-0000-0000000000aa','declined','left stale',false);
+    `);
+    expect(await cancelPendingRfp(tdb, "00000000-0000-0000-0000-00000000d031")).toBeNull();
+    const res = await tdb.execute(sql`
+      SELECT rfp_approval_status, rfp_declined_reason FROM deals
+      WHERE id = '00000000-0000-0000-0000-00000000d031'`);
+    const row = (Array.isArray(res) ? res : res.rows)[0];
+    expect(row.rfp_approval_status).toBe("declined"); // unchanged — not cleared on a deleted record
+    expect(row.rfp_declined_reason).toBe("left stale");
+  });
+
   it("refuses to clear a declined deal that has advanced out of Opportunity (stage guard in WHERE)", async () => {
     // declined + attention status, but sitting in the estimating stage (not opportunity-family) — the
     // atomic WHERE's stage guard must reject it, leaving its RFP fields untouched (TOCTOU backstop).

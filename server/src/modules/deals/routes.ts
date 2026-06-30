@@ -1347,7 +1347,13 @@ router.post("/:id/cancel-rfp", async (req, res, next) => {
     const dealId = req.params.id;
     const userRole = req.user!.role;
     const userId = req.user!.id;
-    const [deal] = await req.tenantDb!.select().from(deals).where(eq(deals.id, dealId)).limit(1);
+    // Active-only, like other per-deal actions: a soft-deleted (is_active=false) deal must read as
+    // not-found rather than letting cancel clear a deleted record's RFP fields + write a spurious audit.
+    const [deal] = await req.tenantDb!
+      .select()
+      .from(deals)
+      .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
+      .limit(1);
     if (!deal) throw new AppError(404, "Deal not found.");
 
     const canCancel =
