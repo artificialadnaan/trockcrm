@@ -24,6 +24,7 @@ const BOOKED = U("f03"); // owns a won deal that's deal-unsigned but ALREADY boo
 const NONREP = U("f04"); // a director (NOT on the rep roster) — deals only they own must NOT inflate office totals
 const EST2 = U("f05"); // estimator on a won deal whose OWNER is booked but EST2 is not -> still in EST2's won·unsigned
 const OWN2 = U("f06"); // owner of that cross-booked deal (booked) — separate so it doesn't perturb REP's earned
+const HELD = U("f07"); // below their OWN floor with earned commission but NO override -> held-only earned cell
 const FROM = "2026-01-01";
 const TO = "2026-12-31";
 
@@ -73,12 +74,14 @@ beforeAll(async () => {
     INSERT INTO users (id, display_name, role, reports_to) VALUES
       ('${REP}','Kaleb','rep', NULL), ('${OTHER}','Owner','rep', NULL),
       ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}'), ('${BOOKED}','Booked','rep', NULL),
-      ('${NONREP}','Director Dana','director', NULL), ('${EST2}','Estimator Two','rep', NULL), ('${OWN2}','Owner Two','rep', NULL);
+      ('${NONREP}','Director Dana','director', NULL), ('${EST2}','Estimator Two','rep', NULL), ('${OWN2}','Owner Two','rep', NULL),
+      ('${HELD}','Held Rep','rep', NULL);
     INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP}', true, 0.05, 0, 0),
       ('${MGR}', true, 0.05, 1000000, 0.10),  -- MGR below their own $1M floor -> direct earned $0
       ('${REPORT}', true, 0.05, 0, 0),
-      ('${BOOKED}', true, 0.05, 0, 0);
+      ('${BOOKED}', true, 0.05, 0, 0),
+      ('${HELD}', true, 0.05, 1000000, 0);  -- below their own $1M floor, NO override -> held-only earned cell
     INSERT INTO companies (id, name) VALUES ('${CO}','Acme');
     INSERT INTO pipeline_stage_config (id, slug, name, workflow_family) VALUES
       ('${ST.opportunity}','opportunity','Opportunity','pipeline'),
@@ -140,6 +143,15 @@ beforeAll(async () => {
       ('${U("d07")}','D-7','Report Signed','${REPORT}','${ST.opportunity}', 100000, '2026-03-01T00:00:00Z');
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
       VALUES ('${U("dc2")}','${U("d07")}','${REPORT}', 5000, 100000, 'owner', '2026-03-01');
+
+    -- HELD's signed deal (owned by HELD) + dsc -> direct earned $5000, but HELD is below their $1M floor and
+    -- has NO override, so the team Earned cell shows the HELD GROSS ($5000), totalEarnedCommission = $0. The
+    -- earned drill must reconcile to the displayed $5000 (gross), not the gated $0. Opportunity stage +
+    -- contract-signed -> excluded from pipeline + won·unsigned, so it doesn't perturb the office totals.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, contract_signed_at) VALUES
+      ('${U("d14")}','D-14','Held Signed','${HELD}','${ST.opportunity}', 100000, '2026-03-01T00:00:00Z');
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc5")}','${U("d14")}','${HELD}', 5000, 100000, 'owner', '2026-03-01');
 
     -- LEADS (open, assigned REP): 2 new, 1 qualified, 1 opportunity.
     INSERT INTO leads (id, name, assigned_rep_id, stage_id, company_id) VALUES
@@ -269,6 +281,24 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     const overrideRow = ev.records.find((r) => r.id === "manager-override");
     expect(overrideRow).toMatchObject({ value: 500, navKind: null });
     expect(ev.subtitle.toLowerCase()).toContain("override");
+  });
+
+  it("below-floor rep with NO override: earned drawer shows HELD GROSS, reconciling with the held cell (not $0)", async () => {
+    const { rows } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    const held = rows.find((r) => r.repId === HELD)!;
+    // Below their $1M floor with $5k earned and NO override -> nothing payable, so the team cell shows the
+    // HELD GROSS ($5k), not the gated $0.
+    expect(held.floorMet).toBe(false);
+    expect(held.totalEarnedCommission).toBe(0);
+    expect(held.heldEarnedCommission).toBe(5000);
+
+    const ev = await getDirectorCommissionEvidence(tdb, { repId: HELD, metric: "earned", from: FROM, to: TO });
+    // The drawer reconciles to the DISPLAYED held figure ($5k), and the per-deal rows carry the gross held
+    // commission so Σ records === the clicked number (the page contract). No override summary row here.
+    expect(ev.total.value).toBe(5000);
+    expect(ev.records.reduce((s, r) => s + (r.value ?? 0), 0)).toBe(5000);
+    expect(ev.records.some((r) => r.id === "manager-override")).toBe(false);
+    expect(ev.subtitle.toLowerCase()).toContain("held");
   });
 
   it("activity records navigate to the linked deal when present, else are non-navigable", async () => {

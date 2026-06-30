@@ -2976,7 +2976,17 @@ export async function getDirectorCommissionEvidence(
       : { ...rawConfig, commissionRate: 0, rollingFloor: 0, overrideRate: 0 };
     const gate = await computeRepEarnedFloorGate(tenantDb, repId, { from, to });
     const rollups = await getCommissionDealRollups(tenantDb, repId, config, from, to);
-    const earned = allocateDealCommissions(rollups, gate.met);
+    const override = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, from, to);
+    // Reconcile the drawer with the EXACT figure the director clicked on the team table:
+    //  • floor met -> per-deal earned is released (gross) + the override summary row below.
+    //  • below floor WITH a payable override -> per-deal earned held at $0; the cell IS the override, shown
+    //    as the one summary row (Σ records === override).
+    //  • below floor with NO override (the held-only cell) -> the team table shows the HELD GROSS earned
+    //    (heldEarnedCommission), so the drawer must sum the gross per-deal amounts too — NOT the gated $0,
+    //    which would contradict the clicked held figure. Σ(gross rollups) === heldEarnedCommission by
+    //    construction (both are SUM(dsc.amount) over the same predicate via getDirectCommissionMetrics).
+    const heldOnly = !gate.met && override === 0;
+    const earned = allocateDealCommissions(rollups, gate.met || heldOnly);
     const records: CommissionEvidenceRecord[] = earned.map((r) => ({
       id: `${r.dealId}-${r.attributionRole}`,
       navKind: "deal",
@@ -2988,11 +2998,9 @@ export async function getDirectorCommissionEvidence(
       date: r.lastPaidAt ? r.lastPaidAt.slice(0, 10) : null,
       companyName: r.companyName,
     }));
-    // The table cell = direct earned (floor-gated above) + manager override on direct reports. The override
-    // has no per-deal record list, so surface it as ONE summary row — otherwise the drawer would total $0
-    // for a below-floor team lead whose cell is non-zero override (the only case its earned cell is even
-    // clickable), contradicting the clicked figure. With it, Σ records === the cell in every case.
-    const override = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, from, to);
+    // The override has no per-deal record list, so surface it as ONE summary row when it's the payable cell —
+    // otherwise the drawer would total $0 for a below-floor team lead whose cell is non-zero override (Σ
+    // records === the cell in every case).
     if (override !== 0) {
       records.push({
         id: "manager-override",
@@ -3010,7 +3018,7 @@ export async function getDirectorCommissionEvidence(
     const subtitle = !gate.met
       ? override !== 0
         ? "Below floor — direct earned held at $0; the cell is manager override on reports"
-        : "Below floor — direct earned held at $0 this period (rows shown)"
+        : "Below floor — earned commission HELD (shown gross); released when booked revenue reaches the floor"
       : override !== 0
         ? "Direct earned + manager override on reports = this period's earned"
         : "Direct earned this period";

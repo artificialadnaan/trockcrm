@@ -29,6 +29,8 @@ const REP_TESTDATA = U("a06"); // is_test_data=true, reports to MANAGER, meets f
 const REP_INACTIVE = U("a07"); // is_active=false config w/ stale $1M floor -> treated as NO floor (not gated)
 const REP_REASSIGNED = U("a08"); // holds the OWNER commission row on a deal now assigned to REP_NEWOWNER
 const REP_NEWOWNER = U("a09"); // currently owns the reassigned deal, but earned nothing on it
+const REP_OTHEROWNER = U("a10"); // currently owns a reassigned+edited deal (not asserted on directly)
+const REP_REASSIGN_EDITED = U("a11"); // holds the owner row on a reassigned deal whose amount was later edited
 const MANAGER = U("b01"); // own rate 0.10 floor 0, override 0.05 over REP_ABOVE + REP_BELOW (+ REP_TESTDATA, excluded)
 
 const ST_OPEN = U("57001"); // 'opportunity' (signed earned rows live here in these fixtures)
@@ -49,6 +51,7 @@ const D = {
   inactive1: U("d12"),
   reassigned: U("d13"), // owned by REP_NEWOWNER now; owner commission row booked to REP_REASSIGNED
   reassignedNoDate: U("d14"), // same, but deal-level contract dates are NULL (legacy/reconciled row)
+  reassignEdited: U("d15"), // reassigned away; deal amount EDITED post-reassignment ≠ booked owner-row value
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -107,12 +110,15 @@ beforeAll(async () => {
       ('${REP_INACTIVE}', 'Inactive', true, 'rep', NULL, false),
       ('${REP_REASSIGNED}', 'Reassigned', true, 'rep', NULL, false),
       ('${REP_NEWOWNER}', 'NewOwner', true, 'rep', NULL, false),
+      ('${REP_OTHEROWNER}', 'OtherOwner', true, 'rep', NULL, false),
+      ('${REP_REASSIGN_EDITED}', 'ReassignEdited', true, 'rep', NULL, false),
       ('${MANAGER}', 'Manager', true, 'rep', NULL, false);
 
     INSERT INTO user_commission_settings (user_id, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP_ABOVE}', 0.10, 50000, 0),
       ('${REP_REASSIGNED}', 0.10, 50000, 0),
       ('${REP_NEWOWNER}', 0.10, 0, 0),
+      ('${REP_REASSIGN_EDITED}', 0.10, 60000, 0),
       ('${REP_AT}', 0.10, 60000, 0),
       ('${REP_BELOW}', 0.10, 80000, 0),
       ('${REP_ZEROFLOOR}', 0.10, 0, 0),
@@ -200,6 +206,15 @@ beforeAll(async () => {
       ('${D.reassignedNoDate}', 'R-2', 'Reassigned no date', '${REP_NEWOWNER}', '${ST_OPEN}', 50000, '2026-01-10T00:00:00Z');
     INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
       ('${D.reassignedNoDate}', '${REP_REASSIGNED}', 'awarded', 50000, 0.10, 5000, 'owner', '2026-03-20');
+
+    -- REASSIGNED + EDITED: a deal REP_REASSIGN_EDITED signed (owner row booked at 40000 -> earned 4000) was
+    -- reassigned to REP_OTHEROWNER, and a director LATER edited the deal's awarded_amount up to 250000. The
+    -- original rep's floor must credit the BOOKED 40000 (matching their earned), NOT the mutated 250000 — so
+    -- the deal value can't spuriously release their floor. Booked 40000 < floor 60000 -> still held.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.reassignEdited}', 'RE-1', 'Reassigned then edited', '${REP_OTHEROWNER}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 250000, '2026-01-10T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.reassignEdited}', '${REP_REASSIGN_EDITED}', 'awarded', 40000, 0.10, 4000, 'owner', '2026-03-15');
   `);
   tdb = drizzle(pg);
 });
@@ -279,6 +294,18 @@ describe("computeRepEarnedFloorGate (the single floor check)", () => {
     const gate = await computeRepEarnedFloorGate(tdb, REP_NEWOWNER, RANGE);
     expect(gate.qualifyingRevenue).toBeCloseTo(90000, 2);
     expect(gate.earnedCommission).toBeCloseTo(0, 2); // earned nothing on it (no dsc row for this rep)
+  });
+
+  it("reassigned-away: qualifying uses the BOOKED owner-row value, not a later edit to the deal amount", async () => {
+    // The deal was reassigned to another owner and its awarded_amount later edited to 250000, but
+    // REP_REASSIGN_EDITED's owner commission row booked 40000. Qualifying must credit the booked 40000
+    // (matching the earned 4000), so the mutated deal value can't release the rep's floor. The OLD code
+    // (reading d.awarded_amount on the owner-row leg) would credit 250000 and wrongly report met=true.
+    const gate = await computeRepEarnedFloorGate(tdb, REP_REASSIGN_EDITED, RANGE);
+    expect(gate.qualifyingRevenue).toBeCloseTo(40000, 2); // booked source value, NOT the edited 250000
+    expect(gate.earnedCommission).toBeCloseTo(4000, 2);
+    expect(gate.floor).toBeCloseTo(60000, 2);
+    expect(gate.met).toBe(false); // 40000 < 60000 — not spuriously released by the 250000 deal amount
   });
 });
 

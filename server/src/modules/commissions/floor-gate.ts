@@ -68,13 +68,29 @@ export async function computeRepEarnedFloorGate(
   const result = await tenantDb.execute(sql`
     SELECT
       COALESCE((
-        SELECT SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
+        SELECT SUM(
+          -- Deals the rep CURRENTLY owns count at their live deal value (awarded → bid → dd) — this also
+          -- covers signed deals with no commission row (the HubSpot-import case). For a deal reassigned
+          -- AWAY (counted only via the owner commission row), use the BOOKED source_value_amount that
+          -- produced the earned commission instead of the now-mutable deal amount: a director editing or
+          -- clearing awarded/bid/DD on the reassigned deal must not move the ORIGINAL rep's floor credit
+          -- off the value their commission row was computed from. Falls back to the deal amount if the
+          -- booked value is somehow null.
+          CASE
+            WHEN d.assigned_rep_id = ${repId}
+              THEN COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+            ELSE COALESCE(oq.owner_source_value, d.awarded_amount, d.bid_estimate, d.dd_estimate, 0)
+          END
+        )
         FROM ${deals} d
         JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
         -- The rep's OWNER commission row for this deal (if any), exposing its snapshot signing date so the
-        -- owner-row leg can apply the same date fallback the earned side uses.
+        -- owner-row leg can apply the same date fallback the earned side uses, and its booked source value
+        -- so the reassigned-away leg credits the floor with the value the commission was computed from.
         LEFT JOIN LATERAL (
-          SELECT MIN(dq.contract_signed_date_at_signing) AS owner_signed_date
+          SELECT
+            MIN(dq.contract_signed_date_at_signing) AS owner_signed_date,
+            MAX(dq.source_value_amount) AS owner_source_value
           FROM ${dealSignedCommissions} dq
           WHERE dq.deal_id = d.id AND dq.rep_user_id = ${repId} AND dq.attribution_role = 'owner'
         ) oq ON true
