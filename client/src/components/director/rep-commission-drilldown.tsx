@@ -396,10 +396,22 @@ function EarningsBar({
   override: number;
 }) {
   const total = owner + estimator + override;
-  if (!(total > 0)) {
+  if (total === 0) {
     return <div className="mt-4 h-2.5 w-full rounded-full bg-slate-100" />;
   }
-  const pct = (value: number) => `${(value / total) * 100}%`;
+  if (total < 0) {
+    // Net negative — reversals/clawbacks exceed earned cuts. A full rose track reads as a negative position
+    // instead of the empty slate track, which a director would misread as "earned nothing".
+    return (
+      <div
+        className="mt-4 h-2.5 w-full rounded-full bg-rose-400"
+        title={`Net negative — ${formatUsd(total)} after reversals`}
+      />
+    );
+  }
+  // Positive total: proportional segments. A single negative component (offset by a larger positive one) is
+  // simply omitted; the overflow-hidden track clips any residual so widths never visually exceed the bar.
+  const pct = (value: number) => `${Math.min(100, (value / total) * 100)}%`;
   return (
     <div className="mt-4 flex h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
       {owner > 0 ? (

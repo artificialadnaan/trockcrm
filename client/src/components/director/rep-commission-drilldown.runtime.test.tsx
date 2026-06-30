@@ -130,6 +130,23 @@ describe("RepCommissionDrilldown — split + floor", () => {
     cleanup();
   });
 
+  it("net-negative earnings render a distinct rose split bar, not the empty track (review finding)", () => {
+    // Clawback/reversal makes the owner cut net negative → total < 0. The bar must signal a negative position
+    // (rose), distinct from the empty slate track that a director would read as "earned nothing".
+    const negativeDeals: Deals = [{ ...SPLIT_DEALS[0], dealId: "d-claw", earnedCommission: -2000 }];
+    const neg = renderDrilldown({
+      commissionDeals: negativeDeals,
+      commissionSummary: summary({ directEarnedCommission: -2000, totalEarnedCommission: -2000 }),
+    });
+    expect(neg.container.querySelector(".bg-rose-400")).toBeTruthy();
+    neg.cleanup();
+
+    // The positive default render uses the proportional segments, NOT the rose negative treatment.
+    const pos = renderDrilldown({});
+    expect(pos.container.querySelector(".bg-rose-400")).toBeNull();
+    pos.cleanup();
+  });
+
   it("floor met: shows cleared, no held markers", () => {
     const { container, cleanup } = renderDrilldown({});
     const text = container.textContent ?? "";
