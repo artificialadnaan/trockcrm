@@ -137,4 +137,42 @@ describe("usePendingRfp", () => {
     const captured = hookDeals as PendingRfpDeal[] | null;
     expect(captured?.map((d) => d.id)).toEqual(["B"]);
   });
+
+  it("clears the prior office's rows and shows loading during an office switch (no stale paint)", async () => {
+    const deferred: Array<(v: { deals: PendingRfpDeal[] }) => void> = [];
+    apiMock.mockImplementation(() => new Promise((resolve) => { deferred.push(resolve); }));
+
+    let hookDeals: PendingRfpDeal[] | null = null;
+    let hookLoading = false;
+    function Probe() {
+      const { deals, loading } = usePendingRfp();
+      const navigate = useNavigate();
+      hookDeals = deals;
+      hookLoading = loading;
+      return createElement(
+        "button",
+        { type: "button", onClick: () => navigate("/deals/pending-rfp?officeId=B") },
+        "switch to B"
+      );
+    }
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        createElement(MemoryRouter, { initialEntries: ["/deals/pending-rfp?officeId=A"] }, createElement(Probe))
+      );
+    });
+    // Office A loads.
+    await act(async () => { deferred[0]({ deals: [{ id: "A" } as unknown as PendingRfpDeal] }); });
+    expect((hookDeals as PendingRfpDeal[] | null)?.map((d) => d.id)).toEqual(["A"]);
+    expect(hookLoading).toBe(false);
+
+    // Switch to office B but DON'T resolve B's fetch yet: the layout effect must have already cleared the
+    // prior office's rows and flipped to loading, so nothing stale paints under ?officeId=B.
+    await act(async () => {
+      container.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(hookDeals).toBeNull();
+    expect(hookLoading).toBe(true);
+  });
 });

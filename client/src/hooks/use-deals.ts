@@ -1094,8 +1094,20 @@ export function usePendingRfp() {
   // wrongly accepted. Invalidate in a LAYOUT effect on ?search change — it runs synchronously after the
   // commit, before the passive refetch AND before any pending response's resolution microtask, and only
   // for committed renders (so, unlike mutating a ref during render, it's safe under concurrent rendering).
+  // Also reset to a clean loading state HERE (pre-paint), so the previous office's rows/error aren't
+  // painted under the new ?officeId for the frame between this commit and the passive refetch starting.
+  const isFirstLayout = useRef(true);
   useLayoutEffect(() => {
     requestIdRef.current += 1;
+    // Skip the mount run (state already starts loading=true / no rows); only a real ?search change should
+    // clear the prior office's data before its refetch is scheduled.
+    if (isFirstLayout.current) {
+      isFirstLayout.current = false;
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setDeals(null);
   }, [search]);
   const refetch = useCallback(() => {
     const requestId = ++requestIdRef.current;
