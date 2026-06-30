@@ -38,7 +38,7 @@ import { ContactFileTab } from "@/components/files/contact-file-tab";
 import { RecordingList } from "@/components/call-recordings/recording-list";
 import { useContactDetail, deleteContact as apiDeleteContact, type Contact } from "@/hooks/use-contacts";
 import { useAuth } from "@/lib/auth";
-import { contactLocation, formatPhone, fullName } from "@/lib/contact-utils";
+import { contactLocation, formatPhone, fullName, getContactCompanyName } from "@/lib/contact-utils";
 
 type Tab = "deals" | "email" | "activity" | "files" | "recordings";
 
@@ -64,10 +64,10 @@ function ContactRightRail({ contact }: { contact: Contact }) {
         <DetailRailSection title="Company">
           {contact.companyId ? (
             <Link className="font-semibold text-slate-950 underline-offset-4 hover:underline" to={`/companies/${contact.companyId}`}>
-              {contact.linkedCompanyName ?? contact.companyName ?? "Unknown company"}
+              {getContactCompanyName(contact, "Unknown company")}
             </Link>
           ) : (
-            <p className="font-semibold text-slate-900">{contact.companyName ?? "Unassigned"}</p>
+            <p className="font-semibold text-slate-900">{getContactCompanyName(contact, "Unassigned")}</p>
           )}
         </DetailRailSection>
 
@@ -179,7 +179,7 @@ export function ContactDetailPage() {
     { id: "recordings", label: "Recordings", icon: <Voicemail className="h-4 w-4" /> },
   ];
 
-  const subtitleParts = [contact.linkedCompanyName ?? contact.companyName, contact.jobTitle, location].filter(Boolean);
+  const subtitleParts = [getContactCompanyName(contact), contact.jobTitle, location].filter(Boolean);
 
   return (
     <DetailPageShell
