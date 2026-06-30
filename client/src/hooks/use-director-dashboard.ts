@@ -187,6 +187,8 @@ export interface DirectorCommissionWorkspaceData {
     floorRemaining: number;
     newCustomerShare: number;
     meetsNewCustomerShare: boolean;
+    floorMet: boolean;
+    heldEarnedCommission: number;
     activeDeals: number;
     pipelineValue: number;
     wonUnsignedValue: number;

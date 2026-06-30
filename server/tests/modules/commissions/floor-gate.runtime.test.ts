@@ -315,6 +315,9 @@ describe("Engine B — getRepCommissionSummary reflects the gate + override", ()
     const { summary, deals } = await getRepCommissionSummary(tdb, REP_BELOW, RANGE.from, RANGE.to);
     expect(summary.directEarnedCommission).toBeCloseTo(0, 2);
     expect(summary.totalEarnedCommission).toBeCloseTo(0, 2);
+    // The gross earned is WITHHELD (not lost): heldEarnedCommission carries it so surfaces can show
+    // "$5,000 held" instead of a misleading $0.
+    expect(summary.heldEarnedCommission).toBeCloseTo(5000, 2);
     expect(deals.length).toBeGreaterThan(0); // breakdown NOT empty
     for (const d of deals) expect(d.earnedCommission).toBeCloseTo(0, 2);
     // floorRemaining reports the remaining hurdle (80000 - 50000)

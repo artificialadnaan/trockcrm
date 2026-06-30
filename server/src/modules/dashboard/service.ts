@@ -515,6 +515,10 @@ export interface RepCommissionSummary {
   // exactly (rather than deriving it from floorRemaining, which is 0 once met).
   qualifyingRevenue: number;
   floorMet: boolean;
+  // The direct earned commission that is currently WITHHELD by the floor (the gross that would be released
+  // the moment qualifying revenue clears the floor). 0 when the floor is met. Lets surfaces show
+  // "$X earned · held" instead of a bare $0 that reads as "earned nothing".
+  heldEarnedCommission: number;
 }
 
 export interface RepCommissionDealEarning {
@@ -552,6 +556,10 @@ export interface DirectorRepCommissionRow {
   floorRemaining: number;
   newCustomerShare: number;
   meetsNewCustomerShare: boolean;
+  // Floor-hold context so the list can show "$X held · below floor" rather than a bare $0 that reads as
+  // "earned nothing": floorMet=false with heldEarnedCommission>0 means real earned commission is withheld.
+  floorMet: boolean;
+  heldEarnedCommission: number;
 }
 
 export interface StaleLeadDashboardRow {
@@ -1375,6 +1383,8 @@ export async function getRepCommissionSummary(
       potentialCommission,
       qualifyingRevenue: floorGate.qualifyingRevenue,
       floorMet: floorGate.met,
+      // Gross direct earned withheld below floor (complement of directEarnedCommission's gate above).
+      heldEarnedCommission: floorGate.met ? 0 : direct.directEarnedCommission,
     },
     deals,
   };
@@ -1414,6 +1424,8 @@ export async function getDirectorRepCommissionRows(
       floorRemaining: summary.floorRemaining,
       newCustomerShare: summary.newCustomerShare,
       meetsNewCustomerShare: summary.meetsNewCustomerShare,
+      floorMet: summary.floorMet,
+      heldEarnedCommission: summary.heldEarnedCommission,
     });
   }
 
@@ -2047,6 +2059,10 @@ export interface DirectorCommissionWorkspaceRow {
   floorRemaining: number;
   newCustomerShare: number;
   meetsNewCustomerShare: boolean;
+  // Floor-hold context: floorMet=false with heldEarnedCommission>0 means the rep has real earned
+  // commission withheld below floor — surfaced so the list shows "held" instead of a misleading $0.
+  floorMet: boolean;
+  heldEarnedCommission: number;
   activeDeals: number;
   pipelineValue: number;
   wonUnsignedValue: number;
@@ -2760,6 +2776,8 @@ export async function getDirectorCommissionWorkspace(
       floorRemaining: row.floorRemaining,
       newCustomerShare: row.newCustomerShare,
       meetsNewCustomerShare: row.meetsNewCustomerShare,
+      floorMet: row.floorMet,
+      heldEarnedCommission: row.heldEarnedCommission,
       activeDeals: dealSummary?.activeDeals ?? 0,
       pipelineValue: dealSummary?.pipelineValue ?? 0,
       wonUnsignedValue: dealSummary?.wonUnsignedValue ?? 0,

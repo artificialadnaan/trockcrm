@@ -184,7 +184,24 @@ export function TeamCommissionsPage() {
                       </Link>
                     </td>
                     <td className="px-3 py-2.5 text-right">
-                      <Drill row={row} metric="earned" money zeroDim={row.totalEarnedCommission === 0} onDrill={onDrill}>{usdExact(row.totalEarnedCommission)}</Drill>
+                      {!row.floorMet && row.heldEarnedCommission > 0 ? (
+                        // Below floor: real earned commission is WITHHELD, not zero. Show the held amount so a
+                        // director doesn't read a bare $0 as "earned nothing"; floorRemaining is how much more
+                        // booked revenue clears it. Still drillable to the contributing deals.
+                        <span
+                          className="inline-flex flex-col items-end"
+                          title={`Held below floor — ${usdExact(row.floorRemaining)} more booked revenue clears it`}
+                        >
+                          <Drill row={row} metric="earned" money zeroDim onDrill={onDrill}>
+                            <span className="text-amber-700">{usdExact(row.heldEarnedCommission)}</span>
+                          </Drill>
+                          <span className="mt-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">
+                            held · {usdExact(row.floorRemaining)} to floor
+                          </span>
+                        </span>
+                      ) : (
+                        <Drill row={row} metric="earned" money zeroDim={row.totalEarnedCommission === 0} onDrill={onDrill}>{usdExact(row.totalEarnedCommission)}</Drill>
+                      )}
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       {/* Drill on COUNT, not value: a won·unsigned deal can lack an awarded/bid/DD amount
