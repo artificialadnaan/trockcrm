@@ -1498,7 +1498,8 @@ describe("DealDetailPage", () => {
     expect(renderPage()).not.toContain("Trigger RFP");
   });
 
-  it("hides Trigger RFP from directors and non-assigned reps", () => {
+  it("shows Trigger RFP to a director on an Opportunity deal owned by another rep", () => {
+    // Default auth is a director (director-1); the deal is owned by rep-1. Directors trigger office-wide.
     mocks.useDealDetailMock.mockReturnValueOnce({
       loading: false,
       error: null,
@@ -1513,8 +1514,10 @@ describe("DealDetailPage", () => {
         rfpApprovalRequestedAt: null,
       }),
     });
-    expect(renderPage()).not.toContain("Trigger RFP");
+    expect(renderPage()).toContain("Trigger RFP");
+  });
 
+  it("hides Trigger RFP from a non-assigned rep", () => {
     mocks.useAuthMock.mockReturnValueOnce({
       user: {
         id: "rep-2",
@@ -1973,5 +1976,34 @@ describe("DealDetailPage", () => {
 
     expect(mounted.container.textContent).toContain("Scoping Tab");
     expect(mounted.container.textContent).toContain("readonly");
+  });
+
+  it("auto-opens the Scope tab only for the deal owner; a non-owner director lands on Overview", () => {
+    // Non-owner director (default auth director-1; deal owned by rep-1) on an Opportunity deal with no
+    // explicit ?tab must NOT be dropped onto the owner-only scope workspace (which would GET
+    // /scoping-intake and 403). They land on Overview, where the Trigger RFP button lives.
+    mocks.useDealDetailMock.mockReturnValueOnce({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ stageId: "stage-opportunity", assignedRepId: "rep-1" }),
+    });
+    const nonOwner = mountPage("/deals/deal-1");
+    expect(nonOwner.container.textContent).toContain("Overview Tab");
+    expect(nonOwner.container.textContent).not.toContain("Scoping Tab");
+    nonOwner.unmount();
+
+    // The owning rep on the same Opportunity deal still auto-opens the Scope workspace. Use persistent
+    // mocks (not ...Once) so re-renders keep the owner identity + opportunity deal; beforeEach resets them.
+    mocks.useAuthMock.mockReturnValue({ user: { id: "rep-1", role: "rep" } });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({ stageId: "stage-opportunity", assignedRepId: "rep-1" }),
+    });
+    const owner = mountPage("/deals/deal-1");
+    expect(owner.container.textContent).toContain("Scoping Tab");
+    owner.unmount();
   });
 });

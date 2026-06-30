@@ -51,6 +51,38 @@ describe("collaboration access", () => {
     ).resolves.toMatchObject({ id: "deal-1" });
   });
 
+  it("allows a non-owner director owner-access when allowDirector is enabled (office-wide, e.g. RFP readiness)", async () => {
+    const { assertDealOwnerAccess } = await import("../../src/lib/collaboration-access.js");
+    const tenantDb = createTenantDb({
+      dealRows: [{ id: "deal-1", assignedRepId: "rep-2", sourceLeadId: null, officeCode: "dal", assigneeOfficeId: "office-1" }],
+    });
+
+    await expect(
+      assertDealOwnerAccess(
+        tenantDb,
+        "deal-1",
+        { id: "director-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" },
+        { allowAdmin: true, allowDirector: true }
+      )
+    ).resolves.toMatchObject({ id: "deal-1" });
+  });
+
+  it("does not extend the director override to a non-owner rep", async () => {
+    const { assertDealOwnerAccess } = await import("../../src/lib/collaboration-access.js");
+    const tenantDb = createTenantDb({
+      dealRows: [{ id: "deal-1", assignedRepId: "rep-2", sourceLeadId: null, officeCode: "dal", assigneeOfficeId: "office-1" }],
+    });
+
+    await expect(
+      assertDealOwnerAccess(
+        tenantDb,
+        "deal-1",
+        { id: "rep-1", role: "rep", officeId: "office-1", activeOfficeId: "office-1" },
+        { allowAdmin: true, allowDirector: true }
+      )
+    ).rejects.toMatchObject({ statusCode: 403 });
+  });
+
   it("matches office access by explicit viewer office instead of first-row fallback", async () => {
     const { assertDealCollaboratorAccess } = await import("../../src/lib/collaboration-access.js");
     const tenantDb = createTenantDb({
