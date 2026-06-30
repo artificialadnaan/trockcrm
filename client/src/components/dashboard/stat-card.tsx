@@ -15,8 +15,22 @@ interface StatCardProps {
 export function StatCard({ title, value, subtitle, icon, trend, className = "", valueClassName = "text-2xl", onClick }: StatCardProps) {
   return (
     <Card
-      className={`${className}${onClick ? " cursor-pointer hover:shadow-md transition-shadow" : ""}`}
+      className={`${className}${onClick ? " cursor-pointer transition-shadow hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red/40" : ""}`}
       onClick={onClick}
+      // When wired clickable, expose button semantics so the card is keyboard-focusable and Enter/Space
+      // activate it — assistive tech can reach the drilldown, not just pointer users.
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={
+        onClick
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
     >
       <CardContent className="p-4">
         <div className="flex items-start justify-between">

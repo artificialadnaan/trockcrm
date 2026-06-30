@@ -85,8 +85,18 @@ vi.mock("@/components/dashboard/date-range-toggle", () => ({
 }));
 
 vi.mock("@/components/dashboard/stat-card", () => ({
-  StatCard: ({ title, value, subtitle }: { title: string; value: ReactNode; subtitle?: ReactNode }) => (
-    <div>
+  StatCard: ({
+    title,
+    value,
+    subtitle,
+    onClick,
+  }: {
+    title: string;
+    value: ReactNode;
+    subtitle?: ReactNode;
+    onClick?: () => void;
+  }) => (
+    <div data-testid="stat-card" className={onClick ? "cursor-pointer" : ""} onClick={onClick}>
       <h3>{title}</h3>
       <div>{value}</div>
       {subtitle ? <p>{subtitle}</p> : null}
@@ -831,5 +841,46 @@ describe("DirectorRepDetail", () => {
     expect(pipelineChartIndex).toBeLessThan(winRateTrendIndex);
     expect(penultimateHeading).toBe("Pipeline by Stage");
     expect(lastHeading).toBe("Win Rate Trend");
+  });
+
+  it("drills KPI and activity cards to their on-page detail sections on click", async () => {
+    const scrollSpy = vi.fn();
+    const originalScroll = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollSpy; // jsdom doesn't implement scrollIntoView
+
+    const { container, cleanup } = await renderPageDom();
+    try {
+      // Each card scrolls to a real anchor that exists on the page.
+      for (const id of [
+        "rep-commission-breakdown",
+        "rep-deals-leads",
+        "rep-win-rate-trend",
+        "rep-activity-summary",
+      ]) {
+        expect(container.querySelector(`#${id}`)).not.toBeNull();
+      }
+      // All 6 KPI StatCards are wired clickable (the StatCard mock forwards onClick → cursor-pointer).
+      const clickableStatCards = Array.from(container.querySelectorAll('[data-testid="stat-card"].cursor-pointer'));
+      expect(clickableStatCards.length).toBe(6);
+      const wonCard = clickableStatCards.find((el) => el.textContent?.includes("Won Commission"));
+      expect(wonCard).toBeTruthy();
+      // Clicking the Won Commission card drills to the commission section (scrollIntoView fires).
+      await act(async () => {
+        wonCard!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(scrollSpy).toHaveBeenCalled();
+
+      // Activity breakdown cards (Calls/Emails/Meetings/Notes) are focusable buttons that also drill.
+      const breakdownButtons = container.querySelectorAll('[role="button"]');
+      expect(breakdownButtons.length).toBeGreaterThanOrEqual(4);
+      scrollSpy.mockClear();
+      await act(async () => {
+        breakdownButtons[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      expect(scrollSpy).toHaveBeenCalled();
+    } finally {
+      Element.prototype.scrollIntoView = originalScroll;
+      await cleanup();
+    }
   });
 });
