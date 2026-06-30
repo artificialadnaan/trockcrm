@@ -124,6 +124,24 @@ describe("cancelPendingRfp", () => {
     expect(await cancelPendingRfp(tdb, "00000000-0000-0000-0000-00000000d010")).toBeNull();
   });
 
+  it("re-binds rep ownership: clears only when requireOwnerId matches the current assignee", async () => {
+    await pg.exec(`
+      INSERT INTO deals (id,name,stage_id,assigned_rep_id,rfp_approval_status,rfp_declined_reason)
+        VALUES ('00000000-0000-0000-0000-00000000d032','OwnedDeclined','00000000-0000-0000-0000-0000000000aa','00000000-0000-0000-0000-0000000000c1','declined','reason');
+    `);
+    // A rep who is NOT the current assignee (e.g. after a reassignment) → no match, nothing cleared.
+    expect(
+      await cancelPendingRfp(tdb, "00000000-0000-0000-0000-00000000d032", "00000000-0000-0000-0000-0000000000c9")
+    ).toBeNull();
+    const stillThere = await tdb.execute(sql`
+      SELECT rfp_approval_status FROM deals WHERE id = '00000000-0000-0000-0000-00000000d032'`);
+    expect((Array.isArray(stillThere) ? stillThere : stillThere.rows)[0].rfp_approval_status).toBe("declined");
+    // The current assignee → matches, clears.
+    expect(
+      await cancelPendingRfp(tdb, "00000000-0000-0000-0000-00000000d032", "00000000-0000-0000-0000-0000000000c1")
+    ).toMatchObject({ id: "00000000-0000-0000-0000-00000000d032" });
+  });
+
   it("refuses to clear a soft-deleted (is_active=false) declined deal", async () => {
     await pg.exec(`
       INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_declined_reason,is_active)

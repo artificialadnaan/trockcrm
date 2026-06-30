@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
-import { companies, dealApprovals, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
+import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
 import {
   addDealChangeOrder,
@@ -1377,7 +1377,9 @@ router.post("/:id/cancel-rfp", async (req, res, next) => {
     }
 
     const previousStatus = deal.rfpApprovalStatus;
-    const updated = await cancelPendingRfp(req.tenantDb!, deal.id);
+    // Re-bind the rep ownership in the atomic update: if the deal is reassigned between the check above and
+    // here, a former-owner rep's cancel matches nothing and 409s instead of clearing another rep's RFP.
+    const updated = await cancelPendingRfp(req.tenantDb!, deal.id, userRole === "rep" ? userId : undefined);
     if (!updated) {
       throw new AppError(409, "This deal's RFP state changed; nothing was cancelled.", "RFP_CANCEL_STALE");
     }
@@ -1391,6 +1393,19 @@ router.post("/:id/cancel-rfp", async (req, res, next) => {
       actorRole: userRole,
       entityType: "deal",
       changes: { rfpApprovalStatus: { from: previousStatus, to: null } },
+    });
+
+    // Also record it on the deal's History/Timeline (deal_history) like the RFP decline + stage-change
+    // flows, so the surface explains why the pending RFP disappeared (audit_log alone doesn't feed it).
+    await req.tenantDb!.insert(dealHistory).values({
+      dealId: deal.id,
+      fieldName: "rfp_approval_status",
+      oldValue: previousStatus ?? null,
+      newValue: null,
+      changedBy: userId,
+      source: "rfp_cancel",
+      reason: "Returned to Opportunity",
+      changedAt: new Date(),
     });
 
     await req.commitTransaction!();

@@ -5,7 +5,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
-import { usePendingRfp } from "./use-deals";
+import { usePendingRfp, type PendingRfpDeal } from "./use-deals";
 
 vi.mock("@/lib/api", () => ({ api: vi.fn() }));
 
@@ -60,5 +60,42 @@ describe("usePendingRfp", () => {
       container.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(apiMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores a stale out-of-order response so the latest office switch wins", async () => {
+    // Every fetch hangs until we resolve it by hand, so we can resolve them out of order.
+    const deferred: Array<(v: { deals: PendingRfpDeal[] }) => void> = [];
+    apiMock.mockImplementation(() => new Promise((resolve) => { deferred.push(resolve); }));
+
+    let hookDeals: PendingRfpDeal[] | null = null;
+    let hookRefetch: () => Promise<unknown> = async () => undefined;
+    function Probe() {
+      const { deals, refetch } = usePendingRfp();
+      hookDeals = deals;
+      hookRefetch = refetch;
+      return null;
+    }
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        createElement(MemoryRouter, { initialEntries: ["/deals/pending-rfp?officeId=A"] }, createElement(Probe))
+      );
+    });
+    // Fire two more overlapping fetches (e.g. a quick A→B office switch); none have resolved yet.
+    await act(async () => { void hookRefetch(); });
+    await act(async () => { void hookRefetch(); });
+    expect(deferred).toHaveLength(3); // mount + 2 refetches
+
+    // Resolve the LATEST request first (office B), then the older ones (office A) out of order.
+    await act(async () => { deferred[2]({ deals: [{ id: "B" } as unknown as PendingRfpDeal] }); });
+    await act(async () => {
+      deferred[0]({ deals: [{ id: "A" } as unknown as PendingRfpDeal] });
+      deferred[1]({ deals: [{ id: "A" } as unknown as PendingRfpDeal] });
+    });
+
+    // The stale office-A responses must not overwrite the latest office-B queue.
+    const captured = hookDeals as PendingRfpDeal[] | null;
+    expect(captured?.map((d) => d.id)).toEqual(["B"]);
   });
 });

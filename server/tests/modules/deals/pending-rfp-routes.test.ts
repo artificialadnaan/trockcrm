@@ -145,10 +145,11 @@ describe("GET /pending-rfp", () => {
   });
 });
 
-function stubDb(deal: any, stageSlug = "opportunity") {
+function stubDb(deal: any, stageSlug = "opportunity", inserted: any[] = []) {
   return {
     select: () => ({ from: () => ({ where: () => ({ limit: () => Promise.resolve([deal]) }) }) }),
     execute: () => Promise.resolve([{ slug: stageSlug }]),
+    insert: () => ({ values: (v: any) => { inserted.push(v); return Promise.resolve(); } }),
   };
 }
 
@@ -173,19 +174,31 @@ describe("POST /:id/cancel-rfp", () => {
     expect(err).toMatchObject({ statusCode: 403 });
   });
 
-  it("clears the RFP for the owning rep and commits", async () => {
+  it("clears the RFP for the owning rep, writes a deal_history entry, and commits", async () => {
     const svc = await import("../../../src/modules/deals/pending-rfp-service.js");
     (svc.cancelPendingRfp as any).mockResolvedValue({ id: "deal-1" });
     const res = makeRes();
     const commitTransaction = vi.fn().mockResolvedValue(undefined);
+    const inserted: any[] = [];
     const err = await runRoute("post", "/:id/cancel-rfp", {
       params: { id: "deal-1" },
       user: { id: "rep-1", role: "rep", displayName: "Rep One" },
-      tenantDb: stubDb(declinedDeal),
+      tenantDb: stubDb(declinedDeal, "opportunity", inserted),
       commitTransaction,
     }, res);
     expect(err).toBeUndefined();
     expect(svc.cancelPendingRfp).toHaveBeenCalled();
+    // Owning rep → the rep ownership constraint is re-bound into the atomic update.
+    expect(svc.cancelPendingRfp).toHaveBeenCalledWith(expect.anything(), "deal-1", "rep-1");
+    // A deal_history (Timeline) row is written explaining the Return to Opportunity.
+    expect(inserted[0]).toMatchObject({
+      dealId: "deal-1",
+      fieldName: "rfp_approval_status",
+      oldValue: "declined",
+      newValue: null,
+      source: "rfp_cancel",
+      reason: "Returned to Opportunity",
+    });
     expect(commitTransaction).toHaveBeenCalled();
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
   });

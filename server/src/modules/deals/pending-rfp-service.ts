@@ -136,9 +136,17 @@ function reasonForPendingRfpRow(r: {
 // and override guards are ALL in the WHERE for atomicity: if the row advanced out of Opportunity or
 // changed state between the route's read and this update, nothing matches and it returns null (the
 // route then 409s) rather than clearing the RFP cycle on a deal that is no longer a pending-RFP row.
-export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{ id: string } | null> {
+export async function cancelPendingRfp(
+  tenantDb: any,
+  dealId: string,
+  // When set (the actor is a rep), the atomic update also requires the deal to STILL be assigned to them,
+  // so a reassignment landing between the route's ownership check and this update races to null (409)
+  // rather than letting a former owner clear the RFP. Admins/directors pass undefined (cancel any owner).
+  requireOwnerId?: string,
+): Promise<{ id: string } | null> {
   const oppStageIds = await opportunityStageIds(tenantDb);
   if (oppStageIds.length === 0) return null;
+  const ownerGuard = requireOwnerId ? [eq(deals.assignedRepId, requireOwnerId)] : [];
   const [updated] = await tenantDb
     .update(deals)
     .set({
@@ -172,6 +180,7 @@ export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{
         inArray(deals.rfpApprovalStatus, [...PENDING_RFP_ATTENTION_STATUSES]),
         NOT_RECONFIRMED_DENIAL,
         NOT_OVERRIDE_APPROVING,
+        ...ownerGuard,
       ),
     )
     .returning({ id: deals.id });

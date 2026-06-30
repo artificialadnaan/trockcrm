@@ -1081,19 +1081,27 @@ export function usePendingRfp() {
   const [deals, setDeals] = useState<PendingRfpDeal[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Monotonic request id: a fast ?officeId switch fires overlapping fetches that can resolve out of order;
+  // only the latest request is allowed to write state, so an older office's response can't overwrite a
+  // newer one (which would show office A's rows under ?officeId=B).
+  const requestIdRef = useRef(0);
   const refetch = useCallback(() => {
+    const requestId = ++requestIdRef.current;
+    const isCurrent = () => requestId === requestIdRef.current;
     setLoading(true);
     setError(null);
     return api<{ deals: PendingRfpDeal[] }>("/deals/pending-rfp")
       .then((r) => {
-        setDeals(r.deals);
+        if (isCurrent()) setDeals(r.deals);
         return r.deals;
       })
       .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : "Failed to load pending RFPs");
+        if (isCurrent()) setError(e instanceof Error ? e.message : "Failed to load pending RFPs");
         throw e;
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (isCurrent()) setLoading(false);
+      });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
   useEffect(() => {
