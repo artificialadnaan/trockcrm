@@ -48,6 +48,7 @@ const D = {
   testRep1: U("d11"),
   inactive1: U("d12"),
   reassigned: U("d13"), // owned by REP_NEWOWNER now; owner commission row booked to REP_REASSIGNED
+  reassignedNoDate: U("d14"), // same, but deal-level contract dates are NULL (legacy/reconciled row)
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -190,6 +191,15 @@ beforeAll(async () => {
       ('${D.reassigned}', 'R-1', 'Reassigned deal', '${REP_NEWOWNER}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 90000, '2026-01-10T00:00:00Z');
     INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
       ('${D.reassigned}', '${REP_REASSIGNED}', 'awarded', 90000, 0.10, 9000, 'owner', '2026-03-15');
+
+    -- Same reassignment, but the deal's contract_signed_at/date are BOTH NULL (a legacy/reconciled owner
+    -- row). Its only signing date is the dsc snapshot (contract_signed_date_at_signing). It earns 5000 via
+    -- the earned-side date fallback, so its 50000 value MUST also count toward REP_REASSIGNED's qualifying
+    -- via the SAME fallback — otherwise qualifying and earned stay inconsistent for this row.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, created_at) VALUES
+      ('${D.reassignedNoDate}', 'R-2', 'Reassigned no date', '${REP_NEWOWNER}', '${ST_OPEN}', 50000, '2026-01-10T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.reassignedNoDate}', '${REP_REASSIGNED}', 'awarded', 50000, 0.10, 5000, 'owner', '2026-03-20');
   `);
   tdb = drizzle(pg);
 });
@@ -252,13 +262,14 @@ describe("computeRepEarnedFloorGate (the single floor check)", () => {
     expect(gate.met).toBe(false); // 0 >= 50000 is false
   });
 
-  it("reassigned-away deal: the rep holding the owner commission row keeps its value in qualifyingRevenue", async () => {
-    // The $90k deal is now owned by REP_NEWOWNER, but REP_REASSIGNED holds the owner commission row and
-    // keeps the earned commission — so its value must still count toward REP_REASSIGNED's floor. qualifying
-    // must reconcile with the earned it gates; a current-owner-only basis gives qualifying 0 -> held at $0.
+  it("reassigned-away deals (incl. null-deal-date legacy rows): qualifyingRevenue reconciles with earned", async () => {
+    // Two $90k + $50k deals now owned by REP_NEWOWNER, but REP_REASSIGNED holds the owner commission rows
+    // and keeps the earned commission — so BOTH values must count toward REP_REASSIGNED's floor. The second
+    // deal has NULL deal-level contract dates, so the gate must use the dsc snapshot date (the same fallback
+    // the earned side uses) on the qualifying side too — else its 50000 earns but never qualifies.
     const gate = await computeRepEarnedFloorGate(tdb, REP_REASSIGNED, RANGE);
-    expect(gate.qualifyingRevenue).toBeCloseTo(90000, 2);
-    expect(gate.earnedCommission).toBeCloseTo(9000, 2);
+    expect(gate.qualifyingRevenue).toBeCloseTo(140000, 2);
+    expect(gate.earnedCommission).toBeCloseTo(14000, 2);
     expect(gate.floor).toBeCloseTo(50000, 2);
     expect(gate.met).toBe(true);
   });

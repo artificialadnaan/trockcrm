@@ -57,7 +57,11 @@ export async function computeRepEarnedFloorGate(
 ): Promise<RepEarnedFloorGate> {
   // Owner-book signed date (no commission row to fall back on); earned uses the dsc fallback to match how
   // the earned surfaces date their rows (earnedSignedDateSql / dashboardEarnedSignedDateSql).
-  const ownedSignedDate = sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date)`;
+  // Qualifying-side signing date: the deal's contract date, else the rep's OWNER commission-row snapshot
+  // date (oq) — the SAME fallback the earned side uses, so a reassigned / legacy owner row with null
+  // deal-level contract dates still contributes its value to qualifying and the gate's two sides stay
+  // consistent (its earned would otherwise count while its revenue never qualifies).
+  const qualifyingSignedDate = sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, oq.owner_signed_date)`;
   const earnedSignedDate = sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)`;
   const notLost = sql`psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')`;
 
@@ -67,6 +71,13 @@ export async function computeRepEarnedFloorGate(
         SELECT SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
         FROM ${deals} d
         JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+        -- The rep's OWNER commission row for this deal (if any), exposing its snapshot signing date so the
+        -- owner-row leg can apply the same date fallback the earned side uses.
+        LEFT JOIN LATERAL (
+          SELECT MIN(dq.contract_signed_date_at_signing) AS owner_signed_date
+          FROM ${dealSignedCommissions} dq
+          WHERE dq.deal_id = d.id AND dq.rep_user_id = ${repId} AND dq.attribution_role = 'owner'
+        ) oq ON true
         WHERE (
             -- A deal counts toward the rep's floor if the rep CURRENTLY owns it (the owner book, which
             -- also covers signed deals with no commission row — the HubSpot-import case), OR the rep holds
@@ -77,17 +88,15 @@ export async function computeRepEarnedFloorGate(
             -- Owner-role ONLY: an additive estimator cut must not pull a whole deal's value into the
             -- estimator's floor book (the floor is a hurdle on the rep's OWN book, not deals they estimated).
             d.assigned_rep_id = ${repId}
-            OR EXISTS (
-              SELECT 1 FROM ${dealSignedCommissions} dq
-              WHERE dq.deal_id = d.id AND dq.rep_user_id = ${repId} AND dq.attribution_role = 'owner'
-            )
+            OR oq.owner_signed_date IS NOT NULL
           )
           AND COALESCE(d.is_test_data, false) = false
-          AND (d.contract_signed_at IS NOT NULL OR d.contract_signed_date IS NOT NULL)
+          -- "Signed" = a deal contract date OR (for a reassigned/legacy owner row) the dsc snapshot date.
+          AND ${qualifyingSignedDate} IS NOT NULL
           AND ${notLost}
           AND ${aliasedActiveDealCountFilterSql("d")}
-          ${dateRange.from ? sql`AND ${ownedSignedDate} >= ${dateRange.from}::date` : sql``}
-          ${dateRange.to ? sql`AND ${ownedSignedDate} <= ${dateRange.to}::date` : sql``}
+          ${dateRange.from ? sql`AND ${qualifyingSignedDate} >= ${dateRange.from}::date` : sql``}
+          ${dateRange.to ? sql`AND ${qualifyingSignedDate} <= ${dateRange.to}::date` : sql``}
       ), 0)::numeric AS qualifying_revenue,
       COALESCE((
         SELECT SUM(dsc.amount)
