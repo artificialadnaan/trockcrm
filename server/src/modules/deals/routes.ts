@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
-import { companies, dealApprovals, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
+import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
 import {
   addDealChangeOrder,
@@ -93,6 +93,7 @@ import {
   getScopeLockedDealPatchFields,
   getScopeLockedResolvedFields,
   normalizeStagePageSort,
+  pendingRfpSubStateForStatus,
   toCanonicalDealStageSlug,
   type DealOpportunityEnteredEventPayload,
   type RfpRequestDeliveryPayload,
@@ -107,6 +108,7 @@ import {
 } from "./scoping-service.js";
 import { getResolvedDeal, writeResolvedDealFields } from "./lineage-resolver.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
+import { getPendingRfpDeals, cancelPendingRfp } from "./pending-rfp-service.js";
 import { confirmUpload, getFileById, getPendingUploadMetadata } from "../files/service.js";
 import {
   createEstimateSourceDocument,
@@ -937,6 +939,18 @@ router.get("/", async (req, res, next) => {
   }
 });
 
+// GET /api/deals/pending-rfp — all deals in the Pending-RFP bucket (office-scoped via tenant schema).
+// Sales-role gated: this is a cross-rep read, so keep non-sales CRM roles (e.g. construction) out.
+router.get("/pending-rfp", requireRole("admin", "director", "rep"), async (req, res, next) => {
+  try {
+    const deals = await getPendingRfpDeals(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json({ deals });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/deals/sources — distinct deal sources for filter dropdown
 router.get("/sources", async (req, res, next) => {
   try {
@@ -1335,6 +1349,80 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
   }
 });
 
+// POST /api/deals/:id/cancel-rfp — escape hatch: clear all RFP request fields so the deal returns to plain Opportunity.
+router.post("/:id/cancel-rfp", async (req, res, next) => {
+  try {
+    const dealId = req.params.id;
+    const userRole = req.user!.role;
+    const userId = req.user!.id;
+    // Active-only, like other per-deal actions: a soft-deleted (is_active=false) deal must read as
+    // not-found rather than letting cancel clear a deleted record's RFP fields + write a spurious audit.
+    const [deal] = await req.tenantDb!
+      .select()
+      .from(deals)
+      .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
+      .limit(1);
+    if (!deal) throw new AppError(404, "Deal not found.");
+
+    const canCancel =
+      userRole === "admin" || userRole === "director" ||
+      (userRole === "rep" && deal.assignedRepId === userId);
+    if (!canCancel) {
+      throw new AppError(403, "Only the assigned rep, a director, or an admin can cancel a pending RFP.", "RFP_CANCEL_UNAUTHORIZED");
+    }
+
+    const stageSlug = await loadDealStageSlug(req.tenantDb!, deal.stageId);
+    const canonicalStage = stageSlug ? toCanonicalDealStageSlug(stageSlug, deal.workflowRoute) : null;
+    if (canonicalStage !== "opportunity" || deal.isBidBoardOwned) {
+      throw new AppError(409, "This deal is no longer a pending RFP.", "RFP_CANCEL_WRONG_STATE");
+    }
+    if (
+      pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== "attention" ||
+      deal.rfpOverrideDecision === "denial_reconfirmed" ||
+      deal.rfpOverrideState === "approving"
+    ) {
+      throw new AppError(409, "Only a declined, failed, or conflicting RFP can be returned to Opportunity.", "RFP_CANCEL_NOT_CANCELLABLE");
+    }
+
+    const previousStatus = deal.rfpApprovalStatus;
+    // Re-bind the rep ownership in the atomic update: if the deal is reassigned between the check above and
+    // here, a former-owner rep's cancel matches nothing and 409s instead of clearing another rep's RFP.
+    const updated = await cancelPendingRfp(req.tenantDb!, deal.id, userRole === "rep" ? userId : undefined);
+    if (!updated) {
+      throw new AppError(409, "This deal's RFP state changed; nothing was cancelled.", "RFP_CANCEL_STALE");
+    }
+
+    await writeAuditLog(req.tenantDb!, {
+      tableName: "deals",
+      recordId: deal.id,
+      action: "update",
+      changedBy: userId,
+      actorName: req.user!.displayName ?? req.user!.email ?? userId,
+      actorRole: userRole,
+      entityType: "deal",
+      changes: { rfpApprovalStatus: { from: previousStatus, to: null } },
+    });
+
+    // Also record it on the deal's History/Timeline (deal_history) like the RFP decline + stage-change
+    // flows, so the surface explains why the pending RFP disappeared (audit_log alone doesn't feed it).
+    await req.tenantDb!.insert(dealHistory).values({
+      dealId: deal.id,
+      fieldName: "rfp_approval_status",
+      oldValue: previousStatus ?? null,
+      newValue: null,
+      changedBy: userId,
+      source: "rfp_cancel",
+      reason: "Returned to Opportunity",
+      changedAt: new Date(),
+    });
+
+    await req.commitTransaction!();
+    res.json(toJsonSafe({ success: true, dealId: updated?.id ?? dealId }));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/deals/:id/rfp-retry — enqueue a fresh RFP delivery job from the latest dead row.
 router.post("/:id/rfp-retry", async (req, res, next) => {
   try {
@@ -1353,6 +1441,13 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       req.user!.id
     );
     if (!deal) throw new AppError(404, "Deal not found");
+
+    // Retry is a send-failed-only action; require the current state up front so a stale Retry click
+    // (e.g. from another tab after the RFP was cancelled via Return to Opportunity) is rejected before
+    // any work, instead of resurrecting a cleared RFP from its still-present dead job.
+    if (deal.rfpApprovalStatus !== "send_failed") {
+      throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
+    }
 
     const deadJobResult = await req.tenantDb!.execute(sql`
       SELECT id, payload
@@ -1379,6 +1474,22 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       body: { ...deadJob.payload.body, attachments: freshAttachments },
     };
     delete payload.dealHandled;
+    // Atomically re-claim the send-failed state BEFORE enqueuing, so a Return to Opportunity that lands
+    // between the read above and here (clearing the RFP fields but leaving the dead job) can't have this
+    // retry resurrect the cancelled RFP: if the status already changed, nothing matches and we 409
+    // without enqueuing. Same transaction, so a later insert failure rolls the status back.
+    const [reclaimed] = await req.tenantDb!
+      .update(deals)
+      .set({
+        rfpApprovalStatus: "pending_outbox",
+        rfpLastAttemptError: null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(deals.id, deal.id), eq(deals.rfpApprovalStatus, "send_failed")))
+      .returning({ id: deals.id });
+    if (!reclaimed) {
+      throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
+    }
     await req.tenantDb!.insert(jobQueue).values({
       jobType: "rfp_request_delivery",
       payload,
@@ -1388,13 +1499,6 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       runAfter: new Date(),
       maxAttempts: 8,
     });
-    await req.tenantDb!
-      .update(deals)
-      .set({
-        rfpApprovalStatus: "pending_outbox",
-        rfpLastAttemptError: null,
-      })
-      .where(eq(deals.id, deal.id));
 
     await req.commitTransaction!();
     res.status(202).json({ success: true, status: "pending_outbox" });

@@ -144,6 +144,7 @@ describe("POST /api/deals/:id/rfp-retry", () => {
     process.env.SYNCHUB_BASE_URL = "https://new.example.com";
     getDealByIdMock.mockResolvedValue({
       id: "deal-1",
+      rfpApprovalStatus: "send_failed",
     });
   });
 
@@ -175,7 +176,7 @@ describe("POST /api/deals/:id/rfp-retry", () => {
         update: vi.fn(() => ({
           set: vi.fn((value) => {
             updated.push(value);
-            return { where: vi.fn(async () => ({})) };
+            return { where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) };
           }),
         })),
       },
@@ -249,7 +250,7 @@ describe("POST /api/deals/:id/rfp-retry", () => {
           }),
         })),
         update: vi.fn(() => ({
-          set: vi.fn(() => ({ where: vi.fn(async () => ({})) })),
+          set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) })),
         })),
       },
       user: { id: "user-1", role: "director", officeId: "office-1", activeOfficeId: "office-1" },
@@ -322,7 +323,7 @@ describe("POST /api/deals/:id/rfp-retry", () => {
           }),
         })),
         update: vi.fn(() => ({
-          set: vi.fn(() => ({ where: vi.fn(async () => ({})) })),
+          set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) })),
         })),
       },
       user: {
@@ -349,5 +350,51 @@ describe("POST /api/deals/:id/rfp-retry", () => {
 
     expect(res.statusCode).toBe(202);
     expect(inserted).toHaveLength(1);
+  });
+
+  it("rejects a stale retry after the RFP was cancelled (status no longer send_failed) without enqueuing", async () => {
+    // A Return to Opportunity cleared the deal's RFP status; a stale Retry click must not resurrect it.
+    getDealByIdMock.mockResolvedValueOnce({ id: "deal-1", rfpApprovalStatus: null });
+    const inserted: any[] = [];
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: vi.fn(async () => ({ rows: [{ id: 10, payload: { dealId: "deal-1", body: {} } }] })),
+        insert: vi.fn(() => ({ values: vi.fn(async (value) => { inserted.push(value); return {}; }) })),
+        update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) })) })),
+      },
+      user: { id: "admin-1", role: "admin", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = { status: vi.fn(), json: vi.fn() } as any;
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: "RFP_RETRY_WRONG_STATE" }));
+    expect(inserted).toHaveLength(0); // no delivery job enqueued
+  });
+
+  it("does not enqueue when the atomic send_failed re-claim matches no row (concurrent cancel race)", async () => {
+    // Deal still reads send_failed (passes the early guard), but the conditional UPDATE matches nothing
+    // because a concurrent cancel already cleared it → 409, and the job is NOT enqueued.
+    const inserted: any[] = [];
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: vi.fn(async () => ({ rows: [{ id: 10, payload: { dealId: "deal-1", body: {} } }] })),
+        insert: vi.fn(() => ({ values: vi.fn(async (value) => { inserted.push(value); return {}; }) })),
+        update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn(async () => [] as any[]) })) })) })),
+      },
+      user: { id: "admin-1", role: "admin", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = { status: vi.fn(), json: vi.fn() } as any;
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: "RFP_RETRY_WRONG_STATE" }));
+    expect(inserted).toHaveLength(0); // re-claim failed → never enqueued
   });
 });

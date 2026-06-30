@@ -1071,4 +1071,166 @@ describe("buildCanonicalDealBoardColumns", () => {
       .filter((deal) => deal.id === "deal-lost-dup");
     expect(renders).toHaveLength(1);
   });
+
+  it("pulls pending-RFP opportunity deals into a synthetic Pending RFP column placed immediately after the opportunity column", () => {
+    // p1 is in the opportunity stage with a pending RFP status and is NOT bid-board-owned → should be
+    // lifted out of "opportunity" and placed in the synthetic "pending_rfp" column.
+    // o1 is a plain opportunity deal (no rfpApprovalStatus) → stays in "opportunity".
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 2,
+          totalValue: 200000,
+          cards: [
+            {
+              id: "p1",
+              stageId: "opp-stage",
+              workflowRoute: "normal",
+              isBidBoardOwned: false,
+              bidBoardStageSlug: null,
+              readOnlySyncedAt: null,
+              rfpApprovalStatus: "pending",
+              bidEstimate: "100000",
+              ddEstimate: null,
+              awardedAmount: null,
+              onHold: false,
+            },
+            {
+              id: "o1",
+              stageId: "opp-stage",
+              workflowRoute: "normal",
+              isBidBoardOwned: false,
+              bidBoardStageSlug: null,
+              readOnlySyncedAt: null,
+              rfpApprovalStatus: null,
+              bidEstimate: "100000",
+              ddEstimate: null,
+              awardedAmount: null,
+              onHold: false,
+            },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    // (a) pending_rfp column exists with the correct name and is immediately after opportunity
+    expect(prfpIndex).not.toBe(-1);
+    expect(columns[prfpIndex]!.stage.name).toBe("Pending RFP");
+    expect(prfpIndex).toBe(oppIndex + 1);
+
+    // (b) p1 is in the pending_rfp column
+    expect(columns[prfpIndex]!.cards.map((d) => d.id)).toContain("p1");
+
+    // (c) p1 is NOT in the opportunity column
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).not.toContain("p1");
+
+    // (d) o1 IS in the opportunity column
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).toContain("o1");
+
+    // (e) opportunity column's count and totalValue EXCLUDE the moved pending deal:
+    // original backend aggregate was count=2 / totalValue=200000; one deal (p1, bid=$100k)
+    // was moved out, so opportunity should be count=1 / totalValue=100000.
+    const preSpitOppCount = 2;
+    expect(columns[oppIndex]!.count).toBe(1);
+    expect(columns[oppIndex]!.totalValue).toBe(100000);
+
+    // (f) pending_rfp column's count/totalValue match the moved deal's contribution (p1: $100k)
+    expect(columns[prfpIndex]!.count).toBe(1);
+    expect(columns[prfpIndex]!.totalValue).toBe(100000);
+
+    // (g) the two columns' counts sum to the pre-split opportunity count (no double-counting)
+    expect(columns[oppIndex]!.count + columns[prfpIndex]!.count).toBe(preSpitOppCount);
+  });
+
+  it("keeps re-confirmed denials in Opportunity and excludes on-hold pending RFPs from the counts", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 1, // backend active count already excludes the on-hold card
+          totalValue: 0,
+          cards: [
+            // re-confirmed denial = resolved terminal → must STAY in opportunity, never pending_rfp
+            { id: "rd", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "declined", rfpOverrideDecision: "denial_reconfirmed", bidEstimate: "50000", ddEstimate: null, awardedAmount: null, onHold: false },
+            // on-hold pending RFP → shown in the pending_rfp column but NOT counted (reportable count excludes on-hold)
+            { id: "hp", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "pending", rfpOverrideDecision: null, bidEstimate: "70000", ddEstimate: null, awardedAmount: null, onHold: true },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).toContain("rd");
+    expect(prfpIndex === -1 ? [] : columns[prfpIndex]!.cards.map((d) => d.id)).not.toContain("rd");
+    expect(columns[prfpIndex]!.cards.map((d) => d.id)).toContain("hp");
+    expect(columns[prfpIndex]!.count).toBe(0);
+    expect(columns[prfpIndex]!.totalValue).toBe(0);
+    expect(columns[oppIndex]!.count).toBe(1);
+  });
+
+  it("keeps an in-flight override approval (rfpOverrideState='approving') in Opportunity, out of pending_rfp", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 1, // backend active count includes the approving card (it is still in opportunity)
+          totalValue: 80000,
+          cards: [
+            // override approval in flight: status stays "declined" + rfpOverrideState "approving" until the
+            // SyncHub callback lands. The server queue/cancel route exclude it, so the board must keep it in
+            // Opportunity and NOT surface it as an actionable pending_rfp card.
+            { id: "ia", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "declined", rfpOverrideDecision: null, rfpOverrideState: "approving", bidEstimate: "80000", ddEstimate: null, awardedAmount: null, onHold: false },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    // No pending RFP cards → no synthetic column is inserted, and opportunity is untouched.
+    expect(prfpIndex).toBe(-1);
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).toContain("ia");
+    expect(columns[oppIndex]!.count).toBe(1);
+    expect(columns[oppIndex]!.totalValue).toBe(80000);
+  });
+
+  it("does not carry totalCount on canonical columns, so the visibleCount rollup uses the adjusted active count", () => {
+    // buildCanonicalDealBoardColumns rebuilds columns and intentionally omits totalCount (the backend
+    // aggregate is dropped), so the Active Pipeline visibleCount rollup falls back to `count`. The split
+    // must therefore reconcile on the COUNT axis alone: opp.count + synthetic.count == pre-split active.
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 2, // active (non-on-hold): p1 + o1
+          totalCount: 4, // backend incl on-hold — must NOT survive onto the canonical column
+          totalValue: 170000,
+          cards: [
+            { id: "p1", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "pending", rfpOverrideDecision: null, bidEstimate: "100000", ddEstimate: null, awardedAmount: null, onHold: false },
+            { id: "p2", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "pending", rfpOverrideDecision: null, bidEstimate: "50000", ddEstimate: null, awardedAmount: null, onHold: true },
+            { id: "o1", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: null, bidEstimate: "70000", ddEstimate: null, awardedAmount: null, onHold: false },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    // totalCount is dropped on BOTH columns → the rollup uses `totalCount ?? count` == count.
+    expect(columns[oppIndex]!.totalCount).toBeUndefined();
+    expect(columns[prfpIndex]!.totalCount).toBeUndefined();
+    // Count axis reconciles: opp loses the active pending (2→1), synthetic gets it (1), sum == pre-split.
+    expect(columns[oppIndex]!.count).toBe(1);
+    expect(columns[prfpIndex]!.count).toBe(1);
+    expect(columns[oppIndex]!.count + columns[prfpIndex]!.count).toBe(2);
+  });
 });

@@ -90,6 +90,7 @@ import {
   getDealAtRiskResult,
   getCanonicalEstimatingBoundaryStageSlug,
   getOwnerInitialColor,
+  pendingRfpSubStateForStatus,
   resolveEffectiveStageEnteredAt,
   toCanonicalDealStageSlug,
   type AtRiskResult,
@@ -320,6 +321,7 @@ export function DealDetailPage() {
   const [rfpRetrying, setRfpRetrying] = useState(false);
   const [rfpTriggering, setRfpTriggering] = useState(false);
   const [rfpTriggerError, setRfpTriggerError] = useState<string | null>(null);
+  const [rfpCancelling, setRfpCancelling] = useState(false);
   const [rfpReadinessStatus, setRfpReadinessStatus] = useState<"draft" | "ready" | "activated" | null>(null);
   const [rfpReadinessLoading, setRfpReadinessLoading] = useState(false);
   const [rfpReadinessRefreshKey, setRfpReadinessRefreshKey] = useState(0);
@@ -462,6 +464,10 @@ export function DealDetailPage() {
     deal?.readOnlySyncedAt ??
     null;
   const canTriggerRfp =
+    user?.role === "admin" ||
+    user?.role === "director" ||
+    (user?.role === "rep" && deal?.assignedRepId === user.id);
+  const canCancelRfp =
     user?.role === "admin" ||
     user?.role === "director" ||
     (user?.role === "rep" && deal?.assignedRepId === user.id);
@@ -652,6 +658,27 @@ export function DealDetailPage() {
       setRfpTriggering(false);
     }
   };
+  const handleCancelRfp = async () => {
+    if (!deal?.id) return;
+    if (!window.confirm("Return this deal to Opportunity and cancel the pending RFP?")) return;
+    setRfpCancelling(true);
+    try {
+      await api(`/deals/${deal.id}/cancel-rfp`, { method: "POST" });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to cancel the RFP");
+      setRfpCancelling(false);
+      return;
+    }
+    toast.success("Returned to Opportunity");
+    try {
+      await refetch();
+    } catch {
+      toast.info("RFP cancelled. Refresh page to see updated status.");
+    } finally {
+      setRfpCancelling(false);
+    }
+  };
+
   const handleScopingReadinessChanged = () => {
     setRfpReadinessRefreshKey((key) => key + 1);
   };
@@ -918,7 +945,16 @@ export function DealDetailPage() {
           onRefresh={refetch}
         />
       )}
-      <RfpApprovalStatusBlock deal={deal} onRetry={handleRfpRetry} retrying={rfpRetrying} />
+      <RfpApprovalStatusBlock
+        deal={deal}
+        onRetry={handleRfpRetry}
+        retrying={rfpRetrying}
+        onCancel={handleCancelRfp}
+        canCancel={canCancelRfp}
+        cancelling={rfpCancelling}
+        isOpportunityStage={isOpportunityStage}
+        isBidBoardOwned={isBidBoardOwned}
+      />
       {isBidBoardOwned && !deal.isHubspotSourced && <BidBoardProjectSummaryPanel deal={deal} />}
       {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
         <DealEstimatingSubstage deal={deal} onUpdate={refetch} />
@@ -1428,10 +1464,24 @@ function RfpApprovalStatusBlock({
   deal,
   onRetry,
   retrying,
+  onCancel,
+  canCancel,
+  cancelling,
+  isOpportunityStage,
+  isBidBoardOwned,
 }: {
   deal: DealDetail;
   onRetry: () => void;
   retrying: boolean;
+  onCancel?: () => void;
+  canCancel?: boolean;
+  cancelling?: boolean;
+  // Page-derived gating (canonicalCurrentStageSlug with currentStage fallback; isBidBoardOwned incl.
+  // inferred bidBoardOwnership.isOwned), so the cancel button matches how the rest of the page gates
+  // actions and doesn't lose the escape hatch when raw deal.stageSlug is absent / expose it on an
+  // inferred Bid Board owned deal.
+  isOpportunityStage: boolean;
+  isBidBoardOwned: boolean;
 }) {
   if (!deal.rfpApprovalStatus) return null;
 
@@ -1509,11 +1559,28 @@ function RfpApprovalStatusBlock({
             <p className="mt-1 text-sm">Declined {formatDate(deal.rfpDeclinedAt)}</p>
           )}
         </div>
-        {deal.rfpApprovalStatus === "send_failed" && (
-          <Button type="button" size="sm" variant="outline" onClick={onRetry} disabled={retrying}>
-            {retrying ? "Retrying..." : "Retry"}
-          </Button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          {deal.rfpApprovalStatus === "send_failed" && (
+            <Button type="button" size="sm" variant="outline" onClick={onRetry} disabled={retrying}>
+              {retrying ? "Retrying..." : "Retry"}
+            </Button>
+          )}
+          {canCancel &&
+            // Mirror the cancel route's full guard so the button only shows when the deal is actually
+            // cancellable: still an Opportunity-family stage, not Bid Board owned, in an attention state,
+            // and neither a re-confirmed denial nor an in-flight override approval. Otherwise the route
+            // rejects (RFP_CANCEL_WRONG_STATE / NOT_CANCELLABLE) and the action can only 409. Stage +
+            // ownership come from the page-derived values (currentStage fallback + inferred ownership).
+            isOpportunityStage &&
+            !isBidBoardOwned &&
+            pendingRfpSubStateForStatus(deal.rfpApprovalStatus) === "attention" &&
+            deal.rfpOverrideDecision !== "denial_reconfirmed" &&
+            deal.rfpOverrideState !== "approving" && (
+              <Button type="button" size="sm" variant="outline" onClick={onCancel} disabled={cancelling}>
+                {cancelling ? "Cancelling..." : "Return to Opportunity"}
+              </Button>
+            )}
+        </div>
       </div>
     </section>
   );

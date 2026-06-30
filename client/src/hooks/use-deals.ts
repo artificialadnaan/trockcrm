@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { useLocation } from "react-router-dom";
 import { api } from "@/lib/api";
 import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 import {
@@ -212,6 +213,8 @@ export interface Deal {
   rfpLastAttemptError?: string | null;
   rfpDeclinedReason?: string | null;
   rfpDeclinedAt?: string | null;
+  rfpOverrideDecision?: string | null;
+  rfpOverrideState?: string | null;
   isRfpTriggerEnabled?: boolean;
   lastActivityAt: string | null;
   stageEnteredAt: string;
@@ -1055,4 +1058,78 @@ export async function activateServiceHandoff(dealId: string) {
   return api<{ activated: true }>(`/deals/${dealId}/service-handoff/activate`, {
     method: "POST",
   });
+}
+
+export interface PendingRfpDeal {
+  id: string;
+  name: string;
+  projectNumber: string | null;
+  dealNumber: string | null;
+  workflowRoute: string;
+  assignedRepId: string | null;
+  assignedRepName: string | null;
+  rfpApprovalStatus: string;
+  subState: "awaiting" | "attention";
+  triggeredById: string | null;
+  triggeredByName: string | null;
+  triggeredAt: string | null;
+  /** Status-specific attention reason: decline note / conflict reason / send-failure error (null while awaiting). */
+  reason: string | null;
+}
+
+export function usePendingRfp() {
+  // The office is URL-driven: api() reads ?officeId from window.location.search. Depend on the router's
+  // search so a cross-office viewer switching ?officeId (same mounted route) refetches the new office's
+  // queue instead of showing the prior office until a manual refresh.
+  const { search } = useLocation();
+  const [deals, setDeals] = useState<PendingRfpDeal[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  // Monotonic request id: a fast ?officeId switch fires overlapping fetches that can resolve out of order;
+  // only the latest request is allowed to write state, so an older office's response can't overwrite a
+  // newer one (which would show office A's rows under ?officeId=B).
+  const requestIdRef = useRef(0);
+  // The refetch below bumps the id only when it RUNS (a passive effect, after commit). That leaves a gap:
+  // a prior office's request can resolve between the ?search-change render and the new refetch and be
+  // wrongly accepted. Invalidate in a LAYOUT effect on ?search change — it runs synchronously after the
+  // commit, before the passive refetch AND before any pending response's resolution microtask, and only
+  // for committed renders (so, unlike mutating a ref during render, it's safe under concurrent rendering).
+  // Also reset to a clean loading state HERE (pre-paint), so the previous office's rows/error aren't
+  // painted under the new ?officeId for the frame between this commit and the passive refetch starting.
+  const isFirstLayout = useRef(true);
+  useLayoutEffect(() => {
+    requestIdRef.current += 1;
+    // Skip the mount run (state already starts loading=true / no rows); only a real ?search change should
+    // clear the prior office's data before its refetch is scheduled.
+    if (isFirstLayout.current) {
+      isFirstLayout.current = false;
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setDeals(null);
+  }, [search]);
+  const refetch = useCallback(() => {
+    const requestId = ++requestIdRef.current;
+    const isCurrent = () => requestId === requestIdRef.current;
+    setLoading(true);
+    setError(null);
+    return api<{ deals: PendingRfpDeal[] }>("/deals/pending-rfp")
+      .then((r) => {
+        if (isCurrent()) setDeals(r.deals);
+        return r.deals;
+      })
+      .catch((e: unknown) => {
+        if (isCurrent()) setError(e instanceof Error ? e.message : "Failed to load pending RFPs");
+        throw e;
+      })
+      .finally(() => {
+        if (isCurrent()) setLoading(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+  useEffect(() => {
+    void refetch().catch(() => undefined);
+  }, [refetch]);
+  return { deals, loading, error, refetch };
 }

@@ -1,5 +1,5 @@
 import type { Deal, DealBoardColumn } from "@/hooks/use-deals";
-import { getEffectiveDealValue } from "@trock-crm/shared/types";
+import { getEffectiveDealValue, pendingRfpSubStateForStatus } from "@trock-crm/shared/types";
 import {
   getDealBoardStageSlugs,
   getDealStageLabelBySlug,
@@ -145,24 +145,47 @@ export function buildCanonicalDealBoardColumns(
 ): DealBoardColumn[] {
   const deals = dedupeDealsById((rawColumns ?? []).flatMap((column) => column.cards));
 
-  return getDealBoardStageSlugs().map((slug) => {
+  const dealCanonicalSlug = (deal: Deal) =>
+    getDealStageMetadata(
+      {
+        stageId: deal.stageId,
+        workflowRoute: deal.workflowRoute ?? "normal",
+        isBidBoardOwned: deal.isBidBoardOwned,
+        bidBoardStageSlug: deal.bidBoardStageSlug,
+        readOnlySyncedAt: deal.readOnlySyncedAt,
+      },
+      stages,
+    ).slug;
+  const isPendingRfpCard = (deal: Deal) =>
+    dealCanonicalSlug(deal) === "opportunity" &&
+    deal.isBidBoardOwned === false &&
+    deal.rfpOverrideDecision !== "denial_reconfirmed" &&
+    // An in-flight override approval (rfpOverrideState === "approving") stays rfpApprovalStatus
+    // "declined" until the SyncHub callback lands; the server queue + cancel route both exclude
+    // it, so the board must too — otherwise it shows as an actionable Pending RFP card.
+    deal.rfpOverrideState !== "approving" &&
+    pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null;
+  // DELIBERATELY owner-scoped: the synthetic Pending RFP column is derived from THIS board's own cards
+  // (already scope-filtered, value-resolved, and at-risk-decorated by the server pipeline), NOT a separate
+  // office-wide cross-rep query. A cross-rep version was built and then reverted (PR #834) because an
+  // all-office overlay cannot reconcile with the scope-filtered board: the synthetic `pending_rfp` column
+  // is in the Active-Pipeline + At-Risk rollups, so its count can match the in-scope KPI OR its all-office
+  // visible cards, not both; and a lean cross-rep projection loses value fields (expectedCloseDate
+  // far-future zeroing, bidBoardTotalSales) + at-risk decoration. The complete cross-rep shared queue is
+  // the dedicated /deals/pending-rfp dashboard. (The board passes BOARD_CARDS_PER_STAGE_LIMIT=1000, so
+  // `deals` is the full Opportunity set in practice — no preview-truncation undercount.)
+  const pendingRfpCards = deals.filter(isPendingRfpCard);
+
+  const columns: DealBoardColumn[] = getDealBoardStageSlugs().map((slug) => {
     const matchingRawColumns = (rawColumns ?? []).filter((column) => {
       const rawSlug = column.stage.slug;
       const columnRoute = workflowRouteFromColumn(column as RawColumnRouteLike);
       return normalizeDealStageSlug(rawSlug, columnRoute) === slug;
     });
     const cards = deals.filter((deal) => {
-      const workflowRoute = deal.workflowRoute ?? "normal";
-      return getDealStageMetadata(
-        {
-          stageId: deal.stageId,
-          workflowRoute,
-          isBidBoardOwned: deal.isBidBoardOwned,
-          bidBoardStageSlug: deal.bidBoardStageSlug,
-          readOnlySyncedAt: deal.readOnlySyncedAt,
-        },
-        stages
-      ).slug === slug;
+      if (dealCanonicalSlug(deal) !== slug) return false;
+      if (slug === "opportunity" && isPendingRfpCard(deal)) return false;
+      return true;
     });
 
     const matchingStage =
@@ -210,6 +233,40 @@ export function buildCanonicalDealBoardColumns(
       cards,
     };
   });
+
+  // Board `count`/`totalValue` are the active/reportable figures (on-hold cards are excluded), so the
+  // moved-card adjustment + the synthetic column must count active cards only — otherwise an on-hold
+  // pending RFP would be double-counted out of opportunity and shown as active here.
+  const activePendingRfp = pendingRfpCards.filter((d) => !d.onHold);
+  const pendingRfpCount = activePendingRfp.length;
+  const pendingRfpValue = activePendingRfp.reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0);
+
+  const oppIndex = columns.findIndex((column) => column.stage.slug === "opportunity");
+  if (oppIndex !== -1 && pendingRfpCards.length > 0) {
+    const opp = columns[oppIndex]!;
+    // Subtract the moved pending-RFP cards from the opportunity column's backend aggregate so
+    // the two columns don't double-count (opportunity header would over-report otherwise).
+    columns[oppIndex] = {
+      ...opp,
+      count: Math.max(0, opp.count - pendingRfpCount),
+      totalValue: opp.totalValue - pendingRfpValue,
+    };
+    columns.splice(oppIndex + 1, 0, {
+      stage: {
+        id: "canonical-pending_rfp",
+        name: "Pending RFP",
+        slug: "pending_rfp",
+        color: null,
+        displayOrder: (opp.stage.displayOrder ?? 0) + 1,
+        isActivePipeline: false,
+        isTerminal: false,
+      },
+      count: pendingRfpCount,
+      totalValue: pendingRfpValue,
+      cards: pendingRfpCards,
+    });
+  }
+  return columns;
 }
 
 function getDealValue(deal: Deal, canonicalStageSlug: string) {

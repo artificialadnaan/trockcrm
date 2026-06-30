@@ -31,6 +31,7 @@ import {
   ChevronDown,
   DollarSign,
   Ticket,
+  Hourglass,
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -81,6 +82,7 @@ const navItems: NavItem[] = [
   { to: "/reports", icon: BarChart3, label: "Reports", roles: ["admin", "director", "rep"] },
   { to: "/commissions", icon: DollarSign, label: "Commissions", roles: ["rep"] },
   { to: "/projects", icon: Building2, label: "Projects", roles: ["admin", "director", "rep"] },
+  { to: "/deals/pending-rfp", icon: Hourglass, label: "Pending RFP", roles: ["admin", "director", "rep"] },
 ];
 
 const directorItems: NavItem[] = [
