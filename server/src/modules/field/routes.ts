@@ -293,11 +293,13 @@ fieldRoutes.delete("/projects/:dealId/star", requireFieldContractor, async (req,
   }
 });
 
-// Public share: mint an unauthenticated, 7-day, photos-only link to a SELECTED set of a project's
+// Public share: mint an unauthenticated, 90-day, photos-only link to a SELECTED set of a project's
 // photos. Photos-only / terminal-safe — this creates a public_photo_tokens row and never mutates the
 // deal (works on Won/terminal projects, matching the field module's zero-deal-mutation contract). The
 // token is scoped to the resolved photo ids; the public viewer + asset/download enforce that subset.
-const SHARE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// The recipient-facing lifetime is purely this token expiry (the asset endpoint streams via our server
+// and never hands out a presigned R2 URL), so it isn't bound by the 7-day presigned-URL cap.
+const SHARE_LINK_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 const MAX_SHARE_PHOTOS = 200;
 
 function parseSharePhotoIds(raw: unknown): string[] {
