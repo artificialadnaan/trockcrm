@@ -2036,6 +2036,35 @@ describe("DealDetailPage", () => {
     expect(mounted.container.textContent).toContain("Return to Opportunity");
   });
 
+  it("still offers Return to Opportunity when deal.stageSlug is absent (resolves stage via currentStage)", async () => {
+    // Robustness: the cancel gate uses the page-derived isOpportunityStage (currentStage fallback), so a
+    // valid Opportunity deal whose raw stageSlug didn't come through still keeps the escape hatch.
+    mocks.useAuthMock.mockReturnValue({ user: { id: "rep-1", role: "rep" } });
+    mocks.useDealDetailMock.mockReturnValue({
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      deal: makeDealDetail({
+        stageId: "stage-opportunity",
+        stageSlug: null,
+        isBidBoardOwned: false,
+        bidBoardStageSlug: null,
+        readOnlySyncedAt: null,
+        bidBoardOwnership: null,
+        rfpApprovalStatus: "declined",
+        rfpApprovalRequestedAt: "2026-05-12T12:00:00.000Z",
+        assignedRepId: "rep-1",
+      }),
+    });
+
+    mounted = mountPage();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(mounted.container.textContent).toContain("Return to Opportunity");
+  });
+
   it("renders Return to Opportunity button for admin on a declined RFP deal (attention states only)", async () => {
     mocks.useAuthMock.mockReturnValue({ user: { id: "admin-1", role: "admin" } });
     mocks.useDealDetailMock.mockReturnValue({

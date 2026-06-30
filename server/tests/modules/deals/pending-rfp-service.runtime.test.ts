@@ -33,8 +33,10 @@ beforeAll(async () => {
       ('00000000-0000-0000-0000-0000000000d1','Director One');
     INSERT INTO deals (id,name,workflow_route,stage_id,assigned_rep_id,rfp_approval_status,rfp_approval_requested_at,rfp_approval_requested_by)
       VALUES ('00000000-0000-0000-0000-00000000d001','Older Pending','normal','00000000-0000-0000-0000-0000000000aa','00000000-0000-0000-0000-0000000000c1','pending','2026-06-01T00:00:00Z','00000000-0000-0000-0000-0000000000d1');
-    INSERT INTO deals (id,name,workflow_route,stage_id,assigned_rep_id,rfp_approval_status,rfp_approval_requested_at,rfp_declined_reason,rfp_approval_request_id,rfp_approval_token,rfp_last_attempt_error,rfp_override_state,rfp_override_error,updated_at)
-      VALUES ('00000000-0000-0000-0000-00000000d002','Newer Declined','service','00000000-0000-0000-0000-0000000000aa','00000000-0000-0000-0000-0000000000c1','declined','2026-06-10T00:00:00Z','missing docs',42,'tok-xyz','boom','failed','prev override error','2020-01-01T00:00:00Z');
+    -- Seeds a non-null stale override block (state/error/decision) — decision is a non-reconfirmed value
+    -- (still cancellable) so the cancel-clear assertion on rfp_override_decision is load-bearing.
+    INSERT INTO deals (id,name,workflow_route,stage_id,assigned_rep_id,rfp_approval_status,rfp_approval_requested_at,rfp_declined_reason,rfp_approval_request_id,rfp_approval_token,rfp_last_attempt_error,rfp_override_state,rfp_override_error,rfp_override_decision,updated_at)
+      VALUES ('00000000-0000-0000-0000-00000000d002','Newer Declined','service','00000000-0000-0000-0000-0000000000aa','00000000-0000-0000-0000-0000000000c1','declined','2026-06-10T00:00:00Z','missing docs',42,'tok-xyz','boom','failed','prev override error','override_approved','2020-01-01T00:00:00Z');
     INSERT INTO deals (id,name,stage_id,rfp_approval_status) VALUES ('00000000-0000-0000-0000-00000000d003','Approved','00000000-0000-0000-0000-0000000000aa','approved');
     INSERT INTO deals (id,name,stage_id,rfp_approval_status,is_bid_board_owned) VALUES ('00000000-0000-0000-0000-00000000d004','Owned','00000000-0000-0000-0000-0000000000aa','pending',true);
     INSERT INTO deals (id,name,stage_id,rfp_approval_status) VALUES ('00000000-0000-0000-0000-00000000d005','Estimating','00000000-0000-0000-0000-0000000000bb','pending');

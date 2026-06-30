@@ -952,6 +952,8 @@ export function DealDetailPage() {
         onCancel={handleCancelRfp}
         canCancel={canCancelRfp}
         cancelling={rfpCancelling}
+        isOpportunityStage={isOpportunityStage}
+        isBidBoardOwned={isBidBoardOwned}
       />
       {isBidBoardOwned && !deal.isHubspotSourced && <BidBoardProjectSummaryPanel deal={deal} />}
       {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
@@ -1465,6 +1467,8 @@ function RfpApprovalStatusBlock({
   onCancel,
   canCancel,
   cancelling,
+  isOpportunityStage,
+  isBidBoardOwned,
 }: {
   deal: DealDetail;
   onRetry: () => void;
@@ -1472,6 +1476,12 @@ function RfpApprovalStatusBlock({
   onCancel?: () => void;
   canCancel?: boolean;
   cancelling?: boolean;
+  // Page-derived gating (canonicalCurrentStageSlug with currentStage fallback; isBidBoardOwned incl.
+  // inferred bidBoardOwnership.isOwned), so the cancel button matches how the rest of the page gates
+  // actions and doesn't lose the escape hatch when raw deal.stageSlug is absent / expose it on an
+  // inferred Bid Board owned deal.
+  isOpportunityStage: boolean;
+  isBidBoardOwned: boolean;
 }) {
   if (!deal.rfpApprovalStatus) return null;
 
@@ -1559,9 +1569,10 @@ function RfpApprovalStatusBlock({
             // Mirror the cancel route's full guard so the button only shows when the deal is actually
             // cancellable: still an Opportunity-family stage, not Bid Board owned, in an attention state,
             // and neither a re-confirmed denial nor an in-flight override approval. Otherwise the route
-            // rejects (RFP_CANCEL_WRONG_STATE / NOT_CANCELLABLE) and the action can only 409.
-            toCanonicalDealStageSlug(deal.stageSlug ?? "", deal.workflowRoute ?? "normal") === "opportunity" &&
-            deal.isBidBoardOwned !== true &&
+            // rejects (RFP_CANCEL_WRONG_STATE / NOT_CANCELLABLE) and the action can only 409. Stage +
+            // ownership come from the page-derived values (currentStage fallback + inferred ownership).
+            isOpportunityStage &&
+            !isBidBoardOwned &&
             pendingRfpSubStateForStatus(deal.rfpApprovalStatus) === "attention" &&
             deal.rfpOverrideDecision !== "denial_reconfirmed" &&
             deal.rfpOverrideState !== "approving" && (
