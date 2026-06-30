@@ -48,6 +48,18 @@ function Drill({
   );
 }
 
+// The Earned cell shows the PAYABLE total, EXCEPT a pure below-floor row — nothing payable yet but real
+// commission withheld — which shows its held amount with a "held" badge. A below-floor rep who still has a
+// payable manager override has totalEarnedCommission > 0 (override is not gated), so it falls through to the
+// normal payable display rather than hiding the override behind the held badge. The held branch, the cell
+// display, and the sort accessor all read these helpers so the column sorts by the number the director sees.
+function isHeldOnly(r: Row): boolean {
+  return !r.floorMet && r.totalEarnedCommission === 0 && r.heldEarnedCommission > 0;
+}
+function displayedEarned(r: Row): number {
+  return isHeldOnly(r) ? r.heldEarnedCommission : r.totalEarnedCommission;
+}
+
 function KpiCard({ label, value, tone }: { label: string; value: string; tone: string }) {
   return (
     <div className="relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4">
@@ -88,7 +100,7 @@ export function TeamCommissionsPage() {
   // Sortable columns (sort keys cover every visible figure; compound cells sort by a representative total).
   const sortCols: SortColumn<Row>[] = [
     { key: "rep", type: "text", accessor: (r) => r.repName },
-    { key: "earned", type: "number", accessor: (r) => r.totalEarnedCommission },
+    { key: "earned", type: "number", accessor: (r) => displayedEarned(r) },
     // Tie-break equal values by deal count so a zero-value-but-counted won·unsigned row (a won deal with
     // no awarded/bid/DD amount) outranks a truly-empty row instead of collapsing to the same position.
     { key: "wonunsigned", type: "number", accessor: (r) => r.wonUnsignedValue, compare: (a, b) => (a.wonUnsignedValue - b.wonUnsignedValue) || (a.wonUnsignedCount - b.wonUnsignedCount) },
@@ -184,22 +196,24 @@ export function TeamCommissionsPage() {
                       </Link>
                     </td>
                     <td className="px-3 py-2.5 text-right">
-                      {!row.floorMet && row.heldEarnedCommission > 0 ? (
-                        // Below floor: real earned commission is WITHHELD, not zero. Show the held amount so a
-                        // director doesn't read a bare $0 as "earned nothing"; floorRemaining is how much more
-                        // booked revenue clears it. Still drillable to the contributing deals.
+                      {isHeldOnly(row) ? (
+                        // Below floor with nothing payable: real earned commission is WITHHELD, not zero. Show
+                        // the held amount so a director doesn't read a bare $0 as "earned nothing"; floorRemaining
+                        // is how much more booked revenue clears it. Drillable to the contributing deals — the
+                        // held amount keeps the emerald drill affordance, the badge carries the amber "held" cue.
                         <span
                           className="inline-flex flex-col items-end"
                           title={`Held below floor — ${usdExact(row.floorRemaining)} more booked revenue clears it`}
                         >
-                          <Drill row={row} metric="earned" money zeroDim onDrill={onDrill}>
-                            <span className="text-amber-700">{usdExact(row.heldEarnedCommission)}</span>
+                          <Drill row={row} metric="earned" money onDrill={onDrill}>
+                            {usdExact(row.heldEarnedCommission)}
                           </Drill>
                           <span className="mt-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">
                             held · {usdExact(row.floorRemaining)} to floor
                           </span>
                         </span>
                       ) : (
+                        // Payable: the full total (incl. any not-gated manager override on an otherwise-held rep).
                         <Drill row={row} metric="earned" money zeroDim={row.totalEarnedCommission === 0} onDrill={onDrill}>{usdExact(row.totalEarnedCommission)}</Drill>
                       )}
                     </td>

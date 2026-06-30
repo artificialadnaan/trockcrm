@@ -142,6 +142,74 @@ describe("TeamCommissionsPage", () => {
     expect(matches.length).toBeGreaterThanOrEqual(2);
   });
 
+  // ── floor-hold display (review findings) ──────────────────────────────────────────────────────────
+  // A "held only" row: below floor (floorMet=false) with real earned commission withheld
+  // (heldEarnedCommission>0) and nothing payable (totalEarnedCommission=0).
+  const heldRow = {
+    repId: "rep-held", repName: "Hold Below",
+    totalEarnedCommission: 0, heldEarnedCommission: 4340, floorMet: false, floorRemaining: 4995660,
+    potentialCommission: 0, newCustomerShare: 0, meetsNewCustomerShare: true,
+    activeDeals: 1, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0,
+    leads: 0, qualifiedLeads: 0, opportunities: 0,
+    estimating: 0, calls: 0, emails: 0, meetings: 0, notes: 0, totalActivities: 0,
+  };
+  const mockWorkspaceRows = (rows: unknown[]) =>
+    mocks.apiMock.mockImplementation((url: string) =>
+      url.includes("/evidence")
+        ? Promise.resolve({ data: { ...evidence, repId: "rep-held", metric: "earned" } })
+        : Promise.resolve({ data: { rows, officeTotals: workspace.officeTotals } }),
+    );
+
+  it("a below-floor rep shows a DRILLABLE held amount + 'held' badge, not a dimmed $0 (findings #1)", async () => {
+    mockWorkspaceRows([heldRow]);
+    const { container } = await render();
+    // The held amount is a real button (drillable to its deals), NOT a dimmed non-clickable span.
+    const heldBtn = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "$4,340.00");
+    expect(heldBtn).toBeTruthy();
+    // The amber "held · $X to floor" cue carries the below-floor context.
+    expect(container.textContent).toContain("held · $4,995,660.00 to floor");
+    // ...and the held amount is a clickable button, never the dimmed non-clickable $0 treatment.
+    expect((heldBtn as HTMLElement).className).not.toContain("text-slate-300");
+    await act(async () => { (heldBtn as HTMLButtonElement).click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.apiMock).toHaveBeenCalledWith(
+      expect.stringContaining("/dashboard/director/commissions/evidence?repId=rep-held&metric=earned"),
+    );
+  });
+
+  it("a below-floor rep with a payable override shows the payable total, not the held-only display (finding #2)", async () => {
+    // Manager override is NOT floor-gated: totalEarnedCommission = override ($1,500) even below floor.
+    mockWorkspaceRows([{ ...heldRow, totalEarnedCommission: 1500 }]);
+    const { container } = await render();
+    // The payable total is shown (drillable) and the held-only collapse does NOT hide it.
+    const payableBtn = Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "$1,500.00");
+    expect(payableBtn).toBeTruthy();
+    expect(container.textContent).not.toContain("held ·"); // not the held-only branch
+    expect(container.textContent).not.toContain("$4,340.00"); // held amount not surfaced over the payable total
+  });
+
+  it("sorts the Earned column by the displayed amount — a held row outranks a true $0 (finding #3)", async () => {
+    // zeroRow truly earns nothing ($0 displayed); heldRow displays its held $4,340. Sorting Earned desc must
+    // put the held row above the $0 row even though both have totalEarnedCommission === 0.
+    const zeroRow = { ...heldRow, repId: "rep-zero", repName: "Zero Earner", heldEarnedCommission: 0, floorMet: true };
+    mockWorkspaceRows([zeroRow, heldRow]);
+    const { container } = await render();
+    const earnedHeader = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Earned")) as HTMLButtonElement;
+    // Toggle to a deterministic Earned-desc sort.
+    await act(async () => { earnedHeader.click(); });
+    await act(async () => { await Promise.resolve(); });
+    let order = Array.from(container.querySelectorAll("tbody tr")).map((tr) => tr.textContent ?? "");
+    if (order.findIndex((t) => t.includes("Hold Below")) > order.findIndex((t) => t.includes("Zero Earner"))) {
+      await act(async () => { earnedHeader.click(); }); // ensure desc (held on top)
+      await act(async () => { await Promise.resolve(); });
+      order = Array.from(container.querySelectorAll("tbody tr")).map((tr) => tr.textContent ?? "");
+    }
+    const heldIdx = order.findIndex((t) => t.includes("Hold Below"));
+    const zeroIdx = order.findIndex((t) => t.includes("Zero Earner"));
+    expect(heldIdx).toBeGreaterThanOrEqual(0);
+    expect(heldIdx).toBeLessThan(zeroIdx); // held ($4,340 displayed) sorts above true $0
+  });
+
   it("changing the period preset refetches the workspace", async () => {
     const { container } = await render();
     const mtd = Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "MTD") as HTMLButtonElement;
