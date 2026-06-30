@@ -401,6 +401,16 @@ function DirectorRepLeadsListSection({
   );
 }
 
+/** Drill a rep-detail KPI card down to its detailed section below: smooth-scroll + a brief highlight so
+ *  it's clear where the click landed. (All the detail lives on this page, so we anchor rather than route.) */
+function scrollToRepSection(id: string) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "start" });
+  el.classList.add("ring-2", "ring-brand-red/40", "transition-shadow");
+  window.setTimeout(() => el.classList.remove("ring-2", "ring-brand-red/40"), 1200);
+}
+
 export function DirectorRepDetail() {
   const navigate = useNavigate();
   const { repId } = useParams<{ repId: string }>();
@@ -624,18 +634,21 @@ export function DirectorRepDetail() {
                   : `${Math.round(data.commissionSummary.newCustomerShare * 100)}% new-customer mix`
               }
               icon={<DollarSign className="h-5 w-5" />}
+              onClick={() => scrollToRepSection("rep-commission-breakdown")}
             />
             <StatCard
               title={`Win Rate · ${periodLabel}`}
               value={`${data.winLoss.winRate}%`}
               subtitle={`${data.winLoss.wins}W / ${data.winLoss.losses}L`}
               icon={<Trophy className="h-5 w-5" />}
+              onClick={() => scrollToRepSection("rep-win-rate-trend")}
             />
             <StatCard
               title="Active Deals (Current)"
               value={data.activeDeals.count}
               subtitle={`${formatCurrency(data.activeDeals.totalValue)} open now`}
               icon={<Briefcase className="h-5 w-5" />}
+              onClick={() => scrollToRepSection("rep-deals-leads")}
             />
           </div>
         </section>
@@ -649,35 +662,40 @@ export function DirectorRepDetail() {
               value={data.activityThisWeek.total}
               subtitle={`${data.activityThisWeek.calls} calls in ${activityPeriodLabel}`}
               icon={<Activity className="h-5 w-5" />}
+              onClick={() => scrollToRepSection("rep-activity-summary")}
             />
             <StatCard
               title="Tasks Today"
               value={taskTotal}
               subtitle={data.tasksToday.overdue > 0 ? `${data.tasksToday.overdue} overdue` : "On track"}
               icon={<CheckSquare className="h-5 w-5" />}
+              onClick={() => scrollToRepSection("rep-activity-summary")}
             />
             <StatCard
               title={`Follow-up Compliance · ${periodLabel}`}
               value={`${data.followUpCompliance.complianceRate}%`}
               subtitle={`${data.followUpCompliance.onTime}/${data.followUpCompliance.total} on time`}
               icon={<Target className="h-5 w-5" />}
+              onClick={() => scrollToRepSection("rep-activity-summary")}
             />
           </div>
         </section>
       </div>
 
-      <RepCommissionDrilldown
-        key={repId}
-        repId={repId ?? ""}
-        repName={data.winLoss.repName || "Rep"}
-        periodLabel={periodLabel}
-        isFlatListWindow={preset === "ytd"}
-        dateRange={dateRange}
-        commissionSummary={data.commissionSummary}
-        commissionDeals={data.commissionDeals}
-        wonMissingContractDate={data.wonMissingContractDate}
-        onDataChanged={refetch}
-      />
+      <div id="rep-commission-breakdown" className="scroll-mt-24 rounded-xl">
+        <RepCommissionDrilldown
+          key={repId}
+          repId={repId ?? ""}
+          repName={data.winLoss.repName || "Rep"}
+          periodLabel={periodLabel}
+          isFlatListWindow={preset === "ytd"}
+          dateRange={dateRange}
+          commissionSummary={data.commissionSummary}
+          commissionDeals={data.commissionDeals}
+          wonMissingContractDate={data.wonMissingContractDate}
+          onDataChanged={refetch}
+        />
+      </div>
 
       <Card id="rep-activity-summary" className="scroll-mt-24">
         <CardHeader>
@@ -715,7 +733,19 @@ export function DirectorRepDetail() {
 
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               {activityBreakdown.map((item) => (
-                <div key={item.label} className={`rounded-2xl border px-4 py-4 ${item.tone}`}>
+                <div
+                  key={item.label}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => scrollToRepSection("rep-deals-leads")}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      scrollToRepSection("rep-deals-leads");
+                    }
+                  }}
+                  className={`cursor-pointer rounded-2xl border px-4 py-4 transition-shadow hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red/40 ${item.tone}`}
+                >
                   <p className="text-[10px] font-bold uppercase tracking-widest opacity-70">{item.label}</p>
                   <p className="mt-3 text-3xl font-black">{item.value}</p>
                   <p className="mt-1 text-xs opacity-80">
@@ -730,7 +760,7 @@ export function DirectorRepDetail() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card id="rep-deals-leads" className="scroll-mt-24">
         <CardHeader className="space-y-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
@@ -855,7 +885,7 @@ export function DirectorRepDetail() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card id="rep-win-rate-trend" className="scroll-mt-24">
           <CardHeader>
             <CardTitle>Win Rate Trend</CardTitle>
           </CardHeader>
