@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
-import { getPendingRfpDeals, cancelPendingRfp } from "../../../src/modules/deals/pending-rfp-service.js";
+import { getPendingRfpDeals, cancelPendingRfp, getPendingRfpBoardCards } from "../../../src/modules/deals/pending-rfp-service.js";
 
 let tdb: any;
 let pg: PGlite;
@@ -12,10 +12,14 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_active_pipeline boolean DEFAULT true);
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
+    CREATE TABLE companies (id uuid PRIMARY KEY, name text);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text, project_number text, deal_number text, workflow_route text,
       stage_id uuid, is_bid_board_owned boolean DEFAULT false, is_active boolean DEFAULT true,
-      is_test_data boolean DEFAULT false, assigned_rep_id uuid,
+      is_test_data boolean DEFAULT false, assigned_rep_id uuid, company_id uuid,
+      is_change_order boolean DEFAULT false, bid_board_stage_slug text, read_only_synced_at timestamptz,
+      property_city text, property_state text, win_probability integer, stage_entered_at timestamptz,
+      bid_estimate numeric, dd_estimate numeric, awarded_amount numeric, on_hold boolean DEFAULT false,
       rfp_approval_status text, rfp_approval_requested_at timestamptz, rfp_approval_requested_by uuid,
       rfp_declined_reason text, rfp_approval_request_event_id uuid, rfp_declined_at timestamptz,
       rfp_approval_request_id integer, rfp_approval_token text,
@@ -170,5 +174,44 @@ describe("cancelPendingRfp", () => {
     const row = (Array.isArray(res) ? res : res.rows)[0];
     expect(row.rfp_approval_status).toBe("declined"); // unchanged — not cleared
     expect(row.rfp_declined_reason).toBe("left stale");
+  });
+});
+
+describe("getPendingRfpBoardCards", () => {
+  it("returns cross-rep pending RFPs as board cards (both reps), stageSlug stamped; excludes owned/inactive/wrong-stage", async () => {
+    await pg.exec(`
+      INSERT INTO companies (id,name) VALUES ('00000000-0000-0000-0000-0000000000e1','Acme');
+      INSERT INTO deals (id,name,stage_id,assigned_rep_id,company_id,rfp_approval_status,bid_estimate,property_city,property_state)
+        VALUES ('00000000-0000-0000-0000-00000000b001','RepA Pending','00000000-0000-0000-0000-0000000000aa','00000000-0000-0000-0000-0000000000c1','00000000-0000-0000-0000-0000000000e1','pending','100000','Dallas','TX');
+      INSERT INTO deals (id,name,stage_id,assigned_rep_id,rfp_approval_status,bid_estimate)
+        VALUES ('00000000-0000-0000-0000-00000000b002','RepB Declined','00000000-0000-0000-0000-0000000000aa','00000000-0000-0000-0000-0000000000d1','declined','70000');
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status) VALUES ('00000000-0000-0000-0000-00000000b003','Estimating','00000000-0000-0000-0000-0000000000bb','pending');
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,is_bid_board_owned) VALUES ('00000000-0000-0000-0000-00000000b004','Owned','00000000-0000-0000-0000-0000000000aa','pending',true);
+      INSERT INTO deals (id,name,stage_id,rfp_approval_status,is_active) VALUES ('00000000-0000-0000-0000-00000000b005','Inactive','00000000-0000-0000-0000-0000000000aa','pending',false);
+    `);
+    const stages = [
+      { id: "00000000-0000-0000-0000-0000000000aa", slug: "opportunity" },
+      { id: "00000000-0000-0000-0000-0000000000dd", slug: "dd" },
+      { id: "00000000-0000-0000-0000-0000000000bb", slug: "estimating" },
+    ];
+    const cards = await getPendingRfpBoardCards(tdb, stages);
+    const byId = new Map(cards.map((c: any) => [c.id, c]));
+
+    // cross-rep: BOTH reps' pending RFPs are returned (no owner/scope filter)
+    expect(byId.has("00000000-0000-0000-0000-00000000b001")).toBe(true);
+    expect(byId.has("00000000-0000-0000-0000-00000000b002")).toBe(true);
+    // excluded: estimating stage, bid-board-owned, soft-deleted
+    expect(byId.has("00000000-0000-0000-0000-00000000b003")).toBe(false);
+    expect(byId.has("00000000-0000-0000-0000-00000000b004")).toBe(false);
+    expect(byId.has("00000000-0000-0000-0000-00000000b005")).toBe(false);
+    // board-card shape: stageSlug stamped (opportunity value chain) + value + company/rep joins
+    expect(byId.get("00000000-0000-0000-0000-00000000b001")).toMatchObject({
+      stageSlug: "opportunity",
+      bidEstimate: "100000",
+      companyName: "Acme",
+      assignedRepName: "Rep One",
+      propertyState: "TX",
+      isBidBoardOwned: false,
+    });
   });
 });

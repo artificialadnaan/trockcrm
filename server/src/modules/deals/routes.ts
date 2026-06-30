@@ -1009,6 +1009,13 @@ router.get("/pipeline", async (req, res, next) => {
           })
         ),
       })),
+      // Cross-rep pending-RFP board cards: redact + strip private fields per viewer like the column deals,
+      // since this office-wide set includes other reps' deals.
+      pendingRfpCards: redactDealList(result.pendingRfpCards ?? [], { includeHubspotId }).map((deal) =>
+        stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
+          isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
+        })
+      ),
       terminalStages: result.terminalStages,
     });
   } catch (err) {

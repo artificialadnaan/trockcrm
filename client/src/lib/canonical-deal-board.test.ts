@@ -1233,4 +1233,71 @@ describe("buildCanonicalDealBoardColumns", () => {
     expect(columns[prfpIndex]!.count).toBe(1);
     expect(columns[oppIndex]!.count + columns[prfpIndex]!.count).toBe(2);
   });
+
+  it("sources the Pending RFP column from the cross-rep set while Opportunity subtracts only the in-scope pending", () => {
+    // scope=mine: the board shows only the viewer's deals (1 pending p1 in Opportunity), but the cross-rep
+    // set is the whole office (p1 + two other reps' p2/p3). Opportunity must subtract only p1 (in-scope),
+    // while the synthetic column shows all three (the shared office queue).
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 2, // viewer's active opportunity: o1 + p1
+          totalValue: 150000, // o1 (100k) + p1 (50k)
+          cards: [
+            { id: "o1", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: null, bidEstimate: "100000", ddEstimate: null, awardedAmount: null, onHold: false },
+            { id: "p1", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: "pending", bidEstimate: "50000", ddEstimate: null, awardedAmount: null, onHold: false },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any,
+      // cross-rep set (office-wide board cards): p1 (viewer's) + p2/p3 (other reps'), all active.
+      [
+        { id: "p1", stageId: "opp-stage", stageSlug: "opportunity", workflowRoute: "normal", isBidBoardOwned: false, bidEstimate: "50000", ddEstimate: null, awardedAmount: null, onHold: false },
+        { id: "p2", stageId: "opp-stage", stageSlug: "opportunity", workflowRoute: "normal", isBidBoardOwned: false, bidEstimate: "70000", ddEstimate: null, awardedAmount: null, onHold: false },
+        { id: "p3", stageId: "opp-stage", stageSlug: "opportunity", workflowRoute: "normal", isBidBoardOwned: false, bidEstimate: "30000", ddEstimate: null, awardedAmount: null, onHold: false },
+      ] as any
+    );
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    // Opportunity subtracts ONLY the in-scope pending (p1): count 2→1, cards = [o1] (p1 removed).
+    expect(columns[oppIndex]!.count).toBe(1);
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).toEqual(["o1"]);
+    expect(columns[oppIndex]!.totalValue).toBe(100000);
+    // Pending RFP column = the full cross-rep set (all three), NOT just the viewer's p1.
+    expect(columns[prfpIndex]!.cards.map((d) => d.id)).toEqual(["p1", "p2", "p3"]);
+    expect(columns[prfpIndex]!.count).toBe(3);
+    expect(columns[prfpIndex]!.totalValue).toBe(150000); // 50k + 70k + 30k
+  });
+
+  it("shows the cross-rep Pending RFP column even when the viewer (scope=mine) has none of their own", () => {
+    // Viewer has zero pending RFPs in their board, but the office has two → the column still appears.
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 1,
+          totalValue: 100000,
+          cards: [
+            { id: "o1", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: null, bidEstimate: "100000", ddEstimate: null, awardedAmount: null, onHold: false },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any,
+      [
+        { id: "p2", stageId: "opp-stage", stageSlug: "opportunity", workflowRoute: "normal", isBidBoardOwned: false, bidEstimate: "70000", ddEstimate: null, awardedAmount: null, onHold: false },
+        { id: "p3", stageId: "opp-stage", stageSlug: "opportunity", workflowRoute: "normal", isBidBoardOwned: false, bidEstimate: "30000", ddEstimate: null, awardedAmount: null, onHold: false },
+      ] as any
+    );
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    // Opportunity is untouched (the viewer had no in-scope pending to subtract).
+    expect(columns[oppIndex]!.count).toBe(1);
+    // The cross-rep column still appears with the office's pending RFPs.
+    expect(prfpIndex).toBe(oppIndex + 1);
+    expect(columns[prfpIndex]!.cards.map((d) => d.id)).toEqual(["p2", "p3"]);
+    expect(columns[prfpIndex]!.count).toBe(2);
+  });
 });

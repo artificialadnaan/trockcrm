@@ -406,6 +406,9 @@ export interface DealBoardResponse {
     totalValue?: number;
     deals?: Deal[];
   }>;
+  /** Office-wide cross-rep pending-RFP board cards (unscoped, unlimited) — the source for the synthetic
+   *  "Pending RFP" column, so it shows every office pending RFP regardless of the board's Mine/All scope. */
+  pendingRfpCards?: Deal[];
 }
 
 export interface DealStagePageResponse {
@@ -448,6 +451,7 @@ interface DealBoardApiResponse {
   }>;
   terminalStages: DealBoardResponse["terminalStages"];
   columns?: DealBoardApiColumn[];
+  pendingRfpCards?: Deal[];
 }
 
 export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBoardResponse {
@@ -469,6 +473,7 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
       totalCount: terminal.totalCount ?? terminal.count,
       totalValue: terminal.totalValue ?? 0,
     })),
+    pendingRfpCards: result.pendingRfpCards ?? [],
   };
 }
 
