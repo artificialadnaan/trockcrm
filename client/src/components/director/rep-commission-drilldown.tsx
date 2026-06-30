@@ -246,7 +246,7 @@ export function RepCommissionDrilldown({
                   No contributing deals in this period.
                 </p>
               ) : (
-                <div className="overflow-hidden rounded-xl border border-slate-200">
+                <div className="overflow-x-auto rounded-xl border border-slate-200">
                   <table className="min-w-full text-sm">
                     <thead>
                       <tr className="border-b border-slate-200 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
