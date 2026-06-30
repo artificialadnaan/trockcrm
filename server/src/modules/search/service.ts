@@ -405,12 +405,18 @@ export function pickDealSecondaryLabel(projectNumber: string | null, dealNumber:
   return resolveDealDisplayNumber({ projectNumber, dealNumber }) ?? "";
 }
 
-async function searchContacts(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
+// Exported for the linked-company search runtime test; used internally by globalSearch / naturalLanguageSearch.
+export async function searchContacts(tenantDb: TenantDb, query: string, limit: number): Promise<SearchResult[]> {
   // Relevance over EVERY field the builder matches (name parts/email/company + phone/mobile/jobTitle/
   // city AND the derived full-name CONCAT), reused as the merge rank -- so a phone-fragment, city, or
   // two-word full-name match can't be dropped before the limit nor demoted in the cross-office merge.
+  // Rank on the RESOLVED company name (linked companies.name over the free-text company_name) so a
+  // contact matched only via its linked company — buildContactSearchCondition now matches companies.name —
+  // ranks like a company hit instead of relevance 0 (which would bury it / demote it in the cross-office
+  // merge), and so the rank matches the label shown below.
+  const resolvedCompanyName = sql`coalesce(${companies.name}, ${contacts.companyName})`;
   const relevance = relevanceOrder(query, [
-    contacts.firstName, contacts.lastName, contacts.email, contacts.companyName,
+    contacts.firstName, contacts.lastName, contacts.email, resolvedCompanyName,
     contacts.phone, contacts.mobile, contacts.jobTitle, contacts.city,
     sql`(coalesce(${contacts.firstName}, '') || ' ' || coalesce(${contacts.lastName}, ''))`,
   ]);
@@ -422,9 +428,13 @@ async function searchContacts(tenantDb: TenantDb, query: string, limit: number):
       email: contacts.email,
       phone: contacts.phone,
       companyName: contacts.companyName,
+      // Linked company's real name (companies.name via company_id) — preferred for the result label so a
+      // linked-company hit shows the company it matched even when the free-text company_name is null/stale.
+      linkedCompanyName: companies.name,
       relevance,
     })
     .from(contacts)
+    .leftJoin(companies, eq(companies.id, contacts.companyId))
     .where(and(buildContactSearchCondition(query), eq(contacts.isActive, true)))
     .orderBy(desc(relevance), desc(contacts.updatedAt))
     .limit(limit);
@@ -436,7 +446,7 @@ async function searchContacts(tenantDb: TenantDb, query: string, limit: number):
       id: r.id,
       primaryLabel: name,
       secondaryLabel: r.email ?? r.phone ?? "",
-      tertiaryLabel: r.companyName ?? undefined,
+      tertiaryLabel: r.linkedCompanyName ?? r.companyName ?? undefined,
       deepLink: `/contacts/${r.id}`,
       rank: Number(r.relevance ?? 0),
     };
