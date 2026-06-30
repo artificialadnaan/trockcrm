@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useLocation } from "react-router-dom";
 import { api } from "@/lib/api";
 import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 import {
@@ -1073,6 +1074,10 @@ export interface PendingRfpDeal {
 }
 
 export function usePendingRfp() {
+  // The office is URL-driven: api() reads ?officeId from window.location.search. Depend on the router's
+  // search so a cross-office viewer switching ?officeId (same mounted route) refetches the new office's
+  // queue instead of showing the prior office until a manual refresh.
+  const { search } = useLocation();
   const [deals, setDeals] = useState<PendingRfpDeal[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1089,7 +1094,8 @@ export function usePendingRfp() {
         throw e;
       })
       .finally(() => setLoading(false));
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
   useEffect(() => {
     void refetch().catch(() => undefined);
   }, [refetch]);
