@@ -28,8 +28,8 @@ export function BidDueDateBanner({ bidDueDate }: { bidDueDate?: string | null })
   if (!formatted) return null;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">
-      <CalendarDays className="h-4 w-4 flex-shrink-0 text-slate-500" />
+    <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+      <CalendarDays className="h-4 w-4 flex-shrink-0 text-red-500" />
       <span>Bid due date: {formatted}</span>
     </div>
   );
