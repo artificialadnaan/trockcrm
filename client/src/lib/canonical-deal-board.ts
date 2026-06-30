@@ -165,6 +165,15 @@ export function buildCanonicalDealBoardColumns(
     // it, so the board must too — otherwise it shows as an actionable Pending RFP card.
     deal.rfpOverrideState !== "approving" &&
     pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null;
+  // DELIBERATELY owner-scoped: the synthetic Pending RFP column is derived from THIS board's own cards
+  // (already scope-filtered, value-resolved, and at-risk-decorated by the server pipeline), NOT a separate
+  // office-wide cross-rep query. A cross-rep version was built and then reverted (PR #834) because an
+  // all-office overlay cannot reconcile with the scope-filtered board: the synthetic `pending_rfp` column
+  // is in the Active-Pipeline + At-Risk rollups, so its count can match the in-scope KPI OR its all-office
+  // visible cards, not both; and a lean cross-rep projection loses value fields (expectedCloseDate
+  // far-future zeroing, bidBoardTotalSales) + at-risk decoration. The complete cross-rep shared queue is
+  // the dedicated /deals/pending-rfp dashboard. (The board passes BOARD_CARDS_PER_STAGE_LIMIT=1000, so
+  // `deals` is the full Opportunity set in practice — no preview-truncation undercount.)
   const pendingRfpCards = deals.filter(isPendingRfpCard);
 
   const columns: DealBoardColumn[] = getDealBoardStageSlugs().map((slug) => {
