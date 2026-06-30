@@ -13,13 +13,22 @@ type TenantDb = NodePgDatabase<typeof schema>;
 
 export interface RepEarnedFloorGate {
   /**
-   * The rep's booked SIGNED book — SUM of source value (awarded_amount → bid_estimate → dd_estimate,
-   * matching the commission writer's resolver) over deals the rep OWNS (assigned_rep_id) that are signed,
-   * non-lost, non-on-hold, non-test, in the period. This is what the floor gates against.
+   * The rep's booked SIGNED book that the floor gates against. SUM over TWO owner-scoped paths:
+   *   1. Deals the rep CURRENTLY owns (assigned_rep_id), valued at the live deal value
+   *      (awarded_amount → bid_estimate → dd_estimate, matching the commission writer's resolver).
+   *   2. Deals reassigned AWAY / legacy rows where the rep no longer owns the deal but still holds its OWNER
+   *      commission row (deal_signed_commissions, attribution_role 'owner' → oq.owner_signed_date). These are
+   *      valued at the BOOKED source_value_amount the earned commission was computed from (NOT the now-mutable
+   *      deal value), so a later edit to the reassigned deal can't move the original rep's floor credit off
+   *      their commission basis. This leg reconciles qualifying with earned after a reassignment — the deal's
+   *      earned commission stays booked to the original rep, so its value must keep counting toward THEIR floor.
+   * Either path counts only signed — the deal contract date, OR (for a legacy/reassigned owner row with null
+   * deal-level dates) the dsc snapshot signing date, the SAME fallback the earned side uses so the gate's two
+   * sides stay aligned — and only non-lost, non-on-hold, non-test deals in the period.
    *
-   * Deliberately OWNER-based, NOT commission-attribution (dsc.rep_user_id): HubSpot-imported signed deals
-   * often have contract_signed_date set without ever running calculateCommissionForDeal, so they carry no
-   * commission row — dsc-attributed revenue badly undercounts an owner-rep's real book (e.g. an owner with
+   * Path 1 is deliberately OWNER-based, NOT commission-attribution, for the value: HubSpot-imported signed
+   * deals often have contract_signed_date set without ever running calculateCommissionForDeal, so they carry
+   * no commission row — dsc-attributed revenue badly undercounts an owner-rep's real book (e.g. an owner with
    * a ~$300k signed book but only two change-order commission rows). The floor is a hurdle on the book.
    */
   qualifyingRevenue: number;
