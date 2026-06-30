@@ -100,4 +100,18 @@ describe("contacts — linkedCompanyName resolves the linked company's real name
     const displayed = rows.map((c) => c.linkedCompanyName ?? c.companyName);
     expect(displayed).toEqual(["Avenue5 Residential", "Avenue5 Residential", "Manual Co", null]);
   });
+
+  it("search matches the LINKED company's name even when the free-text company_name is null/stale", async () => {
+    // The exact reported gap: a row visibly reads "Avenue5 Residential" (resolved), so searching "Avenue5"
+    // must find it — c1 (company_name NULL) AND c2 (company_name "Old Inc") both match via the companies
+    // EXISTS, while c3/c4 (no Avenue5 link) do not.
+    const hit = await getContacts(tdb, { search: "Avenue5" });
+    expect(hit.contacts.map((c) => c.id).sort()).toEqual([C.linkedNullText, C.linkedStaleText].sort());
+    // The COUNT query (no companies join) must match too — proves the EXISTS, not a join, drives both.
+    expect(hit.pagination.total).toBe(2);
+
+    // Free-text fallbacks still match their own column (no regression for unlinked / stale-text contacts).
+    expect((await getContacts(tdb, { search: "Manual" })).contacts.map((c) => c.id)).toEqual([C.freeTextOnly]);
+    expect((await getContacts(tdb, { search: "Old Inc" })).contacts.map((c) => c.id)).toEqual([C.linkedStaleText]);
+  });
 });
