@@ -65,7 +65,6 @@ import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
-import { getPendingRfpBoardCards } from "./pending-rfp-service.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedActiveNonZeroDealSortTierSql,
@@ -3137,12 +3136,7 @@ export async function getDealsForPipeline(
       totalValue: valueByStage.get(stage.id) ?? 0,
     }));
 
-  // The synthetic "Pending RFP" board column is sourced from the office-wide cross-rep pending-RFP set
-  // (NOT the scoped/preview pipeline cards), so it shows EVERY office pending RFP regardless of the board's
-  // Mine/All scope. Returned as ready-to-render board cards; the client splits them out of Opportunity.
-  const pendingRfpCards = await getPendingRfpBoardCards(tenantDb, stages);
-
-  return { pipelineColumns, terminalStages, pendingRfpCards };
+  return { pipelineColumns, terminalStages };
 }
 
 export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePageInput) {

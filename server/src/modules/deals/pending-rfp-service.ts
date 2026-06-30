@@ -1,6 +1,6 @@
 import { alias } from "drizzle-orm/pg-core";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import { companies, deals, users, pipelineStageConfig } from "@trock-crm/shared/schema";
+import { deals, users, pipelineStageConfig } from "@trock-crm/shared/schema";
 import {
   PENDING_RFP_STATUSES,
   PENDING_RFP_ATTENTION_STATUSES,
@@ -109,73 +109,6 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
     // states (pending_outbox/pending) have no reason yet.
     reason: reasonForPendingRfpRow(r),
   }));
-}
-
-// Board-card-shaped rows for the synthetic "Pending RFP" kanban column. Unlike getPendingRfpDeals (the
-// dashboard's light list), this returns full deal rows in the SAME shape getDealsForPipeline emits for its
-// cards, so the board can render them as cards and compute value. Cross-rep + office-scoped via the tenant
-// schema (NO owner/scope filter — this column is the shared office queue) and UNLIMITED (no preview cap),
-// so it shows every office pending RFP regardless of the board's Mine/All scope or per-stage preview.
-export async function getPendingRfpBoardCards(
-  tenantDb: any,
-  stages: Array<{ id: string; slug: string | null }>,
-): Promise<any[]> {
-  const oppStageIds = stages
-    .filter(
-      (s) =>
-        s.slug != null &&
-        (toCanonicalDealStageSlug(s.slug, "normal") === "opportunity" ||
-          toCanonicalDealStageSlug(s.slug, "service") === "opportunity"),
-    )
-    .map((s) => s.id);
-  if (oppStageIds.length === 0) return [];
-
-  // Explicit board-card field set (the union of what the kanban card components + the client's value
-  // resolver read), rather than the full row — a leaner cross-rep payload that still renders identically.
-  const rows = await tenantDb
-    .select({
-      id: deals.id,
-      name: deals.name,
-      dealNumber: deals.dealNumber,
-      projectNumber: deals.projectNumber,
-      stageId: deals.stageId,
-      workflowRoute: deals.workflowRoute,
-      assignedRepId: deals.assignedRepId,
-      isBidBoardOwned: deals.isBidBoardOwned,
-      isChangeOrder: deals.isChangeOrder,
-      bidBoardStageSlug: deals.bidBoardStageSlug,
-      readOnlySyncedAt: deals.readOnlySyncedAt,
-      propertyCity: deals.propertyCity,
-      propertyState: deals.propertyState,
-      winProbability: deals.winProbability,
-      stageEnteredAt: deals.stageEnteredAt,
-      bidEstimate: deals.bidEstimate,
-      ddEstimate: deals.ddEstimate,
-      awardedAmount: deals.awardedAmount,
-      onHold: deals.onHold,
-      rfpApprovalStatus: deals.rfpApprovalStatus,
-      companyName: companies.name,
-      assignedRepName: users.displayName,
-    })
-    .from(deals)
-    .leftJoin(companies, eq(companies.id, deals.companyId))
-    .leftJoin(users, eq(users.id, deals.assignedRepId))
-    .where(
-      and(
-        inArray(deals.stageId, oppStageIds),
-        eq(deals.isBidBoardOwned, false),
-        inArray(deals.rfpApprovalStatus, [...PENDING_RFP_STATUSES]),
-        NOT_RECONFIRMED_DENIAL,
-        NOT_OVERRIDE_APPROVING,
-        eq(deals.isActive, true),
-        sql`coalesce(${deals.isTestData}, false) = false`,
-      ),
-    )
-    .orderBy(asc(deals.rfpApprovalRequestedAt));
-
-  // Stamp the canonical opportunity slug so the client value resolver uses the opportunity value chain
-  // (mirrors how getDealsForPipeline stamps each card with its column's stage slug).
-  return rows.map((r: any) => ({ ...r, stageSlug: "opportunity" }));
 }
 
 function reasonForPendingRfpRow(r: {

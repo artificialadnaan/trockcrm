@@ -963,8 +963,8 @@ function DealListPageContent({ role, userId }: { role: string; userId: string })
   }, [searchParams, setSearchParams]);
 
   const boardColumns = useMemo(
-    () => buildCanonicalDealBoardColumns(board?.columns, stages, board?.pendingRfpCards),
-    [board?.columns, board?.pendingRfpCards, stages]
+    () => buildCanonicalDealBoardColumns(board?.columns, stages),
+    [board?.columns, stages]
   );
   // Base-list board-mirror scope: the /deals board always includes DD (useDealBoard includeDd=true),
   // so showDd=true — the list defaults to the full visible-column set and lets terminal deals through,

@@ -141,11 +141,7 @@ export function buildCanonicalDealStageIdFamilies(
 
 export function buildCanonicalDealBoardColumns(
   rawColumns: DealBoardColumn[] | null | undefined,
-  stages: DealStageLike[],
-  // Office-wide cross-rep pending-RFP board cards (from /deals/pipeline's pendingRfpCards). When provided,
-  // the synthetic "Pending RFP" column is sourced from this complete set rather than the board's own
-  // scoped/preview cards, so it shows every office pending RFP regardless of the board's Mine/All scope.
-  crossRepPendingCards?: Deal[]
+  stages: DealStageLike[]
 ): DealBoardColumn[] {
   const deals = dedupeDealsById((rawColumns ?? []).flatMap((column) => column.cards));
 
@@ -229,27 +225,18 @@ export function buildCanonicalDealBoardColumns(
     };
   });
 
-  // OPPORTUNITY adjustment uses the board's OWN (scoped) pending cards, so the opportunity count/value stay
-  // reconciled with the scoped aggregate they are subtracted from. Board `count`/`totalValue` are the
-  // active/reportable figures (on-hold excluded), so subtract active cards only — else an on-hold pending
-  // RFP would be double-counted out of opportunity and shown as active here.
+  // Board `count`/`totalValue` are the active/reportable figures (on-hold cards are excluded), so the
+  // moved-card adjustment + the synthetic column must count active cards only — otherwise an on-hold
+  // pending RFP would be double-counted out of opportunity and shown as active here.
   const activePendingRfp = pendingRfpCards.filter((d) => !d.onHold);
   const pendingRfpCount = activePendingRfp.length;
   const pendingRfpValue = activePendingRfp.reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0);
 
-  // SYNTHETIC COLUMN source = the office-wide cross-rep set when provided (so it shows every office pending
-  // RFP regardless of scope), else the board's own scoped cards. In scope=all the two are the same set; in
-  // scope=mine the column is a cross-rep overlay (its extra rows were never in the viewer's Opportunity
-  // count, so no double-count), and its own count/value reconcile with its own (active) cards.
-  const columnCards =
-    crossRepPendingCards && crossRepPendingCards.length > 0 ? crossRepPendingCards : pendingRfpCards;
-  const activeColumnCards = columnCards.filter((d) => !d.onHold);
-
   const oppIndex = columns.findIndex((column) => column.stage.slug === "opportunity");
-  if (oppIndex !== -1 && columnCards.length > 0) {
+  if (oppIndex !== -1 && pendingRfpCards.length > 0) {
     const opp = columns[oppIndex]!;
-    // Subtract the viewer's in-scope pending RFPs from the opportunity aggregate so the two columns don't
-    // double-count the deals that ARE in this board's scope (opportunity header would over-report otherwise).
+    // Subtract the moved pending-RFP cards from the opportunity column's backend aggregate so
+    // the two columns don't double-count (opportunity header would over-report otherwise).
     columns[oppIndex] = {
       ...opp,
       count: Math.max(0, opp.count - pendingRfpCount),
@@ -265,9 +252,9 @@ export function buildCanonicalDealBoardColumns(
         isActivePipeline: false,
         isTerminal: false,
       },
-      count: activeColumnCards.length,
-      totalValue: activeColumnCards.reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0),
-      cards: columnCards,
+      count: pendingRfpCount,
+      totalValue: pendingRfpValue,
+      cards: pendingRfpCards,
     });
   }
   return columns;
