@@ -172,7 +172,7 @@ function attachAtRiskResult<T extends {
   };
 }
 
-function normalizeOptionalDealBidDueDate(value: unknown) {
+export function normalizeOptionalDealBidDueDate(value: unknown) {
   if (value == null) {
     return null;
   }
@@ -2001,6 +2001,23 @@ export async function getDealDetail(
     .limit(1);
 
   const dealWithMetadata = detailDeal ?? deal;
+
+  // The banner + detail header must show the AUTHORITATIVE bid due date, not the denormalized
+  // deals.bid_due_date snapshot — which can be stale or null for a lead-backed deal whose lead value
+  // was edited/cleared before the write-through existed. Resolve it the same way getResolvedDeal does:
+  // a present source lead owns it (INCLUDING a deliberately cleared null); only a deal with no source
+  // lead falls back to its own column. One indexed lookup, sequential (tenantDb is a single tx client).
+  const [sourceLeadBid] = dealWithMetadata.sourceLeadId
+    ? await tenantDb
+        .select({ bidDueDate: leads.bidDueDate })
+        .from(leads)
+        .where(eq(leads.id, dealWithMetadata.sourceLeadId))
+        .limit(1)
+    : [];
+  const resolvedBidDueDate = sourceLeadBid
+    ? sourceLeadBid.bidDueDate ?? null
+    : dealWithMetadata.bidDueDate ?? null;
+
   const currentStage = await getStageByIdForWorkflowRoute(dealWithMetadata.stageId, dealWithMetadata.workflowRoute);
 
   // Sequential tenant queries required: tenantDb is a single transaction client
@@ -2028,6 +2045,9 @@ export async function getDealDetail(
 
   return {
     ...dealWithMetadata,
+    // Authoritative bid due date (lead-owned for converted deals; deal column for manual deals),
+    // overriding the raw snapshot spread above so the banner never shows a stale/cleared value.
+    bidDueDate: resolvedBidDueDate,
     // Deal DETAIL re-derives at-risk here (overriding getDealById's), so it must opt into the
     // close-target suppression too — otherwise the detail page that hosts "Move Close Date" would
     // still read threshold_reached after a future date is set.
