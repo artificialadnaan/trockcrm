@@ -185,80 +185,109 @@ export function RepCommissionDrilldown({
               floorShortfall={floorShortfall}
             />
 
-            {/* Owner + estimator split → direct, + override → total. The total MUST equal the flat
-                Team-Commissions list (both Engine B, same window). */}
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <SplitStat
-                label="Owner cuts"
-                value={ownerTotal}
-                sub={`${ownerCuts.length} deal${ownerCuts.length === 1 ? "" : "s"}`}
-              />
-              <SplitStat
-                label="Estimator cuts"
-                value={estimatorTotal}
-                sub={`${estimatorCuts.length} deal${estimatorCuts.length === 1 ? "" : "s"}`}
-                accent="violet"
-              />
-              <SplitStat
-                label="Manager override"
-                value={cs.overrideEarnedCommission}
-                sub={cs.overrideEarnedCommission > 0 ? "on reports" : "none"}
-              />
-              <SplitStat label="Total earned" value={cs.totalEarnedCommission} sub={periodLabel} strong />
+            {/* Earnings hero + visual owner/estimator/override split — the reconciliation, made legible.
+                The total MUST equal the flat Team-Commissions list (both Engine B, same window). */}
+            <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-emerald-50/50 to-white p-5">
+              <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-1">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-slate-400">
+                    Total earned · {periodLabel}
+                  </p>
+                  <p className="mt-1 text-3xl font-black tabular-nums text-slate-950">
+                    {formatUsd(cs.totalEarnedCommission)}
+                  </p>
+                </div>
+                <p className="text-xs font-semibold">
+                  {isFlatListWindow ? (
+                    <span className="text-emerald-700">Matches this rep&apos;s row on Team Commissions.</span>
+                  ) : (
+                    <span className="text-slate-500">(Team Commissions shows YTD.)</span>
+                  )}
+                </p>
+              </div>
+
+              <EarningsBar owner={ownerTotal} estimator={estimatorTotal} override={cs.overrideEarnedCommission} />
+
+              <div className="mt-3 grid grid-cols-3 gap-2 sm:gap-3">
+                <LegendStat
+                  dot="bg-slate-400"
+                  label="Owner cuts"
+                  value={ownerTotal}
+                  sub={`${ownerCuts.length} deal${ownerCuts.length === 1 ? "" : "s"}`}
+                />
+                <LegendStat
+                  dot="bg-violet-400"
+                  label="Estimator cuts"
+                  value={estimatorTotal}
+                  sub={`${estimatorCuts.length} deal${estimatorCuts.length === 1 ? "" : "s"}`}
+                  accent="text-violet-700"
+                />
+                <LegendStat
+                  dot="bg-amber-400"
+                  label="Manager override"
+                  value={cs.overrideEarnedCommission}
+                  sub={cs.overrideEarnedCommission > 0 ? "on reports" : "none"}
+                />
+              </div>
+
+              <p className="mt-3 border-t border-slate-200/70 pt-3 text-xs text-slate-400">
+                Owner + estimator = {formatUsd(cs.directEarnedCommission)} direct; + override ={" "}
+                {formatUsd(cs.totalEarnedCommission)} total for {periodLabel}.
+              </p>
             </div>
-            <p className="text-xs text-slate-400">
-              Owner + estimator = {formatUsd(cs.directEarnedCommission)} direct; + override ={" "}
-              {formatUsd(cs.totalEarnedCommission)} total for {periodLabel}.
-              {isFlatListWindow
-                ? " Matches this rep's row on Team Commissions."
-                : " (Team Commissions shows YTD.)"}
-            </p>
 
             {/* Per-deal contributing rows. Below floor: rows stay visible with held ($0) earnings. */}
-            {commissionDeals.length === 0 ? (
-              <p className="text-sm text-slate-500">No contributing deals in this period.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
-                      <th className="px-3 py-2 text-left">Deal</th>
-                      <th className="px-3 py-2 text-left">Cut</th>
-                      <th className="px-3 py-2 text-right">Won</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {commissionDeals.map((deal, i) => (
-                      <tr
-                        key={`${deal.dealId}-${deal.attributionRole}-${i}`}
-                        className="border-b border-slate-100"
-                      >
-                        <td className="px-3 py-2">
-                          <Link
-                            to={`/deals/${deal.dealId}`}
-                            className="font-medium text-slate-900 underline-offset-2 hover:underline"
-                          >
-                            {deal.dealName}
-                          </Link>
-                          <div className="text-xs text-slate-500">
-                            {[deal.companyName, deal.propertyName].filter(Boolean).join(" · ") || "—"}
-                          </div>
-                        </td>
-                        <td className="px-3 py-2">
-                          <RoleBadge role={deal.attributionRole} />
-                        </td>
-                        <td className="px-3 py-2 text-right font-semibold text-slate-900">
-                          {formatUsd(deal.earnedCommission)}
-                          {!cs.floorMet ? (
-                            <span className="ml-1 text-xs font-normal text-amber-600">held</span>
-                          ) : null}
-                        </td>
+            <div>
+              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.14em] text-slate-400">
+                Contributing deals{commissionDeals.length ? ` · ${commissionDeals.length}` : ""}
+              </p>
+              {commissionDeals.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+                  No contributing deals in this period.
+                </p>
+              ) : (
+                <div className="overflow-hidden rounded-xl border border-slate-200">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                        <th className="px-4 py-2.5 text-left font-bold">Deal</th>
+                        <th className="px-4 py-2.5 text-left font-bold">Cut</th>
+                        <th className="px-4 py-2.5 text-right font-bold">Won</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {commissionDeals.map((deal, i) => (
+                        <tr
+                          key={`${deal.dealId}-${deal.attributionRole}-${i}`}
+                          className="transition-colors hover:bg-slate-50"
+                        >
+                          <td className="px-4 py-3">
+                            <Link
+                              to={`/deals/${deal.dealId}`}
+                              className="font-semibold text-slate-900 underline-offset-2 hover:text-brand-red hover:underline"
+                            >
+                              {deal.dealName}
+                            </Link>
+                            <div className="mt-0.5 text-xs text-slate-500">
+                              {[deal.companyName, deal.propertyName].filter(Boolean).join(" · ") || "—"}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <RoleBadge role={deal.attributionRole} />
+                          </td>
+                          <td className="px-4 py-3 text-right font-bold tabular-nums text-slate-900">
+                            {formatUsd(deal.earnedCommission)}
+                            {!cs.floorMet ? (
+                              <span className="ml-1 text-xs font-medium text-amber-600">held</span>
+                            ) : null}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </>
         )}
 
@@ -350,6 +379,65 @@ function SplitStat({
         {formatUsd(value)}
       </div>
       <div className="text-xs text-slate-400">{sub}</div>
+    </div>
+  );
+}
+
+// Proportional owner / estimator / override bar — a one-glance read of how the total is composed.
+// Renders an empty track when nothing is earned (e.g. held below floor), so it never shows a misleading
+// full bar while FloorProgress (above) explains the $0.
+function EarningsBar({
+  owner,
+  estimator,
+  override,
+}: {
+  owner: number;
+  estimator: number;
+  override: number;
+}) {
+  const total = owner + estimator + override;
+  if (!(total > 0)) {
+    return <div className="mt-4 h-2.5 w-full rounded-full bg-slate-100" />;
+  }
+  const pct = (value: number) => `${(value / total) * 100}%`;
+  return (
+    <div className="mt-4 flex h-2.5 w-full overflow-hidden rounded-full bg-slate-100">
+      {owner > 0 ? (
+        <div className="h-full bg-slate-400" style={{ width: pct(owner) }} title="Owner cuts" />
+      ) : null}
+      {estimator > 0 ? (
+        <div className="h-full bg-violet-400" style={{ width: pct(estimator) }} title="Estimator cuts" />
+      ) : null}
+      {override > 0 ? (
+        <div className="h-full bg-amber-400" style={{ width: pct(override) }} title="Manager override" />
+      ) : null}
+    </div>
+  );
+}
+
+function LegendStat({
+  dot,
+  label,
+  value,
+  sub,
+  accent,
+}: {
+  dot: string;
+  label: string;
+  value: number;
+  sub: string;
+  accent?: string;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+      <div className="flex items-center gap-1.5">
+        <span className={cn("h-2 w-2 rounded-full", dot)} />
+        <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">{label}</span>
+      </div>
+      <div className={cn("mt-1 text-sm font-bold tabular-nums", accent ?? "text-slate-900")}>
+        {formatUsd(value)}
+      </div>
+      <div className="text-[11px] text-slate-400">{sub}</div>
     </div>
   );
 }
