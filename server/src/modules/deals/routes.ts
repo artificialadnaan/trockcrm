@@ -1450,6 +1450,7 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       .set({
         rfpApprovalStatus: "pending_outbox",
         rfpLastAttemptError: null,
+        updatedAt: new Date(),
       })
       .where(and(eq(deals.id, deal.id), eq(deals.rfpApprovalStatus, "send_failed")))
       .returning({ id: deals.id });

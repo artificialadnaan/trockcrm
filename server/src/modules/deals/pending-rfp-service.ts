@@ -159,6 +159,9 @@ export async function cancelPendingRfp(tenantDb: any, dealId: string): Promise<{
       rfpOverrideNote: null,
       rfpOverrideReviewedAt: null,
       rfpOverrideReviewedBy: null,
+      // Bump updated_at like the other RFP state transitions (rfp-override-service) — deals.updated_at
+      // has no $onUpdate, so without this the cancelled deal looks stale in updated_at-ordered lists.
+      updatedAt: new Date(),
     })
     .where(
       and(

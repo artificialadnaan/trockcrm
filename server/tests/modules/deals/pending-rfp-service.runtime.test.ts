@@ -21,7 +21,8 @@ beforeAll(async () => {
       rfp_approval_request_id integer, rfp_approval_token text,
       rfp_conflict_reason text, rfp_conflict_with jsonb, rfp_last_attempt_error text,
       rfp_override_state text, rfp_override_decision text, rfp_override_error text,
-      rfp_override_note text, rfp_override_reviewed_at timestamptz, rfp_override_reviewed_by uuid
+      rfp_override_note text, rfp_override_reviewed_at timestamptz, rfp_override_reviewed_by uuid,
+      updated_at timestamptz DEFAULT now()
     );
     INSERT INTO pipeline_stage_config (id, slug) VALUES
       ('00000000-0000-0000-0000-0000000000aa','opportunity'),
@@ -32,8 +33,8 @@ beforeAll(async () => {
       ('00000000-0000-0000-0000-0000000000d1','Director One');
     INSERT INTO deals (id,name,workflow_route,stage_id,assigned_rep_id,rfp_approval_status,rfp_approval_requested_at,rfp_approval_requested_by)
       VALUES ('00000000-0000-0000-0000-00000000d001','Older Pending','normal','00000000-0000-0000-0000-0000000000aa','00000000-0000-0000-0000-0000000000c1','pending','2026-06-01T00:00:00Z','00000000-0000-0000-0000-0000000000d1');
-    INSERT INTO deals (id,name,workflow_route,stage_id,assigned_rep_id,rfp_approval_status,rfp_approval_requested_at,rfp_declined_reason,rfp_approval_request_id,rfp_approval_token,rfp_last_attempt_error)
-      VALUES ('00000000-0000-0000-0000-00000000d002','Newer Declined','service','00000000-0000-0000-0000-0000000000aa','00000000-0000-0000-0000-0000000000c1','declined','2026-06-10T00:00:00Z','missing docs',42,'tok-xyz','boom');
+    INSERT INTO deals (id,name,workflow_route,stage_id,assigned_rep_id,rfp_approval_status,rfp_approval_requested_at,rfp_declined_reason,rfp_approval_request_id,rfp_approval_token,rfp_last_attempt_error,updated_at)
+      VALUES ('00000000-0000-0000-0000-00000000d002','Newer Declined','service','00000000-0000-0000-0000-0000000000aa','00000000-0000-0000-0000-0000000000c1','declined','2026-06-10T00:00:00Z','missing docs',42,'tok-xyz','boom','2020-01-01T00:00:00Z');
     INSERT INTO deals (id,name,stage_id,rfp_approval_status) VALUES ('00000000-0000-0000-0000-00000000d003','Approved','00000000-0000-0000-0000-0000000000aa','approved');
     INSERT INTO deals (id,name,stage_id,rfp_approval_status,is_bid_board_owned) VALUES ('00000000-0000-0000-0000-00000000d004','Owned','00000000-0000-0000-0000-0000000000aa','pending',true);
     INSERT INTO deals (id,name,stage_id,rfp_approval_status) VALUES ('00000000-0000-0000-0000-00000000d005','Estimating','00000000-0000-0000-0000-0000000000bb','pending');
@@ -96,7 +97,7 @@ describe("cancelPendingRfp", () => {
 
     const res = await tdb.execute(sql`
       SELECT rfp_approval_status, rfp_approval_request_id, rfp_approval_token, rfp_declined_reason,
-             rfp_last_attempt_error, rfp_override_decision
+             rfp_last_attempt_error, rfp_override_decision, updated_at
       FROM deals WHERE id = '00000000-0000-0000-0000-00000000d002'`);
     const row = (Array.isArray(res) ? res : res.rows)[0];
     expect(row.rfp_approval_status).toBeNull();
@@ -104,6 +105,8 @@ describe("cancelPendingRfp", () => {
     expect(row.rfp_approval_token).toBeNull();
     expect(row.rfp_declined_reason).toBeNull();
     expect(row.rfp_last_attempt_error).toBeNull();
+    // Cancel bumps updated_at off its seeded 2020 value so the deal isn't stale in updated_at-ordered lists.
+    expect(new Date(row.updated_at).getTime()).toBeGreaterThan(new Date("2020-01-01T00:00:00Z").getTime());
 
     const after = await getPendingRfpDeals(tdb);
     expect(after.map((r) => r.id)).not.toContain("00000000-0000-0000-0000-00000000d002");
