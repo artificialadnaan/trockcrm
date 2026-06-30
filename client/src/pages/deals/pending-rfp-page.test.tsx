@@ -151,11 +151,15 @@ describe("PendingRfpPage", () => {
 
     root = renderRoute(container);
 
-    // Stat tiles + counts (2 total: 1 needs-attention declined, 1 awaiting, 1 stale).
+    // Stat tiles + the COMPUTED counts (2 total: 1 needs-attention declined, 1 awaiting, 1 stale).
     expect(container.textContent).toContain("Total pending");
     expect(container.textContent).toContain("Needs attention");
     expect(container.textContent).toContain("Awaiting approval");
     expect(container.textContent).toContain("Stale");
+    expect(container.querySelector('[data-testid="pending-rfp-stat-total"]')?.textContent).toBe("2");
+    expect(container.querySelector('[data-testid="pending-rfp-stat-attention"]')?.textContent).toBe("1");
+    expect(container.querySelector('[data-testid="pending-rfp-stat-awaiting"]')?.textContent).toBe("1");
+    expect(container.querySelector('[data-testid="pending-rfp-stat-stale"]')?.textContent).toBe("1");
     // Per-row status labels.
     expect(container.textContent).toContain("Declined"); // deal-fresh-222
     expect(container.textContent).toContain("Awaiting approval"); // deal-stale-111
@@ -180,10 +184,25 @@ describe("PendingRfpPage", () => {
     const rowIds = Array.from(container.querySelectorAll('[data-testid^="pending-rfp-row-"]')).map((r) =>
       r.getAttribute("data-testid")
     );
+    // Assert the FULL rendered sequence (not just relative indexOf) so this fails for a missing row too:
     // deal-fresh-222 is declined (attention) → must render before the awaiting deal-stale-111.
-    expect(rowIds.indexOf("pending-rfp-row-deal-fresh-222")).toBeLessThan(
-      rowIds.indexOf("pending-rfp-row-deal-stale-111")
-    );
+    expect(rowIds).toEqual(["pending-rfp-row-deal-fresh-222", "pending-rfp-row-deal-stale-111"]);
+  });
+
+  it("renders an em-dash, not NaN, for a malformed triggeredAt timestamp", () => {
+    mocks.usePendingRfpMock.mockReturnValue({
+      deals: [{ ...FIXTURE_DEALS[1], id: "deal-bad-date", triggeredAt: "not-a-real-date" }],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    root = renderRoute(container);
+
+    // computeAgeDays guards Number.isNaN, so the waiting cell shows "—" instead of "NaN days".
+    expect(container.textContent).not.toContain("NaN");
+    const row = container.querySelector('[data-testid="pending-rfp-row-deal-bad-date"]');
+    expect(row?.getAttribute("data-stale")).toBe("false");
   });
 
   it("marks the stale row with data-stale=true and fresh row with data-stale=false", () => {

@@ -17,7 +17,10 @@ const PENDING_RFP_STALE_DAYS = 2;
 
 function computeAgeDays(triggeredAt: string | null): number | null {
   if (!triggeredAt) return null;
-  return Math.floor((Date.now() - new Date(triggeredAt).getTime()) / 86_400_000);
+  const ms = new Date(triggeredAt).getTime();
+  // Guard malformed timestamps so NaN can't propagate into formatWaiting() / the urgency tone.
+  if (Number.isNaN(ms)) return null;
+  return Math.floor((Date.now() - ms) / 86_400_000);
 }
 
 function formatWaiting(days: number | null): string {
@@ -82,11 +85,13 @@ function StatTile({
   label,
   value,
   tone,
+  testId,
 }: {
   icon: typeof Clock;
   label: string;
   value: number;
   tone: string;
+  testId: string;
 }) {
   return (
     <div className="flex items-center gap-3 rounded-xl border bg-white px-4 py-3 shadow-sm">
@@ -94,7 +99,9 @@ function StatTile({
         <Icon className="h-4 w-4" />
       </span>
       <div className="min-w-0">
-        <p className="text-xl font-semibold leading-none text-slate-900">{value}</p>
+        <p data-testid={testId} className="text-xl font-semibold leading-none text-slate-900">
+          {value}
+        </p>
         <p className="mt-1 truncate text-xs text-muted-foreground">{label}</p>
       </div>
     </div>
@@ -160,16 +167,19 @@ export function PendingRfpPage() {
       {/* At-a-glance stats (only with data) */}
       {showQueue && (
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <StatTile icon={Hourglass} label="Total pending" value={stats.total} tone="bg-slate-100 text-slate-600" />
-          <StatTile icon={AlertTriangle} label="Needs attention" value={stats.attention} tone="bg-amber-100 text-amber-700" />
-          <StatTile icon={Clock} label="Awaiting approval" value={stats.awaiting} tone="bg-sky-100 text-sky-700" />
-          <StatTile icon={Flame} label={`Stale (${PENDING_RFP_STALE_DAYS}d+)`} value={stats.stale} tone="bg-red-100 text-red-700" />
+          <StatTile testId="pending-rfp-stat-total" icon={Hourglass} label="Total pending" value={stats.total} tone="bg-slate-100 text-slate-600" />
+          <StatTile testId="pending-rfp-stat-attention" icon={AlertTriangle} label="Needs attention" value={stats.attention} tone="bg-amber-100 text-amber-700" />
+          <StatTile testId="pending-rfp-stat-awaiting" icon={Clock} label="Awaiting approval" value={stats.awaiting} tone="bg-sky-100 text-sky-700" />
+          <StatTile testId="pending-rfp-stat-stale" icon={Flame} label={`Stale (${PENDING_RFP_STALE_DAYS}d+)`} value={stats.stale} tone="bg-red-100 text-red-700" />
         </div>
       )}
 
       {error && (
         <Card>
-          <CardContent className="flex items-center gap-2 p-4 text-sm text-red-700">
+          <CardContent
+            role="alert"
+            className="flex items-center gap-2 p-4 text-sm text-red-700"
+          >
             <AlertTriangle className="h-4 w-4 shrink-0" />
             {error}
           </CardContent>
