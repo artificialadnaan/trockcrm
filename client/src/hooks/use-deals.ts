@@ -1085,6 +1085,15 @@ export function usePendingRfp() {
   // only the latest request is allowed to write state, so an older office's response can't overwrite a
   // newer one (which would show office A's rows under ?officeId=B).
   const requestIdRef = useRef(0);
+  // The refetch below bumps the id only when it RUNS (an effect, after commit). That leaves a gap: a prior
+  // office's request can resolve between the ?search-change render and the new refetch, when the id is
+  // still the old value, and be wrongly accepted. Bump it synchronously here the moment ?search changes so
+  // any in-flight request for the previous office is invalidated before it can resolve.
+  const lastSearchRef = useRef(search);
+  if (lastSearchRef.current !== search) {
+    lastSearchRef.current = search;
+    requestIdRef.current += 1;
+  }
   const refetch = useCallback(() => {
     const requestId = ++requestIdRef.current;
     const isCurrent = () => requestId === requestIdRef.current;

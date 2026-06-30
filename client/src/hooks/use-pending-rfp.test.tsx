@@ -62,8 +62,9 @@ describe("usePendingRfp", () => {
     expect(apiMock).toHaveBeenCalledTimes(2);
   });
 
-  it("ignores a stale out-of-order response so the latest office switch wins", async () => {
-    // Every fetch hangs until we resolve it by hand, so we can resolve them out of order.
+  it("ignores a stale out-of-order response from an overlapping refetch (latest wins)", async () => {
+    // Generic overlapping-refetch guard (same office): three overlapping fetches, only the latest may
+    // write state. The A→B office-switch path is covered by the navigation test below.
     const deferred: Array<(v: { deals: PendingRfpDeal[] }) => void> = [];
     apiMock.mockImplementation(() => new Promise((resolve) => { deferred.push(resolve); }));
 
@@ -95,6 +96,44 @@ describe("usePendingRfp", () => {
     });
 
     // The stale office-A responses must not overwrite the latest office-B queue.
+    const captured = hookDeals as PendingRfpDeal[] | null;
+    expect(captured?.map((d) => d.id)).toEqual(["B"]);
+  });
+
+  it("drops a prior office's response after an A→B office switch (navigation-driven)", async () => {
+    const deferred: Array<(v: { deals: PendingRfpDeal[] }) => void> = [];
+    apiMock.mockImplementation(() => new Promise((resolve) => { deferred.push(resolve); }));
+
+    let hookDeals: PendingRfpDeal[] | null = null;
+    function Probe() {
+      const { deals } = usePendingRfp();
+      const navigate = useNavigate();
+      hookDeals = deals;
+      return createElement(
+        "button",
+        { type: "button", onClick: () => navigate("/deals/pending-rfp?officeId=B") },
+        "switch to B"
+      );
+    }
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        createElement(MemoryRouter, { initialEntries: ["/deals/pending-rfp?officeId=A"] }, createElement(Probe))
+      );
+    });
+    expect(deferred).toHaveLength(1); // office A fetch in flight (unresolved)
+
+    // Switch office A→B via the router; the A request is still in flight.
+    await act(async () => {
+      container.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(deferred).toHaveLength(2); // office B fetch fired
+
+    // Office B resolves, then the older office-A request resolves late — A must be ignored.
+    await act(async () => { deferred[1]({ deals: [{ id: "B" } as unknown as PendingRfpDeal] }); });
+    await act(async () => { deferred[0]({ deals: [{ id: "A" } as unknown as PendingRfpDeal] }); });
+
     const captured = hookDeals as PendingRfpDeal[] | null;
     expect(captured?.map((d) => d.id)).toEqual(["B"]);
   });
