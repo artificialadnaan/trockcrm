@@ -70,4 +70,15 @@ describe("global search — linked company resolved in contact results", () => {
     expect(results.map((r) => r.id)).toEqual([C.freeTextOnly]);
     expect(results[0]?.tertiaryLabel).toBe("Manual Co");
   });
+
+  it("keeps a stale/legacy free-text company_name match ranked like a company hit (not demoted to rank 1)", async () => {
+    // c2 is linked to Avenue5 but still carries the legacy free-text "Old Inc". A search for "Old Inc"
+    // matches the raw column; ranking must score the raw company_name too (exact => 3), otherwise scoring
+    // only the resolved name ("Avenue5 Residential") would drop this to the generic ELSE rank (1) and bury it.
+    const results = await searchContacts(tdb, "Old Inc", 25);
+    const hit = results.find((r) => r.id === C.linkedStaleText);
+    expect(hit).toBeTruthy();
+    expect(hit?.rank).toBe(3); // exact match on the raw company_name
+    expect(hit?.tertiaryLabel).toBe("Avenue5 Residential"); // label still resolves to the linked company
+  });
 });

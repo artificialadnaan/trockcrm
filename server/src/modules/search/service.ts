@@ -410,13 +410,12 @@ export async function searchContacts(tenantDb: TenantDb, query: string, limit: n
   // Relevance over EVERY field the builder matches (name parts/email/company + phone/mobile/jobTitle/
   // city AND the derived full-name CONCAT), reused as the merge rank -- so a phone-fragment, city, or
   // two-word full-name match can't be dropped before the limit nor demoted in the cross-office merge.
-  // Rank on the RESOLVED company name (linked companies.name over the free-text company_name) so a
-  // contact matched only via its linked company — buildContactSearchCondition now matches companies.name —
-  // ranks like a company hit instead of relevance 0 (which would bury it / demote it in the cross-office
-  // merge), and so the rank matches the label shown below.
-  const resolvedCompanyName = sql`coalesce(${companies.name}, ${contacts.companyName})`;
+  // Rank on BOTH the raw free-text company_name AND the linked companies.name. buildContactSearchCondition
+  // matches either, so scoring only the resolved (coalesced) name would demote a match on a stale/legacy
+  // free-text value to the generic ELSE rank — burying it or dropping it before the per-entity/cross-office
+  // limit. Two columns keep a stale-free-text hit AND a linked-company-only hit both ranked like company hits.
   const relevance = relevanceOrder(query, [
-    contacts.firstName, contacts.lastName, contacts.email, resolvedCompanyName,
+    contacts.firstName, contacts.lastName, contacts.email, contacts.companyName, companies.name,
     contacts.phone, contacts.mobile, contacts.jobTitle, contacts.city,
     sql`(coalesce(${contacts.firstName}, '') || ' ' || coalesce(${contacts.lastName}, ''))`,
   ]);
