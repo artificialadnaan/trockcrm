@@ -11,7 +11,7 @@ import {
   tasks,
   users,
 } from "@trock-crm/shared/schema";
-import { getContactById, getContacts } from "../../../src/modules/contacts/service.js";
+import { getCompanyNames, getContactById, getContacts } from "../../../src/modules/contacts/service.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 /**
@@ -113,5 +113,25 @@ describe("contacts — linkedCompanyName resolves the linked company's real name
     // Free-text fallbacks still match their own column (no regression for unlinked / stale-text contacts).
     expect((await getContacts(tdb, { search: "Manual" })).contacts.map((c) => c.id)).toEqual([C.freeTextOnly]);
     expect((await getContacts(tdb, { search: "Old Inc" })).contacts.map((c) => c.id)).toEqual([C.linkedStaleText]);
+  });
+
+  it("the companyName FILTER matches the displayed/resolved name (linked OR free-text), in rows AND count", async () => {
+    // Filtering by what the list shows: "Avenue5" returns the linked contacts even though c1's free-text is
+    // null and c2's is "Old Inc" — was excluded before because the filter only hit contacts.company_name.
+    const avenue5 = await getContacts(tdb, { companyName: "Avenue5" });
+    expect(avenue5.contacts.map((c) => c.id).sort()).toEqual([C.linkedNullText, C.linkedStaleText].sort());
+    expect(avenue5.pagination.total).toBe(2); // count/aggregate (no companies join) matches too — EXISTS works there
+
+    // Free-text-only contacts still filter by their own value; stale free-text still matches its raw column.
+    expect((await getContacts(tdb, { companyName: "Manual" })).contacts.map((c) => c.id)).toEqual([C.freeTextOnly]);
+    expect((await getContacts(tdb, { companyName: "Old Inc" })).contacts.map((c) => c.id)).toEqual([C.linkedStaleText]);
+  });
+
+  it("getCompanyNames lists RESOLVED distinct names so the dropdown matches the filter + display", async () => {
+    const names = await getCompanyNames(tdb);
+    // Linked contacts surface their real company; the unlinked one surfaces its free-text name. "Old Inc"
+    // (c2's stale free-text) is superseded by the linked "Avenue5 Residential" — it isn't a displayed name.
+    expect(names).toEqual(["Avenue5 Residential", "Manual Co"]);
+    expect(names).not.toContain("Old Inc");
   });
 });

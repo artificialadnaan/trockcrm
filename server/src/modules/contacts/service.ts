@@ -383,9 +383,18 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     conditions.push(eq(contacts.category, filters.category as any));
   }
 
-  // Company filter (name ILIKE)
+  // Company filter — match the DISPLAYED company name: the free-text company_name OR the LINKED company's
+  // real name (companies.name via company_id), so filtering by what the list shows returns the row (a linked
+  // contact with a null/stale free-text name is no longer excluded). EXISTS (not a join) so the SAME predicate
+  // works in the list query AND the count/card-aggregate queries, which don't join companies.
   if (filters.companyName) {
-    conditions.push(ilike(contacts.companyName, `%${filters.companyName}%`));
+    const companyTerm = `%${filters.companyName}%`;
+    conditions.push(
+      or(
+        ilike(contacts.companyName, companyTerm),
+        sql`EXISTS (SELECT 1 FROM companies fc WHERE fc.id = ${contacts.companyId} AND fc.name ILIKE ${companyTerm})`
+      )
+    );
   }
 
   // Company filter (by company ID — direct column on contacts)
@@ -790,14 +799,19 @@ export async function getContactsNeedingOutreach(tenantDb: TenantDb, limit = 20)
 }
 
 /**
- * Get distinct company names for filter dropdowns.
+ * Get distinct company names for filter dropdowns. Returns the RESOLVED name (linked companies.name over the
+ * free-text company_name) so the dropdown lists what the list displays and what the companyName filter now
+ * matches — a contact linked to a real company is offered by that company even when its free-text company_name
+ * is null/stale.
  */
 export async function getCompanyNames(tenantDb: TenantDb) {
+  const resolvedName = sql<string>`COALESCE(${companies.name}, ${contacts.companyName})`;
   const result = await tenantDb
-    .selectDistinct({ companyName: contacts.companyName })
+    .selectDistinct({ companyName: resolvedName })
     .from(contacts)
-    .where(and(eq(contacts.isActive, true), not(isNull(contacts.companyName))))
-    .orderBy(asc(contacts.companyName));
+    .leftJoin(companies, eq(companies.id, contacts.companyId))
+    .where(and(eq(contacts.isActive, true), sql`COALESCE(${companies.name}, ${contacts.companyName}) IS NOT NULL`))
+    .orderBy(asc(resolvedName));
 
   return result.map((r) => r.companyName).filter(Boolean) as string[];
 }
