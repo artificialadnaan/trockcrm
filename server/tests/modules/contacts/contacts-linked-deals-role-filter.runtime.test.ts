@@ -3,6 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import {
   activities,
+  companies,
   contactDealAssociations,
   contacts,
   deals,
@@ -44,7 +45,7 @@ let pg: PGlite;
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`SET TimeZone='UTC';`);
-  await pg.exec(tenantSchemaSql("public", [users, contacts, contactDealAssociations, deals, activities, emails, tasks]));
+  await pg.exec(tenantSchemaSql("public", [users, companies, contacts, contactDealAssociations, deals, activities, emails, tasks]));
 
   // Mirror migration 0166's partial indexes (the schema helper intentionally omits indexes) so we prove
   // the indexed columns exist and the sorted query plans/executes with them present.
@@ -104,7 +105,7 @@ describe("contacts linked-deals + role filters (real SQL)", () => {
   it("an empty contact_deal_associations table yields an empty linked-deals set (today's prod state)", async () => {
     const empty = new PGlite();
     await empty.exec(`SET TimeZone='UTC';`);
-    await empty.exec(tenantSchemaSql("public", [users, contacts, contactDealAssociations, deals, activities, emails, tasks]));
+    await empty.exec(tenantSchemaSql("public", [users, companies, contacts, contactDealAssociations, deals, activities, emails, tasks]));
     await empty.exec(`
       INSERT INTO contacts (id, first_name, last_name, category, role) VALUES
         ('${C.pmNoDeal}','Pete','NoDeal','client','project_manager');

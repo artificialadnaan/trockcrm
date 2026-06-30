@@ -116,7 +116,7 @@ export function ContactCard({
           <p className="mt-1 truncate text-xs text-slate-500">
             {[contact.jobTitle, contactLocation(contact)].filter(Boolean).join(" • ") || "No title recorded"}
           </p>
-          <p className="mt-1 truncate text-sm font-semibold text-slate-700">{contact.companyName ?? "Unassigned"}</p>
+          <p className="mt-1 truncate text-sm font-semibold text-slate-700">{contact.linkedCompanyName ?? contact.companyName ?? "Unassigned"}</p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
               {contact.role ? ROLE_LABELS[contact.role] ?? contact.role : "Unclassified"}
@@ -460,7 +460,7 @@ export function ContactListPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <p className="max-w-[220px] truncate text-sm font-semibold text-slate-700">{contact.companyName ?? "Unassigned"}</p>
+                        <p className="max-w-[220px] truncate text-sm font-semibold text-slate-700">{contact.linkedCompanyName ?? contact.companyName ?? "Unassigned"}</p>
                       </TableCell>
                       <TableCell>
                         <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700">
