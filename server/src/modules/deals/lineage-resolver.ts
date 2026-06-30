@@ -11,7 +11,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { applyProjectTypeChange } from "./service.js";
+import { applyProjectTypeChange, normalizeOptionalDealBidDueDate } from "./service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -116,6 +116,7 @@ const DEAL_COMPATIBILITY_SNAPSHOT_FIELDS = new Set<ResolvedDealField>([
   "assignedRepId",
   "workflowRoute",
   "description",
+  "bidDueDate",
 ]);
 
 function workflowRouteFromLeadPipeline(pipelineType: string | null | undefined): WorkflowRoute | null {
@@ -179,6 +180,20 @@ async function getQuestionAnswersByKey(tenantDb: TenantDb, leadId: string) {
   return Object.fromEntries(rows.map((row) => [row.key, row.valueJson]));
 }
 
+/**
+ * deals.bid_due_date is a timestamptz stored at UTC midnight; leads.bid_due_date is a date-only column
+ * serialized as "YYYY-MM-DD". When a deal has NO source lead the deal column is the authoritative value,
+ * so the resolver must surface it in the SAME date-only string shape lead-backed deals produce —
+ * consumers (scoping-service, the PATCH /resolved-fields response) guard on `typeof === "string"`. Read
+ * the UTC calendar day so there's no off-by-one against the UTC-midnight storage.
+ */
+function dealBidDueDateToDateOnly(value: unknown): string | null {
+  if (value == null) return null;
+  const date = value instanceof Date ? value : new Date(value as string);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
 export async function getResolvedDeal(
   tenantDb: TenantDb,
   dealId: string
@@ -222,7 +237,13 @@ export async function getResolvedDeal(
       assignedRepId: sourceLead?.assignedRepId ?? deal.assignedRepId,
       workflowRoute,
       description: sourceLead?.description ?? deal.description ?? null,
-      bidDueDate: sourceLead?.bidDueDate ?? null,
+      // A lead-backed deal's bid due date is owned by the lead — INCLUDING when it's been cleared to
+      // null. Only fall back to the deal column when there's NO source lead at all, so a deliberately
+      // cleared lead value isn't masked by a stale pre-write-through deal snapshot (scoping/readiness
+      // must see the clear). No source lead → the deal column is authoritative (UTC date-only).
+      bidDueDate: sourceLead
+        ? sourceLead.bidDueDate ?? null
+        : dealBidDueDateToDateOnly(deal.bidDueDate) ?? null,
     },
     ownership: DEAL_FIELD_OWNERSHIP,
   };
@@ -410,6 +431,10 @@ export async function writeResolvedDealFields(
         if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
         if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";
         if (field === "description") dealUpdates.description = normalizeOptionalText(value);
+        // deals.bid_due_date is timestamptz and the create/conversion path stores it at UTC midnight
+        // (normalizeOptionalDealBidDueDate). Normalize identically here so the deal mirror matches the
+        // lead's date-only "YYYY-MM-DD" with no off-by-one — single normalizer, no divergent inline.
+        if (field === "bidDueDate") dealUpdates.bidDueDate = normalizeOptionalDealBidDueDate(value);
       }
       continue;
     }
@@ -429,6 +454,10 @@ export async function writeResolvedDealFields(
       if (field === "assignedRepId") dealUpdates.assignedRepId = normalizeOptionalText(value);
       if (field === "workflowRoute") dealUpdates.workflowRoute = value === "service" ? "service" : "normal";
       if (field === "description") dealUpdates.description = normalizeOptionalText(value);
+      // A deal with no source lead owns bidDueDate directly — write it to the authoritative
+      // deals.bid_due_date column (timestamptz, UTC-midnight) via the SAME normalizer the
+      // lead-mirror path uses (line ~417), so non-lead edits actually persist instead of no-op'ing.
+      if (field === "bidDueDate") dealUpdates.bidDueDate = normalizeOptionalDealBidDueDate(value);
     }
   }
 

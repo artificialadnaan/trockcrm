@@ -182,12 +182,12 @@ describe("deal lineage resolver field ownership", () => {
     });
   });
 
-  it("routes bid due date to the source lead column", () => {
+  it("routes bid due date to the source lead column with deal snapshot write-through", () => {
     expect(planDealFieldWrite({ field: "bidDueDate", hasSourceLead: true })).toEqual({
       field: "bidDueDate",
       ownership: "lead",
       target: "source_lead",
-      compatibilityWriteThrough: false,
+      compatibilityWriteThrough: true,
     });
   });
 
@@ -252,6 +252,21 @@ describe("deal lineage resolver field ownership", () => {
     expect(resolved.answersByKey).not.toHaveProperty("bid_due_date");
   });
 
+  it("reports a cleared lead bid due date as null, never the stale deal snapshot", async () => {
+    // A lead-backed deal whose lead.bid_due_date was cleared to null, but the deal snapshot still
+    // holds an older value (a pre-write-through scoping clear). The resolver must surface the lead's
+    // cleared null — NOT the stale deal date — so scoping/readiness sees the required field as missing.
+    const tenantDb = createLineageTenantDb({
+      lead: { bidDueDate: null },
+      deal: { bidDueDate: new Date("2026-01-01T00:00:00.000Z") } as never,
+      questionAnswers: [],
+    });
+
+    const resolved = await getResolvedDeal(tenantDb as never, "deal-1");
+
+    expect(resolved.resolved.bidDueDate).toBeNull();
+  });
+
   it("resolves bid due date from the lead column when the V2 answer is stale", async () => {
     const tenantDb = createLineageTenantDb({
       lead: { bidDueDate: "2026-06-01" },
@@ -298,6 +313,54 @@ describe("deal lineage resolver field ownership", () => {
 
     expect(tenantDb.state.leads[0]?.bidDueDate).toBe("2026-08-20");
     expect(tenantDb.state.leadQuestionAnswers).toEqual([]);
+  });
+
+  it("write-throughs a scoping bid due date edit to BOTH leads and deals at UTC midnight", async () => {
+    const tenantDb = createLineageTenantDb({
+      lead: { bidDueDate: "2026-06-01" },
+      questionAnswers: [],
+    });
+
+    await writeResolvedDealFields(
+      tenantDb as never,
+      "deal-1",
+      { bidDueDate: "2026-07-03" },
+      { userId: "user-1", officeId: "office-1", role: "director", now: new Date("2026-05-01T00:00:00.000Z") }
+    );
+
+    // Lead keeps the date-only string (the lineage owner column).
+    expect(tenantDb.state.leads[0]?.bidDueDate).toBe("2026-07-03");
+    // Deal mirror is normalized to UTC midnight for the SAME calendar day — not the prior day.
+    expect(tenantDb.state.deals[0]?.bidDueDate).toEqual(new Date("2026-07-03T00:00:00.000Z"));
+    expect((tenantDb.state.deals[0]?.bidDueDate as Date).toISOString()).toBe(
+      "2026-07-03T00:00:00.000Z"
+    );
+  });
+
+  it("writes bid due date to the deal column at UTC midnight for a deal with no source lead", async () => {
+    // Regression: a manually-created deal (sourceLeadId null) owns bidDueDate directly via the
+    // target:"deal" path. The edit must land on the authoritative deals.bid_due_date column at UTC
+    // midnight — not silently no-op the way it did before this fix.
+    const tenantDb = createLineageTenantDb({
+      deal: { sourceLeadId: null, bidDueDate: null } as never,
+    });
+
+    const resolved = await writeResolvedDealFields(
+      tenantDb as never,
+      "deal-1",
+      { bidDueDate: "2026-07-03" },
+      { userId: "user-1", officeId: "office-1", role: "director", now: new Date("2026-05-01T00:00:00.000Z") }
+    );
+
+    expect(tenantDb.state.deals[0]?.bidDueDate).toEqual(new Date("2026-07-03T00:00:00.000Z"));
+    expect((tenantDb.state.deals[0]?.bidDueDate as Date).toISOString()).toBe(
+      "2026-07-03T00:00:00.000Z"
+    );
+    // The resolver now reflects the deal-owned value as a date-only string (symmetric with the write),
+    // so the PATCH /resolved-fields response + scoping/readiness reads don't see it as "missing".
+    expect(resolved.resolved.bidDueDate).toBe("2026-07-03");
+    // No source lead, so the orphaned lead row is never written by this path.
+    expect(tenantDb.state.leads[0]?.bidDueDate).toBe("2026-06-01");
   });
 
   it("writes company fill-in through the resolved-fields lineage path", async () => {

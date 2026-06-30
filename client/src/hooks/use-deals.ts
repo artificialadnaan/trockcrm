@@ -121,6 +121,10 @@ export interface Deal {
   awardedAmountOverridden?: boolean | null;
   changeOrderTotal: string | null;
   description: string | null;
+  // deals.bid_due_date (timestamptz, nullable) — stamped at UTC midnight from the date-only source
+  // value, so it arrives as e.g. "2026-07-03T00:00:00.000Z". Format in UTC for display (see
+  // BidDueDateBanner) to avoid the off-by-one day west of UTC.
+  bidDueDate?: string | null;
   estimator?: string | null;
   // The CRM estimator (a real user, distinct from the free-text `estimator` above). Set only via the
   // dedicated admin/director PATCH /deals/:id/estimator route; the display name is surfaced by

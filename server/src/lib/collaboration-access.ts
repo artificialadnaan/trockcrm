@@ -130,10 +130,15 @@ export async function assertDealOwnerAccess(
   tenantDb: TenantDb,
   dealId: string,
   viewer: Viewer,
-  options: { allowAdmin?: boolean; message?: string } = {}
+  options: { allowAdmin?: boolean; allowDirector?: boolean; message?: string } = {}
 ) {
-  const isAdminOverride = options.allowAdmin === true && viewer.role === "admin";
-  if (isAdminOverride) {
+  // Elevated roles bypass the owner check. Admin is global; a director is office-scoped, but the deal is
+  // fetched from the viewer's tenant schema (search_path), so getDealOfficeAccess can only return a deal in
+  // the director's active office — the office boundary is enforced implicitly, same as the trigger-rfp route.
+  const isElevatedOverride =
+    (options.allowAdmin === true && viewer.role === "admin") ||
+    (options.allowDirector === true && viewer.role === "director");
+  if (isElevatedOverride) {
     const row = await getDealOfficeAccess(tenantDb, dealId);
     if (!row) {
       throw new AppError(404, "Deal not found");
@@ -143,7 +148,7 @@ export async function assertDealOwnerAccess(
 
   const row = await assertDealCollaboratorAccess(tenantDb, dealId, viewer);
   const isOwner = row.assignedRepId === viewer.id;
-  if (!isOwner && !isAdminOverride) {
+  if (!isOwner) {
     throw new AppError(403, options.message ?? "Only the assigned rep can modify this deal");
   }
   return row;

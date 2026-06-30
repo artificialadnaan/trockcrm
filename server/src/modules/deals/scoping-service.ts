@@ -70,6 +70,10 @@ export interface DealScopingReadinessResult extends DealScopingReadinessSnapshot
 
 interface EvaluateDealScopingReadinessOptions {
   persist?: boolean;
+  // readOnly forbids ALL writes (attachment auto-population AND readiness persistence), not just the
+  // persist step. Used when a non-owner (an elevated director/admin observing the Trigger RFP readiness
+  // gate) evaluates another rep's intake — a passive readiness check must never mutate that rep's data.
+  readOnly?: boolean;
 }
 
 type LinkedScopingAttachmentRow = {
@@ -257,50 +261,53 @@ function fileBelongsToDealScope(file: ExistingScopingAttachmentCandidate, deal: 
   );
 }
 
-async function populateDealScopingAttachmentsForDeal(
+// Resolves which scoped candidate files (the deal's own files PLUS still-unattached files on its source
+// lead) map to which scoping attachment requirement — purely in-memory, no writes. This is the single
+// source of truth for "which files satisfy scoping attachments", shared by the persisting populate path
+// and the read-only readiness path. Read-only matters because a non-owner (an elevated director/admin
+// observing the Trigger RFP readiness gate) must get the SAME answer the owner would without mutating the
+// owner's intake — otherwise auto-population (a write) would be the only way to count lead files and the
+// director's button would be stuck disabled.
+async function resolveScopedAttachmentCandidates(
   tenantDb: TenantDb,
   deal: Pick<DealRow, "id" | "sourceLeadId">
-) {
+): Promise<Array<{ file: ScopingAttachmentFileRow; intakeRequirementKey: string }>> {
   const scopeCondition = deal.sourceLeadId
     ? or(eq(files.dealId, deal.id), and(eq(files.leadId, deal.sourceLeadId), isNull(files.dealId)))
     : eq(files.dealId, deal.id);
 
   const candidateFiles = await tenantDb
-    .select({
-      id: files.id,
-      dealId: files.dealId,
-      leadId: files.leadId,
-      category: files.category,
-      originalFilename: files.originalFilename,
-      mimeType: files.mimeType,
-      isActive: files.isActive,
-      parentFileId: files.parentFileId,
-      version: files.version,
-      intakeSection: files.intakeSection,
-      intakeRequirementKey: files.intakeRequirementKey,
-      intakeSource: files.intakeSource,
-    })
+    .select()
     .from(files)
     .where(and(eq(files.isActive, true), scopeCondition));
 
   const scopedCandidateFiles = candidateFiles.filter((file) => fileBelongsToDealScope(file, deal));
 
+  const resolved: Array<{ file: ScopingAttachmentFileRow; intakeRequirementKey: string }> = [];
   for (const file of scopedCandidateFiles) {
-    if (
-      !isLatestActiveFileInSet(file, scopedCandidateFiles)
-    ) {
+    if (!isLatestActiveFileInSet(file, scopedCandidateFiles)) {
       continue;
     }
-
     const metadata = resolveScopingAttachmentMetadataForCandidate(file, scopedCandidateFiles);
     if (!metadata) {
       continue;
     }
+    resolved.push({ file, intakeRequirementKey: metadata.intakeRequirementKey });
+  }
+  return resolved;
+}
 
+async function populateDealScopingAttachmentsForDeal(
+  tenantDb: TenantDb,
+  deal: Pick<DealRow, "id" | "sourceLeadId">
+) {
+  const resolved = await resolveScopedAttachmentCandidates(tenantDb, deal);
+
+  for (const { file, intakeRequirementKey } of resolved) {
     const nextValues = {
       dealId: deal.id,
       intakeSection: "attachments",
-      intakeRequirementKey: metadata.intakeRequirementKey,
+      intakeRequirementKey,
       intakeSource: DEAL_SCOPING_INTAKE_SOURCE,
     };
     if (
@@ -320,6 +327,21 @@ async function populateDealScopingAttachmentsForDeal(
       })
       .where(eq(files.id, file.id));
   }
+}
+
+// Read-only equivalent of populate-then-listScopingAttachmentFiles: computes the would-be linkage in
+// memory and returns the attachment rows for readiness, without persisting anything.
+async function listScopingAttachmentFilesReadOnly(
+  tenantDb: TenantDb,
+  deal: Pick<DealRow, "id" | "sourceLeadId">
+): Promise<ScopingAttachmentFileRow[]> {
+  const resolved = await resolveScopedAttachmentCandidates(tenantDb, deal);
+  return resolved.map(({ file, intakeRequirementKey }) => ({
+    ...file,
+    intakeSection: "attachments",
+    intakeRequirementKey,
+    intakeSource: DEAL_SCOPING_INTAKE_SOURCE,
+  }));
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -1123,10 +1145,21 @@ export async function evaluateDealScopingReadiness(
   const deal = resolvedDeal.deal;
   const lockState = await resolveDealScopeLockState(deal);
   const existingIntake = await getExistingIntake(tenantDb, dealId);
-  if (shouldAutoPopulateDealScopingAttachments({ lockState, intake: existingIntake })) {
-    await populateDealScopingAttachmentsForDeal(tenantDb, deal);
+  const wouldAutoPopulate = shouldAutoPopulateDealScopingAttachments({ lockState, intake: existingIntake });
+  let attachments: ScopingAttachmentFileRow[];
+  if (options.readOnly) {
+    // Non-owner observer (elevated director/admin): never write. When the owner WOULD auto-populate,
+    // compute the same would-be linkage in memory so readiness matches the owner's; otherwise (locked or
+    // already-populated) the plain lister is itself read-only and returns the existing linked set.
+    attachments = wouldAutoPopulate
+      ? await listScopingAttachmentFilesReadOnly(tenantDb, deal)
+      : await listScopingAttachmentFiles(tenantDb, dealId);
+  } else {
+    if (wouldAutoPopulate) {
+      await populateDealScopingAttachmentsForDeal(tenantDb, deal);
+    }
+    attachments = await listScopingAttachmentFiles(tenantDb, dealId);
   }
-  const attachments = await listScopingAttachmentFiles(tenantDb, dealId);
   const sectionData = buildBaseSectionData(existingIntake, resolvedDeal);
   const projectTypeId = existingIntake?.projectTypeId ?? resolvedDeal.resolved.projectTypeId ?? null;
   const workflowRoute = resolveScopingWorkflowRoute(resolvedDeal.resolved.workflowRoute);
@@ -1138,7 +1171,8 @@ export async function evaluateDealScopingReadiness(
     attachments,
   });
 
-  const shouldPersist = options.persist !== false && !lockState.locked && !isScopingIntakeActivated(existingIntake);
+  const shouldPersist =
+    !options.readOnly && options.persist !== false && !lockState.locked && !isScopingIntakeActivated(existingIntake);
   if (existingIntake && shouldPersist) {
     const user = await getUserOrThrow(tenantDb, existingIntake.lastEditedBy);
     await persistReadinessIfNeeded(

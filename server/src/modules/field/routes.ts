@@ -33,10 +33,12 @@ import {
   FIELD_PROJECTS_MAX_FETCH,
   listFieldProjects,
   listFieldProjectPhotos,
+  getFieldProject,
   listNearbyFieldCaptureTargets,
   listNearbyFieldProjects,
   listStarredFieldProjects,
   mergeFieldCaptureTargets,
+  mergeFieldProjects,
   mergeNearbyProjects,
   searchFieldCaptureTargets,
   starFieldProject,
@@ -151,8 +153,9 @@ const fieldProjectMiddleware = [requireFieldContractor, tenantMiddleware] as con
 
 // Cross-office (field is office-agnostic): fan out the active-project list over ALL active offices,
 // stamp each project with its owning office (dealNumber/name are unique per-schema only, so cross-office
-// rows can be visually identical), merge by recency, and paginate over the merged set. One office
-// failing degrades gracefully — its slug is surfaced in `degradedOffices`, the rest still return.
+// rows can be visually identical), merge photos-first then by recency (via mergeFieldProjects), and
+// paginate over the merged set. One office failing degrades gracefully — its slug is surfaced in
+// `degradedOffices`, the rest still return.
 fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
   try {
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
@@ -179,10 +182,11 @@ fieldRoutes.get("/projects", requireFieldContractor, async (req, res, next) => {
         }),
       ),
     );
-    const merged = results.flatMap(({ office, value }) =>
-      value.projects.map((project: FieldProject) => ({ ...project, ...officeTag(office) })),
+    // Photos-first cross-office order (mirrors the per-office SQL ORDER BY); the page slice is applied
+    // to the merged set below.
+    const merged = mergeFieldProjects(
+      results.map(({ office, value }) => ({ office, projects: value.projects })),
     );
-    merged.sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
     const total = results.reduce((sum, { value }) => sum + value.total, 0);
     res.json({
       projects: merged.slice(offset, offset + perPage),
@@ -234,6 +238,30 @@ fieldRoutes.get("/projects/nearby", requireFieldContractor, async (req, res, nex
       3,
     );
     res.json({ projects, degradedOffices: failures.map((failure) => failure.office.slug) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Single-project metadata by id. Registered AFTER the literal /projects/starred and /projects/nearby
+// routes so `:dealId` doesn't shadow them. The detail page uses this instead of scanning the paginated
+// list, so opening a project never depends on it being inside the list window — photos-first ordering
+// pushes zero-photo projects past the first page in large offices, and a list scan would 404 them (and
+// drop the office context the off-office write guard relies on).
+fieldRoutes.get("/projects/:dealId", requireFieldContractor, async (req, res, next) => {
+  try {
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+    const dealId = String(req.params.dealId);
+    // Validate FORMAT before resolving the office: a non-uuid would otherwise reach the resolver's
+    // per-office `::uuid` cast, fail in every office, and surface as a misleading 503 instead of a 400.
+    assertValidUuid(dealId, "dealId");
+    const { value, office } = await withResolvedOffice(
+      "deal",
+      dealId,
+      (officeDb) => getFieldProject(officeDb, access, dealId),
+      "Project not found",
+    );
+    res.json({ project: { ...value, ...officeTag(office) } });
   } catch (err) {
     next(err);
   }

@@ -57,6 +57,7 @@ import { DealEstimatesTab } from "./deal-estimates-tab";
 import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
+import { BidDueDateBanner } from "./bid-due-date-banner";
 import { DealProposalCard } from "./deal-proposal-card";
 import { DealContractSignedCard } from "./deal-contract-signed-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
@@ -464,6 +465,7 @@ export function DealDetailPage() {
     null;
   const canTriggerRfp =
     user?.role === "admin" ||
+    user?.role === "director" ||
     (user?.role === "rep" && deal?.assignedRepId === user.id);
   const canCancelRfp =
     user?.role === "admin" ||
@@ -506,14 +508,19 @@ export function DealDetailPage() {
   const requestedFocus = searchParams.get("focus");
 
   useEffect(() => {
+    // Only auto-open the Opportunity Scope tab for the deal OWNER — that's their editing workspace.
+    // A non-owner (a director/admin who can now trigger RFP office-wide) would otherwise be dropped onto
+    // the scope panel, which immediately GETs the owner-only /scoping-intake route and 403s. They default
+    // to Overview instead, where the Trigger RFP button + readiness gate live; the Scoping tab is still
+    // reachable by an explicit click.
     const nextTab =
       requestedTab && availableTabs.includes(requestedTab as Tab)
         ? (requestedTab as Tab)
-        : isOpportunityStage
+        : isOpportunityStage && viewerOwnsDeal
           ? "scoping"
           : "overview";
     setActiveTab((current) => (current === nextTab ? current : nextTab));
-  }, [availableTabs, isOpportunityStage, requestedTab]);
+  }, [availableTabs, isOpportunityStage, viewerOwnsDeal, requestedTab]);
 
   useEffect(() => {
     if (activeTab !== "overview" || requestedFocus !== "copilot") {
@@ -924,6 +931,7 @@ export function DealDetailPage() {
   );
   const tabContent = (
     <div className="space-y-4">
+      <BidDueDateBanner bidDueDate={deal.bidDueDate} />
       {!viewerOwnsDeal ? (
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">
           Assigned to {deal.assignedRepName ?? deal.assignedRepId ?? "another rep"}. You can collaborate with notes, activity, files, photos, and emails, but only the assigned rep can edit.

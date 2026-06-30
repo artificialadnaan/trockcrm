@@ -163,7 +163,9 @@ function createRouteState(deal = makeDeal()) {
     deal,
     inserted: [] as any[],
     updatesAttempted: 0,
-    adminOverride: false,
+    // True when the caller bypasses the rep owner-scope on the reservation UPDATE — admins AND directors
+    // (the route only owner-scopes reps via updateConditions).
+    bypassOwnerScope: false,
     beforeUpdate: null as null | (() => void),
   };
 }
@@ -199,7 +201,7 @@ function makeUpdateBuilder(state: ReturnType<typeof createRouteState>, values: R
           state.deal.readOnlySyncedAt != null ||
           state.deal.bidBoardStageEnteredAt != null ||
           state.deal.bidBoardMirrorSourceEnteredAt != null ||
-          (!state.adminOverride && state.deal.assignedRepId !== "rep-1")
+          (!state.bypassOwnerScope && state.deal.assignedRepId !== "rep-1")
         ) {
           return [];
         }
@@ -222,7 +224,7 @@ function makeReq(options: {
   state?: ReturnType<typeof createRouteState>;
 } = {}) {
   const state = options.state ?? createRouteState(makeDeal(options.deal));
-  state.adminOverride = options.role === "admin";
+  state.bypassOwnerScope = options.role === "admin" || options.role === "director";
   const req = {
     params: { id: "deal-1" },
     tenantDb: {
@@ -247,7 +249,12 @@ function makeReq(options: {
       })),
     },
     user: {
-      id: options.role === "admin" ? "admin-1" : "rep-1",
+      id:
+        options.role === "admin"
+          ? "admin-1"
+          : options.role === "director"
+            ? "director-1"
+            : "rep-1",
       role: options.role ?? "rep",
       officeId: "office-1",
       activeOfficeId: "office-1",
@@ -415,8 +422,26 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     expect(insertRfpJobMock).not.toHaveBeenCalled();
   });
 
-  it("rejects users who are neither admin nor the assigned rep", async () => {
-    const { req } = makeReq({ role: "director" });
+  it("allows a director to trigger an eligible deal owned by another rep (office-wide), stamping who requested it", async () => {
+    const { req, state } = makeReq({ role: "director", deal: { assignedRepId: "rep-2" } });
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(state.updatesAttempted).toBe(1);
+    expect(insertRfpJobMock).toHaveBeenCalledTimes(1);
+    // Audit trail: the deal records the director (not the owning rep) as the requester.
+    expect(state.deal).toMatchObject({
+      rfpApprovalStatus: "pending_outbox",
+      rfpApprovalRequestedBy: "director-1",
+    });
+  });
+
+  it("rejects a rep who owns no claim to the deal with the trigger-specific unauthorized code", async () => {
+    const { req } = makeReq({ role: "rep", deal: { assignedRepId: "rep-2" } });
     const res = makeRes();
     const next = vi.fn();
 

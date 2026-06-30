@@ -214,7 +214,7 @@ describe("POST /api/deals/:id/rfp-retry", () => {
       req.tenantDb,
       "deal-1",
       expect.objectContaining({ id: "user-1", role: "director" }),
-      expect.objectContaining({ allowAdmin: true })
+      expect.objectContaining({ allowAdmin: true, allowDirector: true })
     );
   });
 

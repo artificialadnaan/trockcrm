@@ -197,7 +197,16 @@ export async function listFieldProjects(
         AND f.deleted_at IS NULL
     ) photo_stats ON true
     WHERE ${where}
-    ORDER BY COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) DESC NULLS LAST
+    -- Photos-first: surface projects that actually have photos above recently-touched-but-empty deals,
+    -- then most-recent activity within each group, with a final d.id tiebreak for a deterministic total
+    -- order. Mirrored EXACTLY by mergeFieldProjects (incl. the id tiebreak) so the cross-office
+    -- fetch-top-N → merge → slice scheme stays consistent across pages even under exact ties. The recency
+    -- key is truncated to milliseconds so it sorts at the SAME precision the JS merge compares at
+    -- (mapFieldProject -> Date -> ISO is ms); otherwise sub-ms differences would order in SQL but tie in
+    -- JS and the two steps could disagree at the fetch boundary.
+    ORDER BY (COALESCE(photo_stats.photo_count, 0) > 0) DESC,
+             date_trunc('milliseconds', COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at)) DESC NULLS LAST,
+             d.id ASC
     LIMIT ${perPage}
     OFFSET ${offset}
   `);
@@ -362,6 +371,51 @@ export async function assertActiveFieldProject(tenantDb: TenantDb, _access: Fiel
       false AS starred
     FROM deals d
     LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    WHERE d.id = ${dealId}::uuid
+      AND ${activeProjectWhere()}
+    LIMIT 1
+  `);
+  const row = ((result as any).rows ?? result)[0];
+  if (!row) throw new AppError(404, "Project not found");
+  return mapFieldProject(row);
+}
+
+/**
+ * Fetch ONE active field project by id with the SAME field-safe shape the list returns — real photoCount,
+ * real starred state, and photo-aware recency (unlike assertActiveFieldProject, which is an existence gate
+ * that hardcodes photo_count/starred). The detail page uses this so opening a project never depends on it
+ * appearing within the paginated list window — which photos-first ordering pushes zero-photo projects out
+ * of in large offices. Cross-office resolution is the caller's job (withResolvedOffice). UNSCOPED by rep,
+ * exactly like assertActiveFieldProject — the active predicate is the sole gate.
+ */
+export async function getFieldProject(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  dealId: string,
+): Promise<FieldProject> {
+  const result = await tenantDb.execute(sql`
+    SELECT
+      d.id,
+      d.name,
+      d.deal_number,
+      d.project_number,
+      d.name AS property_name,
+      NULLIF(CONCAT_WS(', ', NULLIF(d.property_address, ''), NULLIF(d.property_city, ''), NULLIF(d.property_state, ''), NULLIF(d.property_zip, '')), '') AS property_address,
+      COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
+      COALESCE(photo_stats.last_photo_at, d.last_activity_at, d.updated_at, d.created_at) AS last_activity_at,
+      COALESCE(photo_stats.photo_count, 0)::int AS photo_count,
+      (fsp.user_id IS NOT NULL) AS starred
+    FROM deals d
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN field_user_starred_projects fsp ON fsp.deal_id = d.id AND fsp.user_id = ${access.userId}::uuid
+    LEFT JOIN LATERAL (
+      SELECT count(*) AS photo_count, max(COALESCE(f.taken_at, f.created_at)) AS last_photo_at
+      FROM files f
+      WHERE f.deal_id = d.id
+        AND f.category = 'photo'
+        AND f.is_active = true
+        AND f.deleted_at IS NULL
+    ) photo_stats ON true
     WHERE d.id = ${dealId}::uuid
       AND ${activeProjectWhere()}
     LIMIT 1
@@ -660,4 +714,32 @@ export function mergeNearbyProjects(
     return left.id.localeCompare(right.id);
   });
   return stamped.slice(0, Math.max(0, limit));
+}
+
+/**
+ * Merge per-office active-project results into ONE company-wide list, ordered PHOTOS-FIRST: projects
+ * with at least one photo rank above projects with none, and within each group the most-recent activity
+ * comes first (cross-office-comparable ISO `lastActivityAt`, which already folds in the latest photo
+ * time, at millisecond precision — matching the per-office SQL's date_trunc'd recency key). This mirrors
+ * the per-office SQL ORDER BY (photos-first, then ms recency, then id) so paginating the merged set stays
+ * consistent —
+ * the photo'd projects land in the first window instead of being buried under recently-touched-but-empty
+ * deals. A null/absent `lastActivityAt` sorts last; ties break on id for a stable order. The caller
+ * applies the page/perPage slice.
+ */
+export function mergeFieldProjects(
+  perOffice: Array<{ office: FieldOffice; projects: FieldProject[] }>,
+): FieldProjectWithOffice[] {
+  const stamped: FieldProjectWithOffice[] = perOffice.flatMap(({ office, projects }) =>
+    projects.map((project) => ({ ...project, ...officeTag(office) })),
+  );
+  stamped.sort((left, right) => {
+    const leftHasPhotos = left.photoCount > 0 ? 1 : 0;
+    const rightHasPhotos = right.photoCount > 0 ? 1 : 0;
+    if (leftHasPhotos !== rightHasPhotos) return rightHasPhotos - leftHasPhotos; // has-photos first
+    const recencyDelta = (right.lastActivityAt ?? "").localeCompare(left.lastActivityAt ?? ""); // recent first, nulls last
+    if (recencyDelta !== 0) return recencyDelta;
+    return left.id.localeCompare(right.id);
+  });
+  return stamped;
 }

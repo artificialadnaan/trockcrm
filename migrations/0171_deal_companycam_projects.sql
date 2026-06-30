@@ -33,6 +33,17 @@ BEGIN
       CONTINUE;
     END IF;
 
+    -- Repair drift FIRST: ensure the deprecated scalar column exists on EVERY tenant. office_pwauditoffice
+    -- (and any other drifted/legacy tenant) never got companycam_project_id from migration 0007. Without it,
+    -- not only does the dup-check below error 42703 — the deployed runtime CompanyCam flows that still mirror
+    -- to this column (feed-service assign, link/unlink) would 42703 on that tenant after deploy. ADD it
+    -- (nullable, empty) so the column is universal again. The join table remains the source of truth; this
+    -- scalar is the deprecated mirror, dropped in a later migration. ADD COLUMN IF NOT EXISTS is idempotent.
+    EXECUTE format(
+      'ALTER TABLE %I.deals ADD COLUMN IF NOT EXISTS companycam_project_id varchar(50)',
+      schema_name
+    );
+
     EXECUTE format(
       'SELECT count(*) FROM (
          SELECT companycam_project_id
@@ -81,9 +92,10 @@ BEGIN
       schema_name
     );
 
-    -- Backfill the deprecated scalar link. The pre-flight guard above already RAISEd if any
-    -- companycam_project_id is shared by two deals, so this is now guaranteed conflict-free for the dup case;
-    -- ON CONFLICT DO NOTHING remains only to keep replays idempotent (re-running can't double-insert a link).
+    -- Backfill the deprecated scalar link. The column is guaranteed to exist (repaired above for drifted
+    -- tenants), and the pre-flight guard already RAISEd on any cross-deal duplicate, so this is conflict-free
+    -- for the dup case; ON CONFLICT DO NOTHING keeps replays idempotent. Drifted tenants just added an empty
+    -- column, so they backfill zero rows — the empty join table is correct (new links go straight to it).
     EXECUTE format(
       'INSERT INTO %I.deal_companycam_projects (deal_id, companycam_project_id)
          SELECT id, companycam_project_id FROM %I.deals WHERE companycam_project_id IS NOT NULL
@@ -97,6 +109,11 @@ END $tenant$;
 -- office_dallas at migration time too (redundant with the DO-loop above, guarded by IF NOT EXISTS). A
 -- freshly provisioned schema has no deals yet, so no backfill is needed here.
 -- TENANT_SCHEMA_START
+-- Repair the deprecated scalar for NEW offices too: migration 0007 added companycam_project_id only via a
+-- DO-loop (no tenant block), and the provisioner runs ONLY this TENANT_SCHEMA block — so without this a
+-- freshly provisioned office would lack the column and the runtime CompanyCam mirror writes (feed-service
+-- assign, link/unlink) would 42703. (deals already exists from earlier tenant blocks at provision time.)
+ALTER TABLE office_dallas.deals ADD COLUMN IF NOT EXISTS companycam_project_id varchar(50);
 CREATE TABLE IF NOT EXISTS office_dallas.deal_companycam_projects (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   deal_id uuid NOT NULL REFERENCES office_dallas.deals(id) ON DELETE CASCADE,
