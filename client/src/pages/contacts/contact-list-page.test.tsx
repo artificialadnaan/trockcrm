@@ -247,6 +247,59 @@ describe("ContactListPage", () => {
     }
   });
 
+  it("shows the linked company's resolved name (not 'Unassigned') when the free-text company_name is null", () => {
+    // The reported bug: a contact linked via company_id but with a null denormalized company_name read
+    // "Unassigned" because the column rendered company_name and ignored the link. The server now resolves
+    // companies.name as linkedCompanyName, which the column prefers. Owner is set so the only place an
+    // "Unassigned" could come from is the company cell.
+    mocks.useContactsMock.mockReturnValue({
+      contacts: [
+        {
+          id: "contact-9",
+          firstName: "Francisco",
+          lastName: "Rodriguez",
+          email: "frodriguez@avenue5.com",
+          phone: null,
+          mobile: null,
+          companyName: null,
+          companyId: "company-9",
+          linkedCompanyName: "Avenue5 Residential",
+          ownerUserId: "user-1",
+          ownerUserName: "Alicia Adams",
+          jobTitle: "Area Maintenance Manager",
+          category: "client",
+          role: null,
+          isPrimary: false,
+          linkedinUrl: null,
+          address: null,
+          city: null,
+          state: null,
+          zip: null,
+          notes: null,
+          touchpointCount: 0,
+          lastContactedAt: null,
+          firstOutreachCompleted: false,
+          procoreContactId: null,
+          hubspotContactId: null,
+          linkedDealsCount: 22,
+          lastTouchAt: null,
+          normalizedPhone: null,
+          isActive: true,
+          createdAt: "2026-04-10T10:00:00.000Z",
+          updatedAt: "2026-04-11T10:00:00.000Z",
+        },
+      ],
+      pagination: { page: 1, limit: 50, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = normalize(renderPage());
+    expect(html).toContain("Avenue5 Residential");
+    expect(html).not.toContain("Unassigned");
+  });
+
   it("renders A1 contact role, primary state, linked deals, and last touch", () => {
     const html = normalize(renderPage());
     const ownerColor = getOwnerInitialColor("user-1");

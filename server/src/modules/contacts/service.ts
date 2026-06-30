@@ -1,7 +1,7 @@
 import { eq, and, desc, asc, ilike, sql, or, not, isNull, inArray } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { activities, contacts, contactDealAssociations, deals, emails, tasks, users } from "@trock-crm/shared/schema";
+import { activities, companies, contacts, contactDealAssociations, deals, emails, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildContactSearchCondition } from "../search/unified-search.js";
@@ -212,10 +212,20 @@ export function buildContactSortOrder(sortBy: ContactFilters["sortBy"], sortDir:
     return sortDir === "asc" ? sql`${linkedDeals} ASC NULLS LAST` : sql`${linkedDeals} DESC NULLS LAST`;
   }
 
+  if (sortBy === "company_name") {
+    // Sort by the SAME value the list now DISPLAYS: the linked company's real name (companies.name via
+    // company_id) when present, else the free-text company_name. Sorting on the raw company_name alone
+    // would scatter every contact whose name is resolved from the linked company (blank text → NULLS LAST)
+    // away from where it visibly sorts. Requires getContacts to join companies (it does).
+    const resolvedCompanyName = sql`COALESCE(${companies.name}, ${contacts.companyName})`;
+    return sortDir === "asc"
+      ? sql`${resolvedCompanyName} ASC NULLS LAST`
+      : sql`${resolvedCompanyName} DESC NULLS LAST`;
+  }
+
   const sortColumn = (() => {
     switch (sortBy) {
       case "name": return contacts.lastName;
-      case "company_name": return contacts.companyName;
       case "created_at": return contacts.createdAt;
       case "last_contacted_at": return contacts.lastContactedAt;
       case "touchpoint_count": return contacts.touchpointCount;
@@ -373,9 +383,18 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     conditions.push(eq(contacts.category, filters.category as any));
   }
 
-  // Company filter (name ILIKE)
+  // Company filter — match the DISPLAYED company name: the free-text company_name OR the LINKED company's
+  // real name (companies.name via company_id), so filtering by what the list shows returns the row (a linked
+  // contact with a null/stale free-text name is no longer excluded). EXISTS (not a join) so the SAME predicate
+  // works in the list query AND the count/card-aggregate queries, which don't join companies.
   if (filters.companyName) {
-    conditions.push(ilike(contacts.companyName, `%${filters.companyName}%`));
+    const companyTerm = `%${filters.companyName}%`;
+    conditions.push(
+      or(
+        ilike(contacts.companyName, companyTerm),
+        sql`EXISTS (SELECT 1 FROM companies fc WHERE fc.id = ${contacts.companyId} AND fc.name ILIKE ${companyTerm})`
+      )
+    );
   }
 
   // Company filter (by company ID — direct column on contacts)
@@ -479,6 +498,10 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
       mobile: contacts.mobile,
       companyName: contacts.companyName,
       companyId: contacts.companyId,
+      // Authoritative display name: the LINKED company's real name (companies.name via company_id), which
+      // the free-text company_name column often doesn't carry (null/stale on imported contacts). The UI
+      // prefers this so a contact linked to a real company stops reading "Unassigned"/"Unknown company".
+      linkedCompanyName: companies.name,
       ownerUserId: contacts.ownerId,
       ownerUserName: users.displayName,
       jobTitle: contacts.jobTitle,
@@ -507,6 +530,7 @@ export async function getContacts(tenantDb: TenantDb, filters: ContactFilters) {
     })
     .from(contacts)
     .leftJoin(users, eq(users.id, contacts.ownerId))
+    .leftJoin(companies, eq(companies.id, contacts.companyId))
     .where(where)
     // Stable secondary key so OFFSET pagination is deterministic when the primary sort ties
     // (e.g. equal last_touch_at / company / role) — without it, rows can repeat or vanish across pages.
@@ -546,6 +570,9 @@ export async function getContactById(tenantDb: TenantDb, contactId: string) {
       mobile: contacts.mobile,
       companyName: contacts.companyName,
       companyId: contacts.companyId,
+      // See getContacts: the linked company's real name, preferred by the detail header/sidebar over the
+      // free-text company_name so a contact with company_id set never shows "Unknown company".
+      linkedCompanyName: companies.name,
       jobTitle: contacts.jobTitle,
       category: contacts.category,
       role: contacts.role,
@@ -571,6 +598,7 @@ export async function getContactById(tenantDb: TenantDb, contactId: string) {
       lastTouchAt: buildContactLastTouchAtSql(),
     })
     .from(contacts)
+    .leftJoin(companies, eq(companies.id, contacts.companyId))
     .where(eq(contacts.id, contactId))
     .limit(1);
 
@@ -771,14 +799,19 @@ export async function getContactsNeedingOutreach(tenantDb: TenantDb, limit = 20)
 }
 
 /**
- * Get distinct company names for filter dropdowns.
+ * Get distinct company names for filter dropdowns. Returns the RESOLVED name (linked companies.name over the
+ * free-text company_name) so the dropdown lists what the list displays and what the companyName filter now
+ * matches — a contact linked to a real company is offered by that company even when its free-text company_name
+ * is null/stale.
  */
 export async function getCompanyNames(tenantDb: TenantDb) {
+  const resolvedName = sql<string>`COALESCE(${companies.name}, ${contacts.companyName})`;
   const result = await tenantDb
-    .selectDistinct({ companyName: contacts.companyName })
+    .selectDistinct({ companyName: resolvedName })
     .from(contacts)
-    .where(and(eq(contacts.isActive, true), not(isNull(contacts.companyName))))
-    .orderBy(asc(contacts.companyName));
+    .leftJoin(companies, eq(companies.id, contacts.companyId))
+    .where(and(eq(contacts.isActive, true), sql`COALESCE(${companies.name}, ${contacts.companyName}) IS NOT NULL`))
+    .orderBy(asc(resolvedName));
 
   return result.map((r) => r.companyName).filter(Boolean) as string[];
 }

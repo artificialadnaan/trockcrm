@@ -3,6 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import {
   activities,
+  companies,
   contactDealAssociations,
   contacts,
   deals,
@@ -47,7 +48,7 @@ beforeAll(async () => {
   await pg.exec(`SET TimeZone='UTC';`);
   // activities/emails/tasks/deals exist (the lastTouch + linked-deals subqueries reference them) but stay
   // empty — last_contacted_at alone drives lastTouchAt here.
-  await pg.exec(tenantSchemaSql("public", [users, contacts, contactDealAssociations, deals, activities, emails, tasks]));
+  await pg.exec(tenantSchemaSql("public", [users, companies, contacts, contactDealAssociations, deals, activities, emails, tasks]));
   await pg.exec(`
     INSERT INTO contacts (id, first_name, last_name, category, last_contacted_at) VALUES
       ('${C.primaryTouched}','Pat','Primary','client', NOW() - interval '5 days'),

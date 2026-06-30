@@ -228,6 +228,7 @@ export const CONTACT_SEARCH_FIELDS = [
   "contacts.last_name",
   "contacts.email",
   "contacts.company_name",
+  "companies.name",
   "contacts.phone",
   "contacts.mobile",
   "contacts.job_title",
@@ -237,10 +238,14 @@ export const CONTACT_SEARCH_FIELDS = [
 
 /**
  * Build the WHERE predicate that matches a contact by its own text fields (name, email,
- * denormalized company name, phone/mobile, job title, city) plus its owner's name. Same
- * contract as the other builders: lifecycle-agnostic, read-only, widens no visibility. Owner
- * is an EXISTS subquery (not a join) so the SAME condition works in the list query AND the
- * COUNT query (which does not join users). Caller guards min length (>= 2 chars).
+ * denormalized company name, phone/mobile, job title, city), the LINKED company's real name, and
+ * its owner's name. Same contract as the other builders: lifecycle-agnostic, read-only, widens no
+ * visibility. The linked-company and owner matches are EXISTS subqueries (not joins) so the SAME
+ * condition works in the list query AND the COUNT query (which join neither companies nor users) —
+ * the linked company is aliased so it never collides with a companies join the caller may add.
+ * Matching companies.name keeps search consistent with the displayed name (the list shows the linked
+ * company's real name, which the free-text company_name column is often null/stale for). Caller
+ * guards min length (>= 2 chars).
  */
 export function buildContactSearchCondition(search: string): SQL {
   const searchTerm = `%${escapeLikePattern(search.trim())}%`;
@@ -254,6 +259,12 @@ export function buildContactSearchCondition(search: string): SQL {
     OR ${contacts.mobile} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${contacts.jobTitle} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${contacts.city} ILIKE ${searchTerm} ESCAPE '\\'
+    OR EXISTS (
+      SELECT 1
+      FROM companies linked_company
+      WHERE linked_company.id = ${contacts.companyId}
+        AND linked_company.name ILIKE ${searchTerm} ESCAPE '\\'
+    )
     OR EXISTS (
       SELECT 1
       FROM public.users owner_user

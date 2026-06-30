@@ -161,9 +161,29 @@ describe("ContactDetailPage", () => {
     act(() => root?.unmount());
   });
 
-  it("does not use placeholder copy for linked companies with unresolved names", () => {
+  it("shows the linked company's resolved name when the free-text company_name is null", () => {
+    // The reported bug: a contact correctly linked via company_id but with a null denormalized
+    // company_name rendered "Unknown company". The server now resolves companies.name as
+    // linkedCompanyName, which the link prefers — so the real company name shows.
     mocks.useContactDetailMock.mockReturnValue({
-      contact: { ...makeContact(), companyName: null },
+      contact: { ...makeContact(), companyName: null, linkedCompanyName: "Avenue5 Residential" },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+
+    const link = container.querySelector('a[href="/companies/company-1"]');
+    expect(link?.textContent).toContain("Avenue5 Residential");
+    expect(container.textContent).not.toContain("Unknown company");
+
+    act(() => root?.unmount());
+  });
+
+  it("falls back to 'Unknown company' only when neither the resolved nor the free-text name is present", () => {
+    mocks.useContactDetailMock.mockReturnValue({
+      contact: { ...makeContact(), companyName: null, linkedCompanyName: null },
       loading: false,
       error: null,
       refetch: vi.fn(),

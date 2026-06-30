@@ -11,6 +11,9 @@ export interface Contact {
   mobile: string | null;
   companyName: string | null;
   companyId: string | null;
+  // Resolved name of the linked company (companies.name via companyId). Server-resolved so the UI can show
+  // the real company even when the denormalized free-text companyName is null/stale. Prefer it for display.
+  linkedCompanyName?: string | null;
   ownerUserId?: string | null;
   ownerUserName?: string | null;
   jobTitle: string | null;

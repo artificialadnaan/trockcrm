@@ -137,6 +137,11 @@ export const apiSpec = {
           mobile: { type: "string", nullable: true },
           companyName: { type: "string", nullable: true },
           companyId: { type: "string", format: "uuid", nullable: true },
+          linkedCompanyName: {
+            type: "string",
+            nullable: true,
+            description: "Resolved name of the linked company (companies.name via companyId). Preferred over the free-text companyName for display; null when the contact has no linked company.",
+          },
           jobTitle: { type: "string", nullable: true, example: "VP of Real Estate" },
           category: {
             type: "string",

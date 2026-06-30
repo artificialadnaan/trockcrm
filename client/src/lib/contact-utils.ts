@@ -68,6 +68,20 @@ export function contactLocation(contact: { city: string | null; state: string | 
   return contact.city ?? contact.state ?? "";
 }
 
+/**
+ * Display name for a contact's company, with one consistent precedence everywhere it's shown:
+ * the LINKED company's real name (`linkedCompanyName`, resolved server-side from `company_id`) wins over
+ * the denormalized free-text `companyName`, which is frequently null/stale on imported contacts. `fallback`
+ * is returned when neither is present (e.g. "Unassigned" / "Unknown company"); omit it for callers that
+ * drop empty parts themselves.
+ */
+export function getContactCompanyName(
+  contact: Pick<Contact, "linkedCompanyName" | "companyName">,
+  fallback?: string
+): string | null {
+  return contact.linkedCompanyName ?? contact.companyName ?? fallback ?? null;
+}
+
 export function confidenceLabel(score: string | number): string {
   const s = typeof score === "string" ? parseFloat(score) : score;
   if (s >= 0.9) return "Very High";
