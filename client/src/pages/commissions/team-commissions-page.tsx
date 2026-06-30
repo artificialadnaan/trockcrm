@@ -82,9 +82,13 @@ export function TeamCommissionsPage() {
   // total legitimately sums the rows. The deal-VALUE totals (pipeline, active, won·unsigned) come from
   // officeTotals, which counts each deal ONCE — summing the involvement rows would double-count a deal that
   // has a distinct owner+estimator (e.g. Sidney/Alex as estimator).
+  // Earned sums displayedEarned (NOT totalEarnedCommission) so the KPI + footer reconcile with the column:
+  // a held-only row shows its held amount in the cell, so it must contribute that same held amount to the
+  // total — otherwise a team of all-held rows shows $X in the column but $0 in the card/footer (the very
+  // "$0 reads as earned nothing" contradiction the held display exists to remove).
   const additive = useMemo(() => rows.reduce(
     (a, r) => ({
-      earned: a.earned + r.totalEarnedCommission,
+      earned: a.earned + displayedEarned(r),
       potential: a.potential + r.potentialCommission,
       activities: a.activities + r.totalActivities,
     }),

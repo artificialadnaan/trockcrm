@@ -177,6 +177,18 @@ describe("TeamCommissionsPage", () => {
     );
   });
 
+  it("the Earned KPI + footer total reconcile with the held column value, not $0 (totals-vs-displayed finding)", async () => {
+    mockWorkspaceRows([heldRow]);
+    const { container } = await render();
+    // The held $4,340 must appear THREE times: the column cell, the "Earned commission" KPI card, and the
+    // "Team total" footer. Summing totalEarnedCommission would leave both totals at $0.00 — contradicting the
+    // column (the very thing the held display exists to fix).
+    const occurrences = (container.textContent?.match(/\$4,340\.00/g) ?? []).length;
+    expect(occurrences).toBeGreaterThanOrEqual(3); // column + KPI + footer all reconcile
+    expect(container.textContent).toContain("Earned commission");
+    expect(container.textContent).toContain("Team total");
+  });
+
   it("a below-floor rep with a payable override shows the payable total, not the held-only display (finding #2)", async () => {
     // Manager override is NOT floor-gated: totalEarnedCommission = override ($1,500) even below floor.
     mockWorkspaceRows([{ ...heldRow, totalEarnedCommission: 1500 }]);
