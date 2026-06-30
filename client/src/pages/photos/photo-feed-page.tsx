@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Camera,
@@ -538,6 +538,7 @@ function AssignToDealPopover({
   const [searchFailed, setSearchFailed] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [assigningId, setAssigningId] = useState<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -595,13 +596,24 @@ function AssignToDealPopover({
           </Button>
         }
       />
-      <PopoverContent align="end" className="w-80 p-0">
+      <PopoverContent
+        align="end"
+        className="w-80 p-0"
+        // Focus the search input WITHOUT scrolling. A native `autoFocus` (and Base UI's own
+        // initialFocus when it targets a child) calls focus() with preventScroll:false on a
+        // freshly-portaled, not-yet-positioned popup — which jumps the whole page to the top. Focus
+        // the input ourselves with preventScroll:true and return false so Base UI doesn't re-focus.
+        initialFocus={() => {
+          searchInputRef.current?.focus({ preventScroll: true });
+          return false;
+        }}
+      >
         <div className="border-b p-2">
           <p className="px-1 pb-2 text-xs text-gray-500">
             Assign {photoCount} photo{photoCount !== 1 ? "s" : ""} to:
           </p>
           <Input
-            autoFocus
+            ref={searchInputRef}
             placeholder="Search deals by name or number..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
