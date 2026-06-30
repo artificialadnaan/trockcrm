@@ -27,6 +27,8 @@ const REP_ZEROFLOOR = U("a04"); // rate 0.10, floor 0, owned book 30000 -> met, 
 const REP_OWNED_NO_DSC = U("a05"); // floor 50000, owns a signed deal worth 90000 with NO dsc row -> met on owner book; earned 0
 const REP_TESTDATA = U("a06"); // is_test_data=true, reports to MANAGER, meets floor + has earned -> MUST be excluded from override
 const REP_INACTIVE = U("a07"); // is_active=false config w/ stale $1M floor -> treated as NO floor (not gated)
+const REP_REASSIGNED = U("a08"); // holds the OWNER commission row on a deal now assigned to REP_NEWOWNER
+const REP_NEWOWNER = U("a09"); // currently owns the reassigned deal, but earned nothing on it
 const MANAGER = U("b01"); // own rate 0.10 floor 0, override 0.05 over REP_ABOVE + REP_BELOW (+ REP_TESTDATA, excluded)
 
 const ST_OPEN = U("57001"); // 'opportunity' (signed earned rows live here in these fixtures)
@@ -45,6 +47,7 @@ const D = {
   ownedNoDsc: U("d10"),
   testRep1: U("d11"),
   inactive1: U("d12"),
+  reassigned: U("d13"), // owned by REP_NEWOWNER now; owner commission row booked to REP_REASSIGNED
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -101,10 +104,14 @@ beforeAll(async () => {
       ('${REP_OWNED_NO_DSC}', 'OwnedNoDsc', true, 'rep', NULL, false),
       ('${REP_TESTDATA}', 'TestData', true, 'rep', '${MANAGER}', true),
       ('${REP_INACTIVE}', 'Inactive', true, 'rep', NULL, false),
+      ('${REP_REASSIGNED}', 'Reassigned', true, 'rep', NULL, false),
+      ('${REP_NEWOWNER}', 'NewOwner', true, 'rep', NULL, false),
       ('${MANAGER}', 'Manager', true, 'rep', NULL, false);
 
     INSERT INTO user_commission_settings (user_id, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP_ABOVE}', 0.10, 50000, 0),
+      ('${REP_REASSIGNED}', 0.10, 50000, 0),
+      ('${REP_NEWOWNER}', 0.10, 0, 0),
       ('${REP_AT}', 0.10, 60000, 0),
       ('${REP_BELOW}', 0.10, 80000, 0),
       ('${REP_ZEROFLOOR}', 0.10, 0, 0),
@@ -175,6 +182,14 @@ beforeAll(async () => {
       ('${D.inactive1}', 'I-1', 'Inactive rep deal', '${REP_INACTIVE}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 10000, '2026-01-10T00:00:00Z');
     INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing) VALUES
       ('${D.inactive1}', '${REP_INACTIVE}', 'awarded', 10000, 0.10, 1000, '2026-03-15');
+
+    -- REASSIGNMENT: deal worth 90000 is CURRENTLY owned by REP_NEWOWNER, but the OWNER commission row
+    -- was booked to REP_REASSIGNED (the original rep who signed it). The original rep keeps the earned
+    -- commission, so its value must still count toward REP_REASSIGNED's floor (qualifying ↔ earned).
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.reassigned}', 'R-1', 'Reassigned deal', '${REP_NEWOWNER}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 90000, '2026-01-10T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.reassigned}', '${REP_REASSIGNED}', 'awarded', 90000, 0.10, 9000, 'owner', '2026-03-15');
   `);
   tdb = drizzle(pg);
 });
@@ -235,6 +250,24 @@ describe("computeRepEarnedFloorGate (the single floor check)", () => {
     expect(gate.qualifyingRevenue).toBeCloseTo(0, 2);
     expect(gate.earnedCommission).toBeCloseTo(0, 2);
     expect(gate.met).toBe(false); // 0 >= 50000 is false
+  });
+
+  it("reassigned-away deal: the rep holding the owner commission row keeps its value in qualifyingRevenue", async () => {
+    // The $90k deal is now owned by REP_NEWOWNER, but REP_REASSIGNED holds the owner commission row and
+    // keeps the earned commission — so its value must still count toward REP_REASSIGNED's floor. qualifying
+    // must reconcile with the earned it gates; a current-owner-only basis gives qualifying 0 -> held at $0.
+    const gate = await computeRepEarnedFloorGate(tdb, REP_REASSIGNED, RANGE);
+    expect(gate.qualifyingRevenue).toBeCloseTo(90000, 2);
+    expect(gate.earnedCommission).toBeCloseTo(9000, 2);
+    expect(gate.floor).toBeCloseTo(50000, 2);
+    expect(gate.met).toBe(true);
+  });
+
+  it("REP_NEWOWNER (current owner of a reassigned deal) still counts it in qualifyingRevenue (no regression)", async () => {
+    // The current owner keeps counting deals they own, even when someone else holds the commission row.
+    const gate = await computeRepEarnedFloorGate(tdb, REP_NEWOWNER, RANGE);
+    expect(gate.qualifyingRevenue).toBeCloseTo(90000, 2);
+    expect(gate.earnedCommission).toBeCloseTo(0, 2); // earned nothing on it (no dsc row for this rep)
   });
 });
 

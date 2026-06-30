@@ -67,7 +67,21 @@ export async function computeRepEarnedFloorGate(
         SELECT SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
         FROM ${deals} d
         JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-        WHERE d.assigned_rep_id = ${repId}
+        WHERE (
+            -- A deal counts toward the rep's floor if the rep CURRENTLY owns it (the owner book, which
+            -- also covers signed deals with no commission row — the HubSpot-import case), OR the rep holds
+            -- the OWNER commission row on it. The second leg reconciles qualifying with earned after a
+            -- reassignment: a deal moved to a new owner keeps its earned commission booked to the ORIGINAL
+            -- rep, so its value must keep counting toward THAT rep's floor — otherwise their real earned
+            -- commission is held at $0 against a floor their own booked revenue no longer reaches.
+            -- Owner-role ONLY: an additive estimator cut must not pull a whole deal's value into the
+            -- estimator's floor book (the floor is a hurdle on the rep's OWN book, not deals they estimated).
+            d.assigned_rep_id = ${repId}
+            OR EXISTS (
+              SELECT 1 FROM ${dealSignedCommissions} dq
+              WHERE dq.deal_id = d.id AND dq.rep_user_id = ${repId} AND dq.attribution_role = 'owner'
+            )
+          )
           AND COALESCE(d.is_test_data, false) = false
           AND (d.contract_signed_at IS NOT NULL OR d.contract_signed_date IS NOT NULL)
           AND ${notLost}
