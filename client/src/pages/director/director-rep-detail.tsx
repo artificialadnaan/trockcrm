@@ -526,6 +526,16 @@ export function DirectorRepDetail() {
   if (!data || !repId) return null;
 
   const taskTotal = data.tasksToday.overdue + data.tasksToday.today;
+  const repInitials =
+    (data.winLoss.repName || "?")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => w[0])
+      .slice(0, 2)
+      .join("")
+      .toUpperCase() || "?";
+  const cs = data.commissionSummary;
+  const repRatePct = cs.commissionRate > 0 ? `${(cs.commissionRate * 100).toFixed(2).replace(/\.?0+$/, "")}%` : null;
   const activityBreakdown = [
     {
       label: "Calls",
@@ -551,59 +561,102 @@ export function DirectorRepDetail() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <Link to="/director">
-            <Button variant="ghost" size="sm">
-              <ArrowLeft className="mr-1 h-4 w-4" /> Back
-            </Button>
-          </Link>
-          <h2 className="text-2xl font-bold">{data.winLoss.repName || "Rep Detail"}</h2>
+      {/* ── Rep identity header: who this is, their rate, and where they stand on floor ── */}
+      <div>
+        <Link
+          to="/director"
+          className="inline-flex items-center gap-1 text-sm font-semibold text-slate-500 transition-colors hover:text-slate-900"
+        >
+          <ArrowLeft className="h-4 w-4" /> All reps
+        </Link>
+        <div className="mt-3 flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-center gap-4">
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-700 to-slate-900 text-lg font-black text-white">
+              {repInitials}
+            </div>
+            <div className="min-w-0">
+              <h2 className="truncate text-2xl font-black tracking-tight text-slate-900">
+                {data.winLoss.repName || "Rep Detail"}
+              </h2>
+              <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm text-slate-500">
+                <span className="font-medium text-slate-600">Sales rep</span>
+                {repRatePct ? (
+                  <>
+                    <span className="text-slate-300">·</span>
+                    <span>{repRatePct} commission</span>
+                  </>
+                ) : null}
+                {cs.rollingFloor > 0 ? (
+                  <>
+                    <span className="text-slate-300">·</span>
+                    <span className={cs.floorMet ? "font-semibold text-emerald-700" : "font-semibold text-amber-700"}>
+                      {cs.floorMet ? "Floor cleared" : `${formatCurrency(cs.floorRemaining)} to floor`}
+                    </span>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          </div>
+          <DateRangeToggle value={preset} onChange={handlePresetChange} />
         </div>
-        <DateRangeToggle value={preset} onChange={handlePresetChange} />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-6">
-        <StatCard
-          title={`Won Commission · ${periodLabel}`}
-          value={formatCurrency(data.commissionSummary.totalEarnedCommission)}
-          subtitle={
-            data.commissionSummary.overrideEarnedCommission > 0
-              ? `${formatCurrency(data.commissionSummary.overrideEarnedCommission)} override`
-              : `${Math.round(data.commissionSummary.newCustomerShare * 100)}% new-customer mix`
-          }
-          icon={<DollarSign className="h-5 w-5" />}
-        />
-        <StatCard
-          title="Active Deals (Current)"
-          value={data.activeDeals.count}
-          subtitle={`${formatCurrency(data.activeDeals.totalValue)} open now`}
-          icon={<Briefcase className="h-5 w-5" />}
-        />
-        <StatCard
-          title="Tasks Today"
-          value={taskTotal}
-          subtitle={data.tasksToday.overdue > 0 ? `${data.tasksToday.overdue} overdue` : "On track"}
-          icon={<CheckSquare className="h-5 w-5" />}
-        />
-        <StatCard
-          title={`Activity · ${periodLabel}`}
-          value={data.activityThisWeek.total}
-          subtitle={`${data.activityThisWeek.calls} calls in ${activityPeriodLabel}`}
-          icon={<Activity className="h-5 w-5" />}
-        />
-        <StatCard
-          title={`Win Rate · ${periodLabel}`}
-          value={`${data.winLoss.winRate}%`}
-          subtitle={`${data.winLoss.wins}W / ${data.winLoss.losses}L`}
-          icon={<Trophy className="h-5 w-5" />}
-        />
-        <StatCard
-          title={`Follow-up Compliance · ${periodLabel}`}
-          value={`${data.followUpCompliance.complianceRate}%`}
-          subtitle={`${data.followUpCompliance.onTime}/${data.followUpCompliance.total} on time`}
-          icon={<Target className="h-5 w-5" />}
-        />
+      {/* ── KPIs grouped: outcomes lead, engagement follows (replaces the flat 6-up row) ── */}
+      <div className="space-y-5">
+        <section>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-400">
+            Outcomes · {periodLabel}
+          </p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <StatCard
+              title={`Won Commission · ${periodLabel}`}
+              value={formatCurrency(data.commissionSummary.totalEarnedCommission)}
+              subtitle={
+                data.commissionSummary.overrideEarnedCommission > 0
+                  ? `${formatCurrency(data.commissionSummary.overrideEarnedCommission)} override`
+                  : `${Math.round(data.commissionSummary.newCustomerShare * 100)}% new-customer mix`
+              }
+              icon={<DollarSign className="h-5 w-5" />}
+            />
+            <StatCard
+              title={`Win Rate · ${periodLabel}`}
+              value={`${data.winLoss.winRate}%`}
+              subtitle={`${data.winLoss.wins}W / ${data.winLoss.losses}L`}
+              icon={<Trophy className="h-5 w-5" />}
+            />
+            <StatCard
+              title="Active Deals (Current)"
+              value={data.activeDeals.count}
+              subtitle={`${formatCurrency(data.activeDeals.totalValue)} open now`}
+              icon={<Briefcase className="h-5 w-5" />}
+            />
+          </div>
+        </section>
+        <section>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-400">
+            Engagement · {periodLabel}
+          </p>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <StatCard
+              title={`Activity · ${periodLabel}`}
+              value={data.activityThisWeek.total}
+              subtitle={`${data.activityThisWeek.calls} calls in ${activityPeriodLabel}`}
+              icon={<Activity className="h-5 w-5" />}
+            />
+            <StatCard
+              title="Tasks Today"
+              value={taskTotal}
+              subtitle={data.tasksToday.overdue > 0 ? `${data.tasksToday.overdue} overdue` : "On track"}
+              icon={<CheckSquare className="h-5 w-5" />}
+            />
+            <StatCard
+              title={`Follow-up Compliance · ${periodLabel}`}
+              value={`${data.followUpCompliance.complianceRate}%`}
+              subtitle={`${data.followUpCompliance.onTime}/${data.followUpCompliance.total} on time`}
+              icon={<Target className="h-5 w-5" />}
+            />
+          </div>
+        </section>
       </div>
 
       <RepCommissionDrilldown
