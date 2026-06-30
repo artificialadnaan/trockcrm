@@ -130,6 +130,9 @@ router.get(
         metric,
         from: req.query.from as string | undefined,
         to: req.query.to as string | undefined,
+        // Same active-office scope the Team Commissions table row uses, so the earned drawer's held-only
+        // detection + override row reconcile with the clicked cell (Codex P2).
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
       });
       await req.commitTransaction!();
       res.json({ data });

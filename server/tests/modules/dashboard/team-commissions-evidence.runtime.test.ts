@@ -25,6 +25,10 @@ const NONREP = U("f04"); // a director (NOT on the rep roster) — deals only th
 const EST2 = U("f05"); // estimator on a won deal whose OWNER is booked but EST2 is not -> still in EST2's won·unsigned
 const OWN2 = U("f06"); // owner of that cross-booked deal (booked) — separate so it doesn't perturb REP's earned
 const HELD = U("f07"); // below their OWN floor with earned commission but NO override -> held-only earned cell
+const XMGR = U("f08"); // office A manager: below own floor (held direct) + override rate, only report is cross-office
+const XREP = U("f09"); // office B rep reporting to XMGR -> OFF the roster when the view is scoped to office A
+const OFF_A = U("0a1");
+const OFF_B = U("0b1");
 const FROM = "2026-01-01";
 const TO = "2026-12-31";
 
@@ -70,18 +74,24 @@ beforeAll(async () => {
     CREATE TABLE deal_signed_commissions (id uuid PRIMARY KEY, deal_id uuid, rep_user_id uuid,
       amount numeric NOT NULL, source_value_amount numeric NOT NULL, attribution_role text NOT NULL DEFAULT 'owner',
       contract_signed_date_at_signing date);
+    CREATE TABLE user_office_access (user_id uuid, office_id uuid);
 
     INSERT INTO users (id, display_name, role, reports_to) VALUES
       ('${REP}','Kaleb','rep', NULL), ('${OTHER}','Owner','rep', NULL),
       ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}'), ('${BOOKED}','Booked','rep', NULL),
       ('${NONREP}','Director Dana','director', NULL), ('${EST2}','Estimator Two','rep', NULL), ('${OWN2}','Owner Two','rep', NULL),
       ('${HELD}','Held Rep','rep', NULL);
+    INSERT INTO users (id, display_name, role, reports_to, office_id) VALUES
+      ('${XMGR}','XMgr A','rep', NULL, '${OFF_A}'),
+      ('${XREP}','XRep B','rep','${XMGR}','${OFF_B}');
     INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP}', true, 0.05, 0, 0),
       ('${MGR}', true, 0.05, 1000000, 0.10),  -- MGR below their own $1M floor -> direct earned $0
       ('${REPORT}', true, 0.05, 0, 0),
       ('${BOOKED}', true, 0.05, 0, 0),
-      ('${HELD}', true, 0.05, 1000000, 0);  -- below their own $1M floor, NO override -> held-only earned cell
+      ('${HELD}', true, 0.05, 1000000, 0),  -- below their own $1M floor, NO override -> held-only earned cell
+      ('${XMGR}', true, 0.05, 1000000, 0.10),  -- office A; below own $1M floor (held direct) + override on reports
+      ('${XREP}', true, 0.05, 0, 0);  -- office B; floor 0 -> earns $5000 (XMGR's override base only if same office)
     INSERT INTO companies (id, name) VALUES ('${CO}','Acme');
     INSERT INTO pipeline_stage_config (id, slug, name, workflow_family) VALUES
       ('${ST.opportunity}','opportunity','Opportunity','pipeline'),
@@ -152,6 +162,17 @@ beforeAll(async () => {
       ('${U("d14")}','D-14','Held Signed','${HELD}','${ST.opportunity}', 100000, '2026-03-01T00:00:00Z');
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
       VALUES ('${U("dc5")}','${U("d14")}','${HELD}', 5000, 100000, 'owner', '2026-03-01');
+
+    -- Cross-office override scoping: XMGR (office A) owns a signed deal -> \$5000 direct, held below their \$1M
+    -- floor. XREP (office B) owns a signed deal -> \$5000 earned (floor 0). XREP reports to XMGR but sits in a
+    -- DIFFERENT office, so scoped to office A the override roster excludes XREP -> XMGR's override is \$0
+    -- in-office (held-only); unscoped it's \$500. Opportunity-stage + signed -> excluded from pipeline/won totals.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, contract_signed_at) VALUES
+      ('${U("d15")}','D-15','XMgr Signed','${XMGR}','${ST.opportunity}', 100000, '2026-03-01T00:00:00Z'),
+      ('${U("d16")}','D-16','XRep Signed','${XREP}','${ST.opportunity}', 100000, '2026-03-01T00:00:00Z');
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${U("dc6")}','${U("d15")}','${XMGR}', 5000, 100000, 'owner', '2026-03-01'),
+      ('${U("dc7")}','${U("d16")}','${XREP}', 5000, 100000, 'owner', '2026-03-01');
 
     -- LEADS (open, assigned REP): 2 new, 1 qualified, 1 opportunity.
     INSERT INTO leads (id, name, assigned_rep_id, stage_id, company_id) VALUES
@@ -299,6 +320,28 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(ev.records.reduce((s, r) => s + (r.value ?? 0), 0)).toBe(5000);
     expect(ev.records.some((r) => r.id === "manager-override")).toBe(false);
     expect(ev.subtitle.toLowerCase()).toContain("held");
+  });
+
+  it("held-only detection is OFFICE-SCOPED: a manager with only a cross-office report stays held in-office (Codex P2)", async () => {
+    // XMGR (office A) is below their $1M floor with $5k held direct; their only report XREP is in office B.
+    // Scoped to office A, XREP is off-roster -> override $0 -> the row is held-only. The earned drawer, scoped
+    // to the SAME office, must also see override $0 and show the held gross ($5k) — not the cross-office override.
+    const { rows } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO, officeId: OFF_A });
+    const xmgr = rows.find((r) => r.repId === XMGR)!;
+    expect(xmgr.floorMet).toBe(false);
+    expect(xmgr.totalEarnedCommission).toBe(0); // override scoped out -> nothing payable
+    expect(xmgr.heldEarnedCommission).toBe(5000);
+
+    const evScoped = await getDirectorCommissionEvidence(tdb, { repId: XMGR, metric: "earned", from: FROM, to: TO, officeId: OFF_A });
+    expect(evScoped.total.value).toBe(5000); // held gross, reconciles with the in-office row
+    expect(evScoped.records.some((r) => r.id === "manager-override")).toBe(false);
+    expect(evScoped.subtitle.toLowerCase()).toContain("held");
+
+    // Without the office scope (the bug being fixed), the unscoped override pulls in the cross-office report,
+    // so heldOnly flips off and the drawer surfaces the foreign $500 override — contradicting the held-only row.
+    const evUnscoped = await getDirectorCommissionEvidence(tdb, { repId: XMGR, metric: "earned", from: FROM, to: TO });
+    expect(evUnscoped.total.value).toBe(500);
+    expect(evUnscoped.records.some((r) => r.id === "manager-override")).toBe(true);
   });
 
   it("activity records navigate to the linked deal when present, else are non-navigable", async () => {

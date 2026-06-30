@@ -2871,9 +2871,9 @@ const commissionSlugList = (slugs: readonly string[]) => sql.join(slugs.map((s) 
 
 export async function getDirectorCommissionEvidence(
   tenantDb: TenantDb,
-  options: { repId: string; metric: CommissionEvidenceMetric; from?: string; to?: string }
+  options: { repId: string; metric: CommissionEvidenceMetric; from?: string; to?: string; officeId?: string }
 ): Promise<CommissionEvidence> {
-  const { repId, metric } = options;
+  const { repId, metric, officeId } = options;
   const year = new Date().getUTCFullYear();
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
@@ -2976,7 +2976,12 @@ export async function getDirectorCommissionEvidence(
       : { ...rawConfig, commissionRate: 0, rollingFloor: 0, overrideRate: 0 };
     const gate = await computeRepEarnedFloorGate(tenantDb, repId, { from, to });
     const rollups = await getCommissionDealRollups(tenantDb, repId, config, from, to);
-    const override = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, from, to);
+    // Office-scoped to match the team row: getDirectorCommissionWorkspace computes this rep's override (and
+    // thus its held-only state) over the ACTIVE office's roster only. Without the same officeId here, a
+    // below-floor manager whose only report overrides are CROSS-office would read held-only on the row but
+    // override !== 0 in the drawer — flipping heldOnly off and surfacing a foreign override instead of the
+    // held amount the director clicked. Same scope on both sides keeps the drawer reconciled.
+    const override = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, from, to, officeId);
     // Reconcile the drawer with the EXACT figure the director clicked on the team table:
     //  • floor met -> per-deal earned is released (gross) + the override summary row below.
     //  • below floor WITH a payable override -> per-deal earned held at $0; the cell IS the override, shown
