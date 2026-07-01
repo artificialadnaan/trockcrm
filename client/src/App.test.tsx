@@ -57,4 +57,11 @@ describe("App route guards", () => {
     expect(source).toContain('path="/reports/analytics/customer-concentration" element={<CustomerConcentrationPage />}');
     expect(source).toContain('path="/reports/analytics/executive-trends" element={<ExecutiveTrendsPage />}');
   });
+
+  it("opens the Reports by Region route to all authenticated users (no role guard)", () => {
+    // Region is now available to every CRM role (server /api/reports/region dropped requireDirector too),
+    // so it is mounted like the open analytics reports — with no RequireRole wrapper.
+    expect(source).toContain('path="/reports/region" element={<RegionReportPage />}');
+    expect(source).not.toContain('<RequireRole allowedRoles={["admin", "director"]}> <RegionReportPage />');
+  });
 });
