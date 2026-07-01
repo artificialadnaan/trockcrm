@@ -149,7 +149,7 @@ export function validateSyncHubProjectCreatedPayload(input: unknown): SyncHubPro
   };
 }
 
-async function getActiveOffices(client: QueryClient): Promise<OfficeRow[]> {
+export async function getActiveOffices(client: QueryClient): Promise<OfficeRow[]> {
   const result = await client.query(
     "SELECT id, slug FROM public.offices WHERE is_active = true ORDER BY created_at ASC"
   );
