@@ -158,6 +158,11 @@ export { punchListItems, punchListTypeEnum, punchListStatusEnum } from "./tenant
 export { workflowTimers, workflowTimerTypeEnum, workflowTimerStatusEnum } from "./tenant/workflow-timers.js";
 export { closeoutChecklistItems } from "./tenant/closeout-checklist-items.js";
 export {
+  fieldScorecards,
+  fieldScorecardItems,
+  fieldScorecardPhotos,
+} from "./tenant/field-scorecards.js";
+export {
   projects,
   projectPhaseHistory,
   projectTeam,

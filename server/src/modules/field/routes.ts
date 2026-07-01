@@ -27,6 +27,13 @@ import {
   previewFieldPhotoReport,
 } from "./photo-reports-service.js";
 import {
+  createFieldScorecard,
+  getFieldScorecardDetail,
+  listFieldScorecardsForProject,
+  listRecentFieldScorecards,
+} from "./scorecards-service.js";
+import { getFileDownloadUrl } from "../files/service.js";
+import {
   assertAccessibleFieldCaptureTarget,
   assertActiveFieldProject,
   FIELD_NEARBY_DEFAULT_LIMIT,
@@ -809,6 +816,144 @@ fieldRoutes.get("/projects/:dealId/photos", requireFieldContractor, async (req, 
           to: req.query.to as string | undefined,
           includeDeleted: false,
         }, { page, perPage }),
+      "Project not found",
+    );
+    res.json({ ...value, ...officeTag(office) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Field Scorecards ─────────────────────────────────────────────────────────
+
+function scorecardSubmitterName(user: NonNullable<express.Request["fieldUser"]>): string | null {
+  const name = [user.firstName, user.lastName].filter((s) => s && s.trim()).join(" ").trim();
+  return name || user.email || null;
+}
+
+function strOrNull(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function parseScorecardSubmission(body: unknown) {
+  if (!body || typeof body !== "object") throw new AppError(400, "Missing scorecard body.");
+  const b = body as Record<string, unknown>;
+  const clientSubmissionId = String(b.clientSubmissionId ?? "");
+  const dealId = String(b.dealId ?? "");
+  assertValidUuid(clientSubmissionId, "clientSubmissionId");
+  assertValidUuid(dealId, "dealId");
+  const weekOf = String(b.weekOf ?? "").trim();
+  if (!weekOf) throw new AppError(400, "weekOf is required.");
+
+  const items = Array.isArray(b.items)
+    ? b.items.map((raw) => {
+        const it = (raw ?? {}) as Record<string, unknown>;
+        return {
+          sectionKey: String(it.sectionKey ?? ""),
+          points: Number(it.points),
+          note: typeof it.note === "string" ? it.note : null,
+        };
+      })
+    : [];
+  if (items.length === 0) throw new AppError(400, "items are required.");
+  if (items.some((it) => !Number.isFinite(it.points))) {
+    throw new AppError(400, "Each scorecard item needs a numeric points value.");
+  }
+
+  const photos = Array.isArray(b.photos)
+    ? b.photos.map((raw) => {
+        const p = (raw ?? {}) as Record<string, unknown>;
+        return { sectionKey: String(p.sectionKey ?? ""), clientUploadId: String(p.clientUploadId ?? "") };
+      })
+    : [];
+
+  return {
+    clientSubmissionId,
+    dealId,
+    weekOf,
+    superintendentName: strOrNull(b.superintendentName),
+    pmName: strOrNull(b.pmName),
+    projectNumber: strOrNull(b.projectNumber),
+    items,
+    criticalDeficiencies: Array.isArray(b.criticalDeficiencies) ? b.criticalDeficiencies.map(String) : [],
+    actionItems: Array.isArray(b.actionItems) ? b.actionItems.map(String) : [],
+    photos,
+  };
+}
+
+// Submit a weekly scorecard. Writes land in the deal's owning office (cross-office safe); the server
+// recomputes total/rating and enforces the action-item gate. Idempotent on clientSubmissionId, so the
+// durable offline retry never duplicates a card/PDF/email.
+fieldRoutes.post("/scorecards", requireFieldContractor, async (req, res, next) => {
+  try {
+    const parsed = parseScorecardSubmission(req.body);
+    const submittedByName = scorecardSubmitterName(req.fieldUser!);
+    const { scorecard, created } = await runFieldDealWrite(
+      req,
+      { dealId: parsed.dealId },
+      (db) => createFieldScorecard(db, { userId: req.fieldUser!.id, submittedByName, ...parsed }),
+      "Project not found",
+    );
+    res.status(created ? 201 : 200).json({ scorecard });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Recent submitted scorecards across ALL accessible offices — powers the Scorecard tab landing (which has
+// no pre-selected project). Registered before /scorecards/:id so the literal path is never captured as :id.
+fieldRoutes.get("/scorecards", requireFieldContractor, async (req, res, next) => {
+  try {
+    const limitRaw = parseInt(req.query.limit as string, 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 50;
+    const { results, failures } = assertFanOutNotFullyDegraded(
+      await fanOutActiveOffices((officeDb) => listRecentFieldScorecards(officeDb, { limit })),
+    );
+    const scorecards = results
+      .flatMap(({ office, value }) => value.scorecards.map((s) => ({ ...s, ...officeTag(office) })))
+      .sort((a, b) => (b.submittedAt ?? "").localeCompare(a.submittedAt ?? ""))
+      .slice(0, limit);
+    res.json({ scorecards, degradedOffices: failures.map((failure) => failure.office.slug) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Full detail of one scorecard (items, deficiencies, action items, evidence photos w/ presigned URLs).
+// Resolves the owning office by scorecard id, so it works even off the active x-office-id.
+fieldRoutes.get("/scorecards/:id", requireFieldContractor, async (req, res, next) => {
+  try {
+    const id = String(req.params.id);
+    assertValidUuid(id, "id");
+    const { value, office } = await withResolvedOffice(
+      "scorecard",
+      id,
+      (officeDb) =>
+        getFieldScorecardDetail(officeDb, id, {
+          resolvePhotoUrl: (fileId) =>
+            getFileDownloadUrl(officeDb, fileId)
+              .then((r) => r.url)
+              .catch(() => null),
+        }),
+      "Scorecard not found",
+    );
+    res.json({ scorecard: { ...value, ...officeTag(office) } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Scorecards for one project (project-detail list + post-submit refresh).
+fieldRoutes.get("/projects/:dealId/scorecards", requireFieldContractor, async (req, res, next) => {
+  try {
+    const dealId = String(req.params.dealId);
+    assertValidUuid(dealId, "dealId");
+    const { value, office } = await withResolvedOffice(
+      "deal",
+      dealId,
+      (officeDb) => listFieldScorecardsForProject(officeDb, dealId),
       "Project not found",
     );
     res.json({ ...value, ...officeTag(office) });

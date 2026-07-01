@@ -125,9 +125,20 @@ export async function fanOutActiveOffices<T>(
  * Resolve which active office owns a `deals`/`files` row id (read-side resolver). Returns null if no
  * active office contains it. The owning office is what a cross-office detail read must query.
  */
-export async function resolveOfficeForId(kind: "deal" | "lead" | "file", id: string): Promise<FieldOffice | null> {
+export async function resolveOfficeForId(
+  kind: "deal" | "lead" | "file" | "scorecard",
+  id: string,
+): Promise<FieldOffice | null> {
   // `table` is a fixed internal literal (never user input); `id` is parameterized.
-  const table = sql.identifier(kind === "deal" ? "deals" : kind === "lead" ? "leads" : "files");
+  const table = sql.identifier(
+    kind === "deal"
+      ? "deals"
+      : kind === "lead"
+        ? "leads"
+        : kind === "scorecard"
+          ? "field_scorecards"
+          : "files",
+  );
   const offices = await listActiveFieldOffices();
   const outcome = await fanOutOffices(offices, (office) =>
     runInOffice(office, async (officeDb) => {
@@ -146,7 +157,7 @@ export async function resolveOfficeForId(kind: "deal" | "lead" | "file", id: str
  * the handler can stamp the response with which office the record belongs to.
  */
 export async function withResolvedOffice<T>(
-  kind: "deal" | "lead" | "file",
+  kind: "deal" | "lead" | "file" | "scorecard",
   id: string,
   run: (officeDb: FieldTenantDb, office: FieldOffice) => Promise<T>,
   notFoundMessage: string,
