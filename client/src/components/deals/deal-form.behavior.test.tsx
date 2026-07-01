@@ -641,6 +641,71 @@ describe("DealForm direct-create context", () => {
     expect(bidInput?.disabled).toBe(true);
   });
 
+  it("greys out Deal Name and Project Type on a scope-locked (bid-board / RFP) deal", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderEditForm({
+      id: "deal-locked",
+      dealNumber: "DFW-2-18126-ae",
+      name: "Avela Real Estate Partners Property",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      sourceLeadId: null,
+      isBidBoardOwned: true,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+
+    // Scope-defining fields are read-only after handoff — greyed, not editable-then-error-on-save.
+    expect(container.querySelector<HTMLInputElement>("#name")?.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(true);
+    // Operational metadata stays editable.
+    expect(container.querySelector<HTMLTextAreaElement>("#description")?.disabled).toBe(false);
+    expect(container.querySelector<HTMLInputElement>("#winProbability")?.disabled).toBe(false);
+    expect(container.querySelector<HTMLInputElement>("#expectedCloseDate")?.disabled).toBe(false);
+  });
+
+  it("keeps Deal Name and Project Type editable on an active pre-handoff deal", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderEditForm({
+      id: "deal-active",
+      dealNumber: "DFW-2-18127-aa",
+      name: "Active Deal",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      sourceLeadId: null,
+      isBidBoardOwned: false,
+      rfpApprovalStatus: null,
+      bidBoardProjectNumber: null,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+
+    expect(container.querySelector<HTMLInputElement>("#name")?.disabled).toBe(false);
+    expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(false);
+  });
+
   it("saves a company-only fill-in on an existing deal without requiring a property", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],

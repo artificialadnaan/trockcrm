@@ -78,6 +78,7 @@ import { useSalesReps } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { isDealScopeReadOnlyAfterRfp } from "@/lib/deal-scope-lock";
 import { formatCurrency, bestEstimateCaptionLabel, formatDealDisplayNumber, resolveBestEstimate, resolveDealValueKind, LOST_BID_VALUE_LABEL } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
@@ -443,21 +444,11 @@ export function DealDetailPage() {
     currentStage.workflowFamily === opportunityStage.workflowFamily &&
     currentStage.displayOrder > opportunityStage.displayOrder
   );
-  const isScopeReadOnlyAfterRfp = Boolean(
-    deal &&
-    (
-      deal.rfpApprovalRequestedAt ||
-      deal.rfpApprovalStatus ||
-      deal.bidBoardLinkedAt ||
-      deal.bidBoardProjectNumber ||
-      deal.bidBoardStageEnteredAt ||
-      deal.bidBoardMirrorSourceEnteredAt ||
-      deal.isReadOnlyMirror ||
-      deal.readOnlySyncedAt ||
-      isBidBoardOwned ||
-      isPastOpportunityStage
-    )
-  );
+  // Shared with the deal edit form (deal-form.tsx) so both surfaces grey out the same fields.
+  // isBidBoardOwned here also folds in inferred ownership, so pass it explicitly.
+  const isScopeReadOnlyAfterRfp = deal
+    ? isDealScopeReadOnlyAfterRfp({ ...deal, isBidBoardOwned }, { isPastOpportunityStage })
+    : false;
   const scopeSubmittedAt =
     deal?.rfpApprovalRequestedAt ??
     deal?.bidBoardLinkedAt ??

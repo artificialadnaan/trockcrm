@@ -27,6 +27,11 @@ import {
   resolveDefaultOfficeCode,
 } from "@/lib/office-selection";
 import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
+import { isDealScopeReadOnlyAfterRfp } from "@/lib/deal-scope-lock";
+
+// Shown on scope-defining fields (Deal Name, Project Type) once a deal is past RFP / Bid Board handoff:
+// they're greyed rather than editable-then-rejected on save, because the server locks them.
+const SCOPE_LOCK_MESSAGE = "Locked after RFP / Bid Board handoff — managed in Procore.";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -51,6 +56,9 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
   const isEdit = !!deal;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned);
+  // Scope-defining fields (Deal Name, Project Type) are read-only after RFP submission / Bid Board
+  // handoff / past-Opportunity — the server rejects such edits, so grey them out here.
+  const scopeReadOnly = isDealScopeReadOnlyAfterRfp(deal ?? null);
   // Awarded amount is editable only by admins/directors (mirrors the server-side
   // AWARDED_AMOUNT_RESTRICTED guard); everyone else sees it read-only.
   const canEditAwarded = user?.role === "admin" || user?.role === "director";
@@ -353,13 +361,19 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
           )}
 
           <div className="space-y-2">
-            <Label htmlFor="name">
+            <Label htmlFor="name" className="inline-flex items-center gap-1.5">
               Deal Name <span className="text-red-500">*</span>
+              {scopeReadOnly ? (
+                <span aria-label={SCOPE_LOCK_MESSAGE} title={SCOPE_LOCK_MESSAGE}>
+                  <Lock className="h-3.5 w-3.5 text-amber-600" aria-hidden="true" />
+                </span>
+              ) : null}
             </Label>
             <Input
               id="name"
               placeholder="e.g., Oakwood Apartments Reroofing"
               value={formData.name}
+              disabled={scopeReadOnly}
               onChange={(e) => handleChange("name", e.target.value)}
             />
           </div>
@@ -553,12 +567,20 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="projectType">Project Type</Label>
+              <Label htmlFor="projectType" className="inline-flex items-center gap-1.5">
+                Project Type
+                {scopeReadOnly ? (
+                  <span aria-label={SCOPE_LOCK_MESSAGE} title={SCOPE_LOCK_MESSAGE}>
+                    <Lock className="h-3.5 w-3.5 text-amber-600" aria-hidden="true" />
+                  </span>
+                ) : null}
+              </Label>
               <Select
                 value={formData.projectTypeId}
                 onValueChange={(val) => handleChange("projectTypeId", val ?? "")}
+                disabled={scopeReadOnly}
               >
-                <SelectTrigger>
+                <SelectTrigger id="projectType">
                   <SelectValue placeholder="Select type">
                     {getSelectedOptionLabel(projectTypeOptions, formData.projectTypeId, "Select type")}
                   </SelectValue>
