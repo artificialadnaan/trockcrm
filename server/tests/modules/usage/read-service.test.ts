@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRepScope, weekDates, sumDays, readUsageDaily, resolveDayKind, emptyUsageDay } from "../../../src/modules/usage/read-service.js";
+import { resolveRepScope, resolveReps, weekDates, sumDays, readUsageDaily, resolveDayKind, emptyUsageDay } from "../../../src/modules/usage/read-service.js";
 import type { UsageDailyShape } from "../../../src/modules/usage/types.js";
 
 describe("resolveRepScope (server-enforced)", () => {
@@ -11,6 +11,41 @@ describe("resolveRepScope (server-enforced)", () => {
   });
   it("lets an admin request all reps (null filter)", () => {
     expect(resolveRepScope({ role: "admin", userId: "adm-1" }, undefined)).toBeNull();
+  });
+});
+
+describe("resolveReps roster (surfaces platform staff: reps + directors + admins)", () => {
+  function mockClient(rows: Array<{ id: string; display_name: string }>) {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const client = {
+      query: async (sql: string, params?: unknown[]) => {
+        calls.push({ sql, params });
+        return { rows };
+      },
+    };
+    return { client, calls };
+  }
+
+  it("includes directors and admins in the all-staff (scope=null) roster, not just reps", async () => {
+    const { client, calls } = mockClient([{ id: "adm-1", display_name: "Chase Kelly" }]);
+    const reps = await resolveReps(client as any, null);
+    expect(reps).toEqual([{ id: "adm-1", displayName: "Chase Kelly" }]);
+    expect(calls[0].sql).toMatch(/role IN \('rep', 'director', 'admin'\)/);
+    expect(calls[0].sql).not.toMatch(/role = 'rep'/);
+  });
+
+  it("applies the same staff-role filter on the targeted (scope) path", async () => {
+    const { client, calls } = mockClient([{ id: "adm-1", display_name: "Chase Kelly" }]);
+    await resolveReps(client as any, ["adm-1"]);
+    expect(calls[0].sql).toMatch(/role IN \('rep', 'director', 'admin'\)/);
+    expect(calls[0].sql).not.toMatch(/role = 'rep'/);
+    expect(calls[0].params).toEqual(["adm-1"]);
+  });
+
+  it("still short-circuits an empty scope to [] without querying", async () => {
+    const { client, calls } = mockClient([]);
+    expect(await resolveReps(client as any, [])).toEqual([]);
+    expect(calls.length).toBe(0);
   });
 });
 
