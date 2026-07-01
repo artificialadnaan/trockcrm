@@ -31,18 +31,23 @@ beforeAll(async () => {
       deal_number text,
       project_number text,
       procore_project_id bigint,
+      is_change_order boolean NOT NULL DEFAULT false,
+      parent_deal_id text,
       is_active boolean NOT NULL DEFAULT true
     );
-    INSERT INTO office_main.deals (id, name, deal_number, project_number, procore_project_id, is_active) VALUES
+    INSERT INTO office_main.deals (id, name, deal_number, project_number, procore_project_id, is_change_order, parent_deal_id, is_active) VALUES
       -- Recent HubSpot-imported deal: canonical Procore number is in project_number, deal_number is the HS id
-      ('d-hubspot',  'Tides at Park Lane', 'HS-271393431285', 'DFW-1-13126-af', NULL, true),
+      ('d-hubspot',  'Tides at Park Lane', 'HS-271393431285', 'DFW-1-13126-af', NULL, false, NULL, true),
       -- Legacy deal: canonical Procore number is in deal_number, project_number is null
-      ('d-legacy',   'jasonn ranches',     'DFW-4-16226-ai',  NULL,             NULL, true),
+      ('d-legacy',   'jasonn ranches',     'DFW-4-16226-ai',  NULL,             NULL, false, NULL, true),
       -- Inactive deal that would otherwise match by project_number
-      ('d-inactive', 'Archived',           'HS-999',          'DFW-9-99999-zz', NULL, false),
-      -- Two active deals collide on the same incoming number across the two columns (ambiguous)
-      ('d-collide-a','Collide via project','HS-1',            'DFW-2-00000-aa', NULL, true),
-      ('d-collide-b','Collide via deal',   'DFW-2-00000-aa',  NULL,             NULL, true);
+      ('d-inactive', 'Archived',           'HS-999',          'DFW-9-99999-zz', NULL, false, NULL, false),
+      -- Two DISTINCT active deals collide on the same incoming number across the two columns (ambiguous)
+      ('d-collide-a','Collide via project','HS-1',            'DFW-2-00000-aa', NULL, false, NULL, true),
+      ('d-collide-b','Collide via deal',   'DFW-2-00000-aa',  NULL,             NULL, false, NULL, true),
+      -- Parent deal + its change-order child SHARE project_number; the child must NOT count as a match
+      ('d-parent',   'Has change orders',  'HS-2',            'DFW-7-77777-pp', NULL, false, NULL,       true),
+      ('d-co-child', 'CO #1',              NULL,              'DFW-7-77777-pp', NULL, true,  'd-parent', true);
   `);
 });
 
@@ -73,5 +78,11 @@ describe("findDealsByProjectNumber", () => {
   it("surfaces >1 match when a number collides across project_number and deal_number (ambiguous → caller orphans)", async () => {
     const matches = await findDealsByProjectNumber(client(), OFFICES, "DFW-2-00000-aa");
     expect(matches.length).toBeGreaterThan(1);
+  });
+
+  it("ignores change-order child deals that share the parent's project_number (matches parent only)", async () => {
+    const matches = await findDealsByProjectNumber(client(), OFFICES, "DFW-7-77777-pp");
+    expect(matches).toHaveLength(1);
+    expect(matches[0].dealId).toBe("d-parent");
   });
 });

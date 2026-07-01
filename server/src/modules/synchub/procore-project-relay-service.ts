@@ -196,8 +196,13 @@ export async function findDealsByProjectNumber(
       // SyncHub creates the Procore project from the deal's canonical DFW/ATL number, which for
       // HubSpot-imported and bid-board deals lives in project_number (deal_number holds the HS id
       // or a divergent number). A deal_number-only lookup orphaned those relays, so the worker
-      // never created the "T Rock Photos" link. LIMIT 2 still lets the caller detect ambiguity
-      // (>1 match → orphan, never a mis-link).
+      // never created the "T Rock Photos" link. Mirrors the stage relay's findMatchesByProjectNumber.
+      //
+      // CO child deals SHARE the parent's project_number (migration 0156; the project_number unique
+      // index is partial on is_change_order = false), so exclude them — otherwise a parent-with-CO
+      // would return >1 row and orphan as false-ambiguous instead of linking the real parent. This
+      // guard also aligns the predicate with deals_project_number_uidx so the lookup stays indexed.
+      // LIMIT 2 still lets the caller detect GENUINE ambiguity (>1 distinct parent → orphan).
       `SELECT $2::uuid AS office_id,
               $3::text AS office_slug,
               $4::text AS schema_name,
@@ -206,7 +211,9 @@ export async function findDealsByProjectNumber(
               deal_number,
               procore_project_id
        FROM ${quoteIdent(schemaName)}.deals
-       WHERE (project_number = $1 OR deal_number = $1) AND is_active = true
+       WHERE (project_number = $1 OR deal_number = $1)
+         AND is_active = true
+         AND COALESCE(is_change_order, false) = false
        LIMIT 2`,
       [projectNumber, office.id, office.slug, schemaName]
     );
