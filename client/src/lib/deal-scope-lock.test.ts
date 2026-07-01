@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import { isDealScopeReadOnlyAfterRfp } from "./deal-scope-lock";
+import { isDealBidBoardHandoff, isDealScopeReadOnlyAfterRfp } from "./deal-scope-lock";
+
+describe("isDealBidBoardHandoff", () => {
+  it("detects a Bid Board handoff via any marker, including a legacy stage slug", () => {
+    expect(isDealBidBoardHandoff({ isBidBoardOwned: true })).toBe(true);
+    expect(isDealBidBoardHandoff({ bidBoardProjectNumber: "DFW-1-13126-af" })).toBe(true);
+    expect(isDealBidBoardHandoff({ bidBoardStageSlug: "estimate_in_progress" })).toBe(true);
+  });
+  it("is false for a missing deal or a non-Bid-Board signal (e.g. RFP)", () => {
+    expect(isDealBidBoardHandoff(null)).toBe(false);
+    expect(isDealBidBoardHandoff({ rfpApprovalStatus: "pending" })).toBe(false);
+  });
+});
 
 describe("isDealScopeReadOnlyAfterRfp", () => {
   it("is false for a new / missing deal", () => {

@@ -22,6 +22,24 @@ export interface DealScopeLockSignals {
   isBidBoardOwned?: boolean | null;
 }
 
+// Single source of truth for "this deal has been handed to the Bid Board / is a read-only mirror".
+// Any Bid Board stage slug counts (canonical OR a legacy alias like "estimate_in_progress"), matching
+// the server's inferDealBidBoardOwnership rather than depending on the possibly-stale is_bid_board_owned
+// column. Consumed by isDealScopeReadOnlyAfterRfp and by the edit form's legacy-cleanup gating.
+export function isDealBidBoardHandoff(deal: DealScopeLockSignals | null | undefined): boolean {
+  if (!deal) return false;
+  return Boolean(
+    deal.bidBoardLinkedAt ||
+      deal.bidBoardProjectNumber ||
+      deal.bidBoardStageEnteredAt ||
+      deal.bidBoardMirrorSourceEnteredAt ||
+      deal.bidBoardStageSlug ||
+      deal.isReadOnlyMirror ||
+      deal.readOnlySyncedAt ||
+      deal.isBidBoardOwned
+  );
+}
+
 export function isDealScopeReadOnlyAfterRfp(
   deal: DealScopeLockSignals | null | undefined,
   opts?: { isPastOpportunityStage?: boolean }
@@ -30,17 +48,7 @@ export function isDealScopeReadOnlyAfterRfp(
   return Boolean(
     deal.rfpApprovalRequestedAt ||
       deal.rfpApprovalStatus ||
-      deal.bidBoardLinkedAt ||
-      deal.bidBoardProjectNumber ||
-      deal.bidBoardStageEnteredAt ||
-      deal.bidBoardMirrorSourceEnteredAt ||
-      // Any Bid Board stage slug means the deal is a Bid Board mirror (canonical OR legacy alias like
-      // "estimate_in_progress") — treat it as a handoff, matching the server lock, rather than depend on
-      // the possibly-stale is_bid_board_owned column.
-      deal.bidBoardStageSlug ||
-      deal.isReadOnlyMirror ||
-      deal.readOnlySyncedAt ||
-      deal.isBidBoardOwned ||
+      isDealBidBoardHandoff(deal) ||
       opts?.isPastOpportunityStage
   );
 }

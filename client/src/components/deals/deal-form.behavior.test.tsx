@@ -745,8 +745,10 @@ describe("DealForm direct-create context", () => {
     expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(true);
   });
 
-  it("keeps Name and Project Type editable during RFP-only legacy cleanup (missing company/property, no source lead)", async () => {
-    // The server accepts scope-field edits here via cleanupMode (relationship repair), so don't grey them.
+  it("greys Name/Project Type during RFP-only cleanup until BOTH company + property are supplied, then unlocks", async () => {
+    // The server only accepts scope-field edits when the cleanup repair is COMPLETE
+    // (shouldTreatPatchAsLegacyCleanup && hasCompleteLegacyCleanupRelationships), so the form must keep
+    // them greyed until the live form has both relationships.
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
       loading: false,
@@ -756,13 +758,13 @@ describe("DealForm direct-create context", () => {
       id: "deal-cleanup",
       dealNumber: "DFW-2-18131-aa",
       name: "Cleanup Deal",
-      stageId: "stage-opportunity", // still in Opportunity
+      stageId: "stage-opportunity",
       assignedRepId: "rep-1",
-      companyId: null, // missing relationship → cleanup dialog
+      companyId: null,
       propertyId: null,
-      sourceLeadId: null, // no source lead → cleanup-eligible
+      sourceLeadId: null,
       isBidBoardOwned: false,
-      rfpApprovalStatus: "pending", // RFP submitted → scopeReadOnly true
+      rfpApprovalStatus: "pending",
       bidBoardProjectNumber: null,
       projectTypeId: "type-roofing",
       regionId: null,
@@ -771,8 +773,87 @@ describe("DealForm direct-create context", () => {
     } as any);
     containers.push(container);
     roots.push(root);
+    // Incomplete repair (no relationships yet) → still greyed, so it can't be edited-then-rejected.
+    expect(container.querySelector<HTMLInputElement>("#name")?.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(true);
+    // Supply BOTH company and property — a complete cleanup the server accepts.
+    await act(async () => {
+      mocks.companySelectorProps?.onChange("company-1");
+      mocks.propertySelectorProps?.onChange("property-1");
+    });
     expect(container.querySelector<HTMLInputElement>("#name")?.disabled).toBe(false);
     expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(false);
+  });
+
+  it("keeps Name/Project Type greyed for a past-Opportunity cleanup deal even after a complete repair", async () => {
+    // past-Opportunity is NOT exempted by cleanup mode — it must stay locked even with both relationships.
+    mocks.usePipelineStages.mockReturnValue({
+      stages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", isActivePipeline: true, isTerminal: false, workflowFamily: "standard_deal", displayOrder: 2 },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating", isActivePipeline: true, isTerminal: false, workflowFamily: "standard_deal", displayOrder: 3 },
+      ],
+    });
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+    const { container, root } = await renderEditForm({
+      id: "deal-cleanup-pastopp",
+      dealNumber: "DFW-2-18133-aa",
+      name: "Past-Opp Cleanup",
+      stageId: "stage-estimating", // past Opportunity
+      assignedRepId: "rep-1",
+      companyId: null,
+      propertyId: null,
+      sourceLeadId: null,
+      isBidBoardOwned: false,
+      rfpApprovalStatus: "pending",
+      bidBoardProjectNumber: null,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+    await act(async () => {
+      mocks.companySelectorProps?.onChange("company-1");
+      mocks.propertySelectorProps?.onChange("property-1");
+    });
+    expect(container.querySelector<HTMLInputElement>("#name")?.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(true);
+  });
+
+  it("keeps Name/Project Type greyed while the stage config is still loading (fail-safe)", async () => {
+    // Until stages load we can't evaluate past-Opportunity, so fail safe rather than briefly expose them.
+    mocks.usePipelineStages.mockReturnValue({ stages: [], loading: true });
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+    const { container, root } = await renderEditForm({
+      id: "deal-loading",
+      dealNumber: "DFW-2-18134-aa",
+      name: "Loading Deal",
+      stageId: "stage-estimating",
+      assignedRepId: "rep-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      sourceLeadId: null,
+      isBidBoardOwned: false,
+      rfpApprovalStatus: null,
+      bidBoardProjectNumber: null,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+    expect(container.querySelector<HTMLInputElement>("#name")?.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(true);
   });
 
   it("still greys Name/Project Type on an RFP deal that already has company + property (not cleanup)", async () => {
