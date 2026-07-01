@@ -53,12 +53,14 @@ beforeEach(async () => {
       id text PRIMARY KEY, name text, deal_number text, project_number text,
       procore_project_id bigint, is_change_order boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true
     );
-    INSERT INTO office_main.deals (id, name, deal_number, project_number, is_change_order, is_active) VALUES
-      ('d-hubspot',  'Tides at Park Lane', 'HS-1',           'DFW-1-13126-af', false, true),
-      ('d-collide-a','Collide via project','HS-2',           'DFW-2-00000-aa', false, true),
-      ('d-collide-b','Collide via deal',   'DFW-2-00000-aa', NULL,             false, true),
-      ('d-parent',   'Has change orders',  'HS-3',           'DFW-7-77777-pp', false, true),
-      ('d-co-child', 'CO #1',              NULL,             'DFW-7-77777-pp', true,  true);
+    INSERT INTO office_main.deals (id, name, deal_number, project_number, procore_project_id, is_change_order, is_active) VALUES
+      ('d-hubspot',  'Tides at Park Lane', 'HS-1',           'DFW-1-13126-af', NULL, false, true),
+      ('d-collide-a','Collide via project','HS-2',           'DFW-2-00000-aa', NULL, false, true),
+      ('d-collide-b','Collide via deal',   'DFW-2-00000-aa', NULL,             NULL, false, true),
+      ('d-parent',   'Has change orders',  'HS-3',           'DFW-7-77777-pp', NULL, false, true),
+      ('d-co-child', 'CO #1',              NULL,             'DFW-7-77777-pp', NULL, true,  true),
+      -- Single match, but already linked to a DIFFERENT Procore project (999 != orphan's 888)
+      ('d-conflict', 'Already linked',     'HS-4',           'DFW-8-88888-cc', 999,  false, true);
 
     CREATE TABLE public.synchub_webhook_orphans (
       id text PRIMARY KEY, project_number text, procore_portfolio_project_id text,
@@ -78,6 +80,7 @@ beforeEach(async () => {
   await seed("o3", "DFW-2-00000-aa", "333");
   await seed("o4", "DFW-7-77777-pp", "444");
   await seed("o5", "DFW-1-13126-af", "555", "resolved");
+  await seed("o6", "DFW-8-88888-cc", "888"); // single match, but that deal is linked to project 999
 });
 
 afterEach(async () => {
@@ -93,7 +96,7 @@ describe("replay-synchub-relay-orphans", () => {
 
   it("fetches only open orphans", async () => {
     const orphans = await fetchOpenOrphans(client());
-    expect(orphans.map((o) => o.id).sort()).toEqual(["o1", "o2", "o3", "o4"]);
+    expect(orphans.map((o) => o.id).sort()).toEqual(["o1", "o2", "o3", "o4", "o6"]);
   });
 
   it("dry-run categorizes each orphan and writes nothing", async () => {
@@ -103,24 +106,50 @@ describe("replay-synchub-relay-orphans", () => {
     expect(report.counts.would_link).toBe(2); // o1 (project_number) + o4 (CO parent, child excluded)
     expect(report.counts.skipped_no_match).toBe(1); // o2
     expect(report.counts.skipped_ambiguous).toBe(1); // o3
+    expect(report.counts.skipped_conflict).toBe(1); // o6 (deal linked to a different project)
     expect(calls).toHaveLength(0); // dry-run never invokes the relay
 
-    expect(await orphanStatuses()).toEqual({ o1: "open", o2: "open", o3: "open", o4: "open", o5: "resolved" });
+    expect(await orphanStatuses()).toEqual({ o1: "open", o2: "open", o3: "open", o4: "open", o5: "resolved", o6: "open" });
   });
 
-  it("commit replays only single-match orphans, marks them resolved, and leaves 0/>1 open", async () => {
+  it("commit replays only single-match orphans, marks them resolved, and leaves 0/>1/conflict open", async () => {
     const { fn, calls } = recordingRelay();
     const report = await replayOrphans(client(), { mode: "commit", relay: fn });
 
     expect(report.counts.linked).toBe(2);
     expect(report.counts.skipped_no_match).toBe(1);
     expect(report.counts.skipped_ambiguous).toBe(1);
-    // Relay invoked ONLY for the two single-match orphans (never for no-match / ambiguous).
+    expect(report.counts.skipped_conflict).toBe(1);
+    // Relay invoked ONLY for the two single, non-conflicting matches.
     expect(calls).toHaveLength(2);
     const numbers = calls.map((c: any) => c.procore.projectNumber).sort();
     expect(numbers).toEqual(["DFW-1-13126-af", "DFW-7-77777-pp"]);
 
-    expect(await orphanStatuses()).toEqual({ o1: "resolved", o2: "open", o3: "open", o4: "resolved", o5: "resolved" });
+    expect(await orphanStatuses()).toEqual({ o1: "resolved", o2: "open", o3: "open", o4: "resolved", o5: "resolved", o6: "open" });
+  });
+
+  it("marks the orphan resolved BEFORE invoking the relay (bypasses the open-orphan dedup guard)", async () => {
+    // The real relay short-circuits to duplicate_orphan if it finds the row still open; assert the
+    // script has already flipped it to 'resolved' by the time the relay is called.
+    const statusesAtCall: string[] = [];
+    const guardAwareRelay = async (input: any): Promise<SyncHubRelayResult> => {
+      const { rows } = await db.query(
+        "SELECT status FROM public.synchub_webhook_orphans WHERE procore_portfolio_project_id = $1",
+        [input.procore.portfolioProjectId]
+      );
+      statusesAtCall.push(String((rows as any[])[0]?.status));
+      return { status: "linked", dealId: "linked-deal", officeId: OFFICE_ID };
+    };
+    await replayOrphans(client(), { mode: "commit", relay: guardAwareRelay });
+    expect(statusesAtCall).toEqual(["resolved", "resolved"]); // o1 + o4, both already resolved at relay time
+  });
+
+  it("re-opens the orphan if the relay unexpectedly does not link", async () => {
+    const notLinked = async (): Promise<SyncHubRelayResult> => ({ status: "orphaned", orphanId: "x", reason: "no_match" });
+    const report = await replayOrphans(client(), { mode: "commit", relay: notLinked });
+    expect(report.counts.error).toBe(2); // o1 + o4 relayed, neither linked
+    // Re-opened, not silently lost as 'resolved'.
+    expect(await orphanStatuses()).toMatchObject({ o1: "open", o4: "open" });
   });
 
   it("is idempotent — a second commit re-selects only the still-open orphans and links nothing", async () => {
@@ -130,10 +159,11 @@ describe("replay-synchub-relay-orphans", () => {
     const second = recordingRelay();
     const report = await replayOrphans(client(), { mode: "commit", relay: second.fn });
 
-    expect(report.total).toBe(2); // only o2 + o3 remain open
+    expect(report.total).toBe(3); // o2 (no-match) + o3 (ambiguous) + o6 (conflict) remain open
     expect(report.counts.linked).toBe(0);
     expect(second.calls).toHaveLength(0);
     expect(report.counts.skipped_no_match).toBe(1);
     expect(report.counts.skipped_ambiguous).toBe(1);
+    expect(report.counts.skipped_conflict).toBe(1);
   });
 });

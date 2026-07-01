@@ -89,6 +89,7 @@ export type OrphanDisposition =
   | "already_linked"
   | "skipped_no_match"
   | "skipped_ambiguous"
+  | "skipped_conflict"
   | "error";
 
 export interface OrphanOutcome {
@@ -116,6 +117,7 @@ function emptyCounts(): Record<OrphanDisposition, number> {
     already_linked: 0,
     skipped_no_match: 0,
     skipped_ambiguous: 0,
+    skipped_conflict: 0,
     error: 0,
   };
 }
@@ -126,6 +128,15 @@ async function markOrphanResolved(client: QueryClient, orphanId: string, now: Da
         SET status = 'resolved', resolved_at = $2
       WHERE id = $1 AND status = 'open'`,
     [orphanId, now]
+  );
+}
+
+async function reopenOrphan(client: QueryClient, orphanId: string): Promise<void> {
+  await client.query(
+    `UPDATE public.synchub_webhook_orphans
+        SET status = 'open', resolved_at = NULL
+      WHERE id = $1 AND status = 'resolved'`,
+    [orphanId]
   );
 }
 
@@ -167,22 +178,37 @@ export async function replayOrphans(
       }
 
       const target = matches[0];
+
+      // The single match is already linked to a DIFFERENT Procore project: the relay would reject this
+      // as `matched_deal_has_different_procore_project` and file a fresh orphan. Skip it and leave the
+      // orphan open for a human — never replay a conflicting link.
+      if (target.procoreProjectId != null && String(target.procoreProjectId) !== orphan.portfolioProjectId) {
+        counts.skipped_conflict += 1;
+        outcomes.push({ ...base, disposition: "skipped_conflict", dealId: target.dealId, officeId: target.officeId });
+        continue;
+      }
+
       if (opts.mode === "dry-run") {
         counts.would_link += 1;
         outcomes.push({ ...base, disposition: "would_link", dealId: target.dealId, officeId: target.officeId });
         continue;
       }
 
+      // Mark THIS orphan resolved BEFORE replaying. The relay's open-orphan dedup
+      // (findExistingOrphanBySyncHubLogId, status='open') would otherwise find the very row we're
+      // replaying — 7 of 8 prod orphans carry synchub.webhookLogId — and short-circuit to
+      // `duplicate_orphan` before ever reaching the fixed matcher. Preview guaranteed a single,
+      // non-conflicting match, so the relay links (procore_project_id null) or already_linked (same
+      // project); it never files a new orphan. Re-open on any unexpected result so nothing is lost.
+      await markOrphanResolved(client, orphan.id, now);
       const result = await relay(orphan.rawPayload, { client });
       if (result.status === "linked" || result.status === "already_linked") {
-        await markOrphanResolved(client, orphan.id, now);
         counts[result.status] += 1;
         outcomes.push({ ...base, disposition: result.status, dealId: result.dealId, officeId: result.officeId });
       } else {
-        // Preview said exactly one match, so a non-linked relay result is unexpected — surface it,
-        // leave the orphan open.
+        await reopenOrphan(client, orphan.id);
         counts.error += 1;
-        outcomes.push({ ...base, disposition: "error", error: `relay returned ${result.status}` });
+        outcomes.push({ ...base, disposition: "error", error: `relay returned ${result.status} after resolve` });
       }
     } catch (err) {
       counts.error += 1;
@@ -225,7 +251,7 @@ function printReport(report: ReplayReport): void {
   const c = report.counts;
   const linkedLabel = report.mode === "commit" ? `linked=${c.linked} alreadyLinked=${c.already_linked}` : `wouldLink=${c.would_link}`;
   console.log(
-    `[synchub-orphan-replay] ${linkedLabel} | skipped: noMatch=${c.skipped_no_match} ambiguous=${c.skipped_ambiguous} | errors=${c.error}`
+    `[synchub-orphan-replay] ${linkedLabel} | skipped: noMatch=${c.skipped_no_match} ambiguous=${c.skipped_ambiguous} conflict=${c.skipped_conflict} | errors=${c.error}`
   );
   if (report.mode !== "commit") {
     console.log("[synchub-orphan-replay] dry-run only — re-run with --commit to apply.");
