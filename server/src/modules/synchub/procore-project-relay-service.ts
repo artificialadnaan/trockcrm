@@ -149,7 +149,7 @@ export function validateSyncHubProjectCreatedPayload(input: unknown): SyncHubPro
   };
 }
 
-async function getActiveOffices(client: QueryClient): Promise<OfficeRow[]> {
+export async function getActiveOffices(client: QueryClient): Promise<OfficeRow[]> {
   const result = await client.query(
     "SELECT id, slug FROM public.offices WHERE is_active = true ORDER BY created_at ASC"
   );
@@ -182,7 +182,7 @@ async function findDealLinkedToProcoreProject(
   return null;
 }
 
-async function findDealsByProjectNumber(
+export async function findDealsByProjectNumber(
   client: QueryClient,
   offices: OfficeRow[],
   projectNumber: string
@@ -192,6 +192,17 @@ async function findDealsByProjectNumber(
     const schemaName = schemaNameForOffice(office.slug);
     if (!schemaName) continue;
     const result = await client.query(
+      // Match the incoming Procore project number against BOTH project_number and deal_number.
+      // SyncHub creates the Procore project from the deal's canonical DFW/ATL number, which for
+      // HubSpot-imported and bid-board deals lives in project_number (deal_number holds the HS id
+      // or a divergent number). A deal_number-only lookup orphaned those relays, so the worker
+      // never created the "T Rock Photos" link. Mirrors the stage relay's findMatchesByProjectNumber.
+      //
+      // CO child deals SHARE the parent's project_number (migration 0156; the project_number unique
+      // index is partial on is_change_order = false), so exclude them — otherwise a parent-with-CO
+      // would return >1 row and orphan as false-ambiguous instead of linking the real parent. This
+      // guard also aligns the predicate with deals_project_number_uidx so the lookup stays indexed.
+      // LIMIT 2 still lets the caller detect GENUINE ambiguity (>1 distinct parent → orphan).
       `SELECT $2::uuid AS office_id,
               $3::text AS office_slug,
               $4::text AS schema_name,
@@ -200,7 +211,9 @@ async function findDealsByProjectNumber(
               deal_number,
               procore_project_id
        FROM ${quoteIdent(schemaName)}.deals
-       WHERE deal_number = $1 AND is_active = true
+       WHERE (project_number = $1 OR deal_number = $1)
+         AND is_active = true
+         AND COALESCE(is_change_order, false) = false
        LIMIT 2`,
       [projectNumber, office.id, office.slug, schemaName]
     );
