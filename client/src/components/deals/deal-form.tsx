@@ -68,6 +68,28 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   // Scope-defining fields (Deal Name, Project Type) are read-only after RFP submission / Bid Board
   // handoff / past-Opportunity — the server rejects such edits, so grey them out here.
   const scopeReadOnly = isDealScopeReadOnlyAfterRfp(deal ?? null, { isPastOpportunityStage });
+  // EXCEPTION: an RFP-only legacy deal (no source lead, still missing company/property, not Bid Board and
+  // not past Opportunity) enters cleanup mode, where the server (shouldTreatPatchAsLegacyCleanup →
+  // cleanupMode) intentionally accepts scope-field edits during relationship repair. Don't grey the scope
+  // fields there, or the cleanup dialog could fix company/property but not the missing Project Type/Name.
+  const hasBidBoardHandoff = Boolean(
+    isBidBoardOwned ||
+      deal?.bidBoardLinkedAt ||
+      deal?.bidBoardProjectNumber ||
+      deal?.bidBoardStageSlug ||
+      deal?.bidBoardStageEnteredAt ||
+      deal?.bidBoardMirrorSourceEnteredAt ||
+      deal?.isReadOnlyMirror ||
+      deal?.readOnlySyncedAt
+  );
+  const isLegacyRfpCleanup =
+    isEdit &&
+    !deal?.sourceLeadId &&
+    (!deal?.companyId || !deal?.propertyId) &&
+    Boolean(deal?.rfpApprovalRequestedAt || deal?.rfpApprovalStatus) &&
+    !hasBidBoardHandoff &&
+    !isPastOpportunityStage;
+  const scopeFieldsDisabled = scopeReadOnly && !isLegacyRfpCleanup;
   // Awarded amount is editable only by admins/directors (mirrors the server-side
   // AWARDED_AMOUNT_RESTRICTED guard); everyone else sees it read-only.
   const canEditAwarded = user?.role === "admin" || user?.role === "director";
@@ -372,7 +394,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
           <div className="space-y-2">
             <Label htmlFor="name" className="inline-flex items-center gap-1.5">
               Deal Name <span className="text-red-500">*</span>
-              {scopeReadOnly ? (
+              {scopeFieldsDisabled ? (
                 <span aria-label={SCOPE_LOCK_MESSAGE} title={SCOPE_LOCK_MESSAGE}>
                   <Lock className="h-3.5 w-3.5 text-amber-600" aria-hidden="true" />
                 </span>
@@ -382,7 +404,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               id="name"
               placeholder="e.g., Oakwood Apartments Reroofing"
               value={formData.name}
-              disabled={scopeReadOnly}
+              disabled={scopeFieldsDisabled}
               onChange={(e) => handleChange("name", e.target.value)}
             />
           </div>
@@ -578,7 +600,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
             <div className="space-y-2">
               <Label htmlFor="projectType" className="inline-flex items-center gap-1.5">
                 Project Type
-                {scopeReadOnly ? (
+                {scopeFieldsDisabled ? (
                   <span aria-label={SCOPE_LOCK_MESSAGE} title={SCOPE_LOCK_MESSAGE}>
                     <Lock className="h-3.5 w-3.5 text-amber-600" aria-hidden="true" />
                   </span>
@@ -587,7 +609,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               <Select
                 value={formData.projectTypeId}
                 onValueChange={(val) => handleChange("projectTypeId", val ?? "")}
-                disabled={scopeReadOnly}
+                disabled={scopeFieldsDisabled}
               >
                 <SelectTrigger id="projectType">
                   <SelectValue placeholder="Select type">

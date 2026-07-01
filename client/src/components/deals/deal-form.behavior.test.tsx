@@ -745,6 +745,65 @@ describe("DealForm direct-create context", () => {
     expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(true);
   });
 
+  it("keeps Name and Project Type editable during RFP-only legacy cleanup (missing company/property, no source lead)", async () => {
+    // The server accepts scope-field edits here via cleanupMode (relationship repair), so don't grey them.
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+    const { container, root } = await renderEditForm({
+      id: "deal-cleanup",
+      dealNumber: "DFW-2-18131-aa",
+      name: "Cleanup Deal",
+      stageId: "stage-opportunity", // still in Opportunity
+      assignedRepId: "rep-1",
+      companyId: null, // missing relationship → cleanup dialog
+      propertyId: null,
+      sourceLeadId: null, // no source lead → cleanup-eligible
+      isBidBoardOwned: false,
+      rfpApprovalStatus: "pending", // RFP submitted → scopeReadOnly true
+      bidBoardProjectNumber: null,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+    expect(container.querySelector<HTMLInputElement>("#name")?.disabled).toBe(false);
+    expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(false);
+  });
+
+  it("still greys Name/Project Type on an RFP deal that already has company + property (not cleanup)", async () => {
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+    const { container, root } = await renderEditForm({
+      id: "deal-rfp-linked",
+      dealNumber: "DFW-2-18132-aa",
+      name: "RFP Linked Deal",
+      stageId: "stage-opportunity",
+      assignedRepId: "rep-1",
+      companyId: "company-1", // relationships already set → NOT cleanup
+      propertyId: "property-1",
+      sourceLeadId: null,
+      isBidBoardOwned: false,
+      rfpApprovalStatus: "pending",
+      bidBoardProjectNumber: null,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+    expect(container.querySelector<HTMLInputElement>("#name")?.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(true);
+  });
+
   it("saves a company-only fill-in on an existing deal without requiring a property", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
