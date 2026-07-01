@@ -27,6 +27,12 @@ import {
   resolveDefaultOfficeCode,
 } from "@/lib/office-selection";
 import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
+import { isDealScopeReadOnlyAfterRfp, isDealBidBoardHandoff } from "@/lib/deal-scope-lock";
+
+// Shown on scope-defining fields (Deal Name, Project Type) once a deal is locked — the server rejects
+// these edits after RFP submission, Bid Board handoff, or once the deal moves past Opportunity — so they
+// are greyed rather than editable-then-rejected on save.
+const SCOPE_LOCK_MESSAGE = "Locked after RFP submission, Bid Board handoff, or once the deal moves past Opportunity.";
 
 interface DealFormProps {
   deal?: Deal; // If provided, we're editing; otherwise creating
@@ -44,13 +50,30 @@ interface DealFormProps {
 export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { stages } = usePipelineStages();
+  const { stages, loading: stagesLoading } = usePipelineStages();
   const { hierarchy: projectTypeHierarchy } = useProjectTypes();
   const { regions } = useRegions();
   const { offices } = useAccessibleOffices();
 
   const isEdit = !!deal;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned);
+  // Past-Opportunity is a scope-lock trigger too (server resolveDealScopeLockState), so compute it from
+  // the deal's current stage vs the Opportunity stage in the same workflow family — mirrors deal-detail-page.
+  const currentStage = deal?.stageId ? stages.find((s) => s.id === deal.stageId) : undefined;
+  const opportunityStage = stages.find(
+    (s) => s.slug === "opportunity" && s.workflowFamily === currentStage?.workflowFamily
+  );
+  const isPastOpportunityStage = Boolean(
+    currentStage && opportunityStage && currentStage.displayOrder > opportunityStage.displayOrder
+  );
+  // Scope-defining fields (Deal Name, Project Type) are read-only after RFP submission / Bid Board
+  // handoff / past-Opportunity — the server rejects such edits, so grey them out here. (scopeFieldsDisabled
+  // is derived below, once formData is available, so the cleanup exemption can read the live form state.)
+  const scopeReadOnly = isDealScopeReadOnlyAfterRfp(deal ?? null, { isPastOpportunityStage });
+  const hasBidBoardHandoff = isDealBidBoardHandoff(deal ?? null);
+  // Past-Opportunity needs the stage config; until it loads we can't evaluate it, so treat the lock as
+  // undetermined and fail safe (disable) rather than briefly expose a past-Opportunity deal's fields.
+  const scopeLockUndetermined = isEdit && stagesLoading;
   // Awarded amount is editable only by admins/directors (mirrors the server-side
   // AWARDED_AMOUNT_RESTRICTED guard); everyone else sees it read-only.
   const canEditAwarded = user?.role === "admin" || user?.role === "director";
@@ -103,6 +126,22 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const [closeDateWarning, setCloseDateWarning] = useState<string | null>(null);
   const [regionManuallyOverridden, setRegionManuallyOverridden] = useState(() => Boolean(deal?.regionId));
   const isPropertyAddressManaged = Boolean(formData.propertyId);
+  // EXCEPTION: an RFP-only legacy deal (no source lead) still missing company/property enters cleanup mode,
+  // where the server accepts scope-field edits during relationship repair — but ONLY when the patch supplies
+  // a COMPLETE repair (both company + property), mirroring shouldTreatPatchAsLegacyCleanup &&
+  // hasCompleteLegacyCleanupRelationships. So unlock Name/Project Type only once the live form has BOTH
+  // relationships, and only once the stage config has loaded (so past-Opportunity is actually known).
+  const stagesReady = !stagesLoading && stages.length > 0;
+  const isLegacyRfpCleanup =
+    isEdit &&
+    stagesReady &&
+    !deal?.sourceLeadId &&
+    (!deal?.companyId || !deal?.propertyId) &&
+    Boolean(formData.companyId && formData.propertyId) &&
+    Boolean(deal?.rfpApprovalRequestedAt || deal?.rfpApprovalStatus) &&
+    !hasBidBoardHandoff &&
+    !isPastOpportunityStage;
+  const scopeFieldsDisabled = (scopeReadOnly || scopeLockUndetermined) && !isLegacyRfpCleanup;
   const selectedOfficeLabel =
     officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
   // The office picker is a project-number PREFIX only. Pickers + create target the rep's HOME (active)
@@ -353,13 +392,12 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
           )}
 
           <div className="space-y-2">
-            <Label htmlFor="name">
-              Deal Name <span className="text-red-500">*</span>
-            </Label>
+            <FieldLockLabel htmlFor="name" label="Deal Name" required locked={scopeFieldsDisabled} message={SCOPE_LOCK_MESSAGE} />
             <Input
               id="name"
               placeholder="e.g., Oakwood Apartments Reroofing"
               value={formData.name}
+              disabled={scopeFieldsDisabled}
               onChange={(e) => handleChange("name", e.target.value)}
             />
           </div>
@@ -553,12 +591,13 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="projectType">Project Type</Label>
+              <FieldLockLabel htmlFor="projectType" label="Project Type" locked={scopeFieldsDisabled} message={SCOPE_LOCK_MESSAGE} />
               <Select
                 value={formData.projectTypeId}
                 onValueChange={(val) => handleChange("projectTypeId", val ?? "")}
+                disabled={scopeFieldsDisabled}
               >
-                <SelectTrigger>
+                <SelectTrigger id="projectType">
                   <SelectValue placeholder="Select type">
                     {getSelectedOptionLabel(projectTypeOptions, formData.projectTypeId, "Select type")}
                   </SelectValue>
@@ -769,15 +808,18 @@ function FieldLockLabel({
   label,
   locked,
   message,
+  required = false,
 }: {
   htmlFor: string;
   label: string;
   locked: boolean;
   message: string;
+  required?: boolean;
 }) {
   return (
     <Label htmlFor={htmlFor} className="inline-flex items-center gap-1.5">
       {label}
+      {required ? <span className="text-red-500">*</span> : null}
       {locked ? (
         <span aria-label={message} title={message}>
           <Lock
