@@ -56,9 +56,18 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
 
   const isEdit = !!deal;
   const isBidBoardOwned = Boolean(deal?.isBidBoardOwned);
+  // Past-Opportunity is a scope-lock trigger too (server resolveDealScopeLockState), so compute it from
+  // the deal's current stage vs the Opportunity stage in the same workflow family — mirrors deal-detail-page.
+  const currentStage = deal?.stageId ? stages.find((s) => s.id === deal.stageId) : undefined;
+  const opportunityStage = stages.find(
+    (s) => s.slug === "opportunity" && s.workflowFamily === currentStage?.workflowFamily
+  );
+  const isPastOpportunityStage = Boolean(
+    currentStage && opportunityStage && currentStage.displayOrder > opportunityStage.displayOrder
+  );
   // Scope-defining fields (Deal Name, Project Type) are read-only after RFP submission / Bid Board
   // handoff / past-Opportunity — the server rejects such edits, so grey them out here.
-  const scopeReadOnly = isDealScopeReadOnlyAfterRfp(deal ?? null);
+  const scopeReadOnly = isDealScopeReadOnlyAfterRfp(deal ?? null, { isPastOpportunityStage });
   // Awarded amount is editable only by admins/directors (mirrors the server-side
   // AWARDED_AMOUNT_RESTRICTED guard); everyone else sees it read-only.
   const canEditAwarded = user?.role === "admin" || user?.role === "director";

@@ -706,6 +706,45 @@ describe("DealForm direct-create context", () => {
     expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(false);
   });
 
+  it("greys out Deal Name and Project Type on a CRM deal past the Opportunity stage (no RFP/bid-board)", async () => {
+    // Server resolveDealScopeLockState locks these once a deal is past Opportunity, even without RFP/Bid
+    // Board — so the form must grey them there too (compute isPastOpportunityStage from the stages).
+    mocks.usePipelineStages.mockReturnValue({
+      stages: [
+        { id: "stage-opportunity", name: "Opportunity", slug: "opportunity", isActivePipeline: true, isTerminal: false, workflowFamily: "standard_deal", displayOrder: 2 },
+        { id: "stage-estimating", name: "Estimating", slug: "estimating", isActivePipeline: true, isTerminal: false, workflowFamily: "standard_deal", displayOrder: 3 },
+      ],
+    });
+    mocks.useAccessibleOffices.mockReturnValue({
+      offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+      loading: false,
+      error: null,
+    });
+
+    const { container, root } = await renderEditForm({
+      id: "deal-past-opp",
+      dealNumber: "DFW-2-18130-aa",
+      name: "Past Opportunity Deal",
+      stageId: "stage-estimating",
+      assignedRepId: "rep-1",
+      companyId: "company-1",
+      propertyId: "property-1",
+      sourceLeadId: null,
+      isBidBoardOwned: false,
+      rfpApprovalStatus: null,
+      bidBoardProjectNumber: null,
+      projectTypeId: "type-roofing",
+      regionId: null,
+      source: null,
+      workflowRoute: "normal",
+    } as any);
+    containers.push(container);
+    roots.push(root);
+
+    expect(container.querySelector<HTMLInputElement>("#name")?.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>("#projectType")?.disabled).toBe(true);
+  });
+
   it("saves a company-only fill-in on an existing deal without requiring a property", async () => {
     mocks.useAccessibleOffices.mockReturnValue({
       offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
