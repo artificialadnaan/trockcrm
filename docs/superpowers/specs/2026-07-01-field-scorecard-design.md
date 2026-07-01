@@ -84,7 +84,7 @@ Re-exported from `shared/src/types/index.ts`. Contents:
 - `FIELD_SCORECARD_RATING_BANDS` — the §3.2 bands.
 - `FIELD_SCORECARD_TOTAL_POINTS = 100`.
 - Pure functions: `computeScorecardTotal(items)`, `resolveScorecardRating(total)`, `actionItemsRequired({ total, deficiencyCount })`, `isLegalSectionPoints(sectionKey, points)`.
-- Types: `ScorecardSectionKey`, `ScorecardRating`, `ScorecardCriticalDeficiencyKey`, `ScorecardSubmissionInput` (POST payload), `FieldScorecardSummary`, `FieldScorecardDetail`.
+- Types: `ScorecardSectionKey`, `ScorecardRating`, `ScorecardCriticalDeficiencyKey`, `ScorecardSubmissionInput` (POST payload — carries a client-generated `clientSubmissionId` uuid for idempotent retries), `FieldScorecardSummary`, `FieldScorecardDetail`.
 
 ### 5.2 Tenant tables — `shared/src/schema/tenant/field-scorecards.ts` (new)
 
@@ -92,6 +92,7 @@ Registered in `shared/src/schema/index.ts`. Three per-office tables:
 
 **`field_scorecards`**
 - `id` uuid pk (`gen_random_uuid()`)
+- `client_submission_id` uuid **not null** — client-generated, stable across retries; **unique** index makes `POST` idempotent (a retried offline submit resolves to the same row instead of duplicating a card/PDF/email)
 - `deal_id` uuid **not null** — FK → `deals.id` (mirror the `files.deal_id` FK added in `0158`)
 - `week_of` date **not null**
 - `project_number` text — resolved project number snapshot at submit
@@ -102,6 +103,7 @@ Registered in `shared/src/schema/index.ts`. Three per-office tables:
 - `status` text **not null** default `'submitted'` (reserved for future states)
 - `submitted_by` uuid **not null** (`users.id`) · `submitted_by_name` text (snapshot) · `submitted_at` timestamptz **not null** default `now()`
 - `pdf_r2_key` text · `pdf_r2_bucket` text · `pdf_generated_at` timestamptz — set when the PDF is rendered (PR3)
+- `email_sent_at` timestamptz — set when the recipient email is dispatched (PR3); the email worker's idempotency marker
 - `is_active` boolean **not null** default `true` (soft-delete parity) · `created_at` / `updated_at` timestamptz
 
 **`field_scorecard_items`** — one row per scored section
@@ -129,29 +131,33 @@ New `scorecards-service.ts` + routes appended to `routes.ts`. Auth/CSRF unchange
 **Endpoints**
 - `POST /api/field/scorecards` — body `ScorecardSubmissionInput`:
   ```
-  { dealId, weekOf, superintendentName?, pmName?,
+  { clientSubmissionId,                           // client-generated uuid — idempotency key
+    dealId, weekOf, superintendentName?, pmName?,
     items: [{ sectionKey, points, note? }],      // all 7 sections
     criticalDeficiencies: string[],               // deficiency keys
     actionItems: string[],                        // non-empty strings
     photos: [{ sectionKey, clientUploadId }] }    // reference already-uploaded photos
   ```
-  Validation: every section present exactly once; each `points` legal for its section (`isLegalSectionPoints`); deficiency keys valid; **recompute** `totalScore` + `rating` server-side (ignore any client total); enforce the §3.4 gate (reject 422 if action items required but empty). Resolve each `clientUploadId` → `files` row via `getFileByClientUploadId`, assert it belongs to this deal/office, insert `field_scorecard_photos`. Insert `field_scorecards` + `field_scorecard_items` in one transaction. Emit `field_scorecard.submitted` domain event (PR3). Returns `FieldScorecardSummary`.
-- `GET /api/field/projects/:dealId/scorecards` — list summaries (newest first), for the mobile tab + project detail.
+  **Idempotency first**: if a card with this `clientSubmissionId` already exists, return it `200` with no new insert/PDF/event — so a retried offline submit (response lost after the row landed) never duplicates. Validation: every section present exactly once; each `points` legal for its section (`isLegalSectionPoints`); deficiency keys valid; **recompute** `totalScore` + `rating` server-side (ignore any client total); enforce the §3.4 gate (reject 422 if action items required but empty). Resolve each `clientUploadId` → `files` row via `getFileByClientUploadId`, assert it belongs to this deal/office, insert `field_scorecard_photos`. Insert `field_scorecards` + `field_scorecard_items` in one transaction, guarded by the `client_submission_id` unique index (a concurrent retry resolves to the existing row). Emit `field_scorecard.submitted` domain event (PR3). Returns `FieldScorecardSummary`.
+- `GET /api/field/scorecards` — recent submitted cards across the user's accessible projects/offices (cross-office fan-out, like `/field/projects`), for the **Scorecard tab landing**, which has no pre-selected project. Paged.
+- `GET /api/field/projects/:dealId/scorecards` — list summaries (newest first) for one project (project-detail + post-submit refresh).
 - `GET /api/field/scorecards/:id` — `FieldScorecardDetail` (items, deficiencies, action items, photos with presigned URLs).
 - `GET /api/field/scorecards/:id/download` — presigned PDF URL from `pdf_r2_key` (PR3; 404/409 until rendered).
+
+**Cross-office reads.** These id-keyed routes hit a tenant-local scorecard id, but field is office-agnostic — `cross-office.ts` today resolves the office only for deal/lead/file ids. Add a **scorecard→office resolver** that fans out across the user's accessible office schemas by scorecard id (mirroring the deal/file read path) so opening a card for a project outside the active `x-office-id` resolves the owning office instead of 404-ing; the list + detail + download endpoints all use it.
 
 ## 7. Mobile UX (`mobile/`)
 
 ### 7.1 Navigation & entry
 - New tab in `app/(app)/_layout.tsx`: `Tabs.Screen name="scorecards"` titled **"Scorecard"**, icon `clipboard-outline` (or `checkbox-outline`).
 - Route group mirroring `projects/`: `app/(app)/scorecards/_layout.tsx` (Stack), `index.tsx` (landing list), `[draftId].tsx` (wizard host).
-- **Landing list**: draft cards (with **Resume**) + submitted cards (color-coded rating badge, score, week, submitter) from `GET /field/projects/.../scorecards` merged with local drafts; **＋ New scorecard** button → project picker (`TargetPicker`) → new draft.
+- **Landing list**: local draft cards (with **Resume**) + submitted cards (color-coded rating badge, score, week, submitter) from the cross-office `GET /field/scorecards` recent list (the tab has no pre-selected project, so it can't use the per-deal list); **＋ New scorecard** → **deal-only** project picker → new draft.
 - **Project detail shortcut**: add a **"New scorecard"** button on `app/(app)/projects/[id].tsx` beside *Add photos* / *Build report*, launching the wizard pre-targeted (gated off-office view-only exactly like capture).
 
 ### 7.2 Wizard (guided, one screen per step)
-1. **Setup** — Project (prefilled/picked), Project Number (auto from deal), Superintendent, PM, Week Of (date). Super/PM prefilled from deal data when available; both optional.
+1. **Setup** — Project (prefilled, or chosen via a **deal-only** picker — the shared `TargetPicker` also returns leads/opportunities, which the deal-FK schema can't accept, so the scorecard flow filters to deals/projects *before* a draft is created), Project Number (auto from deal), Superintendent, PM, Week Of (date). Super/PM prefilled from deal data when available; both optional.
 2. **7 section screens** — title + max points, tap-cards for the exact options (single-select, running total pill, progress bar, Back/Next), an **optional note** with 🎙️ voice-to-text, and **Add photo**.
-3. **Add-photo sheet** — reuses `CameraCapture` + import + `PhotoCaptionEditor` + `VoiceRecorder`. Photos attach to that section (held in the draft as local uri + caption + metadata + `clientUploadId`).
+3. **Add-photo sheet** — reuses `CameraCapture` + import + `PhotoCaptionEditor` + `VoiceRecorder`. On attach, the photo file is **copied into durable per-draft storage** (see §7.3) and held as {durable uri + caption + metadata + `clientUploadId`}.
 4. **Critical deficiencies** — the 8-item check-all-that-apply list.
 5. **Required action items** — shown/required only when the §3.4 gate trips; supports dictation.
 6. **Review & submit** — big total, auto color-coded `RatingBadge`, section summary with tap-to-edit, then Submit.
@@ -159,8 +165,8 @@ New `scorecards-service.ts` + routes appended to `routes.ts`. Auth/CSRF unchange
 ### 7.3 State, persistence, submission (`src/scorecard/`)
 - `scorecard-definition.ts` — thin re-export of the shared definition for RN import ergonomics.
 - `scorecard-draft.ts` — pure reducer (answers, notes, photos, deficiencies, action items; derives total/rating/gate). Unit-tested.
-- `draft-store.ts` — device-local persistence (SecureStore/AsyncStorage), per user, keyed by draft id; autosave on change; list/load/delete for the landing screen.
-- `submit-queue.ts` — durable submission job mirroring `upload-queue-core.ts`. On Submit: (1) enqueue each attached photo as a field-photo upload (target = deal, `tags: ['scorecard', sectionKey]`, caption) and drain via the **existing** upload queue → `confirm-upload` persists them with their `clientUploadId`; (2) once all confirmed, `POST /field/scorecards` with `photos: [{ sectionKey, clientUploadId }]`; (3) on success clear the local draft, invalidate the project gallery + scorecard-list queries; (4) offline/failure → stays queued, same "keeps retrying / nothing lost" banners as photos.
+- `draft-store.ts` — device-local persistence (SecureStore/AsyncStorage for metadata), per user, keyed by draft id; autosave on change; list/load/delete for the landing screen. **Each draft owns a durable photo directory under the app document dir**: attached photos are **copied there on attach, not at submit**, because raw camera/library URIs go stale across app-kill/backgrounding — the same reason `upload-queue.ts` copies files into durable storage before persisting. The draft also carries a stable `clientSubmissionId` (uuid, generated at draft creation) used as the submit idempotency key. Submitting or deleting a draft cleans up its photo directory.
+- `submit-queue.ts` — durable submission job mirroring `upload-queue-core.ts`. On Submit: (1) enqueue each attached photo (from its **durable draft copy**) as a field-photo upload (target = deal, `tags: ['scorecard', sectionKey]`, caption) and drain via the **existing** upload queue → `confirm-upload` persists them with their `clientUploadId`; (2) once all confirmed, `POST /field/scorecards` with the draft's `clientSubmissionId` + `photos: [{ sectionKey, clientUploadId }]` (the id makes the POST safe to retry); (3) on success clear the local draft (and its photo dir), invalidate the project gallery + scorecard-list queries; (4) offline/failure → stays queued, same "keeps retrying / nothing lost" banners as photos.
 - API in `src/api/endpoints.ts`: `createScorecard`, `getProjectScorecards`, `getScorecard`, `getScorecardDownload`; types in `src/api/types.ts`.
 - Components: `ScorecardWizard`, `SectionScorer`, `RatingBadge`; reuse `CameraCapture`, `PhotoCaptionEditor`, `VoiceRecorder`, `TargetPicker`, `ui.tsx`, theme.
 
@@ -175,7 +181,7 @@ All 7 sections scored before Review; `weekOf` + `dealId` required; action items 
 
 Modeled on `worker/src/jobs/rfp-rejection-email.ts`.
 - Server create emits `DOMAIN_EVENTS.FIELD_SCORECARD_SUBMITTED` (new constant in `shared`) into `job_queue` with `{ scorecardId, officeId, dealId }`.
-- New worker job `worker/src/jobs/field-scorecard-email.ts`: load scorecard + deal, fetch the PDF from R2, resolve recipients, send via **Resend** with the PDF attached. Retryable; dead-letters on repeated failure.
+- New worker job `worker/src/jobs/field-scorecard-email.ts`: load scorecard + deal, fetch the PDF from R2, resolve recipients, send via **Resend** with the PDF attached. **Idempotent send** — pass a deterministic Resend idempotency key (keyed by `scorecardId`; it's one email per card) and stamp `field_scorecards.email_sent_at`, so a worker retry after a send that succeeded but crashed before the job was marked complete does not re-email duplicate attachments (mirrors the RFP email jobs). Retryable; dead-letters on repeated failure.
 - **Recipients** from a new env var **`FIELD_SCORECARD_EMAIL_RECIPIENTS`** (comma-separated; trimmed; deduped). **Empty/unset → no-op** (logged), matching `DAILY_SUMMARY_RECIPIENTS`. Set on the worker service later once the audience is known — no code change. Resolver (`resolveFieldScorecardRecipients`) is a pure, tested function built so per-office lists or an auto-CC of the PM's user email can be layered in without touching the send path.
 - Subject: `Field Scorecard — {project} — Week of {weekOf} — {total}/100 {ratingLabel}`. Body: summary (project, super/PM, total, rating, deficiencies, action items) + PDF attachment.
 
@@ -186,9 +192,9 @@ A **Field Scorecards** panel on the deal-detail page: submitted cards with score
 ## 11. Testing strategy
 
 - **shared** (unit): `computeScorecardTotal`, `resolveScorecardRating` (band boundaries 74/75/84/85/89/90/100), `actionItemsRequired`, `isLegalSectionPoints`.
-- **server** (PGlite `*.runtime.test.ts`, runs in CI gate): create → total/rating recomputed; gate rejection when action items required but empty; illegal section points rejected; `clientUploadId` resolution + deal-ownership enforcement; photo linking; office scoping; list/get; `/download` presign.
-- **worker**: `resolveFieldScorecardRecipients` (split/trim/dedupe/empty→no-op) + a send test with Resend mocked (mirror `rfp-rejection-email.test.ts`).
-- **mobile** (jest `*.test.ts`): `scorecard-draft` reducer (scoring, gate derivation), `draft-store` persistence round-trip, `submit-queue` ordering (photos before POST) + retry/offline.
+- **server** (PGlite `*.runtime.test.ts`, runs in CI gate): create → total/rating recomputed; gate rejection when action items required but empty; illegal section points rejected; `clientUploadId` resolution + deal-ownership enforcement; photo linking; office scoping; **idempotent submit (duplicate `clientSubmissionId` → single row, no dup card/PDF/event)**; **cross-office scorecard-id read resolves the owning office**; list/get; `/download` presign.
+- **worker**: `resolveFieldScorecardRecipients` (split/trim/dedupe/empty→no-op) + a send test with Resend mocked, including **idempotent re-run (already-sent → no second send)** (mirror `rfp-rejection-email.test.ts`).
+- **mobile** (jest `*.test.ts`): `scorecard-draft` reducer (scoring, gate derivation), `draft-store` persistence round-trip **+ durable photo-copy on attach / cleanup on delete**, `submit-queue` ordering (photos before POST) + retry/offline **+ stable `clientSubmissionId` across retries**.
 - **client/web** (PR4): render test for the scorecard panel; name so it executes in the CI gate (see the client-test-and-CI-gate convention).
 
 ## 12. Phasing — four gated PRs (Adnaan merges; no self-merge)
@@ -203,9 +209,10 @@ A **Field Scorecards** panel on the deal-detail page: submitted cards with score
 - **Local-draft + atomic submit** over server-side drafts — offline-first, reuses the durable photo queue, minimal endpoints.
 - **Dedicated structured tables** over JSONB — queryable by the CRM and future reporting.
 - **Server-authoritative scoring** — client can't submit a wrong total or bypass the action-item gate.
+- **Idempotent submit & email** — a client-generated `clientSubmissionId` (unique index) makes the retryable offline POST safe; the email worker keys Resend idempotency on `scorecardId` and stamps `email_sent_at`. Queue retries can't duplicate cards, PDFs, or emails.
 - **Photos shared to the gallery** (not siloed) — evidence is visible everywhere a project's photos are, and reuses the entire capture/upload/thumbnail pipeline; the scorecard link is an additive join.
 - **Submitted = locked/immutable** — accountability; corrections are new cards.
-- **One-per-project-per-week is soft** — UI groups by week; no DB constraint (avoids blocking legitimate re-scores).
+- **One-per-project-per-week is soft** — UI groups by week; no DB constraint (avoids blocking legitimate re-scores). Retry-duplication is handled separately by `clientSubmissionId`, not a week constraint.
 - **Email ships inert** — `FIELD_SCORECARD_EMAIL_RECIPIENTS` empty until the audience is confirmed; resolver built for later per-office/PM expansion.
 
 ## 14. Deferred / open items
@@ -220,3 +227,14 @@ A **Field Scorecards** panel on the deal-detail page: submitted cards with score
 - **Mobile:** EAS rebuild required (no OTA); no new native modules.
 - **Server / worker:** deploy via Railway; run `0172` migration (`npm run db:migrate`); set `FIELD_SCORECARD_EMAIL_RECIPIENTS` on the worker service when ready (safe to leave empty).
 - **Web CRM:** standard client deploy (PR4).
+
+## 16. Revisions from design review (PR #848)
+
+Codex review of the initial spec surfaced six issues, all incorporated above:
+
+1. **Idempotent submit (P1)** — `clientSubmissionId` unique key so the durable offline retry can't create duplicate cards/PDFs/emails (§5.1, §5.2, §6, §7.3).
+2. **Cross-office scorecard reads (P2)** — a scorecard→office resolver so id-keyed detail/download don't 404 for off-`x-office-id` projects (§6).
+3. **Deal-only project picker (P2)** — the wizard filters `TargetPicker` to deals so a lead/opportunity can't produce an unsubmittable card (§7.1–7.2).
+4. **Durable draft photo copies (P2)** — evidence photos are copied into per-draft durable storage on attach, not at submit, so long-lived drafts survive app-kill (§7.2–7.3).
+5. **Email retry dedup (P2)** — deterministic Resend idempotency key + `email_sent_at` marker so a crash-after-send retry can't double-email (§5.2, §9).
+6. **All-project landing list (P3)** — `GET /field/scorecards` (cross-office recent) so the tab lists submitted cards with no project pre-selected (§6, §7.1).
