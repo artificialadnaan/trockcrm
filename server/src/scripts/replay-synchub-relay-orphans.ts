@@ -231,10 +231,6 @@ function resolveDatabaseUrl(): string {
   return url;
 }
 
-function buildSslConfig(): false | { rejectUnauthorized: boolean } {
-  return process.env.DATABASE_SSL_VERIFY === "true" ? { rejectUnauthorized: true } : { rejectUnauthorized: false };
-}
-
 function printReport(report: ReplayReport): void {
   console.log(`[synchub-orphan-replay] mode=${report.mode} | open orphans: ${report.total}`);
   for (const o of report.outcomes) {
@@ -260,7 +256,10 @@ function printReport(report: ReplayReport): void {
 
 export async function main(argv = process.argv): Promise<void> {
   const { mode } = parseReplayArgs(argv);
-  const client = new pg.Client({ connectionString: resolveDatabaseUrl(), ssl: buildSslConfig() });
+  // No explicit `ssl` object — let the connection string dictate TLS (sslmode=...), mirroring the
+  // repo's read-only prod runner (scripts/run-sql.cjs). Passing { rejectUnauthorized: false } would
+  // silently disable certificate verification and can also be overridden by the connection string.
+  const client = new pg.Client({ connectionString: resolveDatabaseUrl() });
   await client.connect();
   try {
     const report = await replayOrphans(client as unknown as QueryClient, { mode });
