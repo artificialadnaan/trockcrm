@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Loader2, TrendingUp, TrendingDown, Sparkles, Trophy, XCircle } from "lucide-react";
 import { useRegionReport } from "@/hooks/use-reports";
+import { useAuth } from "@/lib/auth";
 import { PresetSelect } from "@/components/filters/preset-select";
 import { usd, int, Sparkline } from "./evidence-kit";
 import {
@@ -153,7 +154,7 @@ function MoversStrip({ movers }: { movers: RegionReportData["movers"] }) {
   );
 }
 
-function RegionCard({ r, onDrill }: { r: RegionRow; onDrill: DrillFn }) {
+function RegionCard({ r, onDrill }: { r: RegionRow; onDrill?: DrillFn }) {
   return (
     <div
       className={`relative overflow-hidden rounded-xl border bg-white p-4 ${
@@ -169,11 +170,11 @@ function RegionCard({ r, onDrill }: { r: RegionRow; onDrill: DrillFn }) {
       <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
         <Metric
           label="Won" value={usd(r.won.value)} sub={`${int(r.won.count)} deals`}
-          onClick={r.won.count > 0 ? () => onDrill({ metric: "won", regionName: r.region, title: `${r.region} — Won`, subtitle: `${int(r.won.count)} deals · ${usd(r.won.value)}` }) : undefined}
+          onClick={onDrill && r.won.count > 0 ? () => onDrill({ metric: "won", regionName: r.region, title: `${r.region} — Won`, subtitle: `${int(r.won.count)} deals · ${usd(r.won.value)}` }) : undefined}
         />
         <Metric
           label="Pipeline" value={usd(r.pipeline.value)} sub={`${int(r.pipeline.count)} open`}
-          onClick={r.pipeline.count > 0 ? () => onDrill({ metric: "pipeline", regionName: r.region, title: `${r.region} — Open pipeline`, subtitle: `${int(r.pipeline.count)} open · ${usd(r.pipeline.value)}` }) : undefined}
+          onClick={onDrill && r.pipeline.count > 0 ? () => onDrill({ metric: "pipeline", regionName: r.region, title: `${r.region} — Open pipeline`, subtitle: `${int(r.pipeline.count)} open · ${usd(r.pipeline.value)}` }) : undefined}
         />
         <Metric label="Win rate" value={pctLabel(r.winRate)} />
         <Metric label="Avg deal" value={r.avgDeal == null ? "—" : usd(r.avgDeal)} />
@@ -205,7 +206,7 @@ function Metric({ label, value, sub, onClick }: { label: string; value: string; 
   );
 }
 
-function RegionCards({ regions, onDrill }: { regions: RegionRow[]; onDrill: DrillFn }) {
+function RegionCards({ regions, onDrill }: { regions: RegionRow[]; onDrill?: DrillFn }) {
   return (
     <section className="space-y-2">
       <h2 className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">By region</h2>
@@ -225,7 +226,7 @@ const BAND_TONE: Record<(typeof PROJECTION_BAND_ORDER)[number], string> = {
   beyond_90: "bg-slate-400",
 };
 
-function ForecastSection({ regions, onDrill }: { regions: RegionRow[]; onDrill: DrillFn }) {
+function ForecastSection({ regions, onDrill }: { regions: RegionRow[]; onDrill?: DrillFn }) {
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2">
@@ -241,7 +242,7 @@ function ForecastSection({ regions, onDrill }: { regions: RegionRow[]; onDrill: 
               <div className="grid grid-cols-4 gap-2">
                 {PROJECTION_BAND_ORDER.map((band) => {
                   const cell = r.forecast.bands[band];
-                  const drillable = cell.count > 0;
+                  const drillable = onDrill != null && cell.count > 0;
                   return (
                     <button
                       key={band}
@@ -275,7 +276,7 @@ function ForecastSection({ regions, onDrill }: { regions: RegionRow[]; onDrill: 
   );
 }
 
-function StageHeatmap({ data, onDrill }: { data: RegionReportData; onDrill: DrillFn }) {
+function StageHeatmap({ data, onDrill }: { data: RegionReportData; onDrill?: DrillFn }) {
   const maxValue = Math.max(0, ...data.stageMatrix.map((c) => c.value));
   const cellOf = (region: string, slug: string) => data.stageMatrix.find((c) => c.region === region && c.stageSlug === slug);
   return (
@@ -309,20 +310,21 @@ function StageHeatmap({ data, onDrill }: { data: RegionReportData; onDrill: Dril
                   const count = cell?.count ?? 0;
                   const value = cell?.value ?? 0;
                   const intensity = heatIntensity(value, maxValue);
+                  const drillable = !!onDrill && count > 0;
                   // Cap the shade so the count (the dual-encoding's other half) keeps a readable contrast
                   // ratio against dark text at every intensity — no white-on-mid-indigo dead zone.
                   return (
                     <td key={`${r.region}-${col.slug}`} className="px-1.5 py-1.5 text-center">
                       <button
                         type="button"
-                        disabled={count === 0}
-                        onClick={count > 0 ? () => onDrill({ metric: "pipeline", regionName: r.region, stageSlug: col.slug, title: `${r.region} — ${col.name}`, subtitle: `${int(count)} open · ${usd(value)}` }) : undefined}
-                        className={`w-full rounded-md px-2 py-1.5 tabular-nums ${count > 0 ? "cursor-pointer hover:ring-1 hover:ring-sky-300" : "cursor-default"}`}
+                        disabled={!drillable}
+                        onClick={onDrill && count > 0 ? () => onDrill({ metric: "pipeline", regionName: r.region, stageSlug: col.slug, title: `${r.region} — ${col.name}`, subtitle: `${int(count)} open · ${usd(value)}` }) : undefined}
+                        className={`w-full rounded-md px-2 py-1.5 tabular-nums ${drillable ? "cursor-pointer hover:ring-1 hover:ring-sky-300" : "cursor-default"}`}
                         style={{
                           backgroundColor: count > 0 ? `rgba(79, 70, 229, ${0.06 + intensity * 0.55})` : "transparent",
                           color: count > 0 ? "rgb(30 41 59)" : "rgb(203 213 225)",
                         }}
-                        title={count > 0 ? `${int(count)} deals · ${usd(value)} — click for the records` : "no open deals"}
+                        title={drillable ? `${int(count)} deals · ${usd(value)} — click for the records` : count > 0 ? `${int(count)} deals · ${usd(value)}` : "no open deals"}
                       >
                         <span className="text-sm font-semibold">{count > 0 ? int(count) : "·"}</span>
                         {count > 0 ? <span className="ml-1 text-[10px] text-slate-500">{usd(value)}</span> : null}
@@ -345,7 +347,7 @@ function StageHeatmap({ data, onDrill }: { data: RegionReportData; onDrill: Dril
   );
 }
 
-function TopRepsSection({ regions, onDrill }: { regions: RegionRow[]; onDrill: DrillFn }) {
+function TopRepsSection({ regions, onDrill }: { regions: RegionRow[]; onDrill?: DrillFn }) {
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2">
@@ -368,23 +370,27 @@ function TopRepsSection({ regions, onDrill }: { regions: RegionRow[]; onDrill: D
                     </span>
                     <span className="min-w-0 flex-1 truncate text-slate-700">{rep.repName}</span>
                     {/* Drill into this rep's won deals WITHIN this region — same period the totals were computed
-                        with, so the drawer total reconciles to the figure clicked. */}
-                    <button
-                      type="button"
-                      className="group cursor-pointer text-right tabular-nums font-semibold text-emerald-700"
-                      title={`See ${rep.repName}'s won deals in ${r.region}`}
-                      onClick={() =>
-                        onDrill({
-                          metric: "won",
-                          regionName: r.region,
-                          repId: rep.repId,
-                          title: `${r.region} — ${rep.repName}`,
-                          subtitle: `${int(rep.wonCount)} won · ${usd(rep.wonValue)}`,
-                        })
-                      }
-                    >
-                      <span className="group-hover:underline">{usd(rep.wonValue)}</span>
-                    </button>
+                        with, so the drawer total reconciles to the figure clicked. Directors/admins only. */}
+                    {onDrill ? (
+                      <button
+                        type="button"
+                        className="group cursor-pointer text-right tabular-nums font-semibold text-emerald-700"
+                        title={`See ${rep.repName}'s won deals in ${r.region}`}
+                        onClick={() =>
+                          onDrill({
+                            metric: "won",
+                            regionName: r.region,
+                            repId: rep.repId,
+                            title: `${r.region} — ${rep.repName}`,
+                            subtitle: `${int(rep.wonCount)} won · ${usd(rep.wonValue)}`,
+                          })
+                        }
+                      >
+                        <span className="group-hover:underline">{usd(rep.wonValue)}</span>
+                      </button>
+                    ) : (
+                      <span className="text-right tabular-nums font-semibold text-emerald-700">{usd(rep.wonValue)}</span>
+                    )}
                   </li>
                 ))}
               </ol>
@@ -397,13 +403,19 @@ function TopRepsSection({ regions, onDrill }: { regions: RegionRow[]; onDrill: D
 }
 
 export function RegionReportPage() {
+  const { user } = useAuth();
   const [periodKey, setPeriodKey] = useState<RegionPeriodKey>("mtd");
   const { from, to } = useMemo(() => resolveRegionPeriod(periodKey), [periodKey]);
   const { data, loading, error } = useRegionReport(from, to);
   const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
+  // The region report is visible to all roles, but its evidence drill-downs pull office-wide, cross-rep
+  // deal-level records that the server (assertShowcaseEvidenceAccess) restricts to directors/admins — a
+  // non-director click would just 403. So gate the drill controls to directors: everyone sees the numbers,
+  // only directors/admins can click through. onDrill is undefined for others → the metrics render inert.
+  const canDrill = user?.role === "admin" || user?.role === "director";
   // Every drill carries the SAME {from,to} the section numbers were computed with — the guarantee that the
   // drawer total equals the clicked figure (the foundation reconciles given identical params).
-  const onDrill: DrillFn = (req) => setEvidence({ ...req, from, to });
+  const onDrill: DrillFn | undefined = canDrill ? (req) => setEvidence({ ...req, from, to }) : undefined;
 
   return (
     <div className="space-y-4 p-4">
