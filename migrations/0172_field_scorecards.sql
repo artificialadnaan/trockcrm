@@ -12,7 +12,11 @@ BEGIN
   FOR schema_name IN
     SELECT nspname FROM pg_namespace WHERE nspname LIKE 'office\_%' ESCAPE '\' ORDER BY nspname
   LOOP
-    IF to_regclass(format('%I.deals', schema_name)) IS NULL THEN
+    -- Both deals AND files must exist: field_scorecard_photos FKs to files and getFieldScorecardDetail
+    -- always reads that table, so never leave an office with a partial scorecard schema — skip the whole
+    -- office if either is missing (drift) rather than create a subset.
+    IF to_regclass(format('%I.deals', schema_name)) IS NULL
+       OR to_regclass(format('%I.files', schema_name)) IS NULL THEN
       CONTINUE;
     END IF;
 
@@ -59,22 +63,19 @@ BEGIN
       schema_name, schema_name
     );
 
-    -- Photo-evidence links depend on files; guard separately so an office missing files (drift) still
-    -- gets the scorecard tables.
-    IF to_regclass(format('%I.files', schema_name)) IS NOT NULL THEN
-      EXECUTE format(
-        'CREATE TABLE IF NOT EXISTS %I.field_scorecard_photos (
-           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-           scorecard_id uuid NOT NULL REFERENCES %I.field_scorecards(id) ON DELETE CASCADE,
-           section_key varchar(40) NOT NULL,
-           file_id uuid NOT NULL REFERENCES %I.files(id) ON DELETE CASCADE,
-           created_at timestamptz NOT NULL DEFAULT now(),
-           CONSTRAINT field_scorecard_photos_card_file_key UNIQUE (scorecard_id, file_id)
-         )',
-        schema_name, schema_name, schema_name
-      );
-      EXECUTE format('CREATE INDEX IF NOT EXISTS field_scorecard_photos_card_idx ON %I.field_scorecard_photos (scorecard_id)', schema_name);
-    END IF;
+    -- Photo-evidence links (files guaranteed present by the office guard above).
+    EXECUTE format(
+      'CREATE TABLE IF NOT EXISTS %I.field_scorecard_photos (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         scorecard_id uuid NOT NULL REFERENCES %I.field_scorecards(id) ON DELETE CASCADE,
+         section_key varchar(40) NOT NULL,
+         file_id uuid NOT NULL REFERENCES %I.files(id) ON DELETE CASCADE,
+         created_at timestamptz NOT NULL DEFAULT now(),
+         CONSTRAINT field_scorecard_photos_card_file_key UNIQUE (scorecard_id, file_id)
+       )',
+      schema_name, schema_name, schema_name
+    );
+    EXECUTE format('CREATE INDEX IF NOT EXISTS field_scorecard_photos_card_idx ON %I.field_scorecard_photos (scorecard_id)', schema_name);
   END LOOP;
 END $tenant$;
 

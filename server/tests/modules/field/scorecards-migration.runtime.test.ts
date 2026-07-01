@@ -50,7 +50,7 @@ describe("0172_field_scorecards migration", () => {
   it("enforces the client_submission_id unique constraint", async () => {
     const deal = "11111111-1111-1111-1111-111111111111";
     const csid = "22222222-2222-2222-2222-222222222222";
-    await pg.exec(`INSERT INTO office_dallas.deals (id) VALUES ('${deal}')`);
+    await pg.exec(`INSERT INTO office_dallas.deals (id) VALUES ('${deal}') ON CONFLICT DO NOTHING`);
     const insert = (id: string) =>
       `INSERT INTO office_dallas.field_scorecards
          (id, client_submission_id, deal_id, week_of, total_score, rating, submitted_by)
@@ -63,7 +63,8 @@ describe("0172_field_scorecards migration", () => {
     const deal = "11111111-1111-1111-1111-111111111111";
     const card = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
     const file = "ffffffff-ffff-ffff-ffff-ffffffffffff";
-    await pg.exec(`INSERT INTO office_dallas.files (id) VALUES ('${file}')`);
+    await pg.exec(`INSERT INTO office_dallas.deals (id) VALUES ('${deal}') ON CONFLICT DO NOTHING`);
+    await pg.exec(`INSERT INTO office_dallas.files (id) VALUES ('${file}') ON CONFLICT DO NOTHING`);
     await pg.exec(`INSERT INTO office_dallas.field_scorecards
       (id, client_submission_id, deal_id, week_of, total_score, rating, submitted_by)
       VALUES ('${card}','99999999-9999-9999-9999-999999999999','${deal}','2026-06-30', 80, 'needs_improvement', '${deal}')`);

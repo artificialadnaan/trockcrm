@@ -32,6 +32,7 @@ import {
   listFieldScorecardsForProject,
   listRecentFieldScorecards,
 } from "./scorecards-service.js";
+import { parseScorecardSubmission } from "./scorecard-submission.js";
 import { getFileDownloadUrl } from "../files/service.js";
 import {
   assertAccessibleFieldCaptureTarget,
@@ -831,61 +832,10 @@ function scorecardSubmitterName(user: NonNullable<express.Request["fieldUser"]>)
   return name || user.email || null;
 }
 
-function strOrNull(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function parseScorecardSubmission(body: unknown) {
-  if (!body || typeof body !== "object") throw new AppError(400, "Missing scorecard body.");
-  const b = body as Record<string, unknown>;
-  const clientSubmissionId = String(b.clientSubmissionId ?? "");
-  const dealId = String(b.dealId ?? "");
-  assertValidUuid(clientSubmissionId, "clientSubmissionId");
-  assertValidUuid(dealId, "dealId");
-  const weekOf = String(b.weekOf ?? "").trim();
-  if (!weekOf) throw new AppError(400, "weekOf is required.");
-
-  const items = Array.isArray(b.items)
-    ? b.items.map((raw) => {
-        const it = (raw ?? {}) as Record<string, unknown>;
-        return {
-          sectionKey: String(it.sectionKey ?? ""),
-          points: Number(it.points),
-          note: typeof it.note === "string" ? it.note : null,
-        };
-      })
-    : [];
-  if (items.length === 0) throw new AppError(400, "items are required.");
-  if (items.some((it) => !Number.isFinite(it.points))) {
-    throw new AppError(400, "Each scorecard item needs a numeric points value.");
-  }
-
-  const photos = Array.isArray(b.photos)
-    ? b.photos.map((raw) => {
-        const p = (raw ?? {}) as Record<string, unknown>;
-        return { sectionKey: String(p.sectionKey ?? ""), clientUploadId: String(p.clientUploadId ?? "") };
-      })
-    : [];
-
-  return {
-    clientSubmissionId,
-    dealId,
-    weekOf,
-    superintendentName: strOrNull(b.superintendentName),
-    pmName: strOrNull(b.pmName),
-    projectNumber: strOrNull(b.projectNumber),
-    items,
-    criticalDeficiencies: Array.isArray(b.criticalDeficiencies) ? b.criticalDeficiencies.map(String) : [],
-    actionItems: Array.isArray(b.actionItems) ? b.actionItems.map(String) : [],
-    photos,
-  };
-}
-
-// Submit a weekly scorecard. Writes land in the deal's owning office (cross-office safe); the server
-// recomputes total/rating and enforces the action-item gate. Idempotent on clientSubmissionId, so the
-// durable offline retry never duplicates a card/PDF/email.
+// Submit a weekly scorecard. Writes run in the deal's owning office when the cross-office write flag is
+// on, else the submitter's active office (mirrors photo capture; off-office projects are view-only). The
+// service gates on the deal being a browsable field project, recomputes total/rating, enforces the
+// action-item gate, and is idempotent on clientSubmissionId so a durable offline retry never duplicates.
 fieldRoutes.post("/scorecards", requireFieldContractor, async (req, res, next) => {
   try {
     const parsed = parseScorecardSubmission(req.body);
@@ -893,7 +843,13 @@ fieldRoutes.post("/scorecards", requireFieldContractor, async (req, res, next) =
     const { scorecard, created } = await runFieldDealWrite(
       req,
       { dealId: parsed.dealId },
-      (db) => createFieldScorecard(db, { userId: req.fieldUser!.id, submittedByName, ...parsed }),
+      (db) =>
+        createFieldScorecard(db, {
+          userId: req.fieldUser!.id,
+          userRole: req.fieldUser!.role,
+          submittedByName,
+          ...parsed,
+        }),
       "Project not found",
     );
     res.status(created ? 201 : 200).json({ scorecard });
@@ -902,8 +858,9 @@ fieldRoutes.post("/scorecards", requireFieldContractor, async (req, res, next) =
   }
 });
 
-// Recent submitted scorecards across ALL accessible offices — powers the Scorecard tab landing (which has
-// no pre-selected project). Registered before /scorecards/:id so the literal path is never captured as :id.
+// Recent submitted scorecards across ALL active offices — powers the Scorecard tab landing (which has no
+// pre-selected project). Field reads are intentionally office-agnostic (view-only), like /projects; each
+// per-office query is gated to browsable projects. Registered before /scorecards/:id.
 fieldRoutes.get("/scorecards", requireFieldContractor, async (req, res, next) => {
   try {
     const limitRaw = parseInt(req.query.limit as string, 10);
@@ -931,12 +888,17 @@ fieldRoutes.get("/scorecards/:id", requireFieldContractor, async (req, res, next
       "scorecard",
       id,
       (officeDb) =>
-        getFieldScorecardDetail(officeDb, id, {
-          resolvePhotoUrl: (fileId) =>
-            getFileDownloadUrl(officeDb, fileId)
-              .then((r) => r.url)
-              .catch(() => null),
-        }),
+        getFieldScorecardDetail(
+          officeDb,
+          id,
+          { userId: req.fieldUser!.id, userRole: req.fieldUser!.role },
+          {
+            resolvePhotoUrl: (fileId) =>
+              getFileDownloadUrl(officeDb, fileId)
+                .then((r) => r.url)
+                .catch(() => null),
+          },
+        ),
       "Scorecard not found",
     );
     res.json({ scorecard: { ...value, ...officeTag(office) } });
@@ -953,7 +915,8 @@ fieldRoutes.get("/projects/:dealId/scorecards", requireFieldContractor, async (r
     const { value, office } = await withResolvedOffice(
       "deal",
       dealId,
-      (officeDb) => listFieldScorecardsForProject(officeDb, dealId),
+      (officeDb) =>
+        listFieldScorecardsForProject(officeDb, { userId: req.fieldUser!.id, userRole: req.fieldUser!.role }, dealId),
       "Project not found",
     );
     res.json({ ...value, ...officeTag(office) });
