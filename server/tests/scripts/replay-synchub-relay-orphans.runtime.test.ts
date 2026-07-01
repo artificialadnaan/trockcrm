@@ -152,6 +152,16 @@ describe("replay-synchub-relay-orphans", () => {
     expect(await orphanStatuses()).toMatchObject({ o1: "open", o4: "open" });
   });
 
+  it("re-opens the orphan if the relay THROWS after pre-resolve", async () => {
+    const thrower = async (): Promise<SyncHubRelayResult> => {
+      throw new Error("boom");
+    };
+    const report = await replayOrphans(client(), { mode: "commit", relay: thrower });
+    expect(report.counts.error).toBe(2); // o1 + o4 attempted, both threw
+    // The pre-resolve must be rolled back so the failed backfill isn't hidden as 'resolved'.
+    expect(await orphanStatuses()).toMatchObject({ o1: "open", o4: "open" });
+  });
+
   it("is idempotent — a second commit re-selects only the still-open orphans and links nothing", async () => {
     const first = recordingRelay();
     await replayOrphans(client(), { mode: "commit", relay: first.fn });

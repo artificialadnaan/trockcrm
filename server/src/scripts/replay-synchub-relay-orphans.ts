@@ -162,6 +162,10 @@ export async function replayOrphans(
       projectNumber: orphan.projectNumber,
       portfolioProjectId: orphan.portfolioProjectId,
     };
+    // Tracks whether we flipped this orphan to 'resolved' before the relay call, so a THROWN relay
+    // error (invalid payload, DB/audit/job failure) re-opens it in the catch — otherwise a failed
+    // backfill would stay 'resolved' and be hidden from subsequent runs.
+    let markedResolved = false;
     try {
       // Preview with the SAME resolver the relay uses. Only an exact single match is replayed, so a
       // still-unresolvable orphan is never re-run (and can never spawn a duplicate orphan row).
@@ -201,16 +205,21 @@ export async function replayOrphans(
       // non-conflicting match, so the relay links (procore_project_id null) or already_linked (same
       // project); it never files a new orphan. Re-open on any unexpected result so nothing is lost.
       await markOrphanResolved(client, orphan.id, now);
+      markedResolved = true;
       const result = await relay(orphan.rawPayload, { client });
       if (result.status === "linked" || result.status === "already_linked") {
         counts[result.status] += 1;
         outcomes.push({ ...base, disposition: result.status, dealId: result.dealId, officeId: result.officeId });
       } else {
         await reopenOrphan(client, orphan.id);
+        markedResolved = false;
         counts.error += 1;
         outcomes.push({ ...base, disposition: "error", error: `relay returned ${result.status} after resolve` });
       }
     } catch (err) {
+      // If we already flipped it to 'resolved' but the relay threw, re-open so the failed backfill
+      // isn't silently hidden from re-runs (best-effort; don't mask the original error).
+      if (markedResolved) await reopenOrphan(client, orphan.id).catch(() => {});
       counts.error += 1;
       outcomes.push({ ...base, disposition: "error", error: err instanceof Error ? err.message : String(err) });
     }
