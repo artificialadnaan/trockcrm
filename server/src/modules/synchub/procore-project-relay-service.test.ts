@@ -94,6 +94,26 @@ describe("SyncHub Procore project relay service", () => {
     expectDealQueriesUseActiveFilter(query);
   });
 
+  it("links a deal matched by project_number when deal_number is a HubSpot id (reversed numbering)", async () => {
+    // The Procore number arrives as projectNumber; for this deal it lives in project_number, while
+    // deal_number is the HubSpot id — the deal_number-only lookup used to orphan it (no photo link).
+    const { client, query } = createClient((sql) => {
+      if (sql.includes("procore_project_id = $1")) return { rows: [] }; // duplicate check → none
+      if (sql.includes("FROM public.synchub_webhook_orphans")) return { rows: [] };
+      if (sql.includes("FROM public.offices")) return { rows: [{ id: "office-1", slug: "main" }] };
+      if (sql.includes("project_number = $1")) return { rows: [{ office_id: "office-1", office_slug: "main", schema_name: "office_main", deal_id: "deal-1", deal_number: "HS-271393431285", procore_project_id: null }] };
+      if (sql.includes("FOR UPDATE")) return { rows: [{ id: "deal-1", procore_project_id: null }] };
+      if (sql.includes("INSERT INTO public.job_queue")) return { rows: [{ id: 88 }] };
+      return { rows: [] };
+    });
+
+    const result = await processSyncHubProcoreProjectCreated(validPayload(), { client: client as any });
+
+    expect(result).toEqual({ status: "linked", dealId: "deal-1", officeId: "office-1", jobId: 88 });
+    expect(query.mock.calls.some((call) => String(call[1]?.[0]).includes("\"action\":\"create_project\""))).toBe(true);
+    expectDealQueriesUseActiveFilter(query);
+  });
+
   it("treats duplicate relays for an already-linked Procore project as idempotent", async () => {
     const { client, query } = createClient((sql) => {
       if (sql.includes("FROM public.offices")) return { rows: [{ id: "office-1", slug: "main" }] };

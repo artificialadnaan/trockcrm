@@ -182,7 +182,7 @@ async function findDealLinkedToProcoreProject(
   return null;
 }
 
-async function findDealsByProjectNumber(
+export async function findDealsByProjectNumber(
   client: QueryClient,
   offices: OfficeRow[],
   projectNumber: string
@@ -192,6 +192,12 @@ async function findDealsByProjectNumber(
     const schemaName = schemaNameForOffice(office.slug);
     if (!schemaName) continue;
     const result = await client.query(
+      // Match the incoming Procore project number against BOTH project_number and deal_number.
+      // SyncHub creates the Procore project from the deal's canonical DFW/ATL number, which for
+      // HubSpot-imported and bid-board deals lives in project_number (deal_number holds the HS id
+      // or a divergent number). A deal_number-only lookup orphaned those relays, so the worker
+      // never created the "T Rock Photos" link. LIMIT 2 still lets the caller detect ambiguity
+      // (>1 match → orphan, never a mis-link).
       `SELECT $2::uuid AS office_id,
               $3::text AS office_slug,
               $4::text AS schema_name,
@@ -200,7 +206,7 @@ async function findDealsByProjectNumber(
               deal_number,
               procore_project_id
        FROM ${quoteIdent(schemaName)}.deals
-       WHERE deal_number = $1 AND is_active = true
+       WHERE (project_number = $1 OR deal_number = $1) AND is_active = true
        LIMIT 2`,
       [projectNumber, office.id, office.slug, schemaName]
     );
