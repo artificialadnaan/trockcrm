@@ -28,8 +28,12 @@ vi.mock("@/hooks/use-reports", () => ({
 // RegionReportPage always mounts <EvidenceDrawer>, which calls useAuth() to gate its inline "Set close
 // date" editor (PR #827). This is a pure unit test that wraps only <MemoryRouter>, so stub useAuth here
 // rather than depend on a real <AuthProvider> in the render tree.
+// Role is configurable: the region report is visible to all roles, but its drill-downs are
+// director/admin-only (server assertShowcaseEvidenceAccess), so drill tests run as a director and a
+// rep sees inert (non-clickable) metrics.
+const authState = { role: "director" as string };
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ user: { id: "test-user", email: "test@trock.dev" } }),
+  useAuth: () => ({ user: { id: "test-user", email: "test@trock.dev", role: authState.role } }),
 }));
 
 const EMPTY: RegionReportData = {
@@ -138,6 +142,7 @@ beforeEach(() => {
   hookState.data = DATA;
   hookState.loading = false;
   hookState.error = null;
+  authState.role = "director"; // drill tests exercise the director path; the rep case sets this explicitly
 });
 afterEach(() => {
   act(() => root.unmount());
@@ -258,6 +263,27 @@ describe("RegionReportPage", () => {
     act(() => btn!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     const req = evidenceRequests[evidenceRequests.length - 1];
     expect(req).toMatchObject({ metric: "pipeline", regionName: "West Coast", stageSlug: "opportunity" });
+  });
+
+  it("gates drills to directors — a rep sees the numbers but they are inert (no drill, no 403)", () => {
+    authState.role = "rep";
+    evidenceRequests.length = 0;
+    mount();
+    const t = container.textContent ?? "";
+    // The whole report + its figures are still visible to a non-director.
+    expect(t).toContain("West Coast");
+    expect(t).toContain("$100,000");
+    // But the Won metric renders inert (a <div>, not a drill <button>), so a rep can't fire the
+    // director-only evidence endpoint and get a 403.
+    const wonBtn = Array.from(container.querySelectorAll("button")).find(
+      (b) => (b.textContent ?? "").includes("Won") && (b.textContent ?? "").includes("$100,000") && (b.textContent ?? "").includes("1 deals")
+    );
+    expect(wonBtn).toBeUndefined();
+    // No heatmap cell advertises the drill affordance either.
+    const drillCell = Array.from(container.querySelectorAll("button")).find(
+      (b) => (b.getAttribute("title") ?? "").includes("click for the records")
+    );
+    expect(drillCell).toBeUndefined();
   });
 
   it("passes the resolved period as valid YYYY-MM-DD from/to into the data hook", () => {

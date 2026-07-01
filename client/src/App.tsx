@@ -271,14 +271,9 @@ export function App() {
                   </RequireRole>
                 )}
               />
-              <Route
-                path="/reports/region"
-                element={(
-                  <RequireRole allowedRoles={["admin", "director"]}>
-                    <RegionReportPage />
-                  </RequireRole>
-                )}
-              />
+              {/* Open to all authenticated users (no RequireRole) — matches the analytics report
+                  routes; server /api/reports/region is likewise no longer director-gated. */}
+              <Route path="/reports/region" element={<RegionReportPage />} />
               <Route
                 path="/reports/at-risk"
                 element={(

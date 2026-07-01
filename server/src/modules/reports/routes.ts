@@ -267,7 +267,12 @@ router.get("/win-loss", requireDirector, async (req, res, next) => {
 // Reports by Region: per-region won/pipeline/win-rate/avg + forecast + stage matrix + top reps + movers.
 // from/to window the Won/Lost metrics (canonical won_closed_date / lost_at); pipeline/forecast/stage-matrix
 // are current snapshots; movers are week-based. Defaults to the current week-to-date when absent.
-router.get("/region", requireDirector, async (req, res, next) => {
+// OPEN to any authenticated CRM user (no requireDirector) — the router mount already applies requireCrmUser,
+// so auth + office/tenant scoping (req.tenantDb) still hold; "all roles" means role, NOT cross-office. The
+// per-region `pipeline`/forecast figures are office AGGREGATES (not a per-rep pipeline breakdown; topReps rank
+// by WON value only), so this exposes rep-visible aggregates. To reverse, re-add requireDirector here (and the
+// RequireRole wrapper on the /reports/region client route).
+router.get("/region", async (req, res, next) => {
   try {
     const rawFrom = readOptionalIsoDate(req.query.from, "from");
     const rawTo = readOptionalIsoDate(req.query.to, "to");
