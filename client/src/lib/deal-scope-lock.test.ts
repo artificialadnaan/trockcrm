@@ -20,6 +20,9 @@ describe("isDealScopeReadOnlyAfterRfp", () => {
     expect(isDealScopeReadOnlyAfterRfp({ bidBoardLinkedAt: "2026-01-01T00:00:00Z" })).toBe(true);
     expect(isDealScopeReadOnlyAfterRfp({ isReadOnlyMirror: true })).toBe(true);
     expect(isDealScopeReadOnlyAfterRfp({ readOnlySyncedAt: "2026-01-01T00:00:00Z" })).toBe(true);
+    // Legacy mirror row: the only handoff marker is a Bid Board stage slug (isBidBoardOwned column stale/false).
+    expect(isDealScopeReadOnlyAfterRfp({ bidBoardStageSlug: "estimate_in_progress", isBidBoardOwned: false })).toBe(true);
+    expect(isDealScopeReadOnlyAfterRfp({ bidBoardStageSlug: "estimating" })).toBe(true);
   });
 
   it("locks when the caller reports the deal is past the Opportunity stage", () => {
@@ -28,7 +31,7 @@ describe("isDealScopeReadOnlyAfterRfp", () => {
 
   it("stays editable for an active, pre-handoff deal", () => {
     expect(
-      isDealScopeReadOnlyAfterRfp({ isBidBoardOwned: false, rfpApprovalStatus: null, bidBoardProjectNumber: null })
+      isDealScopeReadOnlyAfterRfp({ isBidBoardOwned: false, rfpApprovalStatus: null, bidBoardProjectNumber: null, bidBoardStageSlug: null })
     ).toBe(false);
   });
 });
