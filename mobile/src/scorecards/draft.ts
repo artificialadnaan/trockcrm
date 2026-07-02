@@ -17,10 +17,13 @@ export interface ScorecardDraftPhoto {
   clientUploadId: string; // stamped at capture; resolved to a fileId server-side on submit
   sectionKey: ScorecardSectionKey;
   caption: string;
-  // Capture metadata carried so the gallery upload keeps the shot's real time/location (all optional).
+  // Capture metadata carried so the gallery upload keeps the shot's real time/location + can apply the
+  // resize cap (compressForUpload needs width/height to hit the 4032px ceiling). All optional.
   takenAt?: string;
   latitude?: number;
   longitude?: number;
+  width?: number;
+  height?: number;
 }
 
 export interface ScorecardDraft {
@@ -158,17 +161,27 @@ export function scorecardDraftPhotosForSection(
   return draft.photos.filter((p) => p.sectionKey === sectionKey);
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+/** A real YYYY-MM-DD calendar date — mirrors the server (rejects 2026-2-3, 2026-02-30, etc.). */
+export function isValidWeekOf(weekOf: string): boolean {
+  const v = weekOf.trim();
+  if (!ISO_DATE.test(v)) return false;
+  const [y, mo, d] = v.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
+
 export interface DraftValidation {
   canSubmit: boolean;
   missingSections: ScorecardSectionKey[];
   needsActionItems: boolean;
-  missingWeekOf: boolean;
+  missingWeekOf: boolean; // true when Week Of is blank OR not a real calendar date
 }
 export function validateScorecardDraft(draft: ScorecardDraft): DraftValidation {
   const missingSections = FIELD_SCORECARD_SECTION_KEYS.filter((k) => typeof draft.scores[k] !== "number");
   const hasActionItem = draft.actionItems.some((s) => s.trim().length > 0);
   const needsActionItems = scorecardActionItemsRequired(draft) && !hasActionItem;
-  const missingWeekOf = draft.weekOf.trim().length === 0;
+  const missingWeekOf = !isValidWeekOf(draft.weekOf);
   return {
     missingSections,
     needsActionItems,

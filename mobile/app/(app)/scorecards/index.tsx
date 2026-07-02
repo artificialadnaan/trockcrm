@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -13,6 +13,8 @@ import {
 } from "../../../src/scorecards/draft";
 import { listScorecardDrafts, saveScorecardDraft } from "../../../src/scorecards/draft-store";
 import { newClientUploadId, uploadOwnerKey } from "../../../src/capture/upload-queue";
+import { registerUploadBackgroundTask } from "../../../src/capture/upload-background-task";
+import { newSubmissionId } from "../../../src/scorecards/ids";
 import { FIELD_SCORECARD_SECTIONS } from "../../../src/scorecards/scoring";
 import { Button, EmptyState, LoadingState, SectionLabel } from "../../../src/components/ui";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
@@ -23,7 +25,10 @@ import type { FieldCaptureTarget, FieldScorecardSummary } from "../../../src/api
 const SECTION_COUNT = FIELD_SCORECARD_SECTIONS.length;
 
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  // LOCAL date (not toISOString/UTC) so an evening submit west of UTC doesn't file under tomorrow.
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 function shortDate(iso: string): string {
   // yyyy-mm-dd (weekOf) or ISO timestamp → "Mon D".
@@ -38,6 +43,12 @@ export default function ScorecardsScreen() {
 
   const [drafts, setDrafts] = useState<ScorecardDraft[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+
+  // Ensure queued scorecard evidence keeps uploading in the background even if the user never opens the
+  // Capture tab this session (that's the only other place the task is registered).
+  useEffect(() => {
+    void registerUploadBackgroundTask();
+  }, []);
 
   const recent = useQuery({
     queryKey: ["scorecards-recent", user?.id ?? "anon"],
@@ -66,7 +77,7 @@ export default function ScorecardsScreen() {
     const id = newClientUploadId();
     const draft = createScorecardDraft({
       id,
-      clientSubmissionId: newClientUploadId(),
+      clientSubmissionId: newSubmissionId(),
       dealId: target.id,
       dealName: target.name,
       projectNumber: target.recordNumber ?? null,

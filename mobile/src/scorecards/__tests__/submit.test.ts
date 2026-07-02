@@ -1,4 +1,4 @@
-import { scorecardPhotoUploadInput, pendingScorecardPhotoIds } from "../submit";
+import { scorecardPhotoUploadInput, pendingScorecardPhotoIds, classifyDraftPhotoUploads } from "../submit";
 import type { ScorecardDraftPhoto } from "../draft";
 
 describe("scorecardPhotoUploadInput", () => {
@@ -25,5 +25,21 @@ describe("pendingScorecardPhotoIds", () => {
     expect(pendingScorecardPhotoIds(["a", "b", "c"], ["b", "z"])).toEqual(["b"]);
     expect(pendingScorecardPhotoIds(["a"], [])).toEqual([]);
     expect(pendingScorecardPhotoIds([], ["a"])).toEqual([]);
+  });
+});
+
+describe("classifyDraftPhotoUploads", () => {
+  it("splits still-queued photos into pending vs terminally-failed; uploaded ones are neither", () => {
+    const r = classifyDraftPhotoUploads(
+      ["a", "b", "c"],
+      [
+        { clientUploadId: "a", attempts: 1 },
+        { clientUploadId: "b", attempts: 5 },
+      ],
+      5,
+    );
+    expect(r.pending).toEqual(["a"]); // attempts < max → still retrying
+    expect(r.failed).toEqual(["b"]); // attempts >= max → terminal
+    // "c" is not in the queue → uploaded/confirmed → in neither list
   });
 });

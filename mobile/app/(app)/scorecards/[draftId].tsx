@@ -8,6 +8,7 @@ import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { getTranscriptionConfig } from "../../../src/api/endpoints";
 import { uploadOwnerKey, newClientUploadId } from "../../../src/capture/upload-queue";
+import { qk } from "../../../src/query/keys";
 import { extractExifMetadata } from "../../../src/capture/metadata";
 import type { CapturedShot } from "../../../src/capture/CameraCapture";
 import {
@@ -100,8 +101,12 @@ export default function ScorecardWizardScreen() {
       notice={notice}
       setNotice={setNotice}
       voiceEnabled={voiceEnabled}
-      onSubmitted={() => {
-        if (user) void qc.invalidateQueries({ queryKey: ["scorecards-recent", user.id] });
+      onSubmitted={(dealId) => {
+        if (user) {
+          void qc.invalidateQueries({ queryKey: ["scorecards-recent", user.id] });
+          // Evidence photos were just uploaded into the deal gallery — refresh it too.
+          void qc.invalidateQueries({ queryKey: qk.projectPhotos(user.id, dealId) });
+        }
         router.back();
       }}
       fetcher={fetcher}
@@ -122,17 +127,21 @@ function Wizard(props: {
   notice: { tone: "success" | "error"; text: string } | null;
   setNotice: (n: { tone: "success" | "error"; text: string } | null) => void;
   voiceEnabled: boolean;
-  onSubmitted: () => void;
+  onSubmitted: (dealId: string) => void;
   fetcher: ReturnType<typeof useAuth>["fetcher"];
 }) {
   const { ownerKey, draftId, step, setStep, cameraSection, setCameraSection, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher } = props;
   const router = useRouter();
   const [draft, dispatch] = useReducer(scorecardDraftReducer, props.initial);
-  const keyCounter = useRef(0);
-
-  // Autosave every change (draft-store write is cheap; stamps updatedAt).
+  // Serialize autosaves so a slow older write can't land after a newer edit — or after the submit-delete
+  // and resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted.
+  const saveChain = useRef<Promise<unknown>>(Promise.resolve());
+  const finalized = useRef(false);
   useEffect(() => {
-    void saveScorecardDraft(ownerKey, draft, Date.now());
+    if (finalized.current) return;
+    saveChain.current = saveChain.current
+      .then(() => (finalized.current ? undefined : saveScorecardDraft(ownerKey, draft, Date.now())))
+      .catch(() => undefined);
   }, [draft, ownerKey]);
 
   const total = scorecardDraftTotal(draft);
@@ -146,12 +155,11 @@ function Wizard(props: {
     const sectionKey = FIELD_SCORECARD_SECTIONS[cameraSection].key;
     const clientUploadId = newClientUploadId();
     const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, shot.uri).catch(() => shot.uri);
-    keyCounter.current += 1;
     const exif = extractExifMetadata(shot.exif);
     dispatch({
       type: "addPhoto",
       photo: {
-        key: `sp-${keyCounter.current}`,
+        key: clientUploadId, // stable + globally unique → survives resume; removePhoto(by key) can't collide
         uri: durableUri,
         clientUploadId,
         sectionKey,
@@ -159,6 +167,8 @@ function Wizard(props: {
         takenAt: exif.takenAt ?? shot.capturedAt,
         latitude: exif.latitude,
         longitude: exif.longitude,
+        width: shot.width,
+        height: shot.height,
       },
     });
   }
@@ -175,11 +185,10 @@ function Wizard(props: {
     for (const asset of result.assets) {
       const clientUploadId = newClientUploadId();
       const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri).catch(() => asset.uri);
-      keyCounter.current += 1;
       const exif = extractExifMetadata(asset.exif as Record<string, unknown>);
       dispatch({
         type: "addPhoto",
-        photo: { key: `sp-${keyCounter.current}`, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude },
+        photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, width: asset.width, height: asset.height },
       });
     }
   }
@@ -190,13 +199,20 @@ function Wizard(props: {
     setNotice(null);
     try {
       const result = await submitScorecard(fetcher, ownerKey, draft);
+      if (result.status === "photos_failed") {
+        setNotice({ tone: "error", text: `${result.failed} photo${result.failed === 1 ? "" : "s"} couldn’t upload after several tries. Remove and re-add ${result.failed === 1 ? "it" : "them"}, then submit.` });
+        setSubmitting(false);
+        return;
+      }
       if (result.status === "photos_pending") {
         setNotice({ tone: "error", text: `${result.remaining} photo${result.remaining === 1 ? "" : "s"} still uploading — they’ll keep retrying. Try Submit again shortly.` });
         setSubmitting(false);
         return;
       }
+      finalized.current = true;
+      await saveChain.current.catch(() => undefined); // let any in-flight autosave settle (it will skip)
       await deleteScorecardDraft(ownerKey, draftId);
-      onSubmitted();
+      onSubmitted(draft.dealId);
     } catch {
       setNotice({ tone: "error", text: "Couldn’t submit the scorecard. Your work is saved — try again." });
       setSubmitting(false);

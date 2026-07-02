@@ -114,6 +114,17 @@ describe("validation", () => {
     expect(validateScorecardDraft(d).missingWeekOf).toBe(true);
     expect(validateScorecardDraft(d).canSubmit).toBe(false);
   });
+
+  it("blocks submit on a malformed weekOf (typo / impossible calendar date)", () => {
+    let d = fullyScored();
+    for (const bad of ["2026-02-30", "2026-2-3", "2026-13-01", "nope"]) {
+      d = scorecardDraftReducer(d, { type: "setHeader", field: "weekOf", value: bad });
+      expect(validateScorecardDraft(d).missingWeekOf).toBe(true);
+    }
+    d = scorecardDraftReducer(d, { type: "setHeader", field: "weekOf", value: "2026-06-30" });
+    expect(validateScorecardDraft(d).missingWeekOf).toBe(false);
+    expect(validateScorecardDraft(d).canSubmit).toBe(true);
+  });
 });
 
 describe("photos", () => {

@@ -7,7 +7,7 @@
 import { createScorecard, type Fetcher } from "../api/endpoints";
 import type { FieldScorecardSummary } from "../api/types";
 import type { CaptureUploadInput } from "../capture/upload";
-import { drainUploadQueue, enqueueUploads, getQueuedUploads } from "../capture/upload-queue";
+import { MAX_UPLOAD_ATTEMPTS, drainUploadQueue, enqueueUploads, getQueuedUploads } from "../capture/upload-queue";
 import {
   scorecardDraftToSubmission,
   type ScorecardDraft,
@@ -18,6 +18,8 @@ import {
 export function scorecardPhotoUploadInput(photo: ScorecardDraftPhoto, dealId: string): CaptureUploadInput {
   return {
     uri: photo.uri,
+    width: photo.width,
+    height: photo.height,
     target: { dealId },
     category: null,
     caption: photo.caption.trim() ? photo.caption.trim() : null,
@@ -33,9 +35,32 @@ export function pendingScorecardPhotoIds(draftClientUploadIds: string[], stillQu
   return draftClientUploadIds.filter((id) => queued.has(id));
 }
 
+/**
+ * Split the draft's still-queued photos into pending (will keep retrying, attempts < max) vs terminally
+ * failed (retries exhausted — the queue won't retry, so the submit can never reference them and the user
+ * must remove + re-add). Photos not in the queue are confirmed/uploaded.
+ */
+export function classifyDraftPhotoUploads(
+  draftClientUploadIds: string[],
+  queued: { clientUploadId: string; attempts: number }[],
+  maxAttempts: number,
+): { pending: string[]; failed: string[] } {
+  const attemptsById = new Map(queued.map((q) => [q.clientUploadId, q.attempts]));
+  const pending: string[] = [];
+  const failed: string[] = [];
+  for (const id of draftClientUploadIds) {
+    const attempts = attemptsById.get(id);
+    if (attempts === undefined) continue; // uploaded/confirmed (no longer queued)
+    if (attempts >= maxAttempts) failed.push(id);
+    else pending.push(id);
+  }
+  return { pending, failed };
+}
+
 export type SubmitScorecardResult =
   | { status: "submitted"; scorecard: FieldScorecardSummary }
-  | { status: "photos_pending"; remaining: number };
+  | { status: "photos_pending"; remaining: number }
+  | { status: "photos_failed"; failed: number };
 
 /**
  * Submit a draft. Uploads its photos through the durable queue first; if any of THIS draft's photos are
@@ -51,11 +76,13 @@ export async function submitScorecard(
     await enqueueUploads(ownerKey, draft.photos.map((p) => scorecardPhotoUploadInput(p, draft.dealId)));
     await drainUploadQueue(ownerKey, fetcher);
     const stillQueued = await getQueuedUploads(ownerKey);
-    const mine = pendingScorecardPhotoIds(
+    const { pending, failed } = classifyDraftPhotoUploads(
       draft.photos.map((p) => p.clientUploadId),
-      stillQueued.map((q) => q.clientUploadId),
+      stillQueued.map((q) => ({ clientUploadId: q.clientUploadId, attempts: q.attempts })),
+      MAX_UPLOAD_ATTEMPTS,
     );
-    if (mine.length > 0) return { status: "photos_pending", remaining: mine.length };
+    if (failed.length > 0) return { status: "photos_failed", failed: failed.length };
+    if (pending.length > 0) return { status: "photos_pending", remaining: pending.length };
   }
   const { scorecard } = await createScorecard(fetcher, scorecardDraftToSubmission(draft));
   return { status: "submitted", scorecard };
