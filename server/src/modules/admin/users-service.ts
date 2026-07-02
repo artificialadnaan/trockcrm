@@ -16,7 +16,7 @@ import {
   evaluateUpdateUserGuards,
   planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
-import { resolveEffectiveCapxRate } from "@trock-crm/shared/lib/commission-structure";
+import { resolveEffectiveCapxRate, resolveEffectiveServiceSourceRate } from "@trock-crm/shared/lib/commission-structure";
 import {
   incrementTokenVersion,
   revokeLocalAuthOnDeactivate,
@@ -427,21 +427,35 @@ export async function updateUser(
           },
         });
 
-      // Only recompute when the EFFECTIVE capX rate actually moved. Editing an INACTIVE rate
-      // (e.g. Mixed % while the rep is Solo), the service-source rate (unused for owner/estimator
-      // rows in PR1), or a non-rate field leaves the mirror unchanged — so it must NOT trigger a
-      // fan-out (which would otherwise re-rate deals to their current values for no reason). PR2
-      // will additionally gate on the effective service-source rate once sales_source rows exist.
+      // Only recompute when an EFFECTIVE rate actually moved. Editing an INACTIVE rate
+      // (e.g. Mixed % while the rep is Solo) or a non-rate field leaves the mirrors unchanged —
+      // so it must NOT trigger a fan-out (which would otherwise re-rate deals for no reason).
+      // We gate on BOTH the effective capX rate (owner/estimator rows) AND the effective
+      // service-source rate (sales_source rows), so either change triggers a recompute.
       const previousCommissionRate = resolveEffectiveCapxRate({
         commissionStructure: current?.commissionStructure ?? "solo",
         capxRateSolo: Number(current?.capxRateSolo ?? 0),
         capxRateMixed: Number(current?.capxRateMixed ?? 0),
         serviceSourceRate: Number(current?.serviceSourceRate ?? 0),
       });
+      const previousServiceSourceRate = resolveEffectiveServiceSourceRate({
+        commissionStructure: (current?.commissionStructure ?? "solo") as "solo" | "mixed",
+        capxRateSolo: Number(current?.capxRateSolo ?? 0),
+        capxRateMixed: Number(current?.capxRateMixed ?? 0),
+        serviceSourceRate: Number(current?.serviceSourceRate ?? 0),
+      });
+      const nextServiceSourceRate = resolveEffectiveServiceSourceRate({
+        commissionStructure,
+        capxRateSolo,
+        capxRateMixed,
+        serviceSourceRate,
+      });
       // Compare at the column's scale (numeric(7,6)). A raw float compare would treat a no-op blur
       // as a change — e.g. a stored 0.029000 comes back from the client as 2.9/100 = 0.02899999…,
       // which !== 0.029 and would spuriously fan out. Normalising both to 6 decimals avoids that.
-      commissionRatesChanged = commissionRate.toFixed(6) !== previousCommissionRate.toFixed(6);
+      commissionRatesChanged =
+        commissionRate.toFixed(6) !== previousCommissionRate.toFixed(6) ||
+        nextServiceSourceRate.toFixed(6) !== previousServiceSourceRate.toFixed(6);
     }
 
     return { updated, closeStreams: plan.closeStreams, commissionRatesChanged };
