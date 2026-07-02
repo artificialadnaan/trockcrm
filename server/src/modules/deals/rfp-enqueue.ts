@@ -48,10 +48,13 @@ export interface InsertOpportunityRfpJobInput {
  * Resolves the deal's owner — the "Requested by" person shown on the SyncHub RFP email.
  * Priority: assigned rep (deal owner) → synced HubSpot owner email → deal creator.
  * Returns null fields when nothing resolves (SyncHub then renders "—").
+ *
+ * Takes ONLY the three owner columns (not a full deal) so the caller decides where they come from.
+ * loadRfpPayloadDeal passes the authoritative values from its own DB fetch, never a sparse projected row.
  */
 export async function resolveDealOwner(
   tenantDb: TenantDb,
-  deal: typeof deals.$inferSelect
+  deal: Pick<typeof deals.$inferSelect, "assignedRepId" | "hubspotOwnerEmail" | "createdByUserId">
 ): Promise<{ ownerName: string | null; ownerEmail: string | null }> {
   const lookupUser = async (
     userId: string | null | undefined
@@ -90,8 +93,15 @@ export async function resolveDealOwner(
   return { ownerName: rep?.ownerName ?? null, ownerEmail: null };
 }
 
-async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals.$inferSelect) {
-  const owner = await resolveDealOwner(tenantDb, fallbackDeal);
+/**
+ * Builds the SyncHub RFP payload deal AUTHORITATIVELY from the database, keyed by deal id. Every field the
+ * payload/owner needs is read from this function's own `SELECT d.*` (+ company/contact/lead JOINs + a fresh
+ * owner resolution) — NEVER from the caller's object — so callers may pass just `{ id }`. This makes the enqueue
+ * robust against sparse projected rows (e.g. the override-approve path's narrow `.returning({...})`): a full deal
+ * and a bare `{ id }` produce an identical payload. (Previously the deal's own columns — projectType, amounts,
+ * address, description, estimator, … — were taken from the passed object, so a sparse row yielded an empty payload.)
+ */
+async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
   const result = await tenantDb.execute(sql`
     SELECT d.*,
            c.name AS "companyName",
@@ -103,20 +113,54 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, fallbackDeal: typeof deals
       LEFT JOIN companies c ON c.id = d.company_id
       LEFT JOIN contacts pc ON pc.id = d.primary_contact_id
       LEFT JOIN leads l ON l.id = d.source_lead_id
-     WHERE d.id = ${fallbackDeal.id}
+     WHERE d.id = ${deal.id}
      LIMIT 1
   `);
   const rows = Array.isArray(result) ? result : result.rows ?? [];
   const row = rows[0] as Record<string, any> | undefined;
-  if (!row) return { ...fallbackDeal, ...owner };
+  if (!row) {
+    // The deal vanished between the caller's write and this read (should not happen inside a tenant txn). Return a
+    // well-formed shell so the builder still produces a valid (if empty) payload rather than throwing.
+    return { id: deal.id, name: "", dealNumber: "", rfpApprovalRequestEventId: null, ownerName: null, ownerEmail: null };
+  }
+
+  // Owner resolved from the DB row's authoritative owner columns (never a caller-passed object, which may be a
+  // sparse projection). Priority: assigned rep → HubSpot owner email → deal creator (see resolveDealOwner).
+  const owner = await resolveDealOwner(tenantDb, {
+    assignedRepId: (row.assigned_rep_id as string | null) ?? null,
+    hubspotOwnerEmail: (row.hubspot_owner_email as string | null) ?? null,
+    createdByUserId: (row.created_by_user_id as string | null) ?? null,
+  });
 
   return {
-    ...fallbackDeal,
-    companyName: row.companyName ?? null,
-    contactName: row.contactName ?? null,
-    clientEmail: row.clientEmail ?? null,
-    clientPhone: row.clientPhone ?? null,
-    bidDueDate: fallbackDeal.bidDueDate ?? row.sourceLeadBidDueDate ?? null,
+    id: row.id as string,
+    name: (row.name as string | null) ?? "",
+    dealNumber: (row.deal_number as string | null) ?? "",
+    projectNumber: (row.project_number as string | null) ?? null,
+    projectType: (row.project_type as string | null) ?? null,
+    workflowRoute: (row.workflow_route as "normal" | "service" | null) ?? null,
+    awardedAmount: row.awarded_amount ?? null,
+    bidEstimate: row.bid_estimate ?? null,
+    ddEstimate: row.dd_estimate ?? null,
+    forecastRevenue: row.forecast_revenue ?? null,
+    estimator: (row.estimator as string | null) ?? null,
+    bidBoardEstimator: (row.bid_board_estimator as string | null) ?? null,
+    propertyAddress: (row.property_address as string | null) ?? null,
+    propertyCity: (row.property_city as string | null) ?? null,
+    propertyState: (row.property_state as string | null) ?? null,
+    propertyZip: (row.property_zip as string | null) ?? null,
+    propertyCountry: (row.property_country as string | null) ?? null,
+    description: (row.description as string | null) ?? null,
+    // The deal's own bid_due_date wins; else fall back to the source lead's bid_due_date.
+    bidDueDate: row.bid_due_date ?? row.sourceLeadBidDueDate ?? null,
+    bidBoardDueDate: row.bid_board_due_date ?? null,
+    createdAt: row.created_at ?? null,
+    // Round-precise event id for enqueueRfpBidBoardCreate's sourceEventId (authoritative, from the DB row).
+    rfpApprovalRequestEventId: (row.rfp_approval_request_event_id as string | null) ?? null,
+    companyName: (row.companyName as string | null) ?? null,
+    contactName: (row.contactName as string | null) ?? null,
+    clientEmail: (row.clientEmail as string | null) ?? null,
+    clientPhone: (row.clientPhone as string | null) ?? null,
     ownerName: owner.ownerName,
     ownerEmail: owner.ownerEmail,
   };
@@ -252,14 +296,16 @@ export async function enqueueRfpVoteInvitation(input: {
  */
 export async function enqueueRfpBidBoardCreate(input: {
   tenantDb: TenantDb;
-  deal: typeof deals.$inferSelect;
+  // Only the id is required — loadRfpPayloadDeal re-fetches every payload field (incl. the round event id) from
+  // the DB, so a sparse projected row (the override-approve path) and a full deal produce an identical job body.
+  deal: { id: string };
   officeId: string | null;
 }): Promise<{ jobId: number }> {
   const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, input.deal);
   const attachments = await loadRfpAttachmentsForDeal(input.tenantDb, input.deal.id);
   const body = buildNormalizedRfpRequestBody({
     deal: rfpPayloadDeal,
-    sourceEventId: `crm:rfp-vote:approved:${input.deal.rfpApprovalRequestEventId ?? input.deal.id}`,
+    sourceEventId: `crm:rfp-vote:approved:${rfpPayloadDeal.rfpApprovalRequestEventId ?? input.deal.id}`,
     attachments,
   });
   const jobRows = await input.tenantDb

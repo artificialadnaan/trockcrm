@@ -62,8 +62,25 @@ describe("requestOverrideApproval unification", () => {
     );
     expect(result.ok).toBe(true);
     expect(mocks.enqueue).toHaveBeenCalledTimes(1);
-    expect(mocks.enqueue.mock.calls[0][0]).toMatchObject({ officeId: "office-1" });
+    // The create is enqueued with ONLY the deal id — loadRfpPayloadDeal re-fetches the full payload from the DB.
+    expect(mocks.enqueue.mock.calls[0][0]).toMatchObject({ officeId: "office-1", deal: { id: VOTING_DEAL } });
     expect(fetchImpl).not.toHaveBeenCalled();
+    // The voting path must fire the SAME audit side-effects as the legacy path: exactly one activity-log entry...
+    expect(mocks.logActivity).toHaveBeenCalledTimes(1);
+    // ...and exactly one deal_history row recording the null -> approving override transition.
+    const history = (
+      await pg.query(
+        `SELECT field_name, old_value, new_value, source FROM deal_history WHERE deal_id = $1`,
+        [VOTING_DEAL]
+      )
+    ).rows as any[];
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({
+      field_name: "rfp_override_state",
+      old_value: null,
+      new_value: "approving",
+      source: "rfp_override_approve",
+    });
   });
 
   it("legacy path (request_id present): POSTs SyncHub, does NOT enqueue create-from-rfp", async () => {

@@ -22,6 +22,10 @@ export type RfpOverrideApprovalResult =
   // `unconfirmed` = the POST timed out (the request may have reached SyncHub, but no 202 was seen). The deal is
   // kept 'approving' (NOT made retryable — re-approve would risk a duplicate against a possibly-in-flight first
   // attempt) so a later callback can resolve it; a stuck 'approving' is escapable by re-confirming the denial.
+  //
+  // `requestId`: the SyncHub rfp_approval_requests.id for the LEGACY (service/type-4) path. On the VOTING path
+  // there is no SyncHub request row (rfp_approval_request_id stays null), so `requestId` is the sentinel `0`
+  // (the create funnels through create-from-rfp, not SyncHub's override-approve — see requestOverrideApproval).
   | { ok: true; status: "approving"; requestId: number; unconfirmed?: boolean }
   | { ok: false; reason: "not_actionable" }
   | { ok: false; reason: "missing_request_id" }
@@ -134,21 +138,16 @@ export async function requestOverrideApproval(
       updatedAt: new Date(),
     })
     .where(and(eq(deals.id, input.dealId), ...overrideActionableConditions()))
-    // Return only the fields used in this function body; avoids fetching the full 130-column schema
-    // (production correctness: enqueueRfpBidBoardCreate re-fetches via loadRfpPayloadDeal using reset.id).
+    // Return only what THIS function body reads (truthiness, request id, and the audit name/secondary-id
+    // snapshots). The owner columns + round event id are intentionally NOT projected: enqueueRfpBidBoardCreate ->
+    // loadRfpPayloadDeal re-fetches every payload field (owner, amounts, address, round event id, …)
+    // authoritatively from the DB by id, so the create is robust regardless of how narrow this projection is.
     .returning({
       id: deals.id,
       rfpApprovalRequestId: deals.rfpApprovalRequestId,
       name: deals.name,
       projectNumber: deals.projectNumber,
       dealNumber: deals.dealNumber,
-      // Read by resolveDealOwner (inside enqueueRfpBidBoardCreate -> loadRfpPayloadDeal) BEFORE its DB re-fetch,
-      // so they must be on the returned row or the voting-path create loses the deal owner (no owner email).
-      assignedRepId: deals.assignedRepId,
-      hubspotOwnerEmail: deals.hubspotOwnerEmail,
-      createdByUserId: deals.createdByUserId,
-      // Round-precise sourceEventId for the create-from-rfp job (falls back to id if absent).
-      rfpApprovalRequestEventId: deals.rfpApprovalRequestEventId,
     });
 
   if (!reset) {
@@ -186,15 +185,15 @@ export async function requestOverrideApproval(
       fieldChanges: { rfpOverrideState: { from: priorOverrideState, to: "approving" } },
       metadata: { rfpOverrideAction: "override_approve_via_create_from_rfp", approverEmail: input.approverEmail, rfpOverrideNote: input.note },
     });
-    // reset is the projected row from .returning() — it deliberately includes the owner-resolution columns
-    // (assignedRepId / hubspotOwnerEmail / createdByUserId) that resolveDealOwner reads directly, plus the round
-    // event id; enqueueRfpBidBoardCreate re-fetches the remaining deal columns via loadRfpPayloadDeal by id.
-    // The cast only satisfies the full deals.$inferSelect TypeScript signature.
+    // enqueueRfpBidBoardCreate -> loadRfpPayloadDeal re-fetches the full payload (owner, amounts, address, round
+    // event id, …) authoritatively from the DB by id, so passing just the deal id is sufficient (no owner columns
+    // or cast needed).
     await enqueueRfpBidBoardCreate({
       tenantDb: input.tenantDb,
       officeId: input.officeId,
-      deal: reset as unknown as typeof deals.$inferSelect,
+      deal: { id: input.dealId },
     });
+    // requestId: 0 = the voting-path sentinel (no SyncHub request id exists) — see RfpOverrideApprovalResult.
     return { ok: true, status: "approving", requestId: 0 };
   }
 
