@@ -2,9 +2,14 @@ import crypto from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const logActivityMock = vi.hoisted(() => vi.fn(async () => {}));
+const enqueueMock = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("../../../src/modules/audit/audit-logger.js", () => ({
   logActivity: logActivityMock,
   buildAuditActorFromUser: (input: any) => ({ type: "user", ...input }),
+}));
+vi.mock("../../../src/modules/deals/rfp-enqueue.js", async (orig) => ({
+  ...((await orig()) as object),
+  enqueueRfpBidBoardCreate: enqueueMock,
 }));
 
 const { requestOverrideApproval, reconfirmRfpDecline, getRfpReviewDetail } = await import(
@@ -50,7 +55,7 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
     const fetchImpl = fetchReturning(202, { success: true, queued: true });
 
     const result = await requestOverrideApproval(
-      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: "rescue" },
+      { tenantDb, dealId: "deal-1", officeId: null, actor: ACTOR, approverEmail: APPROVER, note: "rescue" },
       { fetchImpl, env: ENV }
     );
 
@@ -78,7 +83,7 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
     const { tenantDb } = makeTenantDb([DEAL], "failed"); // prior state = failed (a retry)
     const fetchImpl = fetchReturning(202);
     await requestOverrideApproval(
-      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { tenantDb, dealId: "deal-1", officeId: null, actor: ACTOR, approverEmail: APPROVER, note: null },
       { fetchImpl, env: ENV }
     );
     expect(logActivityMock).toHaveBeenCalledTimes(1);
@@ -90,7 +95,7 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
     const { tenantDb } = makeTenantDb([]);
     const fetchImpl = fetchReturning(202);
     const result = await requestOverrideApproval(
-      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { tenantDb, dealId: "deal-1", officeId: null, actor: ACTOR, approverEmail: APPROVER, note: null },
       { fetchImpl, env: ENV }
     );
     expect(result).toEqual({ ok: false, reason: "not_actionable" });
@@ -98,14 +103,16 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
     expect(logActivityMock).not.toHaveBeenCalled();
   });
 
-  it("reports missing_request_id (no SyncHub call) when the declined deal has no rfp_approval_request_id", async () => {
+  it("voting-path (null request_id): enqueues create-from-rfp, does NOT POST SyncHub", async () => {
+    // voting-path deals have rfp_approval_request_id=null (never ran the SyncHub pipeline)
     const { tenantDb } = makeTenantDb([{ ...DEAL, rfpApprovalRequestId: null }]);
     const fetchImpl = fetchReturning(202);
     const result = await requestOverrideApproval(
-      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { tenantDb, dealId: "deal-1", officeId: "office-test", actor: ACTOR, approverEmail: APPROVER, note: null },
       { fetchImpl, env: ENV }
     );
-    expect(result).toEqual({ ok: false, reason: "missing_request_id" });
+    expect(result).toMatchObject({ ok: true, status: "approving", requestId: 0 });
+    expect(enqueueMock).toHaveBeenCalledTimes(1);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -113,7 +120,7 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
     const { tenantDb } = makeTenantDb([DEAL]);
     const fetchImpl = fetchReturning(409, { error: "not declined" });
     const result = await requestOverrideApproval(
-      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { tenantDb, dealId: "deal-1", officeId: null, actor: ACTOR, approverEmail: APPROVER, note: null },
       { fetchImpl, env: ENV }
     );
     expect(result).toMatchObject({ ok: false, reason: "synchub_rejected", syncHubStatus: 409 });
@@ -125,7 +132,7 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
       throw new Error("ECONNREFUSED");
     });
     const result = await requestOverrideApproval(
-      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { tenantDb, dealId: "deal-1", officeId: null, actor: ACTOR, approverEmail: APPROVER, note: null },
       { fetchImpl: fetchImpl as any, env: ENV }
     );
     expect(result).toMatchObject({ ok: false, reason: "synchub_unavailable" });
@@ -139,7 +146,7 @@ describe("requestOverrideApproval (approve override → call SyncHub override-ap
       throw err;
     });
     const result = await requestOverrideApproval(
-      { tenantDb, dealId: "deal-1", actor: ACTOR, approverEmail: APPROVER, note: null },
+      { tenantDb, dealId: "deal-1", officeId: null, actor: ACTOR, approverEmail: APPROVER, note: null },
       { fetchImpl: fetchImpl as any, env: ENV }
     );
     // Ambiguous timeout: kept 'approving' (unconfirmed). NOT a rollback (that would drop rfp_override_reviewed_at

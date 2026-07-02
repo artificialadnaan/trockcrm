@@ -1638,6 +1638,7 @@ router.post("/:id/rfp-override/approve", requireRfpReviewer, async (req, res, ne
     const result = await requestOverrideApproval({
       tenantDb: req.tenantDb!,
       dealId: req.params.id as string,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
       actor: { userId: req.user!.id, name: req.user!.displayName, role: req.user!.role },
       approverEmail: req.user!.email, // named accountability — the reviewer's real email is the SyncHub approver
       note: normalizeRfpOverrideNote(req.body?.note),

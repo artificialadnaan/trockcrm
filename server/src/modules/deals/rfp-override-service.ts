@@ -4,6 +4,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
+import { enqueueRfpBidBoardCreate } from "./rfp-enqueue.js";
 import { resolveSyncHubOverrideApproveUrl } from "./rfp-payload.js";
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 
@@ -102,6 +103,7 @@ export async function requestOverrideApproval(
   input: {
     tenantDb: TenantDb;
     dealId: string;
+    officeId: string | null;
     actor: RfpOverrideActor;
     approverEmail: string;
     note: string | null;
@@ -132,16 +134,64 @@ export async function requestOverrideApproval(
       updatedAt: new Date(),
     })
     .where(and(eq(deals.id, input.dealId), ...overrideActionableConditions()))
-    .returning();
+    // Return only the fields used in this function body; avoids fetching the full 130-column schema
+    // (production correctness: enqueueRfpBidBoardCreate re-fetches via loadRfpPayloadDeal using reset.id).
+    .returning({
+      id: deals.id,
+      rfpApprovalRequestId: deals.rfpApprovalRequestId,
+      name: deals.name,
+      projectNumber: deals.projectNumber,
+      dealNumber: deals.dealNumber,
+    });
 
   if (!reset) {
     return { ok: false, reason: "not_actionable" };
   }
 
   const requestId = reset.rfpApprovalRequestId;
+
+  // VOTING-PATH deals never create a SyncHub request row (rfp_approval_request_id stays null). Their
+  // override-approve funnels through the SAME create-from-rfp path as a 2/3-yes vote (enqueueRfpBidBoardCreate),
+  // not SyncHub's override-approve (which requires a pre-existing declined request row). One create path, two
+  // triggers (vote-yes + override-approve). The 'approving' write persists; the bid-board-created callback
+  // advances the deal exactly as the legacy path's callback does.
+  if (requestId == null) {
+    await writeOverrideHistory(input.tenantDb, {
+      dealId: input.dealId,
+      fieldName: "rfp_override_state",
+      oldValue: priorOverrideState,
+      newValue: "approving",
+      changedBy: input.actor.userId,
+      source: "rfp_override_approve",
+      reason: input.note,
+    });
+    await logActivity({
+      tenantDb: input.tenantDb,
+      actor: buildAuditActorFromUser({ userId: input.actor.userId, name: input.actor.name, role: input.actor.role }),
+      action: "update",
+      entity: {
+        tableName: "deals",
+        entityType: "deal",
+        recordId: input.dealId,
+        nameSnapshot: String(reset.name ?? "Deal"),
+        secondaryIdSnapshot: (reset.projectNumber ?? reset.dealNumber ?? null) as string | null,
+      },
+      fieldChanges: { rfpOverrideState: { from: priorOverrideState, to: "approving" } },
+      metadata: { rfpOverrideAction: "override_approve_via_create_from_rfp", approverEmail: input.approverEmail, rfpOverrideNote: input.note },
+    });
+    // reset is the partial row from .returning(); enqueueRfpBidBoardCreate uses reset.id to re-fetch via
+    // loadRfpPayloadDeal, so the partial type is safe at runtime (cast required for the TypeScript signature).
+    await enqueueRfpBidBoardCreate({
+      tenantDb: input.tenantDb,
+      officeId: input.officeId,
+      deal: reset as unknown as typeof deals.$inferSelect,
+    });
+    return { ok: true, status: "approving", requestId: 0 };
+  }
+
+  // LEGACY (service/type-4): a declined deal that ran the SyncHub pipeline always carries the request id.
   if (typeof requestId !== "number" || !Number.isInteger(requestId) || requestId <= 0) {
-    // Declined deals that ran the pipeline always carry the SyncHub request id; guard defensively so the route
-    // rolls back rather than POSTing to a `/null/override-approve` URL.
+    // Guard defensively so the route rolls back rather than POSTing to a `/null/override-approve` URL.
     return { ok: false, reason: "missing_request_id" };
   }
 
