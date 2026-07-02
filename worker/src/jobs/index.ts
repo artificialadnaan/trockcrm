@@ -37,6 +37,7 @@ import { handleRfpReconfirmDenialEmail, RFP_RECONFIRM_DENIAL_JOB } from "./rfp-r
 import { handleRfpOverrideApprovedEmail, RFP_OVERRIDE_APPROVED_JOB } from "./rfp-override-approved-email.js";
 import { handleRfpVoteInvitation, RFP_VOTE_INVITATION_JOB } from "./rfp-vote-invitation.js";
 import { handleRfpBidBoardCreate, RFP_BIDBOARD_CREATE_JOB } from "./rfp-bidboard-create.js";
+import { handleRfpVoteOutcomeEmail, RFP_VOTE_OUTCOME_JOB } from "./rfp-vote-outcome.js";
 
 const SERVER_MODULE_ROOT =
   process.env.NODE_ENV === "production" ? "../../../server/dist/modules" : "../../../server/src/modules";
@@ -134,6 +135,7 @@ export function registerAllJobs() {
   registerJobHandler(RFP_OVERRIDE_APPROVED_JOB, handleRfpOverrideApprovedEmail);
   registerJobHandler(RFP_VOTE_INVITATION_JOB, handleRfpVoteInvitation);
   registerJobHandler(RFP_BIDBOARD_CREATE_JOB, handleRfpBidBoardCreate);
+  registerJobHandler(RFP_VOTE_OUTCOME_JOB, handleRfpVoteOutcomeEmail);
 
   registerJobHandler("reports_execution", async () => {
     await runReportsExecutionTick();
