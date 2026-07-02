@@ -72,6 +72,7 @@ import {
   deleteDeal as apiDeleteDeal,
   updateDeal as apiUpdateDeal,
   updateDealEstimator as apiUpdateDealEstimator,
+  updateDealSalesSource as apiUpdateDealSalesSource,
   type DealDetail,
 } from "@/hooks/use-deals";
 import { useLeadDetail } from "@/hooks/use-leads";
@@ -1192,6 +1193,45 @@ function DealRightRail({
       setSavingEstimator(false);
     }
   }
+
+  // Sales Source editing is leadership-only (matches the PATCH /deals/:id/sales-source RBAC).
+  // Reuses the same canEditEstimator condition and the already-loaded salesReps list.
+  const canEditSalesSource = canEditEstimator;
+  const [savingSalesSource, setSavingSalesSource] = useState(false);
+  const [salesSourceError, setSalesSourceError] = useState<string | null>(null);
+  const salesSourceOptions = [...salesReps];
+  if (deal.salesSourceUserId && !salesSourceOptions.some((rep) => rep.id === deal.salesSourceUserId)) {
+    salesSourceOptions.unshift({
+      id: deal.salesSourceUserId,
+      displayName: salesReps.find((r) => r.id === deal.salesSourceUserId)?.displayName ?? "Current sales source",
+    });
+  }
+  const salesSourceName =
+    salesReps.find((r) => r.id === deal.salesSourceUserId)?.displayName ??
+    (deal.salesSourceUserId ? deal.salesSourceUserId : null);
+
+  async function handleSalesSourceChange(nextIdRaw: string) {
+    const nextId = nextIdRaw || null;
+    if (nextId === (deal.salesSourceUserId ?? null) || savingSalesSource) return;
+    setSavingSalesSource(true);
+    setSalesSourceError(null);
+    try {
+      await apiUpdateDealSalesSource(deal.id, nextId, { officeId });
+      toast.success(nextId ? "Sales source updated" : "Sales source cleared");
+      try {
+        await onReassigned();
+      } catch {
+        toast.info("Sales source updated. Refresh the page to see the latest detail state.");
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to update sales source";
+      setSalesSourceError(message);
+      toast.error(message);
+    } finally {
+      setSavingSalesSource(false);
+    }
+  }
+
   const headerDisplayNumber = formatDealDisplayNumber(deal);
   const dealWithOptionalContact = deal as DealDetail & {
     primaryContactName?: string | null;
@@ -1307,6 +1347,49 @@ function DealRightRail({
                   <span>{estimatorName}</span>
                   <p className="text-xs italic text-slate-500">
                     Only admins and directors can edit the estimator.
+                  </p>
+                </div>
+              )
+            }
+          />
+          <DetailRailItem
+            label="Sales Source"
+            value={
+              // Change orders inherit their sales source from the parent deal — no own source to set.
+              deal.isChangeOrder ? (
+                <div className="space-y-1">
+                  <span>{salesSourceName ?? "Not set"}</span>
+                  <p className="text-xs italic text-slate-500">
+                    Inherited from the parent deal.
+                  </p>
+                </div>
+              ) : canEditSalesSource ? (
+                <div className="space-y-1">
+                  <select
+                    aria-label="Edit sales source"
+                    className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900"
+                    disabled={salesRepsLoading || savingSalesSource}
+                    value={deal.salesSourceUserId ?? ""}
+                    onChange={(event) => {
+                      void handleSalesSourceChange(event.currentTarget.value);
+                    }}
+                  >
+                    <option value="">— None —</option>
+                    {salesSourceOptions.map((rep) => (
+                      <option key={rep.id} value={rep.id}>
+                        {rep.displayName}
+                      </option>
+                    ))}
+                  </select>
+                  {salesSourceError ? (
+                    <p className="text-xs font-medium text-red-600">{salesSourceError}</p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <span>{salesSourceName ?? "Not set"}</span>
+                  <p className="text-xs italic text-slate-500">
+                    Only admins and directors can edit the sales source.
                   </p>
                 </div>
               )
