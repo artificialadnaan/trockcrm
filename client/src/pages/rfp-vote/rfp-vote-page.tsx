@@ -21,6 +21,7 @@ export function RfpVotePage() {
   const [decision, setDecision] = useState<"approve" | "reject" | null>(null);
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [voted, setVoted] = useState(false);
 
   if (!user?.isRfpVoter) {
     return (
@@ -64,13 +65,15 @@ export function RfpVotePage() {
   );
   const decided = deal.rfpVoteState.outcome !== "pending";
   const rejectNeedsReason = decision === "reject" && reason.trim().length === 0;
-  const canSubmit = decision !== null && !rejectNeedsReason && !submitting && !alreadyVoted && !decided;
+  const canSubmit = decision !== null && !rejectNeedsReason && !submitting && !alreadyVoted && !decided && !voted;
 
   async function onSubmit() {
     if (!dealId || decision === null) return;
     setSubmitting(true);
     try {
       const result = await castRfpVote(dealId, { decision, reason: decision === "reject" ? reason.trim() : null, officeId });
+      // The vote is recorded — lock re-submit immediately, independent of whether the follow-up refetch succeeds.
+      setVoted(true);
       toast.success(
         result.outcome === "approved"
           ? "Vote recorded — 2/3 approved, creating the Bid Board project."
@@ -78,7 +81,12 @@ export function RfpVotePage() {
             ? "Vote recorded — 2/3 rejected, escalating for review."
             : "Vote recorded."
       );
-      await refetch();
+      // A refetch failure must NOT surface as a vote failure — the vote already succeeded; the next load reconciles.
+      try {
+        await refetch();
+      } catch {
+        /* ignore — the vote is recorded; the panel / next load will reflect it */
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to record your vote");
     } finally {
@@ -113,6 +121,7 @@ export function RfpVotePage() {
           ) : (
             <>
               <fieldset className="flex flex-col gap-2">
+                <legend className="sr-only">Your decision</legend>
                 <label className="flex items-center gap-2 text-sm">
                   <input type="radio" name="decision" value="approve" checked={decision === "approve"} onChange={() => setDecision("approve")} />
                   Approve

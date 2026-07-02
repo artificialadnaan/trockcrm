@@ -40,7 +40,7 @@ export function useRfpVote(dealId: string | undefined, officeId?: string | null)
       setDeal({
         id: data.deal.id,
         name: data.deal.name,
-        projectNumber: (data.deal.projectNumber as string | null) ?? null,
+        projectNumber: data.deal.projectNumber ?? null,
         rfpApprovalStatus: data.deal.rfpApprovalStatus ?? null,
         rfpVotes: data.deal.rfpVotes,
         rfpVoteState: data.deal.rfpVoteState,
