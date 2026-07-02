@@ -410,11 +410,12 @@ export async function getMarketMixReport(
     // CC1 — every Won VALUE figure (KPI total, per-vertical/property/region, breakdown won/avg) comes from
     // the WON cohort (canonical won_closed_date window + usable-won-date guard, archived wins included),
     // NOT the created_at-windowed active cohort. By construction this reconciles to quarterlyWonByVertical.
-    const [wonVerticalRows, wonPropertyRows, wonRegionRows] = await Promise.all([
-      tenantDb.execute(buildWonByDimensionSql(filters, verticalExpr)),
-      tenantDb.execute(buildWonByDimensionSql(filters, propertyTypeExpr)),
-      tenantDb.execute(buildWonByDimensionSql(filters, regionExpr)),
-    ]);
+    // Sequential, not Promise.all: tenantDb is one transaction-bound client, so these serialize on a
+    // single connection anyway; awaiting in sequence keeps each query's client-side query_timeout scoped
+    // to its own execution instead of the cumulative queue wait (see db.ts query_timeout caveat).
+    const wonVerticalRows = await tenantDb.execute(buildWonByDimensionSql(filters, verticalExpr));
+    const wonPropertyRows = await tenantDb.execute(buildWonByDimensionSql(filters, propertyTypeExpr));
+    const wonRegionRows = await tenantDb.execute(buildWonByDimensionSql(filters, regionExpr));
     const wonVerticalMap = wonDimensionMap(wonVerticalRows);
     const wonPropertyMap = wonDimensionMap(wonPropertyRows);
     const wonRegionMap = wonDimensionMap(wonRegionRows);

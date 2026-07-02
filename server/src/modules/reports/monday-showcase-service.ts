@@ -535,22 +535,24 @@ export async function getMondayShowcaseData(
   const lastWeekFrom = shiftIsoDays(from, -7);
   const lastWeekTo = shiftIsoDays(from, -1);
 
-  const [wonSummary, repWonRows, lastWonSummary, sentRows, estimatedRows, lastSentRows, lastEstRows, projBandRows, projCovRows, leadRows, repNameRows] =
-    await Promise.all([
-      getWonCloseSummary(tenantDb, { from, to }),
-      getCanonicalRepWonSummary(tenantDb, { from, to }),
-      getWonCloseSummary(tenantDb, { from: lastWeekFrom, to: lastWeekTo }),
-      tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, from, to)),
-      tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, from, to)),
-      tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, lastWeekFrom, lastWeekTo)),
-      tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, lastWeekFrom, lastWeekTo)),
-      tenantDb.execute(buildProjectionBandsSql()),
-      tenantDb.execute(buildProjectionCoverageSql()),
-      tenantDb.execute(buildLeadStatusSql()),
-      tenantDb.execute(
-        sql`SELECT ${users.id} AS id, ${users.displayName} AS name FROM ${users}`
-      ),
-    ]);
+  // Run SEQUENTIALLY, not via Promise.all: tenantDb is a single transaction-bound pg client, so these
+  // queries serialize on one connection regardless — Promise.all gave no real concurrency, it only made
+  // every query's client-side query_timeout start at once, so a late one could time out on cumulative
+  // QUEUE wait rather than its own execution. Awaiting in sequence keeps each query's timer scoped to its
+  // own run (same total wall-clock on one connection).
+  const wonSummary = await getWonCloseSummary(tenantDb, { from, to });
+  const repWonRows = await getCanonicalRepWonSummary(tenantDb, { from, to });
+  const lastWonSummary = await getWonCloseSummary(tenantDb, { from: lastWeekFrom, to: lastWeekTo });
+  const sentRows = await tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, from, to));
+  const estimatedRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, from, to));
+  const lastSentRows = await tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, lastWeekFrom, lastWeekTo));
+  const lastEstRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, lastWeekFrom, lastWeekTo));
+  const projBandRows = await tenantDb.execute(buildProjectionBandsSql());
+  const projCovRows = await tenantDb.execute(buildProjectionCoverageSql());
+  const leadRows = await tenantDb.execute(buildLeadStatusSql());
+  const repNameRows = await tenantDb.execute(
+    sql`SELECT ${users.id} AS id, ${users.displayName} AS name FROM ${users}`,
+  );
   const won = { count: wonSummary.count, value: wonSummary.totalValue };
 
   const repNames = new Map<string | null, string>(
