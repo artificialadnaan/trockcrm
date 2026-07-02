@@ -79,8 +79,13 @@ export function useQcScorecards(filters: QcScorecardFilters) {
     } catch (e) {
       if (requestId !== requestIdRef.current) return;
       setError(e instanceof Error ? e.message : "Failed to load QC reports");
-      // Drop the previous fetch's truncation flag so the "showing most recent 1,000" banner doesn't linger
-      // over an error state (the page renders that banner independently of the table's error branch).
+      // A failed fetch has no valid data for the CURRENT filters/office. Clear the rows, option lists, and
+      // truncation flag so the KPI stat cards, result count, dropdowns, and the "most recent 1,000" banner
+      // can't keep showing counts from a prior office/filter context while the error is displayed. The
+      // "Try again" button re-runs this fetch and repopulates everything.
+      setScorecards([]);
+      setRegions([]);
+      setSuperintendents([]);
       setTruncated(false);
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
