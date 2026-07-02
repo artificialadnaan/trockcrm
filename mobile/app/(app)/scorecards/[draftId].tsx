@@ -372,7 +372,7 @@ function Wizard(props: {
         ) : step === SECTION_COUNT + 2 ? (
           <ActionsStep draft={draft} dispatch={dispatch} voiceEnabled={voiceEnabled} required={scorecardActionItemsRequired(draft)} />
         ) : (
-          <ReviewStep draft={draft} onEditSection={(i) => setStep(1 + i)} />
+          <ReviewStep draft={draft} onEditStep={(n) => setStep(n)} />
         )}
       </ScrollView>
 
@@ -523,7 +523,10 @@ function ActionsStep({ draft, dispatch, voiceEnabled, required }: { draft: Score
   );
 }
 
-function ReviewStep({ draft, onEditSection }: { draft: ScorecardDraft; onEditSection: (i: number) => void }) {
+function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: (step: number) => void }) {
+  // Step indices for the non-section blockers so the review page can send the user straight to them.
+  const ACTION_ITEMS_STEP = SECTION_COUNT + 2;
+  const SETUP_STEP = 0;
   const total = scorecardDraftTotal(draft);
   const rating = scorecardDraftRating(draft);
   const validation = validateScorecardDraft(draft);
@@ -536,13 +539,65 @@ function ReviewStep({ draft, onEditSection }: { draft: ScorecardDraft; onEditSec
       <View style={{ gap: 2 }}>
         {FIELD_SCORECARD_SECTIONS.map((s, i) => {
           const pts = draft.scores[s.key];
+          const scored = typeof pts === "number";
+          // Every row jumps back to its section; unscored ("needs review") rows get a red accent + a
+          // "Score" call-to-action so it's obvious they're both tappable and still required.
           return (
-            <Pressable key={s.key} onPress={() => onEditSection(i)} style={styles.summaryRow}>
-              <Text style={styles.summaryName} numberOfLines={1}>{s.title}</Text>
-              <Text style={styles.summaryPts}>{typeof pts === "number" ? pts : "—"}</Text>
+            <Pressable
+              key={s.key}
+              onPress={() => onEditStep(1 + i)}
+              accessibilityRole="button"
+              accessibilityLabel={scored ? `${s.title}: ${pts} points. Tap to edit.` : `${s.title} still needs a score. Tap to fill it in.`}
+              style={({ pressed }) => [styles.summaryRow, !scored && styles.summaryRowMissing, pressed && styles.summaryRowPressed]}
+            >
+              <Text style={[styles.summaryName, !scored && styles.summaryNameMissing]} numberOfLines={1}>{s.title}</Text>
+              {scored ? (
+                <View style={styles.summaryRight}>
+                  <Text style={styles.summaryPts}>{pts}</Text>
+                  <Text style={styles.summaryChevron}>›</Text>
+                </View>
+              ) : (
+                <View style={styles.summaryRight}>
+                  <Text style={styles.summaryCta}>Score</Text>
+                  <Text style={styles.summaryChevronRed}>›</Text>
+                </View>
+              )}
             </Pressable>
           );
         })}
+        {/* Non-section requirements that also block submit — surfaced as tappable rows so the user isn't
+            told "action items required" with no way to get there from the review screen. Only shown once
+            every section is scored: the total (and thus the action-items requirement) is meaningless while
+            scores are missing — the red section rows above are the guidance until then. Mirrors the submit
+            Banner's stage priority. */}
+        {validation.missingSections.length === 0 && validation.needsActionItems ? (
+          <Pressable
+            onPress={() => onEditStep(ACTION_ITEMS_STEP)}
+            accessibilityRole="button"
+            accessibilityLabel="Action items are required. Tap to add one."
+            style={({ pressed }) => [styles.summaryRow, styles.summaryRowMissing, pressed && styles.summaryRowPressed]}
+          >
+            <Text style={[styles.summaryName, styles.summaryNameMissing]} numberOfLines={1}>Action items</Text>
+            <View style={styles.summaryRight}>
+              <Text style={styles.summaryCta}>Add</Text>
+              <Text style={styles.summaryChevronRed}>›</Text>
+            </View>
+          </Pressable>
+        ) : null}
+        {validation.missingSections.length === 0 && validation.missingWeekOf ? (
+          <Pressable
+            onPress={() => onEditStep(SETUP_STEP)}
+            accessibilityRole="button"
+            accessibilityLabel="The Week Of date is required. Tap to set it."
+            style={({ pressed }) => [styles.summaryRow, styles.summaryRowMissing, pressed && styles.summaryRowPressed]}
+          >
+            <Text style={[styles.summaryName, styles.summaryNameMissing]} numberOfLines={1}>Week of date</Text>
+            <View style={styles.summaryRight}>
+              <Text style={styles.summaryCta}>Set</Text>
+              <Text style={styles.summaryChevronRed}>›</Text>
+            </View>
+          </Pressable>
+        ) : null}
       </View>
       {draft.criticalDeficiencies.length > 0 ? <Badge label={`${draft.criticalDeficiencies.length} deficiency flag${draft.criticalDeficiencies.length === 1 ? "" : "s"}`} /> : null}
       {!validation.canSubmit ? (
@@ -606,9 +661,16 @@ const styles = StyleSheet.create({
   scoreWrap: { alignItems: "center", gap: theme.space.sm, paddingVertical: theme.space.md },
   bigScore: { fontFamily: theme.font.bold, fontSize: 44, color: theme.color.textPrimary },
   bigScoreMax: { fontSize: 18, color: theme.color.textMuted },
-  summaryRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: theme.space.sm, borderBottomWidth: 1, borderBottomColor: theme.color.surfaceMuted },
+  summaryRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: theme.space.sm, paddingHorizontal: theme.space.sm, borderBottomWidth: 1, borderBottomColor: theme.color.surfaceMuted, borderLeftWidth: 3, borderLeftColor: "transparent" },
+  summaryRowMissing: { backgroundColor: "rgba(220,40,40,0.06)", borderLeftColor: theme.color.brandRed, borderBottomColor: "transparent" },
+  summaryRowPressed: { opacity: 0.55 },
   summaryName: { flex: 1, fontFamily: theme.font.body, fontSize: 14, color: theme.color.textPrimary },
+  summaryNameMissing: { fontFamily: theme.font.bold, color: theme.color.danger },
+  summaryRight: { flexDirection: "row", alignItems: "center", gap: 6 },
   summaryPts: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textPrimary },
+  summaryCta: { fontFamily: theme.font.bold, fontSize: 13, color: theme.color.brandRed },
+  summaryChevron: { fontFamily: theme.font.body, fontSize: 20, lineHeight: 20, color: theme.color.textMuted },
+  summaryChevronRed: { fontFamily: theme.font.body, fontSize: 20, lineHeight: 20, color: theme.color.brandRed },
   footer: {
     flexDirection: "row", alignItems: "center", gap: theme.space.md,
     padding: theme.space.md, borderTopWidth: 1, borderTopColor: theme.color.border, backgroundColor: theme.color.surfaceCard,
