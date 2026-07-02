@@ -60,29 +60,19 @@ export default function QcReportsPage() {
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [search, setSearch] = useState("");
 
-  const { scorecards, truncated, loading, error, refetch } = useQcScorecards({ from, to });
+  // Debounce the search box so keystrokes don't spam the server-side query.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
 
-  const regionOptions = useMemo(
-    () => [...new Set(scorecards.map((s) => s.regionName).filter((r): r is string => !!r))].sort(),
-    [scorecards],
-  );
-  const superOptions = useMemo(
-    () => [...new Set(scorecards.map((s) => s.superintendentName).filter((r): r is string => !!r))].sort(),
-    [scorecards],
-  );
-
-  const rows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return scorecards.filter((s) => {
-      if (region && s.regionName !== region) return false;
-      if (superintendent && s.superintendentName !== superintendent) return false;
-      if (rating && s.rating !== rating) return false;
-      if (flaggedOnly && s.deficiencyCount === 0) return false;
-      if (q && ![s.projectName, s.projectNumber, s.superintendentName].some((v) => v?.toLowerCase().includes(q)))
-        return false;
-      return true;
-    });
-  }, [scorecards, region, superintendent, rating, flaggedOnly, search]);
+  // ALL filters are applied server-side (before the row cap); `regions`/`superintendents` are the
+  // window-wide option lists so the dropdowns never empty each other.
+  const { scorecards, regions, superintendents, truncated, loading, error, refetch } = useQcScorecards({
+    from, to, region, superintendent, rating, flaggedOnly, search: debouncedSearch,
+  });
+  const rows = scorecards;
 
   const stats = useMemo(() => {
     const avg = rows.length ? Math.round(rows.reduce((s, r) => s + r.totalScore, 0) / rows.length) : null;
@@ -143,8 +133,8 @@ export default function QcReportsPage() {
 
       {/* filter bar */}
       <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
-        <FilterSelect label="Region" value={region} onChange={setRegion} options={regionOptions} allLabel="All regions" />
-        <FilterSelect label="Superintendent" value={superintendent} onChange={setSuperintendent} options={superOptions} allLabel="Anyone" />
+        <FilterSelect label="Region" value={region} onChange={setRegion} options={regions} allLabel="All regions" />
+        <FilterSelect label="Superintendent" value={superintendent} onChange={setSuperintendent} options={superintendents} allLabel="Anyone" />
         <FilterSelect
           label="Rating"
           value={rating}
@@ -295,7 +285,16 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
           <tr
             key={r.scorecardId}
             onClick={() => onRowClick(r)}
-            className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 ${r.deficiencyCount > 0 ? "shadow-[inset_3px_0_0_var(--tw-shadow-color)] shadow-brand-red" : ""}`}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onRowClick(r);
+              }
+            }}
+            tabIndex={0}
+            role="button"
+            aria-label={`Open scorecard for ${r.projectName}, week of ${fmtWeek(r.weekOf)}`}
+            className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-red/40 ${r.deficiencyCount > 0 ? "shadow-[inset_3px_0_0_var(--tw-shadow-color)] shadow-brand-red" : ""}`}
           >
             <td className="px-3.5 py-3">
               <div className="font-semibold text-slate-950">{r.projectName}</div>

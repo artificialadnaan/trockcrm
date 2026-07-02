@@ -11,7 +11,7 @@ const textArray = (values: readonly string[]) =>
 export interface QcScorecardsFilters {
   from: string; // yyyy-mm-dd (week_of lower bound)
   to: string; // yyyy-mm-dd (week_of upper bound)
-  regionId?: string | null;
+  region?: string | null; // region NAME (matches region_config.name)
   superintendent?: string | null;
   rating?: string | null;
   flaggedOnly?: boolean;
@@ -47,11 +47,19 @@ const MAX_ROWS = 1000;
 export async function getQcScorecardsReport(
   tenantDb: TenantDb,
   filters: QcScorecardsFilters,
-): Promise<{ scorecards: QcScorecardRow[]; truncated: boolean }> {
+): Promise<{ scorecards: QcScorecardRow[]; truncated: boolean; regions: string[]; superintendents: string[] }> {
   // Live/won projects only — mirror the field list's activeProjectWhere off the same WON/LOST slug source of
   // truth: active deal, not terminal (or a Won-family stage), never Lost. Keeps archived/Lost projects out.
   const stageSlug = sql`COALESCE(psc.slug, d.bid_board_stage_slug, '')`;
-  const conditions = [
+  const FROM = sql`
+    FROM field_scorecards sc
+    JOIN deals d ON d.id = sc.deal_id
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+    LEFT JOIN public.region_config rc ON rc.id = d.region_id
+  `;
+  // The WINDOW predicate = live-project gate + week range. It bounds BOTH the filter-option lists (so the
+  // dropdowns stay fully populated) AND the row list. The interactive filters are added ON TOP for the rows.
+  const windowConditions = [
     sql`sc.is_active = true`,
     sql`d.is_active = true`,
     sql`(COALESCE(psc.is_terminal, false) = false OR ${stageSlug} = ANY(${textArray(WON_STAGE_SLUGS)}))`,
@@ -59,17 +67,30 @@ export async function getQcScorecardsReport(
     sql`sc.week_of >= ${filters.from}`,
     sql`sc.week_of <= ${filters.to}`,
   ];
-  if (filters.regionId) conditions.push(sql`d.region_id = ${filters.regionId}::uuid`);
-  if (filters.rating) conditions.push(sql`sc.rating = ${filters.rating}`);
-  if (filters.flaggedOnly) conditions.push(sql`COALESCE(array_length(sc.critical_deficiencies, 1), 0) > 0`);
-  if (filters.superintendent) conditions.push(sql`sc.superintendent_name ILIKE ${`%${filters.superintendent}%`}`);
+  const rowConditions = [...windowConditions];
+  // Interactive filters applied SERVER-SIDE (before the cap) so a match older than the most-recent cap
+  // window is never dropped.
+  if (filters.region) rowConditions.push(sql`rc.name = ${filters.region}`);
+  if (filters.rating) rowConditions.push(sql`sc.rating = ${filters.rating}`);
+  if (filters.flaggedOnly) rowConditions.push(sql`COALESCE(array_length(sc.critical_deficiencies, 1), 0) > 0`);
+  if (filters.superintendent) rowConditions.push(sql`sc.superintendent_name ILIKE ${`%${filters.superintendent}%`}`);
   if (filters.search) {
     const term = `%${filters.search}%`;
-    conditions.push(
+    rowConditions.push(
       sql`(d.name ILIKE ${term} OR sc.project_number ILIKE ${term} OR sc.superintendent_name ILIKE ${term})`,
     );
   }
-  const where = sql.join(conditions, sql` AND `);
+
+  // Distinct region + superintendent options across the WHOLE window (independent of the interactive
+  // filters), so selecting one filter never empties the other dropdown.
+  const optResult = await tenantDb.execute(sql`
+    SELECT
+      COALESCE(array_agg(DISTINCT rc.name) FILTER (WHERE rc.name IS NOT NULL), '{}') AS "regions",
+      COALESCE(array_agg(DISTINCT sc.superintendent_name) FILTER (WHERE sc.superintendent_name IS NOT NULL), '{}') AS "superintendents"
+    ${FROM}
+    WHERE ${sql.join(windowConditions, sql` AND `)}
+  `);
+  const optRow = (((optResult as any).rows ?? optResult) as any[])[0] ?? {};
 
   const result = await tenantDb.execute(sql`
     SELECT
@@ -86,11 +107,8 @@ export async function getQcScorecardsReport(
       sc.submitted_at AS "submittedAt",
       sc.submitted_by_name AS "submittedByName",
       (sc.pdf_r2_key IS NOT NULL) AS "pdfAvailable"
-    FROM field_scorecards sc
-    JOIN deals d ON d.id = sc.deal_id
-    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-    LEFT JOIN public.region_config rc ON rc.id = d.region_id
-    WHERE ${where}
+    ${FROM}
+    WHERE ${sql.join(rowConditions, sql` AND `)}
     ORDER BY sc.submitted_at DESC
     LIMIT ${MAX_ROWS}
   `);
@@ -98,6 +116,8 @@ export async function getQcScorecardsReport(
   const rows = (((result as any).rows ?? result) as any[]) ?? [];
   return {
     truncated: rows.length >= MAX_ROWS,
+    regions: (optRow.regions ?? []).slice().sort(),
+    superintendents: (optRow.superintendents ?? []).slice().sort(),
     scorecards: rows.map((r) => ({
       scorecardId: String(r.scorecardId),
       dealId: String(r.dealId),

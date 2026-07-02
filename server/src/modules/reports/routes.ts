@@ -311,7 +311,7 @@ router.get("/qc-scorecards", requireAnyRole, async (req, res, next) => {
     const data = await getQcScorecardsReport(req.tenantDb!, {
       from,
       to,
-      regionId: readOptionalUuid(req.query.regionId, "regionId"),
+      region: readQueryString(req.query.region),
       superintendent: readQueryString(req.query.superintendent),
       rating: readQueryString(req.query.rating),
       flaggedOnly: req.query.flaggedOnly === "true",
