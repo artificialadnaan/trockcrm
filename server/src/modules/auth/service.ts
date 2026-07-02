@@ -1,7 +1,7 @@
 import jwt, { type SignOptions } from "jsonwebtoken";
 import crypto from "crypto";
 import { eq, and, like } from "drizzle-orm";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient } from "../../db.js";
 import { db } from "../../db.js";
 import { offices, users, userOfficeAccess } from "@trock-crm/shared/schema";
 import type { JwtClaims } from "@trock-crm/shared/types";
@@ -249,6 +249,7 @@ export async function ensureDevDemoWorkspace(
   const schemaName = `office_${office.slug}`;
   const leadOffice = leadOfficeForDemoOfficeSlug(office.slug);
   const client = await pool.connect();
+  let releaseErr: unknown;
 
   const companyId = deterministicUuid(`${schemaName}:demo-company`);
   const propertyId = deterministicUuid(`${schemaName}:demo-property`);
@@ -758,10 +759,11 @@ export async function ensureDevDemoWorkspace(
 
     await client.query("COMMIT");
   } catch (error) {
+    releaseErr = error;
     await client.query("ROLLBACK").catch(() => {});
     throw error;
   } finally {
-    client.release();
+    releasePooledClient(client, releaseErr);
   }
 }
 

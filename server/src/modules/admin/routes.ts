@@ -7,7 +7,7 @@ import { requireCrmUser } from "../../middleware/field-auth.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin, requireDirector, requireGlobalAdmin } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient } from "../../db.js";
 import { getAccessibleOffices } from "../auth/service.js";
 import {
   listOffices, getOfficeById, createOffice, updateOffice,
@@ -76,6 +76,7 @@ async function withOfficeTenantContext<T>(
   }
 
   const client = await pool.connect();
+  let releaseErr: unknown;
   try {
     await client.query("BEGIN");
     await client.query("SET LOCAL statement_timeout = '30s'");
@@ -87,10 +88,11 @@ async function withOfficeTenantContext<T>(
     await client.query("COMMIT");
     return result;
   } catch (err) {
+    releaseErr = err;
     await client.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
-    client.release();
+    releasePooledClient(client, releaseErr);
   }
 }
 
@@ -1036,6 +1038,7 @@ router.get(
   requireDirector,
   async (req: Request, res: Response, next: NextFunction) => {
     const client = await pool.connect();
+    let releaseErr: unknown;
     try {
       const user = req.user!;
       const offices = await getAccessibleOfficeSlugs(user.id, user.role, user.activeOfficeId ?? user.officeId);
@@ -1119,9 +1122,10 @@ router.get(
 
       return res.json({ offices: results });
     } catch (err) {
+      releaseErr = err;
       return next(err);
     } finally {
-      client.release();
+      releasePooledClient(client, releaseErr);
     }
   }
 );
@@ -1132,6 +1136,7 @@ router.get(
   requireDirector,
   async (req: Request, res: Response, next: NextFunction) => {
     const client = await pool.connect();
+    let releaseErr: unknown;
     try {
       const user = req.user!;
       const offices = await getAccessibleOfficeSlugs(user.id, user.role, user.activeOfficeId ?? user.officeId);
@@ -1214,9 +1219,10 @@ router.get(
 
       return res.json({ offices: results });
     } catch (err) {
+      releaseErr = err;
       return next(err);
     } finally {
-      client.release();
+      releasePooledClient(client, releaseErr);
     }
   }
 );

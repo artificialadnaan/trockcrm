@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { releasePooledClient } from "../../db.js";
 import { procoreClient } from "../../lib/procore-client.js";
 import {
   buildProjectMirrorFields,
@@ -182,6 +183,7 @@ export async function runProjectsBackfill(
   const seenProjectIds = new Set<string>();
 
   const client = await pool.connect();
+  let releaseErr: unknown;
   console.log(
     `[ProjectsBackfill] start schema=${schemaName} office=${officeSlug} companyId=${companyId} mirrorAllProjects=${mirrorAllProjects}`
   );
@@ -240,6 +242,9 @@ export async function runProjectsBackfill(
       // (which means Procore is cycling its results).
       if (!pageHadNewRow) break;
     }
+  } catch (err) {
+    releaseErr = err;
+    throw err;
   } finally {
     console.log(
       `[ProjectsBackfill] done backfilled=${result.backfilled} skipped=${result.skipped} errored=${result.errored} errors=${result.errors.length} uniqueIds=${seenProjectIds.size}`
@@ -253,7 +258,7 @@ export async function runProjectsBackfill(
         resetError,
       });
     });
-    client.release();
+    releasePooledClient(client, releaseErr);
   }
 
   return result;

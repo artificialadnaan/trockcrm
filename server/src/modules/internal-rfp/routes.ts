@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import express, { Router } from "express";
 import { getHoldStateAtStageEntry, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient } from "../../db.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { INTERNAL_RFP_RECEIVER } from "../audit/system-processes.js";
@@ -563,6 +563,7 @@ internalRfpRoutes.post(
       }
 
       const client = await pool.connect();
+      let releaseErr: unknown;
       try {
         await client.query("BEGIN");
         const declineResult = await applyRfpDeclineToDeal({
@@ -604,10 +605,11 @@ internalRfpRoutes.post(
 
         await client.query("COMMIT");
       } catch (err) {
+        releaseErr = err;
         await client.query("ROLLBACK").catch(() => {});
         throw err;
       } finally {
-        client.release();
+        releasePooledClient(client, releaseErr);
       }
 
       res.json({
@@ -687,6 +689,7 @@ internalRfpRoutes.post(
         }
         let failedApplied = false;
         const client = await pool.connect();
+        let releaseErr: unknown;
         try {
           await client.query("BEGIN");
           const failedUpdate = await client.query(
@@ -730,10 +733,11 @@ internalRfpRoutes.post(
           }
           await client.query("COMMIT");
         } catch (err) {
+          releaseErr = err;
           await client.query("ROLLBACK").catch(() => {});
           throw err;
         } finally {
-          client.release();
+          releasePooledClient(client, releaseErr);
         }
         res.json({ success: true, status: "failed", dealId: sourceDealId, applied: failedApplied });
         return;
@@ -807,6 +811,7 @@ internalRfpRoutes.post(
       }
 
       const client = await pool.connect();
+      let releaseErr: unknown;
       try {
         await client.query("BEGIN");
         // This callback writes deal_stage_history explicitly on the stage move (below), so
@@ -945,10 +950,11 @@ internalRfpRoutes.post(
 
         await client.query("COMMIT");
       } catch (err) {
+        releaseErr = err;
         await client.query("ROLLBACK").catch(() => {});
         throw err;
       } finally {
-        client.release();
+        releasePooledClient(client, releaseErr);
       }
 
       res.json({ success: true, dealId: sourceDealId, bidboardProjectId });

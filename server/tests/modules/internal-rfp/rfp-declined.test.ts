@@ -6,6 +6,7 @@ const clientReleaseMock = vi.hoisted(() => vi.fn());
 const DEAL_ID = "11111111-1111-4111-8111-111111111111";
 
 vi.mock("../../../src/db.js", () => ({
+  releasePooledClient: (client: any) => client?.release?.(),
   pool: {
     query: queryMock,
     connect: vi.fn(async () => ({ query: queryMock, release: clientReleaseMock })),

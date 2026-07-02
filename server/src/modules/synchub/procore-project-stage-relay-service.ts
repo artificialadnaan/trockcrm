@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import type { PoolClient } from "pg";
 import { normalizePortfolioProjectStage, isPortfolioProjectBoardStage } from "@trock-crm/shared/types";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 type QueryClient = Pick<PoolClient, "query"> & { release?: () => void };
@@ -759,6 +759,7 @@ export async function processSyncHubProcoreProjectStageChanged(
   const eventKey = eventKeyForPayload(payload);
   const ownsClient = !deps.client;
   const client = deps.client ?? await pool.connect();
+  let releaseErr: unknown;
   const receivedAt = deps.receivedAt ?? new Date();
 
   try {
@@ -773,8 +774,11 @@ export async function processSyncHubProcoreProjectStageChanged(
     }
 
     return await recordResolvedEvent(client, payload, match, eventKey, receivedAt);
+  } catch (err) {
+    releaseErr = err;
+    throw err;
   } finally {
-    if (ownsClient) client.release?.();
+    if (ownsClient) releasePooledClient(client as PoolClient, releaseErr);
   }
 }
 
@@ -811,6 +815,7 @@ export async function replayUnresolvedSyncHubProcoreProjectStageReceipts(
 
   const ownsClient = !options.client;
   const client = options.client ?? await pool.connect();
+  let releaseErr: unknown;
   const summary: ReplayUnresolvedStageReceiptsResult = {
     mode: commit ? "commit" : "dry-run",
     scanned: 0,
@@ -904,7 +909,10 @@ export async function replayUnresolvedSyncHubProcoreProjectStageReceipts(
       }
     }
     return summary;
+  } catch (err) {
+    releaseErr = err;
+    throw err;
   } finally {
-    if (ownsClient) client.release?.();
+    if (ownsClient) releasePooledClient(client as PoolClient, releaseErr);
   }
 }

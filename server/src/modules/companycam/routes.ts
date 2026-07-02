@@ -7,7 +7,7 @@
 import { Router } from "express";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getProjectMappings,
@@ -63,17 +63,25 @@ async function acquireBackgroundDb(officeSlug: string) {
   return {
     tenantDb,
     release: async (rollback = false) => {
+      let releaseErr: unknown;
       try {
         if (rollback) {
-          await client.query("ROLLBACK").catch(() => {});
+          await client.query("ROLLBACK").catch((rollbackErr) => {
+            releaseErr = rollbackErr;
+          });
         } else {
           // Propagate COMMIT failures (fail-closed): a failed commit must be treated as a failure, never
           // swallowed and reported as success. Callers translate the throw into a Failed sync status.
           await client.query("COMMIT");
         }
+      } catch (err) {
+        releaseErr = err;
+        throw err;
       } finally {
         // Always return the connection to the pool, even when COMMIT throws, to avoid leaking it.
-        client.release();
+        // Route through releasePooledClient so a broken connection (COMMIT/ROLLBACK on a dead
+        // socket) is destroyed instead of recycled back into the idle pool.
+        releasePooledClient(client, releaseErr);
       }
     },
   };

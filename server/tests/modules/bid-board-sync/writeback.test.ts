@@ -4,6 +4,7 @@ const query = vi.fn();
 const release = vi.fn();
 
 vi.mock("../../../src/db.js", () => ({
+  releasePooledClient: (client: any) => client?.release?.(),
   pool: {
     connect: vi.fn(async () => ({ query, release })),
   },

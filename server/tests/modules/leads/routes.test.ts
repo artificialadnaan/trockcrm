@@ -67,6 +67,7 @@ vi.mock("../../../src/modules/leads/questionnaire-service.js", () => ({
 }));
 
 vi.mock("../../../src/db.js", () => ({
+  releasePooledClient: (client: any) => client?.release?.(),
   pool: {
     connect: dbMocks.poolConnect,
   },
@@ -109,6 +110,7 @@ async function loadLeadRoutes() {
   }));
 
   vi.doMock("../../../src/db.js", () => ({
+    releasePooledClient: (client: any) => client?.release?.(),
     pool: {
       connect: dbMocks.poolConnect,
     },

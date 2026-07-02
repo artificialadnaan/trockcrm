@@ -22,6 +22,7 @@ const PNG_1X1 = Buffer.from(
 );
 
 vi.mock("../../../src/db.js", () => ({
+  releasePooledClient: (client: any) => client?.release?.(),
   db: { execute: executeMock },
   pool: { query: queryMock, connect: connectMock },
 }));

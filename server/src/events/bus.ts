@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { pool } from "../db.js";
+import { pool, releasePooledClient } from "../db.js";
 import { PG_NOTIFY_CHANNEL, type DomainEvent, type DomainEventName } from "./types.js";
 
 class EventBus extends EventEmitter {
@@ -31,6 +31,7 @@ class EventBus extends EventEmitter {
    */
   async emitRemote(event: DomainEvent) {
     const client = await pool.connect();
+    let releaseErr: unknown;
     try {
       await client.query("BEGIN");
 
@@ -58,11 +59,12 @@ class EventBus extends EventEmitter {
 
       await client.query("COMMIT");
     } catch (err) {
+      releaseErr = err;
       await client.query("ROLLBACK").catch(() => {});
       console.error("[EventBus] emitRemote failed:", err);
       throw err;
     } finally {
-      client.release();
+      releasePooledClient(client, releaseErr);
     }
   }
 

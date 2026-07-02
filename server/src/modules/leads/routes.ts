@@ -4,7 +4,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { PoolClient } from "pg";
 import * as schema from "@trock-crm/shared/schema";
 import { leadSubscriptions } from "@trock-crm/shared/schema";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { assertOptionalIsoDateQueryParam } from "../../lib/date-query.js";
@@ -93,6 +93,7 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
 }) {
   let client: PoolClient | null = null;
   let committed = false;
+  let releaseErr: unknown;
   try {
     client = await pool.connect();
     assertSafeOfficeSlug(input.officeSlug);
@@ -104,6 +105,7 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
     await client.query("COMMIT");
     committed = true;
   } catch (err) {
+    releaseErr = err;
     if (client && !committed) {
       await client.query("ROLLBACK").catch(() => {});
     }
@@ -112,7 +114,7 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
       err,
     });
   } finally {
-    client?.release();
+    if (client) releasePooledClient(client, releaseErr);
   }
 }
 

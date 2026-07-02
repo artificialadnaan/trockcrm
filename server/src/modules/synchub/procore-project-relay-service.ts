@@ -1,4 +1,4 @@
-import { pool } from "../../db.js";
+import { pool, releasePooledClient } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { upsertProjectMirror } from "../projects/service.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
@@ -423,6 +423,7 @@ export async function processSyncHubProcoreProjectCreated(
   const procoreProjectId = parseSafeProcoreId(payload.procore.portfolioProjectId);
   const ownsClient = !deps.client;
   const client = deps.client ?? await pool.connect();
+  let releaseErr: unknown;
 
   try {
     const offices = await getActiveOffices(client);
@@ -470,7 +471,10 @@ export async function processSyncHubProcoreProjectCreated(
       `[SyncHub:relay] Project ${payload.procore.portfolioProjectId} (${payload.procore.projectNumber}) result=${result.status}`
     );
     return result;
+  } catch (err) {
+    releaseErr = err;
+    throw err;
   } finally {
-    if (ownsClient) client.release?.();
+    if (ownsClient) releasePooledClient(client as import("pg").PoolClient, releaseErr);
   }
 }
