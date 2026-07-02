@@ -53,6 +53,21 @@ function hasCoords(m: PhotoMetadata): boolean {
   return m.latitude !== undefined && m.longitude !== undefined;
 }
 
+// Patch coords onto a queued shot, retrying briefly: when the session GPS fix lands, that shot's
+// enqueueUploads copy may still be in flight (not yet in the index), so a single patch would no-op and the
+// coords would be lost. The shot's drain is deferred until after this runs, so it can't upload coordless
+// first — a few short retries let the patch land once the item hits the index. Gives up quietly otherwise.
+async function patchQueuedGpsWithRetry(
+  ownerKey: string,
+  clientUploadId: string,
+  coords: { latitude: number; longitude: number; addressSource?: "exif" | "live_gps" },
+): Promise<void> {
+  for (let i = 0; i < 4; i += 1) {
+    if (await patchQueuedMetadata(ownerKey, clientUploadId, coords).catch(() => false)) return;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+}
+
 export default function CaptureScreen() {
   const params = useLocalSearchParams<{
     dealId?: string;
@@ -481,11 +496,11 @@ export default function CaptureScreen() {
       if (withCoords) {
         await Promise.all(
           pending.map((p) =>
-            patchQueuedMetadata(owner, p.clientUploadId, {
+            patchQueuedGpsWithRetry(owner, p.clientUploadId, {
               latitude: m.latitude!,
               longitude: m.longitude!,
               addressSource: m.addressSource,
-            }).catch(() => undefined),
+            }),
           ),
         );
       }
