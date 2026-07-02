@@ -129,6 +129,10 @@ export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMap
   // them together via Promise.all gains no real concurrency; it only queues the second behind the first, and
   // the pool-level query_timeout counts that queue wait against the timer. Run the DB reads sequentially.
   const ccProjectsPromise = getAllProjects();
+  // If a DB read below throws first, we exit before awaiting ccProjectsPromise — attach a catch now so a
+  // later CompanyCam HTTP rejection can't become an unhandled rejection. The real value/rejection is still
+  // surfaced by the `await ccProjectsPromise` below on the success path.
+  void ccProjectsPromise.catch(() => {});
   const dealRows = await tenantDb
     .select({
       id: deals.id,

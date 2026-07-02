@@ -14,6 +14,9 @@ declare global {
       officeSlug?: string;
       tenantClient?: PoolClient;
       commitTransaction: () => Promise<void>;
+      // Set by the error handler to the failing request's error, so the res-close cleanup can skip ROLLBACK
+      // on an already-broken tenant connection (a ROLLBACK on a query-timed-out socket would wait again).
+      tenantOpError?: unknown;
     }
   }
 }
@@ -120,6 +123,13 @@ export async function tenantMiddleware(req: Request, res: Response, next: NextFu
     const cleanup = async () => {
       if (committed) return;
       committed = true;
+      // If the request already failed with a broken-connection error (carried here by the error handler),
+      // skip ROLLBACK — it would issue another query on a dead/timed-out socket and wait again before we
+      // finally destroy it. Destroy immediately with the original error.
+      if (isBrokenConnectionError(req.tenantOpError)) {
+        releasePooledClient(client, req.tenantOpError);
+        return;
+      }
       let rollbackErr: unknown;
       await client.query("ROLLBACK").catch((e) => {
         rollbackErr = e; // a failed rollback means the connection is unusable → destroy on release

@@ -408,10 +408,14 @@ async function linkMatchedDeal(
       jobId: jobResult.rows[0]?.id ?? null,
     };
   } catch (error) {
+    let rollbackErr: unknown;
     if (transactionOpen) {
-      await client.query("ROLLBACK").catch(() => {});
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
     }
-    throw error;
+    // Prefer a failed ROLLBACK (a dead socket) over the original error so the outer
+    // processSyncHubProcoreProjectCreated catch → releasePooledClient sees the broken connection and
+    // destroys the owned client instead of recycling it.
+    throw rollbackErr ?? error;
   }
 }
 

@@ -55,10 +55,17 @@ function requireAdminOrDirector(role: string): void {
 async function acquireBackgroundDb(officeSlug: string) {
   const client = await pool.connect();
   const schemaName = `office_${officeSlug}`;
-  // Use a transaction-local search_path (true = transaction-local, not session-local)
-  // so concurrent requests on other connections are not affected.
-  await client.query("BEGIN");
-  await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
+  try {
+    // Use a transaction-local search_path (true = transaction-local, not session-local)
+    // so concurrent requests on other connections are not affected.
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
+  } catch (err) {
+    // Setup failed (e.g. a stale checked-out socket now rejecting with Query read timeout) BEFORE we could
+    // return the release handle — release/destroy the client here so the caller can't leak this pool slot.
+    releasePooledClient(client, err);
+    throw err;
+  }
   const tenantDb = drizzle(client, { schema });
   return {
     tenantDb,

@@ -255,18 +255,21 @@ export async function runProjectsBackfill(
     console.log(
       `[ProjectsBackfill] done backfilled=${result.backfilled} skipped=${result.skipped} errored=${result.errored} errors=${result.errors.length} uniqueIds=${seenProjectIds.size}`
     );
-    // Reset session state before returning the client to the pool so the
-    // next consumer doesn't inherit our search_path.
-    await client.query("RESET search_path").catch((resetError) => {
-      console.error("[ProjectsBackfill] RESET search_path failed before release", {
-        schemaName,
-        officeSlug,
-        resetError,
+    // Reset session state before returning the client to the pool so the next consumer doesn't inherit our
+    // search_path — but SKIP it when the client is already known broken (processRow rethrew a broken error),
+    // since RESET on a dead socket would wait another full query_timeout before we finally destroy it.
+    if (!isBrokenConnectionError(releaseErr)) {
+      await client.query("RESET search_path").catch((resetError) => {
+        console.error("[ProjectsBackfill] RESET search_path failed before release", {
+          schemaName,
+          officeSlug,
+          resetError,
+        });
+        // A failed reset means the connection is unusable (this also catches a connection that broke
+        // mid-loop — every remaining row erred on the dead client, then this reset fails too). Destroy it.
+        releaseErr = resetError;
       });
-      // A failed reset means the connection is unusable (this also catches a connection that broke
-      // mid-loop — every remaining row erred on the dead client, then this reset fails too). Destroy it.
-      releaseErr = resetError;
-    });
+    }
     releasePooledClient(client, releaseErr);
   }
 
