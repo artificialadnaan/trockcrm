@@ -15,7 +15,8 @@
 -- plain ALTER -- no per-tenant office_* loop and no provisioner replay block.
 
 ALTER TABLE public.user_commission_settings
-  ADD COLUMN IF NOT EXISTS commission_structure text NOT NULL DEFAULT 'solo';
+  ADD COLUMN IF NOT EXISTS commission_structure text NOT NULL DEFAULT 'solo'
+    CHECK (commission_structure IN ('solo', 'mixed'));
 ALTER TABLE public.user_commission_settings
   ADD COLUMN IF NOT EXISTS capx_rate_solo numeric(7,6) NOT NULL DEFAULT 0;
 ALTER TABLE public.user_commission_settings

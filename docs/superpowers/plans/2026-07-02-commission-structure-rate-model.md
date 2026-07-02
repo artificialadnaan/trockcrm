@@ -689,14 +689,16 @@ Two edits to `updateUser`:
   });
 ```
 
-(b) Inside the `if (hasCommissionPatch) {` block (Step 3), right after the upsert `await tx…`, set the flag when a rate-affecting field is in this patch (structure or any capX/service rate — floor/override/isActive don't change dsc amounts):
+(b) Inside the `if (hasCommissionPatch) {` block (Step 3), right after the upsert `await tx…`, set the flag ONLY when the **effective** capX rate actually moved. Compare the previous effective rate (from `current`) against the new mirror (`commissionRate`). Editing an inactive rate (Mixed % while Solo), the service-source rate (unused for owner/estimator rows in PR1), or a non-rate field leaves the mirror unchanged and must NOT trigger a recompute:
 
 ```ts
-      commissionRatesChanged =
-        input.commissionStructure !== undefined ||
-        input.capxRateSolo !== undefined ||
-        input.capxRateMixed !== undefined ||
-        input.serviceSourceRate !== undefined;
+      const previousCommissionRate = resolveEffectiveCapxRate({
+        commissionStructure: (current?.commissionStructure as "solo" | "mixed" | undefined) ?? "solo",
+        capxRateSolo: Number(current?.capxRateSolo ?? 0),
+        capxRateMixed: Number(current?.capxRateMixed ?? 0),
+        serviceSourceRate: Number(current?.serviceSourceRate ?? 0),
+      });
+      commissionRatesChanged = commissionRate !== previousCommissionRate;
 ```
 
 (c) The function ends (line 373-379) with the transaction resolving to `{ updated, closeStreams }`, then a post-commit `closeUserSseConnections` call, then `return result.updated;`. Insert the recompute immediately before that final `return result.updated;` — after commit, so it reads the freshly-mirrored `commission_rate`:
@@ -704,24 +706,31 @@ Two edits to `updateUser`:
 ```ts
   if (result.closeStreams) closeUserSseConnections(id);
 
-  // Best-effort: a recompute failure (incl. office enumeration) must NEVER fail the
-  // already-committed settings write. Swallow + log; the per-office loop also degrades internally.
+  // Fire-and-forget, post-commit: re-rating is best-effort and must never block the admin's save
+  // nor fail the already-committed settings write (kicked off like closeUserSseConnections above).
+  // The task owns its own logging. Only fires when the effective capX rate actually changed.
   if (result.commissionRatesChanged) {
-    try {
-      const summary = await recalculateAllCommissionsForRep(id, actorUserId);
-      if (summary.officeFailures.length > 0) {
-        console.error(
-          `[commissions] rep ${id} recompute had office failures:`,
-          JSON.stringify(summary.officeFailures),
-        );
+    void (async () => {
+      try {
+        const summary = await recalculateAllCommissionsForRep(id, actorUserId);
+        if (summary.officeFailures.length > 0) {
+          console.error(
+            `[commissions] rep ${id} recompute had office failures:`,
+            JSON.stringify(summary.officeFailures),
+          );
+        }
+      } catch (err) {
+        console.error(`[commissions] rep ${id} recompute could not start:`, err);
       }
-    } catch (err) {
-      console.error(`[commissions] rep ${id} recompute could not start:`, err);
-    }
+    })();
   }
 
   return result.updated;
 ```
+
+> **Deferred (noted for reviewers):** the fan-out is fire-and-forget but still one recompute per
+> effective-rate-changing save. A true cross-request debounce/queue (coalesce rapid edits into one
+> recompute, or hand off to a job runner) is the deferred async enhancement — out of PR1 scope.
 
 - [ ] **Step 5: Extend `getUsersWithStats` SELECT + GROUP BY + row map**
 

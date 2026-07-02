@@ -64,7 +64,7 @@ alternate structures.
 
 ### Data model changes
 
-**`public.user_commission_settings`** — migration `0172` adds:
+**`public.user_commission_settings`** — migration `0173` adds:
 
 | Column | Type | Default | Meaning |
 |---|---|---|---|
@@ -83,7 +83,7 @@ unchanged.
 `commission_structure = 'solo'`, `service_source_rate = 0`. Every rep stays on their current
 rate with no service-source behavior — zero change to existing payouts.
 
-**`tenant.deals`** — migration `0173` adds:
+**`tenant.deals`** — migration `0174` (PR2) adds:
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -111,26 +111,29 @@ denormalization is maintained. Live pipeline/potential/earned reads keep reading
 
 ### PR1 — Rate model + Users page
 
-1. **Schema + backfill:** migration `0172` (above); extend the Drizzle schema and the
+1. **Schema + backfill:** migration `0173` (above); extend the Drizzle schema and the
    `AdminUser` type (`client/src/hooks/use-admin-users.ts`).
 2. **Settings write path:** extend `updateUser` input + `hasCommissionPatch` +
    `onConflictDoUpdate` set (`server/src/modules/admin/users-service.ts:309-371`) for the four
    new fields, and compute/write the effective `commission_rate` mirror in the same upsert.
    Route (`admin/routes.ts:198-207`) is a passthrough — no change.
 3. **Users-page UI** (`client/src/pages/admin/users-page.tsx:684-714`): add a structure
-   `Switch` (solo/mixed — first toggle in this column; precedent is the existing
-   `commissionConfigActive` boolean) plus inputs for the two capX rates and the service-source
-   rate. Consider gating the structure/capX-specific inputs to `role === "rep"`.
+   `Select` (Solo/Mixed — reusing the already-imported shadcn `Select`; a `Switch` component
+   does not exist in the repo, so this avoids a new Radix dependency) plus inputs for the two
+   capX rates and the service-source rate. Consider gating the structure/capX-specific inputs to
+   `role === "rep"`.
 4. **Live recompute on settings change (Fork 2):** a new service
-   `recalculateAllCommissionsForRep(userId)` that fans out across every office the rep has
-   deals in and re-runs the per-deal writer (`recalculateCommissionForDeal`) for the rep's
-   owner rows **and** `sales_source` rows, refreshing `dsc.amount`/`applied_rate` to the new
-   effective rates. Triggered after a commission-settings save. See "Cross-office recompute"
-   risk below.
+   `recalculateAllCommissionsForRep(userId)` that fans out across every active office and
+   re-runs the per-deal writer (`recalculateCommissionForDeal`) for the rep's existing dsc rows —
+   in PR1 that is **owner and estimator** rows only, refreshing `dsc.amount`/`applied_rate` to the
+   new effective rate. (`sales_source` rows don't exist until PR2; the same fan-out covers them
+   for free once they do.) Fired after a commission-settings save, best-effort (never blocks or
+   fails the PATCH) and only when the effective capX rate actually changed. See "Cross-office
+   recompute" risk below.
 
 ### PR2 — Sales Source end-to-end
 
-1. **Schema:** migration `0173` adds `deals.sales_source_user_id`.
+1. **Schema:** migration `0174` adds `deals.sales_source_user_id`.
 2. **Service-opportunity form** (`client/src/components/deals/service-opportunity-form.tsx`):
    add an optional "Sales Source" dropdown of all office reps; include
    `salesSourceUserId` in the submit payload. Server create route

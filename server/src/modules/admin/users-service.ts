@@ -413,11 +413,18 @@ export async function updateUser(
           },
         });
 
-      commissionRatesChanged =
-        input.commissionStructure !== undefined ||
-        input.capxRateSolo !== undefined ||
-        input.capxRateMixed !== undefined ||
-        input.serviceSourceRate !== undefined;
+      // Only recompute when the EFFECTIVE capX rate actually moved. Editing an INACTIVE rate
+      // (e.g. Mixed % while the rep is Solo), the service-source rate (unused for owner/estimator
+      // rows in PR1), or a non-rate field leaves the mirror unchanged — so it must NOT trigger a
+      // fan-out (which would otherwise re-rate deals to their current values for no reason). PR2
+      // will additionally gate on the effective service-source rate once sales_source rows exist.
+      const previousCommissionRate = resolveEffectiveCapxRate({
+        commissionStructure: (current?.commissionStructure as "solo" | "mixed" | undefined) ?? "solo",
+        capxRateSolo: Number(current?.capxRateSolo ?? 0),
+        capxRateMixed: Number(current?.capxRateMixed ?? 0),
+        serviceSourceRate: Number(current?.serviceSourceRate ?? 0),
+      });
+      commissionRatesChanged = commissionRate !== previousCommissionRate;
     }
 
     return { updated, closeStreams: plan.closeStreams, commissionRatesChanged };
@@ -427,18 +434,23 @@ export async function updateUser(
   // authoritative gate remains the per-request is_active + token-version re-check.
   if (result.closeStreams) closeUserSseConnections(id);
 
+  // Fire-and-forget, post-commit: re-rating is best-effort and must never block the admin's save
+  // nor fail the already-committed settings write (kicked off like closeUserSseConnections above).
+  // The task owns its own logging. Only fires when the effective capX rate actually changed.
   if (result.commissionRatesChanged) {
-    try {
-      const summary = await recalculateAllCommissionsForRep(id, actorUserId);
-      if (summary.officeFailures.length > 0) {
-        console.error(
-          `[commissions] rep ${id} recompute had office failures:`,
-          JSON.stringify(summary.officeFailures),
-        );
+    void (async () => {
+      try {
+        const summary = await recalculateAllCommissionsForRep(id, actorUserId);
+        if (summary.officeFailures.length > 0) {
+          console.error(
+            `[commissions] rep ${id} recompute had office failures:`,
+            JSON.stringify(summary.officeFailures),
+          );
+        }
+      } catch (err) {
+        console.error(`[commissions] rep ${id} recompute could not start:`, err);
       }
-    } catch (err) {
-      console.error(`[commissions] rep ${id} recompute could not start:`, err);
-    }
+    })();
   }
 
   return result.updated;
