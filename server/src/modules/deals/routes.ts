@@ -1601,7 +1601,7 @@ router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
     if (decision === "reject" && rawReason.length === 0) {
       throw new AppError(400, "A reason is required to reject an RFP.", "RFP_VOTE_REASON_REQUIRED");
     }
-    const deal = await loadTriggerRfpDeal(req.tenantDb!, req.params.id);
+    const deal = await loadTriggerRfpDeal(req.tenantDb!, req.params.id as string);
     if (!deal) throw new AppError(404, "Deal not found");
     if (isServiceRfp(deal)) {
       throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
