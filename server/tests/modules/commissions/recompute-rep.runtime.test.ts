@@ -195,6 +195,52 @@ describe("recalculateRepCommissionsInOffice", () => {
     expect(await rowFor(ESTIMATOR)).toEqual({ amount: "4000.00", applied_rate: "0.040000" });
   });
 
+  it("re-rates a sales_source row at the service-source rate, not the capX mirror (INV-1)", async () => {
+    const SRC = U("0a20"); // mixed rep who sources a service deal
+    const SVC = U("0a21"); // service-rep owner
+    const D = U("0c20");
+    await pg.exec(
+      `INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+       VALUES ('${SRC}', 'src@t.test', 'Src', 'rep', '${OFFICE}', true),
+              ('${SVC}', 'svc@t.test', 'Svc', 'rep', '${OFFICE}', true)`,
+    );
+    await pg.exec(
+      `INSERT INTO public.user_commission_settings
+         (user_id, commission_rate, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate, is_active)
+       VALUES ('${SRC}', 0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
+              ('${SVC}', 0.030000, 'solo',  0.030000, 0.020000, 0.000000, true)`,
+    );
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, sales_source_user_id,
+          awarded_amount, bid_estimate, dd_estimate, is_change_order, on_hold, office_code, contract_signed_date)
+       VALUES ('${D}', 'D-0c20', 'Sourced', '${STAGE}', '${SVC}', '${SRC}',
+               100000, NULL, NULL, false, false, NULL, '2026-09-15')`,
+    );
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
+
+    const srcRow = async () => {
+      const { rows } = await pg.query<{ amount: string; applied_rate: string }>(
+        `SELECT amount, applied_rate FROM public.deal_signed_commissions
+         WHERE deal_id = $1 AND rep_user_id = $2 AND attribution_role = 'sales_source' LIMIT 1`,
+        [D, SRC],
+      );
+      return rows[0];
+    };
+    // Baseline: sales_source row at service-source rate 0.005000 → 100000 × 0.005 = 500.00.
+    // capX mirror (commission_rate = 0.020000) must NOT appear here.
+    expect(await srcRow()).toEqual({ amount: "500.00", applied_rate: "0.005000" });
+
+    // Raise the source rep's service-source rate to 0.8% (capX mirror commission_rate unchanged at 0.02).
+    await pg.exec(
+      `UPDATE public.user_commission_settings SET service_source_rate = 0.008000 WHERE user_id = '${SRC}'`,
+    );
+    await recalculateRepCommissionsInOffice(tdb, SRC, ADMIN);
+
+    // MUST re-rate at the SERVICE-SOURCE rate (0.008 → 800.00), NOT the capX mirror (0.02 → 2000.00).
+    expect(await srcRow()).toEqual({ amount: "800.00", applied_rate: "0.008000" });
+  });
+
   it("re-rates a rep's rows to $0 when the effective rate is deliberately set to 0%", async () => {
     const REP3 = U("0a05");
     const DEAL4 = U("0c04");
