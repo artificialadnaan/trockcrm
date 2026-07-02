@@ -63,7 +63,7 @@ export interface RepRecomputeSummary {
  * an office simply recomputes 0). Each office runs in its own transaction; one office failing
  * degrades gracefully and is reported, never thrown.
  */
-export async function recalculateAllCommissionsForRep(
+async function runRepRecompute(
   userId: string,
   triggeredByUserId: string,
 ): Promise<RepRecomputeSummary> {
@@ -84,4 +84,29 @@ export async function recalculateAllCommissionsForRep(
     }
   }
   return { recomputed, officeFailures };
+}
+
+// Per-rep in-memory serialization. Two rapid settings edits for the same rep must not run their
+// cross-office recomputes concurrently: an earlier recompute that read the OLD rate inside its
+// office transactions could commit AFTER the later one and leave deal_signed_commissions at the
+// stale rate. Chaining each rep's recompute after any in-flight one guarantees the last-committed
+// rate wins. There is no await between the map read and write below, so concurrent calls chain
+// deterministically. Per-instance only; cross-instance serialization is part of the deferred
+// job-queue work (see the spec's "Cross-office recompute" note).
+const repRecomputeChains = new Map<string, Promise<unknown>>();
+
+export function recalculateAllCommissionsForRep(
+  userId: string,
+  triggeredByUserId: string,
+): Promise<RepRecomputeSummary> {
+  const prior = repRecomputeChains.get(userId) ?? Promise.resolve();
+  const run = prior
+    .catch(() => undefined)
+    .then(() => runRepRecompute(userId, triggeredByUserId));
+  repRecomputeChains.set(userId, run);
+  // Drop the entry once this is the tail of the chain, so the map doesn't grow unbounded.
+  void run.finally(() => {
+    if (repRecomputeChains.get(userId) === run) repRecomputeChains.delete(userId);
+  });
+  return run;
 }
