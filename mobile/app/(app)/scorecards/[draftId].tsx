@@ -7,7 +7,7 @@ import * as ImagePicker from "expo-image-picker";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { getTranscriptionConfig } from "../../../src/api/endpoints";
-import { uploadOwnerKey, newClientUploadId } from "../../../src/capture/upload-queue";
+import { uploadOwnerKey, newClientUploadId, removeQueuedUploads } from "../../../src/capture/upload-queue";
 import { qk } from "../../../src/query/keys";
 import { extractExifMetadata } from "../../../src/capture/metadata";
 import type { CapturedShot } from "../../../src/capture/CameraCapture";
@@ -24,6 +24,7 @@ import {
   scorecardDraftPhotosForSection,
   validateScorecardDraft,
   type ScorecardDraft,
+  type ScorecardDraftPhoto,
   type DraftAction,
 } from "../../../src/scorecards/draft";
 import { loadScorecardDraft, saveScorecardDraft, deleteScorecardDraft, copyPhotoIntoDraft } from "../../../src/scorecards/draft-store";
@@ -66,6 +67,8 @@ export default function ScorecardWizardScreen() {
 
   useEffect(() => {
     if (!ownerKey || !draftId) return;
+    setLoaded(null); // reset if the screen is reused for a different draftId (deep link / replace)
+    setStep(0);
     void loadScorecardDraft(ownerKey, draftId).then((d) => setLoaded(d ?? "missing"));
   }, [ownerKey, draftId]);
 
@@ -89,6 +92,7 @@ export default function ScorecardWizardScreen() {
 
   return (
     <Wizard
+      key={draftId}
       initial={loaded}
       ownerKey={ownerKey!}
       draftId={draftId}
@@ -149,6 +153,13 @@ function Wizard(props: {
 
   const goNext = () => setStep(Math.min(LAST_STEP, step + 1));
   const goBack = () => (step === 0 ? router.back() : setStep(step - 1));
+
+  // Remove a photo from the draft AND cancel any already-queued upload for it (a prior offline submit may
+  // have enqueued it) so a later drain can't upload evidence that's no longer part of the card.
+  const removePhotoAndCancelUpload = (photo: ScorecardDraftPhoto) => {
+    dispatch({ type: "removePhoto", key: photo.key });
+    void removeQueuedUploads(ownerKey, [photo.clientUploadId]).catch(() => undefined);
+  };
 
   async function onCameraCapture(shot: CapturedShot, caption: string) {
     if (cameraSection === null) return;
@@ -247,6 +258,7 @@ function Wizard(props: {
             voiceEnabled={voiceEnabled}
             onAddPhoto={() => setCameraSection(step - 1)}
             onImport={() => void importForSection(step - 1)}
+            onRemovePhoto={removePhotoAndCancelUpload}
           />
         ) : step === SECTION_COUNT + 1 ? (
           <DeficienciesStep draft={draft} dispatch={dispatch} />
@@ -303,10 +315,11 @@ function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React
 }
 
 function SectionStep({
-  sectionIndex, draft, dispatch, voiceEnabled, onAddPhoto, onImport,
+  sectionIndex, draft, dispatch, voiceEnabled, onAddPhoto, onImport, onRemovePhoto,
 }: {
   sectionIndex: number; draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction>;
   voiceEnabled: boolean; onAddPhoto: () => void; onImport: () => void;
+  onRemovePhoto: (photo: ScorecardDraftPhoto) => void;
 }) {
   const section = FIELD_SCORECARD_SECTIONS[sectionIndex];
   const selected = draft.scores[section.key];
@@ -334,7 +347,7 @@ function SectionStep({
       <Field label="Note (optional)">
         <TextInput value={note} onChangeText={(v) => dispatch({ type: "setNote", sectionKey: section.key, note: v })} placeholder="Add a note" multiline style={{ minHeight: 56, textAlignVertical: "top", paddingTop: 10 }} />
         {voiceEnabled ? (
-          <VoiceRecorder onTranscript={(t) => dispatch({ type: "setNote", sectionKey: section.key, note: note ? `${note} ${t}` : t })} />
+          <VoiceRecorder onTranscript={(t) => dispatch({ type: "appendNote", sectionKey: section.key, text: t })} />
         ) : null}
       </Field>
       <View style={{ gap: theme.space.sm }}>
@@ -343,7 +356,7 @@ function SectionStep({
           {photos.map((p) => (
             <View key={p.key} style={styles.thumbWrap}>
               <Image source={{ uri: p.uri }} style={styles.thumb} />
-              <Pressable onPress={() => dispatch({ type: "removePhoto", key: p.key })} hitSlop={8} style={styles.thumbX}>
+              <Pressable onPress={() => onRemovePhoto(p)} hitSlop={8} style={styles.thumbX}>
                 <Text style={styles.thumbXText}>✕</Text>
               </Pressable>
             </View>

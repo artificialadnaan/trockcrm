@@ -25,21 +25,31 @@ async function ensureDir(dir: string): Promise<void> {
 }
 
 export async function listScorecardDrafts(ownerKey: string): Promise<ScorecardDraft[]> {
-  try {
-    const path = indexPath(ownerKey);
-    const info = await FileSystem.getInfoAsync(path);
-    if (!info.exists) return [];
-    const raw = await FileSystem.readAsStringAsync(path);
-    const parsed = JSON.parse(raw) as ScorecardDraft[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return []; // a corrupt index shouldn't brick the tab — start clean
+  const path = indexPath(ownerKey);
+  // Prefer the live index; fall back to the .tmp left by a crash between delete + move (see writeIndex).
+  for (const candidate of [path, `${path}.tmp`]) {
+    try {
+      const info = await FileSystem.getInfoAsync(candidate);
+      if (!info.exists) continue;
+      const raw = await FileSystem.readAsStringAsync(candidate);
+      const parsed = JSON.parse(raw) as ScorecardDraft[];
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // try the next candidate — a partial write shouldn't brick the tab
+    }
   }
+  return [];
 }
 
 async function writeIndex(ownerKey: string, drafts: ScorecardDraft[]): Promise<void> {
   await ensureDir(ownerDir(ownerKey));
-  await FileSystem.writeAsStringAsync(indexPath(ownerKey), JSON.stringify(drafts));
+  const path = indexPath(ownerKey);
+  const tmp = `${path}.tmp`;
+  // Write to a temp file then move it over the live index, so an interrupted write can't leave a
+  // half-written index.json (which would parse-fail and hide EVERY local draft).
+  await FileSystem.writeAsStringAsync(tmp, JSON.stringify(drafts));
+  await FileSystem.deleteAsync(path, { idempotent: true });
+  await FileSystem.moveAsync({ from: tmp, to: path });
 }
 
 /** Upsert a draft (stamping updatedAt at persist time — the reducer stays pure/time-free). */

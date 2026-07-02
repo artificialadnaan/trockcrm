@@ -147,6 +147,20 @@ describe("photos", () => {
   });
 });
 
+describe("appendNote", () => {
+  it("appends to the current note (dictation-safe — no stale-closure clobber)", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "setNote", sectionKey: "schedule", note: "typed" });
+    d = scorecardDraftReducer(d, { type: "appendNote", sectionKey: "schedule", text: "dictated" });
+    expect(d.notes.schedule).toBe("typed dictated");
+  });
+  it("starts fresh when the note is empty", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "appendNote", sectionKey: "quality", text: "first" });
+    expect(d.notes.quality).toBe("first");
+  });
+});
+
 describe("scorecardDraftToSubmission", () => {
   it("builds the POST payload in canonical section order with trimmed action items + photo refs", () => {
     let d = fullyScored();

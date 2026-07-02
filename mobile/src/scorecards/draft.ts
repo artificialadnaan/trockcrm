@@ -47,6 +47,7 @@ export interface ScorecardDraft {
 export type DraftAction =
   | { type: "setScore"; sectionKey: ScorecardSectionKey; points: number }
   | { type: "setNote"; sectionKey: ScorecardSectionKey; note: string }
+  | { type: "appendNote"; sectionKey: ScorecardSectionKey; text: string }
   | { type: "setHeader"; field: "superintendentName" | "pmName" | "weekOf"; value: string }
   | { type: "toggleDeficiency"; key: ScorecardCriticalDeficiencyKey }
   | { type: "setActionItems"; items: string[] }
@@ -102,6 +103,13 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       return { ...draft, scores: { ...draft.scores, [action.sectionKey]: action.points } };
     case "setNote":
       return { ...draft, notes: { ...draft.notes, [action.sectionKey]: action.note } };
+    case "appendNote": {
+      // Append to the LATEST note (from reducer state), so a dictation transcript that returns after the
+      // user kept typing doesn't clobber those edits with a stale-closure value.
+      const current = draft.notes[action.sectionKey] ?? "";
+      const next = current ? `${current} ${action.text}` : action.text;
+      return { ...draft, notes: { ...draft.notes, [action.sectionKey]: next } };
+    }
     case "setHeader":
       return { ...draft, [action.field]: action.value };
     case "toggleDeficiency": {

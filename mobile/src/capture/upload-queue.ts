@@ -127,6 +127,21 @@ export async function clearFailedUploads(ownerKey: string): Promise<void> {
 }
 
 /**
+ * Cancel specific queued uploads by clientUploadId (and delete their copied files). Used when scorecard
+ * evidence is removed from a draft after a prior offline submit already enqueued it — otherwise a later
+ * drain would still upload a photo that's no longer part of the card.
+ */
+export async function removeQueuedUploads(ownerKey: string, clientUploadIds: string[]): Promise<void> {
+  if (clientUploadIds.length === 0) return;
+  const ids = new Set(clientUploadIds);
+  const current = await readQueue(ownerKey);
+  const toRemove = current.filter((item) => ids.has(item.clientUploadId));
+  if (toRemove.length === 0) return;
+  await writeQueue(ownerKey, current.filter((item) => !ids.has(item.clientUploadId)));
+  await deleteQueuedFiles(toRemove);
+}
+
+/**
  * Copy each capture into durable storage and persist it to the index. The index is rewritten AFTER EACH
  * item is copied (not once at the end): if the app is killed mid-enqueue, every photo already copied is
  * recoverable from the index instead of being orphaned and lost. Returns the queued items.
