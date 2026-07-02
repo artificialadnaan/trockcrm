@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Download, Loader2, Search, ClipboardCheck, ArrowUpRight } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/layout/page-header";
@@ -60,7 +60,7 @@ export default function QcReportsPage() {
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [search, setSearch] = useState("");
 
-  const { scorecards, loading, error, refetch } = useQcScorecards({ from, to });
+  const { scorecards, truncated, loading, error, refetch } = useQcScorecards({ from, to });
 
   const regionOptions = useMemo(
     () => [...new Set(scorecards.map((s) => s.regionName).filter((r): r is string => !!r))].sort(),
@@ -176,6 +176,12 @@ export default function QcReportsPage() {
           />
         </div>
       </div>
+
+      {truncated && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-[12.5px] font-medium text-amber-800">
+          Showing the most recent 1,000 scorecards for this window — narrow the week range to see the rest.
+        </div>
+      )}
 
       {/* table */}
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -347,23 +353,31 @@ async function triggerDownload(r: QcScorecardRow) {
 
 function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: () => void }) {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [detail, setDetail] = useState<FieldScorecardDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const key = row?.scorecardId ?? null;
 
-  // Fetch detail when a row is opened (keyed on scorecardId so switching rows reloads).
+  // Carry the current office context onto the deal link — dropping it would 404 a cross-office admin.
+  const officeId = searchParams.get("officeId");
+  const dealHref = row ? `/deals/${row.dealId}?tab=scorecards${officeId ? `&officeId=${encodeURIComponent(officeId)}` : ""}` : "";
+
+  // Fetch detail when a row is opened (keyed on scorecardId so switching rows reloads); reloadKey retries.
   useEffect(() => {
     if (!row) return;
     let cancelled = false;
     setDetail(null);
+    setDetailError(null);
     setLoading(true);
     fetchDealScorecardDetail(row.dealId, row.scorecardId)
       .then((d) => { if (!cancelled) setDetail(d); })
-      .catch((e) => { if (!cancelled) toast.error(e instanceof Error ? e.message : "Couldn’t load detail"); })
+      .catch((e) => { if (!cancelled) setDetailError(e instanceof Error ? e.message : "Couldn’t load scorecard detail"); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, reloadKey]);
 
   return (
     <Sheet open={!!row} onOpenChange={(o) => !o && onClose()}>
@@ -387,20 +401,25 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
             </div>
 
             <div className="mt-4">
-              {loading || !detail ? (
+              {loading ? (
                 <div className="flex items-center justify-center py-8 text-sm text-slate-500">
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading detail…
                 </div>
-              ) : (
+              ) : detailError ? (
+                <div className="py-8 text-center">
+                  <p className="text-sm text-brand-red">{detailError}</p>
+                  <Button variant="outline" size="sm" className="mt-3" onClick={() => setReloadKey((k) => k + 1)}>Try again</Button>
+                </div>
+              ) : detail ? (
                 <ScorecardDetailView detail={detail} />
-              )}
+              ) : null}
             </div>
 
             <div className="mt-5 flex gap-2 border-t border-slate-100 pt-4">
               <Button className="flex-1 bg-brand-red text-white hover:bg-brand-red/90" onClick={() => void triggerDownload(row)}>
                 <Download className="mr-2 h-4 w-4" /> Download PDF
               </Button>
-              <Button variant="outline" onClick={() => navigate(`/deals/${row.dealId}?tab=scorecards`)}>
+              <Button variant="outline" onClick={() => navigate(dealHref)}>
                 Open deal
               </Button>
             </div>

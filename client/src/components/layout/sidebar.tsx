@@ -272,8 +272,9 @@ export function Sidebar() {
                   <item.icon className="h-4 w-4" />
                   {item.label}
                 </NavLink>
-                {/* pl-2 bridges the gap so the mouse can travel from item to panel without closing */}
-                <div className="invisible absolute left-full top-0 z-30 pl-2 opacity-0 transition-opacity group-hover:visible group-hover:opacity-100">
+                {/* pl-2 bridges the gap so the mouse can travel from item to panel without closing. Revealed
+                    on hover AND keyboard focus (focus-within) so it isn't mouse-only. */}
+                <div className="invisible absolute left-full top-0 z-30 pl-2 opacity-0 transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
                   <div className="min-w-[200px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
                     <div className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Projects</div>
                     <NavLink to="/projects" end className={subItemClass}>

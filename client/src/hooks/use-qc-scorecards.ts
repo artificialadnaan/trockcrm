@@ -30,6 +30,7 @@ export interface QcScorecardFilters {
 /** Office-scoped QC dashboard feed: every Field Scorecard in the window, filtered server-side. */
 export function useQcScorecards(filters: QcScorecardFilters) {
   const [scorecards, setScorecards] = useState<QcScorecardRow[]>([]);
+  const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,8 +48,9 @@ export function useQcScorecards(filters: QcScorecardFilters) {
       if (rating) qs.set("rating", rating);
       if (flaggedOnly) qs.set("flaggedOnly", "true");
       if (search) qs.set("search", search);
-      const data = await api<{ data: { scorecards: QcScorecardRow[] } }>(`/reports/qc-scorecards?${qs.toString()}`);
+      const data = await api<{ data: { scorecards: QcScorecardRow[]; truncated?: boolean } }>(`/reports/qc-scorecards?${qs.toString()}`);
       setScorecards(data.data.scorecards);
+      setTruncated(data.data.truncated ?? false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load QC reports");
     } finally {
@@ -60,5 +62,5 @@ export function useQcScorecards(filters: QcScorecardFilters) {
     void refetch();
   }, [refetch]);
 
-  return { scorecards, loading, error, refetch };
+  return { scorecards, truncated, loading, error, refetch };
 }

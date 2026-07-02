@@ -1,8 +1,12 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
+
+const textArray = (values: readonly string[]) =>
+  sql`ARRAY[${sql.join(values.map((v) => sql`${v}`), sql`, `)}]::text[]`;
 
 export interface QcScorecardsFilters {
   from: string; // yyyy-mm-dd (week_of lower bound)
@@ -30,7 +34,9 @@ export interface QcScorecardRow {
   pdfAvailable: boolean;
 }
 
-const MAX_ROWS = 500;
+// High enough to be non-binding for a single office's week window (a real office rarely has this many
+// scorecards in a few weeks). If it's ever hit, `truncated` lets the UI say so instead of silently dropping.
+const MAX_ROWS = 1000;
 
 /**
  * Office-scoped QC report: every Field Scorecard whose week falls in [from, to], joined to its deal for the
@@ -41,9 +47,15 @@ const MAX_ROWS = 500;
 export async function getQcScorecardsReport(
   tenantDb: TenantDb,
   filters: QcScorecardsFilters,
-): Promise<{ scorecards: QcScorecardRow[] }> {
+): Promise<{ scorecards: QcScorecardRow[]; truncated: boolean }> {
+  // Live/won projects only — mirror the field list's activeProjectWhere off the same WON/LOST slug source of
+  // truth: active deal, not terminal (or a Won-family stage), never Lost. Keeps archived/Lost projects out.
+  const stageSlug = sql`COALESCE(psc.slug, d.bid_board_stage_slug, '')`;
   const conditions = [
     sql`sc.is_active = true`,
+    sql`d.is_active = true`,
+    sql`(COALESCE(psc.is_terminal, false) = false OR ${stageSlug} = ANY(${textArray(WON_STAGE_SLUGS)}))`,
+    sql`${stageSlug} <> ALL(${textArray(LOST_STAGE_SLUGS)})`,
     sql`sc.week_of >= ${filters.from}`,
     sql`sc.week_of <= ${filters.to}`,
   ];
@@ -76,6 +88,7 @@ export async function getQcScorecardsReport(
       (sc.pdf_r2_key IS NOT NULL) AS "pdfAvailable"
     FROM field_scorecards sc
     JOIN deals d ON d.id = sc.deal_id
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
     LEFT JOIN public.region_config rc ON rc.id = d.region_id
     WHERE ${where}
     ORDER BY sc.submitted_at DESC
@@ -84,6 +97,7 @@ export async function getQcScorecardsReport(
 
   const rows = (((result as any).rows ?? result) as any[]) ?? [];
   return {
+    truncated: rows.length >= MAX_ROWS,
     scorecards: rows.map((r) => ({
       scorecardId: String(r.scorecardId),
       dealId: String(r.dealId),
