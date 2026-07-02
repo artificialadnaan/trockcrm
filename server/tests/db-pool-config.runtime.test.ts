@@ -37,6 +37,9 @@ describe("isBrokenConnectionError", () => {
     expect(isBrokenConnectionError({ code: "08006" })).toBe(true); // connection_failure
     expect(isBrokenConnectionError(new Error("Connection terminated unexpectedly"))).toBe(true);
     expect(isBrokenConnectionError(new Error("Query read timeout"))).toBe(true);
+    // node-pg's follow-up-query error after a connection error (what a cleanup ROLLBACK/reset throws) —
+    // cleanup paths prefer this over the original error, so it MUST read as broken.
+    expect(isBrokenConnectionError(new Error("Client has encountered a connection error and is not queryable"))).toBe(true);
   });
 
   it("does NOT flag normal query errors or absent errors (connection stays reusable)", () => {

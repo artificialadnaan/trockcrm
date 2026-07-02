@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { pool, releasePooledClient } from "../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../db.js";
 import { PG_NOTIFY_CHANNEL, type DomainEvent, type DomainEventName } from "./types.js";
 
 class EventBus extends EventEmitter {
@@ -59,9 +59,14 @@ class EventBus extends EventEmitter {
 
       await client.query("COMMIT");
     } catch (err) {
-      let rollbackErr: unknown;
-      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
-      releaseErr = rollbackErr ?? err;
+      if (isBrokenConnectionError(err)) {
+        // Dead socket — skip ROLLBACK (it can't succeed on a broken connection) and destroy the client.
+        releaseErr = err;
+      } else {
+        let rollbackErr: unknown;
+        await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+        releaseErr = rollbackErr ?? err;
+      }
       console.error("[EventBus] emitRemote failed:", err);
       throw err;
     } finally {

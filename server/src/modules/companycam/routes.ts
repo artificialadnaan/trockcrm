@@ -174,6 +174,7 @@ router.post("/sync/:projectId", async (req, res, next) => {
     // Acquire a fresh DB connection for background work
     const { tenantDb: bgDb, release } = await acquireBackgroundDb(officeSlug);
     let syncFailed = false;
+    let syncErr: unknown;
     syncProjectPhotos(bgDb, projectId, userId, officeSlug, (progress) => {
       syncStatus.progress = progress;
     })
@@ -182,12 +183,13 @@ router.post("/sync/:projectId", async (req, res, next) => {
       })
       .catch((err) => {
         syncFailed = true;
+        syncErr = err; // pass the actual error to release() so a dead-socket sync failure destroys the client
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
       })
       .finally(() =>
         // release() now THROWS on a failed COMMIT; treat that as a sync failure (fail-closed) instead of
         // letting it surface as an unhandled rejection or leave a "Complete" status standing after a bad commit.
-        release(syncFailed).catch((err) => {
+        release(syncFailed, syncErr).catch((err) => {
           syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
         }),
       );
@@ -217,6 +219,7 @@ router.post("/sync-all", async (req, res, next) => {
 
     const { tenantDb: bgDb, release } = await acquireBackgroundDb(officeSlug);
     let syncAllFailed = false;
+    let syncAllErr: unknown;
     syncAllLinkedProjects(bgDb, userId, officeSlug, (progress) => {
       syncStatus.progress = progress;
     })
@@ -225,12 +228,13 @@ router.post("/sync-all", async (req, res, next) => {
       })
       .catch((err) => {
         syncAllFailed = true;
+        syncAllErr = err; // pass the actual error to release() so a dead-socket sync failure destroys the client
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
       })
       .finally(() =>
         // release() now THROWS on a failed COMMIT; treat that as a sync failure (fail-closed) instead of
         // letting it surface as an unhandled rejection or leave a "Complete" status standing after a bad commit.
-        release(syncAllFailed).catch((err) => {
+        release(syncAllFailed, syncAllErr).catch((err) => {
           syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
         }),
       );

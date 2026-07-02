@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { releasePooledClient } from "../../db.js";
+import { releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { procoreClient } from "../../lib/procore-client.js";
 import {
   buildProjectMirrorFields,
@@ -149,6 +149,12 @@ async function processRow(
     result.backfilled += 1;
     return normalized.procoreProjectId;
   } catch (error) {
+    // A broken-connection error means the client is dead: don't ROLLBACK on it (burns another
+    // query_timeout) and don't record-and-continue (every remaining row would fail the same way, one
+    // timeout each). Rethrow so the caller aborts the backfill and destroys the client via releaseErr.
+    if (isBrokenConnectionError(error)) {
+      throw error;
+    }
     await client.query("ROLLBACK").catch((rollbackError) => {
       console.error(
         "[ProjectsBackfill] ROLLBACK failed after row error",

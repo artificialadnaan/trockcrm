@@ -3,9 +3,10 @@ import pg from "pg";
 import * as schema from "@trock-crm/shared/schema";
 
 const DEFAULT_POOL_MAX = 20;
-// Validate DB_POOL_MAX: a missing / malformed / NaN / non-positive value falls back to the default so an
-// invalid env can't set pg.Pool.max (and the saturation-gauge threshold) to 0/NaN.
-const parsedPoolMax = parseInt(process.env.DB_POOL_MAX ?? "", 10);
+// Validate DB_POOL_MAX: a missing / malformed / non-positive value falls back to the default so an invalid
+// env can't set pg.Pool.max (and the saturation-gauge threshold) to a bad value. Number() (not parseInt)
+// rejects partial-numeric strings — "10foo" → NaN, "1.5" → non-integer — instead of silently accepting 10/1.
+const parsedPoolMax = Number(process.env.DB_POOL_MAX);
 const POOL_MAX = Number.isInteger(parsedPoolMax) && parsedPoolMax > 0 ? parsedPoolMax : DEFAULT_POOL_MAX;
 
 const pool = new pg.Pool({
@@ -81,7 +82,10 @@ export function isBrokenConnectionError(err: unknown): boolean {
   // Match only messages specific to CONNECTION loss. Deliberately NOT a bare "timeout" — a statement_timeout
   // ("canceling statement due to statement timeout") or lock timeout leaves the connection healthy and
   // reusable; only node-pg's client-side "Query read timeout" (ambiguous socket state) counts as broken.
-  if (/Query read timeout|Connection terminated|terminating connection|server closed the connection/i.test(message)) {
+  // "not queryable" / "Client has encountered a connection error" is what node-pg throws for a follow-up
+  // query (ROLLBACK/reset) on a client that ALREADY hit a connection error — cleanup paths that prefer the
+  // rollback error over the original must recognize it, or they'd recycle an unusable client.
+  if (/Query read timeout|Connection terminated|terminating connection|server closed the connection|not queryable|Client has encountered a connection error/i.test(message)) {
     return true;
   }
   const code = typeof e.code === "string" ? e.code : "";

@@ -1108,9 +1108,10 @@ router.get(
           });
         } catch (officeErr) {
           if (isBrokenConnectionError(officeErr)) {
-            // Already a dead socket — don't waste a query_timeout on ROLLBACK; stop and destroy.
+            // Dead socket — don't waste a query_timeout on ROLLBACK. Throw so the request FAILS (the finally
+            // destroys the client) rather than returning a misleading 200 with a truncated office list.
             releaseErr = officeErr;
-            break;
+            throw officeErr;
           }
           let rollbackErr: unknown;
           await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
@@ -1119,8 +1120,10 @@ router.get(
           // destruction. Continuing would run every remaining office on the dead connection and then
           // the finally would recycle it back to the pool as healthy.
           if (isBrokenConnectionError(rollbackErr)) {
+            // Connection broke during ROLLBACK — fail the request (the finally destroys the client) rather
+            // than returning a truncated office list as a success.
             releaseErr = rollbackErr;
-            break;
+            throw rollbackErr;
           }
           results.push({
             officeId: office.id,
@@ -1217,9 +1220,10 @@ router.get(
           });
         } catch (officeErr) {
           if (isBrokenConnectionError(officeErr)) {
-            // Already a dead socket — don't waste a query_timeout on ROLLBACK; stop and destroy.
+            // Dead socket — don't waste a query_timeout on ROLLBACK. Throw so the request FAILS (the finally
+            // destroys the client) rather than returning a misleading 200 with a truncated office list.
             releaseErr = officeErr;
-            break;
+            throw officeErr;
           }
           let rollbackErr: unknown;
           await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
@@ -1227,8 +1231,10 @@ router.get(
           // A failed ROLLBACK means the connection is now broken — stop and destroy; don't run the rest
           // of the offices on a poisoned client and then recycle it as healthy.
           if (isBrokenConnectionError(rollbackErr)) {
+            // Connection broke during ROLLBACK — fail the request (the finally destroys the client) rather
+            // than returning a truncated office list as a success.
             releaseErr = rollbackErr;
-            break;
+            throw rollbackErr;
           }
           results.push({
             officeId: office.id,
