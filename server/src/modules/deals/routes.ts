@@ -35,6 +35,7 @@ import {
   setDealContractSignedDate,
   setDealEstimator,
 } from "./service.js";
+import { listDealDescriptionHistory } from "./deal-description-history.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
@@ -2220,6 +2221,18 @@ router.get("/:id/scorecards/:scorecardId/download", async (req, res, next) => {
     const result = await getDealScorecardPdfDownload(req.tenantDb!, req.params.id, req.params.scorecardId);
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/description-history — the deal's description change-log (newest first)
+router.get("/:id/description-history", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const history = await listDealDescriptionHistory(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json({ history });
   } catch (err) {
     next(err);
   }
