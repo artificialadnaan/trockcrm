@@ -5,6 +5,7 @@ import { runConcurrentUploads, uploadCapture, type CaptureUploadInput } from "./
 import {
   UPLOAD_CONCURRENCY,
   bumpAttempts,
+  createAsyncMutex,
   dedupeQueue,
   isDrainable,
   partitionResults,
@@ -42,6 +43,13 @@ function indexFile(ownerKey: string): string {
 }
 
 export type DrainSummary = { succeeded: number; failed: number; remaining: number };
+
+// Serialize every index READ-MODIFY-WRITE for this process. enqueue / removeQueuedUploads / drain-commit
+// each read a snapshot then write it back; run concurrently (remove-a-photo racing a submit's enqueue) they
+// would clobber each other. Each mutation below reads AND writes inside this lock, so writes never race.
+// Pure READS (getQueuedUploads/getQueuedCount/getFailedCount) stay lock-free — writeQueue is atomic
+// (tmp+move), so a read always sees a whole index, never a torn one.
+const withQueueLock = createAsyncMutex();
 
 // ── Disk-backed index + file lifecycle ─────────────────────────────────────────
 
@@ -119,11 +127,13 @@ export async function getFailedCount(ownerKey: string): Promise<number> {
 
 /** Discard the terminal/failed items (and their files) — the UI's "Dismiss failed" action. */
 export async function clearFailedUploads(ownerKey: string): Promise<void> {
-  const current = await readQueue(ownerKey);
-  const failed = current.filter((item) => !isDrainable(item));
-  if (failed.length === 0) return;
-  await writeQueue(ownerKey, current.filter(isDrainable));
-  await deleteQueuedFiles(failed);
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    const failed = current.filter((item) => !isDrainable(item));
+    if (failed.length === 0) return;
+    await writeQueue(ownerKey, current.filter(isDrainable));
+    await deleteQueuedFiles(failed);
+  });
 }
 
 /**
@@ -134,11 +144,13 @@ export async function clearFailedUploads(ownerKey: string): Promise<void> {
 export async function removeQueuedUploads(ownerKey: string, clientUploadIds: string[]): Promise<void> {
   if (clientUploadIds.length === 0) return;
   const ids = new Set(clientUploadIds);
-  const current = await readQueue(ownerKey);
-  const toRemove = current.filter((item) => ids.has(item.clientUploadId));
-  if (toRemove.length === 0) return;
-  await writeQueue(ownerKey, current.filter((item) => !ids.has(item.clientUploadId)));
-  await deleteQueuedFiles(toRemove);
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    const toRemove = current.filter((item) => ids.has(item.clientUploadId));
+    if (toRemove.length === 0) return;
+    await writeQueue(ownerKey, current.filter((item) => !ids.has(item.clientUploadId)));
+    await deleteQueuedFiles(toRemove);
+  });
 }
 
 /**
@@ -148,43 +160,51 @@ export async function removeQueuedUploads(ownerKey: string, clientUploadIds: str
  */
 export async function enqueueUploads(ownerKey: string, inputs: CaptureUploadInput[]): Promise<QueuedUpload[]> {
   if (inputs.length === 0) return [];
-  await ensureDir(ownerKey);
-  const dir = ownerDir(ownerKey);
-  const queued: QueuedUpload[] = [];
-  let current = await readQueue(ownerKey);
-  for (const input of inputs) {
-    const ext = input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
-    const dest = `${dir}${input.clientUploadId}${ext}`;
-    await FileSystem.copyAsync({ from: input.uri, to: dest });
-    const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
-    // Persist immediately so a crash right after this copy still recovers the item on next launch.
-    current = dedupeQueue(current, [item]);
-    await writeQueue(ownerKey, current);
-    queued.push(item);
-  }
-  return queued;
+  return withQueueLock(async () => {
+    await ensureDir(ownerKey);
+    const dir = ownerDir(ownerKey);
+    const queued: QueuedUpload[] = [];
+    let current = await readQueue(ownerKey);
+    for (const input of inputs) {
+      const ext = input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
+      const dest = `${dir}${input.clientUploadId}${ext}`;
+      await FileSystem.copyAsync({ from: input.uri, to: dest });
+      const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
+      // Persist immediately so a crash right after this copy still recovers the item on next launch.
+      current = dedupeQueue(current, [item]);
+      await writeQueue(ownerKey, current);
+      queued.push(item);
+    }
+    return queued;
+  });
 }
 
 /** Remove items (and their files) from the persisted index — used after a successful upload. */
 async function removeQueuedItems(ownerKey: string, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  const current = await readQueue(ownerKey);
-  const toDelete = current.filter((item) => ids.includes(item.clientUploadId));
-  await writeQueue(ownerKey, removeIds(current, ids));
-  await deleteQueuedFiles(toDelete);
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    const toDelete = current.filter((item) => ids.includes(item.clientUploadId));
+    await writeQueue(ownerKey, removeIds(current, ids));
+    await deleteQueuedFiles(toDelete);
+  });
 }
 
 /** Increment the failed-attempt counter for the given ids — moves them toward the terminal cap. */
 async function recordFailedAttempts(ownerKey: string, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  const current = await readQueue(ownerKey);
-  await writeQueue(ownerKey, bumpAttempts(current, ids, Date.now()));
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    await writeQueue(ownerKey, bumpAttempts(current, ids, Date.now()));
+  });
 }
 
 export async function clearUploadQueue(ownerKey: string): Promise<void> {
-  const current = await readQueue(ownerKey);
-  await deleteQueuedFiles(current);
-  await writeQueue(ownerKey, []);
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    await deleteQueuedFiles(current);
+    await writeQueue(ownerKey, []);
+  });
 }
 
 // A drain must never run twice at once (foreground + background, or a double tap): a second caller would

@@ -24,20 +24,30 @@ async function ensureDir(dir: string): Promise<void> {
   if (!info.exists) await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
 }
 
+// Read + parse one index file, or null if missing / partial / unparseable.
+async function readDraftIndexFile(file: string): Promise<ScorecardDraft[] | null> {
+  try {
+    const info = await FileSystem.getInfoAsync(file);
+    if (!info.exists) return null;
+    const raw = await FileSystem.readAsStringAsync(file);
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as ScorecardDraft[]) : null;
+  } catch {
+    return null; // a partial write shouldn't brick the tab
+  }
+}
+
 export async function listScorecardDrafts(ownerKey: string): Promise<ScorecardDraft[]> {
   const path = indexPath(ownerKey);
-  // Prefer the live index; fall back to the .tmp left by a crash between delete + move (see writeIndex).
-  for (const candidate of [path, `${path}.tmp`]) {
-    try {
-      const info = await FileSystem.getInfoAsync(candidate);
-      if (!info.exists) continue;
-      const raw = await FileSystem.readAsStringAsync(candidate);
-      const parsed = JSON.parse(raw) as ScorecardDraft[];
-      if (Array.isArray(parsed)) return parsed;
-    } catch {
-      // try the next candidate — a partial write shouldn't brick the tab
-    }
-  }
+  // A leftover .tmp exists ONLY when writeIndex was interrupted after fully writing tmp but before the
+  // rename completed — and it holds the NEWEST intended state (written in full before the rename). So
+  // prefer a VALID .tmp first (readDraftIndexFile returns null for a partial/corrupt one → fall through),
+  // then the live index. Reading the live index first here would return the STALE pre-save copy and the
+  // next save would overwrite the newer edit that had already been fully written. Empty only if both fail.
+  const temp = await readDraftIndexFile(`${path}.tmp`);
+  if (temp !== null) return temp;
+  const primary = await readDraftIndexFile(path);
+  if (primary !== null) return primary;
   return [];
 }
 

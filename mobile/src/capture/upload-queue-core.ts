@@ -73,6 +73,25 @@ export function removeIds(queue: QueuedUpload[], ids: Iterable<string>): QueuedU
   return queue.filter((item) => !drop.has(item.clientUploadId));
 }
 
+/**
+ * A minimal async mutex. Every task runs only after the previous one SETTLES (resolve OR reject), so
+ * read-modify-write sections on a shared resource can't interleave: without it, two callers each read the
+ * same on-disk index snapshot and then write, and the later write silently clobbers the earlier one (e.g.
+ * removing a photo while a submit enqueues remaining photos). Tasks run in FIFO order; a task that throws
+ * rejects to ITS caller but never wedges the chain for the next task.
+ */
+export function createAsyncMutex(): <T>(task: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  const noop = () => undefined;
+  return function run<T>(task: () => Promise<T>): Promise<T> {
+    // Chain onto the tail as BOTH handlers so `task` runs after the prior settles either way.
+    const result = tail.then(task, task);
+    // Advance the tail on a swallowed copy so one task's rejection can't break the chain.
+    tail = result.then(noop, noop);
+    return result;
+  };
+}
+
 /** Split a settled drain into the ids that uploaded vs the ids that failed (stay queued for retry). */
 export function partitionResults(
   items: QueuedUpload[],

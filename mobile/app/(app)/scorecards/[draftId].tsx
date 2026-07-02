@@ -155,10 +155,17 @@ function Wizard(props: {
   const goBack = () => (step === 0 ? router.back() : setStep(step - 1));
 
   // Remove a photo from the draft AND cancel any already-queued upload for it (a prior offline submit may
-  // have enqueued it) so a later drain can't upload evidence that's no longer part of the card.
-  const removePhotoAndCancelUpload = (photo: ScorecardDraftPhoto) => {
+  // have enqueued it) so a later drain can't upload evidence that's no longer part of the card. AWAIT the
+  // cancellation: it must be durable before the user can tap Submit (which drains the whole owner queue) —
+  // otherwise the just-removed photo could still upload. The queue mutex additionally guarantees this write
+  // can't clobber photos a concurrent submit enqueues.
+  const removePhotoAndCancelUpload = async (photo: ScorecardDraftPhoto) => {
     dispatch({ type: "removePhoto", key: photo.key });
-    void removeQueuedUploads(ownerKey, [photo.clientUploadId]).catch(() => undefined);
+    try {
+      await removeQueuedUploads(ownerKey, [photo.clientUploadId]);
+    } catch {
+      // best-effort: if cancellation fails the server still dedupes on clientUploadId
+    }
   };
 
   async function onCameraCapture(shot: CapturedShot, caption: string) {
