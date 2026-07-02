@@ -49,6 +49,9 @@ export async function recalculateRepCommissionsInOffice(
       // Re-rate ONLY this rep's rows: a rate edit for one rep must never rewrite a co-booked rep's
       // row on a shared deal (which would race with that other rep's own recompute).
       onlyRepUserId: repUserId,
+      // A settings change is deliberate, so a 0% effective rate must re-rate the rep's rows to $0
+      // (not preserve a stale payout). The deal-edit path leaves this off to keep #732 all-or-nothing.
+      zeroOnNoRate: true,
     });
     if (result.status === "created") recomputed += 1;
   }

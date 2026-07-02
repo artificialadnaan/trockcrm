@@ -194,4 +194,43 @@ describe("recalculateRepCommissionsInOffice", () => {
     expect(await rowFor(OWNER)).toEqual({ amount: "2000.00", applied_rate: "0.020000" });
     expect(await rowFor(ESTIMATOR)).toEqual({ amount: "4000.00", applied_rate: "0.040000" });
   });
+
+  it("re-rates a rep's rows to $0 when the effective rate is deliberately set to 0%", async () => {
+    const REP3 = U("0a05");
+    const DEAL4 = U("0c04");
+    await pg.exec(
+      `INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+       VALUES ('${REP3}', 'rep3@t.test', 'Rep3', 'rep', '${OFFICE}', true)`,
+    );
+    await pg.exec(
+      `INSERT INTO public.user_commission_settings
+         (user_id, commission_rate, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate, is_active)
+       VALUES ('${REP3}', 0.030000, 'solo', 0.030000, 0.020000, 0.000000, true)`,
+    );
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, bid_estimate, dd_estimate,
+          is_change_order, on_hold, office_code, contract_signed_date)
+       VALUES ('${DEAL4}', 'D-0c04', 'Zero Deal', '${STAGE}', '${REP3}', 100000, NULL, NULL,
+          false, false, NULL, '2026-09-15')`,
+    );
+    await calculateCommissionForDeal(tdb, {
+      dealId: DEAL4,
+      contractSignedDate: "2026-09-15",
+      triggeredByUserId: ADMIN,
+    });
+    // Baseline: 3000.00 @ 0.03.
+    expect(await ownerRow(DEAL4)).toEqual({ amount: "3000.00", applied_rate: "0.030000" });
+
+    // Admin deliberately sets the active capX rate to 0 → mirror commission_rate = 0.
+    await pg.exec(
+      `UPDATE public.user_commission_settings SET commission_rate = 0, capx_rate_solo = 0 WHERE user_id = '${REP3}'`,
+    );
+    const count = await recalculateRepCommissionsInOffice(tdb, REP3, ADMIN);
+    expect(count).toBe(1);
+
+    // The earned row is re-rated to $0 — NOT left at the stale 3000.00 (the settings-change path
+    // zeroes on a deliberate 0% rate; the deal-edit path would preserve it).
+    expect(await ownerRow(DEAL4)).toEqual({ amount: "0.00", applied_rate: "0.000000" });
+  });
 });

@@ -201,6 +201,12 @@ export function UsersPage() {
       | "newCustomerShareFloor",
     rawValue: string
   ) => {
+    // A cleared/whitespace-only field must NOT be treated as 0 — Number("") is 0, which would
+    // silently persist a 0% rate (and trigger a recompute). Reject it; an explicit "0" still passes.
+    if (rawValue.trim() === "") {
+      toast.error("Enter a numeric value");
+      return;
+    }
     const parsed = Number(rawValue);
     if (Number.isNaN(parsed)) {
       toast.error("Enter a numeric value");
@@ -724,22 +730,36 @@ export function UsersPage() {
                       </Select>
                     </div>
                     <div className="grid grid-cols-3 gap-2">
-                      <div>
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">capX Solo %</p>
+                      <div className={(user.commissionStructure ?? "solo") === "solo" ? "" : "opacity-50"}>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">
+                          capX Solo %{(user.commissionStructure ?? "solo") === "solo" ? " · active" : ""}
+                        </p>
                         <Input
                           className="h-8 text-xs"
                           defaultValue={formatRatePercentInput(user.capxRateSolo)}
                           onBlur={(event) => handleCommissionFieldUpdate(user.id, "capxRateSolo", event.target.value)}
                           disabled={updatingId === user.id || bulkUpdating}
+                          title={
+                            (user.commissionStructure ?? "solo") === "solo"
+                              ? "Active capX rate under the Solo structure."
+                              : "Inactive under the current (Mixed) structure — does not affect payouts."
+                          }
                         />
                       </div>
-                      <div>
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">capX Mixed %</p>
+                      <div className={(user.commissionStructure ?? "solo") === "mixed" ? "" : "opacity-50"}>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">
+                          capX Mixed %{(user.commissionStructure ?? "solo") === "mixed" ? " · active" : ""}
+                        </p>
                         <Input
                           className="h-8 text-xs"
                           defaultValue={formatRatePercentInput(user.capxRateMixed)}
                           onBlur={(event) => handleCommissionFieldUpdate(user.id, "capxRateMixed", event.target.value)}
                           disabled={updatingId === user.id || bulkUpdating}
+                          title={
+                            (user.commissionStructure ?? "solo") === "mixed"
+                              ? "Active capX rate under the Mixed structure."
+                              : "Inactive under the current (Solo) structure — does not affect payouts."
+                          }
                         />
                       </div>
                       <div>

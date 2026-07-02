@@ -336,11 +336,14 @@ export async function updateUser(
         .select()
         .from(userCommissionSettings)
         .where(eq(userCommissionSettings.userId, id))
-        .limit(1);
+        .limit(1)
+        // Lock the row so concurrent PATCHes for the same rep serialize: the second tx blocks here,
+        // then re-reads the first's committed values before deriving fallbacks — no lost update on
+        // a field the other request didn't touch. (No row yet ⇒ the unique key serializes the insert.)
+        .for("update");
       const current = existingConfig[0];
 
-      const commissionStructure =
-        input.commissionStructure ?? (current?.commissionStructure as "solo" | "mixed" | undefined) ?? "solo";
+      const commissionStructure = input.commissionStructure ?? current?.commissionStructure ?? "solo";
       const capxRateSolo = input.capxRateSolo ?? Number(current?.capxRateSolo ?? 0);
       const capxRateMixed = input.capxRateMixed ?? Number(current?.capxRateMixed ?? 0);
       const serviceSourceRate = input.serviceSourceRate ?? Number(current?.serviceSourceRate ?? 0);
@@ -416,7 +419,7 @@ export async function updateUser(
       // fan-out (which would otherwise re-rate deals to their current values for no reason). PR2
       // will additionally gate on the effective service-source rate once sales_source rows exist.
       const previousCommissionRate = resolveEffectiveCapxRate({
-        commissionStructure: (current?.commissionStructure as "solo" | "mixed" | undefined) ?? "solo",
+        commissionStructure: current?.commissionStructure ?? "solo",
         capxRateSolo: Number(current?.capxRateSolo ?? 0),
         capxRateMixed: Number(current?.capxRateMixed ?? 0),
         serviceSourceRate: Number(current?.serviceSourceRate ?? 0),

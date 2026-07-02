@@ -16,7 +16,7 @@ export const userCommissionSettings = pgTable(
   {
     userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
     commissionRate: numeric("commission_rate", { precision: 7, scale: 6 }).notNull().default("0"),
-    commissionStructure: text("commission_structure").notNull().default("solo"),
+    commissionStructure: text("commission_structure", { enum: ["solo", "mixed"] }).notNull().default("solo"),
     capxRateSolo: numeric("capx_rate_solo", { precision: 7, scale: 6 }).notNull().default("0"),
     capxRateMixed: numeric("capx_rate_mixed", { precision: 7, scale: 6 }).notNull().default("0"),
     serviceSourceRate: numeric("service_source_rate", { precision: 7, scale: 6 }).notNull().default("0"),

@@ -335,6 +335,10 @@ export async function recalculateCommissionForDeal(
     // deal), which would otherwise let concurrent cross-rep edits lose the later rate. Omitted →
     // re-rate every row on the deal (the deal date/amount edit path, where the whole deal changed).
     onlyRepUserId?: string;
+    // When set (settings-change recompute), a deliberate 0% rate on an ACTIVE settings row re-rates
+    // the row to $0 rather than preserving the stale payout. Omitted (deal date/amount edit) keeps
+    // the all-or-nothing preserve (#732), so a transient config never wipes an earned row.
+    zeroOnNoRate?: boolean;
   }
 ): Promise<CalculateCommissionResult> {
   const existingRows = await tenantDb
@@ -385,8 +389,16 @@ export async function recalculateCommissionForDeal(
       .where(eq(userCommissionSettings.userId, row.repUserId))
       .limit(1);
 
-    // ALL-OR-NOTHING: cannot validly recompute → LEAVE THE ROW INTACT (no delete, no zeroing).
-    if (!sourceValue || !settings || !settings.isActive || Number(settings.commissionRate) <= 0) {
+    // ALL-OR-NOTHING preserve when intent is indeterminate: no source value to compute against, or
+    // no active settings row (missing / inactive) → LEAVE THE ROW INTACT (no delete, no zeroing).
+    if (!sourceValue || !settings || !settings.isActive) {
+      continue;
+    }
+    // A rate of exactly 0 on an ACTIVE settings row is a deliberate "no commission". The deal
+    // date/amount edit path still preserves the row (all-or-nothing, #732), but the settings-change
+    // recompute (zeroOnNoRate) re-rates it to $0 — the admin explicitly set 0, so the earned row
+    // must not keep a stale positive payout. Below, appliedRate "0" → amount "0.00".
+    if (Number(settings.commissionRate) <= 0 && !input.zeroOnNoRate) {
       continue;
     }
 
