@@ -657,7 +657,7 @@ internalRfpRoutes.post(
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
       }
-      if (!sourceDealId || typeof payload.rfpApprovalRequestId !== "number") {
+      if (!sourceDealId) {
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
       }
@@ -670,13 +670,19 @@ internalRfpRoutes.post(
 
       // Stale-callback guard (both statuses): the callback must reference the deal's current RFP cycle. The
       // callback is at-least-once, so a duplicate (same request id, same resulting state) is a safe no-op below.
-      const currentRequestId = Number(found.deal.rfp_approval_request_id);
-      if (!Number.isFinite(currentRequestId) || payload.rfpApprovalRequestId !== currentRequestId) {
-        console.warn(
-          `[RFP callback] stale callback ignored for sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"}`
-        );
-        res.json({ success: true, idempotent: true, reason: "stale_callback_ignored" });
-        return;
+      // Legacy / service / override deals carry a SyncHub rfp_approval_request_id and must reconcile the
+      // callback against it. VOTING-path deals never mint one (the CRM decided by vote, not SyncHub), so the
+      // callback carries no rfpApprovalRequestId and is resolved purely by sourceDealId (found via findDeal).
+      const dealRequestId = found.deal.rfp_approval_request_id;
+      const currentRequestId = dealRequestId == null ? null : Number(dealRequestId);
+      if (dealRequestId != null) {
+        if (!Number.isFinite(currentRequestId as number) || payload.rfpApprovalRequestId !== currentRequestId) {
+          console.warn(
+            `[RFP callback] stale callback ignored for sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"}`
+          );
+          res.json({ success: true, idempotent: true, reason: "stale_callback_ignored" });
+          return;
+        }
       }
 
       // Failure callback: the Playwright Bid Board creation failed. Mark the override retryable and leave the
