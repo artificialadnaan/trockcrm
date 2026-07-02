@@ -67,8 +67,13 @@ export default function ScorecardWizardScreen() {
 
   useEffect(() => {
     if (!ownerKey || !draftId) return;
-    setLoaded(null); // reset if the screen is reused for a different draftId (deep link / replace)
+    // Reset ALL transient screen state if the screen is reused for a different draftId (deep link /
+    // replace) — otherwise the camera overlay, submit spinner, or a stale banner leak across sessions.
+    setLoaded(null);
     setStep(0);
+    setCameraSection(null);
+    setSubmitting(false);
+    setNotice(null);
     void loadScorecardDraft(ownerKey, draftId).then((d) => setLoaded(d ?? "missing"));
   }, [ownerKey, draftId]);
 
@@ -227,9 +232,13 @@ function Wizard(props: {
         setSubmitting(false);
         return;
       }
+      // Server accepted the card — the submission is COMPLETE. Everything below is best-effort local
+      // cleanup: it must never block navigation or the recent-list refresh. finalized stays true so autosave
+      // can't resurrect a submitted draft; a failed local delete just leaves a harmless orphan draft (re-
+      // submitting it is idempotent on clientSubmissionId — the server returns the existing card).
       finalized.current = true;
       await saveChain.current.catch(() => undefined); // let any in-flight autosave settle (it will skip)
-      await deleteScorecardDraft(ownerKey, draftId);
+      await deleteScorecardDraft(ownerKey, draftId).catch(() => undefined);
       onSubmitted(draft.dealId);
     } catch {
       setNotice({ tone: "error", text: "Couldn’t submit the scorecard. Your work is saved — try again." });
@@ -303,7 +312,7 @@ function Wizard(props: {
   );
 }
 
-function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React.Dispatch<any> }) {
+function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction> }) {
   return (
     <View style={{ gap: theme.space.md }}>
       <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>
@@ -378,7 +387,7 @@ function SectionStep({
   );
 }
 
-function DeficienciesStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React.Dispatch<any> }) {
+function DeficienciesStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction> }) {
   return (
     <View style={{ gap: theme.space.xs }}>
       <Text style={styles.hint}>Check all that apply.</Text>
@@ -395,7 +404,7 @@ function DeficienciesStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch
   );
 }
 
-function ActionsStep({ draft, dispatch, required }: { draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction>; voiceEnabled: boolean; required: boolean }) {
+function ActionsStep({ draft, dispatch, voiceEnabled, required }: { draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction>; voiceEnabled: boolean; required: boolean }) {
   const text = draft.actionItems.join("\n");
   return (
     <View style={{ gap: theme.space.sm }}>
@@ -409,6 +418,9 @@ function ActionsStep({ draft, dispatch, required }: { draft: ScorecardDraft; dis
         multiline
         style={{ minHeight: 120, textAlignVertical: "top", paddingTop: 10 }}
       />
+      {voiceEnabled ? (
+        <VoiceRecorder onTranscript={(t) => dispatch({ type: "appendActionItem", text: t })} />
+      ) : null}
     </View>
   );
 }

@@ -1,4 +1,5 @@
 import type { FieldProject, FieldPhoto, FieldCaptureTarget } from "../projects/field-projects";
+import type { ScorecardSectionKey } from "../scorecards/scoring";
 
 export type { FieldProject, FieldPhoto, FieldCaptureTarget };
 
@@ -163,10 +164,10 @@ export type FieldScorecardSummary = {
   officeSlug?: string;
   officeId?: string;
 };
-export type FieldScorecardItemView = { sectionKey: string; points: number; note: string | null };
+export type FieldScorecardItemView = { sectionKey: ScorecardSectionKey; points: number; note: string | null };
 export type FieldScorecardPhotoView = {
   id: string;
-  sectionKey: string;
+  sectionKey: ScorecardSectionKey;
   fileId: string;
   url: string | null;
   caption: string | null;

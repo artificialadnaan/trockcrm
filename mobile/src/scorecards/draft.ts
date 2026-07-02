@@ -51,6 +51,7 @@ export type DraftAction =
   | { type: "setHeader"; field: "superintendentName" | "pmName" | "weekOf"; value: string }
   | { type: "toggleDeficiency"; key: ScorecardCriticalDeficiencyKey }
   | { type: "setActionItems"; items: string[] }
+  | { type: "appendActionItem"; text: string }
   | { type: "addPhoto"; photo: ScorecardDraftPhoto }
   | { type: "removePhoto"; key: string }
   | { type: "setPhotoCaption"; key: string; caption: string };
@@ -123,6 +124,16 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
     }
     case "setActionItems":
       return { ...draft, actionItems: action.items };
+    case "appendActionItem": {
+      // Append a dictated transcript as its own action item (from reducer state → no stale-closure
+      // clobber, like appendNote). Drop trailing blank lines first so a mid-typed newline doesn't leave a
+      // gap; ignore an empty transcript.
+      const t = action.text.trim();
+      if (!t) return draft;
+      const items = [...draft.actionItems];
+      while (items.length > 0 && items[items.length - 1].trim() === "") items.pop();
+      return { ...draft, actionItems: [...items, t] };
+    }
     case "addPhoto":
       return { ...draft, photos: [...draft.photos, action.photo] };
     case "removePhoto":

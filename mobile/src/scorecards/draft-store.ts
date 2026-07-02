@@ -4,10 +4,18 @@
 // backed, mirroring src/capture/upload-queue.ts.
 
 import * as FileSystem from "expo-file-system/legacy";
-import { sanitizeOwnerKey } from "../capture/upload-queue";
+// Both from the PURE queue core (createAsyncMutex + sanitizeOwnerKey) — avoids pulling the native
+// upload-queue module (camera / keep-awake) into a module whose only native dep is expo-file-system.
+import { createAsyncMutex, sanitizeOwnerKey } from "../capture/upload-queue-core";
 import type { ScorecardDraft } from "./draft";
 
 const ROOT = `${FileSystem.documentDirectory}scorecard-drafts/`;
+
+// Serialize every index READ-MODIFY-WRITE (autosave upsert + delete) for this process. Both read the whole
+// index then write it back; run concurrently (a slow autosave racing the submit-delete, or two autosaves)
+// they would clobber each other from stale snapshots. Reads (listScorecardDrafts/loadScorecardDraft) stay
+// lock-free — writeIndex is atomic (tmp + move), so a read always sees a whole index, never a torn one.
+const withDraftLock = createAsyncMutex();
 
 function ownerDir(ownerKey: string): string {
   return `${ROOT}${sanitizeOwnerKey(ownerKey)}/`;
@@ -64,12 +72,14 @@ async function writeIndex(ownerKey: string, drafts: ScorecardDraft[]): Promise<v
 
 /** Upsert a draft (stamping updatedAt at persist time — the reducer stays pure/time-free). */
 export async function saveScorecardDraft(ownerKey: string, draft: ScorecardDraft, now: number): Promise<void> {
-  const drafts = await listScorecardDrafts(ownerKey);
-  const stamped = { ...draft, updatedAt: now };
-  const idx = drafts.findIndex((d) => d.id === draft.id);
-  if (idx >= 0) drafts[idx] = stamped;
-  else drafts.push(stamped);
-  await writeIndex(ownerKey, drafts);
+  await withDraftLock(async () => {
+    const drafts = await listScorecardDrafts(ownerKey);
+    const stamped = { ...draft, updatedAt: now };
+    const idx = drafts.findIndex((d) => d.id === draft.id);
+    if (idx >= 0) drafts[idx] = stamped;
+    else drafts.push(stamped);
+    await writeIndex(ownerKey, drafts);
+  });
 }
 
 export async function loadScorecardDraft(ownerKey: string, draftId: string): Promise<ScorecardDraft | null> {
@@ -78,9 +88,11 @@ export async function loadScorecardDraft(ownerKey: string, draftId: string): Pro
 }
 
 export async function deleteScorecardDraft(ownerKey: string, draftId: string): Promise<void> {
-  const drafts = await listScorecardDrafts(ownerKey);
-  await writeIndex(ownerKey, drafts.filter((d) => d.id !== draftId));
-  // Best-effort cleanup of the draft's copied photos.
+  await withDraftLock(async () => {
+    const drafts = await listScorecardDrafts(ownerKey);
+    await writeIndex(ownerKey, drafts.filter((d) => d.id !== draftId));
+  });
+  // Best-effort cleanup of the draft's copied photos (no index dependency — outside the lock).
   try {
     await FileSystem.deleteAsync(photoDir(ownerKey, draftId), { idempotent: true });
   } catch {

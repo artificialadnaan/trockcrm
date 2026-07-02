@@ -161,6 +161,27 @@ describe("appendNote", () => {
   });
 });
 
+describe("appendActionItem", () => {
+  it("appends a trimmed transcript as a new action item (dictation-safe)", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "setActionItems", items: ["Re-pour slab"] });
+    d = scorecardDraftReducer(d, { type: "appendActionItem", text: "  Schedule recovery meeting  " });
+    expect(d.actionItems).toEqual(["Re-pour slab", "Schedule recovery meeting"]);
+  });
+  it("drops trailing blank lines before appending (no double blank from a mid-typed newline)", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "setActionItems", items: ["First", ""] });
+    d = scorecardDraftReducer(d, { type: "appendActionItem", text: "Second" });
+    expect(d.actionItems).toEqual(["First", "Second"]);
+  });
+  it("ignores an empty/whitespace transcript", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, { type: "setActionItems", items: ["Keep"] });
+    d = scorecardDraftReducer(d, { type: "appendActionItem", text: "   " });
+    expect(d.actionItems).toEqual(["Keep"]);
+  });
+});
+
 describe("scorecardDraftToSubmission", () => {
   it("builds the POST payload in canonical section order with trimmed action items + photo refs", () => {
     let d = fullyScored();
