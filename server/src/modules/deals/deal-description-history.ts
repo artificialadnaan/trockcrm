@@ -11,17 +11,19 @@ const DESCRIPTION_FIELD = "description";
 /**
  * The deal_history row to record for a description edit, or null when nothing actually changed. Pure so
  * updateDeal writes a change-log row ONLY on a real change (null and undefined normalize to the same empty),
- * and the decision is unit-testable without a DB. `source: "deal_edit"` marks the origin for the display.
+ * and the decision is unit-testable without a DB. `source` marks the origin for the display ("deal_edit"
+ * for the deal form, "scope_summary" for the scoping workspace's scope-summary write).
  */
 export function buildDescriptionHistoryEntry(
   oldDescription: string | null | undefined,
   newDescription: string | null | undefined,
   changedBy: string,
+  source = "deal_edit",
 ): { fieldName: string; oldValue: string | null; newValue: string | null; changedBy: string; source: string } | null {
   const oldValue = oldDescription ?? null;
   const newValue = newDescription ?? null;
   if (oldValue === newValue) return null;
-  return { fieldName: DESCRIPTION_FIELD, oldValue, newValue, changedBy, source: "deal_edit" };
+  return { fieldName: DESCRIPTION_FIELD, oldValue, newValue, changedBy, source };
 }
 
 /**

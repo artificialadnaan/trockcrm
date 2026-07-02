@@ -82,6 +82,11 @@ describe("buildDescriptionHistoryEntry", () => {
     expect(buildDescriptionHistoryEntry(undefined, null, ALICE)).toBeNull();
     expect(buildDescriptionHistoryEntry(null, undefined, ALICE)).toBeNull();
   });
+
+  it("uses the provided source, defaulting to deal_edit (scope_summary for the scoping workspace write)", () => {
+    expect(buildDescriptionHistoryEntry("a", "b", ALICE)?.source).toBe("deal_edit");
+    expect(buildDescriptionHistoryEntry("a", "b", ALICE, "scope_summary")?.source).toBe("scope_summary");
+  });
 });
 
 describe("listDealDescriptionHistory", () => {
