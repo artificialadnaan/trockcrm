@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { companies, contacts, deals, files, leads, pipelineStageConfig, properties, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { FileCategory, PhotoCategory } from "@trock-crm/shared/types";
+import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   deleteObject,
@@ -1057,6 +1058,10 @@ export function sortPhotoTargetsByRelevance<
   });
 }
 
+/** Postgres text[] literal for a slug list — used in the dealsOnly browsability ANY/ALL predicate. */
+const photoTargetTextArray = (values: readonly string[]) =>
+  sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
+
 export async function searchPhotoUploadTargets(
   tenantDb: TenantDb,
   input: { search?: string; limit?: number; dealsOnly?: boolean }
@@ -1090,6 +1095,16 @@ export async function searchPhotoUploadTargets(
   // that cannot actually receive a photo.
   leadConditions.push(eq(leads.isActive, true));
   dealConditions.push(eq(deals.isActive, true));
+  if (dealsOnly) {
+    // Scorecard picker: only surface BROWSABLE field projects (active-pipeline OR Won-family, never
+    // Lost/terminal) so it can't offer a deal the createFieldScorecard gate would 404. Mirrors
+    // field/projects-service.activeProjectWhere, keyed off the SAME WON/LOST slug source of truth.
+    const stageSlug = sql`COALESCE(${pipelineStageConfig.slug}, ${deals.bidBoardStageSlug}, '')`;
+    dealConditions.push(sql`
+      (COALESCE(${pipelineStageConfig.isTerminal}, false) = false OR ${stageSlug} = ANY(${photoTargetTextArray(WON_STAGE_SLUGS)}))
+      AND ${stageSlug} <> ALL(${photoTargetTextArray(LOST_STAGE_SLUGS)})
+    `);
+  }
   if (leadSearch) leadConditions.push(leadSearch);
   if (dealSearch) dealConditions.push(dealSearch);
 

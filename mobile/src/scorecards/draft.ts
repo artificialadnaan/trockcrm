@@ -54,7 +54,6 @@ export type DraftAction =
   | { type: "appendActionItem"; text: string }
   | { type: "addPhoto"; photo: ScorecardDraftPhoto }
   | { type: "removePhoto"; key: string }
-  | { type: "setPhotoUri"; key: string; uri: string }
   | { type: "setPhotoCaption"; key: string; caption: string };
 
 export interface ScorecardSubmissionPayload {
@@ -139,18 +138,17 @@ export function scorecardDraftReducer(draft: ScorecardDraft, action: DraftAction
       return { ...draft, photos: [...draft.photos, action.photo] };
     case "removePhoto":
       return { ...draft, photos: draft.photos.filter((p) => p.key !== action.key) };
-    case "setPhotoUri":
-      return {
-        ...draft,
-        photos: draft.photos.map((p) => (p.key === action.key ? { ...p, uri: action.uri } : p)),
-      };
     case "setPhotoCaption":
       return {
         ...draft,
         photos: draft.photos.map((p) => (p.key === action.key ? { ...p, caption: action.caption } : p)),
       };
-    default:
+    default: {
+      // Exhaustiveness guard: adding a DraftAction variant without a case here fails to compile.
+      const _exhaustive: never = action;
+      void _exhaustive;
       return draft;
+    }
   }
 }
 

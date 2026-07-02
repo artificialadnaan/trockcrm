@@ -10,7 +10,7 @@ import { getTranscriptionConfig, type Fetcher } from "../../../src/api/endpoints
 import { apiFetch } from "../../../src/api/client";
 import { uploadOwnerKey, newClientUploadId, removeQueuedUploads } from "../../../src/capture/upload-queue";
 import { qk } from "../../../src/query/keys";
-import { extractExifMetadata } from "../../../src/capture/metadata";
+import { extractExifMetadata, getLiveGps } from "../../../src/capture/metadata";
 import type { CapturedShot } from "../../../src/capture/CameraCapture";
 import {
   FIELD_SCORECARD_SECTIONS,
@@ -44,6 +44,17 @@ const LAST_STEP = 1 + SECTION_COUNT + 2; // setup + sections + deficiencies + ac
 
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
+}
+
+// Stamp live device GPS when a shot's EXIF has no location — mirrors the Capture screen, so scorecard
+// evidence isn't missing coordinates on devices whose camera omits GPS EXIF. Best-effort; never throws.
+async function withLiveGpsFallback(exif: ReturnType<typeof extractExifMetadata>) {
+  if (exif.latitude !== undefined && exif.longitude !== undefined) return exif;
+  const live = await getLiveGps().catch(() => null);
+  if (live && live.latitude !== undefined && live.longitude !== undefined) {
+    return { ...exif, latitude: live.latitude, longitude: live.longitude, addressSource: live.addressSource ?? exif.addressSource };
+  }
+  return exif;
 }
 
 export default function ScorecardWizardScreen() {
@@ -88,9 +99,15 @@ export default function ScorecardWizardScreen() {
     // Guard against a slow load from a PREVIOUS draftId/owner resolving last and seeding the wizard with
     // the wrong draft — ignore any resolution after this effect has been superseded.
     let cancelled = false;
-    void loadScorecardDraft(ownerKey, draftId).then((d) => {
-      if (!cancelled) setLoaded(d ?? "missing");
-    });
+    void loadScorecardDraft(ownerKey, draftId)
+      .then((d) => {
+        if (!cancelled) setLoaded(d ?? "missing");
+      })
+      .catch(() => {
+        // A read failure must not leave the screen stuck on "Loading…" forever — resolve to the
+        // not-found state so the user gets a clear message + a way back.
+        if (!cancelled) setLoaded("missing");
+      });
     return () => {
       cancelled = true;
     };
@@ -161,10 +178,16 @@ function Wizard(props: {
   const { ownerKey, draftId, step, setStep, cameraSection, setCameraSection, submitting, setSubmitting, notice, setNotice, voiceEnabled, onSubmitted, fetcher } = props;
   const router = useRouter();
   const [draft, dispatch] = useReducer(scorecardDraftReducer, props.initial);
+  // Count of evidence photos still being copied into durable storage. Submit is blocked while > 0 so a
+  // capture in flight (durable copy + dispatch not yet done) can't be omitted from a fast submit.
+  const [savingPhotos, setSavingPhotos] = useState(0);
   // Serialize autosaves so a slow older write can't land after a newer edit — or after the submit-delete
   // and resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted.
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const finalized = useRef(false);
+  // In-flight photo-cancellation promises — onSubmit awaits these so a fast Remove → Submit can't drain
+  // (upload) a just-removed photo before its queue removal settles.
+  const pendingRemovals = useRef<Promise<unknown>[]>([]);
   useEffect(() => {
     if (finalized.current) return;
     saveChain.current = saveChain.current
@@ -179,49 +202,48 @@ function Wizard(props: {
   const goBack = () => (step === 0 ? router.back() : setStep(step - 1));
 
   // Remove a photo from the draft AND cancel any already-queued upload for it (a prior offline submit may
-  // have enqueued it) so a later drain can't upload evidence that's no longer part of the card. AWAIT the
-  // cancellation: it must be durable before the user can tap Submit (which drains the whole owner queue) —
-  // otherwise the just-removed photo could still upload. The queue mutex additionally guarantees this write
-  // can't clobber photos a concurrent submit enqueues.
-  const removePhotoAndCancelUpload = async (photo: ScorecardDraftPhoto) => {
+  // have enqueued it) so a later drain can't upload evidence that's no longer part of the card. The
+  // cancellation is TRACKED (not fire-and-forget): onSubmit awaits it, so a fast Remove → Submit can't
+  // drain the just-removed photo before its queue removal settles, and a failure blocks submit instead of
+  // being silently ignored. The queue mutex additionally guarantees this write can't clobber photos a
+  // concurrent submit enqueues.
+  const removePhotoAndCancelUpload = (photo: ScorecardDraftPhoto) => {
     dispatch({ type: "removePhoto", key: photo.key });
-    try {
-      await removeQueuedUploads(ownerKey, [photo.clientUploadId]);
-    } catch {
-      // best-effort: if cancellation fails the server still dedupes on clientUploadId
-    }
+    const task = removeQueuedUploads(ownerKey, [photo.clientUploadId]);
+    pendingRemovals.current.push(task);
+    void task.catch(() => undefined); // avoid an unhandled rejection; onSubmit inspects the settled result
   };
 
   async function onCameraCapture(shot: CapturedShot, caption: string) {
     if (cameraSection === null) return;
     const sectionKey = FIELD_SCORECARD_SECTIONS[cameraSection].key;
     const clientUploadId = newClientUploadId();
-    const exif = extractExifMetadata(shot.exif);
-    // Add with the RAW uri IMMEDIATELY (synchronously after capture) so a crew tapping Save then instantly
-    // closing the camera or submitting can't drop a photo the UI already accepted — the draft always
-    // reflects what was captured. The raw uri is still uploadable this session (enqueue re-copies it).
-    dispatch({
-      type: "addPhoto",
-      photo: {
-        key: clientUploadId, // stable + globally unique → survives resume; removePhoto(by key) can't collide
-        uri: shot.uri,
-        clientUploadId,
-        sectionKey,
-        caption,
-        takenAt: exif.takenAt ?? shot.capturedAt,
-        latitude: exif.latitude,
-        longitude: exif.longitude,
-        width: shot.width,
-        height: shot.height,
-      },
-    });
-    // Then copy into durable per-draft storage and swap the uri (so it survives app-kill while the draft
-    // sits unsubmitted); keep the raw uri if the copy fails.
+    setSavingPhotos((n) => n + 1); // blocks Submit until the durable copy + dispatch below finish
     try {
+      const exif = await withLiveGpsFallback(extractExifMetadata(shot.exif));
+      // Copy into durable per-draft storage BEFORE dispatching, so the draft (and its autosave) never
+      // persists a raw camera uri that would go stale on app-kill. If the copy fails, drop the photo with a
+      // notice rather than persisting a stale uri — the user retakes.
       const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, shot.uri);
-      dispatch({ type: "setPhotoUri", key: clientUploadId, uri: durableUri });
+      dispatch({
+        type: "addPhoto",
+        photo: {
+          key: clientUploadId, // stable + globally unique → survives resume; removePhoto(by key) can't collide
+          uri: durableUri,
+          clientUploadId,
+          sectionKey,
+          caption,
+          takenAt: exif.takenAt ?? shot.capturedAt,
+          latitude: exif.latitude,
+          longitude: exif.longitude,
+          width: shot.width,
+          height: shot.height,
+        },
+      });
     } catch {
-      /* keep the raw uri */
+      setNotice({ tone: "error", text: "Couldn’t save that photo — please retake it." });
+    } finally {
+      setSavingPhotos((n) => n - 1);
     }
   }
 
@@ -236,17 +258,19 @@ function Wizard(props: {
     const sectionKey = FIELD_SCORECARD_SECTIONS[sectionIndex].key;
     for (const asset of result.assets) {
       const clientUploadId = newClientUploadId();
-      const exif = extractExifMetadata(asset.exif as Record<string, unknown>);
-      // Add with the raw uri first (see onCameraCapture), then swap to the durable copy.
-      dispatch({
-        type: "addPhoto",
-        photo: { key: clientUploadId, uri: asset.uri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, width: asset.width, height: asset.height },
-      });
+      setSavingPhotos((n) => n + 1);
       try {
+        const exif = await withLiveGpsFallback(extractExifMetadata(asset.exif as Record<string, unknown>));
+        // Durable-copy BEFORE dispatch (see onCameraCapture); drop with a notice if the copy fails.
         const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
-        dispatch({ type: "setPhotoUri", key: clientUploadId, uri: durableUri });
+        dispatch({
+          type: "addPhoto",
+          photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, width: asset.width, height: asset.height },
+        });
       } catch {
-        /* keep the raw uri */
+        setNotice({ tone: "error", text: "Couldn’t import that photo — please try again." });
+      } finally {
+        setSavingPhotos((n) => n - 1);
       }
     }
   }
@@ -255,6 +279,17 @@ function Wizard(props: {
     if (submitting) return;
     setSubmitting(true);
     setNotice(null);
+    // Let any in-flight photo removals settle first, so the drain in submitScorecard can't upload a
+    // just-removed photo. A failed removal blocks submit (rather than silently shipping stale evidence).
+    if (pendingRemovals.current.length > 0) {
+      const results = await Promise.allSettled(pendingRemovals.current);
+      pendingRemovals.current = [];
+      if (results.some((r) => r.status === "rejected")) {
+        setNotice({ tone: "error", text: "Couldn’t finish removing a photo — please try again." });
+        setSubmitting(false);
+        return;
+      }
+    }
     try {
       const result = await submitScorecard(fetcher, ownerKey, draft);
       if (result.status === "photos_failed") {
@@ -327,7 +362,7 @@ function Wizard(props: {
         {step < LAST_STEP ? (
           <Button title="Next →" onPress={goNext} style={{ flex: 1 }} />
         ) : (
-          <Button title="Submit ✓" onPress={onSubmit} loading={submitting} disabled={!validation.canSubmit || submitting} style={{ flex: 1 }} />
+          <Button title={savingPhotos > 0 ? "Saving photo…" : "Submit ✓"} onPress={onSubmit} loading={submitting} disabled={!validation.canSubmit || submitting || savingPhotos > 0} style={{ flex: 1 }} />
         )}
       </View>
 
@@ -429,7 +464,14 @@ function DeficienciesStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch
       {FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => {
         const on = draft.criticalDeficiencies.includes(d.key);
         return (
-          <Pressable key={d.key} onPress={() => dispatch({ type: "toggleDeficiency", key: d.key })} style={styles.check}>
+          <Pressable
+            key={d.key}
+            onPress={() => dispatch({ type: "toggleDeficiency", key: d.key })}
+            style={styles.check}
+            accessibilityRole="checkbox"
+            accessibilityState={{ checked: on }}
+            accessibilityLabel={d.label}
+          >
             <View style={[styles.box, on && styles.boxOn]}>{on ? <Text style={styles.boxCheck}>✓</Text> : null}</View>
             <Text style={styles.checkLabel}>{d.label}</Text>
           </Pressable>

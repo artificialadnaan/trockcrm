@@ -105,4 +105,17 @@ describe("draft-store: serialization (no read-modify-write clobber)", () => {
     ]);
     expect((await listScorecardDrafts("u1")).map((d) => d.id)).toEqual(["b"]);
   });
+
+  it("a concurrent save + delete of the SAME id leaves a consistent index (no duplicate / corruption)", async () => {
+    await saveScorecardDraft("u1", draft("a"), 1);
+    await Promise.all([
+      saveScorecardDraft("u1", draft("a"), 2), // re-save the same draft
+      deleteScorecardDraft("u1", "a"), // ...while deleting it
+    ]);
+    const list = await listScorecardDrafts("u1");
+    // The mutex serializes the two RMWs, so the result is one clean state — never a duplicate or a
+    // half-written index. Either ends deleted (delete last) or present exactly once (save last).
+    expect(list.filter((d) => d.id === "a").length).toBeLessThanOrEqual(1);
+    expect([0, 1]).toContain(list.length);
+  });
 });

@@ -1,7 +1,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import type { Fetcher } from "../api/endpoints";
-import { runConcurrentUploads, uploadCapture, type CaptureUploadInput } from "./upload";
+import { runConcurrentUploads, uploadCapture, UploadCancelledError, type CaptureUploadInput } from "./upload";
 import {
   UPLOAD_CONCURRENCY,
   bumpAttempts,
@@ -165,23 +165,24 @@ export async function removeQueuedUploads(ownerKey: string, clientUploadIds: str
  */
 export async function enqueueUploads(ownerKey: string, inputs: CaptureUploadInput[]): Promise<QueuedUpload[]> {
   if (inputs.length === 0) return [];
-  return withQueueLock(async () => {
-    await ensureDir(ownerKey);
-    const dir = ownerDir(ownerKey);
-    const queued: QueuedUpload[] = [];
-    let current = await readQueue(ownerKey);
-    for (const input of inputs) {
-      const ext = input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
-      const dest = `${dir}${input.clientUploadId}${ext}`;
-      await FileSystem.copyAsync({ from: input.uri, to: dest });
-      const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
-      // Persist immediately so a crash right after this copy still recovers the item on next launch.
-      current = dedupeQueue(current, [item]);
-      await writeQueue(ownerKey, current);
-      queued.push(item);
-    }
-    return queued;
-  });
+  await ensureDir(ownerKey);
+  const dir = ownerDir(ownerKey);
+  const queued: QueuedUpload[] = [];
+  for (const input of inputs) {
+    const ext = input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
+    const dest = `${dir}${input.clientUploadId}${ext}`;
+    // Copy OUTSIDE the lock — a large photo's copy is slow and must not block removeQueuedUploads /
+    // drain re-selection from making progress during a big batch.
+    await FileSystem.copyAsync({ from: input.uri, to: dest });
+    const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
+    // Persist immediately (read-modify-write UNDER the lock) so a crash right after the copy still recovers
+    // the item, without holding the lock across the copy above.
+    await withQueueLock(async () => {
+      await writeQueue(ownerKey, dedupeQueue(await readQueue(ownerKey), [item]));
+    });
+    queued.push(item);
+  }
+  return queued;
 }
 
 /** Remove items (and their files) from the persisted index — used after a successful upload. */
@@ -267,7 +268,18 @@ export async function drainUploadQueue(
         // (user pulled a photo off the card), skip confirm so the removed evidence never links to the deal.
         uploadCapture(fetcher, item, { shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId) }),
       );
-      const { succeededIds, failedIds } = partitionResults(chunk, results);
+      // A cancelled upload (photo removed mid-flight → confirm skipped) is neither a success nor a failure:
+      // it was intentionally dropped + already removed from the index, so exclude it from
+      // partitionResults/recordFailedAttempts rather than counting it as failed or bumping its attempts.
+      const liveChunk: QueuedUpload[] = [];
+      const liveResults: PromiseSettledResult<unknown>[] = [];
+      chunk.forEach((item, i) => {
+        const r = results[i];
+        if (r && r.status === "rejected" && r.reason instanceof UploadCancelledError) return;
+        liveChunk.push(item);
+        liveResults.push(r);
+      });
+      const { succeededIds, failedIds } = partitionResults(liveChunk, liveResults);
       await removeQueuedItems(ownerKey, succeededIds);
       await recordFailedAttempts(ownerKey, failedIds);
       succeeded += succeededIds.length;

@@ -91,13 +91,15 @@ export async function deleteScorecardDraft(ownerKey: string, draftId: string): P
   await withDraftLock(async () => {
     const drafts = await listScorecardDrafts(ownerKey);
     await writeIndex(ownerKey, drafts.filter((d) => d.id !== draftId));
+    // Clean up the draft's copied photos UNDER THE SAME LOCK so a concurrent saveScorecardDraft can't
+    // resurrect the index entry while its photo dir is being deleted (which would leave a restored draft
+    // pointing at missing photos). One lock coordinates both the index update and the photo cleanup.
+    try {
+      await FileSystem.deleteAsync(photoDir(ownerKey, draftId), { idempotent: true });
+    } catch {
+      /* best-effort */
+    }
   });
-  // Best-effort cleanup of the draft's copied photos (no index dependency — outside the lock).
-  try {
-    await FileSystem.deleteAsync(photoDir(ownerKey, draftId), { idempotent: true });
-  } catch {
-    /* ignore */
-  }
 }
 
 /**
