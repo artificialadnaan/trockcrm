@@ -73,6 +73,7 @@ export { dealPaymentEvents } from "./tenant/deal-payment-events.js";
 export { dealSignedCommissions } from "./tenant/deal-signed-commissions.js";
 export { bidBoardSyncRuns } from "./tenant/bid-board-sync-runs.js";
 export { dealApprovals, approvalStatusEnum } from "./tenant/deal-approvals.js";
+export { rfpVotes } from "./tenant/rfp-votes.js";
 export {
   estimateMarkets,
   estimateMarketZipMappings,
