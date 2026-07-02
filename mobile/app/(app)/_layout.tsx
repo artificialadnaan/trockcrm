@@ -44,6 +44,10 @@ export default function AppLayout() {
         options={{ title: "Capture", tabBarIcon: ({ color }) => <TabIcon name="camera-outline" color={color} /> }}
       />
       <Tabs.Screen
+        name="scorecards"
+        options={{ title: "Scorecard", tabBarIcon: ({ color }) => <TabIcon name="clipboard-outline" color={color} /> }}
+      />
+      <Tabs.Screen
         name="profile"
         options={{ title: "Profile", tabBarIcon: ({ color }) => <TabIcon name="person-outline" color={color} /> }}
       />

@@ -35,10 +35,13 @@ export function TargetPicker({
   visible,
   onClose,
   onSelect,
+  dealsOnly = false,
 }: {
   visible: boolean;
   onClose: () => void;
   onSelect: (target: FieldCaptureTarget) => void;
+  /** Scorecards attach to a deal (FK to deals) — restrict the picker so a lead/opportunity can't be chosen. */
+  dealsOnly?: boolean;
 }) {
   const [search, setSearch] = useState("");
   const [nearbyCoords, setNearbyCoords] = useState<NearbyCoords | null>(null);
@@ -46,8 +49,9 @@ export function TargetPicker({
   const debounced = useDebouncedValue(search.trim(), 200);
   const { data, isFetching } = useCaptureTargets(debounced);
   const nearbyQuery = useNearbyCaptureTargets(nearbyCoords, visible && debounced.length === 0, NEARBY_LIMIT);
-  const targets = data?.targets ?? [];
-  const nearbyTargets = nearbyQuery.data?.targets ?? [];
+  const onlyDeals = (items: FieldCaptureTarget[]) => (dealsOnly ? items.filter((t) => t.type === "deal") : items);
+  const targets = onlyDeals(data?.targets ?? []);
+  const nearbyTargets = onlyDeals(nearbyQuery.data?.targets ?? []);
 
   useEffect(() => {
     if (!visible) {
@@ -126,7 +130,7 @@ export function TargetPicker({
           <TextInput
             value={search}
             onChangeText={setSearch}
-            placeholder="Search deals, opportunities, leads"
+            placeholder={dealsOnly ? "Search projects" : "Search deals, opportunities, leads"}
             autoCapitalize="none"
           />
         </View>
