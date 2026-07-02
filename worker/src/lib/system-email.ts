@@ -18,11 +18,18 @@ function toArray(value: string | string[] | undefined): string[] {
   return Array.isArray(value) ? value.filter(Boolean) : [value].filter(Boolean);
 }
 
+export interface SendSystemEmailAttachment {
+  filename: string;
+  content: Buffer;
+}
+
 export interface SendSystemEmailOptions {
   cc?: string | string[];
   bcc?: string | string[];
   text?: string;
   idempotencyKey?: string;
+  /** File attachments (e.g. a rendered PDF). Passed through to Resend as { filename, content }. */
+  attachments?: SendSystemEmailAttachment[];
 }
 
 export interface SendSystemEmailResult {
@@ -64,6 +71,9 @@ export async function sendSystemEmailWithMetadata(
     if (bcc.length) console.log(`  Bcc: ${bcc.join(", ")}`);
     console.log(`  From: ${fromAddress()}`);
     console.log(`  Subject: ${subjectLine}`);
+    if (options.attachments?.length) {
+      console.log(`  Attachments: ${options.attachments.map((a) => a.filename).join(", ")}`);
+    }
     console.log(`  Body: ${body.substring(0, 200)}...`);
     return { success: true, messageId: null };
   }
@@ -71,6 +81,17 @@ export async function sendSystemEmailWithMetadata(
   if (recipients.length === 0) {
     console.warn("[Email] No recipients after override - skipping");
     return { success: false, messageId: null };
+  }
+
+  // Resend's post-encoding attachment limit is ~40MB and base64 inflates raw bytes by ~33%, so warn well
+  // before that (Resend still rejects oversized payloads via result.error as the backstop). Makes an
+  // oversized scorecard PDF easy to diagnose instead of a bare provider error.
+  const attachmentBytes = (options.attachments ?? []).reduce((sum, a) => sum + (a.content?.length ?? 0), 0);
+  if (attachmentBytes > 28 * 1024 * 1024) {
+    console.warn(
+      `[Email] Attachments total ${(attachmentBytes / (1024 * 1024)).toFixed(1)}MB — near Resend's ~40MB post-encoding limit; the send may be rejected.`,
+      { subject: subjectLine }
+    );
   }
 
   const result = await resend.emails.send({
@@ -81,6 +102,9 @@ export async function sendSystemEmailWithMetadata(
     ...(options.text ? { text: options.text } : {}),
     ...(cc.length ? { cc } : {}),
     ...(bcc.length ? { bcc } : {}),
+    ...(options.attachments?.length
+      ? { attachments: options.attachments.map((a) => ({ filename: a.filename, content: a.content })) }
+      : {}),
   }, options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined);
 
   if (result.error) {

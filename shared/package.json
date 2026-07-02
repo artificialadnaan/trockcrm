@@ -21,6 +21,10 @@
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
     },
+    "./lib/fieldScorecardEmails": {
+      "types": "./dist/lib/fieldScorecardEmails.d.ts",
+      "default": "./dist/lib/fieldScorecardEmails.js"
+    },
     "./lib/rfpReviewerEmails": {
       "types": "./dist/lib/rfpReviewerEmails.d.ts",
       "default": "./dist/lib/rfpReviewerEmails.js"

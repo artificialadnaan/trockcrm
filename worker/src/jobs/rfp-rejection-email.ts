@@ -9,6 +9,7 @@ import {
   resolveRfpReviewerEmails,
   DEFAULT_NON_PROD_RFP_REVIEWER,
 } from "@trock-crm/shared/lib/rfpReviewerEmails";
+import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 
 export const RFP_REJECTED_JOB = "rfp_rejected_email";
 
@@ -338,7 +339,7 @@ export function buildRfpRejectionEmail(input: {
   return { subject, html, text, dealUrl, reviewUrl, dealNumber: input.dealNumber };
 }
 
-// --- small local utilities (mirror the private helpers in project-number-email.ts) ---
+// --- small local utilities (escapeHtml / normalizeText / isSafeTenantSchema are shared via email-format) ---
 
 function dedupeEmails(emails: string[]): string[] {
   const seen = new Set<string>();
@@ -352,25 +353,7 @@ function dedupeEmails(emails: string[]): string[] {
   return out;
 }
 
-function normalizeText(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
 function normalizePositiveInt(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) return null;
   return value;
-}
-
-function isSafeTenantSchema(value: unknown): value is string {
-  return typeof value === "string" && /^office_[a-z0-9_]+$/.test(value);
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }

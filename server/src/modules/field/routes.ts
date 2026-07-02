@@ -28,7 +28,9 @@ import {
 } from "./photo-reports-service.js";
 import {
   createFieldScorecard,
+  finalizeFieldScorecardArtifacts,
   getFieldScorecardDetail,
+  getFieldScorecardPdfDownload,
   listFieldScorecardsForProject,
   listRecentFieldScorecards,
 } from "./scorecards-service.js";
@@ -843,19 +845,39 @@ fieldRoutes.post("/scorecards", requireFieldContractor, async (req, res, next) =
   try {
     const parsed = parseScorecardSubmission(req.body);
     const submittedByName = scorecardSubmitterName(req.fieldUser!);
+    let resolvedOffice: FieldOffice | undefined;
     const { scorecard, created } = await runFieldDealWrite(
       req,
       { dealId: parsed.dealId },
-      (db) =>
-        createFieldScorecard(db, {
+      (db, office) => {
+        resolvedOffice = office;
+        return createFieldScorecard(db, {
           userId: req.fieldUser!.id,
           userRole: req.fieldUser!.role,
           submittedByName,
+          office: { id: office.id, slug: office.slug },
           ...parsed,
-        }),
+        });
+      },
       "Project not found",
     );
+    // Respond as soon as the submission is durably committed — the PDF render + email happen post-commit so
+    // an R2/email hiccup can never lose (or block) the submission, and the mobile submit stays snappy.
     res.status(created ? 201 : 200).json({ scorecard });
+    if (created && resolvedOffice) {
+      const office = resolvedOffice;
+      // Best-effort: enqueue the email (durable) + render/store the PDF. Manages its own connections and
+      // enqueues BEFORE the best-effort render, so a PDF/R2 failure can't drop the notification. A throw
+      // must not surface to the client — the scorecard is already saved.
+      void finalizeFieldScorecardArtifacts(office, req.fieldUser!.id, scorecard.id).catch((err) => {
+        console.error("[field-scorecard] PDF/email finalize failed (submission is saved)", {
+          scorecardId: scorecard.id,
+          office: office.slug,
+          err,
+        });
+      });
+    }
+    return;
   } catch (err) {
     next(err);
   }
@@ -905,6 +927,25 @@ fieldRoutes.get("/scorecards/:id", requireFieldContractor, async (req, res, next
       "Scorecard not found",
     );
     res.json({ scorecard: { ...value, ...officeTag(office) } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Presigned download for a scorecard's rendered PDF. Resolves the owning office by scorecard id (works
+// off the active x-office-id), gates on project browsability, and 404s while the PDF is still generating.
+fieldRoutes.get("/scorecards/:id/download", requireFieldContractor, async (req, res, next) => {
+  try {
+    const id = String(req.params.id);
+    assertValidUuid(id, "id");
+    const { value } = await withResolvedOffice(
+      "scorecard",
+      id,
+      (officeDb) =>
+        getFieldScorecardPdfDownload(officeDb, id, { userId: req.fieldUser!.id, userRole: req.fieldUser!.role }),
+      "Scorecard not found",
+    );
+    res.json(value);
   } catch (err) {
     next(err);
   }

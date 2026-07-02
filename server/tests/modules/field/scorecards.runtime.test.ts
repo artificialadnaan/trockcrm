@@ -48,6 +48,7 @@ function submission(over: Partial<Parameters<typeof createFieldScorecard>[1]> = 
     userRole: "field_contractor" as const,
     submittedByName: "Marcus Reed",
     dealId: DEAL,
+    office: { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" },
     clientSubmissionId: csid(1),
     weekOf: "2026-06-30",
     superintendentName: "Marcus Reed",
@@ -75,6 +76,12 @@ beforeAll(async () => {
     CREATE TABLE files (
       id uuid PRIMARY KEY, deal_id uuid, client_upload_id text, uploaded_by uuid,
       description text, is_active boolean DEFAULT true, deleted_at timestamptz, created_at timestamptz DEFAULT now()
+    );
+    CREATE TABLE public.job_queue (
+      id bigserial PRIMARY KEY, job_type varchar(100) NOT NULL, payload jsonb NOT NULL, office_id uuid,
+      status text NOT NULL DEFAULT 'pending', attempts int NOT NULL DEFAULT 0, max_attempts int NOT NULL DEFAULT 3,
+      last_error text, started_processing_at timestamptz, run_after timestamptz NOT NULL DEFAULT now(),
+      created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
     );
   `);
   await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos]));
@@ -108,6 +115,7 @@ beforeEach(async () => {
   await tdb.execute(sql`DELETE FROM field_scorecard_photos`);
   await tdb.execute(sql`DELETE FROM field_scorecard_items`);
   await tdb.execute(sql`DELETE FROM field_scorecards`);
+  await tdb.execute(sql`DELETE FROM public.job_queue`);
 });
 
 describe("createFieldScorecard", () => {

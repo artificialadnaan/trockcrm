@@ -32,6 +32,7 @@ import {
   PROJECT_NUMBER_FIRST_SET_JOB,
 } from "./project-number-email.js";
 import { handleRfpRejectedEmail, RFP_REJECTED_JOB } from "./rfp-rejection-email.js";
+import { handleFieldScorecardEmail, FIELD_SCORECARD_EMAIL_JOB } from "./field-scorecard-email.js";
 import { handleRfpReconfirmDenialEmail, RFP_RECONFIRM_DENIAL_JOB } from "./rfp-reconfirm-denial-email.js";
 import { handleRfpOverrideApprovedEmail, RFP_OVERRIDE_APPROVED_JOB } from "./rfp-override-approved-email.js";
 
@@ -126,6 +127,7 @@ export function registerAllJobs() {
   registerJobHandler(PROJECT_NUMBER_FIRST_SET_JOB, handleProjectNumberFirstSetEmail);
   registerJobHandler(DEAL_OPPORTUNITY_FIRST_ENTRY_JOB, handleDealOpportunityFirstEntryEmail);
   registerJobHandler(RFP_REJECTED_JOB, handleRfpRejectedEmail);
+  registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, handleFieldScorecardEmail);
   registerJobHandler(RFP_RECONFIRM_DENIAL_JOB, handleRfpReconfirmDenialEmail);
   registerJobHandler(RFP_OVERRIDE_APPROVED_JOB, handleRfpOverrideApprovedEmail);
 
