@@ -7,7 +7,7 @@
 import { Router } from "express";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getProjectMappings,
@@ -62,13 +62,19 @@ async function acquireBackgroundDb(officeSlug: string) {
   const tenantDb = drizzle(client, { schema });
   return {
     tenantDb,
-    release: async (rollback = false) => {
-      let releaseErr: unknown;
+    release: async (rollback = false, opErr?: unknown) => {
+      // opErr = the caller's operation error (the reason for the rollback). Seed releaseErr with it so a
+      // broken operation is destroyed even if the ROLLBACK below reports success.
+      let releaseErr: unknown = opErr;
       try {
         if (rollback) {
-          await client.query("ROLLBACK").catch((rollbackErr) => {
-            releaseErr = rollbackErr;
-          });
+          // Skip ROLLBACK on an already-dead socket (it would burn another query_timeout) — opErr already
+          // marks the client for destruction. Otherwise roll back, letting a failed rollback win.
+          if (!isBrokenConnectionError(opErr)) {
+            await client.query("ROLLBACK").catch((rollbackErr) => {
+              releaseErr = rollbackErr ?? opErr;
+            });
+          }
         } else {
           // Propagate COMMIT failures (fail-closed): a failed commit must be treated as a failure, never
           // swallowed and reported as success. Callers translate the throw into a Failed sync status.
@@ -273,7 +279,7 @@ router.post("/auto-import", async (req, res, next) => {
               syncStatus.progress = progress;
             });
           } catch (err) {
-            await release(true); // ROLLBACK this phase's connection, then fail
+            await release(true, err); // ROLLBACK this phase's connection (or destroy it if err broke it), then fail
             throw err;
           }
           // COMMIT is OUTSIDE the inner try so a COMMIT failure isn't double-released by the catch's
@@ -291,7 +297,7 @@ router.post("/auto-import", async (req, res, next) => {
               syncStatus.progress = progress;
             });
           } catch (err) {
-            await release(true); // ROLLBACK this phase's connection, then fail
+            await release(true, err); // ROLLBACK this phase's connection (or destroy it if err broke it), then fail
             throw err;
           }
           await release(); // COMMIT — a commit failure propagates to the outer catch (never reports Complete)

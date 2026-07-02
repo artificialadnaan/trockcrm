@@ -76,8 +76,9 @@ export async function createOffice(
     console.log(`[Office] Created office '${name}' with schema office_${slug}`);
     return office;
   } catch (err) {
-    releaseErr = err;
-    await client.query("ROLLBACK").catch(() => {});
+    let rollbackErr: unknown;
+    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    releaseErr = rollbackErr ?? err;
     console.error(`[Office] Failed to create office '${name}':`, err);
     if (err instanceof AppError) throw err;
     throw new AppError(500, `Failed to create office: ${(err as Error).message}`);

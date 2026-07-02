@@ -15,7 +15,7 @@
 import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 export type FieldOffice = { id: string; slug: string };
@@ -111,8 +111,9 @@ export async function runInOffice<T>(office: FieldOffice, run: (officeDb: FieldT
     try {
       await client.query("SELECT set_config('search_path', 'public', false)");
     } catch (resetErr) {
-      // A failed reset means the connection is unusable — ensure it's destroyed, not recycled.
-      brokenErr = brokenErr ?? resetErr;
+      // A failed reset means the connection is unusable — it TAKES PRECEDENCE over any earlier (non-broken)
+      // run error so the client is destroyed, not recycled.
+      brokenErr = resetErr;
     }
     releasePooledClient(client, brokenErr);
   }
@@ -258,10 +259,13 @@ export async function runInOfficeTransaction<T>(
     return result;
   } catch (err) {
     brokenErr = err;
-    await client.query("ROLLBACK").catch((rbErr) => {
-      // A failed rollback means the connection itself is unusable — destroy it, don't recycle.
-      brokenErr = rbErr;
-    });
+    // Skip ROLLBACK on an already-dead socket (it would burn another query_timeout); the client is destroyed
+    // below via brokenErr. Otherwise roll back, letting a failed rollback (broken connection) win.
+    if (!isBrokenConnectionError(err)) {
+      await client.query("ROLLBACK").catch((rbErr) => {
+        brokenErr = rbErr;
+      });
+    }
     throw err;
   } finally {
     releasePooledClient(client, brokenErr);

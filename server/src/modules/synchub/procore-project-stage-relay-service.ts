@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import type { PoolClient } from "pg";
 import { normalizePortfolioProjectStage, isPortfolioProjectBoardStage } from "@trock-crm/shared/types";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 type QueryClient = Pick<PoolClient, "query"> & { release?: () => void };
@@ -906,6 +906,13 @@ export async function replayUnresolvedSyncHubProcoreProjectStageReceipts(
           outcome: "failed",
           reason: error instanceof Error ? error.message : String(error),
         });
+        // If the connection itself broke, stop replaying on a dead client and mark it for destruction —
+        // otherwise every remaining receipt "fails" on the dead socket and the finally recycles it clean.
+        // A normal per-row error (bad payload, no tenant match) is just recorded and the loop continues.
+        if (isBrokenConnectionError(error)) {
+          releaseErr = error;
+          break;
+        }
       }
     }
     return summary;

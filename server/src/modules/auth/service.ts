@@ -759,8 +759,9 @@ export async function ensureDevDemoWorkspace(
 
     await client.query("COMMIT");
   } catch (error) {
-    releaseErr = error;
-    await client.query("ROLLBACK").catch(() => {});
+    let rollbackErr: unknown;
+    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    releaseErr = rollbackErr ?? error;
     throw error;
   } finally {
     releasePooledClient(client, releaseErr);

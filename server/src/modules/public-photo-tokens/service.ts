@@ -320,8 +320,9 @@ export async function withPublicPhotoTenant<T>(
     await client.query("COMMIT");
     return value;
   } catch (err) {
-    releaseErr = err;
-    await client.query("ROLLBACK").catch(() => {});
+    let rollbackErr: unknown;
+    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    releaseErr = rollbackErr ?? err;
     throw err;
   } finally {
     releasePooledClient(client, releaseErr);

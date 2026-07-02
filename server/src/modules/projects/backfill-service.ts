@@ -257,6 +257,9 @@ export async function runProjectsBackfill(
         officeSlug,
         resetError,
       });
+      // A failed reset means the connection is unusable (this also catches a connection that broke
+      // mid-loop — every remaining row erred on the dead client, then this reset fails too). Destroy it.
+      releaseErr = resetError;
     });
     releasePooledClient(client, releaseErr);
   }

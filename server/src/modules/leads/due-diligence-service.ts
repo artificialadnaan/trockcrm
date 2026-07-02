@@ -861,7 +861,7 @@ export async function decideDueDiligenceByToken(input: {
   } catch (err) {
     releaseErr = err;
     if (transactionActive) {
-      await client.query("ROLLBACK").catch(() => {});
+      await client.query("ROLLBACK").catch((e) => { releaseErr = e ?? releaseErr; });
     }
     throw err;
   } finally {

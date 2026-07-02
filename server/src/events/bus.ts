@@ -59,8 +59,9 @@ class EventBus extends EventEmitter {
 
       await client.query("COMMIT");
     } catch (err) {
-      releaseErr = err;
-      await client.query("ROLLBACK").catch(() => {});
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+      releaseErr = rollbackErr ?? err;
       console.error("[EventBus] emitRemote failed:", err);
       throw err;
     } finally {

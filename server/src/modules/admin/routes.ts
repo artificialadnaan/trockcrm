@@ -88,8 +88,9 @@ async function withOfficeTenantContext<T>(
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    releaseErr = err;
-    await client.query("ROLLBACK").catch(() => {});
+    let rollbackErr: unknown;
+    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    releaseErr = rollbackErr ?? err;
     throw err;
   } finally {
     releasePooledClient(client, releaseErr);
@@ -1106,14 +1107,19 @@ router.get(
             totalAwardedValue: parseFloat(r.total_awarded_value),
           });
         } catch (officeErr) {
+          if (isBrokenConnectionError(officeErr)) {
+            // Already a dead socket — don't waste a query_timeout on ROLLBACK; stop and destroy.
+            releaseErr = officeErr;
+            break;
+          }
           let rollbackErr: unknown;
           await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
           console.error(`[CrossOffice] Pipeline query failed for ${office.slug}:`, officeErr);
-          // If the connection itself is broken (a dead-socket query_timeout), the client is poisoned —
-          // stop the loop and mark it for destruction. Continuing would run every remaining office on the
-          // dead connection and then the finally would recycle it back to the pool as healthy.
-          if (isBrokenConnectionError(officeErr) || isBrokenConnectionError(rollbackErr)) {
-            releaseErr = rollbackErr ?? officeErr;
+          // A failed ROLLBACK means the connection is now broken — stop the loop and mark it for
+          // destruction. Continuing would run every remaining office on the dead connection and then
+          // the finally would recycle it back to the pool as healthy.
+          if (isBrokenConnectionError(rollbackErr)) {
+            releaseErr = rollbackErr;
             break;
           }
           results.push({
@@ -1210,13 +1216,18 @@ router.get(
             meetingCount: parseInt(r.meeting_count, 10),
           });
         } catch (officeErr) {
+          if (isBrokenConnectionError(officeErr)) {
+            // Already a dead socket — don't waste a query_timeout on ROLLBACK; stop and destroy.
+            releaseErr = officeErr;
+            break;
+          }
           let rollbackErr: unknown;
           await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
           console.error(`[CrossOffice] Activity query failed for ${office.slug}:`, officeErr);
-          // Broken connection (dead-socket query_timeout) → stop and destroy; don't run the rest of the
-          // offices on a poisoned client and then recycle it as healthy.
-          if (isBrokenConnectionError(officeErr) || isBrokenConnectionError(rollbackErr)) {
-            releaseErr = rollbackErr ?? officeErr;
+          // A failed ROLLBACK means the connection is now broken — stop and destroy; don't run the rest
+          // of the offices on a poisoned client and then recycle it as healthy.
+          if (isBrokenConnectionError(rollbackErr)) {
+            releaseErr = rollbackErr;
             break;
           }
           results.push({

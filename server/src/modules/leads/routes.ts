@@ -107,7 +107,7 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
   } catch (err) {
     releaseErr = err;
     if (client && !committed) {
-      await client.query("ROLLBACK").catch(() => {});
+      await client.query("ROLLBACK").catch((e) => { releaseErr = e ?? releaseErr; });
     }
     console.error("[lead-dd] post-commit email dispatch failed", {
       approvalId: input.approvalId,

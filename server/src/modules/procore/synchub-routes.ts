@@ -856,8 +856,9 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     console.log(`[SyncHub] Created deal ${dealNumber} (${newDealId}) from Bid Board push`);
     res.status(201).json({ status: "created", deal_id: newDealId, deal_number: dealNumber });
   } catch (err) {
-    releaseErr = err;
-    await client.query("ROLLBACK").catch(() => {});
+    let rollbackErr: unknown;
+    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    releaseErr = rollbackErr ?? err;
     next(err);
   } finally {
     releasePooledClient(client, releaseErr);

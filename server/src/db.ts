@@ -2,7 +2,11 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "@trock-crm/shared/schema";
 
-const POOL_MAX = parseInt(process.env.DB_POOL_MAX || "20", 10);
+const DEFAULT_POOL_MAX = 20;
+// Validate DB_POOL_MAX: a missing / malformed / NaN / non-positive value falls back to the default so an
+// invalid env can't set pg.Pool.max (and the saturation-gauge threshold) to 0/NaN.
+const parsedPoolMax = parseInt(process.env.DB_POOL_MAX ?? "", 10);
+const POOL_MAX = Number.isInteger(parsedPoolMax) && parsedPoolMax > 0 ? parsedPoolMax : DEFAULT_POOL_MAX;
 
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
@@ -74,7 +78,10 @@ export function isBrokenConnectionError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const e = err as { message?: unknown; code?: unknown };
   const message = typeof e.message === "string" ? e.message : "";
-  if (/Query read timeout|Connection terminated|terminating connection|server closed the connection|timeout expired/i.test(message)) {
+  // Match only messages specific to CONNECTION loss. Deliberately NOT a bare "timeout" — a statement_timeout
+  // ("canceling statement due to statement timeout") or lock timeout leaves the connection healthy and
+  // reusable; only node-pg's client-side "Query read timeout" (ambiguous socket state) counts as broken.
+  if (/Query read timeout|Connection terminated|terminating connection|server closed the connection/i.test(message)) {
     return true;
   }
   const code = typeof e.code === "string" ? e.code : "";

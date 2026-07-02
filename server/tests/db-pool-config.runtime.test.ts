@@ -10,14 +10,14 @@ import { pool, isBrokenConnectionError, releasePooledClient } from "../src/db.js
 describe("API DB pool resilience config", () => {
   it("enables TCP keepAlive so a dead peer is detected instead of hanging forever", () => {
     expect(pool.options.keepAlive).toBe(true);
-    expect(pool.options.keepAliveInitialDelayMillis).toBeGreaterThan(0);
+    expect(pool.options.keepAliveInitialDelayMillis).toBe(10000); // pinned: 10s initial probe delay
   });
 
-  it("sets a client-side query_timeout that backstops (never precedes) the 30s tenant statement_timeout", () => {
-    // query_timeout is a node-pg client-side timer, so it fires even when the socket is dead — unlike a
-    // server-side statement_timeout, which a gone backend can never enforce. It must sit ABOVE the tenant
-    // transaction's 30s statement_timeout so it only ever catches a stuck/dead query, not a slow-but-legit one.
-    expect(pool.options.query_timeout).toBeGreaterThan(30000);
+  it("sets a client-side query_timeout at the intended 45s headroom above the 30s statement_timeout", () => {
+    // query_timeout is a node-pg client-side timer that fires even when the socket is dead. Pinned at 45s:
+    // ABOVE the tenant transaction's 30s statement_timeout (so it only backstops a stuck/dead query, never a
+    // slow-but-legit one) with headroom to absorb a couple of queries stacked on one pooled client.
+    expect(pool.options.query_timeout).toBe(45000);
   });
 
   it("sets a server-side statement_timeout for queries that bypass the tenant middleware", () => {
@@ -44,6 +44,15 @@ describe("isBrokenConnectionError", () => {
     expect(isBrokenConnectionError(new Error("null value violates not-null constraint"))).toBe(false);
     expect(isBrokenConnectionError(null)).toBe(false);
     expect(isBrokenConnectionError(undefined)).toBe(false);
+  });
+
+  it("does NOT flag non-connection timeouts (a healthy client must not be discarded)", () => {
+    // A statement/lock timeout cancels the query but the connection stays healthy — a bare "timeout" match
+    // would wrongly discard it. Only node-pg's "Query read timeout" (ambiguous socket) counts.
+    expect(isBrokenConnectionError(new Error("canceling statement due to statement timeout"))).toBe(false);
+    expect(isBrokenConnectionError(new Error("canceling statement due to lock timeout"))).toBe(false);
+    expect(isBrokenConnectionError(new Error("timeout expired"))).toBe(false);
+    expect(isBrokenConnectionError({ code: "57014" })).toBe(false); // query_canceled (statement_timeout)
   });
 });
 
