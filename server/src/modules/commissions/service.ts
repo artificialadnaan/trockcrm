@@ -419,7 +419,7 @@ export async function recalculateCommissionForDeal(
 
 /** Date-only (YYYY-MM-DD, UTC) of a contract_signed_at timestamp. The app stores _at at UTC midnight of
  *  the signed date, so this round-trips the canonical effective signed date. */
-function effectiveSignedDateOf(deal: {
+export function effectiveSignedDateOf(deal: {
   contractSignedAt: Date | string | null;
   contractSignedDate: string | null;
 }): string | null {
