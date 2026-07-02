@@ -7,7 +7,7 @@
 import { Router } from "express";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getProjectMappings,
@@ -55,25 +55,54 @@ function requireAdminOrDirector(role: string): void {
 async function acquireBackgroundDb(officeSlug: string) {
   const client = await pool.connect();
   const schemaName = `office_${officeSlug}`;
-  // Use a transaction-local search_path (true = transaction-local, not session-local)
-  // so concurrent requests on other connections are not affected.
-  await client.query("BEGIN");
-  await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
+  let beganTx = false;
+  try {
+    // Use a transaction-local search_path (true = transaction-local, not session-local)
+    // so concurrent requests on other connections are not affected.
+    await client.query("BEGIN");
+    beganTx = true;
+    await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
+  } catch (err) {
+    // Setup failed BEFORE we could return the release handle — release/destroy the client here so the caller
+    // can't leak this pool slot. If BEGIN succeeded but a later setup query failed (a non-broken error), ROLL
+    // BACK first so we don't recycle a client left mid-transaction; a failed rollback (broken socket) becomes
+    // the release error. Skip the rollback when the socket is already broken (it can't succeed).
+    let releaseErr: unknown = err;
+    if (beganTx && !isBrokenConnectionError(err)) {
+      await client.query("ROLLBACK").catch((rbErr) => { releaseErr = rbErr; });
+    }
+    releasePooledClient(client, releaseErr);
+    throw err;
+  }
   const tenantDb = drizzle(client, { schema });
   return {
     tenantDb,
-    release: async (rollback = false) => {
+    release: async (rollback = false, opErr?: unknown) => {
+      // opErr = the caller's operation error (the reason for the rollback). Seed releaseErr with it so a
+      // broken operation is destroyed even if the ROLLBACK below reports success.
+      let releaseErr: unknown = opErr;
       try {
         if (rollback) {
-          await client.query("ROLLBACK").catch(() => {});
+          // Skip ROLLBACK on an already-dead socket (it would burn another query_timeout) — opErr already
+          // marks the client for destruction. Otherwise roll back, letting a failed rollback win.
+          if (!isBrokenConnectionError(opErr)) {
+            await client.query("ROLLBACK").catch((rollbackErr) => {
+              releaseErr = rollbackErr ?? opErr;
+            });
+          }
         } else {
           // Propagate COMMIT failures (fail-closed): a failed commit must be treated as a failure, never
           // swallowed and reported as success. Callers translate the throw into a Failed sync status.
           await client.query("COMMIT");
         }
+      } catch (err) {
+        releaseErr = err;
+        throw err;
       } finally {
         // Always return the connection to the pool, even when COMMIT throws, to avoid leaking it.
-        client.release();
+        // Route through releasePooledClient so a broken connection (COMMIT/ROLLBACK on a dead
+        // socket) is destroyed instead of recycled back into the idle pool.
+        releasePooledClient(client, releaseErr);
       }
     },
   };
@@ -160,6 +189,7 @@ router.post("/sync/:projectId", async (req, res, next) => {
     // Acquire a fresh DB connection for background work
     const { tenantDb: bgDb, release } = await acquireBackgroundDb(officeSlug);
     let syncFailed = false;
+    let syncErr: unknown;
     syncProjectPhotos(bgDb, projectId, userId, officeSlug, (progress) => {
       syncStatus.progress = progress;
     })
@@ -168,12 +198,13 @@ router.post("/sync/:projectId", async (req, res, next) => {
       })
       .catch((err) => {
         syncFailed = true;
+        syncErr = err; // pass the actual error to release() so a dead-socket sync failure destroys the client
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
       })
       .finally(() =>
         // release() now THROWS on a failed COMMIT; treat that as a sync failure (fail-closed) instead of
         // letting it surface as an unhandled rejection or leave a "Complete" status standing after a bad commit.
-        release(syncFailed).catch((err) => {
+        release(syncFailed, syncErr).catch((err) => {
           syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
         }),
       );
@@ -203,6 +234,7 @@ router.post("/sync-all", async (req, res, next) => {
 
     const { tenantDb: bgDb, release } = await acquireBackgroundDb(officeSlug);
     let syncAllFailed = false;
+    let syncAllErr: unknown;
     syncAllLinkedProjects(bgDb, userId, officeSlug, (progress) => {
       syncStatus.progress = progress;
     })
@@ -211,12 +243,13 @@ router.post("/sync-all", async (req, res, next) => {
       })
       .catch((err) => {
         syncAllFailed = true;
+        syncAllErr = err; // pass the actual error to release() so a dead-socket sync failure destroys the client
         syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
       })
       .finally(() =>
         // release() now THROWS on a failed COMMIT; treat that as a sync failure (fail-closed) instead of
         // letting it surface as an unhandled rejection or leave a "Complete" status standing after a bad commit.
-        release(syncAllFailed).catch((err) => {
+        release(syncAllFailed, syncAllErr).catch((err) => {
           syncStatus = { running: false, startedAt: syncStatus.startedAt, progress: "Failed", results: null, error: err instanceof Error ? err.message : String(err) };
         }),
       );
@@ -265,7 +298,7 @@ router.post("/auto-import", async (req, res, next) => {
               syncStatus.progress = progress;
             });
           } catch (err) {
-            await release(true); // ROLLBACK this phase's connection, then fail
+            await release(true, err); // ROLLBACK this phase's connection (or destroy it if err broke it), then fail
             throw err;
           }
           // COMMIT is OUTSIDE the inner try so a COMMIT failure isn't double-released by the catch's
@@ -283,7 +316,7 @@ router.post("/auto-import", async (req, res, next) => {
               syncStatus.progress = progress;
             });
           } catch (err) {
-            await release(true); // ROLLBACK this phase's connection, then fail
+            await release(true, err); // ROLLBACK this phase's connection (or destroy it if err broke it), then fail
             throw err;
           }
           await release(); // COMMIT — a commit failure propagates to the outer catch (never reports Complete)

@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import type { PoolClient } from "pg";
 import { normalizePortfolioProjectStage, isPortfolioProjectBoardStage } from "@trock-crm/shared/types";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 type QueryClient = Pick<PoolClient, "query"> & { release?: () => void };
@@ -720,8 +720,14 @@ async function recordResolvedEvent(
       isBoardRelevant: payload.stage.current.isBoardRelevant,
     };
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw error;
+    // Skip ROLLBACK when the error is already broken (it can't succeed and would wait another query_timeout).
+    // Otherwise prefer a failed ROLLBACK (a dead socket) over the original error so the replay loop's
+    // broken-connection check destroys the owned client instead of recycling it.
+    let rollbackErr: unknown;
+    if (!isBrokenConnectionError(error)) {
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    }
+    throw rollbackErr ?? error;
   }
 }
 
@@ -746,8 +752,14 @@ async function recordUnresolvedEvent(
       ? { status: "unresolved" as const, reason, eventKey }
       : { status: "duplicate" as const, eventKey };
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw error;
+    // Skip ROLLBACK when the error is already broken (it can't succeed and would wait another query_timeout).
+    // Otherwise prefer a failed ROLLBACK (a dead socket) over the original error so the replay loop's
+    // broken-connection check destroys the owned client instead of recycling it.
+    let rollbackErr: unknown;
+    if (!isBrokenConnectionError(error)) {
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    }
+    throw rollbackErr ?? error;
   }
 }
 
@@ -759,6 +771,7 @@ export async function processSyncHubProcoreProjectStageChanged(
   const eventKey = eventKeyForPayload(payload);
   const ownsClient = !deps.client;
   const client = deps.client ?? await pool.connect();
+  let releaseErr: unknown;
   const receivedAt = deps.receivedAt ?? new Date();
 
   try {
@@ -773,8 +786,11 @@ export async function processSyncHubProcoreProjectStageChanged(
     }
 
     return await recordResolvedEvent(client, payload, match, eventKey, receivedAt);
+  } catch (err) {
+    releaseErr = err;
+    throw err;
   } finally {
-    if (ownsClient) client.release?.();
+    if (ownsClient) releasePooledClient(client as PoolClient, releaseErr);
   }
 }
 
@@ -811,6 +827,7 @@ export async function replayUnresolvedSyncHubProcoreProjectStageReceipts(
 
   const ownsClient = !options.client;
   const client = options.client ?? await pool.connect();
+  let releaseErr: unknown;
   const summary: ReplayUnresolvedStageReceiptsResult = {
     mode: commit ? "commit" : "dry-run",
     scanned: 0,
@@ -901,10 +918,20 @@ export async function replayUnresolvedSyncHubProcoreProjectStageReceipts(
           outcome: "failed",
           reason: error instanceof Error ? error.message : String(error),
         });
+        // If the connection itself broke, stop replaying on a dead client and mark it for destruction —
+        // otherwise every remaining receipt "fails" on the dead socket and the finally recycles it clean.
+        // A normal per-row error (bad payload, no tenant match) is just recorded and the loop continues.
+        if (isBrokenConnectionError(error)) {
+          releaseErr = error;
+          break;
+        }
       }
     }
     return summary;
+  } catch (err) {
+    releaseErr = err;
+    throw err;
   } finally {
-    if (ownsClient) client.release?.();
+    if (ownsClient) releasePooledClient(client as PoolClient, releaseErr);
   }
 }

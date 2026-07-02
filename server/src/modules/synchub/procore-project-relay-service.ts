@@ -1,4 +1,4 @@
-import { pool } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { upsertProjectMirror } from "../projects/service.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
@@ -408,10 +408,15 @@ async function linkMatchedDeal(
       jobId: jobResult.rows[0]?.id ?? null,
     };
   } catch (error) {
-    if (transactionOpen) {
-      await client.query("ROLLBACK").catch(() => {});
+    let rollbackErr: unknown;
+    // Skip ROLLBACK when the failure is already a broken connection (it can't succeed and would just wait
+    // another query_timeout). Otherwise roll back and PREFER a failed ROLLBACK (a dead socket) over the
+    // original error, so the outer processSyncHubProcoreProjectCreated catch → releasePooledClient sees the
+    // broken connection and destroys the owned client instead of recycling it.
+    if (transactionOpen && !isBrokenConnectionError(error)) {
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
     }
-    throw error;
+    throw rollbackErr ?? error;
   }
 }
 
@@ -423,6 +428,7 @@ export async function processSyncHubProcoreProjectCreated(
   const procoreProjectId = parseSafeProcoreId(payload.procore.portfolioProjectId);
   const ownsClient = !deps.client;
   const client = deps.client ?? await pool.connect();
+  let releaseErr: unknown;
 
   try {
     const offices = await getActiveOffices(client);
@@ -470,7 +476,10 @@ export async function processSyncHubProcoreProjectCreated(
       `[SyncHub:relay] Project ${payload.procore.portfolioProjectId} (${payload.procore.projectNumber}) result=${result.status}`
     );
     return result;
+  } catch (err) {
+    releaseErr = err;
+    throw err;
   } finally {
-    if (ownsClient) client.release?.();
+    if (ownsClient) releasePooledClient(client as import("pg").PoolClient, releaseErr);
   }
 }

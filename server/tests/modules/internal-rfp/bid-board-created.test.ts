@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const queryMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../src/db.js", () => ({
+  releasePooledClient: (client: any) => client?.release?.(),
   pool: {
     query: queryMock,
     connect: vi.fn(async () => ({ query: queryMock, release: vi.fn() })),

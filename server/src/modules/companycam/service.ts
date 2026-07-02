@@ -12,6 +12,7 @@ import { getAllProjects, getProjectPhotos } from "./client.js";
 import type { CCProject, CCPhoto } from "./client.js";
 import { putObject, isR2Configured } from "../../lib/r2-client.js";
 import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
+import { isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import crypto from "node:crypto";
 
@@ -124,29 +125,36 @@ type PreparedCompanyCamPhoto = {
  * Get all CompanyCam projects with their match status against deals.
  */
 export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMapping[]> {
-  const [ccProjects, dealRows, linkRows] = await Promise.all([
-    getAllProjects(),
-    tenantDb
-      .select({
-        id: deals.id,
-        dealNumber: deals.dealNumber,
-        name: deals.name,
-      })
-      .from(deals)
-      .where(eq(deals.isActive, true)),
-    // Every deal <-> CompanyCam-project link (a deal may own many projects). Join to deals so off-deal /
-    // inactive-deal links are dropped, mirroring the isActive filter on the deal list above.
-    tenantDb
-      .select({
-        companycamProjectId: dealCompanycamProjects.companycamProjectId,
-        dealId: dealCompanycamProjects.dealId,
-      })
-      .from(dealCompanycamProjects)
-      .innerJoin(
-        deals,
-        and(eq(deals.id, dealCompanycamProjects.dealId), eq(deals.isActive, true)),
-      ),
-  ]);
+  // getAllProjects() is an external CompanyCam HTTP call, so start it concurrently. But the two DB reads
+  // both run on `tenantDb` — a single transaction-bound client that executes queries SERIALLY — so awaiting
+  // them together via Promise.all gains no real concurrency; it only queues the second behind the first, and
+  // the pool-level query_timeout counts that queue wait against the timer. Run the DB reads sequentially.
+  const ccProjectsPromise = getAllProjects();
+  // If a DB read below throws first, we exit before awaiting ccProjectsPromise — attach a catch now so a
+  // later CompanyCam HTTP rejection can't become an unhandled rejection. The real value/rejection is still
+  // surfaced by the `await ccProjectsPromise` below on the success path.
+  void ccProjectsPromise.catch(() => {});
+  const dealRows = await tenantDb
+    .select({
+      id: deals.id,
+      dealNumber: deals.dealNumber,
+      name: deals.name,
+    })
+    .from(deals)
+    .where(eq(deals.isActive, true));
+  // Every deal <-> CompanyCam-project link (a deal may own many projects). Join to deals so off-deal /
+  // inactive-deal links are dropped, mirroring the isActive filter on the deal list above.
+  const linkRows = await tenantDb
+    .select({
+      companycamProjectId: dealCompanycamProjects.companycamProjectId,
+      dealId: dealCompanycamProjects.dealId,
+    })
+    .from(dealCompanycamProjects)
+    .innerJoin(
+      deals,
+      and(eq(deals.id, dealCompanycamProjects.dealId), eq(deals.isActive, true)),
+    );
+  const ccProjects = await ccProjectsPromise;
 
   // Index deals by companycam_project_id for linked matches (from the join table — the source of truth).
   const dealById = new Map(dealRows.map((deal) => [deal.id, deal]));
@@ -498,6 +506,11 @@ export async function syncProjectPhotos(
         onProgress?.(`${deal.name}: ${imported}/${newPhotos.length} photos imported`);
       }
     } catch (err) {
+      // A broken-connection error means the tenant client is dead — rethrow (aborts the sync, destroys the
+      // client) instead of recording a per-photo error and inserting the rest on the dead socket.
+      if (isBrokenConnectionError(err)) {
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`Photo ${prepared.photoId}: ${msg}`);
     }
@@ -545,6 +558,12 @@ export async function syncAllLinkedProjects(
       const result = await syncProjectPhotos(tenantDb, projectId, systemUserId, officeSlug, onProgress);
       results.push(result);
     } catch (err) {
+      // A broken-connection error means the tenant client is dead — abort the whole sync (rethrow to the
+      // /sync-all handler, which destroys the client) instead of recording it as a per-project failure and
+      // running every remaining project's queries on the dead socket (and briefly reporting "Complete").
+      if (isBrokenConnectionError(err)) {
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       results.push({
         projectId,

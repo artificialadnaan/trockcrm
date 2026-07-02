@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { procoreClient } from "../../lib/procore-client.js";
 import {
   buildProjectMirrorFields,
@@ -148,12 +149,25 @@ async function processRow(
     result.backfilled += 1;
     return normalized.procoreProjectId;
   } catch (error) {
-    await client.query("ROLLBACK").catch((rollbackError) => {
+    // A broken-connection error means the client is dead: don't ROLLBACK on it (burns another
+    // query_timeout) and don't record-and-continue (every remaining row would fail the same way, one
+    // timeout each). Rethrow so the caller aborts the backfill and destroys the client via releaseErr.
+    if (isBrokenConnectionError(error)) {
+      throw error;
+    }
+    let rollbackError: unknown;
+    await client.query("ROLLBACK").catch((e) => {
+      rollbackError = e;
       console.error(
         "[ProjectsBackfill] ROLLBACK failed after row error",
-        { procoreProjectId: normalized.procoreProjectId, rollbackError }
+        { procoreProjectId: normalized.procoreProjectId, rollbackError: e }
       );
     });
+    // Any ROLLBACK failure (not only a broken-connection one) leaves the transaction/client state unsafe to
+    // keep processing rows on — abort so the caller releases/destroys the client with the cleanup error.
+    if (rollbackError !== undefined) {
+      throw rollbackError;
+    }
     result.errored += 1;
     result.errors.push({
       procoreProjectId: normalized.procoreProjectId,
@@ -182,6 +196,7 @@ export async function runProjectsBackfill(
   const seenProjectIds = new Set<string>();
 
   const client = await pool.connect();
+  let releaseErr: unknown;
   console.log(
     `[ProjectsBackfill] start schema=${schemaName} office=${officeSlug} companyId=${companyId} mirrorAllProjects=${mirrorAllProjects}`
   );
@@ -240,20 +255,29 @@ export async function runProjectsBackfill(
       // (which means Procore is cycling its results).
       if (!pageHadNewRow) break;
     }
+  } catch (err) {
+    releaseErr = err;
+    throw err;
   } finally {
     console.log(
       `[ProjectsBackfill] done backfilled=${result.backfilled} skipped=${result.skipped} errored=${result.errored} errors=${result.errors.length} uniqueIds=${seenProjectIds.size}`
     );
-    // Reset session state before returning the client to the pool so the
-    // next consumer doesn't inherit our search_path.
-    await client.query("RESET search_path").catch((resetError) => {
-      console.error("[ProjectsBackfill] RESET search_path failed before release", {
-        schemaName,
-        officeSlug,
-        resetError,
+    // Reset session state before returning the client to the pool so the next consumer doesn't inherit our
+    // search_path — but SKIP it when the client is already known broken (processRow rethrew a broken error),
+    // since RESET on a dead socket would wait another full query_timeout before we finally destroy it.
+    if (!isBrokenConnectionError(releaseErr)) {
+      await client.query("RESET search_path").catch((resetError) => {
+        console.error("[ProjectsBackfill] RESET search_path failed before release", {
+          schemaName,
+          officeSlug,
+          resetError,
+        });
+        // A failed reset means the connection is unusable (this also catches a connection that broke
+        // mid-loop — every remaining row erred on the dead client, then this reset fails too). Destroy it.
+        releaseErr = resetError;
       });
-    });
-    client.release();
+    }
+    releasePooledClient(client, releaseErr);
   }
 
   return result;

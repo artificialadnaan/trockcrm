@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
-import { db, pool } from "../../db.js";
+import { db, pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
@@ -311,6 +311,7 @@ export async function withPublicPhotoTenant<T>(
 ): Promise<T> {
   const tenant = await resolveTenant(tenantId);
   const client = await pool.connect();
+  let releaseErr: unknown;
   try {
     await client.query("BEGIN");
     await client.query("SELECT set_config('search_path', $1, true)", [`office_${tenant.slug},public`]);
@@ -319,10 +320,17 @@ export async function withPublicPhotoTenant<T>(
     await client.query("COMMIT");
     return value;
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (isBrokenConnectionError(err)) {
+      // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+      releaseErr = err;
+    } else {
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+      releaseErr = rollbackErr ?? err;
+    }
     throw err;
   } finally {
-    client.release();
+    releasePooledClient(client, releaseErr);
   }
 }
 

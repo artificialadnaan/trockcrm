@@ -15,7 +15,7 @@ import {
   users,
 } from "@trock-crm/shared/schema";
 import * as schema from "@trock-crm/shared/schema";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmailWithMetadata } from "../../lib/resend-client.js";
 import { getStageBySlug } from "../pipeline/service.js";
@@ -738,6 +738,7 @@ export async function renderDueDiligenceDecisionPage(token: string, options: {
   assertPublicDecisionToken(token);
 
   const client = await pool.connect();
+  let releaseErr: unknown;
   try {
     const approval = await findApprovalByToken(client, token);
     if (!approval) {
@@ -756,8 +757,11 @@ export async function renderDueDiligenceDecisionPage(token: string, options: {
     }
 
     return renderDecisionHtml({ token, approval, summary, notice: options.notice, error: options.error });
+  } catch (err) {
+    releaseErr = err;
+    throw err;
   } finally {
-    client.release();
+    releasePooledClient(client, releaseErr);
   }
 }
 
@@ -768,6 +772,7 @@ export async function decideDueDiligenceByToken(input: {
 }) {
   assertPublicDecisionToken(input.token);
   const client = await pool.connect();
+  let releaseErr: unknown;
   let transactionActive = false;
   try {
     await client.query("BEGIN");
@@ -854,12 +859,15 @@ export async function decideDueDiligenceByToken(input: {
     transactionActive = false;
     return { ...update.rows[0], tenant_schema: tenantSchema };
   } catch (err) {
-    if (transactionActive) {
-      await client.query("ROLLBACK").catch(() => {});
+    releaseErr = err;
+    // Skip ROLLBACK when the error is already broken (a rollback on a dead socket would just wait another
+    // query_timeout before we destroy the client — this is an unauthenticated approve/reject response path).
+    if (transactionActive && !isBrokenConnectionError(err)) {
+      await client.query("ROLLBACK").catch((e) => { releaseErr = e ?? releaseErr; });
     }
     throw err;
   } finally {
-    client.release();
+    releasePooledClient(client, releaseErr);
   }
 }
 

@@ -11,7 +11,11 @@ export class AppError extends Error {
   }
 }
 
-export function errorHandler(err: Error, _req: Request, res: Response, _next: NextFunction) {
+export function errorHandler(err: Error, req: Request, res: Response, _next: NextFunction) {
+  // Stash the failing error so the tenant middleware's res-close cleanup can see it (and skip a ROLLBACK on
+  // an already-broken connection). Runs before the response finishes, so it's set before "close" fires.
+  req.tenantOpError = err;
+
   if (err instanceof AppError) {
     if (err.statusCode >= 500) {
       console.error(`[ERROR] ${err.message}`, err.stack);

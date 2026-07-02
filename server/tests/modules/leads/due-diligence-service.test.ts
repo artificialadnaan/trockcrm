@@ -27,6 +27,7 @@ import {
 } from "../../../src/modules/leads/due-diligence-service.js";
 
 vi.mock("../../../src/db.js", () => ({
+  releasePooledClient: (client: any) => client?.release?.(),
   pool: {
     connect: vi.fn(),
   },

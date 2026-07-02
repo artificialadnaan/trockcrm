@@ -3,7 +3,7 @@ import crypto from "crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { aiFeedback, userOfficeAccess, offices, users, deals, contacts, companies, leads, properties, pipelineStageConfig } from "@trock-crm/shared/schema";
-import { db, pool } from "../../db.js";
+import { db, pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 import {
   buildDealSearchCondition,
@@ -289,6 +289,7 @@ async function crossOfficeSearch(
   await Promise.allSettled(
     accessibleOffices.map(async (office) => {
       const client = await pool.connect();
+      let releaseErr: unknown;
       try {
         const schemaName = `office_${office.slug}`;
         await client.query("SELECT set_config('search_path', $1, false)", [`${schemaName},public`]);
@@ -305,9 +306,20 @@ async function crossOfficeSearch(
             })),
           );
         }
+      } catch (err) {
+        releaseErr = err;
+        throw err;
       } finally {
-        await client.query("SELECT set_config('search_path', 'public', false)");
-        client.release();
+        // Best-effort search_path reset — must NOT throw before the release. SKIP it when the search already
+        // failed with a broken connection (a reset on a dead socket would just wait another query_timeout
+        // before we destroy the client). Otherwise a FAILED reset TAKES PRECEDENCE (destroys) over any
+        // earlier non-broken search error; the client is only reused when the reset succeeds.
+        if (!isBrokenConnectionError(releaseErr)) {
+          await client.query("SELECT set_config('search_path', 'public', false)").catch((resetErr) => {
+            releaseErr = resetErr;
+          });
+        }
+        releasePooledClient(client, releaseErr);
       }
     }),
   );

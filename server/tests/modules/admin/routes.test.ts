@@ -55,6 +55,8 @@ vi.mock("../../../../server/src/modules/auth/service.js", () => ({
 }));
 
 vi.mock("../../../../server/src/db.js", () => ({
+  releasePooledClient: (client: any) => client?.release?.(),
+  isBrokenConnectionError: () => false,
   pool: {
     query: mocks.poolQuery,
     connect: mocks.poolConnect,

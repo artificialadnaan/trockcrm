@@ -7,7 +7,7 @@ import { requireCrmUser } from "../../middleware/field-auth.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin, requireDirector, requireGlobalAdmin } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { getAccessibleOffices } from "../auth/service.js";
 import {
   listOffices, getOfficeById, createOffice, updateOffice,
@@ -76,6 +76,7 @@ async function withOfficeTenantContext<T>(
   }
 
   const client = await pool.connect();
+  let releaseErr: unknown;
   try {
     await client.query("BEGIN");
     await client.query("SET LOCAL statement_timeout = '30s'");
@@ -87,10 +88,17 @@ async function withOfficeTenantContext<T>(
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (isBrokenConnectionError(err)) {
+      // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+      releaseErr = err;
+    } else {
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+      releaseErr = rollbackErr ?? err;
+    }
     throw err;
   } finally {
-    client.release();
+    releasePooledClient(client, releaseErr);
   }
 }
 
@@ -1036,6 +1044,7 @@ router.get(
   requireDirector,
   async (req: Request, res: Response, next: NextFunction) => {
     const client = await pool.connect();
+    let releaseErr: unknown;
     try {
       const user = req.user!;
       const offices = await getAccessibleOfficeSlugs(user.id, user.role, user.activeOfficeId ?? user.officeId);
@@ -1103,8 +1112,24 @@ router.get(
             totalAwardedValue: parseFloat(r.total_awarded_value),
           });
         } catch (officeErr) {
-          await client.query("ROLLBACK").catch(() => {});
+          if (isBrokenConnectionError(officeErr)) {
+            // Dead socket — don't waste a query_timeout on ROLLBACK. Throw so the request FAILS (the finally
+            // destroys the client) rather than returning a misleading 200 with a truncated office list.
+            releaseErr = officeErr;
+            throw officeErr;
+          }
+          let rollbackErr: unknown;
+          await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
           console.error(`[CrossOffice] Pipeline query failed for ${office.slug}:`, officeErr);
+          // A failed ROLLBACK means the connection is now broken — stop the loop and mark it for
+          // destruction. Continuing would run every remaining office on the dead connection and then
+          // the finally would recycle it back to the pool as healthy.
+          if (isBrokenConnectionError(rollbackErr)) {
+            // Connection broke during ROLLBACK — fail the request (the finally destroys the client) rather
+            // than returning a truncated office list as a success.
+            releaseErr = rollbackErr;
+            throw rollbackErr;
+          }
           results.push({
             officeId: office.id,
             officeName: office.name,
@@ -1119,9 +1144,10 @@ router.get(
 
       return res.json({ offices: results });
     } catch (err) {
+      releaseErr = err;
       return next(err);
     } finally {
-      client.release();
+      releasePooledClient(client, releaseErr);
     }
   }
 );
@@ -1132,6 +1158,7 @@ router.get(
   requireDirector,
   async (req: Request, res: Response, next: NextFunction) => {
     const client = await pool.connect();
+    let releaseErr: unknown;
     try {
       const user = req.user!;
       const offices = await getAccessibleOfficeSlugs(user.id, user.role, user.activeOfficeId ?? user.officeId);
@@ -1197,8 +1224,23 @@ router.get(
             meetingCount: parseInt(r.meeting_count, 10),
           });
         } catch (officeErr) {
-          await client.query("ROLLBACK").catch(() => {});
+          if (isBrokenConnectionError(officeErr)) {
+            // Dead socket — don't waste a query_timeout on ROLLBACK. Throw so the request FAILS (the finally
+            // destroys the client) rather than returning a misleading 200 with a truncated office list.
+            releaseErr = officeErr;
+            throw officeErr;
+          }
+          let rollbackErr: unknown;
+          await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
           console.error(`[CrossOffice] Activity query failed for ${office.slug}:`, officeErr);
+          // A failed ROLLBACK means the connection is now broken — stop and destroy; don't run the rest
+          // of the offices on a poisoned client and then recycle it as healthy.
+          if (isBrokenConnectionError(rollbackErr)) {
+            // Connection broke during ROLLBACK — fail the request (the finally destroys the client) rather
+            // than returning a truncated office list as a success.
+            releaseErr = rollbackErr;
+            throw rollbackErr;
+          }
           results.push({
             officeId: office.id,
             officeName: office.name,
@@ -1214,9 +1256,10 @@ router.get(
 
       return res.json({ offices: results });
     } catch (err) {
+      releaseErr = err;
       return next(err);
     } finally {
-      client.release();
+      releasePooledClient(client, releaseErr);
     }
   }
 );

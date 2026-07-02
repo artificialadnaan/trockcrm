@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import type { PoolClient } from "pg";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { pool } from "../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../db.js";
 import { AppError } from "./error-handler.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
@@ -14,6 +14,9 @@ declare global {
       officeSlug?: string;
       tenantClient?: PoolClient;
       commitTransaction: () => Promise<void>;
+      // Set by the error handler to the failing request's error, so the res-close cleanup can skip ROLLBACK
+      // on an already-broken tenant connection (a ROLLBACK on a query-timed-out socket would wait again).
+      tenantOpError?: unknown;
     }
   }
 }
@@ -104,20 +107,34 @@ export async function tenantMiddleware(req: Request, res: Response, next: NextFu
 
     // Commit helper — route handlers call this before sending a response
     req.commitTransaction = async () => {
-      if (!committed) {
-        committed = true;
+      if (committed) return;
+      committed = true;
+      try {
         await client.query("COMMIT");
         client.release();
+      } catch (err) {
+        // COMMIT on a dead/timed-out socket: destroy the client so it isn't recycled, then surface.
+        releasePooledClient(client, err);
+        throw err;
       }
     };
 
     // Cleanup on connection close or error — rollback if commit never happened
     const cleanup = async () => {
-      if (!committed) {
-        committed = true;
-        await client.query("ROLLBACK").catch(() => {});
-        client.release();
+      if (committed) return;
+      committed = true;
+      // If the request already failed with a broken-connection error (carried here by the error handler),
+      // skip ROLLBACK — it would issue another query on a dead/timed-out socket and wait again before we
+      // finally destroy it. Destroy immediately with the original error.
+      if (isBrokenConnectionError(req.tenantOpError)) {
+        releasePooledClient(client, req.tenantOpError);
+        return;
       }
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => {
+        rollbackErr = e; // a failed rollback means the connection is unusable → destroy on release
+      });
+      releasePooledClient(client, rollbackErr);
     };
     res.on("close", cleanup);
     res.on("error", cleanup);
@@ -126,8 +143,19 @@ export async function tenantMiddleware(req: Request, res: Response, next: NextFu
   } catch (err) {
     if (!committed) {
       committed = true;
-      await client.query("ROLLBACK").catch(() => {});
-      client.release();
+      if (isBrokenConnectionError(err)) {
+        // The connection is already dead (e.g. a setup query hit the client-side query_timeout on a dead
+        // socket). Skip ROLLBACK — it would burn another full query_timeout keeping this bad pool slot
+        // checked out during a saturation incident — and destroy the client immediately.
+        releasePooledClient(client, err);
+      } else {
+        let rollbackErr: unknown;
+        await client.query("ROLLBACK").catch((e) => {
+          rollbackErr = e;
+        });
+        // Destroy the client if the request error OR the failed rollback indicates a broken connection.
+        releasePooledClient(client, rollbackErr ?? err);
+      }
     }
     next(err);
   }

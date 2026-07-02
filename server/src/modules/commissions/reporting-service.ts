@@ -775,16 +775,17 @@ export async function getCommissionSummary(
   if (summaryRepId) {
     const laterDate = (periodStart: string, from: string | undefined) =>
       from && from > periodStart ? from : periodStart;
-    const [mtdGate, ytdGate] = await Promise.all([
-      computeRepEarnedFloorGate(tenantDb, summaryRepId, {
-        from: laterDate(utcBounds.monthStart, filters.from),
-        to: filters.to ?? null,
-      }),
-      computeRepEarnedFloorGate(tenantDb, summaryRepId, {
-        from: laterDate(utcBounds.yearStart, filters.from),
-        to: filters.to ?? null,
-      }),
-    ]);
+    // Serialized, NOT Promise.all: tenantDb is bound to ONE pooled client that runs queries serially, so a
+    // parallel fan-out just queues the second behind the first — and the pool-level query_timeout counts
+    // that queue wait against the timer, so a healthy second query could spuriously time out under load.
+    const mtdGate = await computeRepEarnedFloorGate(tenantDb, summaryRepId, {
+      from: laterDate(utcBounds.monthStart, filters.from),
+      to: filters.to ?? null,
+    });
+    const ytdGate = await computeRepEarnedFloorGate(tenantDb, summaryRepId, {
+      from: laterDate(utcBounds.yearStart, filters.from),
+      to: filters.to ?? null,
+    });
     if (!mtdGate.met) earnedMtd = 0;
     if (!ytdGate.met) earnedYtd = 0;
   }

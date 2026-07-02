@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { eq } from "drizzle-orm";
-import { db, pool } from "../../db.js";
+import { db, pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { offices } from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { getOfficeTimezone } from "../../lib/office-timezone.js";
@@ -56,6 +56,7 @@ export async function createOffice(
 
   // Issue #18 fix: atomic operation — insert + provision in a single transaction
   const client = await pool.connect();
+  let releaseErr: unknown;
   try {
     await client.query("BEGIN");
 
@@ -75,12 +76,19 @@ export async function createOffice(
     console.log(`[Office] Created office '${name}' with schema office_${slug}`);
     return office;
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
+    if (isBrokenConnectionError(err)) {
+      // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+      releaseErr = err;
+    } else {
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+      releaseErr = rollbackErr ?? err;
+    }
     console.error(`[Office] Failed to create office '${name}':`, err);
     if (err instanceof AppError) throw err;
     throw new AppError(500, `Failed to create office: ${(err as Error).message}`);
   } finally {
-    client.release();
+    releasePooledClient(client, releaseErr);
   }
 }
 
