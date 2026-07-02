@@ -124,29 +124,32 @@ type PreparedCompanyCamPhoto = {
  * Get all CompanyCam projects with their match status against deals.
  */
 export async function getProjectMappings(tenantDb: TenantDb): Promise<ProjectMapping[]> {
-  const [ccProjects, dealRows, linkRows] = await Promise.all([
-    getAllProjects(),
-    tenantDb
-      .select({
-        id: deals.id,
-        dealNumber: deals.dealNumber,
-        name: deals.name,
-      })
-      .from(deals)
-      .where(eq(deals.isActive, true)),
-    // Every deal <-> CompanyCam-project link (a deal may own many projects). Join to deals so off-deal /
-    // inactive-deal links are dropped, mirroring the isActive filter on the deal list above.
-    tenantDb
-      .select({
-        companycamProjectId: dealCompanycamProjects.companycamProjectId,
-        dealId: dealCompanycamProjects.dealId,
-      })
-      .from(dealCompanycamProjects)
-      .innerJoin(
-        deals,
-        and(eq(deals.id, dealCompanycamProjects.dealId), eq(deals.isActive, true)),
-      ),
-  ]);
+  // getAllProjects() is an external CompanyCam HTTP call, so start it concurrently. But the two DB reads
+  // both run on `tenantDb` — a single transaction-bound client that executes queries SERIALLY — so awaiting
+  // them together via Promise.all gains no real concurrency; it only queues the second behind the first, and
+  // the pool-level query_timeout counts that queue wait against the timer. Run the DB reads sequentially.
+  const ccProjectsPromise = getAllProjects();
+  const dealRows = await tenantDb
+    .select({
+      id: deals.id,
+      dealNumber: deals.dealNumber,
+      name: deals.name,
+    })
+    .from(deals)
+    .where(eq(deals.isActive, true));
+  // Every deal <-> CompanyCam-project link (a deal may own many projects). Join to deals so off-deal /
+  // inactive-deal links are dropped, mirroring the isActive filter on the deal list above.
+  const linkRows = await tenantDb
+    .select({
+      companycamProjectId: dealCompanycamProjects.companycamProjectId,
+      dealId: dealCompanycamProjects.dealId,
+    })
+    .from(dealCompanycamProjects)
+    .innerJoin(
+      deals,
+      and(eq(deals.id, dealCompanycamProjects.dealId), eq(deals.isActive, true)),
+    );
+  const ccProjects = await ccProjectsPromise;
 
   // Index deals by companycam_project_id for linked matches (from the join table — the source of truth).
   const dealById = new Map(dealRows.map((deal) => [deal.id, deal]));
