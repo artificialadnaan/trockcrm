@@ -70,24 +70,39 @@ const ZERO_BREAKDOWN = () => ({
   creates: 0, edits: 0, stage_moves: 0, uploads: 0, activities: {} as Record<string, number>,
 });
 
-// The usage report surfaces everyone who works in the CRM web app — reps, directors, and admins — so a
-// director/admin's own platform time shows up too (not just reps). Field contractors use the separate
-// field app (T-Rock Cam) and don't emit these web heartbeats, so they stay excluded. Shared across both
-// roster queries so the targeted and all-staff paths can't drift.
-const USAGE_ROSTER_ROLE_SQL = `role IN ('rep', 'director', 'admin')`;
+// Roster roles for the PLATFORM-USAGE report: everyone who works in the CRM web app — reps, directors,
+// and admins — so a director/admin's own platform time shows (not just reps). Field contractors use the
+// separate field app (T-Rock Cam) and don't emit these web heartbeats, so they stay excluded. NOTE: the
+// daily-summary email deliberately does NOT pass this — it keeps the rep-only default so director/admin
+// activity can't inflate the rep-focused headline/leaderboard/quiet metrics.
+export const USAGE_ROSTER_ROLES = ["rep", "director", "admin"] as const;
 
-/** Resolve the staff roster for the request. scope=null → all active staff; else exactly those ids. */
-export async function resolveReps(client: QueryClient, scope: string[] | null): Promise<RepRef[]> {
+/**
+ * Resolve the roster for the request. scope=null → all active users in `roles`; else exactly those ids
+ * (still constrained to `roles`). `roles` defaults to rep-only so existing callers (the daily summary)
+ * are unchanged; the platform-usage endpoints pass USAGE_ROSTER_ROLES to include directors/admins.
+ */
+export async function resolveReps(
+  client: QueryClient,
+  scope: string[] | null,
+  roles: readonly string[] = ["rep"],
+): Promise<RepRef[]> {
+  // `roles` is a trusted code-level allowlist, but parameterize it (alongside the ids) so the query text
+  // stays static.
   if (scope) {
     if (scope.length === 0) return [];
-    const placeholders = scope.map((_, i) => `$${i + 1}`).join(",");
+    const idPlaceholders = scope.map((_, i) => `$${i + 1}`).join(",");
+    const rolePlaceholders = roles.map((_, i) => `$${scope.length + i + 1}`).join(",");
     const { rows } = await client.query<{ id: string; display_name: string }>(
-      `SELECT id, display_name FROM public.users WHERE id IN (${placeholders}) AND ${USAGE_ROSTER_ROLE_SQL} AND is_active = true AND COALESCE(is_test_data, false) = false`, scope,
+      `SELECT id, display_name FROM public.users WHERE id IN (${idPlaceholders}) AND role IN (${rolePlaceholders}) AND is_active = true AND COALESCE(is_test_data, false) = false`,
+      [...scope, ...roles],
     );
     return rows.map((r) => ({ id: r.id, displayName: r.display_name }));
   }
+  const rolePlaceholders = roles.map((_, i) => `$${i + 1}`).join(",");
   const { rows } = await client.query<{ id: string; display_name: string }>(
-    `SELECT id, display_name FROM public.users WHERE ${USAGE_ROSTER_ROLE_SQL} AND is_active = true AND COALESCE(is_test_data, false) = false ORDER BY display_name`,
+    `SELECT id, display_name FROM public.users WHERE role IN (${rolePlaceholders}) AND is_active = true AND COALESCE(is_test_data, false) = false ORDER BY display_name`,
+    [...roles],
   );
   return rows.map((r) => ({ id: r.id, displayName: r.display_name }));
 }

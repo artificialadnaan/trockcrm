@@ -83,7 +83,7 @@ import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { getRegionReport } from "./region-report-service.js";
-import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, classifyViewsState, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
+import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, USAGE_ROSTER_ROLES, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, classifyViewsState, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
 import { businessToday, shiftBusinessDate, getWtdPeriod, type WeekMode } from "../../lib/period.js";
 
 // Parse the showcase/report period toggle. Accepts the four canonical modes; anything else (incl.
@@ -1199,7 +1199,7 @@ router.get("/platform-usage", requireAnyRole, async (req, res, next) => {
     const schema = `office_${req.officeSlug!}`;
     const client = req.tenantClient!; // pg PoolClient bound to the request transaction
 
-    const reps = await resolveReps(client, scope);
+    const reps = await resolveReps(client, scope, USAGE_ROSTER_ROLES);
 
     // Sequential by design: all queries share the one tenant PoolClient (a single connection),
     // which cannot run concurrent queries. Do NOT wrap this in Promise.all. Batch per-rep if needed.
@@ -1251,7 +1251,7 @@ router.get("/platform-usage/drilldown", requireAnyRole, async (req, res, next) =
       throw new AppError(400, "rep is required");
     }
     const schema = `office_${req.officeSlug!}`;
-    const roster = await resolveReps(req.tenantClient!, targetScope);
+    const roster = await resolveReps(req.tenantClient!, targetScope, USAGE_ROSTER_ROLES);
     if (roster.length === 0) {
       throw new AppError(404, "rep not found in usage roster");
     }
@@ -1291,7 +1291,7 @@ router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
       throw new AppError(400, "rep is required");
     }
     const schema = `office_${req.officeSlug!}`;
-    const roster = await resolveReps(req.tenantClient!, scope);
+    const roster = await resolveReps(req.tenantClient!, scope, USAGE_ROSTER_ROLES);
     if (roster.length === 0) {
       throw new AppError(404, "rep not found in usage roster");
     }

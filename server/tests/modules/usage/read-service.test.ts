@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveRepScope, resolveReps, weekDates, sumDays, readUsageDaily, resolveDayKind, emptyUsageDay } from "../../../src/modules/usage/read-service.js";
+import { resolveRepScope, resolveReps, USAGE_ROSTER_ROLES, weekDates, sumDays, readUsageDaily, resolveDayKind, emptyUsageDay } from "../../../src/modules/usage/read-service.js";
 import type { UsageDailyShape } from "../../../src/modules/usage/types.js";
 
 describe("resolveRepScope (server-enforced)", () => {
@@ -14,7 +14,7 @@ describe("resolveRepScope (server-enforced)", () => {
   });
 });
 
-describe("resolveReps roster (surfaces platform staff: reps + directors + admins)", () => {
+describe("resolveReps roster", () => {
   function mockClient(rows: Array<{ id: string; display_name: string }>) {
     const calls: Array<{ sql: string; params?: unknown[] }> = [];
     const client = {
@@ -26,25 +26,36 @@ describe("resolveReps roster (surfaces platform staff: reps + directors + admins
     return { client, calls };
   }
 
-  it("includes directors and admins in the all-staff (scope=null) roster, not just reps", async () => {
-    const { client, calls } = mockClient([{ id: "adm-1", display_name: "Chase Kelly" }]);
+  it("defaults to a REP-ONLY roster (so the daily-summary caller is unchanged)", async () => {
+    const { client, calls } = mockClient([{ id: "rep-1", display_name: "A Rep" }]);
     const reps = await resolveReps(client as any, null);
-    expect(reps).toEqual([{ id: "adm-1", displayName: "Chase Kelly" }]);
-    expect(calls[0].sql).toMatch(/role IN \('rep', 'director', 'admin'\)/);
-    expect(calls[0].sql).not.toMatch(/role = 'rep'/);
+    expect(reps).toEqual([{ id: "rep-1", displayName: "A Rep" }]);
+    // roles parameterized (not interpolated); default = exactly ['rep'].
+    expect(calls[0].sql).toMatch(/role IN \(\$1\)/);
+    expect(calls[0].sql).not.toMatch(/'rep'|'director'|'admin'/); // no literal roles in the query text
+    expect(calls[0].params).toEqual(["rep"]);
   });
 
-  it("applies the same staff-role filter on the targeted (scope) path", async () => {
+  it("surfaces reps + directors + admins when USAGE_ROSTER_ROLES is passed (platform-usage page)", async () => {
+    expect(USAGE_ROSTER_ROLES).toEqual(["rep", "director", "admin"]);
     const { client, calls } = mockClient([{ id: "adm-1", display_name: "Chase Kelly" }]);
-    await resolveReps(client as any, ["adm-1"]);
-    expect(calls[0].sql).toMatch(/role IN \('rep', 'director', 'admin'\)/);
-    expect(calls[0].sql).not.toMatch(/role = 'rep'/);
-    expect(calls[0].params).toEqual(["adm-1"]);
+    const reps = await resolveReps(client as any, null, USAGE_ROSTER_ROLES);
+    expect(reps).toEqual([{ id: "adm-1", displayName: "Chase Kelly" }]);
+    expect(calls[0].sql).toMatch(/role IN \(\$1,\$2,\$3\)/);
+    expect(calls[0].params).toEqual(["rep", "director", "admin"]);
+  });
+
+  it("parameterizes ids AND roles together on the targeted (scope) path", async () => {
+    const { client, calls } = mockClient([{ id: "adm-1", display_name: "Chase Kelly" }]);
+    await resolveReps(client as any, ["adm-1"], USAGE_ROSTER_ROLES);
+    expect(calls[0].sql).toMatch(/id IN \(\$1\)/);
+    expect(calls[0].sql).toMatch(/role IN \(\$2,\$3,\$4\)/);
+    expect(calls[0].params).toEqual(["adm-1", "rep", "director", "admin"]);
   });
 
   it("still short-circuits an empty scope to [] without querying", async () => {
     const { client, calls } = mockClient([]);
-    expect(await resolveReps(client as any, [])).toEqual([]);
+    expect(await resolveReps(client as any, [], USAGE_ROSTER_ROLES)).toEqual([]);
     expect(calls.length).toBe(0);
   });
 });
