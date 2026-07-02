@@ -1,10 +1,11 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import type { Fetcher } from "../api/endpoints";
-import { runConcurrentUploads, uploadCapture, type CaptureUploadInput } from "./upload";
+import { runConcurrentUploads, uploadCapture, UploadCancelledError, type CaptureUploadInput } from "./upload";
 import {
   UPLOAD_CONCURRENCY,
   bumpAttempts,
+  createAsyncMutex,
   dedupeQueue,
   isDrainable,
   partitionResults,
@@ -42,6 +43,20 @@ function indexFile(ownerKey: string): string {
 }
 
 export type DrainSummary = { succeeded: number; failed: number; remaining: number };
+
+// Serialize every index READ-MODIFY-WRITE for this process. enqueue / removeQueuedUploads / drain-commit
+// each read a snapshot then write it back; run concurrently (remove-a-photo racing a submit's enqueue) they
+// would clobber each other. Each mutation below reads AND writes inside this lock, so writes never race.
+// Pure READS (getQueuedUploads/getQueuedCount/getFailedCount) stay lock-free — writeQueue is atomic
+// (tmp+move), so a read always sees a whole index, never a torn one.
+const withQueueLock = createAsyncMutex();
+
+// Because enqueue copies the file OUTSIDE the lock, a removeQueuedUploads can run while a photo is still
+// copying (before it's in the index). `enqueueing` holds ids currently mid-copy (registered under the
+// lock); a concurrent cancel tombstones them in `cancelledMidEnqueue`, and enqueue drops the item instead
+// of appending it. Both sets are consumed by the enqueue write → bounded, no leak.
+const enqueueing = new Set<string>();
+const cancelledMidEnqueue = new Set<string>();
 
 // ── Disk-backed index + file lifecycle ─────────────────────────────────────────
 
@@ -107,6 +122,11 @@ export async function getQueuedUploads(ownerKey: string): Promise<QueuedUpload[]
   return readQueue(ownerKey);
 }
 
+/** True iff the id is still present in the queue — the drain's pre-confirm cancellation check. */
+async function queueHasClientUploadId(ownerKey: string, clientUploadId: string): Promise<boolean> {
+  return (await readQueue(ownerKey)).some((item) => item.clientUploadId === clientUploadId);
+}
+
 /** Count of still-DRAINABLE items (excludes terminal/failed) — drives the "waiting" banner + resume. */
 export async function getQueuedCount(ownerKey: string): Promise<number> {
   return (await readQueue(ownerKey)).filter(isDrainable).length;
@@ -119,11 +139,33 @@ export async function getFailedCount(ownerKey: string): Promise<number> {
 
 /** Discard the terminal/failed items (and their files) — the UI's "Dismiss failed" action. */
 export async function clearFailedUploads(ownerKey: string): Promise<void> {
-  const current = await readQueue(ownerKey);
-  const failed = current.filter((item) => !isDrainable(item));
-  if (failed.length === 0) return;
-  await writeQueue(ownerKey, current.filter(isDrainable));
-  await deleteQueuedFiles(failed);
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    const failed = current.filter((item) => !isDrainable(item));
+    if (failed.length === 0) return;
+    await writeQueue(ownerKey, current.filter(isDrainable));
+    await deleteQueuedFiles(failed);
+  });
+}
+
+/**
+ * Cancel specific queued uploads by clientUploadId (and delete their copied files). Used when scorecard
+ * evidence is removed from a draft after a prior offline submit already enqueued it — otherwise a later
+ * drain would still upload a photo that's no longer part of the card.
+ */
+export async function removeQueuedUploads(ownerKey: string, clientUploadIds: string[]): Promise<void> {
+  if (clientUploadIds.length === 0) return;
+  const ids = new Set(clientUploadIds);
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    const toRemove = current.filter((item) => ids.has(item.clientUploadId));
+    // Tombstone any requested id whose enqueue copy is IN FLIGHT (not yet in the index) so the pending
+    // write drops it instead of resurrecting removed evidence.
+    for (const id of ids) if (enqueueing.has(id)) cancelledMidEnqueue.add(id);
+    if (toRemove.length === 0) return;
+    await writeQueue(ownerKey, current.filter((item) => !ids.has(item.clientUploadId)));
+    await deleteQueuedFiles(toRemove);
+  });
 }
 
 /**
@@ -136,15 +178,39 @@ export async function enqueueUploads(ownerKey: string, inputs: CaptureUploadInpu
   await ensureDir(ownerKey);
   const dir = ownerDir(ownerKey);
   const queued: QueuedUpload[] = [];
-  let current = await readQueue(ownerKey);
   for (const input of inputs) {
+    const id = input.clientUploadId;
     const ext = input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
-    const dest = `${dir}${input.clientUploadId}${ext}`;
-    await FileSystem.copyAsync({ from: input.uri, to: dest });
+    const dest = `${dir}${id}${ext}`;
+    // Register as in-flight under the lock, then copy OUTSIDE the lock — a large photo's copy is slow and
+    // must not block removeQueuedUploads / drain re-selection during a big batch.
+    await withQueueLock(async () => {
+      enqueueing.add(id);
+    });
+    try {
+      await FileSystem.copyAsync({ from: input.uri, to: dest });
+    } catch (err) {
+      // Copy failed — clear the in-flight marker (+ any tombstone) so `enqueueing` can't leak the id, then
+      // rethrow (a copy failure still aborts the batch, as before).
+      await withQueueLock(async () => {
+        enqueueing.delete(id);
+        cancelledMidEnqueue.delete(id);
+      });
+      throw err;
+    }
     const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
-    // Persist immediately so a crash right after this copy still recovers the item on next launch.
-    current = dedupeQueue(current, [item]);
-    await writeQueue(ownerKey, current);
+    // Persist under the lock — but if a cancel arrived WHILE copying, drop the item (delete the copy)
+    // instead of appending removed evidence. A crash right after the copy still recovers via the index.
+    const cancelled = await withQueueLock(async () => {
+      enqueueing.delete(id);
+      if (cancelledMidEnqueue.delete(id)) return true;
+      await writeQueue(ownerKey, dedupeQueue(await readQueue(ownerKey), [item]));
+      return false;
+    });
+    if (cancelled) {
+      await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => undefined);
+      continue;
+    }
     queued.push(item);
   }
   return queued;
@@ -153,23 +219,29 @@ export async function enqueueUploads(ownerKey: string, inputs: CaptureUploadInpu
 /** Remove items (and their files) from the persisted index — used after a successful upload. */
 async function removeQueuedItems(ownerKey: string, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  const current = await readQueue(ownerKey);
-  const toDelete = current.filter((item) => ids.includes(item.clientUploadId));
-  await writeQueue(ownerKey, removeIds(current, ids));
-  await deleteQueuedFiles(toDelete);
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    const toDelete = current.filter((item) => ids.includes(item.clientUploadId));
+    await writeQueue(ownerKey, removeIds(current, ids));
+    await deleteQueuedFiles(toDelete);
+  });
 }
 
 /** Increment the failed-attempt counter for the given ids — moves them toward the terminal cap. */
 async function recordFailedAttempts(ownerKey: string, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  const current = await readQueue(ownerKey);
-  await writeQueue(ownerKey, bumpAttempts(current, ids, Date.now()));
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    await writeQueue(ownerKey, bumpAttempts(current, ids, Date.now()));
+  });
 }
 
 export async function clearUploadQueue(ownerKey: string): Promise<void> {
-  const current = await readQueue(ownerKey);
-  await deleteQueuedFiles(current);
-  await writeQueue(ownerKey, []);
+  await withQueueLock(async () => {
+    const current = await readQueue(ownerKey);
+    await deleteQueuedFiles(current);
+    await writeQueue(ownerKey, []);
+  });
 }
 
 // A drain must never run twice at once (foreground + background, or a double tap): a second caller would
@@ -190,10 +262,16 @@ export async function drainUploadQueue(
   draining = true;
   let keptAwake = false;
   try {
-    // Only drain items that haven't exhausted their retries — terminal/failed items are left for the UI
-    // to surface and discard, never re-PUT.
-    const items = (await readQueue(ownerKey)).filter(isDrainable);
-    if (items.length === 0) return { succeeded: 0, failed: 0, remaining: 0 };
+    // Plan the drainable id order UNDER THE LOCK so the snapshot is consistent with any cancellation that
+    // has already completed (terminal/failed items are left for the UI to surface + discard, never re-PUT).
+    const planned = await withQueueLock(async () => {
+      const queue = await readQueue(ownerKey);
+      return { ids: queue.filter(isDrainable).map((item) => item.clientUploadId), total: queue.length };
+    });
+    const plannedIds = planned.ids;
+    // Nothing drainable, but report the ACTUAL queue size as `remaining` — terminal/failed items still sit
+    // in the queue (surfaced/dismissed via the UI), so hardcoding 0 would hide them from the caller.
+    if (plannedIds.length === 0) return { succeeded: 0, failed: 0, remaining: planned.total };
 
     try {
       await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
@@ -208,10 +286,35 @@ export async function drainUploadQueue(
     // of retrying forever.
     let succeeded = 0;
     let failed = 0;
-    for (let i = 0; i < items.length; i += DRAIN_CHUNK) {
-      const chunk = items.slice(i, i + DRAIN_CHUNK);
-      const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) => uploadCapture(fetcher, item));
-      const { succeededIds, failedIds } = partitionResults(chunk, results);
+    for (let i = 0; i < plannedIds.length; i += DRAIN_CHUNK) {
+      const chunkIds = plannedIds.slice(i, i + DRAIN_CHUNK);
+      // Re-select the items STILL queued + drainable right now, under the lock: a removeQueuedUploads that
+      // landed since the plan (user pulled a photo off the card) cancels it — so we never upload evidence
+      // the user just removed, and never touch a file another mutation deleted.
+      const chunk = await withQueueLock(async () => {
+        const byId = new Map((await readQueue(ownerKey)).map((item) => [item.clientUploadId, item]));
+        return chunkIds
+          .map((id) => byId.get(id))
+          .filter((item): item is QueuedUpload => !!item && isDrainable(item));
+      });
+      if (chunk.length === 0) continue;
+      const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) =>
+        // Re-check right before the confirm step: if the item was cancelled while this chunk was uploading
+        // (user pulled a photo off the card), skip confirm so the removed evidence never links to the deal.
+        uploadCapture(fetcher, item, { shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId) }),
+      );
+      // A cancelled upload (photo removed mid-flight → confirm skipped) is neither a success nor a failure:
+      // it was intentionally dropped + already removed from the index, so exclude it from
+      // partitionResults/recordFailedAttempts rather than counting it as failed or bumping its attempts.
+      const liveChunk: QueuedUpload[] = [];
+      const liveResults: PromiseSettledResult<unknown>[] = [];
+      chunk.forEach((item, i) => {
+        const r = results[i];
+        if (r && r.status === "rejected" && r.reason instanceof UploadCancelledError) return;
+        liveChunk.push(item);
+        liveResults.push(r);
+      });
+      const { succeededIds, failedIds } = partitionResults(liveChunk, liveResults);
       await removeQueuedItems(ownerKey, succeededIds);
       await recordFailedAttempts(ownerKey, failedIds);
       succeeded += succeededIds.length;

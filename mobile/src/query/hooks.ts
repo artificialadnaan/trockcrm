@@ -123,12 +123,12 @@ export function useProjectTags(dealId: string | undefined, q: string) {
   });
 }
 
-/** Capture-target search (deals/leads/opps) for the target picker. */
-export function useCaptureTargets(search: string) {
+/** Capture-target search (deals/leads/opps) for the target picker. `dealsOnly` restricts to deals (scorecard). */
+export function useCaptureTargets(search: string, dealsOnly = false) {
   const { fetcher, user } = useAuth();
   return useQuery({
-    queryKey: qk.targets(user?.id ?? "anon", search),
-    queryFn: () => api.searchCaptureTargets(fetcher, search.trim()),
+    queryKey: [...qk.targets(user?.id ?? "anon", search), dealsOnly] as const,
+    queryFn: () => api.searchCaptureTargets(fetcher, search.trim(), 20, dealsOnly),
     enabled: !!user && search.trim().length > 0,
   });
 }

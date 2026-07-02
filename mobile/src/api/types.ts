@@ -1,4 +1,5 @@
 import type { FieldProject, FieldPhoto, FieldCaptureTarget } from "../projects/field-projects";
+import type { ScorecardSectionKey } from "../scorecards/scoring";
 
 export type { FieldProject, FieldPhoto, FieldCaptureTarget };
 
@@ -144,3 +145,44 @@ export type FieldProjectReportSummary = {
 };
 export type ReportsResponse = { reports: FieldProjectReportSummary[] };
 export type ReportDownloadResponse = { url: string; filename: string };
+
+// ── Field Scorecards ────────────────────────────────────────────────────────
+export type ScorecardRatingValue = "elite" | "on_standard" | "needs_improvement" | "corrective_action";
+export type FieldScorecardSummary = {
+  id: string;
+  dealId: string;
+  weekOf: string;
+  totalScore: number;
+  rating: ScorecardRatingValue;
+  ratingLabel: string;
+  superintendentName: string | null;
+  pmName: string | null;
+  projectNumber: string | null;
+  criticalDeficiencyCount: number;
+  submittedByName: string | null;
+  submittedAt: string;
+  officeSlug?: string;
+  officeId?: string;
+};
+export type FieldScorecardItemView = { sectionKey: ScorecardSectionKey; points: number; note: string | null };
+export type FieldScorecardPhotoView = {
+  id: string;
+  sectionKey: ScorecardSectionKey;
+  fileId: string;
+  url: string | null;
+  caption: string | null;
+};
+export type FieldScorecardDetail = FieldScorecardSummary & {
+  items: FieldScorecardItemView[];
+  criticalDeficiencies: string[];
+  actionItems: string[];
+  photos: FieldScorecardPhotoView[];
+};
+export type RecentScorecardsResponse = { scorecards: FieldScorecardSummary[]; degradedOffices?: string[] };
+export type ProjectScorecardsResponse = {
+  scorecards: FieldScorecardSummary[];
+  officeSlug?: string;
+  officeId?: string;
+};
+export type ScorecardDetailResponse = { scorecard: FieldScorecardDetail };
+export type CreateScorecardResponse = { scorecard: FieldScorecardSummary };

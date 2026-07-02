@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { companies, contacts, deals, files, leads, pipelineStageConfig, properties, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { FileCategory, PhotoCategory } from "@trock-crm/shared/types";
+import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   deleteObject,
@@ -1057,13 +1058,21 @@ export function sortPhotoTargetsByRelevance<
   });
 }
 
+/** Postgres text[] literal for a slug list — used in the dealsOnly browsability ANY/ALL predicate. */
+const photoTargetTextArray = (values: readonly string[]) =>
+  sql`ARRAY[${sql.join(values.map((value) => sql`${value}`), sql`, `)}]::text[]`;
+
 export async function searchPhotoUploadTargets(
   tenantDb: TenantDb,
-  input: { search?: string; limit?: number }
+  input: { search?: string; limit?: number; dealsOnly?: boolean }
 ): Promise<{ targets: PhotoUploadTarget[] }> {
   const limit = Math.min(Math.max(input.limit ?? 30, 1), 60);
   const trimmed = input.search?.trim() ?? "";
   const hasSearch = trimmed.length > 0;
+  // dealsOnly: the Field Scorecard attaches to a deal (FK to deals) and can't score a lead/opportunity.
+  // Filtering must happen HERE (before each type's LIMIT + the caller's cross-office cap) — a client-side
+  // filter on the already-capped, lead/opportunity-first result set can hide every matching deal.
+  const dealsOnly = input.dealsOnly === true;
 
   const leadSearch = hasSearch ? buildPhotoTargetLeadSearchCondition(trimmed) : null;
   const dealSearch = hasSearch ? buildPhotoTargetDealSearchCondition(trimmed) : null;
@@ -1086,6 +1095,16 @@ export async function searchPhotoUploadTargets(
   // that cannot actually receive a photo.
   leadConditions.push(eq(leads.isActive, true));
   dealConditions.push(eq(deals.isActive, true));
+  if (dealsOnly) {
+    // Scorecard picker: only surface BROWSABLE field projects (active-pipeline OR Won-family, never
+    // Lost/terminal) so it can't offer a deal the createFieldScorecard gate would 404. Mirrors
+    // field/projects-service.activeProjectWhere, keyed off the SAME WON/LOST slug source of truth.
+    const stageSlug = sql`COALESCE(${pipelineStageConfig.slug}, ${deals.bidBoardStageSlug}, '')`;
+    dealConditions.push(sql`
+      (COALESCE(${pipelineStageConfig.isTerminal}, false) = false OR ${stageSlug} = ANY(${photoTargetTextArray(WON_STAGE_SLUGS)}))
+      AND ${stageSlug} <> ALL(${photoTargetTextArray(LOST_STAGE_SLUGS)})
+    `);
+  }
   if (leadSearch) leadConditions.push(leadSearch);
   if (dealSearch) dealConditions.push(dealSearch);
 
@@ -1124,23 +1143,25 @@ export async function searchPhotoUploadTargets(
   const leadOrder = hasSearch ? [desc(leadRelevance), desc(leads.updatedAt)] : [desc(leads.updatedAt)];
   const dealOrder = hasSearch ? [desc(dealRelevance), desc(deals.updatedAt)] : [desc(deals.updatedAt)];
 
-  const leadRows = await tenantDb
-    .select({
-      id: leads.id,
-      name: leads.name,
-      stageName: pipelineStageConfig.name,
-      companyName: companies.name,
-      lastUpdatedAt: leads.updatedAt,
-      relevance: leadRelevance,
-    })
-    .from(leads)
-    .leftJoin(companies, eq(companies.id, leads.companyId))
-    .leftJoin(properties, eq(properties.id, leads.propertyId))
-    .leftJoin(contacts, eq(contacts.id, leads.primaryContactId))
-    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, leads.stageId))
-    .where(leadConditions.length > 0 ? and(...leadConditions) : sql`true`)
-    .orderBy(...leadOrder)
-    .limit(limit);
+  const leadRows = dealsOnly
+    ? []
+    : await tenantDb
+        .select({
+          id: leads.id,
+          name: leads.name,
+          stageName: pipelineStageConfig.name,
+          companyName: companies.name,
+          lastUpdatedAt: leads.updatedAt,
+          relevance: leadRelevance,
+        })
+        .from(leads)
+        .leftJoin(companies, eq(companies.id, leads.companyId))
+        .leftJoin(properties, eq(properties.id, leads.propertyId))
+        .leftJoin(contacts, eq(contacts.id, leads.primaryContactId))
+        .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, leads.stageId))
+        .where(leadConditions.length > 0 ? and(...leadConditions) : sql`true`)
+        .orderBy(...leadOrder)
+        .limit(limit);
   // Opportunities and deals are both deal-table rows but render as SEPARATE UI
   // groups, so they get SEPARATE per-type caps below. Fetch them as two queries
   // (not one shared LIMIT) — otherwise a flood of deals can fill the deal query's
@@ -1166,7 +1187,7 @@ export async function searchPhotoUploadTargets(
       .where(and(...dealConditions, dispositionCond))
       .orderBy(...dealOrder)
       .limit(limit);
-  const opportunityRows = await fetchDeals(eq(deals.pipelineDisposition, "opportunity"));
+  const opportunityRows = dealsOnly ? [] : await fetchDeals(eq(deals.pipelineDisposition, "opportunity"));
   const dealRows = await fetchDeals(sql`${deals.pipelineDisposition} IS DISTINCT FROM 'opportunity'`);
 
   const scoredLeads = leadRows.map((row) => ({

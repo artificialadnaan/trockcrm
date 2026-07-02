@@ -1,6 +1,7 @@
 import {
   MAX_UPLOAD_ATTEMPTS,
   bumpAttempts,
+  createAsyncMutex,
   dedupeQueue,
   isDrainable,
   newClientUploadId,
@@ -78,5 +79,40 @@ describe("upload-queue-core", () => {
       { status: "fulfilled", value: 3 },
     ];
     expect(partitionResults(items, results)).toEqual({ succeededIds: ["a", "c"], failedIds: ["b"] });
+  });
+});
+
+describe("createAsyncMutex", () => {
+  it("serializes read-modify-write so concurrent tasks can't clobber a shared snapshot", async () => {
+    const run = createAsyncMutex();
+    // Shared cell mutated read → await → write. Without serialization both tasks read 0 and write 1.
+    let cell = 0;
+    const rmw = async () => {
+      const snapshot = cell;
+      await Promise.resolve(); // yield: lets an interleaving task run if unserialized
+      cell = snapshot + 1;
+    };
+    await Promise.all([run(rmw), run(rmw), run(rmw)]);
+    expect(cell).toBe(3);
+  });
+
+  it("preserves enqueue order (FIFO)", async () => {
+    const run = createAsyncMutex();
+    const order: number[] = [];
+    await Promise.all([1, 2, 3].map((n) => run(async () => { await Promise.resolve(); order.push(n); })));
+    expect(order).toEqual([1, 2, 3]);
+  });
+
+  it("a throwing task rejects to its caller but does not wedge the chain", async () => {
+    const run = createAsyncMutex();
+    await expect(run(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    // The next task still runs after the failure.
+    await expect(run(async () => 42)).resolves.toBe(42);
+  });
+
+  it("returns each task's resolved value", async () => {
+    const run = createAsyncMutex();
+    const [a, b] = await Promise.all([run(async () => "a"), run(async () => "b")]);
+    expect([a, b]).toEqual(["a", "b"]);
   });
 });

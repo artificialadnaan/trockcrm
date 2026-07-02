@@ -25,7 +25,12 @@ import type {
   ReportsResponse,
   ReportDownloadResponse,
   ShareLinkResponse,
+  CreateScorecardResponse,
+  RecentScorecardsResponse,
+  ProjectScorecardsResponse,
+  ScorecardDetailResponse,
 } from "./types";
+import type { ScorecardSubmissionPayload } from "../scorecards/draft";
 
 /**
  * A `Fetcher` is `apiFetch` already bound to the current token / officeId /
@@ -105,8 +110,11 @@ export const getProjectTags = (f: Fetcher, dealId: string, q: string, limit = 8)
   f<ProjectTagsResponse>(`/field/projects/${dealId}/tags`, { query: { q, limit } });
 
 // ── Capture targets ───────────────────────────────────────────────────────────
-export const searchCaptureTargets = (f: Fetcher, search: string, limit = 20) =>
-  f<CaptureTargetsResponse>("/field/photo-targets/search", { query: { search, limit } });
+export const searchCaptureTargets = (f: Fetcher, search: string, limit = 20, dealsOnly = false) =>
+  f<CaptureTargetsResponse>("/field/photo-targets/search", {
+    // dealsOnly filters to deals server-side (before the result cap) for the scorecard picker.
+    query: { search, limit, ...(dealsOnly ? { dealsOnly: "true" } : {}) },
+  });
 
 export const getNearbyCaptureTargets = (
   f: Fetcher,
@@ -139,3 +147,17 @@ export const getProjectReports = (f: Fetcher, dealId: string) =>
 
 export const getReportDownload = (f: Fetcher, reportId: string) =>
   f<ReportDownloadResponse>(`/field/reports/${reportId}/download`);
+
+// ── Field Scorecards ────────────────────────────────────────────────────────
+export const createScorecard = (f: Fetcher, body: ScorecardSubmissionPayload) =>
+  f<CreateScorecardResponse>("/field/scorecards", { method: "POST", body });
+
+// Recent submitted cards across accessible offices — the Scorecard tab landing.
+export const getRecentScorecards = (f: Fetcher, limit = 50) =>
+  f<RecentScorecardsResponse>("/field/scorecards", { query: { limit } });
+
+export const getProjectScorecards = (f: Fetcher, dealId: string) =>
+  f<ProjectScorecardsResponse>(`/field/projects/${dealId}/scorecards`);
+
+export const getScorecard = (f: Fetcher, id: string) =>
+  f<ScorecardDetailResponse>(`/field/scorecards/${id}`);

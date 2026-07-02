@@ -30,9 +30,14 @@ import {
   assertAccessibleFieldCaptureTarget,
   assertScopedCaptureTargetAccess,
 } from "../../../src/modules/field/projects-service.js";
+import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../../../src/modules/shared/pipeline-terminal-stages.js";
 
 const T = "office_test";
 const STAGE = "00000000-0000-0000-0000-0000000000a1";
+const STAGE_WON = "00000000-0000-0000-0000-0000000000a2";
+const STAGE_LOST = "00000000-0000-0000-0000-0000000000a3";
+const D_WON = "00000000-0000-0000-0000-0000000040a1"; // a Won-family deal matching "roof" (browsable)
+const D_LOST = "00000000-0000-0000-0000-0000000040a2"; // a Lost deal matching "roof" (NOT browsable)
 const CO = "00000000-0000-0000-0000-0000000000b1";
 const PROP_ADDR = "00000000-0000-0000-0000-0000000000c1"; // property WITH address
 const PROP_BLANK = "00000000-0000-0000-0000-0000000000c2"; // property with BLANK address
@@ -53,7 +58,7 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
     CREATE SCHEMA ${T};
-    CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, display_order int);
+    CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, display_order int, slug text, is_terminal boolean NOT NULL DEFAULT false);
     CREATE TABLE ${T}.companies (id uuid PRIMARY KEY, name text);
     CREATE TABLE ${T}.properties (id uuid PRIMARY KEY, name text, address text, city text, state text);
     CREATE TABLE ${T}.contacts (id uuid PRIMARY KEY, first_name text, last_name text);
@@ -68,6 +73,7 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, name text NOT NULL, deal_number text, pipeline_disposition text,
       company_id uuid, property_id uuid, primary_contact_id uuid, stage_id uuid, assigned_rep_id uuid,
       source text, description text, property_address text, property_city text, property_state text,
+      bid_board_stage_slug text,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       updated_at timestamptz NOT NULL DEFAULT now()
     );
@@ -75,7 +81,10 @@ beforeAll(async () => {
   `);
 
   await pg.exec(`
-    INSERT INTO public.pipeline_stage_config (id, name, display_order) VALUES ('${STAGE}', 'New Lead', 1);
+    INSERT INTO public.pipeline_stage_config (id, name, display_order, slug, is_terminal) VALUES
+      ('${STAGE}', 'New Lead', 1, 'new-lead', false),
+      ('${STAGE_WON}', 'Won', 2, '${WON_STAGE_SLUGS[0]}', true),
+      ('${STAGE_LOST}', 'Lost', 3, '${LOST_STAGE_SLUGS[0]}', true);
     INSERT INTO ${T}.companies (id, name) VALUES ('${CO}', 'Birchstone Residential');
     INSERT INTO ${T}.properties (id, name, address, city, state) VALUES
       ('${PROP_ADDR}', 'Maple Court', '100 Oak Street', 'Dallas', 'TX'),
@@ -107,6 +116,15 @@ beforeAll(async () => {
   await pg.exec(
     `INSERT INTO ${T}.deals (id, name, deal_number, pipeline_disposition, company_id, property_id, primary_contact_id, stage_id, assigned_rep_id, description, updated_at) VALUES
       ('${OPP_ROOF}', 'Roof Opportunity', 'O-1', 'opportunity', '${CO}', '${PROP_ADDR}', '${CT}', '${STAGE}', '${REP_B}', 'roof opportunity', now() - interval '90 days');`
+  );
+  // A Won-family deal (browsable → scoreable) and a Lost deal (terminal → NOT scoreable), both matching
+  // "roof", for the dealsOnly browsability assertion.
+  // Distinct search term ("gutter") so these two aren't evicted by the 40-deal "roof" flood + the 30-cap —
+  // the browsability assertion then isolates the terminal filter, not the cap.
+  await pg.exec(
+    `INSERT INTO ${T}.deals (id, name, deal_number, pipeline_disposition, company_id, property_id, primary_contact_id, stage_id, assigned_rep_id, description, updated_at) VALUES
+      ('${D_WON}', 'Gutter Won Job', 'D-WON', 'deal', '${CO}', '${PROP_ADDR}', '${CT}', '${STAGE_WON}', '${REP_A}', 'won gutter', now() - interval '5 days'),
+      ('${D_LOST}', 'Gutter Lost Job', 'D-LOST', 'deal', '${CO}', '${PROP_ADDR}', '${CT}', '${STAGE_LOST}', '${REP_A}', 'lost gutter', now() - interval '6 days');`
   );
 
   tdb = drizzle(pg) as never;
@@ -147,6 +165,24 @@ describe("searchPhotoUploadTargets — cross-type cap must not evict leads", () 
   it("excludes INACTIVE records (they can't be attached, so must not appear)", async () => {
     const { targets } = await searchPhotoUploadTargets(tdb, { search: "roof", limit: 30 });
     expect(ids(targets).has(L_INACTIVE)).toBe(false);
+  });
+
+  it("dealsOnly returns ONLY deals — leads + opportunities are filtered in SQL before the cap (scorecard picker)", async () => {
+    const { targets } = await searchPhotoUploadTargets(tdb, { search: "roof", limit: 30, dealsOnly: true });
+    // Every result is a deal (no leads, no opportunity) — the exact starvation Codex flagged (leads/opps
+    // ranked ahead of deals, then a client filter) can't happen because the filter is server-side.
+    expect(targets.length).toBeGreaterThan(0);
+    expect(targets.every((t) => t.type === "deal")).toBe(true);
+    const returned = ids(targets);
+    expect(returned.has(L_ROOF1)).toBe(false);
+    expect(returned.has(OPP_ROOF)).toBe(false);
+  });
+
+  it("dealsOnly surfaces only BROWSABLE deals — includes Won-family, excludes Lost/terminal (matches the scorecard gate)", async () => {
+    const { targets } = await searchPhotoUploadTargets(tdb, { search: "gutter", limit: 30, dealsOnly: true });
+    const returned = ids(targets);
+    expect(returned.has(D_WON)).toBe(true); // Won-family is scoreable
+    expect(returned.has(D_LOST)).toBe(false); // Lost/terminal is NOT — the picker must not offer it
   });
 });
 
