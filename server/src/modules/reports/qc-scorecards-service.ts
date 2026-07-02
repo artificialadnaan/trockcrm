@@ -62,6 +62,9 @@ export async function getQcScorecardsReport(
   const windowConditions = [
     sql`sc.is_active = true`,
     sql`d.is_active = true`,
+    // Standard reports guard: keep demo/test projects out of the counts, dropdowns, row list, and cap — the
+    // same COALESCE(d.is_test_data, false) = false exclusion every other report surface applies.
+    sql`COALESCE(d.is_test_data, false) = false`,
     sql`(COALESCE(psc.is_terminal, false) = false OR ${stageSlug} = ANY(${textArray(WON_STAGE_SLUGS)}))`,
     // A deal is Lost if EITHER its CRM stage slug OR its Bid Board mirror slug is Lost — a BB-owned deal can
     // be closed_lost in bid_board_stage_slug while its CRM stage_id is still open (see deal-filter-

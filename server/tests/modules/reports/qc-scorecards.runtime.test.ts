@@ -15,6 +15,7 @@ const DEAL_A = "bbbbbbbb-0000-0000-0000-000000000002"; // Atlanta, active
 const DEAL_LOST = "bbbbbbbb-0000-0000-0000-000000000003"; // Lost stage → excluded
 const DEAL_ARCHIVED = "bbbbbbbb-0000-0000-0000-000000000004"; // is_active=false → excluded
 const DEAL_BB_LOST = "bbbbbbbb-0000-0000-0000-000000000005"; // open CRM stage, Lost Bid Board mirror → excluded
+const DEAL_TEST = "bbbbbbbb-0000-0000-0000-000000000006"; // is_test_data=true (active, live stage) → excluded
 const USER = "33333333-3333-3333-3333-333333333333";
 const SC1 = "55555555-5555-5555-5555-000000000001"; // Dallas, Jun 30, needs_improvement, 1 flag, pdf
 const SC2 = "55555555-5555-5555-5555-000000000002"; // Dallas, Jun 23, elite, no flag, no pdf
@@ -23,6 +24,7 @@ const SC_OLD = "55555555-5555-5555-5555-000000000004"; // Atlanta, May 1 (out of
 const SC_LOST = "55555555-5555-5555-5555-000000000005"; // on a Lost deal → excluded by the live-project gate
 const SC_ARCHIVED = "55555555-5555-5555-5555-000000000006"; // on an archived (is_active=false) deal → excluded
 const SC_BB_LOST = "55555555-5555-5555-5555-000000000007"; // on a deal whose Bid Board mirror is Lost → excluded
+const SC_TEST = "55555555-5555-5555-5555-000000000008"; // on a test-data deal → excluded from reports
 
 let pg: PGlite;
 let tdb: any;
@@ -32,7 +34,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.region_config (id uuid PRIMARY KEY, name varchar(100) NOT NULL);
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_terminal boolean NOT NULL DEFAULT false);
-    CREATE TABLE deals (id uuid PRIMARY KEY, name text, region_id uuid, project_number text, stage_id uuid, bid_board_stage_slug text, is_active boolean NOT NULL DEFAULT true);
+    CREATE TABLE deals (id uuid PRIMARY KEY, name text, region_id uuid, project_number text, stage_id uuid, bid_board_stage_slug text, is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false);
     SET search_path TO public;
   `);
   await pg.exec(tenantSchemaSql("public", [fieldScorecards]));
@@ -48,6 +50,9 @@ beforeAll(async () => {
     -- BB-owned deal: CRM stage_id is the OPEN 'construction' stage, but the Bid Board mirror is Lost.
     INSERT INTO deals (id, name, region_id, project_number, stage_id, bid_board_stage_slug, is_active) VALUES
       ('${DEAL_BB_LOST}','Stale BB Lost','${RC_DALLAS}','DFW-7777','${STAGE_ACTIVE}','${LOST_STAGE_SLUGS[0]}', true);
+    -- Demo/test project: active + live stage, but flagged is_test_data → must not leak into reports.
+    INSERT INTO deals (id, name, region_id, project_number, stage_id, is_active, is_test_data) VALUES
+      ('${DEAL_TEST}','Demo Sandbox','${RC_DALLAS}','DFW-0000','${STAGE_ACTIVE}', true, true);
   `);
   tdb = drizzle(pg);
 
@@ -59,6 +64,7 @@ beforeAll(async () => {
     { id: SC_LOST, clientSubmissionId: "66666666-6666-6666-6666-000000000005", dealId: DEAL_LOST, weekOf: "2026-06-30", projectNumber: "DFW-9999", superintendentName: "Sam Reyes", totalScore: 50, rating: "corrective_action", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
     { id: SC_ARCHIVED, clientSubmissionId: "66666666-6666-6666-6666-000000000006", dealId: DEAL_ARCHIVED, weekOf: "2026-06-30", projectNumber: "DFW-8888", superintendentName: "Sam Reyes", totalScore: 88, rating: "on_standard", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
     { id: SC_BB_LOST, clientSubmissionId: "66666666-6666-6666-6666-000000000007", dealId: DEAL_BB_LOST, weekOf: "2026-06-30", projectNumber: "DFW-7777", superintendentName: "Sam Reyes", totalScore: 65, rating: "corrective_action", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
+    { id: SC_TEST, clientSubmissionId: "66666666-6666-6666-6666-000000000008", dealId: DEAL_TEST, weekOf: "2026-06-30", projectNumber: "DFW-0000", superintendentName: "Demo Tester", totalScore: 99, rating: "elite", submittedBy: USER, submittedByName: "Demo Tester", submittedAt: new Date("2026-06-30T18:00:00Z") },
   ]);
 });
 
@@ -81,13 +87,17 @@ describe("getQcScorecardsReport", () => {
     expect(scorecards.find((s) => s.scorecardId === SC3)!.deficiencyCount).toBe(2);
   });
 
-  it("excludes scorecards on Lost / archived / Bid-Board-Lost deals (live-project gate)", async () => {
-    const ids = (await getQcScorecardsReport(tdb, JUNE)).scorecards.map((s) => s.scorecardId);
+  it("excludes scorecards on Lost / archived / Bid-Board-Lost / test-data deals (live-project + reports gate)", async () => {
+    const res = await getQcScorecardsReport(tdb, JUNE);
+    const ids = res.scorecards.map((s) => s.scorecardId);
     expect(ids).not.toContain(SC_LOST); // DEAL_LOST is on a terminal Lost stage
     expect(ids).not.toContain(SC_ARCHIVED); // DEAL_ARCHIVED has is_active = false
     // DEAL_BB_LOST keeps an OPEN CRM stage_id but its Bid Board mirror is Lost — the gate must still exclude it
     // (COALESCE(psc.slug, bid_board_stage_slug) would pick the open CRM slug and let this stale row through).
     expect(ids).not.toContain(SC_BB_LOST);
+    // DEAL_TEST is active + live-staged but is_test_data — the reports guard keeps it out of rows AND options.
+    expect(ids).not.toContain(SC_TEST);
+    expect(res.superintendents).not.toContain("Demo Tester");
   });
 
   it("filters by region name (server-side, before the cap)", async () => {

@@ -117,7 +117,7 @@ export default function QcReportsPage() {
           tone="bad"
           label="Corrective Action"
           value={String(stats.corrective.length)}
-          meta="projects below 75"
+          meta="scorecards rated corrective action"
           onClick={() => stats.corrective.length && setDrill({ title: "Corrective Action", rows: stats.corrective })}
         />
         <StatCard
@@ -253,6 +253,10 @@ function StatCard(props: {
 function FilterSelect(props: {
   label: string; value: string; onChange: (v: string) => void; options: string[]; allLabel: string; renderOption?: (v: string) => string;
 }) {
+  // If the active selection dropped out of the new window-wide options (week range / office changed), keep it
+  // in the list so the applied filter stays visible — otherwise a controlled select with an unlisted value
+  // renders blank while still filtering, leaving the user staring at zero rows with no way to see why.
+  const options = props.value && !props.options.includes(props.value) ? [props.value, ...props.options] : props.options;
   return (
     <div className="flex items-center gap-1.5">
       <span className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{props.label}</span>
@@ -262,7 +266,7 @@ function FilterSelect(props: {
         className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[13px] font-semibold text-slate-700"
       >
         <option value="">{props.allLabel}</option>
-        {props.options.map((o) => (
+        {options.map((o) => (
           <option key={o} value={o}>{props.renderOption ? props.renderOption(o) : o}</option>
         ))}
       </select>
