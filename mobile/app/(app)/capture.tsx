@@ -53,21 +53,6 @@ function hasCoords(m: PhotoMetadata): boolean {
   return m.latitude !== undefined && m.longitude !== undefined;
 }
 
-// Patch coords onto a queued shot, retrying briefly: when the session GPS fix lands, that shot's
-// enqueueUploads copy may still be in flight (not yet in the index), so a single patch would no-op and the
-// coords would be lost. The shot's drain is deferred until after this runs, so it can't upload coordless
-// first — a few short retries let the patch land once the item hits the index. Gives up quietly otherwise.
-async function patchQueuedGpsWithRetry(
-  ownerKey: string,
-  clientUploadId: string,
-  coords: { latitude: number; longitude: number; addressSource?: "exif" | "live_gps" },
-): Promise<void> {
-  for (let i = 0; i < 4; i += 1) {
-    if (await patchQueuedMetadata(ownerKey, clientUploadId, coords).catch(() => false)) return;
-    await new Promise((resolve) => setTimeout(resolve, 400));
-  }
-}
-
 export default function CaptureScreen() {
   const params = useLocalSearchParams<{
     dealId?: string;
@@ -346,11 +331,7 @@ export default function CaptureScreen() {
   // full, or a transient sign-out clearing ownerKey) is NEVER dropped: it's kept in the failedShots retry
   // buffer and drops off the session counter, with a sticky error, so a real photo can't vanish silently.
   const streamPhoto = useCallback(
-    async (
-      sp: SessionPhoto,
-      ctx: { target: CaptureTargetRef; category: string | null; tags: string[] },
-      opts?: { deferDrain?: boolean },
-    ) => {
+    async (sp: SessionPhoto, ctx: { target: CaptureTargetRef; category: string | null; tags: string[] }) => {
       // Build the FULL upload payload from the CAPTURE-TIME context snapshot the caller passes (never live
       // refs), so a shot enqueued after the crew switched projects — or buffered and retried later — uploads
       // to the destination it was captured for.
@@ -382,9 +363,7 @@ export default function CaptureScreen() {
       // Enqueued OK — clear it from the retry buffer if a prior attempt had parked it there.
       setFailedShots((prev) => prev.filter((f) => f.input.clientUploadId !== input.clientUploadId));
       await refreshQueuedCount();
-      // A coordless shot defers its drain until the session GPS fix lands (openCamera's settle patches the
-      // coords onto the queue entry, THEN drains) — so it uploads geotagged instead of racing the patch.
-      if (!opts?.deferDrain) void kickDrain();
+      void kickDrain();
     },
     [ownerKey, refreshQueuedCount, kickDrain],
   );
@@ -482,29 +461,24 @@ export default function CaptureScreen() {
     void getLiveGps().then(async (m) => {
       const withCoords = hasCoords(m);
       // Adopt the fix as the live session GPS only if THIS is still the active session (don't clobber a
-      // later session's ref). getLiveGps always resolves (coordless on denial/timeout), so this runs once.
+      // newer session's ref). getLiveGps always resolves (coordless on denial/timeout), so this runs once.
       if (cameraSessionRef.current === session && withCoords) {
         cameraGpsRef.current = m;
         cameraGpsSessionRef.current = session;
       }
-      // ALWAYS release THIS session's deferred coordless shots (even if a newer session is now open, so
-      // they can't strand). Patch coords onto their queue entries FIRST — awaited, so the subsequent drain
-      // reads geotagged items — then drain. A coordless fix just uploads them as-is.
-      const pending = pendingGpsRef.current.filter((p) => p.session === session);
+      // Best-effort geotag: patch coords onto THIS session's still-queued coordless shots. Shots are NEVER
+      // held back for GPS — they enqueue + drain immediately (durability + no stranding), so some may have
+      // already uploaded; those are simply skipped. Always clear this session's pending ids.
+      const ids = pendingGpsRef.current.filter((p) => p.session === session).map((p) => p.clientUploadId);
       pendingGpsRef.current = pendingGpsRef.current.filter((p) => p.session !== session);
-      if (pending.length === 0) return;
-      if (withCoords) {
-        await Promise.all(
-          pending.map((p) =>
-            patchQueuedGpsWithRetry(owner, p.clientUploadId, {
-              latitude: m.latitude!,
-              longitude: m.longitude!,
-              addressSource: m.addressSource,
-            }),
-          ),
-        );
-      }
-      void kickDrain();
+      if (!withCoords || ids.length === 0) return;
+      const patched = await Promise.all(
+        ids.map((id) =>
+          patchQueuedMetadata(owner, id, { latitude: m.latitude!, longitude: m.longitude!, addressSource: m.addressSource }).catch(() => false),
+        ),
+      );
+      // If any still-queued shot got geotagged, drain so it uploads WITH coords now instead of on the next trigger.
+      if (patched.some(Boolean)) void kickDrain();
     });
     setCameraOpen(true);
   }
@@ -523,15 +497,14 @@ export default function CaptureScreen() {
     setSessionShots((prev) => [...prev, { key, uri: shot.uri }]);
 
     let metadata: PhotoMetadata;
-    let coordless = false;
     if (hasCoords(exifMeta)) {
       metadata = { ...exifMeta, takenAt };
     } else if (cameraGpsRef.current && hasCoords(cameraGpsRef.current)) {
       metadata = { ...cameraGpsRef.current, takenAt };
     } else {
-      // No coords yet — enqueue coordless NOW and remember to patch when the session fix resolves.
+      // No coords yet — enqueue coordless NOW (durability first) and note it so the session fix, when it
+      // lands, can patch coords onto its queue entry if it hasn't uploaded yet (best-effort geotag).
       metadata = { takenAt };
-      coordless = true;
       pendingGpsRef.current.push({ clientUploadId, session });
     }
 
@@ -540,7 +513,6 @@ export default function CaptureScreen() {
     await streamPhoto(
       { key, clientUploadId, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: session },
       ctx,
-      { deferDrain: coordless },
     );
   }
 
