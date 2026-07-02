@@ -5,6 +5,7 @@ import { AppError } from "../../../src/middleware/error-handler.js";
 
 const mocks = vi.hoisted(() => ({
   userRole: "admin",
+  userBaseRole: undefined as string | undefined,
   authEnabled: true,
   authMiddleware: vi.fn((req: any, res: any, next: any) => {
     if (!mocks.authEnabled) {
@@ -14,15 +15,17 @@ const mocks = vi.hoisted(() => ({
     req.user = {
       id: "admin-1",
       role: mocks.userRole,
+      baseRole: mocks.userBaseRole,
       officeId: "tenant-1",
       activeOfficeId: "tenant-1",
     };
     next();
   }),
   requireCrmUser: vi.fn((_req: any, _res: any, next: any) => next()),
-  requireAdmin: vi.fn((req: any, res: any, next: any) => {
-    if (req.user?.role !== "admin") {
-      res.status(403).json({ error: { message: "Admin access required" } });
+  // Mirrors the real requireAdminOrGlobalAdmin: office admin OR global admin passes.
+  requireAdminOrGlobalAdmin: vi.fn((req: any, res: any, next: any) => {
+    if (req.user?.role !== "admin" && req.user?.baseRole !== "admin") {
+      res.status(403).json({ error: { message: "Requires one of: admin" } });
       return;
     }
     next();
@@ -43,7 +46,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/middleware/auth.js", () => ({ authMiddleware: mocks.authMiddleware }));
 vi.mock("../../../src/middleware/field-auth.js", () => ({ requireCrmUser: mocks.requireCrmUser }));
-vi.mock("../../../src/middleware/rbac.js", () => ({ requireAdmin: mocks.requireAdmin }));
+vi.mock("../../../src/middleware/rbac.js", () => ({ requireAdminOrGlobalAdmin: mocks.requireAdminOrGlobalAdmin }));
 vi.mock("../../../src/middleware/tenant.js", () => ({ tenantMiddleware: mocks.tenantMiddleware }));
 vi.mock("../../../src/modules/deals/service.js", () => ({ getDealById: mocks.getDealById }));
 vi.mock("../../../src/modules/public-photo-tokens/service.js", () => ({
@@ -83,6 +86,7 @@ describe("public photo token routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.userRole = "admin";
+    mocks.userBaseRole = undefined;
     mocks.authEnabled = true;
     mocks.getDealById.mockResolvedValue({ id: "deal-1" });
     mocks.generatePublicToken.mockResolvedValue({
@@ -287,6 +291,18 @@ describe("public photo token routes", () => {
     mocks.userRole = "field_contractor";
     const forbidden = await request(createApp()).post("/api/admin/deals/deal-1/photo-tokens").send({});
     expect(forbidden.status).toBe(403);
+  });
+
+  it("lets a GLOBAL admin share photos in an office where they are a non-admin (Edward / St. Simons Gate)", async () => {
+    // Effective office role is 'rep' (non-admin override in the deal's office), but baseRole is 'admin'.
+    // Before the fix requireAdmin rejected this with 403; the union guard must allow it.
+    mocks.userRole = "rep";
+    mocks.userBaseRole = "admin";
+
+    const response = await request(createApp()).post("/api/admin/deals/deal-1/photo-tokens").send({});
+
+    expect(response.status).toBe(201);
+    expect(response.body.rawToken).toBe("raw-token");
   });
 
   it("lists admin public tokens without raw or hashed token values", async () => {

@@ -3,7 +3,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { requireCrmUser } from "../../middleware/field-auth.js";
-import { requireAdmin } from "../../middleware/rbac.js";
+import { requireAdminOrGlobalAdmin } from "../../middleware/rbac.js";
 import {
   generatePublicToken,
   getPublicPhotoAsset,
@@ -159,7 +159,7 @@ publicPhotoViewerRoutes.get("/:token/photos/:photoId/image", async (req, res, ne
 
 adminPhotoTokenRoutes.post(
   "/admin/deals/:dealId/photo-tokens",
-  requireAdmin,
+  requireAdminOrGlobalAdmin,
   tenantMiddleware,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -189,7 +189,7 @@ adminPhotoTokenRoutes.post(
 
 adminPhotoTokenRoutes.get(
   "/admin/deals/:dealId/photo-tokens",
-  requireAdmin,
+  requireAdminOrGlobalAdmin,
   tenantMiddleware,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -207,7 +207,7 @@ adminPhotoTokenRoutes.get(
 
 adminPhotoTokenRoutes.post(
   "/admin/photo-tokens/:tokenId/revoke",
-  requireAdmin,
+  requireAdminOrGlobalAdmin,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       await revokeToken(String(req.params.tokenId), req.user!.id, req.user!.activeOfficeId);
