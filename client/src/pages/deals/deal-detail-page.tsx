@@ -9,6 +9,7 @@ import {
   FileText,
   History,
   Images,
+  ClipboardCheck,
   ListChecks,
   Mail,
   MapPin,
@@ -52,6 +53,7 @@ import { PipelineProgress } from "@/components/deals/pipeline-progress";
 import { DealScopingWorkspace } from "@/components/deals/deal-scoping-workspace";
 import { DealFileTab } from "@/components/files/deal-file-tab";
 import { DealPhotosTab } from "./deal-photos-tab";
+import { DealScorecardsTab } from "./deal-scorecards-tab";
 import { DealTeamTab } from "./deal-team-tab";
 import { DealEstimatesTab } from "./deal-estimates-tab";
 import { DealPunchListTab } from "./deal-punch-list-tab";
@@ -147,7 +149,7 @@ export function buildBidBoardProjectUrl(deal: Pick<DealDetail, "procoreCompanyId
   return `https://us02.procore.com/webclients/host/companies/${deal.procoreCompanyId}/tools/bid-board/project/${deal.procoreBidId}/details`;
 }
 
-type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
+type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "scorecards" | "email" | "activity" | "timeline" | "history" | "team" | "estimates" | "punch_list" | "closeout";
 
 function formatNullable(value: string | number | null | undefined) {
   if (value == null || value === "") return "Not set";
@@ -284,6 +286,8 @@ function getTabIcon(tab: Tab) {
       return <FileText className={iconClassName} />;
     case "photos":
       return <Images className={iconClassName} />;
+    case "scorecards":
+      return <ClipboardCheck className={iconClassName} />;
     case "email":
       return <Mail className={iconClassName} />;
     case "activity":
@@ -485,6 +489,7 @@ export function DealDetailPage() {
     { key: "scoping", label: isOpportunityStage ? "Opportunity Scope" : "Scoping" },
     { key: "files", label: "Files" },
     { key: "photos", label: photoCount != null ? `Photos (${photoCount})` : "Photos" },
+    { key: "scorecards", label: "Scorecards" },
     { key: "email", label: "Emails" },
     { key: "activity", label: "Activity" },
     { key: "timeline", label: "Timeline" },
@@ -994,6 +999,7 @@ export function DealDetailPage() {
       )}
       {activeTab === "files" && <DealFileTab dealId={deal.id} />}
       {activeTab === "photos" && <DealPhotosTab dealId={deal.id} onCountChange={setPhotoCount} />}
+      {activeTab === "scorecards" && <DealScorecardsTab dealId={deal.id} />}
       {activeTab === "email" && <DealEmailTab dealId={deal.id} />}
       {activeTab === "activity" && (
         <EntityActivityTab

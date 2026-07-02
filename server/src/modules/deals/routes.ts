@@ -109,7 +109,8 @@ import {
 import { getResolvedDeal, writeResolvedDealFields } from "./lineage-resolver.js";
 import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { getPendingRfpDeals, cancelPendingRfp } from "./pending-rfp-service.js";
-import { confirmUpload, getFileById, getPendingUploadMetadata } from "../files/service.js";
+import { confirmUpload, getFileById, getFileDownloadUrl, getPendingUploadMetadata } from "../files/service.js";
+import { listDealScorecards, getDealScorecardDetail, getDealScorecardPdfDownload } from "./scorecards-service.js";
 import {
   createEstimateSourceDocument,
   enqueueEstimateDocumentOcrJob,
@@ -2181,6 +2182,48 @@ router.patch(
 // Distinct from the Procore-synced `change_orders` table; never synced out. Mutations are
 // admin-only; the amount is positive-only and the parent deal must be Won / Bid-Board-Owned
 // (both enforced in change-order-service).
+
+// GET /api/deals/:id/scorecards — list the Field Scorecards submitted for this deal (T-Rock Cam)
+router.get("/:id/scorecards", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const result = await listDealScorecards(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/scorecards/:scorecardId — one scorecard's full detail (items, deficiencies, action
+// items, evidence photos with presigned URLs)
+router.get("/:id/scorecards/:scorecardId", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const scorecard = await getDealScorecardDetail(req.tenantDb!, req.params.id, req.params.scorecardId, {
+      resolvePhotoUrl: (fileId) =>
+        getFileDownloadUrl(req.tenantDb!, fileId)
+          .then((r) => r.url)
+          .catch(() => null),
+    });
+    await req.commitTransaction!();
+    res.json({ scorecard });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/scorecards/:scorecardId/download — presigned URL for the scorecard's stored PDF
+router.get("/:id/scorecards/:scorecardId/download", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const result = await getDealScorecardPdfDownload(req.tenantDb!, req.params.id, req.params.scorecardId);
+    await req.commitTransaction!();
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /api/deals/:id/change-orders — list a deal's CRM change orders + their sum
 router.get("/:id/change-orders", async (req, res, next) => {
