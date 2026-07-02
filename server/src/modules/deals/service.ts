@@ -63,6 +63,7 @@ import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
+import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
@@ -2043,6 +2044,14 @@ export async function getDealDetail(
   const dealChangeOrderRows = await listDealChangeOrders(tenantDb, dealId);
   const dealChangeOrderTotal = await sumDealChangeOrders(tenantDb, dealId);
 
+  // Current-round RFP votes for the vote panel / focused vote page. Scoped to the deal's live round event id
+  // so a re-trigger shows a clean tally. rfpVoteState comes from the ONE shared helper (reconciliation rule).
+  const { rfpVotes: rfpVotesView, rfpVoteState } = await loadRfpVoteDetail(
+    tenantDb,
+    dealId,
+    dealWithMetadata.rfpApprovalRequestEventId ?? null
+  );
+
   return {
     ...dealWithMetadata,
     // Authoritative bid due date (lead-owned for converted deals; deal column for manual deals),
@@ -2061,6 +2070,8 @@ export async function getDealDetail(
     changeOrders: cos,
     dealChangeOrders: dealChangeOrderRows,
     dealChangeOrderTotal,
+    rfpVotes: rfpVotesView,
+    rfpVoteState,
   };
 }
 
