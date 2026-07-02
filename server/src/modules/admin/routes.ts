@@ -7,7 +7,7 @@ import { requireCrmUser } from "../../middleware/field-auth.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin, requireDirector, requireGlobalAdmin } from "../../middleware/rbac.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { getAccessibleOffices } from "../auth/service.js";
 import {
   listOffices, getOfficeById, createOffice, updateOffice,
@@ -1106,8 +1106,16 @@ router.get(
             totalAwardedValue: parseFloat(r.total_awarded_value),
           });
         } catch (officeErr) {
-          await client.query("ROLLBACK").catch(() => {});
+          let rollbackErr: unknown;
+          await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
           console.error(`[CrossOffice] Pipeline query failed for ${office.slug}:`, officeErr);
+          // If the connection itself is broken (a dead-socket query_timeout), the client is poisoned —
+          // stop the loop and mark it for destruction. Continuing would run every remaining office on the
+          // dead connection and then the finally would recycle it back to the pool as healthy.
+          if (isBrokenConnectionError(officeErr) || isBrokenConnectionError(rollbackErr)) {
+            releaseErr = rollbackErr ?? officeErr;
+            break;
+          }
           results.push({
             officeId: office.id,
             officeName: office.name,
@@ -1202,8 +1210,15 @@ router.get(
             meetingCount: parseInt(r.meeting_count, 10),
           });
         } catch (officeErr) {
-          await client.query("ROLLBACK").catch(() => {});
+          let rollbackErr: unknown;
+          await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
           console.error(`[CrossOffice] Activity query failed for ${office.slug}:`, officeErr);
+          // Broken connection (dead-socket query_timeout) → stop and destroy; don't run the rest of the
+          // offices on a poisoned client and then recycle it as healthy.
+          if (isBrokenConnectionError(officeErr) || isBrokenConnectionError(rollbackErr)) {
+            releaseErr = rollbackErr ?? officeErr;
+            break;
+          }
           results.push({
             officeId: office.id,
             officeName: office.name,

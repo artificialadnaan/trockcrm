@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import type { PoolClient } from "pg";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { pool, releasePooledClient } from "../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../db.js";
 import { AppError } from "./error-handler.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
@@ -133,12 +133,19 @@ export async function tenantMiddleware(req: Request, res: Response, next: NextFu
   } catch (err) {
     if (!committed) {
       committed = true;
-      let rollbackErr: unknown;
-      await client.query("ROLLBACK").catch((e) => {
-        rollbackErr = e;
-      });
-      // Destroy the client if the request error OR the failed rollback indicates a broken connection.
-      releasePooledClient(client, rollbackErr ?? err);
+      if (isBrokenConnectionError(err)) {
+        // The connection is already dead (e.g. a setup query hit the client-side query_timeout on a dead
+        // socket). Skip ROLLBACK — it would burn another full query_timeout keeping this bad pool slot
+        // checked out during a saturation incident — and destroy the client immediately.
+        releasePooledClient(client, err);
+      } else {
+        let rollbackErr: unknown;
+        await client.query("ROLLBACK").catch((e) => {
+          rollbackErr = e;
+        });
+        // Destroy the client if the request error OR the failed rollback indicates a broken connection.
+        releasePooledClient(client, rollbackErr ?? err);
+      }
     }
     next(err);
   }

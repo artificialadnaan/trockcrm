@@ -311,9 +311,12 @@ async function crossOfficeSearch(
         throw err;
       } finally {
         // Best-effort search_path reset — must NOT throw before the release (on a broken/dead-socket
-        // connection this query would fail and leak the client). A destroyed connection can't carry a
-        // stale search_path anyway, and a healthy reused connection re-sets it on next checkout.
-        await client.query("SELECT set_config('search_path', 'public', false)").catch(() => {});
+        // connection this query would fail and leak the client). Capture its error (if the body didn't
+        // already set one) so a reset that fails on a dead socket DESTROYS the client instead of recycling a
+        // broken connection — or one still carrying the office search_path — back into the pool.
+        await client.query("SELECT set_config('search_path', 'public', false)").catch((resetErr) => {
+          releaseErr = releaseErr ?? resetErr;
+        });
         releasePooledClient(client, releaseErr);
       }
     }),
