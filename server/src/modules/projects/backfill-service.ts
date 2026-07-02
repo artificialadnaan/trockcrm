@@ -163,9 +163,9 @@ async function processRow(
         { procoreProjectId: normalized.procoreProjectId, rollbackError: e }
       );
     });
-    // If the ROLLBACK itself broke the connection, every remaining row would run on a dead client — abort
-    // so the caller destroys it immediately instead of a query_timeout per remaining row.
-    if (isBrokenConnectionError(rollbackError)) {
+    // Any ROLLBACK failure (not only a broken-connection one) leaves the transaction/client state unsafe to
+    // keep processing rows on — abort so the caller releases/destroys the client with the cleanup error.
+    if (rollbackError !== undefined) {
       throw rollbackError;
     }
     result.errored += 1;

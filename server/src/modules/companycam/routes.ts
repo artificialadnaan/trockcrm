@@ -55,15 +55,23 @@ function requireAdminOrDirector(role: string): void {
 async function acquireBackgroundDb(officeSlug: string) {
   const client = await pool.connect();
   const schemaName = `office_${officeSlug}`;
+  let beganTx = false;
   try {
     // Use a transaction-local search_path (true = transaction-local, not session-local)
     // so concurrent requests on other connections are not affected.
     await client.query("BEGIN");
+    beganTx = true;
     await client.query("SELECT set_config('search_path', $1, true)", [`${schemaName},public`]);
   } catch (err) {
-    // Setup failed (e.g. a stale checked-out socket now rejecting with Query read timeout) BEFORE we could
-    // return the release handle — release/destroy the client here so the caller can't leak this pool slot.
-    releasePooledClient(client, err);
+    // Setup failed BEFORE we could return the release handle — release/destroy the client here so the caller
+    // can't leak this pool slot. If BEGIN succeeded but a later setup query failed (a non-broken error), ROLL
+    // BACK first so we don't recycle a client left mid-transaction; a failed rollback (broken socket) becomes
+    // the release error. Skip the rollback when the socket is already broken (it can't succeed).
+    let releaseErr: unknown = err;
+    if (beganTx && !isBrokenConnectionError(err)) {
+      await client.query("ROLLBACK").catch((rbErr) => { releaseErr = rbErr; });
+    }
+    releasePooledClient(client, releaseErr);
     throw err;
   }
   const tenantDb = drizzle(client, { schema });

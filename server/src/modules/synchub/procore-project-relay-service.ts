@@ -1,4 +1,4 @@
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { upsertProjectMirror } from "../projects/service.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
@@ -409,12 +409,13 @@ async function linkMatchedDeal(
     };
   } catch (error) {
     let rollbackErr: unknown;
-    if (transactionOpen) {
+    // Skip ROLLBACK when the failure is already a broken connection (it can't succeed and would just wait
+    // another query_timeout). Otherwise roll back and PREFER a failed ROLLBACK (a dead socket) over the
+    // original error, so the outer processSyncHubProcoreProjectCreated catch → releasePooledClient sees the
+    // broken connection and destroys the owned client instead of recycling it.
+    if (transactionOpen && !isBrokenConnectionError(error)) {
       await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
     }
-    // Prefer a failed ROLLBACK (a dead socket) over the original error so the outer
-    // processSyncHubProcoreProjectCreated catch → releasePooledClient sees the broken connection and
-    // destroys the owned client instead of recycling it.
     throw rollbackErr ?? error;
   }
 }
