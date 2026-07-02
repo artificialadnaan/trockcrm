@@ -60,6 +60,7 @@ import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { BidDueDateBanner } from "./bid-due-date-banner";
+import { RfpVotePanel } from "./rfp-vote-panel";
 import { DealProposalCard } from "./deal-proposal-card";
 import { DealContractSignedCard } from "./deal-contract-signed-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
@@ -317,6 +318,19 @@ export function DealDetailPage() {
   const { user } = useAuth();
   const detailOfficeId = searchParams.get("officeId");
   const { deal, loading, error, refetch } = useDealDetail(id, { officeId: detailOfficeId });
+
+  // Poll the detail every 5s while the RFP vote round is unresolved so the panel flips to decided (go/no-go)
+  // without a manual refresh. Mirrors the /rfp-review 5s interval; stops once the outcome is decided (votes are
+  // final) or there's no open round.
+  useEffect(() => {
+    if (deal?.rfpVoteState?.outcome !== "pending") return;
+    if (deal?.rfpApprovalStatus !== "pending" && deal?.rfpApprovalStatus !== "pending_outbox") return;
+    const interval = setInterval(() => {
+      refetch();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [deal?.rfpVoteState?.outcome, deal?.rfpApprovalStatus, refetch]);
+
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
@@ -950,6 +964,8 @@ export function DealDetailPage() {
         cancelling={rfpCancelling}
         isOpportunityStage={isOpportunityStage}
         isBidBoardOwned={isBidBoardOwned}
+        user={user}
+        officeId={detailOfficeId}
       />
       {isBidBoardOwned && !deal.isHubspotSourced && <BidBoardProjectSummaryPanel deal={deal} />}
       {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
@@ -1466,6 +1482,8 @@ function RfpApprovalStatusBlock({
   cancelling,
   isOpportunityStage,
   isBidBoardOwned,
+  user,
+  officeId,
 }: {
   deal: DealDetail;
   onRetry: () => void;
@@ -1479,6 +1497,8 @@ function RfpApprovalStatusBlock({
   // inferred Bid Board owned deal.
   isOpportunityStage: boolean;
   isBidBoardOwned: boolean;
+  user: ReturnType<typeof useAuth>["user"];
+  officeId: string | null;
 }) {
   if (!deal.rfpApprovalStatus) return null;
 
@@ -1579,6 +1599,7 @@ function RfpApprovalStatusBlock({
             )}
         </div>
       </div>
+      <RfpVotePanel deal={deal} user={user} officeId={officeId} />
     </section>
   );
 }
