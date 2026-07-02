@@ -153,6 +153,10 @@ export function resolveSyncHubRfpRequestUrl(env: NodeJS.ProcessEnv = process.env
   return `${resolveSyncHubBaseUrl(env)}/api/rfp-requests`;
 }
 
+export function resolveSyncHubCreateFromRfpUrl(env: NodeJS.ProcessEnv = process.env): string {
+  return `${resolveSyncHubBaseUrl(env)}/api/bid-board/create-from-rfp`;
+}
+
 /**
  * SyncHub's authoritative override-approve endpoint for a previously-declined RFP request.
  * `requestId` is the SyncHub rfp_approval_requests.id (the integer the CRM stored as rfp_approval_request_id).

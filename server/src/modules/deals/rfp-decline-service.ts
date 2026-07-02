@@ -22,7 +22,7 @@ export async function applyRfpDeclineToDeal(input: {
   schemaName: string;
   deal: RfpDeclineDealSnapshot;
   sourceDealId: string;
-  rfpApprovalRequestId: number;
+  rfpApprovalRequestId: number | null;
   denialReason: string | null;
   declinedAt: string;
   changedByUserId: string;
@@ -34,7 +34,7 @@ export async function applyRfpDeclineToDeal(input: {
             rfp_declined_at = $2::timestamptz,
             updated_at = NOW()
       WHERE id = $3
-        AND rfp_approval_request_id = $4
+        AND rfp_approval_request_id IS NOT DISTINCT FROM $4
         AND rfp_approval_status IN ('pending_outbox', 'pending')
       RETURNING id, name, deal_number, project_number,
                 rfp_approval_status, rfp_declined_reason, rfp_declined_at`,

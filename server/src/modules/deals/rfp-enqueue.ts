@@ -10,7 +10,7 @@ import {
   isR2Configured,
 } from "../../lib/r2-client.js";
 import { activeLatestFileConditions, buildDealFileScopeCondition } from "../files/service.js";
-import { buildRfpAttachmentsFromFiles, buildRfpRequestDeliveryPayload, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
+import { buildNormalizedRfpRequestBody, buildRfpAttachmentsFromFiles, buildRfpRequestDeliveryPayload, resolveSyncHubCreateFromRfpUrl, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -213,4 +213,106 @@ export async function enqueueOpportunityRfpIfNeeded(
     jobId,
     dealUpdates,
   };
+}
+
+/**
+ * Enqueue the three-voter invitation email job for an opened vote round. Mirrors insertOpportunityRfpRequestJob's
+ * Drizzle insert; the WORKER handler (worker/src/jobs/rfp-vote-invitation.ts) sends the emails. Server-side so the
+ * server package (which never imports worker/src at runtime) owns the enqueue.
+ */
+export async function enqueueRfpVoteInvitation(input: {
+  tenantDb: TenantDb;
+  deal: typeof deals.$inferSelect;
+  officeId: string | null;
+}): Promise<{ jobId: number }> {
+  const jobRows = await input.tenantDb
+    .insert(jobQueue)
+    .values({
+      jobType: "rfp_vote_invitation",
+      payload: {
+        dealId: input.deal.id,
+        dealNumber: input.deal.dealNumber ?? null,
+        dealName: input.deal.name ?? null,
+        officeId: input.officeId,
+      },
+      officeId: input.officeId,
+      status: "pending",
+      runAfter: new Date(),
+      maxAttempts: 5,
+    })
+    .returning({ id: jobQueue.id });
+  return { jobId: Number(jobRows[0]?.id) };
+}
+
+/**
+ * Enqueue the GO outbound job (2/3-approve OR override-approve): the WORKER HMAC-POSTs the normalized deal body
+ * (+ decision:'approved') to SyncHub's /api/bid-board/create-from-rfp. Mirrors insertOpportunityRfpRequestJob but
+ * targets the create-from-rfp URL and carries a decision flag so SyncHub creates immediately (no email).
+ */
+export async function enqueueRfpBidBoardCreate(input: {
+  tenantDb: TenantDb;
+  deal: typeof deals.$inferSelect;
+  officeId: string | null;
+}): Promise<{ jobId: number }> {
+  const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, input.deal);
+  const attachments = await loadRfpAttachmentsForDeal(input.tenantDb, input.deal.id);
+  const body = buildNormalizedRfpRequestBody({
+    deal: rfpPayloadDeal,
+    sourceEventId: `crm:rfp-vote:approved:${input.deal.rfpApprovalRequestEventId ?? input.deal.id}`,
+    attachments,
+  });
+  const jobRows = await input.tenantDb
+    .insert(jobQueue)
+    .values({
+      jobType: "rfp_bidboard_create",
+      payload: {
+        dealId: input.deal.id,
+        syncHubUrl: resolveSyncHubCreateFromRfpUrl(),
+        body: { ...body, decision: "approved" },
+      },
+      officeId: input.officeId,
+      status: "pending",
+      runAfter: new Date(),
+      maxAttempts: 8,
+    })
+    .returning({ id: jobQueue.id });
+  return { jobId: Number(jobRows[0]?.id) };
+}
+
+/**
+ * Enqueue the vote-outcome notification job (fires on a DECIDED round). approve -> rep GO email; reject -> rep +
+ * Takashi/Adam escalation (the /rfp-review link) — the app-driven no-go escalation, since migration 0148's trigger
+ * stays inert for a null-request-id voting decline. Mirrors enqueueRfpVoteInvitation. tenantSchema is resolved by
+ * the caller (castRfpVote already resolves it for the decline path) so the worker handler can look up the office.
+ */
+export async function enqueueRfpVoteOutcome(input: {
+  tenantDb: TenantDb;
+  officeId: string | null;
+  tenantSchema: string;
+  deal: typeof deals.$inferSelect;
+  outcome: "approved" | "rejected";
+  approvals: number;
+  rejections: number;
+}): Promise<{ jobId: number }> {
+  const jobRows = await input.tenantDb
+    .insert(jobQueue)
+    .values({
+      jobType: "rfp_vote_outcome",
+      payload: {
+        tenantSchema: input.tenantSchema,
+        dealId: input.deal.id,
+        dealName: input.deal.name ?? null,
+        dealNumber: input.deal.dealNumber ?? null,
+        requestedByUserId: input.deal.rfpApprovalRequestedBy ?? null,
+        outcome: input.outcome,
+        approvals: input.approvals,
+        rejections: input.rejections,
+      },
+      officeId: input.officeId,
+      status: "pending",
+      runAfter: new Date(),
+      maxAttempts: 5,
+    })
+    .returning({ id: jobQueue.id });
+  return { jobId: Number(jobRows[0]?.id) };
 }
