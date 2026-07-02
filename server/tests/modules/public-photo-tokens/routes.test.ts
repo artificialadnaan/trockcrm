@@ -303,6 +303,9 @@ describe("public photo token routes", () => {
 
     expect(response.status).toBe(201);
     expect(response.body.rawToken).toBe("raw-token");
+    // And it must read the deal as ADMIN — otherwise getDealById rep-scopes to owned deals and a global
+    // admin gets 403 on a deal not assigned to them (St. Simons Gate), re-breaking the fix.
+    expect(mocks.getDealById).toHaveBeenCalledWith(expect.anything(), "deal-1", "admin", "admin-1");
   });
 
   it("lists admin public tokens without raw or hashed token values", async () => {

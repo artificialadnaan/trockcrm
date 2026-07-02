@@ -157,6 +157,14 @@ publicPhotoViewerRoutes.get("/:token/photos/:photoId/image", async (req, res, ne
   }
 });
 
+// This surface admits office admins AND global admins (requireAdminOrGlobalAdmin). getDealById rep-scopes
+// to the caller's OWN deals, so a global admin acting in an office where their effective role is 'rep' would
+// be blocked (403) loading a deal not assigned to them — defeating the share fix. Read the deal as admin for
+// a global admin; an office admin already carries an admin effective role, so this is a no-op for them.
+function dealReadRole(req: Request): string {
+  return req.user!.baseRole === "admin" ? "admin" : req.user!.role;
+}
+
 adminPhotoTokenRoutes.post(
   "/admin/deals/:dealId/photo-tokens",
   requireAdminOrGlobalAdmin,
@@ -164,7 +172,7 @@ adminPhotoTokenRoutes.post(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const dealId = String(req.params.dealId);
-      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+      const deal = await getDealById(req.tenantDb!, dealId, dealReadRole(req), req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found");
       const expiresAt = typeof req.body?.expiresAt === "string" && req.body.expiresAt
         ? new Date(req.body.expiresAt)
@@ -194,7 +202,7 @@ adminPhotoTokenRoutes.get(
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const dealId = String(req.params.dealId);
-      const deal = await getDealById(req.tenantDb!, dealId, req.user!.role, req.user!.id);
+      const deal = await getDealById(req.tenantDb!, dealId, dealReadRole(req), req.user!.id);
       if (!deal) throw new AppError(404, "Deal not found");
       const tokens = await listTokensForDeal(dealId, req.user!.activeOfficeId);
       await req.commitTransaction!();
