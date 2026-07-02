@@ -108,12 +108,15 @@ export async function runInOffice<T>(office: FieldOffice, run: (officeDb: FieldT
     brokenErr = err;
     throw err;
   } finally {
-    try {
-      await client.query("SELECT set_config('search_path', 'public', false)");
-    } catch (resetErr) {
-      // A failed reset means the connection is unusable — it TAKES PRECEDENCE over any earlier (non-broken)
-      // run error so the client is destroyed, not recycled.
-      brokenErr = resetErr;
+    // Skip the reset when the read already failed with a broken connection (a reset on a dead socket would
+    // just wait another query_timeout before we destroy the client). Otherwise a FAILED reset means the
+    // connection is unusable — it TAKES PRECEDENCE over any earlier non-broken run error.
+    if (!isBrokenConnectionError(brokenErr)) {
+      try {
+        await client.query("SELECT set_config('search_path', 'public', false)");
+      } catch (resetErr) {
+        brokenErr = resetErr;
+      }
     }
     releasePooledClient(client, brokenErr);
   }

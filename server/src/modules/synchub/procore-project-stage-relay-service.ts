@@ -720,10 +720,13 @@ async function recordResolvedEvent(
       isBoardRelevant: payload.stage.current.isBoardRelevant,
     };
   } catch (error) {
-    // Prefer a failed ROLLBACK (a dead socket) over the original error so the replay loop's broken-connection
-    // check sees it and destroys the owned client instead of recycling it.
+    // Skip ROLLBACK when the error is already broken (it can't succeed and would wait another query_timeout).
+    // Otherwise prefer a failed ROLLBACK (a dead socket) over the original error so the replay loop's
+    // broken-connection check destroys the owned client instead of recycling it.
     let rollbackErr: unknown;
-    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    if (!isBrokenConnectionError(error)) {
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    }
     throw rollbackErr ?? error;
   }
 }
@@ -749,10 +752,13 @@ async function recordUnresolvedEvent(
       ? { status: "unresolved" as const, reason, eventKey }
       : { status: "duplicate" as const, eventKey };
   } catch (error) {
-    // Prefer a failed ROLLBACK (a dead socket) over the original error so the replay loop's broken-connection
-    // check sees it and destroys the owned client instead of recycling it.
+    // Skip ROLLBACK when the error is already broken (it can't succeed and would wait another query_timeout).
+    // Otherwise prefer a failed ROLLBACK (a dead socket) over the original error so the replay loop's
+    // broken-connection check destroys the owned client instead of recycling it.
     let rollbackErr: unknown;
-    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    if (!isBrokenConnectionError(error)) {
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+    }
     throw rollbackErr ?? error;
   }
 }

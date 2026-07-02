@@ -15,7 +15,7 @@ import {
   users,
 } from "@trock-crm/shared/schema";
 import * as schema from "@trock-crm/shared/schema";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmailWithMetadata } from "../../lib/resend-client.js";
 import { getStageBySlug } from "../pipeline/service.js";
@@ -860,7 +860,9 @@ export async function decideDueDiligenceByToken(input: {
     return { ...update.rows[0], tenant_schema: tenantSchema };
   } catch (err) {
     releaseErr = err;
-    if (transactionActive) {
+    // Skip ROLLBACK when the error is already broken (a rollback on a dead socket would just wait another
+    // query_timeout before we destroy the client — this is an unauthenticated approve/reject response path).
+    if (transactionActive && !isBrokenConnectionError(err)) {
       await client.query("ROLLBACK").catch((e) => { releaseErr = e ?? releaseErr; });
     }
     throw err;

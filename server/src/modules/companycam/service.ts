@@ -506,6 +506,11 @@ export async function syncProjectPhotos(
         onProgress?.(`${deal.name}: ${imported}/${newPhotos.length} photos imported`);
       }
     } catch (err) {
+      // A broken-connection error means the tenant client is dead — rethrow (aborts the sync, destroys the
+      // client) instead of recording a per-photo error and inserting the rest on the dead socket.
+      if (isBrokenConnectionError(err)) {
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`Photo ${prepared.photoId}: ${msg}`);
     }

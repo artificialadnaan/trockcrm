@@ -4,7 +4,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { PoolClient } from "pg";
 import * as schema from "@trock-crm/shared/schema";
 import { leadSubscriptions } from "@trock-crm/shared/schema";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { assertOptionalIsoDateQueryParam } from "../../lib/date-query.js";
@@ -106,7 +106,9 @@ async function dispatchDueDiligenceEmailAfterCommit(input: {
     committed = true;
   } catch (err) {
     releaseErr = err;
-    if (client && !committed) {
+    // Skip ROLLBACK when the error is already broken (a rollback on a dead socket would just wait another
+    // query_timeout before releasePooledClient destroys this background dispatch client).
+    if (client && !committed && !isBrokenConnectionError(err)) {
       await client.query("ROLLBACK").catch((e) => { releaseErr = e ?? releaseErr; });
     }
     console.error("[lead-dd] post-commit email dispatch failed", {
