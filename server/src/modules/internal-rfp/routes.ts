@@ -657,6 +657,8 @@ internalRfpRoutes.post(
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
       }
+      // rfpApprovalRequestId is OPTIONAL: voting-path deals omit it (they mint no SyncHub request row) and are
+      // reconciled by sourceDealId; legacy/service/override deals still carry it and are matched below.
       if (!sourceDealId) {
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
