@@ -98,7 +98,15 @@ export async function handleFieldScorecardEmail(
   let attachments: SendSystemEmailAttachment[] | undefined;
   if (pdfR2Key) {
     const getPdf = deps.getPdf ?? getObjectBuffer;
-    const buffer = await getPdf(pdfR2Key);
+    let buffer: Buffer | null = null;
+    try {
+      buffer = await getPdf(pdfR2Key);
+    } catch (err) {
+      // A missing / not-yet-readable object makes the S3 client REJECT (NoSuchKey), not return null. Treat
+      // that as "no PDF" and fall through to the no-attachment notice instead of failing the whole job —
+      // the notification still goes out and the PDF remains downloadable via the CRM.
+      logger.warn("[FieldScorecardEmail] PDF fetch failed - sending without attachment", { scorecardId, pdfR2Key, err });
+    }
     if (buffer) {
       attachments = [{ filename: scorecardPdfFilename(payload), content: buffer }];
     } else {

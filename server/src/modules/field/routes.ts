@@ -862,9 +862,10 @@ fieldRoutes.post("/scorecards", requireFieldContractor, async (req, res, next) =
     res.status(created ? 201 : 200).json({ scorecard });
     if (created && resolvedOffice) {
       const office = resolvedOffice;
-      // Best-effort: render + store the PDF and enqueue the email (which re-drives its own delivery). A
-      // failure here must not surface to the client — the scorecard is already saved.
-      void runInOffice(office, (db) => finalizeFieldScorecardArtifacts(db, office, scorecard.id)).catch((err) => {
+      // Best-effort: enqueue the email (durable) + render/store the PDF. Manages its own connections and
+      // enqueues BEFORE the best-effort render, so a PDF/R2 failure can't drop the notification. A throw
+      // must not surface to the client — the scorecard is already saved.
+      void finalizeFieldScorecardArtifacts(office, req.fieldUser!.id, scorecard.id).catch((err) => {
         console.error("[field-scorecard] PDF/email finalize failed (submission is saved)", {
           scorecardId: scorecard.id,
           office: office.slug,

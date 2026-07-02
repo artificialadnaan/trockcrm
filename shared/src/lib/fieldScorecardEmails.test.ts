@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   DEFAULT_NON_PROD_FIELD_SCORECARD_RECIPIENT,
   resolveFieldScorecardRecipients,
-} from "./fieldScorecardEmails";
+} from "./fieldScorecardEmails.js";
 
 describe("resolveFieldScorecardRecipients", () => {
   it("parses a comma-separated list: trims, drops blanks, de-dupes case-insensitively", () => {

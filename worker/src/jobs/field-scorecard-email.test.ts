@@ -88,12 +88,21 @@ describe("handleFieldScorecardEmail", () => {
     expect(calls.some((c) => /UPDATE/i.test(c.sql) && /email_sent_at/.test(c.sql))).toBe(true);
   });
 
-  it("degrades to a no-attachment email when the PDF isn't in R2 yet", async () => {
+  it("degrades to a no-attachment email when the PDF isn't in R2 yet (getPdf returns null)", async () => {
     const { query } = makeQuery(null);
     const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m2" });
     const getPdf = vi.fn().mockResolvedValue(null);
     await handleFieldScorecardEmail(payload(), null, { query, env: PROD, logger: silent, sendEmail, getPdf });
     expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
+  });
+
+  it("degrades (not retries) when the PDF fetch REJECTS — S3 NoSuchKey throws, not null", async () => {
+    const { query } = makeQuery(null);
+    const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "m3" });
+    const getPdf = vi.fn().mockRejectedValue(new Error("NoSuchKey"));
+    await handleFieldScorecardEmail(payload(), null, { query, env: PROD, logger: silent, sendEmail, getPdf });
+    expect(sendEmail).toHaveBeenCalledTimes(1); // sent (degraded), NOT thrown → no retry/dead-letter
     expect(sendEmail.mock.calls[0][3].attachments).toBeUndefined();
   });
 

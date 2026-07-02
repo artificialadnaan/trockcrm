@@ -20,6 +20,7 @@ import {
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { activeProjectWhere, assertActiveFieldProject, type FieldAccessContext } from "./projects-service.js";
+import { runInOffice, runInOfficeTransaction } from "./cross-office.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ScorecardRow = typeof fieldScorecards.$inferSelect;
@@ -256,30 +257,40 @@ export async function getFieldScorecardDetail(
 // can't import from the worker package, so the string is duplicated (as with the other enqueue sites).
 const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
 const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
+// Give the synchronous render + R2 upload (sub-second) a head start over the worker's poll, so the email
+// job normally finds the PDF already stored. If render/upload failed, the worker degrades to a
+// no-attachment notice — the notification is never lost.
+const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 30;
 
 /**
- * Render + store the scorecard PDF and enqueue its email job. Called POST-COMMIT (outside the submit
- * transaction) so R2 I/O never holds a DB txn open and a PDF/R2 hiccup can NEVER lose the submission — the
- * scorecard row is already durably committed. Best-effort by design: the caller swallows failures (the
- * email job re-drives delivery; a missing PDF degrades the email to a no-attachment notice).
+ * Enqueue the scorecard email (durable) then render + store its PDF (best-effort). Called POST-COMMIT
+ * (outside the submit txn) so R2 I/O never holds a DB txn open and a PDF/R2 hiccup can NEVER lose the
+ * submission. The ENQUEUE happens FIRST so a later render/upload failure can't drop the notification — the
+ * worker then sends with the PDF attached if it's there, or a no-attachment fallback if not. Manages its
+ * own connections (read via runInOffice, writes via runInOfficeTransaction); the caller swallows failures.
  */
 export async function finalizeFieldScorecardArtifacts(
-  tenantDb: TenantDb,
   office: { id: string; slug: string },
+  userId: string,
   scorecardId: string,
 ): Promise<void> {
-  const [card] = await tenantDb.select().from(fieldScorecards).where(eq(fieldScorecards.id, scorecardId)).limit(1);
-  if (!card) return;
-
-  const itemRows = await tenantDb
-    .select()
-    .from(fieldScorecardItems)
-    .where(eq(fieldScorecardItems.scorecardId, scorecardId));
-  const [deal] = await tenantDb
-    .select({ name: deals.name, dealNumber: deals.dealNumber })
-    .from(deals)
-    .where(eq(deals.id, card.dealId))
-    .limit(1);
+  // 1. READ the scorecard + items + deal on a read-only connection.
+  const loaded = await runInOffice(office, async (db) => {
+    const [card] = await db.select().from(fieldScorecards).where(eq(fieldScorecards.id, scorecardId)).limit(1);
+    if (!card) return null;
+    const itemRows = await db
+      .select()
+      .from(fieldScorecardItems)
+      .where(eq(fieldScorecardItems.scorecardId, scorecardId));
+    const [deal] = await db
+      .select({ name: deals.name, dealNumber: deals.dealNumber })
+      .from(deals)
+      .where(eq(deals.id, card.dealId))
+      .limit(1);
+    return { card, itemRows, deal: deal ?? null };
+  });
+  if (!loaded) return;
+  const { card, itemRows, deal } = loaded;
 
   const pdfData = buildScorecardPdfData({
     dealName: deal?.name ?? "Project",
@@ -295,40 +306,46 @@ export async function finalizeFieldScorecardArtifacts(
     criticalDeficiencyKeys: card.criticalDeficiencies ?? [],
     actionItems: card.actionItems ?? [],
   });
-
-  const pdf = await renderFieldScorecardPdf(pdfData);
   const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
-  // Organise under the deal like photo reports; scorecardId keeps the key unique. RAW deal_number (the
-  // photo-report key convention), falling back to the deal id when a deal has none.
+  // Deterministic key (organised under the deal like photo reports; scorecardId keeps it unique). RAW
+  // deal_number (the photo-report key convention), falling back to the deal id when a deal has none.
   const dealKeySegment = deal?.dealNumber?.trim() || card.dealId;
   const r2Key = `office_${office.slug}/deals/${dealKeySegment}/documents/scorecards/${scorecardId}.pdf`;
-  await putObject(r2Key, pdf, "application/pdf");
 
-  await tenantDb
-    .update(fieldScorecards)
-    .set({ pdfR2Key: r2Key, pdfR2Bucket: bucket, pdfGeneratedAt: new Date() })
-    .where(eq(fieldScorecards.id, scorecardId));
-
-  // Outbox: enqueue the email job (worker fetches the PDF from R2 + sends with it attached).
-  await tenantDb.insert(jobQueue).values({
-    jobType: FIELD_SCORECARD_EMAIL_JOB,
-    payload: {
-      tenantSchema: `office_${office.slug}`,
-      scorecardId,
-      dealId: card.dealId,
-      dealName: deal?.name ?? null,
-      projectNumber: card.projectNumber ?? null,
-      weekOf: pdfData.weekOf,
-      totalScore: card.totalScore,
-      ratingLabel: pdfData.ratingLabel,
-      submittedByName: card.submittedByName ?? null,
-      pdfR2Key: r2Key,
+  // 2. ENQUEUE FIRST (durable outbox) with the intended key — so a render/upload failure below can't drop
+  // the notification.
+  await runInOfficeTransaction(office, userId, async (db) => {
+    await db.insert(jobQueue).values({
+      jobType: FIELD_SCORECARD_EMAIL_JOB,
+      payload: {
+        tenantSchema: `office_${office.slug}`,
+        scorecardId,
+        dealId: card.dealId,
+        dealName: deal?.name ?? null,
+        projectNumber: card.projectNumber ?? null,
+        weekOf: pdfData.weekOf,
+        totalScore: card.totalScore,
+        ratingLabel: pdfData.ratingLabel,
+        submittedByName: card.submittedByName ?? null,
+        pdfR2Key: r2Key,
+        officeId: office.id,
+      },
       officeId: office.id,
-    },
-    officeId: office.id,
-    status: "pending",
-    runAfter: new Date(),
-    maxAttempts: 6,
+      status: "pending",
+      runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
+      maxAttempts: 6,
+    });
+  });
+
+  // 3. BEST-EFFORT: render + store the PDF, then record its key. A throw here propagates to the caller's
+  // .catch — harmless, the job is already enqueued and will send the no-attachment fallback.
+  const pdf = await renderFieldScorecardPdf(pdfData);
+  await putObject(r2Key, pdf, "application/pdf");
+  await runInOfficeTransaction(office, userId, async (db) => {
+    await db
+      .update(fieldScorecards)
+      .set({ pdfR2Key: r2Key, pdfR2Bucket: bucket, pdfGeneratedAt: new Date() })
+      .where(eq(fieldScorecards.id, scorecardId));
   });
 }
 
