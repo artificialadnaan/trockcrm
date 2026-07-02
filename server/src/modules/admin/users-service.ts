@@ -233,6 +233,7 @@ export async function updateUser(
     reportsTo: string | null;
     isActive: boolean;
     notificationPrefs: Record<string, unknown>;
+    /** @deprecated superseded by capxRateSolo/capxRateMixed; still accepted but no longer drives commission_rate */
     commissionRate: number;
     commissionStructure: "solo" | "mixed";
     capxRateSolo: number;
@@ -248,8 +249,8 @@ export async function updateUser(
   }>,
   actorUserId: string
 ) {
-  let commissionRatesChanged = false;
   const result = await db.transaction(async (tx) => {
+    let commissionRatesChanged = false;
     const existing = await tx
       .select()
       .from(users)
@@ -419,20 +420,24 @@ export async function updateUser(
         input.serviceSourceRate !== undefined;
     }
 
-    return { updated, closeStreams: plan.closeStreams };
+    return { updated, closeStreams: plan.closeStreams, commissionRatesChanged };
   });
 
   // Best-effort, post-commit: drop the deactivated user's live SSE streams immediately. The
   // authoritative gate remains the per-request is_active + token-version re-check.
   if (result.closeStreams) closeUserSseConnections(id);
 
-  if (commissionRatesChanged) {
-    const summary = await recalculateAllCommissionsForRep(id, actorUserId);
-    if (summary.officeFailures.length > 0) {
-      console.error(
-        `[commissions] rep ${id} recompute had office failures:`,
-        JSON.stringify(summary.officeFailures),
-      );
+  if (result.commissionRatesChanged) {
+    try {
+      const summary = await recalculateAllCommissionsForRep(id, actorUserId);
+      if (summary.officeFailures.length > 0) {
+        console.error(
+          `[commissions] rep ${id} recompute had office failures:`,
+          JSON.stringify(summary.officeFailures),
+        );
+      }
+    } catch (err) {
+      console.error(`[commissions] rep ${id} recompute could not start:`, err);
     }
   }
 
