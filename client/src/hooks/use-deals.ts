@@ -318,12 +318,14 @@ export interface DealDetail extends Deal {
     reason: string | null;
     votedAt: string;
   }>;
+  // Null for non-vote deals (service / type-4, legacy SyncHub-path, or while ENABLE_RFP_VOTING is off) so the
+  // vote panel + focused vote page stay inert (their `if (!state) return null` guards fire).
   rfpVoteState: {
     approvals: number;
     rejections: number;
     outcome: "pending" | "approved" | "rejected";
     decidedAt: string | null;
-  };
+  } | null;
 }
 
 export interface DealChangeOrder {

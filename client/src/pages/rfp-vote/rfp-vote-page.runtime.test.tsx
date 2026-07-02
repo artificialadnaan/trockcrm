@@ -85,6 +85,19 @@ describe("RfpVotePage", () => {
     expect(postCall![1]).toMatchObject({ method: "POST", json: { decision: "reject", reason: "Margins too thin" } });
   });
 
+  it("shows a 'not open for voting' card (no crash) when the loaded deal's rfpVoteState is null", async () => {
+    mocks.apiMock.mockResolvedValueOnce({
+      deal: { id: "deal-1", name: "Service RFP", projectNumber: "DFW-4-200", rfpApprovalStatus: "pending", rfpVotes: [], rfpVoteState: null },
+    });
+    await render();
+    expect(container.textContent).toMatch(/not open for voting/i);
+    // The vote form must NOT render off a null state.
+    expect(container.querySelector('input[value="approve"]')).toBeNull();
+    expect(Array.from(container.querySelectorAll("button")).some((b) => /submit vote/i.test(b.textContent ?? ""))).toBe(false);
+    // Only the "Open the full deal" escape hatch remains.
+    expect(container.querySelector('a[href*="/deals/deal-1"]')).not.toBeNull();
+  });
+
   it("blocks a non-voter with an access-restricted message", async () => {
     mocks.useAuthMock.mockReturnValue({ user: { id: "u-x", email: "x@trockgc.com", isRfpVoter: false, officeId: null } });
     await render();

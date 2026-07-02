@@ -8,6 +8,7 @@ import { deals, rfpVotes } from "@trock-crm/shared/schema";
 import { requireRfpVoter } from "../../../src/middleware/rbac.js";
 import { castRfpVote, isServiceRfp } from "../../../src/modules/deals/rfp-vote-service.js";
 import { AppError } from "../../../src/middleware/error-handler.js";
+import { isRfpVotingEnabled } from "../../../src/config/feature-flags.js";
 
 const DEAL = "00000000-0000-0000-0000-0000000000d1";
 const VOTER = { id: "00000000-0000-0000-0000-000000000001", email: "sidney@x.com" };
@@ -15,10 +16,11 @@ const NON_VOTER = { id: "00000000-0000-0000-0000-000000000009", email: "nobody@x
 const ROUND = "00000000-0000-0000-0000-0000000000e1";
 
 // Two designated voters so a second distinct voter can be simulated in one round.
-const ENV = { RFP_VOTER_EMAILS: "sidney@x.com,james@x.com,tim@x.com", NODE_ENV: "test" } as any;
+// ENABLE_RFP_VOTING on by default so the flag-gate lets the happy paths through; the 503 case flips it off.
+const ENV = { RFP_VOTER_EMAILS: "sidney@x.com,james@x.com,tim@x.com", ENABLE_RFP_VOTING: "true", NODE_ENV: "test" } as any;
 
 let pg: PGlite | null = null;
-afterEach(async () => { await pg?.close(); pg = null; process.env.RFP_VOTER_EMAILS = undefined as any; });
+afterEach(async () => { await pg?.close(); pg = null; process.env.RFP_VOTER_EMAILS = undefined as any; process.env.ENABLE_RFP_VOTING = undefined as any; });
 
 async function setup() {
   const db = new PGlite();
@@ -62,6 +64,8 @@ function buildApp(pgDb: PGlite, user: { id: string; email: string }) {
   });
   app.post("/deals/:id/rfp-vote", requireRfpVoter, async (req: any, res, next) => {
     try {
+      // Mirror of the production flag-gate: the cast is inert while ENABLE_RFP_VOTING is off.
+      if (!isRfpVotingEnabled()) throw new AppError(503, "RFP voting is not enabled.", "RFP_VOTING_DISABLED");
       const decision = req.body?.decision;
       if (decision !== "approve" && decision !== "reject") throw new AppError(400, "decision must be 'approve' or 'reject'.", "RFP_VOTE_DECISION_INVALID");
       const rawReason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
@@ -92,6 +96,19 @@ describe("POST /deals/:id/rfp-vote", () => {
     const res = await request(buildApp(pg, NON_VOTER)).post(`/deals/${DEAL}/rfp-vote`).send({ decision: "approve" });
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("RFP_VOTER_ONLY");
+  });
+
+  it("503 RFP_VOTING_DISABLED when ENABLE_RFP_VOTING is not 'true' (a voter can't cast during the rollout window)", async () => {
+    pg = await setup();
+    const app = buildApp(pg, VOTER);
+    // buildApp seeds ENABLE_RFP_VOTING='true' via ENV; flip it off AFTER build so the request-time check trips.
+    process.env.ENABLE_RFP_VOTING = "false";
+    const res = await request(app).post(`/deals/${DEAL}/rfp-vote`).send({ decision: "approve" });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe("RFP_VOTING_DISABLED");
+    // Nothing was recorded — the cast never ran.
+    const votes = (await pg.query(`SELECT decision FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(0);
   });
 
   it("400 when rejecting without a reason", async () => {

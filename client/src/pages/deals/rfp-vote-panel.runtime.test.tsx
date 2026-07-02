@@ -47,6 +47,19 @@ describe("RfpVotePanel", () => {
     expect(container.textContent).toContain("needs 2 of 3");
   });
 
+  it("renders NOTHING for a non-vote deal (null rfpVoteState) so the panel stays inert", async () => {
+    const nonVoteDeal = {
+      id: "deal-1",
+      rfpApprovalStatus: "pending",
+      rfpVotes: [],
+      rfpVoteState: null,
+    } as never;
+    await render(<RfpVotePanel deal={nonVoteDeal} user={{ id: "u-tim", email: "tim@trockgc.com", isRfpVoter: true, officeId: null } as never} officeId="office-1" />);
+    expect(container.textContent).toBe("");
+    expect(container.textContent).not.toContain("RFP Approval Vote");
+    expect(container.querySelector('a[href*="/rfp-vote/deal-1"]')).toBeNull();
+  });
+
   it("shows a 'Cast your vote' link only for an eligible voter who has not voted", async () => {
     // Eligible + not yet voted -> link present.
     await render(<RfpVotePanel deal={baseDeal} user={{ id: "u-tim", email: "tim@trockgc.com", isRfpVoter: true, officeId: null } as never} officeId="office-1" />);

@@ -60,10 +60,29 @@ export function RfpVotePage() {
     );
   }
 
+  // A non-vote deal reached directly (service / type-4, legacy SyncHub-path, or ENABLE_RFP_VOTING off) carries a
+  // null rfpVoteState from the server. Guard BEFORE reading .outcome so the page never crashes on null.
+  const voteState = deal.rfpVoteState;
+  if (!voteState) {
+    return (
+      <PageFrame>
+        <Card>
+          <CardHeader>
+            <CardTitle>This deal is not open for voting</CardTitle>
+            <CardDescription>This RFP isn't in an open voting round. It may be a service RFP, already decided, or handled through the standard approval path.</CardDescription>
+          </CardHeader>
+          <CardFooter>
+            <Link to={`/deals/${deal.id}${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`} className={buttonVariants({ variant: "outline" })}>Open the full deal</Link>
+          </CardFooter>
+        </Card>
+      </PageFrame>
+    );
+  }
+
   const alreadyVoted = deal.rfpVotes.some(
     (v) => (user.id != null && v.voterUserId === user.id) || (!!user.email && v.voterEmail.toLowerCase() === user.email.toLowerCase())
   );
-  const decided = deal.rfpVoteState.outcome !== "pending";
+  const decided = voteState.outcome !== "pending";
   const rejectNeedsReason = decision === "reject" && reason.trim().length === 0;
   const canSubmit = decision !== null && !rejectNeedsReason && !submitting && !alreadyVoted && !decided && !voted;
 
@@ -108,7 +127,7 @@ export function RfpVotePage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <p className="text-sm text-muted-foreground">
-            Tally so far: {deal.rfpVoteState.approvals} approve · {deal.rfpVoteState.rejections} reject — needs 2 of 3.
+            Tally so far: {voteState.approvals} approve · {voteState.rejections} reject — needs 2 of 3.
           </p>
 
           {alreadyVoted || decided ? (

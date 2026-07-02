@@ -1593,6 +1593,11 @@ router.get("/:id/rfp-review", requireRfpReviewer, async (req, res, next) => {
 // to the RFP_VOTER_EMAILS allowlist; 2-of-3 decides. Reject requires a reason; approve ignores it.
 router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
   try {
+    // Flag-gate the cast itself. In the rollout window (RFP_VOTER_EMAILS set but ENABLE_RFP_VOTING off) a voter
+    // could otherwise vote on a legacy non-service deal, firing a double escalation email + premature create.
+    if (!isRfpVotingEnabled()) {
+      throw new AppError(503, "RFP voting is not enabled.", "RFP_VOTING_DISABLED");
+    }
     const decision = req.body?.decision;
     if (decision !== "approve" && decision !== "reject") {
       throw new AppError(400, "decision must be 'approve' or 'reject'.", "RFP_VOTE_DECISION_INVALID");

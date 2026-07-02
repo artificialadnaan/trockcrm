@@ -64,6 +64,7 @@ import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-cre
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
 import { loadRfpVoteDetail } from "./rfp-vote-detail.js";
+import { isServiceRfp } from "./rfp-vote-service.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
@@ -90,7 +91,7 @@ import {
 } from "../shared/deal-date-scope.js";
 import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
-import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
+import { isRfpVotingEnabled, isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import {
   buildDealFilterBarConditions,
   buildInvolvedRepCondition,
@@ -2052,6 +2053,18 @@ export async function getDealDetail(
     dealWithMetadata.rfpApprovalRequestEventId ?? null
   );
 
+  // The vote panel + focused vote page must be INERT for non-vote deals. A deal is in a vote round ONLY when
+  // it's non-service AND either (a) it has recorded votes, or (b) it's a freshly-opened round (flag on, status
+  // 'pending', and no SyncHub request_id — the legacy single-approver path stamps request_id). Otherwise emit a
+  // null rfpVoteState so the client's `if (!state) return null` guard actually fires (loadRfpVoteDetail returns
+  // a non-null zero-state, which would otherwise render the panel on every RFP).
+  const isVoteRound =
+    !isServiceRfp(dealWithMetadata) &&
+    (rfpVotesView.length > 0 ||
+      (isRfpVotingEnabled() &&
+        dealWithMetadata.rfpApprovalStatus === "pending" &&
+        dealWithMetadata.rfpApprovalRequestId == null));
+
   return {
     ...dealWithMetadata,
     // Authoritative bid due date (lead-owned for converted deals; deal column for manual deals),
@@ -2070,8 +2083,8 @@ export async function getDealDetail(
     changeOrders: cos,
     dealChangeOrders: dealChangeOrderRows,
     dealChangeOrderTotal,
-    rfpVotes: rfpVotesView,
-    rfpVoteState,
+    rfpVotes: isVoteRound ? rfpVotesView : [],
+    rfpVoteState: isVoteRound ? rfpVoteState : null,
   };
 }
 
