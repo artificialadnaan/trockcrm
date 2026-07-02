@@ -118,7 +118,7 @@ function mapFieldProject(row: any): FieldProject {
   return project;
 }
 
-function activeProjectWhere(search?: string) {
+export function activeProjectWhere(search?: string) {
   const normalizedSearch = search?.trim();
   const stageSlug = sql`COALESCE(psc.slug, d.bid_board_stage_slug, '')`;
   return sql`
