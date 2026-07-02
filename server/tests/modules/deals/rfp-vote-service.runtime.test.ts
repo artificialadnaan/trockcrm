@@ -103,23 +103,27 @@ describe("castRfpVote", () => {
     pg = await setup();
     const tdb: any = drizzle(pg as any);
     const enqueueBidBoardCreate = vi.fn(async () => ({ jobId: 1 }));
+    const enqueueOutcome = vi.fn(async () => ({ jobId: 99 }));
 
     const r1 = await castRfpVote(
       { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V1, email: "sidney@x.com" }, decision: "approve", reason: null },
-      { enqueueBidBoardCreate },
+      { enqueueBidBoardCreate, enqueueOutcome },
     );
     expect(r1.outcome).toBe("pending");
     const r2 = await castRfpVote(
       { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V2, email: "james@x.com" }, decision: "approve", reason: null },
-      { enqueueBidBoardCreate },
+      { enqueueBidBoardCreate, enqueueOutcome },
     );
     expect(r2.outcome).toBe("approved");
     const r3 = await castRfpVote(
       { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V3, email: "tim@x.com" }, decision: "approve", reason: null },
-      { enqueueBidBoardCreate },
+      { enqueueBidBoardCreate, enqueueOutcome },
     );
     expect(r3.outcome).toBe("approved");
     expect(enqueueBidBoardCreate).toHaveBeenCalledTimes(1);
+    // The outcome-email enqueue (rep GO notification) must also fire exactly once, on the deciding vote.
+    expect(enqueueOutcome).toHaveBeenCalledTimes(1);
+    expect(enqueueOutcome.mock.calls[0][0]).toMatchObject({ outcome: "approved", approvals: 2 });
   });
 
   it("reject-majority calls applyDecline with the aggregated reason and flips status to declined", async () => {
@@ -129,20 +133,25 @@ describe("castRfpVote", () => {
       await pg!.query(`UPDATE deals SET rfp_approval_status='declined', rfp_declined_reason=$1 WHERE id=$2`, [input.denialReason, input.sourceDealId]);
       return { applied: true, declinedDeal: null };
     });
+    const enqueueOutcome = vi.fn(async () => ({ jobId: 99 }));
 
     await castRfpVote(
       { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V1, email: "sidney@x.com" }, decision: "reject", reason: "Margins too thin" },
-      { applyDecline },
+      { applyDecline, enqueueOutcome },
     );
     const res = await castRfpVote(
       { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V2, email: "james@x.com" }, decision: "reject", reason: "Scope unclear" },
-      { applyDecline },
+      { applyDecline, enqueueOutcome },
     );
     expect(res.outcome).toBe("rejected");
     expect(applyDecline).toHaveBeenCalledTimes(1);
     expect(applyDecline.mock.calls[0][0].denialReason).toBe(
       "Rejected by vote (2 of 3). sidney@x.com: Margins too thin; james@x.com: Scope unclear",
     );
+    // The outcome-email enqueue (rep + Takashi/Adam NO-GO escalation) must fire exactly once — this is the
+    // ONLY no-go escalation path (the 0148 trigger is inert for null-request-id voting declines).
+    expect(enqueueOutcome).toHaveBeenCalledTimes(1);
+    expect(enqueueOutcome.mock.calls[0][0]).toMatchObject({ outcome: "rejected", rejections: 2 });
     const rows = (await pg!.query(`SELECT rfp_approval_status, rfp_declined_reason FROM deals WHERE id=$1`, [DEAL])).rows as any[];
     expect(rows[0].rfp_approval_status).toBe("declined");
   });
