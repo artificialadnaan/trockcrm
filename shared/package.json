@@ -33,6 +33,10 @@
       "types": "./dist/lib/rfpVoterEmails.d.ts",
       "default": "./dist/lib/rfpVoterEmails.js"
     },
+    "./lib/rfpVoteState": {
+      "types": "./dist/lib/rfpVoteState.d.ts",
+      "default": "./dist/lib/rfpVoteState.js"
+    },
     "./lib/userProvisioningGuards": {
       "types": "./dist/lib/userProvisioningGuards.d.ts",
       "default": "./dist/lib/userProvisioningGuards.js"
