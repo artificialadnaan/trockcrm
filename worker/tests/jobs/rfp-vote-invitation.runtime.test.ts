@@ -4,23 +4,24 @@ import { handleRfpVoteInvitation, buildRfpVoteInvitationEmail } from "../../src/
 const ENV = {
   RFP_VOTER_EMAILS: "sidney@x.com,tim@x.com,james@x.com",
   NODE_ENV: "test",
-  APP_BASE_URL: "https://trockcrm.com",
+  FRONTEND_URL: "https://trockcrm.com",
 } as any;
 
 describe("handleRfpVoteInvitation", () => {
   it("emails the three configured voters with a /rfp-vote/:dealId link", async () => {
     const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
     await handleRfpVoteInvitation(
-      { dealId: "deal-1", dealNumber: "TR-1001", dealName: "jasonn ranches", officeId: "office-9" },
+      { dealId: "deal-1", dealNumber: "TR-1001", dealName: "jasonn ranches", officeId: "office-9", roundEventId: "round-evt-1" },
       "office-9",
       { sendEmail, env: ENV, logger: { log: vi.fn(), warn: vi.fn(), error: vi.fn() } },
     );
     expect(sendEmail).toHaveBeenCalledTimes(1);
-    const [recipients, subject, html] = sendEmail.mock.calls[0];
+    const [recipients, subject, html, opts] = sendEmail.mock.calls[0];
     expect(recipients).toEqual(["sidney@x.com", "tim@x.com", "james@x.com"]);
     expect(subject).toContain("TR-1001");
     expect(html).toContain("/rfp-vote/deal-1");
     expect(html).toContain("officeId=office-9");
+    expect(opts.idempotencyKey).toBe("rfp-vote-invite-deal-1-round-evt-1");
   });
 
   it("throws (fails loudly) when RFP_VOTER_EMAILS is unset in prod", async () => {

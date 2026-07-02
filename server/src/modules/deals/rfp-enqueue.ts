@@ -234,6 +234,7 @@ export async function enqueueRfpVoteInvitation(input: {
         dealNumber: input.deal.dealNumber ?? null,
         dealName: input.deal.name ?? null,
         officeId: input.officeId,
+        roundEventId: input.deal.rfpApprovalRequestEventId ?? null,
       },
       officeId: input.officeId,
       status: "pending",

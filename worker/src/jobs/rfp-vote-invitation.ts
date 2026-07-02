@@ -10,6 +10,7 @@ interface RfpVoteInvitationPayload {
   dealNumber?: string | null;
   dealName?: string | null;
   officeId?: string | null;
+  roundEventId?: string | null;
 }
 
 interface HandlerDeps {
@@ -52,6 +53,7 @@ export async function handleRfpVoteInvitation(
   }
 
   const officeId = normalizeText(payload.officeId);
+  const roundEventId = normalizeText(payload.roundEventId);
   const email = buildRfpVoteInvitationEmail({
     dealId,
     dealName: normalizeText(payload.dealName) ?? "Deal",
@@ -60,19 +62,25 @@ export async function handleRfpVoteInvitation(
     frontendUrl: resolveFrontendUrl(env),
   });
 
+  const recipientCount = recipients.length;
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
-  const result = await sendEmail(recipients, email.subject, email.html, {
-    text: email.text,
-    idempotencyKey: `rfp-vote-invite-${dealId}`,
-  });
-  if (!result.success) {
-    throw new Error("Email provider returned unsuccessful result");
+  try {
+    const sendResult = await sendEmail(recipients, email.subject, email.html, {
+      text: email.text,
+      idempotencyKey: `rfp-vote-invite-${dealId}-${roundEventId ?? "noroundid"}`,
+    });
+    if (!sendResult.success) {
+      throw new Error("Email provider returned unsuccessful result");
+    }
+    logger.log("[RfpVoteInvitation] Sent vote invitations", {
+      dealId,
+      recipientCount,
+      messageId: sendResult.messageId,
+    });
+  } catch (error) {
+    logger.error("[RfpVoteInvitation] Failed to send vote invitations", { dealId, recipientCount, error });
+    throw error;
   }
-  logger.log("[RfpVoteInvitation] Sent vote invitations", {
-    dealId,
-    recipientCount: recipients.length,
-    messageId: result.messageId,
-  });
 }
 
 export function buildRfpVoteInvitationEmail(input: {
@@ -119,6 +127,7 @@ export function buildRfpVoteInvitationEmail(input: {
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f4f5;">
     <tr>
       <td align="center" style="padding:24px 12px;">
+        <!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0"><tr><td><![endif]-->
         <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background-color:#ffffff;border:1px solid #e2e8f0;">
           <tr><td style="background-color:#CC0000;height:4px;line-height:4px;font-size:4px;mso-line-height-rule:exactly;">&nbsp;</td></tr>
           <tr><td align="center" style="padding:28px 24px 8px 24px;"><img src="${TROCK_LOGO_EMAIL_URL}" alt="T Rock Construction" width="220" height="246" style="display:block;width:220px;height:246px;border:0;outline:none;text-decoration:none;-ms-interpolation-mode:bicubic;" /></td></tr>
@@ -135,6 +144,7 @@ export function buildRfpVoteInvitationEmail(input: {
           </td></tr>
           <tr><td align="center" style="padding:0 24px 24px 24px;"><p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#94a3b8;">Votes are final once cast. Live progress is shown on the deal.</p></td></tr>
         </table>
+        <!--[if mso]></td></tr></table><![endif]-->
       </td>
     </tr>
   </table>
