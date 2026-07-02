@@ -259,33 +259,58 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 px-2 space-y-1">
-        {visibleNavItems.map((item) => (
-          item.external
-            ? (
-              <a
-                key={getNavItemKey(item)}
-                href={item.to}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label={item.ariaLabel}
-                className={inactiveNavLinkClass}
-              >
-                <item.icon className="h-4 w-4" />
-                {item.label}
-              </a>
-            )
-            : (
-              <NavLink
-                key={getNavItemKey(item)}
-                to={item.to}
-                end={item.to === "/"}
-                className={navLinkClass}
-              >
-                <item.icon className="h-4 w-4" />
-                {item.label}
-              </NavLink>
-            )
-        ))}
+        {visibleNavItems.map((item) => {
+          // Projects gets an on-hover flyout submenu (All Projects · QC Reports).
+          if (!item.external && item.to === "/projects") {
+            const subItemClass = ({ isActive }: { isActive: boolean }) =>
+              `flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-semibold transition-colors ${
+                isActive ? "bg-brand-red/10 text-brand-red" : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"
+              }`;
+            return (
+              <div key={getNavItemKey(item)} className="group relative">
+                <NavLink to="/projects" className={navLinkClass}>
+                  <item.icon className="h-4 w-4" />
+                  {item.label}
+                </NavLink>
+                {/* pl-2 bridges the gap so the mouse can travel from item to panel without closing */}
+                <div className="invisible absolute left-full top-0 z-30 pl-2 opacity-0 transition-opacity group-hover:visible group-hover:opacity-100">
+                  <div className="min-w-[200px] rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
+                    <div className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Projects</div>
+                    <NavLink to="/projects" end className={subItemClass}>
+                      <Building2 className="h-4 w-4" /> All Projects
+                    </NavLink>
+                    <NavLink to="/projects/qc-reports" className={subItemClass}>
+                      <ClipboardCheck className="h-4 w-4" /> QC Reports
+                    </NavLink>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+          return item.external ? (
+            <a
+              key={getNavItemKey(item)}
+              href={item.to}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={item.ariaLabel}
+              className={inactiveNavLinkClass}
+            >
+              <item.icon className="h-4 w-4" />
+              {item.label}
+            </a>
+          ) : (
+            <NavLink
+              key={getNavItemKey(item)}
+              to={item.to}
+              end={item.to === "/"}
+              className={navLinkClass}
+            >
+              <item.icon className="h-4 w-4" />
+              {item.label}
+            </NavLink>
+          );
+        })}
 
         {visibleDirectorItems.length > 0 && (
           <div className="mt-4 space-y-1 border-t border-slate-200 pt-3">

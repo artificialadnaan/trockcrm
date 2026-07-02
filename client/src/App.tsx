@@ -57,6 +57,7 @@ import { RegionReportPage } from "@/pages/reports/region-report-page";
 import { RepPackPage } from "@/pages/reports/rep-pack-page";
 import { SalesReviewPage } from "@/pages/sales-review/sales-review-page";
 import { ProjectsPage } from "@/pages/projects/projects-page";
+import QcReportsPage from "@/pages/reports/qc-reports-page";
 import { ProcoreSyncPage } from "@/pages/admin/procore-sync-page";
 import { MigrationDashboardPage } from "@/pages/admin/migration/migration-dashboard-page";
 import { MigrationDealsPage } from "@/pages/admin/migration/migration-deals-page";
@@ -371,6 +372,14 @@ export function App() {
               <Route path="/sales-review" element={<SalesReviewPage />} />
               <Route path="/pipeline/hygiene" element={<PipelineHygienePage />} />
               <Route path="/projects" element={<ProjectsPage />} />
+              <Route
+                path="/projects/qc-reports"
+                element={
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
+                    <QcReportsPage />
+                  </RequireRole>
+                }
+              />
               <Route path="/projects/:id" element={<ProjectDetailPage />} />
               <Route
                 path="/director"

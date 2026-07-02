@@ -172,7 +172,7 @@ function ScorecardRow({ dealId, summary }: { dealId: string; summary: FieldScore
   );
 }
 
-function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }) {
+export function ScorecardDetailView({ detail }: { detail: FieldScorecardDetail }) {
   return (
     <div className="space-y-4">
       <div>

@@ -1,0 +1,412 @@
+import { useEffect, useMemo, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
+import { AlertTriangle, Download, Loader2, Search, ClipboardCheck, ArrowUpRight } from "lucide-react";
+import { toast } from "sonner";
+import { PageHeader } from "@/components/layout/page-header";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { scorecardRatingLabel, type ScorecardRating, type FieldScorecardDetail } from "@trock-crm/shared/types";
+import { useQcScorecards, type QcScorecardRow } from "@/hooks/use-qc-scorecards";
+import { fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
+import { ScorecardDetailView } from "@/pages/deals/deal-scorecards-tab";
+
+const RATING_BADGE: Record<string, string> = {
+  elite: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  on_standard: "bg-blue-50 text-blue-700 border-blue-200",
+  needs_improvement: "bg-amber-50 text-amber-700 border-amber-200",
+  corrective_action: "bg-red-50 text-brand-red border-red-200",
+};
+const SCORE_COLOR: Record<string, string> = {
+  elite: "text-emerald-600",
+  on_standard: "text-slate-800",
+  needs_improvement: "text-amber-600",
+  corrective_action: "text-brand-red",
+};
+function label(rating: string) {
+  return scorecardRatingLabel(rating as ScorecardRating) ?? rating;
+}
+function fmtWeek(w: string) {
+  const d = new Date(`${w}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? w : d.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
+}
+function fmtDate(iso: string) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+function isoDaysAgo(n: number) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+export default function QcReportsPage() {
+  const [from, setFrom] = useState(isoDaysAgo(56));
+  const [to, setTo] = useState(isoDaysAgo(0));
+  const [region, setRegion] = useState("");
+  const [superintendent, setSuperintendent] = useState("");
+  const [rating, setRating] = useState("");
+  const [flaggedOnly, setFlaggedOnly] = useState(false);
+  const [search, setSearch] = useState("");
+
+  const { scorecards, loading, error, refetch } = useQcScorecards({ from, to });
+
+  const regionOptions = useMemo(
+    () => [...new Set(scorecards.map((s) => s.regionName).filter((r): r is string => !!r))].sort(),
+    [scorecards],
+  );
+  const superOptions = useMemo(
+    () => [...new Set(scorecards.map((s) => s.superintendentName).filter((r): r is string => !!r))].sort(),
+    [scorecards],
+  );
+
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return scorecards.filter((s) => {
+      if (region && s.regionName !== region) return false;
+      if (superintendent && s.superintendentName !== superintendent) return false;
+      if (rating && s.rating !== rating) return false;
+      if (flaggedOnly && s.deficiencyCount === 0) return false;
+      if (q && ![s.projectName, s.projectNumber, s.superintendentName].some((v) => v?.toLowerCase().includes(q)))
+        return false;
+      return true;
+    });
+  }, [scorecards, region, superintendent, rating, flaggedOnly, search]);
+
+  const stats = useMemo(() => {
+    const avg = rows.length ? Math.round(rows.reduce((s, r) => s + r.totalScore, 0) / rows.length) : null;
+    const corrective = rows.filter((r) => r.rating === "corrective_action");
+    const flagged = rows.filter((r) => r.deficiencyCount > 0);
+    const weekAgo = isoDaysAgo(7);
+    const thisWeek = rows.filter((r) => r.submittedAt.slice(0, 10) >= weekAgo);
+    return { avg, corrective, flagged, thisWeek };
+  }, [rows]);
+
+  const [drill, setDrill] = useState<{ title: string; rows: QcScorecardRow[] } | null>(null);
+  const [detailRow, setDetailRow] = useState<QcScorecardRow | null>(null);
+
+  const openDetail = useCallback((row: QcScorecardRow) => {
+    setDrill(null);
+    setDetailRow(row);
+  }, []);
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Field QC · Live & Won Projects"
+        title="QC Reports"
+        description="Weekly Field Scorecards submitted from T-Rock Cam across every active project. Track quality, catch corrective-action jobs early, and pull the signed PDF."
+      />
+
+      {/* stat strip — every card drills into its exact rows */}
+      <section className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <StatCard
+          label="Avg Score · Period"
+          value={stats.avg == null ? "—" : String(stats.avg)}
+          suffix={stats.avg == null ? undefined : "/100"}
+          meta={`across ${rows.length} scorecard${rows.length === 1 ? "" : "s"}`}
+          onClick={() => setDrill({ title: "All scorecards this period", rows: [...rows].sort((a, b) => a.totalScore - b.totalScore) })}
+        />
+        <StatCard
+          tone="bad"
+          label="Corrective Action"
+          value={String(stats.corrective.length)}
+          meta="projects below 75"
+          onClick={() => stats.corrective.length && setDrill({ title: "Corrective Action", rows: stats.corrective })}
+        />
+        <StatCard
+          tone="warn"
+          label="Deficiency-Flagged"
+          value={String(stats.flagged.length)}
+          meta="scorecards with a critical flag"
+          onClick={() => stats.flagged.length && setDrill({ title: "Deficiency-Flagged", rows: stats.flagged })}
+        />
+        <StatCard
+          tone="ok"
+          label="Submitted · Last 7 Days"
+          value={String(stats.thisWeek.length)}
+          meta="fresh submissions"
+          onClick={() => stats.thisWeek.length && setDrill({ title: "Submitted in the last 7 days", rows: stats.thisWeek })}
+        />
+      </section>
+
+      {/* filter bar */}
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
+        <FilterSelect label="Region" value={region} onChange={setRegion} options={regionOptions} allLabel="All regions" />
+        <FilterSelect label="Superintendent" value={superintendent} onChange={setSuperintendent} options={superOptions} allLabel="Anyone" />
+        <FilterSelect
+          label="Rating"
+          value={rating}
+          onChange={setRating}
+          options={["elite", "on_standard", "needs_improvement", "corrective_action"]}
+          renderOption={label}
+          allLabel="All ratings"
+        />
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">Weeks</span>
+          <input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[13px] font-medium text-slate-700" />
+          <span className="text-slate-400">→</span>
+          <input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[13px] font-medium text-slate-700" />
+        </div>
+        <button
+          type="button"
+          onClick={() => setFlaggedOnly((v) => !v)}
+          className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[12.5px] font-bold ${flaggedOnly ? "border-red-200 bg-red-50 text-brand-red" : "border-slate-200 bg-slate-50 text-slate-500"}`}
+        >
+          <AlertTriangle className="h-3.5 w-3.5" /> Flagged only
+        </button>
+        <div className="relative min-w-[220px] flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search project, number, superintendent…"
+            className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-[13px] font-medium"
+          />
+        </div>
+      </div>
+
+      {/* table */}
+      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+          <div className="text-[13px] font-bold text-slate-900">
+            Scorecards <span className="font-semibold text-slate-400">· {rows.length} result{rows.length === 1 ? "" : "s"}</span>
+          </div>
+        </div>
+        {loading ? (
+          <div className="flex items-center justify-center py-16 text-sm text-slate-500">
+            <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading QC reports…
+          </div>
+        ) : error ? (
+          <div className="py-14 text-center">
+            <p className="text-sm text-brand-red">{error}</p>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => void refetch()}>Try again</Button>
+          </div>
+        ) : rows.length === 0 ? (
+          <div className="py-16 text-center">
+            <ClipboardCheck className="mx-auto h-10 w-10 text-slate-300" />
+            <p className="mt-3 text-sm font-medium text-slate-900">No scorecards match these filters</p>
+            <p className="mt-1 text-sm text-slate-500">Widen the week range or clear filters.</p>
+          </div>
+        ) : (
+          <QcTable rows={rows} onRowClick={openDetail} />
+        )}
+      </div>
+
+      {/* KPI drill-down modal */}
+      <Dialog open={!!drill} onOpenChange={(o) => !o && setDrill(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{drill?.title} <span className="text-slate-400">· {drill?.rows.length}</span></DialogTitle>
+          </DialogHeader>
+          <div className="max-h-[60vh] overflow-y-auto">
+            {drill && <QcTable rows={drill.rows} onRowClick={openDetail} compact />}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* detail drawer (reuses the deal-tab detail view + per-deal endpoints) */}
+      <QcDetailSheet row={detailRow} onClose={() => setDetailRow(null)} />
+    </div>
+  );
+}
+
+function StatCard(props: {
+  label: string; value: string; suffix?: string; meta: string; tone?: "ok" | "warn" | "bad"; onClick: () => void;
+}) {
+  const bar =
+    props.tone === "ok" ? "bg-emerald-500" : props.tone === "warn" ? "bg-amber-500" : props.tone === "bad" ? "bg-brand-red" : "bg-brand-red";
+  const val =
+    props.tone === "ok" ? "text-emerald-600" : props.tone === "warn" ? "text-amber-600" : props.tone === "bad" ? "text-brand-red" : "text-slate-950";
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      className="group relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4 pb-5 text-left transition hover:border-slate-300 hover:shadow-md"
+    >
+      <div className="flex items-center justify-between">
+        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">{props.label}</div>
+        <ArrowUpRight className="h-3.5 w-3.5 text-slate-300 transition group-hover:text-slate-500" />
+      </div>
+      <div className={`mt-2 text-[32px] font-black leading-none tracking-tight ${val}`}>
+        {props.value}
+        {props.suffix && <span className="text-[15px] font-semibold text-slate-400">{props.suffix}</span>}
+      </div>
+      <div className="mt-2 text-[12px] text-slate-500">{props.meta}</div>
+      <div className={`absolute inset-x-0 bottom-0 h-1 ${bar}`} />
+    </button>
+  );
+}
+
+function FilterSelect(props: {
+  label: string; value: string; onChange: (v: string) => void; options: string[]; allLabel: string; renderOption?: (v: string) => string;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[10.5px] font-bold uppercase tracking-wider text-slate-400">{props.label}</span>
+      <select
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
+        className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[13px] font-semibold text-slate-700"
+      >
+        <option value="">{props.allLabel}</option>
+        {props.options.map((o) => (
+          <option key={o} value={o}>{props.renderOption ? props.renderOption(o) : o}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowClick: (r: QcScorecardRow) => void; compact?: boolean }) {
+  return (
+    <table className="w-full border-collapse">
+      <thead>
+        <tr className="border-b border-slate-100">
+          <Th>Project</Th>
+          {!compact && <Th>Week of</Th>}
+          {!compact && <Th>Superintendent</Th>}
+          <Th className="text-right">Score</Th>
+          <Th className="text-center">Rating</Th>
+          <Th className="text-center">Flags</Th>
+          {!compact && <Th>Submitted</Th>}
+          <Th />
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr
+            key={r.scorecardId}
+            onClick={() => onRowClick(r)}
+            className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 ${r.deficiencyCount > 0 ? "shadow-[inset_3px_0_0_var(--tw-shadow-color)] shadow-brand-red" : ""}`}
+          >
+            <td className="px-3.5 py-3">
+              <div className="font-semibold text-slate-950">{r.projectName}</div>
+              <div className="mt-0.5 text-[11.5px] font-semibold text-slate-400">
+                {[r.projectNumber, r.regionName].filter(Boolean).join(" · ") || "—"}
+              </div>
+            </td>
+            {!compact && <td className="px-3.5 py-3 text-[13px] text-slate-500">{fmtWeek(r.weekOf)}</td>}
+            {!compact && <td className="px-3.5 py-3 text-[13.5px]">{r.superintendentName ?? "—"}</td>}
+            <td className={`px-3.5 py-3 text-right text-[19px] font-black tabular-nums ${SCORE_COLOR[r.rating] ?? "text-slate-800"}`}>
+              {r.totalScore}
+              <span className="text-[11px] font-semibold text-slate-300">/100</span>
+            </td>
+            <td className="px-3.5 py-3 text-center">
+              <Badge variant="outline" className={`${RATING_BADGE[r.rating] ?? ""} whitespace-nowrap`}>{label(r.rating)}</Badge>
+            </td>
+            <td className="px-3.5 py-3 text-center">
+              {r.deficiencyCount > 0 ? (
+                <span className="inline-flex items-center gap-1 text-[12.5px] font-bold text-brand-red">
+                  <AlertTriangle className="h-3.5 w-3.5" />{r.deficiencyCount}
+                </span>
+              ) : (
+                <span className="text-slate-300">—</span>
+              )}
+            </td>
+            {!compact && <td className="px-3.5 py-3 text-[13px] text-slate-500">{[r.submittedByName, fmtDate(r.submittedAt)].filter(Boolean).join(" · ")}</td>}
+            <td className="px-3.5 py-3 text-right">
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); void triggerDownload(r); }}
+                title={r.pdfAvailable ? "Download PDF" : "PDF still generating"}
+                className="inline-grid h-8 w-8 place-items-center rounded-lg border border-slate-200 text-slate-500 hover:border-brand-red hover:text-brand-red"
+              >
+                <Download className="h-4 w-4" />
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function Th({ children, className = "" }: { children?: React.ReactNode; className?: string }) {
+  return <th className={`px-3.5 py-2.5 text-left text-[10.5px] font-bold uppercase tracking-wider text-slate-400 ${className}`}>{children}</th>;
+}
+
+async function triggerDownload(r: QcScorecardRow) {
+  try {
+    await downloadDealScorecardPdf(r.dealId, r.scorecardId);
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "The PDF isn’t ready yet");
+  }
+}
+
+function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: () => void }) {
+  const navigate = useNavigate();
+  const [detail, setDetail] = useState<FieldScorecardDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const key = row?.scorecardId ?? null;
+
+  // Fetch detail when a row is opened (keyed on scorecardId so switching rows reloads).
+  useEffect(() => {
+    if (!row) return;
+    let cancelled = false;
+    setDetail(null);
+    setLoading(true);
+    fetchDealScorecardDetail(row.dealId, row.scorecardId)
+      .then((d) => { if (!cancelled) setDetail(d); })
+      .catch((e) => { if (!cancelled) toast.error(e instanceof Error ? e.message : "Couldn’t load detail"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  return (
+    <Sheet open={!!row} onOpenChange={(o) => !o && onClose()}>
+      <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
+        {row && (
+          <>
+            <SheetHeader>
+              <SheetTitle className="pr-6 leading-snug">{row.projectName}</SheetTitle>
+              <div className="text-[12.5px] text-slate-500">
+                {[row.projectNumber, `Week of ${fmtWeek(row.weekOf)}`, row.superintendentName ? `Supt. ${row.superintendentName}` : null].filter(Boolean).join(" · ")}
+              </div>
+            </SheetHeader>
+            <div className="mt-4 flex items-center gap-4 rounded-xl border border-slate-100 bg-slate-50 p-4">
+              <div className={`text-[38px] font-black leading-none tracking-tight ${SCORE_COLOR[row.rating] ?? "text-slate-800"}`}>
+                {row.totalScore}<span className="text-[15px] font-semibold text-slate-300">/100</span>
+              </div>
+              <div>
+                <Badge variant="outline" className={RATING_BADGE[row.rating] ?? ""}>{label(row.rating)}</Badge>
+                <div className="mt-1.5 text-[12px] text-slate-500">Submitted by {row.submittedByName ?? "—"} · {fmtDate(row.submittedAt)}</div>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              {loading || !detail ? (
+                <div className="flex items-center justify-center py-8 text-sm text-slate-500">
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading detail…
+                </div>
+              ) : (
+                <ScorecardDetailView detail={detail} />
+              )}
+            </div>
+
+            <div className="mt-5 flex gap-2 border-t border-slate-100 pt-4">
+              <Button className="flex-1 bg-brand-red text-white hover:bg-brand-red/90" onClick={() => void triggerDownload(row)}>
+                <Download className="mr-2 h-4 w-4" /> Download PDF
+              </Button>
+              <Button variant="outline" onClick={() => navigate(`/deals/${row.dealId}?tab=scorecards`)}>
+                Open deal
+              </Button>
+            </div>
+          </>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}

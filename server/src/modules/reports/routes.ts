@@ -83,6 +83,7 @@ import type { ProjectionBand } from "./foundations.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { getRegionReport } from "./region-report-service.js";
+import { getQcScorecardsReport } from "./qc-scorecards-service.js";
 import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, USAGE_ROSTER_ROLES, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, classifyViewsState, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
 import { businessToday, shiftBusinessDate, getWtdPeriod, type WeekMode } from "../../lib/period.js";
 
@@ -285,6 +286,37 @@ router.get("/region", async (req, res, next) => {
     const to = rawTo ?? fallback.to;
     if (from > to) throw new AppError(400, "'from' must be on or before 'to'.");
     const data = await getRegionReport(req.tenantDb!, { from, to });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/qc-scorecards — office-scoped Field Scorecards for the QC dashboard, filtered by week
+// range + region/superintendent/rating/flagged/search. The dashboard derives its stat strip + card
+// drill-downs from this list client-side.
+router.get("/qc-scorecards", requireAnyRole, async (req, res, next) => {
+  try {
+    const rawFrom = readOptionalIsoDate(req.query.from, "from");
+    const rawTo = readOptionalIsoDate(req.query.to, "to");
+    if ((rawFrom == null) !== (rawTo == null)) {
+      throw new AppError(400, "Provide both 'from' and 'to', or neither.");
+    }
+    // Default window: the trailing ~8 weeks up to today (covers the typical review horizon).
+    const to = rawTo ?? businessToday();
+    const from = rawFrom ?? shiftBusinessDate(to, -56);
+    if (from > to) throw new AppError(400, "'from' must be on or before 'to'.");
+
+    const data = await getQcScorecardsReport(req.tenantDb!, {
+      from,
+      to,
+      regionId: readOptionalUuid(req.query.regionId, "regionId"),
+      superintendent: readQueryString(req.query.superintendent),
+      rating: readQueryString(req.query.rating),
+      flaggedOnly: req.query.flaggedOnly === "true",
+      search: readQueryString(req.query.search),
+    });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
