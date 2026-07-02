@@ -16,12 +16,14 @@ import {
   evaluateUpdateUserGuards,
   planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
+import { resolveEffectiveCapxRate } from "@trock-crm/shared/lib/commission-structure";
 import {
   incrementTokenVersion,
   revokeLocalAuthOnDeactivate,
   clearLocalAuthRevocation,
   closeUserSseConnections,
 } from "../auth/session-invalidation.js";
+import { recalculateAllCommissionsForRep } from "../commissions/recompute-service.js";
 import {
   getLocalAuthStatus,
   type LocalAuthStatus,
@@ -65,6 +67,12 @@ function assertNonNegative(name: string, value: number) {
 function assertPositiveInteger(name: string, value: number) {
   if (!Number.isInteger(value) || value < 1) {
     throw new AppError(400, `${name} must be an integer greater than or equal to 1`);
+  }
+}
+
+function assertCommissionStructure(value: string): asserts value is "solo" | "mixed" {
+  if (value !== "solo" && value !== "mixed") {
+    throw new AppError(400, "commissionStructure must be 'solo' or 'mixed'");
   }
 }
 
@@ -226,6 +234,10 @@ export async function updateUser(
     isActive: boolean;
     notificationPrefs: Record<string, unknown>;
     commissionRate: number;
+    commissionStructure: "solo" | "mixed";
+    capxRateSolo: number;
+    capxRateMixed: number;
+    serviceSourceRate: number;
     rollingFloor: number;
     overrideRate: number;
     estimatedMarginRate: number;
@@ -236,6 +248,7 @@ export async function updateUser(
   }>,
   actorUserId: string
 ) {
+  let commissionRatesChanged = false;
   const result = await db.transaction(async (tx) => {
     const existing = await tx
       .select()
@@ -308,6 +321,10 @@ export async function updateUser(
 
     const hasCommissionPatch =
       input.commissionRate !== undefined ||
+      input.commissionStructure !== undefined ||
+      input.capxRateSolo !== undefined ||
+      input.capxRateMixed !== undefined ||
+      input.serviceSourceRate !== undefined ||
       input.rollingFloor !== undefined ||
       input.overrideRate !== undefined ||
       input.estimatedMarginRate !== undefined ||
@@ -324,7 +341,11 @@ export async function updateUser(
         .limit(1);
       const current = existingConfig[0];
 
-      const commissionRate = input.commissionRate ?? Number(current?.commissionRate ?? 0);
+      const commissionStructure =
+        input.commissionStructure ?? (current?.commissionStructure as "solo" | "mixed" | undefined) ?? "solo";
+      const capxRateSolo = input.capxRateSolo ?? Number(current?.capxRateSolo ?? 0);
+      const capxRateMixed = input.capxRateMixed ?? Number(current?.capxRateMixed ?? 0);
+      const serviceSourceRate = input.serviceSourceRate ?? Number(current?.serviceSourceRate ?? 0);
       const rollingFloor = input.rollingFloor ?? Number(current?.rollingFloor ?? 0);
       const overrideRate = input.overrideRate ?? Number(current?.overrideRate ?? 0);
       const estimatedMarginRate = input.estimatedMarginRate ?? Number(current?.estimatedMarginRate ?? 0.3);
@@ -333,7 +354,10 @@ export async function updateUser(
       const newCustomerWindowMonths = input.newCustomerWindowMonths ?? Number(current?.newCustomerWindowMonths ?? 6);
       const isActive = input.commissionConfigActive ?? Boolean(current?.isActive ?? true);
 
-      assertRate("commissionRate", commissionRate);
+      assertCommissionStructure(commissionStructure);
+      assertRate("capxRateSolo", capxRateSolo);
+      assertRate("capxRateMixed", capxRateMixed);
+      assertRate("serviceSourceRate", serviceSourceRate);
       assertNonNegative("rollingFloor", rollingFloor);
       assertRate("overrideRate", overrideRate);
       assertRate("estimatedMarginRate", estimatedMarginRate);
@@ -341,11 +365,26 @@ export async function updateUser(
       assertRate("newCustomerShareFloor", newCustomerShareFloor);
       assertPositiveInteger("newCustomerWindowMonths", newCustomerWindowMonths);
 
+      // Denormalized mirror: commission_rate = the EFFECTIVE capX rate for the active structure,
+      // so every existing engine read of commission_rate keeps working. This SINGLE line is the
+      // only place the mirror is maintained. (input.commissionRate is superseded by the capX
+      // rates and no longer drives the stored rate.)
+      const commissionRate = resolveEffectiveCapxRate({
+        commissionStructure,
+        capxRateSolo,
+        capxRateMixed,
+        serviceSourceRate,
+      });
+
       await tx
         .insert(userCommissionSettings)
         .values({
           userId: id,
           commissionRate: String(commissionRate),
+          commissionStructure,
+          capxRateSolo: String(capxRateSolo),
+          capxRateMixed: String(capxRateMixed),
+          serviceSourceRate: String(serviceSourceRate),
           rollingFloor: String(rollingFloor),
           overrideRate: String(overrideRate),
           estimatedMarginRate: String(estimatedMarginRate),
@@ -358,6 +397,10 @@ export async function updateUser(
           target: userCommissionSettings.userId,
           set: {
             commissionRate: String(commissionRate),
+            commissionStructure,
+            capxRateSolo: String(capxRateSolo),
+            capxRateMixed: String(capxRateMixed),
+            serviceSourceRate: String(serviceSourceRate),
             rollingFloor: String(rollingFloor),
             overrideRate: String(overrideRate),
             estimatedMarginRate: String(estimatedMarginRate),
@@ -368,6 +411,12 @@ export async function updateUser(
             updatedAt: new Date(),
           },
         });
+
+      commissionRatesChanged =
+        input.commissionStructure !== undefined ||
+        input.capxRateSolo !== undefined ||
+        input.capxRateMixed !== undefined ||
+        input.serviceSourceRate !== undefined;
     }
 
     return { updated, closeStreams: plan.closeStreams };
@@ -376,6 +425,17 @@ export async function updateUser(
   // Best-effort, post-commit: drop the deactivated user's live SSE streams immediately. The
   // authoritative gate remains the per-request is_active + token-version re-check.
   if (result.closeStreams) closeUserSseConnections(id);
+
+  if (commissionRatesChanged) {
+    const summary = await recalculateAllCommissionsForRep(id, actorUserId);
+    if (summary.officeFailures.length > 0) {
+      console.error(
+        `[commissions] rep ${id} recompute had office failures:`,
+        JSON.stringify(summary.officeFailures),
+      );
+    }
+  }
+
   return result.updated;
 }
 
@@ -441,6 +501,10 @@ export async function getUsersWithStats() {
       o.name AS office_name,
       COUNT(uoa.office_id)::int AS extra_office_count,
       cs.commission_rate,
+      cs.commission_structure,
+      cs.capx_rate_solo,
+      cs.capx_rate_mixed,
+      cs.service_source_rate,
       cs.rolling_floor,
       cs.override_rate,
       cs.estimated_margin_rate,
@@ -462,6 +526,10 @@ export async function getUsersWithStats() {
       u.is_active,
       o.name,
       cs.commission_rate,
+      cs.commission_structure,
+      cs.capx_rate_solo,
+      cs.capx_rate_mixed,
+      cs.service_source_rate,
       cs.rolling_floor,
       cs.override_rate,
       cs.estimated_margin_rate,
@@ -561,6 +629,10 @@ export async function getUsersWithStats() {
     isActive: r.is_active,
     extraOfficeCount: Number(r.extra_office_count ?? 0),
     commissionRate: Number(r.commission_rate ?? 0),
+    commissionStructure: (r.commission_structure ?? "solo") as "solo" | "mixed",
+    capxRateSolo: Number(r.capx_rate_solo ?? 0),
+    capxRateMixed: Number(r.capx_rate_mixed ?? 0),
+    serviceSourceRate: Number(r.service_source_rate ?? 0),
     rollingFloor: Number(r.rolling_floor ?? 0),
     overrideRate: Number(r.override_rate ?? 0),
     estimatedMarginRate: Number(r.estimated_margin_rate ?? 0.30),
