@@ -45,9 +45,14 @@ function fmtDate(iso: string) {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
+const BUSINESS_TZ = "America/Chicago";
+// Business-timezone "today" (Central) minus n days, as YYYY-MM-DD. Anchoring to the OFFICE tz — not the
+// browser's UTC day — keeps the default window from shifting forward for users past the UTC rollover
+// (~7–8pm Central would otherwise send tomorrow as `to`). Day math at UTC noon dodges DST/midnight edges.
 function isoDaysAgo(n: number) {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: BUSINESS_TZ }); // yyyy-mm-dd in Central
+  const d = new Date(`${today}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - n);
   return d.toISOString().slice(0, 10);
 }
 

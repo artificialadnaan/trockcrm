@@ -79,6 +79,9 @@ export function useQcScorecards(filters: QcScorecardFilters) {
     } catch (e) {
       if (requestId !== requestIdRef.current) return;
       setError(e instanceof Error ? e.message : "Failed to load QC reports");
+      // Drop the previous fetch's truncation flag so the "showing most recent 1,000" banner doesn't linger
+      // over an error state (the page renders that banner independently of the table's error branch).
+      setTruncated(false);
     } finally {
       if (requestId === requestIdRef.current) setLoading(false);
     }
