@@ -594,15 +594,17 @@ export async function listFieldProjectPhotos(
 export async function searchFieldCaptureTargets(
   tenantDb: TenantDb,
   _access: FieldAccessContext,
-  input: { search?: string; limit?: number } = {}
+  input: { search?: string; limit?: number; dealsOnly?: boolean } = {}
 ) {
   // The field/TrockCam capture-target picker is intentionally UNSCOPED: any rep must
   // be able to find ANY lead/deal to attach photos to, so we do NOT forward the
   // rep identity into searchPhotoUploadTargets (forwarding it rep-scoped the search
   // and hid every non-owned lead). See .audit/trockcam-leads-not-returning.md.
+  // dealsOnly (scorecard picker) filters to deals in SQL — before the per-type + cross-office caps.
   return searchPhotoUploadTargets(tenantDb, {
     search: input.search,
     limit: input.limit,
+    dealsOnly: input.dealsOnly,
   });
 }
 

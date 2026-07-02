@@ -148,6 +148,17 @@ describe("searchPhotoUploadTargets — cross-type cap must not evict leads", () 
     const { targets } = await searchPhotoUploadTargets(tdb, { search: "roof", limit: 30 });
     expect(ids(targets).has(L_INACTIVE)).toBe(false);
   });
+
+  it("dealsOnly returns ONLY deals — leads + opportunities are filtered in SQL before the cap (scorecard picker)", async () => {
+    const { targets } = await searchPhotoUploadTargets(tdb, { search: "roof", limit: 30, dealsOnly: true });
+    // Every result is a deal (no leads, no opportunity) — the exact starvation Codex flagged (leads/opps
+    // ranked ahead of deals, then a client filter) can't happen because the filter is server-side.
+    expect(targets.length).toBeGreaterThan(0);
+    expect(targets.every((t) => t.type === "deal")).toBe(true);
+    const returned = ids(targets);
+    expect(returned.has(L_ROOF1)).toBe(false);
+    expect(returned.has(OPP_ROOF)).toBe(false);
+  });
 });
 
 describe("searchPhotoUploadTargets — direct search returns the lead (left join, own fields)", () => {

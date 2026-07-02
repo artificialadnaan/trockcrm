@@ -103,7 +103,7 @@ describe("TargetPicker nearby defaults", () => {
 
     fireEvent.changeText(screen.getByPlaceholderText("Search deals, opportunities, leads"), "oak");
 
-    expect(mockUseCaptureTargets).toHaveBeenLastCalledWith("oak");
+    expect(mockUseCaptureTargets).toHaveBeenLastCalledWith("oak", false); // default picker: dealsOnly = false
     expect(screen.queryByText("121 Preston Oaks")).toBeNull();
     expect(screen.getByText("Oak Creek Lead")).toBeTruthy();
     expect(screen.getByText("Lead")).toBeTruthy();
@@ -135,7 +135,28 @@ describe("TargetPicker nearby defaults", () => {
     screen.rerender(<TargetPicker visible onClose={onClose} onSelect={onSelect} />);
     await flushGpsEffect();
 
-    expect(mockUseCaptureTargets).toHaveBeenLastCalledWith("oak");
+    expect(mockUseCaptureTargets).toHaveBeenLastCalledWith("oak", false); // default picker: dealsOnly = false
     expect(mockGetLiveGps).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("TargetPicker dealsOnly (scorecard)", () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    mockGetLiveGps.mockResolvedValue({ latitude: 32.911, longitude: -96.775, takenAt: "2026-06-23T14:00:00.000Z" });
+    mockUseNearbyCaptureTargets.mockReturnValue({ data: { targets: [] }, isFetching: false });
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it("passes dealsOnly=true to the search hook (server filters before the cap) and drops any stray non-deal", () => {
+    mockUseCaptureTargets.mockReturnValue({ data: { targets: [nearbyDeal, searchLead] }, isFetching: false });
+    const screen = render(<TargetPicker visible dealsOnly onClose={jest.fn()} onSelect={jest.fn()} />);
+    fireEvent.changeText(screen.getByPlaceholderText("Search projects"), "oak");
+    expect(mockUseCaptureTargets).toHaveBeenLastCalledWith("oak", true);
+    expect(screen.getByText("121 Preston Oaks")).toBeTruthy(); // the deal shows
+    expect(screen.queryByText("Oak Creek Lead")).toBeNull(); // client fallback drops a stray lead
   });
 });

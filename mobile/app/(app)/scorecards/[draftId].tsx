@@ -74,7 +74,15 @@ export default function ScorecardWizardScreen() {
     setCameraSection(null);
     setSubmitting(false);
     setNotice(null);
-    void loadScorecardDraft(ownerKey, draftId).then((d) => setLoaded(d ?? "missing"));
+    // Guard against a slow load from a PREVIOUS draftId/owner resolving last and seeding the wizard with
+    // the wrong draft — ignore any resolution after this effect has been superseded.
+    let cancelled = false;
+    void loadScorecardDraft(ownerKey, draftId).then((d) => {
+      if (!cancelled) setLoaded(d ?? "missing");
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [ownerKey, draftId]);
 
   // Reducer seeded once the draft loads. `key` remounts the reducer host when the draft arrives.

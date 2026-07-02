@@ -225,10 +225,12 @@ export async function drainUploadQueue(
   draining = true;
   let keptAwake = false;
   try {
-    // Only drain items that haven't exhausted their retries — terminal/failed items are left for the UI
-    // to surface and discard, never re-PUT.
-    const items = (await readQueue(ownerKey)).filter(isDrainable);
-    if (items.length === 0) return { succeeded: 0, failed: 0, remaining: 0 };
+    // Plan the drainable id order UNDER THE LOCK so the snapshot is consistent with any cancellation that
+    // has already completed (terminal/failed items are left for the UI to surface + discard, never re-PUT).
+    const plannedIds = await withQueueLock(async () =>
+      (await readQueue(ownerKey)).filter(isDrainable).map((item) => item.clientUploadId),
+    );
+    if (plannedIds.length === 0) return { succeeded: 0, failed: 0, remaining: 0 };
 
     try {
       await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
@@ -243,8 +245,18 @@ export async function drainUploadQueue(
     // of retrying forever.
     let succeeded = 0;
     let failed = 0;
-    for (let i = 0; i < items.length; i += DRAIN_CHUNK) {
-      const chunk = items.slice(i, i + DRAIN_CHUNK);
+    for (let i = 0; i < plannedIds.length; i += DRAIN_CHUNK) {
+      const chunkIds = plannedIds.slice(i, i + DRAIN_CHUNK);
+      // Re-select the items STILL queued + drainable right now, under the lock: a removeQueuedUploads that
+      // landed since the plan (user pulled a photo off the card) cancels it — so we never upload evidence
+      // the user just removed, and never touch a file another mutation deleted.
+      const chunk = await withQueueLock(async () => {
+        const byId = new Map((await readQueue(ownerKey)).map((item) => [item.clientUploadId, item]));
+        return chunkIds
+          .map((id) => byId.get(id))
+          .filter((item): item is QueuedUpload => !!item && isDrainable(item));
+      });
+      if (chunk.length === 0) continue;
       const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) => uploadCapture(fetcher, item));
       const { succeededIds, failedIds } = partitionResults(chunk, results);
       await removeQueuedItems(ownerKey, succeededIds);

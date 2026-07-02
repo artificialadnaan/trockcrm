@@ -706,17 +706,20 @@ fieldRoutes.get("/photo-targets/search", requireFieldContractor, async (req, res
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
     const search = req.query.search as string | undefined;
     const limit = parseOptionalPositiveInt(req.query.limit);
+    // Scorecard picker: filter to deals server-side (before the caps) so a lead/opportunity-heavy result
+    // set can't starve out matching deals.
+    const dealsOnly = req.query.dealsOnly === "true";
 
     if (!isFieldCrossOfficeWritesEnabled()) {
       const office = await getFieldOfficeById(req.fieldUser!.tenantId);
-      const result = await runInOffice(office, (db) => searchFieldCaptureTargets(db, access, { search, limit }));
+      const result = await runInOffice(office, (db) => searchFieldCaptureTargets(db, access, { search, limit, dealsOnly }));
       res.json(result);
       return;
     }
 
     const globalLimit = limit ?? FIELD_CAPTURE_TARGET_DEFAULT_LIMIT;
     const { results, failures } = assertFanOutNotFullyDegraded(
-      await fanOutActiveOffices((db) => searchFieldCaptureTargets(db, access, { search, limit: globalLimit })),
+      await fanOutActiveOffices((db) => searchFieldCaptureTargets(db, access, { search, limit: globalLimit, dealsOnly })),
     );
     const targets = mergeFieldCaptureTargets(
       results.map(({ office, value }) => ({ office, targets: value.targets })),

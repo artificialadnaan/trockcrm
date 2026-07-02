@@ -110,8 +110,11 @@ export const getProjectTags = (f: Fetcher, dealId: string, q: string, limit = 8)
   f<ProjectTagsResponse>(`/field/projects/${dealId}/tags`, { query: { q, limit } });
 
 // ── Capture targets ───────────────────────────────────────────────────────────
-export const searchCaptureTargets = (f: Fetcher, search: string, limit = 20) =>
-  f<CaptureTargetsResponse>("/field/photo-targets/search", { query: { search, limit } });
+export const searchCaptureTargets = (f: Fetcher, search: string, limit = 20, dealsOnly = false) =>
+  f<CaptureTargetsResponse>("/field/photo-targets/search", {
+    // dealsOnly filters to deals server-side (before the result cap) for the scorecard picker.
+    query: { search, limit, ...(dealsOnly ? { dealsOnly: "true" } : {}) },
+  });
 
 export const getNearbyCaptureTargets = (
   f: Fetcher,

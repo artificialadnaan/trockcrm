@@ -1059,11 +1059,15 @@ export function sortPhotoTargetsByRelevance<
 
 export async function searchPhotoUploadTargets(
   tenantDb: TenantDb,
-  input: { search?: string; limit?: number }
+  input: { search?: string; limit?: number; dealsOnly?: boolean }
 ): Promise<{ targets: PhotoUploadTarget[] }> {
   const limit = Math.min(Math.max(input.limit ?? 30, 1), 60);
   const trimmed = input.search?.trim() ?? "";
   const hasSearch = trimmed.length > 0;
+  // dealsOnly: the Field Scorecard attaches to a deal (FK to deals) and can't score a lead/opportunity.
+  // Filtering must happen HERE (before each type's LIMIT + the caller's cross-office cap) — a client-side
+  // filter on the already-capped, lead/opportunity-first result set can hide every matching deal.
+  const dealsOnly = input.dealsOnly === true;
 
   const leadSearch = hasSearch ? buildPhotoTargetLeadSearchCondition(trimmed) : null;
   const dealSearch = hasSearch ? buildPhotoTargetDealSearchCondition(trimmed) : null;
@@ -1124,23 +1128,25 @@ export async function searchPhotoUploadTargets(
   const leadOrder = hasSearch ? [desc(leadRelevance), desc(leads.updatedAt)] : [desc(leads.updatedAt)];
   const dealOrder = hasSearch ? [desc(dealRelevance), desc(deals.updatedAt)] : [desc(deals.updatedAt)];
 
-  const leadRows = await tenantDb
-    .select({
-      id: leads.id,
-      name: leads.name,
-      stageName: pipelineStageConfig.name,
-      companyName: companies.name,
-      lastUpdatedAt: leads.updatedAt,
-      relevance: leadRelevance,
-    })
-    .from(leads)
-    .leftJoin(companies, eq(companies.id, leads.companyId))
-    .leftJoin(properties, eq(properties.id, leads.propertyId))
-    .leftJoin(contacts, eq(contacts.id, leads.primaryContactId))
-    .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, leads.stageId))
-    .where(leadConditions.length > 0 ? and(...leadConditions) : sql`true`)
-    .orderBy(...leadOrder)
-    .limit(limit);
+  const leadRows = dealsOnly
+    ? []
+    : await tenantDb
+        .select({
+          id: leads.id,
+          name: leads.name,
+          stageName: pipelineStageConfig.name,
+          companyName: companies.name,
+          lastUpdatedAt: leads.updatedAt,
+          relevance: leadRelevance,
+        })
+        .from(leads)
+        .leftJoin(companies, eq(companies.id, leads.companyId))
+        .leftJoin(properties, eq(properties.id, leads.propertyId))
+        .leftJoin(contacts, eq(contacts.id, leads.primaryContactId))
+        .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, leads.stageId))
+        .where(leadConditions.length > 0 ? and(...leadConditions) : sql`true`)
+        .orderBy(...leadOrder)
+        .limit(limit);
   // Opportunities and deals are both deal-table rows but render as SEPARATE UI
   // groups, so they get SEPARATE per-type caps below. Fetch them as two queries
   // (not one shared LIMIT) — otherwise a flood of deals can fill the deal query's
@@ -1166,7 +1172,7 @@ export async function searchPhotoUploadTargets(
       .where(and(...dealConditions, dispositionCond))
       .orderBy(...dealOrder)
       .limit(limit);
-  const opportunityRows = await fetchDeals(eq(deals.pipelineDisposition, "opportunity"));
+  const opportunityRows = dealsOnly ? [] : await fetchDeals(eq(deals.pipelineDisposition, "opportunity"));
   const dealRows = await fetchDeals(sql`${deals.pipelineDisposition} IS DISTINCT FROM 'opportunity'`);
 
   const scoredLeads = leadRows.map((row) => ({
