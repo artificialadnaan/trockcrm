@@ -66,6 +66,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
     propertyId: "",
     description: "",
     assignedRepId: user?.role === "rep" ? user.id : "",
+    salesSourceUserId: "",
     officeCode: initialOfficeCode,
     expectedCloseDate: "",
     winProbability: "",
@@ -193,6 +194,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
           companyId: formData.companyId,
           propertyId: formData.propertyId,
           assignedRepId: formData.assignedRepId,
+          salesSourceUserId: formData.salesSourceUserId || null,
           description: formData.description.trim() || null,
           expectedCloseDate: formData.expectedCloseDate || null,
           winProbability: formData.winProbability !== "" ? Number(formData.winProbability) : null,
@@ -297,6 +299,29 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
                 ))}
               </SelectContent>
             </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Sales Source (optional)</Label>
+            <Select
+              value={formData.salesSourceUserId || "__none__"}
+              onValueChange={(v) => handleChange("salesSourceUserId", v && v !== "__none__" ? v : "")}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="None" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">None</SelectItem>
+                {assignees.map((a) => (
+                  <SelectItem key={a.id} value={a.id}>
+                    {a.displayName}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              The capX rep who brought this in. Set once — locked after creation.
+            </p>
           </div>
 
           <div className="space-y-2">
