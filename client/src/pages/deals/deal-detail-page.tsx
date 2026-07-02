@@ -1203,10 +1203,19 @@ function DealRightRail({
   if (deal.salesSourceUserId && !salesSourceOptions.some((rep) => rep.id === deal.salesSourceUserId)) {
     salesSourceOptions.unshift({
       id: deal.salesSourceUserId,
-      displayName: salesReps.find((r) => r.id === deal.salesSourceUserId)?.displayName ?? "Current sales source",
+      // Prefer the server-provided name (survives inactive reps); fall back to the client list, then a
+      // sentinel. Mirrors the estimator injection pattern so the dropdown always has a readable label even
+      // when the source rep is no longer in the active salesReps list.
+      displayName:
+        deal.salesSourceUserName ??
+        salesReps.find((r) => r.id === deal.salesSourceUserId)?.displayName ??
+        "Current sales source",
     });
   }
+  // Prefer the server-provided name so a deactivated source rep doesn't show a raw UUID.
+  // Mirrors how estimatorUserName is used for the estimator read-only display above.
   const salesSourceName =
+    deal.salesSourceUserName ??
     salesReps.find((r) => r.id === deal.salesSourceUserId)?.displayName ??
     (deal.salesSourceUserId ? deal.salesSourceUserId : null);
 

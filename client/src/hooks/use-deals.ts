@@ -132,6 +132,7 @@ export interface Deal {
   estimatorUserId?: string | null;
   estimatorUserName?: string | null;
   salesSourceUserId?: string | null;
+  salesSourceUserName?: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
   propertyState: string | null;

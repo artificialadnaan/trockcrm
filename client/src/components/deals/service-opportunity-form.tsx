@@ -142,6 +142,11 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
       }
       // officeCode is a cosmetic prefix that no longer rescopes the data, so changing it must NOT clear the
       // company/property/rep selections (the pickers stay on the home office regardless of the prefix).
+      // If the assigned rep is changed to the current sales source, clear the sales source — self-sourcing
+      // would cause a floor-gate double-count (the same person would appear in both roles).
+      if (field === "assignedRepId" && next.salesSourceUserId && next.salesSourceUserId === value) {
+        next.salesSourceUserId = "";
+      }
       return next;
     });
     setError(null);
@@ -312,7 +317,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__none__">None</SelectItem>
-                {assignees.map((a) => (
+                {assignees.filter((a) => a.id !== formData.assignedRepId).map((a) => (
                   <SelectItem key={a.id} value={a.id}>
                     {a.displayName}
                   </SelectItem>
@@ -320,7 +325,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              The capX rep who brought this in. Set once — locked after creation.
+              Set at creation. Admins and directors can update it on the deal detail page.
             </p>
           </div>
 
