@@ -1,5 +1,5 @@
 import React, { Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { AppState, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, AppState, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -25,24 +25,21 @@ import {
   uploadOwnerKey,
 } from "../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
-import { applyGpsToPending, buildCaptureUploadInput, type SessionPhoto } from "../../src/capture/session-photo";
+import { buildCaptureUploadInput, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
 import { DEFAULT_CAPTURE_MODE, loadCaptureMode, saveCaptureMode, type CaptureMode } from "../../src/capture/capture-mode";
-import { Badge, Button, EmptyState, TextInput } from "../../src/components/ui";
+import { Badge, Button, EmptyState } from "../../src/components/ui";
 import { Banner } from "../../src/components/Banner";
 import { CategoryPicker } from "../../src/components/CategoryPicker";
 import { ScreenHeader } from "../../src/components/ScreenHeader";
 import { PhotoTagInput } from "../../src/components/PhotoTagInput";
-import { VoiceRecorder } from "../../src/components/VoiceRecorder";
 import { TargetPicker } from "../../src/components/TargetPicker";
-import { ReviewTray } from "../../src/components/ReviewTray";
 
 // Lazy so the Import path never loads expo-camera's native module (live camera is
 // a physical-device-only surface; the iOS Simulator has no camera).
 const CameraCapture = React.lazy(() => import("../../src/capture/CameraCapture"));
 
 type SelectedTarget = { id: string; type: "deal" | "lead" | "opportunity"; name: string };
-type UploadStatus = "idle" | "uploading" | "failed";
 
 function targetRef(t: SelectedTarget | null): CaptureTargetRef {
   if (!t) return {};
@@ -104,16 +101,22 @@ export default function CaptureScreen() {
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [assigningPhotoId, setAssigningPhotoId] = useState<string | null>(null);
-  const [photos, setPhotos] = useState<SessionPhoto[]>([]);
-  const [batchCaption, setBatchCaption] = useState("");
-  // Held true while the batch dictation is recording/transcribing, so an Upload
-  // (which clears photos and unmounts VoiceRecorder) can't abandon it mid-flight.
-  const [batchVoiceBusy, setBatchVoiceBusy] = useState(false);
+  // Photos are streamed to the durable upload queue the instant they're captured — this is only a
+  // lightweight in-session strip (uri + key) for the camera's count/recent preview, reset per camera open.
+  const [sessionShots, setSessionShots] = useState<{ key: string; uri: string }[]>([]);
+  // Category + tags are chosen BEFORE shooting now (streaming leaves no after-capture tray to tag in) and
+  // are stamped onto every photo taken next.
   const [category, setCategory] = useState<string | null>(null);
   const [tags, setTags] = useState<string[]>([]);
-  const [status, setStatus] = useState<UploadStatus>("idle");
-  // How many photos are durably queued but not yet uploaded (persists across app restarts). Drives the
-  // "pending upload" banner + Resume action.
+  // True while the background drain is actively pushing photos to the server — drives the "Uploading…"
+  // indicator. It never blocks capture: the crew keeps shooting while uploads fly.
+  const [draining, setDraining] = useState(false);
+  // Shots that could NOT be persisted to the durable queue (storage full, or a transient sign-out that
+  // cleared ownerKey). Held in memory so a streamed photo is never silently dropped — the crew can Retry.
+  const [failedShots, setFailedShots] = useState<SessionPhoto[]>([]);
+  const failedShotsRef = useRef<SessionPhoto[]>([]);
+  useEffect(() => { failedShotsRef.current = failedShots; }, [failedShots]);
+  // How many photos are durably queued but not yet uploaded (persists across app restarts).
   const [queuedCount, setQueuedCount] = useState(0);
   // Items that exhausted their retries — surfaced separately so the user can dismiss them (they're no
   // longer retried automatically).
@@ -122,26 +125,31 @@ export default function CaptureScreen() {
     { tone: "error" | "success"; text: string; viewTarget?: SelectedTarget } | null
   >(null);
   const [cameraOpen, setCameraOpen] = useState(false);
-  // Camera mode: per-photo (document-as-you-go, the default) vs. batch (burst then
-  // caption in the tray). Loaded from / persisted to secure-store so it sticks.
+  // Camera mode: per-photo (caption each shot as you go, the default) vs. batch (fast burst, no caption
+  // prompt). Loaded from / persisted to secure-store so it sticks.
   const [mode, setMode] = useState<CaptureMode>(DEFAULT_CAPTURE_MODE);
   const keyCounter = useRef(0);
   // Live GPS fetched once per camera session so burst shots aren't each blocked
   // on a fresh fix (a burst is at one location); applied to every shot.
   const cameraGpsRef = useRef<PhotoMetadata | null>(null);
-  // Keys of shots captured before this session's GPS fix resolved — back-patched
-  // with the coordinates once getLiveGps() returns (capture never waits on it).
-  const pendingGpsKeysRef = useRef<Set<string>>(new Set());
   // Monotonic camera-session token: a late getLiveGps() from a PRIOR session (the
-  // user reopened the camera before it resolved) must not overwrite or back-patch
-  // the current session with a stale fix.
+  // user reopened the camera before it resolved) must not overwrite the current session.
   const cameraSessionRef = useRef(0);
-  // The in-flight getLiveGps() promise for the current session — upload() awaits it
-  // so a quick burst+upload doesn't snapshot ungeotagged metadata before it lands.
+  // The in-flight getLiveGps() promise for the current session — a shot taken before the fix lands awaits
+  // it (best-effort, off the shutter) so the streamed upload is still geotagged.
   const cameraGpsPromiseRef = useRef<Promise<PhotoMetadata> | null>(null);
   // The camera session cameraGpsRef belongs to — scopes upload-time reconciliation
   // so a later session's fix can't geotag an earlier session's shot.
   const cameraGpsSessionRef = useRef<number | null>(null);
+
+  // Mirror the pieces streamPhoto stamps onto each upload into refs, so a shot streamed from a (possibly
+  // memoized) camera callback always reads the CURRENT target/category/tags rather than a stale closure.
+  const targetStateRef = useRef(target);
+  const categoryRef = useRef(category);
+  const tagsRef = useRef(tags);
+  useEffect(() => { targetStateRef.current = target; }, [target]);
+  useEffect(() => { categoryRef.current = category; }, [category]);
+  useEffect(() => { tagsRef.current = tags; }, [tags]);
 
   // Restore the saved camera mode once on mount (default applies until it resolves).
   useEffect(() => {
@@ -192,74 +200,178 @@ export default function CaptureScreen() {
     return out;
   }
 
-  // Library imports keep EXIF → live-GPS fallback; caption starts empty.
+  const refreshQueuedCount = useCallback(async () => {
+    if (!ownerKey) return;
+    setQueuedCount(await getQueuedCount(ownerKey));
+    setFailedCount(await getFailedCount(ownerKey));
+  }, [ownerKey]);
+
+  const dismissFailedUploads = useCallback(async () => {
+    if (!ownerKey) return;
+    await clearFailedUploads(ownerKey);
+    await refreshQueuedCount();
+  }, [ownerKey, refreshQueuedCount]);
+
+  // Coalesced background drain: at most one runs at a time, and it re-runs if more photos got queued while
+  // it was mid-flight (so a burst that streams during a drain still ships). drainUploadQueue keeps the
+  // screen awake, dedupes server-side, and leaves un-confirmed items queued for retry — so this is safe to
+  // call after every capture. It never flips the screen into a blocking state: capture stays live.
+  const drainingRef = useRef(false);
+  const redrainRef = useRef(false);
+  // Reset the coalescer when the owner changes so a redrain raised under a new user/office can't re-kick the
+  // previous owner's queue.
+  useEffect(() => {
+    drainingRef.current = false;
+    redrainRef.current = false;
+  }, [ownerKey]);
+  const kickDrain = useCallback(async () => {
+    if (!ownerKey) return;
+    if (drainingRef.current) {
+      redrainRef.current = true;
+      return;
+    }
+    drainingRef.current = true;
+    setDraining(true);
+    let succeeded = 0;
+    let remaining = 0;
+    // Deal galleries to refresh = the destinations that ACTUALLY had queued photos this drain. Each queued
+    // item carries its OWN target, so we invalidate by that — not by the currently-selected project, which
+    // may have changed since capture (a coalesced drain can even span multiple projects).
+    const dealIds = new Set<string>();
+    try {
+      do {
+        redrainRef.current = false;
+        try {
+          for (const item of await getQueuedUploads(ownerKey)) {
+            const did = item.target?.dealId;
+            if (did) dealIds.add(did);
+          }
+        } catch {
+          /* best-effort — gallery invalidation only */
+        }
+        try {
+          const summary = await drainUploadQueue(ownerKey, queueFetcher);
+          succeeded += summary.succeeded;
+          remaining = summary.remaining;
+        } catch {
+          // Transient/offline — items stay queued and keep retrying; reflect the live backlog.
+          remaining = await getQueuedCount(ownerKey).catch(() => remaining);
+        }
+      } while (redrainRef.current);
+    } finally {
+      drainingRef.current = false;
+      setDraining(false);
+    }
+    await refreshQueuedCount();
+    void pendingQuery.refetch();
+    if (succeeded > 0) dealIds.forEach((id) => invalidateDealPhotos(id));
+    // Target-agnostic (the batch may span projects) and never shown OVER an unresolved save failure.
+    if (remaining === 0 && succeeded > 0 && failedShotsRef.current.length === 0) {
+      setNotice({ tone: "success", text: `${succeeded} photo${succeeded === 1 ? "" : "s"} uploaded.` });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ownerKey, queueFetcher, refreshQueuedCount, pendingQuery]);
+
+  // On mount (per signed-in user): schedule the background drain and resume any queue left over from a
+  // previous run/crash; also resume whenever the app returns to the foreground. The latest kickDrain is read
+  // via a ref so the listener never goes stale.
+  const kickDrainRef = useRef(kickDrain);
+  useEffect(() => { kickDrainRef.current = kickDrain; }, [kickDrain]);
+  useEffect(() => {
+    if (!ownerKey) return;
+    void registerUploadBackgroundTask();
+    let cancelled = false;
+    const resumeIfQueued = async () => {
+      const [n, failed] = await Promise.all([getQueuedCount(ownerKey), getFailedCount(ownerKey)]);
+      if (cancelled) return;
+      setQueuedCount(n);
+      setFailedCount(failed);
+      if (n > 0) void kickDrainRef.current();
+    };
+    void resumeIfQueued();
+    const sub = AppState.addEventListener("change", (state) => {
+      if (state === "active") void resumeIfQueued();
+    });
+    return () => {
+      cancelled = true;
+      sub.remove();
+    };
+  }, [ownerKey]);
+
+  // Persist one captured/imported photo to the durable queue (stamping the CURRENT target, category, and
+  // tags via refs), then kick the background drain — no separate "upload" step. Once enqueueUploads resolves
+  // the photo is durable (survives crash/kill/connection drop). A capture that can't be persisted (storage
+  // full, or a transient sign-out clearing ownerKey) is NEVER dropped: it's kept in the failedShots retry
+  // buffer and drops off the session counter, with a sticky error, so a real photo can't vanish silently.
+  const streamPhoto = useCallback(
+    async (sp: SessionPhoto) => {
+      const retain = () => {
+        setSessionShots((prev) => prev.filter((s) => s.key !== sp.key));
+        setFailedShots((prev) =>
+          prev.some((p) => p.clientUploadId === sp.clientUploadId) ? prev : [...prev, sp],
+        );
+        setNotice({ tone: "error", text: "Some photos couldn't be saved yet — tap Retry to try again." });
+      };
+      if (!ownerKey) {
+        retain();
+        return;
+      }
+      const input = buildCaptureUploadInput(sp, {
+        target: targetRef(targetStateRef.current),
+        category: categoryRef.current,
+        tags: tagsRef.current,
+        batchCaption: "",
+        sessionGps: cameraGpsRef.current,
+        gpsSession: cameraGpsSessionRef.current,
+      });
+      try {
+        await enqueueUploads(ownerKey, [input]);
+      } catch {
+        retain();
+        return;
+      }
+      // Enqueued OK — clear it from the retry buffer if a prior attempt had parked it there.
+      setFailedShots((prev) => prev.filter((p) => p.clientUploadId !== sp.clientUploadId));
+      await refreshQueuedCount();
+      void kickDrain();
+    },
+    [ownerKey, refreshQueuedCount, kickDrain],
+  );
+
+  // Re-attempt every buffered shot that failed to persist. A shot that fails again is re-buffered by
+  // streamPhoto; one that succeeds is cleared.
+  async function retryFailedShots() {
+    const shots = failedShotsRef.current;
+    if (shots.length === 0) return;
+    setNotice(null);
+    setFailedShots([]);
+    for (const sp of shots) await streamPhoto(sp);
+  }
+
+  // Library imports keep EXIF → live-GPS fallback; caption starts empty. Each is streamed on its own.
   async function addAssets(assets: ImagePicker.ImagePickerAsset[]) {
     let live: PhotoMetadata | null = null;
     const needsLive = assets.some((a) => !hasCoords(extractExifMetadata(a.exif as Record<string, unknown>)));
     if (needsLive) live = await getLiveGps();
 
-    const next: SessionPhoto[] = assets.map((asset) => {
+    for (const asset of assets) {
       const exifMeta = extractExifMetadata(asset.exif as Record<string, unknown>);
       const metadata: PhotoMetadata = hasCoords(exifMeta)
         ? exifMeta
         : { ...(live ?? {}), takenAt: exifMeta.takenAt ?? live?.takenAt ?? new Date().toISOString() };
-      return { key: nextKey(), clientUploadId: newClientUploadId(), uri: asset.uri, width: asset.width, height: asset.height, metadata, caption: "" };
-    });
-    setPhotos((prev) => [...prev, ...next]);
-  }
-
-  function openCamera() {
-    if (status === "uploading") return;
-    setNotice(null);
-    cameraGpsRef.current = null;
-    pendingGpsKeysRef.current = new Set();
-    const session = (cameraSessionRef.current += 1);
-    const gpsPromise = getLiveGps();
-    cameraGpsPromiseRef.current = gpsPromise;
-    void gpsPromise.then((m) => {
-      // Drop a fix from a previous camera session (reopened before this resolved)
-      // so it can't overwrite cameraGpsRef or back-patch the new session's shots.
-      if (cameraSessionRef.current !== session) return;
-      cameraGpsRef.current = m;
-      cameraGpsSessionRef.current = session;
-      // Geotag any shots captured before the fix arrived, then stop tracking them.
-      const keys = pendingGpsKeysRef.current;
-      if (keys.size > 0 && hasCoords(m)) {
-        setPhotos((prev) => applyGpsToPending(prev, keys, m));
-        pendingGpsKeysRef.current = new Set();
-      }
-    });
-    setCameraOpen(true);
-  }
-
-  function onCameraCapture(shot: CapturedShot, caption: string) {
-    const key = nextKey();
-    // Honor the shot's own EXIF (DateTimeOriginal + any embedded GPS), mirroring the
-    // import path; else the live session GPS; else back-patch when getLiveGps() lands.
-    const exifMeta = extractExifMetadata(shot.exif);
-    const gps = cameraGpsRef.current;
-    // Per-photo mode commits a shot only after its note is dismissed, so fall back to the shutter
-    // timestamp (shot.capturedAt, always stamped at capture) rather than commit-time now() — keeps the
-    // recorded capture time at when it was shot, not when it was annotated.
-    const takenAt = exifMeta.takenAt ?? shot.capturedAt;
-    let metadata: PhotoMetadata;
-    if (hasCoords(exifMeta)) {
-      metadata = { ...exifMeta, takenAt };
-    } else if (gps && hasCoords(gps)) {
-      metadata = { ...gps, takenAt };
-    } else {
-      // Capture never blocks on GPS — keep the shot and back-patch coordinates later.
-      metadata = { takenAt };
-      pendingGpsKeysRef.current.add(key);
+      await streamPhoto({
+        key: nextKey(),
+        clientUploadId: newClientUploadId(),
+        uri: asset.uri,
+        width: asset.width,
+        height: asset.height,
+        metadata,
+        caption: "",
+      });
     }
-    setPhotos((prev) => [
-      ...prev,
-      { key, clientUploadId: newClientUploadId(), uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: cameraSessionRef.current },
-    ]);
   }
 
   async function importPhotos() {
-    if (status === "uploading") return;
     setNotice(null);
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
@@ -275,189 +387,62 @@ export default function CaptureScreen() {
     if (!result.canceled) await addAssets(result.assets);
   }
 
-  function removePhoto(key: string) {
-    if (status === "uploading") return;
-    setPhotos((prev) => prev.filter((p) => p.key !== key));
-  }
-
-  function setPhotoCaption(key: string, text: string) {
-    setPhotos((prev) => prev.map((p) => (p.key === key ? { ...p, caption: text } : p)));
-  }
-
-  // Functional append (reads the live caption) so back-to-back voice transcripts
-  // can't overwrite each other via a stale captured value.
-  function appendPhotoCaption(key: string, text: string) {
-    setPhotos((prev) =>
-      prev.map((p) => (p.key === key ? { ...p, caption: p.caption ? `${p.caption} ${text}` : text } : p)),
-    );
-  }
-
-  // Materialize the batch caption onto photos WITHOUT their own caption — keeps
-  // "individual overrides batch" (never clobbers a per-photo caption).
-  function applyBatchToEmpty() {
-    const batch = batchCaption.trim();
-    if (!batch) return;
-    setPhotos((prev) => prev.map((p) => (p.caption.trim() ? p : { ...p, caption: batch })));
-  }
-
-  function clearTarget() {
-    setTarget(null);
-    router.setParams({ dealId: "", targetName: "", projectNumber: "", stage: "", propertyAddress: "" });
-  }
-
-  const refreshQueuedCount = useCallback(async () => {
-    if (!ownerKey) return;
-    setQueuedCount(await getQueuedCount(ownerKey));
-    setFailedCount(await getFailedCount(ownerKey));
-  }, [ownerKey]);
-
-  const dismissFailedUploads = useCallback(async () => {
-    if (!ownerKey) return;
-    await clearFailedUploads(ownerKey);
-    await refreshQueuedCount();
-  }, [ownerKey, refreshQueuedCount]);
-
-  // Drain the durable upload queue. Used by the Resume action, the on-mount resume of a queue left over
-  // from a previous session/crash, and the return-to-foreground resume. drainUploadQueue keeps the screen
-  // awake while it runs and dedupes server-side, so this is safe to call repeatedly. Wrapped so a rejected
-  // drain/refresh can't strand the screen in "uploading" (disabled actions, hidden banner).
-  const resumeQueue = useCallback(async () => {
-    if (!ownerKey || status === "uploading") return;
-    setStatus("uploading");
+  function openCamera() {
     setNotice(null);
-    try {
-      const summary = await drainUploadQueue(ownerKey, queueFetcher);
-      await refreshQueuedCount();
-      void pendingQuery.refetch();
-      if (summary.remaining === 0) {
-        setStatus("idle");
-        if (summary.succeeded > 0) {
-          setNotice({ tone: "success", text: `${summary.succeeded} queued photo${summary.succeeded === 1 ? "" : "s"} uploaded.` });
-        }
-      } else {
-        setStatus("failed");
-        setNotice({ tone: "error", text: `${summary.remaining} photo${summary.remaining === 1 ? "" : "s"} still queued — they'll keep retrying.` });
-      }
-    } catch {
-      setStatus("failed");
-      setNotice({ tone: "error", text: "Couldn't upload the queued photos. They're saved — tap Resume to try again." });
-      await refreshQueuedCount().catch(() => undefined);
-    }
-  }, [fetcher, ownerKey, pendingQuery, refreshQueuedCount, status]);
-
-  // On mount (per signed-in user): schedule the background drain and resume any queue left over from a
-  // previous run; also resume whenever the app returns to the foreground. The latest resumeQueue is read
-  // via a ref so the listener never goes stale.
-  const resumeQueueRef = useRef(resumeQueue);
-  useEffect(() => {
-    resumeQueueRef.current = resumeQueue;
-  }, [resumeQueue]);
-  useEffect(() => {
-    if (!ownerKey) return;
-    void registerUploadBackgroundTask();
-    let cancelled = false;
-    const resumeIfQueued = async () => {
-      // Refresh BOTH counts: on a restart/foreground with only terminal failures persisted, the failed
-      // banner must show (and be dismissible) even though there's nothing drainable to trigger a refresh.
-      const [n, failed] = await Promise.all([getQueuedCount(ownerKey), getFailedCount(ownerKey)]);
-      if (cancelled) return;
-      setQueuedCount(n);
-      setFailedCount(failed);
-      if (n > 0) void resumeQueueRef.current();
-    };
-    void resumeIfQueued();
-    const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active") void resumeIfQueued();
+    cameraGpsRef.current = null;
+    cameraGpsSessionRef.current = null;
+    setSessionShots([]);
+    const session = (cameraSessionRef.current += 1);
+    const gpsPromise = getLiveGps();
+    cameraGpsPromiseRef.current = gpsPromise;
+    void gpsPromise.then((m) => {
+      // Drop a fix from a previous camera session (reopened before this resolved)
+      // so it can't overwrite cameraGpsRef for the new session.
+      if (cameraSessionRef.current !== session) return;
+      cameraGpsRef.current = m;
+      cameraGpsSessionRef.current = session;
     });
-    return () => {
-      cancelled = true;
-      sub.remove();
-    };
-  }, [ownerKey]);
+    setCameraOpen(true);
+  }
 
-  async function upload() {
-    if (!ownerKey || photos.length === 0 || status === "uploading") return;
-    setStatus("uploading");
-    setNotice(null);
-    // Don't let a quick burst→Upload race the non-blocking GPS fix: if early shots
-    // are still waiting on it, wait for the in-flight fix so the snapshot is geotagged.
-    if (pendingGpsKeysRef.current.size > 0 && cameraGpsRef.current === null && cameraGpsPromiseRef.current) {
+  // Each "Save & Next" streams the shot straight to the durable queue — no review tray, no upload step.
+  async function onCameraCapture(shot: CapturedShot, caption: string) {
+    const key = nextKey();
+    const exifMeta = extractExifMetadata(shot.exif);
+    // Honor the shot's own EXIF (DateTimeOriginal + any embedded GPS) first; else the live session GPS.
+    // Fall back to the shutter timestamp (always stamped at capture), not commit-time now().
+    const takenAt = exifMeta.takenAt ?? shot.capturedAt;
+    const session = cameraSessionRef.current;
+    setSessionShots((prev) => [...prev, { key, uri: shot.uri }]);
+
+    let metadata: PhotoMetadata;
+    if (hasCoords(exifMeta)) {
+      metadata = { ...exifMeta, takenAt };
+    } else if (cameraGpsRef.current && hasCoords(cameraGpsRef.current)) {
+      metadata = { ...cameraGpsRef.current, takenAt };
+    } else if (cameraGpsPromiseRef.current) {
+      // The shot is already captured; wait for the in-flight fix (best-effort, off the shutter) so the
+      // streamed upload is still geotagged. A fix that resolves for a DIFFERENT session is ignored.
       try {
-        await cameraGpsPromiseRef.current;
+        const m = await cameraGpsPromiseRef.current;
+        metadata = cameraSessionRef.current === session && hasCoords(m) ? { ...m, takenAt } : { takenAt };
       } catch {
-        /* best-effort — upload still proceeds */
+        metadata = { takenAt };
       }
+    } else {
+      metadata = { takenAt };
     }
-    const sessionGps = cameraGpsRef.current;
-    const gpsSession = cameraGpsSessionRef.current;
-    const ref = targetRef(target);
-    // One mapping for every shot: per-photo caption wins over the batch caption, and a
-    // resolved session GPS reconciles only into still-ungeotagged shots FROM THAT session
-    // (an earlier session's shot is never geotagged with it). The note a crew dictated for
-    // a shot rides with THAT shot — see session-photo.buildCaptureUploadInput.
-    const inputs = photos.map((sp) =>
-      buildCaptureUploadInput(sp, { target: ref, category, tags, batchCaption, sessionGps, gpsSession }),
-    );
-    const destName = target ? target.name : "Pending";
-    const viewTarget = target?.type === "deal" ? target : undefined;
 
-    // Persist the whole batch to the durable queue FIRST, so a crash/kill/connection drop can't lose it.
-    let batchIds: Set<string>;
-    try {
-      const queuedBatch = await enqueueUploads(ownerKey, inputs);
-      batchIds = new Set(queuedBatch.map((item) => item.clientUploadId));
-    } catch {
-      setStatus("failed");
-      setNotice({ tone: "error", text: "Couldn't save photos for upload. Please try again." });
-      return;
-    }
-    // The batch is durable now — clear the in-memory tray so the crew can keep capturing while it uploads.
-    setPhotos([]);
-    setBatchCaption("");
-    setTags([]);
-    setCategory(null);
-    await refreshQueuedCount();
-
-    // drainUploadQueue uploads EVERYTHING queued (incl. any earlier backlog), but the confirmation below is
-    // scoped to THIS batch's ids — so a stale backlog for another project can't make the banner claim those
-    // were "saved to <this target>" or invalidate the wrong gallery. Guarded so a rejected drain/refresh
-    // can't strand the screen in "uploading".
-    try {
-      await drainUploadQueue(ownerKey, queueFetcher);
-      await refreshQueuedCount();
-      void pendingQuery.refetch();
-
-      const stillQueued = await getQueuedUploads(ownerKey);
-      const remainingMine = stillQueued.filter((item) => batchIds.has(item.clientUploadId)).length;
-      const uploadedMine = batchIds.size - remainingMine;
-      if (target?.type === "deal" && uploadedMine > 0) invalidateDealPhotos(target.id);
-
-      if (remainingMine === 0) {
-        setStatus("idle");
-        // Name the destination so the green banner is unambiguous; a deal target also gets a "View" action.
-        setNotice({
-          tone: "success",
-          text: `${uploadedMine} photo${uploadedMine === 1 ? "" : "s"} saved to ${destName}.`,
-          viewTarget,
-        });
-        if (target?.type === "deal") {
-          const fromAccessibleProject = typeof params.dealId === "string" && params.dealId === target.id;
-          if (fromAccessibleProject) {
-            router.replace({ pathname: "/(app)/projects/[id]", params: detailParamsFor(target) });
-          }
-        }
-      } else {
-        setStatus("failed");
-        setNotice({
-          tone: "error",
-          text: `${uploadedMine} uploaded, ${remainingMine} still queued — they'll keep retrying. Tap Resume to try now.`,
-        });
-      }
-    } catch {
-      setStatus("failed");
-      setNotice({ tone: "error", text: "Photos are saved but the upload didn't finish. Tap Resume to try again." });
-      await refreshQueuedCount().catch(() => undefined);
-    }
+    await streamPhoto({
+      key,
+      clientUploadId: newClientUploadId(),
+      uri: shot.uri,
+      width: shot.width,
+      height: shot.height,
+      metadata,
+      caption,
+      cameraSession: session,
+    });
   }
 
   async function assignPending(t: FieldCaptureTarget) {
@@ -478,8 +463,12 @@ export default function CaptureScreen() {
     }
   }
 
+  function clearTarget() {
+    setTarget(null);
+    router.setParams({ dealId: "", targetName: "", projectNumber: "", stage: "", propertyAddress: "" });
+  }
+
   const pending = pendingQuery.data?.photos ?? [];
-  const uploading = status === "uploading";
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -500,12 +489,12 @@ export default function CaptureScreen() {
           </View>
           <View style={styles.targetActions}>
             {target ? (
-              <Pressable onPress={clearTarget} disabled={uploading} hitSlop={12} accessibilityLabel="Clear project">
-                <Text style={[styles.link, uploading && styles.linkDisabled]}>Clear</Text>
+              <Pressable onPress={clearTarget} hitSlop={12} accessibilityLabel="Clear project">
+                <Text style={styles.link}>Clear</Text>
               </Pressable>
             ) : null}
-            <Pressable onPress={() => setPickerOpen(true)} disabled={uploading} hitSlop={12}>
-              <Text style={[styles.link, uploading && styles.linkDisabled]}>{target ? "Change" : "Choose"}</Text>
+            <Pressable onPress={() => setPickerOpen(true)} hitSlop={12}>
+              <Text style={styles.link}>{target ? "Change" : "Choose"}</Text>
             </Pressable>
           </View>
         </View>
@@ -526,19 +515,38 @@ export default function CaptureScreen() {
           />
         ) : null}
 
-        {/* Durable queue: photos saved on-device but not yet uploaded (survives restarts). Auto-resumes,
-            but a manual Resume is offered for an immediate retry. Hidden while a drain is in progress. */}
-        {queuedCount > 0 && !uploading ? (
+        {/* Live upload status — photos stream to the durable queue as you capture; this reflects the drain.
+            Actively draining → a spinner; stalled with a backlog (e.g. offline) → a Retry (it auto-retries
+            in the background too). */}
+        {draining ? (
+          <View style={styles.uploadingRow}>
+            <ActivityIndicator size="small" color={theme.color.brandRed} />
+            <Text style={styles.hint}>Uploading…</Text>
+          </View>
+        ) : queuedCount > 0 ? (
+          <View style={styles.uploadingRow}>
+            <Text style={styles.hint}>
+              {queuedCount} photo{queuedCount === 1 ? "" : "s"} waiting to upload — they'll keep retrying.
+            </Text>
+            <Pressable onPress={() => void kickDrain()} hitSlop={12} accessibilityLabel="Retry upload now">
+              <Text style={styles.link}>Retry</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
+        {/* Shots that couldn't be written to the durable queue at all (storage full / signed out). Held in
+            memory only — retrying re-attempts the enqueue before the temp file can be reclaimed. */}
+        {failedShots.length > 0 ? (
           <Banner
-            message={`${queuedCount} photo${queuedCount === 1 ? "" : "s"} waiting to upload. They'll keep retrying automatically.`}
+            message={`${failedShots.length} photo${failedShots.length === 1 ? "" : "s"} couldn't be saved to the upload queue.`}
             tone="error"
-            action={{ label: "Resume", onPress: () => void resumeQueue() }}
+            action={{ label: "Retry", onPress: () => void retryFailedShots() }}
           />
         ) : null}
 
         {/* Terminal failures: items that exhausted their retries. Not retried automatically — the user can
             dismiss them so they stop occupying the queue. */}
-        {failedCount > 0 && !uploading ? (
+        {failedCount > 0 ? (
           <Banner
             message={`${failedCount} photo${failedCount === 1 ? "" : "s"} couldn't be uploaded after several tries.`}
             tone="error"
@@ -546,7 +554,7 @@ export default function CaptureScreen() {
           />
         ) : null}
 
-        {/* Camera mode — per-photo (document-as-you-go) vs. batch (burst, caption after) */}
+        {/* Camera mode — per-photo (caption each shot) vs. batch (fast burst, no caption prompt) */}
         <View style={styles.modeRow}>
           <Text style={styles.modeLabel}>Camera</Text>
           <View style={styles.segment}>
@@ -559,9 +567,8 @@ export default function CaptureScreen() {
                 <Pressable
                   key={value}
                   onPress={() => changeMode(value)}
-                  disabled={uploading}
                   accessibilityRole="button"
-                  accessibilityState={{ selected: active, disabled: uploading }}
+                  accessibilityState={{ selected: active }}
                   accessibilityLabel={`${label} camera mode`}
                   style={[styles.segBtn, active && styles.segBtnActive]}
                 >
@@ -572,102 +579,48 @@ export default function CaptureScreen() {
           </View>
         </View>
 
-        {/* Capture actions */}
+        {/* Category + tags are stamped onto every photo you take NEXT — set them before shooting. */}
+        <View style={{ gap: theme.space.xs }}>
+          <Text style={styles.fieldLabel}>Category</Text>
+          <Text style={styles.hint}>Applied to every photo you capture next.</Text>
+          <CategoryPicker value={category} onChange={setCategory} />
+        </View>
+        <View style={{ gap: theme.space.xs }}>
+          <Text style={styles.fieldLabel}>Tags</Text>
+          <PhotoTagInput tags={tags} onChange={setTags} dealId={target?.type === "deal" ? target.id : undefined} />
+        </View>
+
+        {/* Capture actions — every shot uploads immediately, no separate upload step. */}
         <View style={styles.actions}>
           <Button
             title="Open camera"
             icon={<Ionicons name="camera" size={18} color={theme.color.textInverse} />}
             onPress={openCamera}
-            disabled={uploading}
             accessibilityLabel="Open camera"
             style={{ flex: 1 }}
           />
           <Button
             title="Import"
             variant="ghost"
-            icon={
-              <Ionicons name="images-outline" size={18} color={uploading ? theme.color.textMuted : theme.color.textPrimary} />
-            }
+            icon={<Ionicons name="images-outline" size={18} color={theme.color.textPrimary} />}
             onPress={importPhotos}
-            disabled={uploading}
             accessibilityLabel="Import photos"
             style={{ flex: 1 }}
           />
         </View>
 
-        {photos.length > 0 ? (
-          <View style={{ gap: theme.space.md }}>
-            {/* Review tray (per-photo captions) */}
-            <Text style={styles.fieldLabel}>Review ({photos.length})</Text>
-            <ReviewTray
-              photos={photos}
-              onSetCaption={setPhotoCaption}
-              onAppendCaption={appendPhotoCaption}
-              onRemove={removePhoto}
-              disabled={uploading}
-              voiceEnabled={transcribeConfig.data?.configured ?? false}
-            />
-
-            {/* Batch metadata — locked during upload (values are snapshotted per request) */}
-            <View
-              pointerEvents={uploading ? "none" : "auto"}
-              style={[{ gap: theme.space.md }, uploading && { opacity: 0.5 }]}
-            >
-              <View style={{ gap: theme.space.xs }}>
-                <Text style={styles.fieldLabel}>Batch caption</Text>
-                <Text style={styles.hint}>Optional — applied to any photo you don't caption individually.</Text>
-                <TextInput
-                  value={batchCaption}
-                  onChangeText={setBatchCaption}
-                  placeholder="Caption for the whole batch"
-                  multiline
-                  style={{ minHeight: 60, textAlignVertical: "top", paddingTop: 10 }}
-                />
-                <View style={styles.batchRow}>
-                  {transcribeConfig.data?.configured ? (
-                    <VoiceRecorder
-                      onTranscript={(text) => setBatchCaption((prev) => (prev ? `${prev} ${text}` : text))}
-                      onBusyChange={setBatchVoiceBusy}
-                    />
-                  ) : (
-                    <View />
-                  )}
-                  <Pressable onPress={applyBatchToEmpty} hitSlop={12} accessibilityLabel="Apply batch caption to all uncaptioned photos">
-                    <Text style={styles.link}>Apply to all</Text>
-                  </Pressable>
-                </View>
-              </View>
-
-              <View style={{ gap: theme.space.xs }}>
-                <Text style={styles.fieldLabel}>Category</Text>
-                <CategoryPicker value={category} onChange={setCategory} />
-              </View>
-
-              <View style={{ gap: theme.space.xs }}>
-                <Text style={styles.fieldLabel}>Tags</Text>
-                <PhotoTagInput tags={tags} onChange={setTags} dealId={target?.type === "deal" ? target.id : undefined} />
-              </View>
-            </View>
-
-            <Button
-              title={`Upload ${photos.length} photo${photos.length === 1 ? "" : "s"}`}
-              onPress={upload}
-              loading={uploading}
-              disabled={uploading || batchVoiceBusy}
-            />
-          </View>
-        ) : (
+        {queuedCount === 0 && !draining && failedShots.length === 0 && pending.length === 0 ? (
           <View style={styles.emptyWrap}>
             <EmptyState
-              title={target ? "Ready for the next capture" : "No photos yet"}
+              title={target ? "Ready to capture" : "No project selected"}
               subtitle={
                 target
-                  ? `New photos will be saved to ${target.name}.`
-                  : "Open the camera to burst-capture, or import from your library."
+                  ? `Every photo uploads to ${target.name} the moment you take it.`
+                  : "Choose a project above, or shoot now — photos upload to Pending and you can assign them after."
               }
             />
           </View>
-        )}
+        ) : null}
 
         {/* Pending captures */}
         {pending.length > 0 ? (
@@ -702,8 +655,8 @@ export default function CaptureScreen() {
           <CameraCapture
             onCapture={onCameraCapture}
             onClose={() => setCameraOpen(false)}
-            count={photos.length}
-            recent={photos.slice(-5).map((p) => p.uri)}
+            count={sessionShots.length}
+            recent={sessionShots.slice(-5).map((p) => p.uri)}
             annotatePerShot={mode === "perPhoto"}
             voiceEnabled={transcribeConfig.data?.configured ?? false}
           />
@@ -731,8 +684,7 @@ export default function CaptureScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  // flexGrow lets the "No photos yet" empty state center in the leftover space
-  // instead of hugging the buttons; no effect once the tray makes content scroll.
+  // flexGrow lets the "Ready to capture" empty state center in the leftover space.
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl, flexGrow: 1 },
   emptyWrap: { flexGrow: 1, justifyContent: "center" },
   targetCard: {
@@ -749,8 +701,8 @@ const styles = StyleSheet.create({
   targetName: { fontFamily: theme.font.semibold, fontSize: 16, color: theme.color.textPrimary },
   // Charcoal (not red) so the only red call-to-action in view is the primary button.
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
-  linkDisabled: { opacity: 0.4 },
   targetActions: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
+  uploadingRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm },
   modeRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
   modeLabel: { fontFamily: theme.font.medium, fontSize: 13, color: theme.color.textMuted },
   segment: {
@@ -768,7 +720,6 @@ const styles = StyleSheet.create({
   actions: { flexDirection: "row", gap: theme.space.md },
   fieldLabel: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   hint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
-  batchRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
   pendingRow: {
     flexDirection: "row",
     alignItems: "center",
