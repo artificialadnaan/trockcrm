@@ -35,6 +35,7 @@ import {
   setDealContractSignedDate,
   setDealEstimator,
   setDealSalesSource,
+  validateAssignee,
 } from "./service.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
@@ -1992,6 +1993,25 @@ router.post("/service-opportunity", async (req, res, next) => {
       throw new AppError(400, officeCodeResolution.error);
     }
 
+    // Validate the sales source user when one is provided.
+    const resolvedSalesSource: string | null =
+      typeof salesSourceUserId === "string" && salesSourceUserId.trim() !== ""
+        ? salesSourceUserId.trim()
+        : null;
+    if (resolvedSalesSource != null) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resolvedSalesSource)) {
+        throw new AppError(422, "salesSourceUserId must be a valid UUID or null");
+      }
+      await validateAssignee(
+        req.tenantDb!,
+        resolvedSalesSource,
+        req.user!.activeOfficeId ?? req.user!.officeId ?? undefined
+      );
+      if (resolvedSalesSource === repId) {
+        throw new AppError(400, "Sales source cannot be the assigned rep", "SALES_SOURCE_OWNER_CONFLICT");
+      }
+    }
+
     const deal = await createDeal(req.tenantDb!, {
       name,
       assignedRepId: repId,
@@ -2017,7 +2037,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       projectTypeId: serviceProjectType.id,
       projectNumber,
       officeCode: officeCodeResolution.officeCode,
-      salesSourceUserId: typeof salesSourceUserId === "string" && salesSourceUserId.trim() !== "" ? salesSourceUserId.trim() : null,
+      salesSourceUserId: resolvedSalesSource,
       auditContext: buildRouteAuditContext(req),
     });
     await req.commitTransaction!();

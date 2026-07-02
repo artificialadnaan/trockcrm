@@ -213,4 +213,16 @@ describe("setDealSalesSource (runtime)", () => {
     expect(db._state.updateCalls).toHaveLength(0);
     expect(commissions.mintSalesSourceCommissionForDeal).not.toHaveBeenCalled();
   });
+
+  it("throws 422 SALES_SOURCE_CONFLICT when new source equals the assigned rep", async () => {
+    // Setting the deal owner as the sales source would grant a double commission cut
+    // (owner row + additive source row). The service must reject this at the data layer.
+    const db = makeTenantDb({ id: "d", salesSourceUserId: null, assignedRepId: OWNER });
+    await expect(setDealSalesSource(db, "d", OWNER, OWNER, "o1")).rejects.toMatchObject({
+      statusCode: 422,
+      code: "SALES_SOURCE_CONFLICT",
+    });
+    expect(db._state.updateCalls).toHaveLength(0);
+    expect(commissions.mintSalesSourceCommissionForDeal).not.toHaveBeenCalled();
+  });
 });

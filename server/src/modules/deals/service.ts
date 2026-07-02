@@ -967,7 +967,7 @@ export interface DealBidBoardOwnershipState {
 /**
  * Validate that the assigned user exists, is active, and has access to the office.
  */
-async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId?: string): Promise<void> {
+export async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId?: string): Promise<void> {
   const [user] = await tenantDb.select().from(users)
     .where(and(eq(users.id, assigneeId), eq(users.isActive, true))).limit(1);
   if (!user) throw new AppError(400, "Assigned user not found or inactive");
@@ -1936,15 +1936,19 @@ export async function getDealById(
 ) {
   // estimatorUserId already comes through getTableColumns(deals); join users to surface the estimator's
   // display name for the PR3 estimator picker (mirrors the assignedRep name join in getDealDetail).
+  // salesSourceUser is a parallel alias so a deactivated source rep shows a name, not a raw UUID.
+  const salesSourceUser = alias(users, "sales_source_user");
   const result = await tenantDb
     .select({
       ...getTableColumns(deals),
       stageSlug: pipelineStageConfig.slug,
       estimatorUserName: users.displayName,
+      salesSourceUserName: salesSourceUser.displayName,
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
     .leftJoin(users, eq(users.id, deals.estimatorUserId))
+    .leftJoin(salesSourceUser, eq(salesSourceUser.id, deals.salesSourceUserId))
     .where(includeInactive ? eq(deals.id, dealId) : and(eq(deals.id, dealId), eq(deals.isActive, true)))
     .limit(1);
 
@@ -1975,12 +1979,15 @@ export async function getDealDetail(
   if (!deal) return null;
 
   // Second users alias so the estimator name can be joined alongside the assigned-rep name.
+  // Third alias for the sales source user so a deactivated rep shows a name, not a raw UUID.
   const estimatorUser = alias(users, "estimator_user");
+  const salesSourceUser = alias(users, "sales_source_user");
   const [detailDeal] = await tenantDb
     .select({
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
       estimatorUserName: estimatorUser.displayName,
+      salesSourceUserName: salesSourceUser.displayName,
       companyName: companies.name,
       companyOwnerUserId: companies.ownerId,
       companyOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${companies.ownerId})`,
@@ -1997,6 +2004,7 @@ export async function getDealDetail(
     .from(deals)
     .leftJoin(users, eq(users.id, deals.assignedRepId))
     .leftJoin(estimatorUser, eq(estimatorUser.id, deals.estimatorUserId))
+    .leftJoin(salesSourceUser, eq(salesSourceUser.id, deals.salesSourceUserId))
     .leftJoin(companies, eq(companies.id, deals.companyId))
     .leftJoin(contacts, eq(contacts.id, deals.primaryContactId))
     .leftJoin(projectTypeConfig, eq(projectTypeConfig.id, deals.projectTypeId))
@@ -3854,6 +3862,12 @@ export async function setDealSalesSource(
     // No-op short-circuit — preserve: an unchanged source's commission row is never re-evaluated.
     if (oldSalesSourceUserId === newSource) {
       return existing;
+    }
+
+    // A sales source cannot be set to the deal owner or estimator — that would allow the
+    // same person to earn a double commission cut (owner row + additive source row).
+    if (newSource != null && (newSource === existing.assignedRepId || newSource === existing.estimatorUserId)) {
+      throw new AppError(422, "Sales source cannot be the deal owner or estimator", "SALES_SOURCE_CONFLICT");
     }
 
     // A NEW sales source must be an active user with access to the active office.
