@@ -1,7 +1,9 @@
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files } from "@trock-crm/shared/schema";
+import { deals, fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, files, jobQueue } from "@trock-crm/shared/schema";
+import { generateDownloadUrl, putObject } from "../../lib/r2-client.js";
+import { buildScorecardPdfData, renderFieldScorecardPdf } from "./scorecard-pdf.js";
 import {
   FIELD_SCORECARD_SECTION_KEYS,
   actionItemsRequired,
@@ -248,6 +250,107 @@ export async function getFieldScorecardDetail(
     actionItems: card.actionItems ?? [],
     photos,
   };
+}
+
+// job_type string — MUST match the worker's registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, ...). The server
+// can't import from the worker package, so the string is duplicated (as with the other enqueue sites).
+const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
+const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
+
+/**
+ * Render + store the scorecard PDF and enqueue its email job. Called POST-COMMIT (outside the submit
+ * transaction) so R2 I/O never holds a DB txn open and a PDF/R2 hiccup can NEVER lose the submission — the
+ * scorecard row is already durably committed. Best-effort by design: the caller swallows failures (the
+ * email job re-drives delivery; a missing PDF degrades the email to a no-attachment notice).
+ */
+export async function finalizeFieldScorecardArtifacts(
+  tenantDb: TenantDb,
+  office: { id: string; slug: string },
+  scorecardId: string,
+): Promise<void> {
+  const [card] = await tenantDb.select().from(fieldScorecards).where(eq(fieldScorecards.id, scorecardId)).limit(1);
+  if (!card) return;
+
+  const itemRows = await tenantDb
+    .select()
+    .from(fieldScorecardItems)
+    .where(eq(fieldScorecardItems.scorecardId, scorecardId));
+  const [deal] = await tenantDb
+    .select({ name: deals.name, dealNumber: deals.dealNumber })
+    .from(deals)
+    .where(eq(deals.id, card.dealId))
+    .limit(1);
+
+  const pdfData = buildScorecardPdfData({
+    dealName: deal?.name ?? "Project",
+    projectNumber: card.projectNumber ?? null,
+    weekOf: typeof card.weekOf === "string" ? card.weekOf : String(card.weekOf),
+    superintendentName: card.superintendentName ?? null,
+    pmName: card.pmName ?? null,
+    submittedByName: card.submittedByName ?? null,
+    submittedAt: toIso(card.submittedAt),
+    totalScore: card.totalScore,
+    rating: card.rating as ScorecardRating,
+    items: itemRows.map((r) => ({ sectionKey: r.sectionKey, points: r.points, note: r.note ?? null })),
+    criticalDeficiencyKeys: card.criticalDeficiencies ?? [],
+    actionItems: card.actionItems ?? [],
+  });
+
+  const pdf = await renderFieldScorecardPdf(pdfData);
+  const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
+  // Organise under the deal like photo reports; scorecardId keeps the key unique. RAW deal_number (the
+  // photo-report key convention), falling back to the deal id when a deal has none.
+  const dealKeySegment = deal?.dealNumber?.trim() || card.dealId;
+  const r2Key = `office_${office.slug}/deals/${dealKeySegment}/documents/scorecards/${scorecardId}.pdf`;
+  await putObject(r2Key, pdf, "application/pdf");
+
+  await tenantDb
+    .update(fieldScorecards)
+    .set({ pdfR2Key: r2Key, pdfR2Bucket: bucket, pdfGeneratedAt: new Date() })
+    .where(eq(fieldScorecards.id, scorecardId));
+
+  // Outbox: enqueue the email job (worker fetches the PDF from R2 + sends with it attached).
+  await tenantDb.insert(jobQueue).values({
+    jobType: FIELD_SCORECARD_EMAIL_JOB,
+    payload: {
+      tenantSchema: `office_${office.slug}`,
+      scorecardId,
+      dealId: card.dealId,
+      dealName: deal?.name ?? null,
+      projectNumber: card.projectNumber ?? null,
+      weekOf: pdfData.weekOf,
+      totalScore: card.totalScore,
+      ratingLabel: pdfData.ratingLabel,
+      submittedByName: card.submittedByName ?? null,
+      pdfR2Key: r2Key,
+      officeId: office.id,
+    },
+    officeId: office.id,
+    status: "pending",
+    runAfter: new Date(),
+    maxAttempts: 6,
+  });
+}
+
+/**
+ * Presigned download URL for a scorecard's stored PDF. Gated on the underlying project's browsability
+ * (same as the detail read). 404s cleanly while the PDF is still generating (no key yet).
+ */
+export async function getFieldScorecardPdfDownload(
+  tenantDb: TenantDb,
+  id: string,
+  access: FieldAccessContext,
+): Promise<{ url: string; expiresAt: string }> {
+  const [card] = await tenantDb
+    .select({ dealId: fieldScorecards.dealId, pdfR2Key: fieldScorecards.pdfR2Key })
+    .from(fieldScorecards)
+    .where(and(eq(fieldScorecards.id, id), eq(fieldScorecards.isActive, true)))
+    .limit(1);
+  if (!card) throw new AppError(404, "Scorecard not found");
+  await assertActiveFieldProject(tenantDb, access, card.dealId);
+  if (!card.pdfR2Key) throw new AppError(404, "The scorecard PDF is still generating — please try again shortly.");
+  const url = await generateDownloadUrl(card.pdfR2Key, SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS, `field-scorecard-${id}.pdf`);
+  return { url, expiresAt: new Date(Date.now() + SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS * 1000).toISOString() };
 }
 
 // ── internals ───────────────────────────────────────────────────────────────

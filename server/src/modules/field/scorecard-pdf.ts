@@ -80,7 +80,7 @@ export function buildScorecardPdfData(input: ScorecardPdfInput): ScorecardPdfDat
       note: item?.note?.trim() ? item.note.trim() : null,
     };
   });
-  const labelByKey = new Map(FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]));
+  const labelByKey = new Map<string, string>(FIELD_SCORECARD_CRITICAL_DEFICIENCIES.map((d) => [d.key, d.label]));
   const deficiencies = input.criticalDeficiencyKeys
     .map((k) => labelByKey.get(k))
     .filter((l): l is string => typeof l === "string");

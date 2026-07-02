@@ -6,7 +6,7 @@
  * Kept in shared so the worker (who sends) and any future server-side gate resolve the same set from one
  * config. Reuses the RFP list parser so parsing/de-dupe behaviour can't drift between the two features.
  */
-import { parseReviewerEmails } from "./rfpReviewerEmails";
+import { parseReviewerEmails } from "./rfpReviewerEmails.js";
 
 export const DEFAULT_NON_PROD_FIELD_SCORECARD_RECIPIENT = "adnaan.iqbal@gmail.com";
 
