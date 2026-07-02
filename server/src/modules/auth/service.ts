@@ -1,7 +1,7 @@
 import jwt, { type SignOptions } from "jsonwebtoken";
 import crypto from "crypto";
 import { eq, and, like } from "drizzle-orm";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { db } from "../../db.js";
 import { offices, users, userOfficeAccess } from "@trock-crm/shared/schema";
 import type { JwtClaims } from "@trock-crm/shared/types";
@@ -759,9 +759,14 @@ export async function ensureDevDemoWorkspace(
 
     await client.query("COMMIT");
   } catch (error) {
-    let rollbackErr: unknown;
-    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
-    releaseErr = rollbackErr ?? error;
+    if (isBrokenConnectionError(error)) {
+      // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+      releaseErr = error;
+    } else {
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+      releaseErr = rollbackErr ?? error;
+    }
     throw error;
   } finally {
     releasePooledClient(client, releaseErr);

@@ -10,6 +10,7 @@ vi.mock("../../../src/db.js", () => ({
   pool: {
     connect: dbMocks.connect,
   },
+  isBrokenConnectionError: () => false,
 }));
 
 const { syncHubRoutes } = await import("../../../src/modules/procore/synchub-routes.js");

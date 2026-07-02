@@ -88,9 +88,14 @@ async function withOfficeTenantContext<T>(
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    let rollbackErr: unknown;
-    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
-    releaseErr = rollbackErr ?? err;
+    if (isBrokenConnectionError(err)) {
+      // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+      releaseErr = err;
+    } else {
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+      releaseErr = rollbackErr ?? err;
+    }
     throw err;
   } finally {
     releasePooledClient(client, releaseErr);

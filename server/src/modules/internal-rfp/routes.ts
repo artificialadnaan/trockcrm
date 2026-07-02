@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import express, { Router } from "express";
 import { getHoldStateAtStageEntry, WORKFLOW_ROUTES } from "@trock-crm/shared/types";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { INTERNAL_RFP_RECEIVER } from "../audit/system-processes.js";
@@ -605,9 +605,14 @@ internalRfpRoutes.post(
 
         await client.query("COMMIT");
       } catch (err) {
-        let rollbackErr: unknown;
-        await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
-        releaseErr = rollbackErr ?? err;
+        if (isBrokenConnectionError(err)) {
+          // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+          releaseErr = err;
+        } else {
+          let rollbackErr: unknown;
+          await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+          releaseErr = rollbackErr ?? err;
+        }
         throw err;
       } finally {
         releasePooledClient(client, releaseErr);
@@ -734,9 +739,14 @@ internalRfpRoutes.post(
           }
           await client.query("COMMIT");
         } catch (err) {
-          let rollbackErr: unknown;
-          await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
-          releaseErr = rollbackErr ?? err;
+          if (isBrokenConnectionError(err)) {
+            // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+            releaseErr = err;
+          } else {
+            let rollbackErr: unknown;
+            await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+            releaseErr = rollbackErr ?? err;
+          }
           throw err;
         } finally {
           releasePooledClient(client, releaseErr);
@@ -952,9 +962,14 @@ internalRfpRoutes.post(
 
         await client.query("COMMIT");
       } catch (err) {
-        let rollbackErr: unknown;
-        await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
-        releaseErr = rollbackErr ?? err;
+        if (isBrokenConnectionError(err)) {
+          // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+          releaseErr = err;
+        } else {
+          let rollbackErr: unknown;
+          await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+          releaseErr = rollbackErr ?? err;
+        }
         throw err;
       } finally {
         releasePooledClient(client, releaseErr);

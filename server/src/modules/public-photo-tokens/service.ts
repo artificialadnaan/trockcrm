@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
-import { db, pool, releasePooledClient } from "../../db.js";
+import { db, pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealPhotoTimeline } from "../files/service.js";
 import { logPhotoEvent } from "../files/audit-log-service.js";
@@ -320,9 +320,14 @@ export async function withPublicPhotoTenant<T>(
     await client.query("COMMIT");
     return value;
   } catch (err) {
-    let rollbackErr: unknown;
-    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
-    releaseErr = rollbackErr ?? err;
+    if (isBrokenConnectionError(err)) {
+      // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+      releaseErr = err;
+    } else {
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+      releaseErr = rollbackErr ?? err;
+    }
     throw err;
   } finally {
     releasePooledClient(client, releaseErr);

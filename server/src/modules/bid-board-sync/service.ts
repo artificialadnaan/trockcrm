@@ -6,7 +6,7 @@ import {
   type WorkflowRoute,
 } from "@trock-crm/shared/types";
 import { bidBoardStatusToCrmStage, normalizeBidBoardStatus } from "@trock-crm/shared/lib/bidBoardStatusMap";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { effectiveContractSignedDate, resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
@@ -1253,9 +1253,14 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
 
     return { runId, metrics, warnings };
   } catch (err) {
-    let rollbackErr: unknown;
-    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
-    releaseErr = rollbackErr ?? err;
+    if (isBrokenConnectionError(err)) {
+      // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+      releaseErr = err;
+    } else {
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+      releaseErr = rollbackErr ?? err;
+    }
     throw err;
   } finally {
     releasePooledClient(client, releaseErr);

@@ -12,6 +12,7 @@ import { getAllProjects, getProjectPhotos } from "./client.js";
 import type { CCProject, CCPhoto } from "./client.js";
 import { putObject, isR2Configured } from "../../lib/r2-client.js";
 import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
+import { isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import crypto from "node:crypto";
 
@@ -552,6 +553,12 @@ export async function syncAllLinkedProjects(
       const result = await syncProjectPhotos(tenantDb, projectId, systemUserId, officeSlug, onProgress);
       results.push(result);
     } catch (err) {
+      // A broken-connection error means the tenant client is dead — abort the whole sync (rethrow to the
+      // /sync-all handler, which destroys the client) instead of recording it as a per-project failure and
+      // running every remaining project's queries on the dead socket (and briefly reporting "Complete").
+      if (isBrokenConnectionError(err)) {
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       results.push({
         projectId,

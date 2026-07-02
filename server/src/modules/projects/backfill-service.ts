@@ -155,12 +155,19 @@ async function processRow(
     if (isBrokenConnectionError(error)) {
       throw error;
     }
-    await client.query("ROLLBACK").catch((rollbackError) => {
+    let rollbackError: unknown;
+    await client.query("ROLLBACK").catch((e) => {
+      rollbackError = e;
       console.error(
         "[ProjectsBackfill] ROLLBACK failed after row error",
-        { procoreProjectId: normalized.procoreProjectId, rollbackError }
+        { procoreProjectId: normalized.procoreProjectId, rollbackError: e }
       );
     });
+    // If the ROLLBACK itself broke the connection, every remaining row would run on a dead client — abort
+    // so the caller destroys it immediately instead of a query_timeout per remaining row.
+    if (isBrokenConnectionError(rollbackError)) {
+      throw rollbackError;
+    }
     result.errored += 1;
     result.errors.push({
       procoreProjectId: normalized.procoreProjectId,

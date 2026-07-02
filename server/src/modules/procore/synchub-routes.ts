@@ -5,7 +5,7 @@
 import { Router } from "express";
 import type { Request, Response, NextFunction } from "express";
 import type { PoolClient } from "pg";
-import { pool, releasePooledClient } from "../../db.js";
+import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   buildBidBoardMirrorUpdate,
@@ -856,9 +856,14 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     console.log(`[SyncHub] Created deal ${dealNumber} (${newDealId}) from Bid Board push`);
     res.status(201).json({ status: "created", deal_id: newDealId, deal_number: dealNumber });
   } catch (err) {
-    let rollbackErr: unknown;
-    await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
-    releaseErr = rollbackErr ?? err;
+    if (isBrokenConnectionError(err)) {
+      // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+      releaseErr = err;
+    } else {
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+      releaseErr = rollbackErr ?? err;
+    }
     next(err);
   } finally {
     releasePooledClient(client, releaseErr);
