@@ -15,21 +15,25 @@ import { computeRepEarnedFloorGate } from "../../../src/modules/commissions/floo
  */
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 
-const SRC = U("c01"); // mixed source rep; floor 50000
+const SRC = U("c01"); // mixed source rep; floor 50000 — has sales_source dsc rows
 const SVC = U("c02"); // service-rep who OWNS the sourced deals; floor 0
 const OTHER = U("c03"); // rep who owns nothing and sources nothing; floor 0
+const SOLO = U("c04"); // sources a deal but has NO sales_source dsc row (no rate config / skipped)
+const SELF = U("c05"); // both owns AND sources one deal (owner == source); floor 50000
 
 const ST_OPEN = U("68001"); // 'opportunity'
 const ST_LOST = U("68002"); // 'lost'
 
 const D = {
-  sourced1: U("e01"), // signed, non-lost, active, owned by SVC, sourced by SRC, $100,000
+  sourced1: U("e01"), // signed, non-lost, active, owned by SVC, sourced by SRC, $100,000 — has dsc row
   sourcedUnsigned: U("e02"), // no contract date — sourced by SRC but unsigned -> must NOT count
   sourcedLost: U("e03"), // lost stage + sourced by SRC -> must NOT count
   sourcedTest: U("e04"), // is_test_data=true + sourced by SRC -> must NOT count
   sourcedOnHold: U("e05"), // on_hold=true + sourced by SRC -> must NOT count
   svcOwned: U("e06"), // owned by SVC, no sales_source -> must NOT credit SRC
-  sourcedOld: U("e07"), // sourced by SRC, signed 2025 (before 2026 RANGE) -> excluded in 2026 window
+  sourcedOld: U("e07"), // sourced by SRC, signed 2025 (before 2026 RANGE) — has dsc row
+  selfOwned: U("e08"), // owned AND sourced by SELF, signed 2027; no sales_source dsc row (owner==source skip)
+  soloSourced: U("e09"), // sourced by SOLO, signed 2027; NO dsc row (SOLO has no rate config)
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -84,12 +88,16 @@ beforeAll(async () => {
     INSERT INTO users (id, display_name, is_active, role) VALUES
       ('${SRC}', 'Source Rep', true, 'rep'),
       ('${SVC}', 'Service Rep', true, 'rep'),
-      ('${OTHER}', 'Other Rep', true, 'rep');
+      ('${OTHER}', 'Other Rep', true, 'rep'),
+      ('${SOLO}', 'Solo Source Rep', true, 'rep'),
+      ('${SELF}', 'Self Source Rep', true, 'rep');
 
     INSERT INTO user_commission_settings (user_id, commission_rate, rolling_floor, override_rate) VALUES
       ('${SRC}', 0.005, 50000, 0),
       ('${SVC}', 0.030, 0, 0),
-      ('${OTHER}', 0.030, 0, 0);
+      ('${OTHER}', 0.030, 0, 0),
+      ('${SOLO}', 0.005, 10000, 0),
+      ('${SELF}', 0.005, 50000, 0);
 
     -- D.sourced1: signed 2026-04-01, non-lost, active, owned by SVC, sourced by SRC, $100k
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, sales_source_user_id, stage_id,
@@ -132,6 +140,32 @@ beforeAll(async () => {
       contract_signed_at, awarded_amount, created_at)
     VALUES ('${D.sourcedOld}', 'SS-7', 'Sourced old', '${SVC}', '${SRC}', '${ST_OPEN}',
       '2025-11-01T00:00:00Z', 80000, '2025-01-10T00:00:00Z');
+
+    -- D.selfOwned: SELF both owns AND sources this deal (signed 2027). No sales_source dsc row is minted
+    -- when owner==source (calculateCommissionForDeal skips the source cut). Used to prove the new
+    -- dsc-row-based source leg does NOT double-count the deal into the owner leg.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, sales_source_user_id, stage_id,
+      contract_signed_at, awarded_amount, created_at)
+    VALUES ('${D.selfOwned}', 'SS-8', 'SELF self-sourced', '${SELF}', '${SELF}', '${ST_OPEN}',
+      '2027-06-01T00:00:00Z', 200000, '2027-01-10T00:00:00Z');
+    -- Intentionally NO deal_signed_commissions row for SELF/sales_source on D.selfOwned.
+
+    -- D.soloSourced: SOLO is the sales_source_user_id but has NO dsc row (no rate configured / skipped).
+    -- Used to prove the source leg credits 0 without a minted row (phantom-credit scenario).
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, sales_source_user_id, stage_id,
+      contract_signed_at, awarded_amount, created_at)
+    VALUES ('${D.soloSourced}', 'SS-9', 'Solo sourced no row', '${SVC}', '${SOLO}', '${ST_OPEN}',
+      '2027-06-01T00:00:00Z', 120000, '2027-01-10T00:00:00Z');
+    -- Intentionally NO deal_signed_commissions row for SOLO on D.soloSourced.
+
+    -- sales_source dsc rows for SRC on the two signed sourced deals.
+    -- The new source leg keys exclusively on these rows (not d.sales_source_user_id), so they MUST exist
+    -- for D.sourced1 and D.sourcedOld to appear in SRC's qualifying revenue.
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, attribution_role, source_value_amount,
+      amount, applied_rate, contract_signed_date_at_signing)
+    VALUES
+      ('${D.sourced1}', '${SRC}', 'sales_source', 100000, 500, 0.005, '2026-04-01'),
+      ('${D.sourcedOld}', '${SRC}', 'sales_source', 80000, 400, 0.005, '2025-11-01');
   `);
   tdb = drizzle(pg);
 });
@@ -142,8 +176,8 @@ afterAll(async () => {
 
 describe("computeRepEarnedFloorGate – sales-source qualifying leg", () => {
   it("credits a sourced service deal to the source rep's qualifying revenue at full value", async () => {
-    // SRC sources D.sourced1 ($100k, signed, non-lost, active) and owns nothing.
-    // With no date filter: also D.sourcedOld ($80k) is in range -> 180000 total.
+    // SRC sources D.sourced1 ($100k) and D.sourcedOld ($80k); both have sales_source dsc rows.
+    // SRC owns nothing. With no date filter: 100000 + 80000 = 180000 total.
     // D.sourcedUnsigned, D.sourcedLost, D.sourcedTest, D.sourcedOnHold must be excluded.
     const gate = await computeRepEarnedFloorGate(tdb, SRC, { from: null, to: null });
     expect(Number(gate.qualifyingRevenue)).toBe(180000);
@@ -219,5 +253,32 @@ describe("computeRepEarnedFloorGate – sales-source qualifying leg", () => {
     expect(Number(gate.qualifyingRevenue)).toBe(0);
     expect(gate.floor).toBeCloseTo(50000, 2);
     expect(gate.met).toBe(false);
+  });
+
+  it("P3: solo source rep without a sales_source dsc row gets 0 source credit (phantom-credit fix)", async () => {
+    // D.soloSourced: sales_source_user_id = SOLO, signed 2027, $120k — but NO dsc row was minted
+    // (SOLO has no rate config / calculateCommissionForDeal skipped the source cut).
+    // Old SQL (d.sales_source_user_id = repId) would credit $120k here; new dsc-based SQL credits 0.
+    // SOLO also owns nothing, so qualifying = 0 and floor 10000 is not met.
+    const gate = await computeRepEarnedFloorGate(tdb, SOLO, { from: null, to: null });
+    expect(Number(gate.qualifyingRevenue)).toBe(0);
+    expect(gate.floor).toBeCloseTo(10000, 2);
+    expect(gate.met).toBe(false);
+  });
+
+  it("P1: owner == source does NOT double-count — owner leg once, source leg 0 (no minted row)", async () => {
+    // D.selfOwned: assigned_rep_id = SELF AND sales_source_user_id = SELF, $200k, signed 2027.
+    // calculateCommissionForDeal skips the sales_source cut when owner == source (same rep), so no
+    // sales_source dsc row exists. The new dsc-based source leg therefore contributes 0; the owner
+    // leg (d.assigned_rep_id = SELF) counts the deal exactly once at $200k.
+    // Old SQL would count $200k (owner leg) + $200k (source leg via d.sales_source_user_id = SELF)
+    // = $400k, clearing the floor with doubled revenue.
+    const gate2027 = await computeRepEarnedFloorGate(tdb, SELF, {
+      from: "2027-01-01",
+      to: "2027-12-31",
+    });
+    expect(Number(gate2027.qualifyingRevenue)).toBe(200000); // owner leg only, not $400k
+    expect(gate2027.floor).toBeCloseTo(50000, 2);
+    expect(gate2027.met).toBe(true); // 200000 >= 50000
   });
 });

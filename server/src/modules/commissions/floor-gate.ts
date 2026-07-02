@@ -128,16 +128,23 @@ export async function computeRepEarnedFloorGate(
             ${dateRange.from ? sql`AND ${qualifyingSignedDate} >= ${dateRange.from}::date` : sql``}
             ${dateRange.to ? sql`AND ${qualifyingSignedDate} <= ${dateRange.to}::date` : sql``}
         ), 0)
-        -- Sales-source qualifying leg: credit the full deal value to the rep who sourced the service deal
-        -- (sales_source_user_id), under the same signed/not-lost/active/test/date-window filters as the
-        -- owner leg. A rep can never be both owner AND source of the same deal (guarded at mint), so the two
-        -- legs cannot double-count for a single rep. The sourceSignedDate expression uses only the deal's own
-        -- contract dates (no oq lateral join — the source rep holds no owner commission row here).
+        -- Sales-source qualifying leg: credit the rep's BOOKED source_value_amount (the value their
+        -- commission row was computed from) for each deal where they hold a 'sales_source' commission row.
+        -- Keying on the dsc row (rather than d.sales_source_user_id) eliminates three overlap hazards:
+        --   1. Owner/source same rep: when a rep is both owner and source, no sales_source row is minted
+        --      (calculateCommissionForDeal skips the source cut), so this leg contributes 0 — the owner leg
+        --      counts the deal exactly once and there is no double-count.
+        --   2. Estimator/source same rep: same mint-skip logic applies, zero phantom credit.
+        --   3. Solo rep / no rate config: mint produces no row → source leg 0, matching earned = 0.
+        -- source_value_amount is the snapshot value the commission was computed from, so a later live-value
+        -- edit to the deal cannot shift the source rep's floor credit off their commission basis.
         + COALESCE((
-          SELECT SUM(COALESCE(d.awarded_amount, d.bid_estimate, d.dd_estimate, 0))
-          FROM ${deals} d
+          SELECT SUM(sq.source_value_amount)
+          FROM ${dealSignedCommissions} sq
+          JOIN ${deals} d ON d.id = sq.deal_id
           JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
-          WHERE d.sales_source_user_id = ${repId}
+          WHERE sq.rep_user_id = ${repId}
+            AND sq.attribution_role = 'sales_source'
             AND COALESCE(d.is_test_data, false) = false
             AND ${sourceSignedDate} IS NOT NULL
             AND ${notLost}
