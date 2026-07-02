@@ -62,7 +62,7 @@ async function setup(functionSql: string): Promise<PGlite> {
     );
     CREATE SCHEMA ${SCHEMA};
     CREATE TABLE ${SCHEMA}.deals (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY, sales_source_user_id uuid,
       name text NOT NULL,
       project_number text
     );

@@ -44,7 +44,7 @@ function ids(q: SQL): Promise<string[]> {
 beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
-    CREATE TABLE deals (id uuid PRIMARY KEY, assigned_rep_id uuid, estimator_user_id uuid);
+    CREATE TABLE deals (id uuid PRIMARY KEY, assigned_rep_id uuid, estimator_user_id uuid, sales_source_user_id uuid);
     INSERT INTO deals (id, assigned_rep_id, estimator_user_id) VALUES
       ('${D.ownedByA}', '${REP_A}', NULL),
       ('${D.ownedByB}', '${REP_B}', NULL),

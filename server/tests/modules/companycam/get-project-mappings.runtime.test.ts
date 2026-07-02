@@ -47,7 +47,7 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, is_active boolean NOT NULL DEFAULT true,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text, deal_number text, is_active boolean NOT NULL DEFAULT true,
       -- Legacy scalar mirror: link/unlink keep it in sync for un-migrated readers (#830 drops it).
       companycam_project_id varchar(50)
     );

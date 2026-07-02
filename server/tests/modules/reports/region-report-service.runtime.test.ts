@@ -41,7 +41,7 @@ beforeAll(async () => {
       is_terminal boolean NOT NULL DEFAULT false
     );
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text NOT NULL, stage_id uuid NOT NULL,
       assigned_rep_id uuid, region_id uuid, on_hold boolean NOT NULL DEFAULT false,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       won_closed_date date, lost_at timestamptz, actual_close_date date, stage_entered_at timestamptz,

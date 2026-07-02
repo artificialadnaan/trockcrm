@@ -13,7 +13,7 @@ beforeAll(async () => {
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_active_pipeline boolean DEFAULT true);
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, project_number text, deal_number text, workflow_route text,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text, project_number text, deal_number text, workflow_route text,
       stage_id uuid, is_bid_board_owned boolean DEFAULT false, is_active boolean DEFAULT true,
       is_test_data boolean DEFAULT false, assigned_rep_id uuid,
       rfp_approval_status text, rfp_approval_requested_at timestamptz, rfp_approval_requested_by uuid,

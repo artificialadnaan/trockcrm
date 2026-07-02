@@ -97,6 +97,7 @@ beforeAll(async () => {
       bid_board_customer_contact_raw text,
       bid_board_project_number text,
       estimator_user_id uuid,
+      sales_source_user_id uuid,
       bid_board_last_updated_at timestamptz,
       updated_at timestamptz DEFAULT now()
     );

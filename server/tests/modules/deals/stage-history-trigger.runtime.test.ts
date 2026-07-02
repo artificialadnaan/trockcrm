@@ -55,7 +55,7 @@ beforeAll(async () => {
     CREATE TABLE public.users (id uuid PRIMARY KEY);
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, display_order int);
     CREATE TABLE ${T}.deals (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), sales_source_user_id uuid,
       deal_number text NOT NULL, name text NOT NULL, stage_id uuid NOT NULL,
       stage_entered_at timestamptz NOT NULL DEFAULT now(),
       assigned_rep_id uuid, created_by_user_id uuid

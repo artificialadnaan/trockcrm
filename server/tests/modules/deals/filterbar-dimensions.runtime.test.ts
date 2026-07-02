@@ -42,7 +42,7 @@ beforeAll(async () => {
       stage_id text NOT NULL DEFAULT 'open',
       bid_board_stage_slug text,
       assigned_rep_id text,
-      estimator_user_id text,
+      estimator_user_id text, sales_source_user_id uuid,
       region_id text,
       project_type_id text,
       workflow_route text NOT NULL DEFAULT 'normal',

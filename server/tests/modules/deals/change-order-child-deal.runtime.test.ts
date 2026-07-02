@@ -52,7 +52,7 @@ beforeAll(async () => {
       stage_id uuid NOT NULL, assigned_rep_id uuid, company_id uuid, property_id uuid, source_lead_id uuid,
       awarded_amount numeric(14,2), bid_estimate numeric(14,2), dd_estimate numeric(14,2), won_closed_date date, contract_signed_date date,
       project_number text, office_code text, project_type text, project_type_id uuid, region_id uuid,
-      pipeline_type_snapshot text NOT NULL DEFAULT 'normal', estimator_user_id uuid,
+      pipeline_type_snapshot text NOT NULL DEFAULT 'normal', estimator_user_id uuid, sales_source_user_id uuid,
       source varchar(100), workflow_route text NOT NULL DEFAULT 'normal', created_by_user_id uuid,
       is_change_order boolean NOT NULL DEFAULT false, parent_deal_id uuid,
       is_bid_board_owned boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
@@ -76,7 +76,9 @@ beforeAll(async () => {
       ip_address text, user_agent varchar(500), created_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE TABLE user_commission_settings (
-      user_id uuid PRIMARY KEY, commission_rate numeric(7,6) NOT NULL DEFAULT 0, is_active boolean NOT NULL DEFAULT true
+      user_id uuid PRIMARY KEY, commission_rate numeric(7,6) NOT NULL DEFAULT 0, is_active boolean NOT NULL DEFAULT true,
+      commission_structure text NOT NULL DEFAULT 'solo', capx_rate_solo numeric(7,6) NOT NULL DEFAULT 0,
+      capx_rate_mixed numeric(7,6) NOT NULL DEFAULT 0, service_source_rate numeric(7,6) NOT NULL DEFAULT 0
     );
     CREATE TABLE deal_signed_commissions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL REFERENCES deals(id) ON DELETE CASCADE,

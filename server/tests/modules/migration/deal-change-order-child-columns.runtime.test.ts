@@ -26,7 +26,7 @@ async function setup(): Promise<PGlite> {
   const db = new PGlite();
   await db.exec(`
     CREATE SCHEMA ${SCHEMA};
-    CREATE TABLE ${SCHEMA}.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), project_number text);
+    CREATE TABLE ${SCHEMA}.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), sales_source_user_id uuid, project_number text);
     CREATE UNIQUE INDEX deals_project_number_uidx ON ${SCHEMA}.deals (project_number) WHERE project_number IS NOT NULL;
     INSERT INTO ${SCHEMA}.deals (id, project_number) VALUES ('${PARENT}', 'DFW-1');
   `);

@@ -49,7 +49,7 @@ beforeAll(async () => {
     );
     CREATE SCHEMA office_test;
     CREATE TABLE office_test.deals (
-      id uuid PRIMARY KEY, name text, deal_number text, project_number text,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text, deal_number text, project_number text,
       stage_id uuid NOT NULL, stage_entered_at timestamptz,
       on_hold boolean NOT NULL DEFAULT false, on_hold_started_at timestamptz,
       on_hold_accumulated_seconds bigint NOT NULL DEFAULT 0,
