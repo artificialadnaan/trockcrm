@@ -187,7 +187,17 @@ export async function enqueueUploads(ownerKey: string, inputs: CaptureUploadInpu
     await withQueueLock(async () => {
       enqueueing.add(id);
     });
-    await FileSystem.copyAsync({ from: input.uri, to: dest });
+    try {
+      await FileSystem.copyAsync({ from: input.uri, to: dest });
+    } catch (err) {
+      // Copy failed — clear the in-flight marker (+ any tombstone) so `enqueueing` can't leak the id, then
+      // rethrow (a copy failure still aborts the batch, as before).
+      await withQueueLock(async () => {
+        enqueueing.delete(id);
+        cancelledMidEnqueue.delete(id);
+      });
+      throw err;
+    }
     const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
     // Persist under the lock — but if a cancel arrived WHILE copying, drop the item (delete the copy)
     // instead of appending removed evidence. A crash right after the copy still recovers via the index.
@@ -254,10 +264,14 @@ export async function drainUploadQueue(
   try {
     // Plan the drainable id order UNDER THE LOCK so the snapshot is consistent with any cancellation that
     // has already completed (terminal/failed items are left for the UI to surface + discard, never re-PUT).
-    const plannedIds = await withQueueLock(async () =>
-      (await readQueue(ownerKey)).filter(isDrainable).map((item) => item.clientUploadId),
-    );
-    if (plannedIds.length === 0) return { succeeded: 0, failed: 0, remaining: 0 };
+    const planned = await withQueueLock(async () => {
+      const queue = await readQueue(ownerKey);
+      return { ids: queue.filter(isDrainable).map((item) => item.clientUploadId), total: queue.length };
+    });
+    const plannedIds = planned.ids;
+    // Nothing drainable, but report the ACTUAL queue size as `remaining` — terminal/failed items still sit
+    // in the queue (surfaced/dismissed via the UI), so hardcoding 0 would hide them from the caller.
+    if (plannedIds.length === 0) return { succeeded: 0, failed: 0, remaining: planned.total };
 
     try {
       await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
