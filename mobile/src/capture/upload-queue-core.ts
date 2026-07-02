@@ -74,6 +74,30 @@ export function removeIds(queue: QueuedUpload[], ids: Iterable<string>): QueuedU
 }
 
 /**
+ * Fill GPS coordinates onto a still-queued item — ONLY if it's coordless (never overwrites EXIF/existing
+ * coords). Used when a camera session's fix lands after a shot was already streamed coordless. Returns
+ * whether anything changed so the caller only rewrites the durable index when it did; a no-op (id absent, or
+ * already geotagged) returns the original queue reference unchanged.
+ */
+export function applyGpsPatch(
+  queue: QueuedUpload[],
+  clientUploadId: string,
+  coords: { latitude: number; longitude: number; addressSource?: "exif" | "live_gps" },
+): { queue: QueuedUpload[]; changed: boolean } {
+  let changed = false;
+  const next = queue.map((item) => {
+    if (item.clientUploadId !== clientUploadId) return item;
+    if (item.metadata?.latitude !== undefined && item.metadata?.longitude !== undefined) return item;
+    changed = true;
+    return {
+      ...item,
+      metadata: { ...item.metadata, latitude: coords.latitude, longitude: coords.longitude, addressSource: coords.addressSource },
+    };
+  });
+  return { queue: changed ? next : queue, changed };
+}
+
+/**
  * A minimal async mutex. Every task runs only after the previous one SETTLES (resolve OR reject), so
  * read-modify-write sections on a shared resource can't interleave: without it, two callers each read the
  * same on-disk index snapshot and then write, and the later write silently clobbers the earlier one (e.g.

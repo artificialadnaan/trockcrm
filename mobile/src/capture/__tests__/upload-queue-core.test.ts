@@ -1,5 +1,6 @@
 import {
   MAX_UPLOAD_ATTEMPTS,
+  applyGpsPatch,
   bumpAttempts,
   createAsyncMutex,
   dedupeQueue,
@@ -114,5 +115,37 @@ describe("createAsyncMutex", () => {
     const run = createAsyncMutex();
     const [a, b] = await Promise.all([run(async () => "a"), run(async () => "b")]);
     expect([a, b]).toEqual(["a", "b"]);
+  });
+
+  describe("applyGpsPatch", () => {
+    const coords = { latitude: 32.7, longitude: -96.8, addressSource: "live_gps" as const };
+
+    it("fills coords onto a coordless item and reports changed", () => {
+      const { queue, changed } = applyGpsPatch([item("a")], "a", coords);
+      expect(changed).toBe(true);
+      expect(queue[0].metadata).toMatchObject({ latitude: 32.7, longitude: -96.8, addressSource: "live_gps" });
+    });
+
+    it("never overwrites an item that already has coords", () => {
+      const existing = [{ ...item("a"), metadata: { latitude: 1, longitude: 2, addressSource: "exif" as const } }];
+      const { queue, changed } = applyGpsPatch(existing, "a", coords);
+      expect(changed).toBe(false);
+      expect(queue).toBe(existing); // same reference — no rewrite
+      expect(queue[0].metadata).toMatchObject({ latitude: 1, longitude: 2 });
+    });
+
+    it("is a no-op when the id is absent (already uploaded/removed)", () => {
+      const existing = [item("a")];
+      const { queue, changed } = applyGpsPatch(existing, "missing", coords);
+      expect(changed).toBe(false);
+      expect(queue).toBe(existing);
+    });
+
+    it("patches only the matching id, leaving siblings untouched", () => {
+      const { queue, changed } = applyGpsPatch([item("a"), item("b")], "b", coords);
+      expect(changed).toBe(true);
+      expect(queue[0].metadata).toEqual({});
+      expect(queue[1].metadata).toMatchObject({ latitude: 32.7, longitude: -96.8 });
+    });
   });
 });
