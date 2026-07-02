@@ -17,6 +17,7 @@ describe("handleRfpVoteOutcomeEmail (GO)", () => {
       offices: [{ id: "office-1" }],
     });
 
+    const roundId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
     await handleRfpVoteOutcomeEmail(
       {
         tenantSchema: "office_dallas",
@@ -24,6 +25,7 @@ describe("handleRfpVoteOutcomeEmail (GO)", () => {
         dealName: "Terraces Re-Roof",
         dealNumber: "DFW-1-100",
         requestedByUserId: "00000000-0000-0000-0000-000000000a09",
+        rfpVoteRoundId: roundId,
         outcome: "approved",
         approvals: 2,
         rejections: 0,
@@ -33,11 +35,13 @@ describe("handleRfpVoteOutcomeEmail (GO)", () => {
     );
 
     expect(sendEmail).toHaveBeenCalledTimes(1);
-    const [to, subject, html] = sendEmail.mock.calls[0];
+    const [to, subject, html, options] = sendEmail.mock.calls[0];
     expect(to).toEqual(["rep@trockgc.com"]); // rep only — leadership is the NO-GO path, not this one
     expect(String(subject)).toMatch(/approved/i);
     expect(String(html)).toContain("2 of 3");
     expect(String(html)).toMatch(/creating the Bid Board/i);
+    // FIX 1: idempotency key must be scoped to the round so a second round with the same outcome isn't deduped.
+    expect((options as { idempotencyKey: string }).idempotencyKey).toContain(roundId);
   });
 
   it("no-ops (no throw, no send) when the requesting rep can't be resolved", async () => {

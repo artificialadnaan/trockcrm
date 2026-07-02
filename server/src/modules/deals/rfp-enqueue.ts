@@ -351,6 +351,7 @@ export async function enqueueRfpVoteOutcome(input: {
         dealName: input.deal.name ?? null,
         dealNumber: input.deal.dealNumber ?? null,
         requestedByUserId: input.deal.rfpApprovalRequestedBy ?? null,
+        rfpVoteRoundId: input.deal.rfpApprovalRequestEventId ?? null,
         outcome: input.outcome,
         approvals: input.approvals,
         rejections: input.rejections,

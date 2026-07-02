@@ -16,6 +16,7 @@ interface RfpVoteOutcomePayload {
   dealName?: string;
   dealNumber?: string | null;
   requestedByUserId?: string | null;
+  rfpVoteRoundId?: string | null;
   outcome?: "approved" | "rejected";
   approvals?: number;
   rejections?: number;
@@ -57,7 +58,15 @@ export async function handleRfpVoteOutcomeEmail(
 
   const query = deps.query ?? pool.query.bind(pool);
   const env = deps.env ?? process.env;
+  // FIX 4: warn when outcome is missing or not a known value before defaulting.
+  if (payload.outcome !== "approved" && payload.outcome !== "rejected") {
+    logger.warn("[RfpVoteOutcome] Missing/unknown outcome; defaulting to approved", {
+      dealId,
+      outcome: payload.outcome,
+    });
+  }
   const outcome = payload.outcome === "rejected" ? "rejected" : "approved";
+  const roundId = normalizeText(payload.rfpVoteRoundId);
 
   // Resolve the requesting rep's email (dynamic, per-deal). Degrade gracefully: a missing/unresolvable
   // requester on the NO-GO path still sends to the reviewer set. On the GO path, if there's no rep there
@@ -70,15 +79,27 @@ export async function handleRfpVoteOutcomeEmail(
       [requestedByUserId]
     );
     repEmail = normalizeText(repResult.rows[0]?.email ?? null);
+    // FIX 3: warn when the rep id was present but didn't resolve to an email.
+    if (!repEmail) {
+      logger.warn("[RfpVoteOutcome] Requesting rep could not be resolved to an email", {
+        dealId,
+        requestedByUserId,
+      });
+    }
+  } else {
+    // FIX 3: warn when there is no requestedByUserId at all.
+    logger.warn("[RfpVoteOutcome] Requesting rep could not be resolved to an email", {
+      dealId,
+      requestedByUserId: null,
+    });
   }
 
   // GO -> just the requesting rep. NO-GO -> rep + the Takashi/Adam reviewers (same allowlist the
-  // DB-trigger escalation would have used), deduped. If nothing resolves we log + no-op (the
-  // create/decline already happened — this is an FYI notification, not a gate).
+  // DB-trigger escalation would have used), deduped case-insensitively. If nothing resolves we log +
+  // no-op (the create/decline already happened — this is an FYI notification, not a gate).
   const reviewerEmails = outcome === "rejected" ? resolveRfpReviewerEmails(env) : [];
-  const recipients = Array.from(
-    new Set([repEmail, ...reviewerEmails].filter((e): e is string => !!e))
-  );
+  // FIX 2: case-insensitive dedup — mirrors rfp-rejection-email.ts dedupeEmails helper.
+  const recipients = dedupeEmails([repEmail, ...reviewerEmails].filter((e): e is string => !!e));
   if (recipients.length === 0) {
     logger.warn(
       "[RfpVoteOutcome] No resolvable recipients - skipping outcome notification",
@@ -111,7 +132,7 @@ export async function handleRfpVoteOutcomeEmail(
     const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
     const sendResult = await sendEmail(recipients, email.subject, email.html, {
       text: email.text,
-      idempotencyKey: `rfp-vote-${outcome}-${tenantSchema}-${dealId}`,
+      idempotencyKey: `rfp-vote-${outcome}-${tenantSchema}-${dealId}-${roundId ?? "noround"}`,
     });
     if (!sendResult.success) {
       throw new Error("Email provider returned unsuccessful result");
@@ -268,7 +289,7 @@ export function buildRfpVoteRejectedEmail(input: {
           <tr>
             <td align="center" style="padding:6px 24px 16px 24px;">
               <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#64748b;">
-                The RFP for ${escapeHtml(input.dealName)} was rejected by a 2-of-3 vote. As a designated reviewer you can approve the override (create the Bid Board project anyway) or confirm the denial.
+                The RFP for ${escapeHtml(input.dealName)} was rejected by a 2-of-3 vote. The RFP reviewers can approve the override (create the Bid Board project anyway) or confirm the denial on the review page.
               </p>
             </td>
           </tr>
@@ -304,4 +325,19 @@ export function buildRfpVoteRejectedEmail(input: {
 </html>`;
 
   return { subject, html, text, dealNumber: input.dealNumber };
+}
+
+// --- local utilities ---
+
+/** Case-insensitive dedup: preserves first-seen casing, mirrors rfp-rejection-email.ts. */
+function dedupeEmails(emails: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const email of emails) {
+    const key = email.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(email);
+  }
+  return out;
 }
