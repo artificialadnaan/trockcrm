@@ -13,7 +13,7 @@ import { assignPhotoTarget, getTranscriptionConfig, type Fetcher } from "../../s
 import { apiFetch } from "../../src/api/client";
 import type { FieldCaptureTarget } from "../../src/api/types";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
-import { type CaptureTargetRef } from "../../src/capture/upload";
+import { type CaptureTargetRef, type CaptureUploadInput } from "../../src/capture/upload";
 import {
   clearFailedUploads,
   drainUploadQueue,
@@ -22,6 +22,7 @@ import {
   getQueuedCount,
   getQueuedUploads,
   newClientUploadId,
+  patchQueuedMetadata,
   uploadOwnerKey,
 } from "../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
@@ -113,8 +114,10 @@ export default function CaptureScreen() {
   const [draining, setDraining] = useState(false);
   // Shots that could NOT be persisted to the durable queue (storage full, or a transient sign-out that
   // cleared ownerKey). Held in memory so a streamed photo is never silently dropped — the crew can Retry.
-  const [failedShots, setFailedShots] = useState<SessionPhoto[]>([]);
-  const failedShotsRef = useRef<SessionPhoto[]>([]);
+  // Each is BOUND to the ownerKey that captured it (+ its fully-resolved capture-time upload input), so one
+  // account can never retry another's photo and a retry never re-binds to a project selected later.
+  const [failedShots, setFailedShots] = useState<{ ownerKey: string; input: CaptureUploadInput }[]>([]);
+  const failedShotsRef = useRef<{ ownerKey: string; input: CaptureUploadInput }[]>([]);
   useEffect(() => { failedShotsRef.current = failedShots; }, [failedShots]);
   // How many photos are durably queued but not yet uploaded (persists across app restarts).
   const [queuedCount, setQueuedCount] = useState(0);
@@ -135,15 +138,15 @@ export default function CaptureScreen() {
   // Monotonic camera-session token: a late getLiveGps() from a PRIOR session (the
   // user reopened the camera before it resolved) must not overwrite the current session.
   const cameraSessionRef = useRef(0);
-  // The in-flight getLiveGps() promise for the current session — a shot taken before the fix lands awaits
-  // it (best-effort, off the shutter) so the streamed upload is still geotagged.
-  const cameraGpsPromiseRef = useRef<Promise<PhotoMetadata> | null>(null);
   // The camera session cameraGpsRef belongs to — scopes upload-time reconciliation
   // so a later session's fix can't geotag an earlier session's shot.
   const cameraGpsSessionRef = useRef<number | null>(null);
+  // clientUploadIds streamed coordless (captured before this session's GPS fix landed), tagged by session.
+  // When the fix resolves, their durable queue entries are patched with the coordinates (best-effort).
+  const pendingGpsRef = useRef<{ clientUploadId: string; session: number }[]>([]);
 
-  // Mirror the pieces streamPhoto stamps onto each upload into refs, so a shot streamed from a (possibly
-  // memoized) camera callback always reads the CURRENT target/category/tags rather than a stale closure.
+  // Mirror target/category/tags into refs so the capture handlers can read the LIVE value (not a stale
+  // closure) at the shutter — the snapshot they take there is what each streamed photo is stamped with.
   const targetStateRef = useRef(target);
   const categoryRef = useRef(category);
   const tagsRef = useRef(tags);
@@ -218,59 +221,74 @@ export default function CaptureScreen() {
   // call after every capture. It never flips the screen into a blocking state: capture stays live.
   const drainingRef = useRef(false);
   const redrainRef = useRef(false);
-  // Reset the coalescer when the owner changes so a redrain raised under a new user/office can't re-kick the
-  // previous owner's queue.
+  // While offline, auto-drains fired after each shot are suppressed until this timestamp — otherwise every
+  // capture would re-attempt the whole backlog and burn a retry on each queued item (they go terminal after
+  // MAX_UPLOAD_ATTEMPTS). Lifecycle/user triggers (foreground, manual Retry, owner resume) force through it.
+  const drainBackoffUntilRef = useRef(0);
+  // Reset the coalescer + backoff when the owner changes so nothing carries across a user/office switch.
   useEffect(() => {
     drainingRef.current = false;
     redrainRef.current = false;
+    drainBackoffUntilRef.current = 0;
+    // Security: buffered shots are bound to the owner that captured them — drop any from a DIFFERENT owner
+    // (user/office) when the owner changes, so one account can never retry a prior account's photo.
+    setFailedShots((prev) => prev.filter((f) => f.ownerKey === ownerKey));
   }, [ownerKey]);
-  const kickDrain = useCallback(async () => {
-    if (!ownerKey) return;
-    if (drainingRef.current) {
-      redrainRef.current = true;
-      return;
-    }
-    drainingRef.current = true;
-    setDraining(true);
-    let succeeded = 0;
-    let remaining = 0;
-    // Deal galleries to refresh = the destinations that ACTUALLY had queued photos this drain. Each queued
-    // item carries its OWN target, so we invalidate by that — not by the currently-selected project, which
-    // may have changed since capture (a coalesced drain can even span multiple projects).
-    const dealIds = new Set<string>();
-    try {
-      do {
-        redrainRef.current = false;
-        try {
-          for (const item of await getQueuedUploads(ownerKey)) {
-            const did = item.target?.dealId;
-            if (did) dealIds.add(did);
+  const kickDrain = useCallback(
+    async (force = false) => {
+      if (!ownerKey) return;
+      if (!force && Date.now() < drainBackoffUntilRef.current) return;
+      if (drainingRef.current) {
+        redrainRef.current = true;
+        return;
+      }
+      drainingRef.current = true;
+      setDraining(true);
+      let succeeded = 0;
+      let remaining = 0;
+      // Deal galleries to refresh = the destinations that ACTUALLY had queued photos this drain. Each queued
+      // item carries its OWN target, so we invalidate by that — not by the currently-selected project, which
+      // may have changed since capture (a coalesced drain can even span multiple projects).
+      const dealIds = new Set<string>();
+      try {
+        do {
+          redrainRef.current = false;
+          try {
+            for (const item of await getQueuedUploads(ownerKey)) {
+              const did = item.target?.dealId;
+              if (did) dealIds.add(did);
+            }
+          } catch {
+            /* best-effort — gallery invalidation only */
           }
-        } catch {
-          /* best-effort — gallery invalidation only */
-        }
-        try {
-          const summary = await drainUploadQueue(ownerKey, queueFetcher);
-          succeeded += summary.succeeded;
-          remaining = summary.remaining;
-        } catch {
-          // Transient/offline — items stay queued and keep retrying; reflect the live backlog.
-          remaining = await getQueuedCount(ownerKey).catch(() => remaining);
-        }
-      } while (redrainRef.current);
-    } finally {
-      drainingRef.current = false;
-      setDraining(false);
-    }
-    await refreshQueuedCount();
-    void pendingQuery.refetch();
-    if (succeeded > 0) dealIds.forEach((id) => invalidateDealPhotos(id));
-    // Target-agnostic (the batch may span projects) and never shown OVER an unresolved save failure.
-    if (remaining === 0 && succeeded > 0 && failedShotsRef.current.length === 0) {
-      setNotice({ tone: "success", text: `${succeeded} photo${succeeded === 1 ? "" : "s"} uploaded.` });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ownerKey, queueFetcher, refreshQueuedCount, pendingQuery]);
+          try {
+            const summary = await drainUploadQueue(ownerKey, queueFetcher);
+            succeeded += summary.succeeded;
+            remaining = summary.remaining;
+            drainBackoffUntilRef.current = 0;
+          } catch {
+            // Offline/transient: stop and back off per-shot auto-drains for a window. The background task,
+            // the return-to-foreground resume, and later captures all retry.
+            remaining = await getQueuedCount(ownerKey).catch(() => remaining);
+            drainBackoffUntilRef.current = Date.now() + 30_000;
+            break;
+          }
+        } while (redrainRef.current);
+      } finally {
+        drainingRef.current = false;
+        setDraining(false);
+      }
+      await refreshQueuedCount();
+      void pendingQuery.refetch();
+      if (succeeded > 0) dealIds.forEach((id) => invalidateDealPhotos(id));
+      // Target-agnostic (the batch may span projects) and never shown OVER an unresolved save failure.
+      if (remaining === 0 && succeeded > 0 && failedShotsRef.current.length === 0) {
+        setNotice({ tone: "success", text: `${succeeded} photo${succeeded === 1 ? "" : "s"} uploaded.` });
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    },
+    [ownerKey, queueFetcher, refreshQueuedCount, pendingQuery],
+  );
 
   // On mount (per signed-in user): schedule the background drain and resume any queue left over from a
   // previous run/crash; also resume whenever the app returns to the foreground. The latest kickDrain is read
@@ -286,7 +304,7 @@ export default function CaptureScreen() {
       if (cancelled) return;
       setQueuedCount(n);
       setFailedCount(failed);
-      if (n > 0) void kickDrainRef.current();
+      if (n > 0) void kickDrainRef.current(true);
     };
     void resumeIfQueued();
     const sub = AppState.addEventListener("change", (state) => {
@@ -304,11 +322,22 @@ export default function CaptureScreen() {
   // full, or a transient sign-out clearing ownerKey) is NEVER dropped: it's kept in the failedShots retry
   // buffer and drops off the session counter, with a sticky error, so a real photo can't vanish silently.
   const streamPhoto = useCallback(
-    async (sp: SessionPhoto) => {
+    async (sp: SessionPhoto, ctx: { target: CaptureTargetRef; category: string | null; tags: string[] }) => {
+      // Build the FULL upload payload from the CAPTURE-TIME context snapshot the caller passes (never live
+      // refs), so a shot enqueued after the crew switched projects — or buffered and retried later — uploads
+      // to the destination it was captured for.
+      const input = buildCaptureUploadInput(sp, {
+        target: ctx.target,
+        category: ctx.category,
+        tags: ctx.tags,
+        batchCaption: "",
+        sessionGps: cameraGpsRef.current,
+        gpsSession: cameraGpsSessionRef.current,
+      });
       const retain = () => {
         setSessionShots((prev) => prev.filter((s) => s.key !== sp.key));
         setFailedShots((prev) =>
-          prev.some((p) => p.clientUploadId === sp.clientUploadId) ? prev : [...prev, sp],
+          prev.some((f) => f.input.clientUploadId === input.clientUploadId) ? prev : [...prev, { ownerKey, input }],
         );
         setNotice({ tone: "error", text: "Some photos couldn't be saved yet — tap Retry to try again." });
       };
@@ -316,14 +345,6 @@ export default function CaptureScreen() {
         retain();
         return;
       }
-      const input = buildCaptureUploadInput(sp, {
-        target: targetRef(targetStateRef.current),
-        category: categoryRef.current,
-        tags: tagsRef.current,
-        batchCaption: "",
-        sessionGps: cameraGpsRef.current,
-        gpsSession: cameraGpsSessionRef.current,
-      });
       try {
         await enqueueUploads(ownerKey, [input]);
       } catch {
@@ -331,25 +352,45 @@ export default function CaptureScreen() {
         return;
       }
       // Enqueued OK — clear it from the retry buffer if a prior attempt had parked it there.
-      setFailedShots((prev) => prev.filter((p) => p.clientUploadId !== sp.clientUploadId));
+      setFailedShots((prev) => prev.filter((f) => f.input.clientUploadId !== input.clientUploadId));
       await refreshQueuedCount();
       void kickDrain();
     },
     [ownerKey, refreshQueuedCount, kickDrain],
   );
 
-  // Re-attempt every buffered shot that failed to persist. A shot that fails again is re-buffered by
-  // streamPhoto; one that succeeds is cleared.
+  // Re-attempt the buffered shots — but ONLY those captured under the CURRENT owner, replaying their stored
+  // capture-time payload (not the live target/tags). A shot that fails again is re-buffered under its owner.
   async function retryFailedShots() {
-    const shots = failedShotsRef.current;
-    if (shots.length === 0) return;
+    if (!ownerKey) {
+      setNotice({ tone: "error", text: "Sign in again before retrying failed photos." });
+      return;
+    }
+    const mine = failedShotsRef.current.filter((f) => f.ownerKey === ownerKey);
+    if (mine.length === 0) return;
     setNotice(null);
-    setFailedShots([]);
-    for (const sp of shots) await streamPhoto(sp);
+    setFailedShots((prev) => prev.filter((f) => f.ownerKey !== ownerKey));
+    let anyFailed = false;
+    for (const f of mine) {
+      try {
+        await enqueueUploads(ownerKey, [f.input]);
+      } catch {
+        anyFailed = true;
+        setFailedShots((prev) =>
+          prev.some((x) => x.input.clientUploadId === f.input.clientUploadId) ? prev : [...prev, f],
+        );
+      }
+    }
+    await refreshQueuedCount();
+    if (anyFailed) setNotice({ tone: "error", text: "Some photos still couldn't be saved — tap Retry to try again." });
+    void kickDrain(true);
   }
 
   // Library imports keep EXIF → live-GPS fallback; caption starts empty. Each is streamed on its own.
   async function addAssets(assets: ImagePicker.ImagePickerAsset[]) {
+    // Snapshot the destination NOW — before the awaited getLiveGps — so a project switch during/after the
+    // picker can't retarget the import.
+    const ctx = { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current };
     let live: PhotoMetadata | null = null;
     const needsLive = assets.some((a) => !hasCoords(extractExifMetadata(a.exif as Record<string, unknown>)));
     if (needsLive) live = await getLiveGps();
@@ -359,15 +400,18 @@ export default function CaptureScreen() {
       const metadata: PhotoMetadata = hasCoords(exifMeta)
         ? exifMeta
         : { ...(live ?? {}), takenAt: exifMeta.takenAt ?? live?.takenAt ?? new Date().toISOString() };
-      await streamPhoto({
-        key: nextKey(),
-        clientUploadId: newClientUploadId(),
-        uri: asset.uri,
-        width: asset.width,
-        height: asset.height,
-        metadata,
-        caption: "",
-      });
+      await streamPhoto(
+        {
+          key: nextKey(),
+          clientUploadId: newClientUploadId(),
+          uri: asset.uri,
+          width: asset.width,
+          height: asset.height,
+          metadata,
+          caption: "",
+        },
+        ctx,
+      );
     }
   }
 
@@ -393,26 +437,41 @@ export default function CaptureScreen() {
     cameraGpsSessionRef.current = null;
     setSessionShots([]);
     const session = (cameraSessionRef.current += 1);
-    const gpsPromise = getLiveGps();
-    cameraGpsPromiseRef.current = gpsPromise;
-    void gpsPromise.then((m) => {
-      // Drop a fix from a previous camera session (reopened before this resolved)
-      // so it can't overwrite cameraGpsRef for the new session.
+    const owner = ownerKey;
+    void getLiveGps().then((m) => {
+      // Drop a fix from a previous camera session (reopened before this resolved) so it can't overwrite
+      // cameraGpsRef for the new session.
       if (cameraSessionRef.current !== session) return;
       cameraGpsRef.current = m;
       cameraGpsSessionRef.current = session;
+      // Durably geotag shots already streamed COORDLESS in this session (the durable analogue of the old
+      // in-memory back-patch). Best-effort: a shot that already uploaded is simply skipped.
+      if (owner && hasCoords(m)) {
+        const ids = pendingGpsRef.current.filter((p) => p.session === session).map((p) => p.clientUploadId);
+        pendingGpsRef.current = pendingGpsRef.current.filter((p) => p.session !== session);
+        for (const id of ids) {
+          void patchQueuedMetadata(owner, id, {
+            latitude: m.latitude!,
+            longitude: m.longitude!,
+            addressSource: m.addressSource,
+          }).catch(() => undefined);
+        }
+      }
     });
     setCameraOpen(true);
   }
 
-  // Each "Save & Next" streams the shot straight to the durable queue — no review tray, no upload step.
+  // Each "Save & Next" streams the shot straight to the durable queue — no review tray, no upload step. The
+  // shot is enqueued IMMEDIATELY (never waits on the GPS fix); if it has no coords yet, its queue entry is
+  // patched when the session fix lands (openCamera's .then). Durability first, geotag best-effort.
   async function onCameraCapture(shot: CapturedShot, caption: string) {
     const key = nextKey();
     const exifMeta = extractExifMetadata(shot.exif);
-    // Honor the shot's own EXIF (DateTimeOriginal + any embedded GPS) first; else the live session GPS.
+    // Honor the shot's own EXIF (DateTimeOriginal + any embedded GPS) first; else the resolved session fix.
     // Fall back to the shutter timestamp (always stamped at capture), not commit-time now().
     const takenAt = exifMeta.takenAt ?? shot.capturedAt;
     const session = cameraSessionRef.current;
+    const clientUploadId = newClientUploadId();
     setSessionShots((prev) => [...prev, { key, uri: shot.uri }]);
 
     let metadata: PhotoMetadata;
@@ -420,29 +479,18 @@ export default function CaptureScreen() {
       metadata = { ...exifMeta, takenAt };
     } else if (cameraGpsRef.current && hasCoords(cameraGpsRef.current)) {
       metadata = { ...cameraGpsRef.current, takenAt };
-    } else if (cameraGpsPromiseRef.current) {
-      // The shot is already captured; wait for the in-flight fix (best-effort, off the shutter) so the
-      // streamed upload is still geotagged. A fix that resolves for a DIFFERENT session is ignored.
-      try {
-        const m = await cameraGpsPromiseRef.current;
-        metadata = cameraSessionRef.current === session && hasCoords(m) ? { ...m, takenAt } : { takenAt };
-      } catch {
-        metadata = { takenAt };
-      }
     } else {
+      // No coords yet — enqueue coordless NOW and remember to patch when the session fix resolves.
       metadata = { takenAt };
+      pendingGpsRef.current.push({ clientUploadId, session });
     }
 
-    await streamPhoto({
-      key,
-      clientUploadId: newClientUploadId(),
-      uri: shot.uri,
-      width: shot.width,
-      height: shot.height,
-      metadata,
-      caption,
-      cameraSession: session,
-    });
+    // Snapshot the destination at the shutter so a later project/tag switch can't retarget this shot.
+    const ctx = { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current };
+    await streamPhoto(
+      { key, clientUploadId, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: session },
+      ctx,
+    );
   }
 
   async function assignPending(t: FieldCaptureTarget) {
@@ -528,7 +576,7 @@ export default function CaptureScreen() {
             <Text style={styles.hint}>
               {queuedCount} photo{queuedCount === 1 ? "" : "s"} waiting to upload — they'll keep retrying.
             </Text>
-            <Pressable onPress={() => void kickDrain()} hitSlop={12} accessibilityLabel="Retry upload now">
+            <Pressable onPress={() => void kickDrain(true)} hitSlop={12} accessibilityLabel="Retry upload now">
               <Text style={styles.link}>Retry</Text>
             </Pressable>
           </View>
