@@ -566,8 +566,11 @@ function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: 
           );
         })}
         {/* Non-section requirements that also block submit — surfaced as tappable rows so the user isn't
-            told "action items required" with no way to get there from the review screen. */}
-        {validation.needsActionItems ? (
+            told "action items required" with no way to get there from the review screen. Only shown once
+            every section is scored: the total (and thus the action-items requirement) is meaningless while
+            scores are missing — the red section rows above are the guidance until then. Mirrors the submit
+            Banner's stage priority. */}
+        {validation.missingSections.length === 0 && validation.needsActionItems ? (
           <Pressable
             onPress={() => onEditStep(ACTION_ITEMS_STEP)}
             accessibilityRole="button"
@@ -581,7 +584,7 @@ function ReviewStep({ draft, onEditStep }: { draft: ScorecardDraft; onEditStep: 
             </View>
           </Pressable>
         ) : null}
-        {validation.missingWeekOf ? (
+        {validation.missingSections.length === 0 && validation.missingWeekOf ? (
           <Pressable
             onPress={() => onEditStep(SETUP_STEP)}
             accessibilityRole="button"
