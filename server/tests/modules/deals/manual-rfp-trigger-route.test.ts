@@ -107,6 +107,11 @@ vi.mock("../../../src/modules/deals/workflow-backfill.js", () => ({
 
 vi.mock("../../../src/modules/deals/rfp-enqueue.js", () => ({
   insertOpportunityRfpRequestJob: insertRfpJobMock,
+  // rfp-vote-service.js (in the module graph via routes.js) imports these; stub them so a future flag flip
+  // in this suite can't hit an undefined enqueue helper.
+  enqueueRfpVoteInvitation: vi.fn(),
+  enqueueRfpBidBoardCreate: vi.fn(),
+  enqueueRfpVoteOutcome: vi.fn(),
 }));
 
 vi.mock("../../../src/config/feature-flags.js", () => ({
