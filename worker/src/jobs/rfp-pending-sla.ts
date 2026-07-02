@@ -6,6 +6,9 @@ import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email
 // Leadership recipients (Takashi + Adam Shaw) — the SAME source of truth the RFP-decline email and the
 // server override-review gate use (RFP_REJECTION_EMAIL_RECIPIENTS), so the notified set never drifts.
 import { resolveRfpReviewerEmails } from "@trock-crm/shared/lib/rfpReviewerEmails";
+// Mirror the Pending RFP queue EXACTLY: awaiting-only statuses + every stage id that canonicalizes to
+// Opportunity (incl. legacy `dd`). Keeps the SLA scan and the /deals/pending-rfp bucket in lockstep.
+import { PENDING_RFP_AWAITING_STATUSES, toCanonicalDealStageSlug } from "@trock-crm/shared/types";
 import { escapeHtml } from "../lib/email-format.js";
 
 /** The Pending RFP SLA: an RFP awaiting approval longer than this many hours is a breach. */
@@ -53,11 +56,27 @@ export function isRfpPendingSlaEnabled(env: NodeJS.ProcessEnv): boolean {
   return String(env.RFP_PENDING_SLA_ENABLED ?? "").trim().toLowerCase() === "true";
 }
 
+/** Every stage id whose slug canonicalizes to Opportunity (incl. legacy aliases like `dd`) — exactly the set
+ * the Pending RFP queue (pending-rfp-service.ts) and the trigger route treat as Opportunity. */
+async function opportunityStageIds(query: PgQuery): Promise<string[]> {
+  const result = await query(`SELECT id, slug FROM public.pipeline_stage_config`);
+  return result.rows
+    .filter(
+      (s) =>
+        s.slug != null &&
+        (toCanonicalDealStageSlug(String(s.slug), "normal") === "opportunity" ||
+          toCanonicalDealStageSlug(String(s.slug), "service") === "opportunity"),
+    )
+    .map((s) => String(s.id));
+}
+
 /**
  * Deals whose RFP has been awaiting approval (pending_outbox/pending) longer than `slaHours`, in one office
- * schema. Mirrors the pending-RFP bucket predicate (opportunity, not bid-board-owned, awaiting status) and
- * adds the 24h clock off deals.rfp_approval_requested_at (indexed). Excludes on-hold + test-data deals so a
- * paused/demo deal never alerts leadership. Oldest first.
+ * schema. Mirrors the Pending RFP bucket EXACTLY (pending-rfp-service.ts): every Opportunity-canonical stage
+ * (incl. legacy `dd`), not bid-board-owned, awaiting status, excludes re-confirmed denials
+ * (rfp_override_decision='denial_reconfirmed') and in-flight override approvals (rfp_override_state='approving')
+ * so a row hidden from the queue never alerts. Adds the 24h clock off rfp_approval_requested_at (indexed) and
+ * drops on-hold + test-data. Oldest first.
  */
 export async function findPendingRfpSlaBreaches(
   query: PgQuery,
@@ -67,6 +86,8 @@ export async function findPendingRfpSlaBreaches(
   if (!TENANT_SCHEMA_REGEX.test(schemaName)) {
     throw new Error(`Unsafe tenant schema: ${schemaName}`);
   }
+  const oppStageIds = await opportunityStageIds(query);
+  if (oppStageIds.length === 0) return [];
   const result = await query(
     `SELECT d.id,
             d.name,
@@ -74,17 +95,18 @@ export async function findPendingRfpSlaBreaches(
             d.rfp_approval_requested_at,
             EXTRACT(EPOCH FROM (NOW() - d.rfp_approval_requested_at)) / 3600.0 AS hours_pending
        FROM ${schemaName}.deals d
-       JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
-      WHERE psc.slug = 'opportunity'
+      WHERE d.stage_id = ANY($1::uuid[])
         AND d.is_bid_board_owned = false
-        AND d.rfp_approval_status IN ('pending_outbox', 'pending')
+        AND d.rfp_approval_status = ANY($2::text[])
         AND d.rfp_approval_requested_at IS NOT NULL
-        AND d.rfp_approval_requested_at < NOW() - ($1 || ' hours')::interval
+        AND d.rfp_approval_requested_at < NOW() - ($3 || ' hours')::interval
         AND d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
         AND COALESCE(d.on_hold, false) = false
+        AND COALESCE(d.rfp_override_decision, '') <> 'denial_reconfirmed'
+        AND COALESCE(d.rfp_override_state, '') <> 'approving'
       ORDER BY d.rfp_approval_requested_at ASC`,
-    [String(slaHours)],
+    [oppStageIds, [...PENDING_RFP_AWAITING_STATUSES], String(slaHours)],
   );
   return result.rows.map((row) => ({
     dealId: String(row.id),
@@ -170,16 +192,20 @@ async function processBreach(
 ): Promise<"sent" | "skipped" | "failed"> {
   const { tenantSchema, officeId, breach, recipients, frontendUrl, slaHours } = args;
 
-  // Claim this cycle atomically; a conflict means we already alerted for this pending instant.
-  const claim = await query(
-    `INSERT INTO public.rfp_pending_sla_email_receipts
-        (tenant_schema, deal_id, rfp_approval_requested_at, deal_number, recipient_emails, sent_at, created_at, updated_at)
-      VALUES ($1, $2::uuid, $3, $4, $5, NOW(), NOW(), NOW())
-      ON CONFLICT (tenant_schema, deal_id, rfp_approval_requested_at) DO NOTHING
-      RETURNING deal_id`,
-    [tenantSchema, breach.dealId, breach.requestedAt, breach.dealNumber, recipients.join(", ")],
+  // Already alerted for this pending cycle? The receipt is written only AFTER a durable send (below), so a
+  // crash between "decided to send" and "sent" leaves NO receipt and the next scan retries — the alert is
+  // never permanently suppressed.
+  const existing = await query(
+    `SELECT 1 FROM public.rfp_pending_sla_email_receipts
+      WHERE tenant_schema = $1 AND deal_id = $2::uuid AND rfp_approval_requested_at = $3
+      LIMIT 1`,
+    [tenantSchema, breach.dealId, breach.requestedAt],
   );
-  if (claim.rows.length === 0) return "skipped";
+  if (existing.rows.length > 0) return "skipped";
+
+  // Re-check the deal is STILL a breach right before sending: a reviewer may approve/decline (or an override
+  // may resolve) between the batch scan and this send, and those transitions are async. Skip a stale alert.
+  if (!(await isStillBreaching(query, tenantSchema, breach))) return "skipped";
 
   try {
     const email = buildRfpPendingSlaEmail({
@@ -197,11 +223,14 @@ async function processBreach(
       idempotencyKey: `rfp-pending-sla-${tenantSchema}-${breach.dealId}-${breach.requestedAt}`,
     });
     if (!result.success) throw new Error("Email provider returned unsuccessful result");
+    // Record the receipt ONLY after the send is durable, so a failed send never suppresses a retry. ON
+    // CONFLICT DO NOTHING guards the (single-worker) case of an overlapping run that already recorded it.
     await query(
-      `UPDATE public.rfp_pending_sla_email_receipts
-          SET resend_message_id = $4, updated_at = NOW()
-        WHERE tenant_schema = $1 AND deal_id = $2::uuid AND rfp_approval_requested_at = $3`,
-      [tenantSchema, breach.dealId, breach.requestedAt, result.messageId],
+      `INSERT INTO public.rfp_pending_sla_email_receipts
+          (tenant_schema, deal_id, rfp_approval_requested_at, deal_number, recipient_emails, resend_message_id, sent_at, created_at, updated_at)
+        VALUES ($1, $2::uuid, $3, $4, $5, $6, NOW(), NOW(), NOW())
+        ON CONFLICT (tenant_schema, deal_id, rfp_approval_requested_at) DO NOTHING`,
+      [tenantSchema, breach.dealId, breach.requestedAt, breach.dealNumber, recipients.join(", "), result.messageId],
     );
     logger.log("[RfpPendingSla] Sent SLA breach alert", {
       tenantSchema,
@@ -211,13 +240,8 @@ async function processBreach(
     });
     return "sent";
   } catch (err) {
-    // Roll back the claim so a transient failure re-sends on the next scan (the claim must not permanently
-    // suppress the alert). One deal's failure must not abort the rest of the scan, so we swallow + log here.
-    await query(
-      `DELETE FROM public.rfp_pending_sla_email_receipts
-        WHERE tenant_schema = $1 AND deal_id = $2::uuid AND rfp_approval_requested_at = $3`,
-      [tenantSchema, breach.dealId, breach.requestedAt],
-    ).catch(() => undefined);
+    // No receipt was written, so the next hourly scan retries. One deal's failure must not abort the rest of
+    // the scan, so we swallow + log here.
     logger.error("[RfpPendingSla] Failed to send SLA breach alert", {
       tenantSchema,
       dealId: breach.dealId,
@@ -225,6 +249,43 @@ async function processBreach(
     });
     return "failed";
   }
+}
+
+/** Re-read the deal and confirm it's STILL an awaiting, unresolved, alert-eligible pending RFP for the same
+ * cycle — the same predicate as findPendingRfpSlaBreaches, minus the 24h clock (only grows). */
+async function isStillBreaching(
+  query: PgQuery,
+  schemaName: string,
+  breach: RfpPendingSlaBreach,
+): Promise<boolean> {
+  if (!TENANT_SCHEMA_REGEX.test(schemaName)) return false;
+  const result = await query(
+    `SELECT d.rfp_approval_status AS status,
+            d.rfp_approval_requested_at AS requested_at,
+            COALESCE(d.is_bid_board_owned, false) AS bbo,
+            COALESCE(d.is_active, false) AS active,
+            COALESCE(d.is_test_data, false) AS test_data,
+            COALESCE(d.on_hold, false) AS on_hold,
+            COALESCE(d.rfp_override_decision, '') AS override_decision,
+            COALESCE(d.rfp_override_state, '') AS override_state
+       FROM ${schemaName}.deals d
+      WHERE d.id = $1::uuid
+      LIMIT 1`,
+    [breach.dealId],
+  );
+  const row = result.rows[0];
+  if (!row) return false;
+  return (
+    (PENDING_RFP_AWAITING_STATUSES as readonly string[]).includes(String(row.status)) &&
+    row.requested_at != null &&
+    new Date(row.requested_at).toISOString() === breach.requestedAt &&
+    row.bbo !== true &&
+    row.active === true &&
+    row.test_data !== true &&
+    row.on_hold !== true &&
+    row.override_decision !== "denial_reconfirmed" &&
+    row.override_state !== "approving"
+  );
 }
 
 function formatPendingSince(iso: string): string {
