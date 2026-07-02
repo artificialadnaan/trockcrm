@@ -330,6 +330,11 @@ export async function recalculateCommissionForDeal(
     dealId: string;
     contractSignedDate: string;
     triggeredByUserId: string;
+    // When set, re-rate ONLY this rep's rows on the deal. Used by the settings-change recompute so
+    // one rep's rate edit can never touch a co-booked rep's row (e.g. owner vs estimator on a shared
+    // deal), which would otherwise let concurrent cross-rep edits lose the later rate. Omitted →
+    // re-rate every row on the deal (the deal date/amount edit path, where the whole deal changed).
+    onlyRepUserId?: string;
   }
 ): Promise<CalculateCommissionResult> {
   const existingRows = await tenantDb
@@ -345,8 +350,10 @@ export async function recalculateCommissionForDeal(
     .from(dealSignedCommissions)
     .where(eq(dealSignedCommissions.dealId, input.dealId));
 
-  // No prior commission → behave as a fresh calc for the deal's CURRENT assigned rep.
+  // No prior commission → behave as a fresh calc for the deal's CURRENT assigned rep. A rep-scoped
+  // recompute never mints a fresh row (minting belongs to the owner/estimator/backfill paths).
   if (existingRows.length === 0) {
+    if (input.onlyRepUserId) return { status: "skipped_no_rate" };
     return calculateCommissionForDeal(tenantDb, input);
   }
 
@@ -361,8 +368,12 @@ export async function recalculateCommissionForDeal(
     .limit(1);
   const sourceValue = deal ? resolveSourceValue(deal) : null;
 
+  const rowsToRecompute = input.onlyRepUserId
+    ? existingRows.filter((row) => row.repUserId === input.onlyRepUserId)
+    : existingRows;
+
   let recomputed = 0;
-  for (const row of existingRows) {
+  for (const row of rowsToRecompute) {
     // The rate is the BOOKED rep's current rate — attribution stays with row.repUserId, never the deal's
     // (possibly reassigned) current assignedRepId.
     const [settings] = await tenantDb

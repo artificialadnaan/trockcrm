@@ -140,4 +140,58 @@ describe("recalculateRepCommissionsInOffice", () => {
     );
     expect(rows[0]).toEqual({ amount: "1500.00", applied_rate: "0.030000" });
   });
+
+  it("re-rates only the target rep's rows on a shared deal (owner vs estimator)", async () => {
+    const OWNER = U("0a03");
+    const ESTIMATOR = U("0a04");
+    const DEAL3 = U("0c03");
+
+    await pg.exec(
+      `INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+       VALUES ('${OWNER}', 'owner@t.test', 'Owner', 'rep', '${OFFICE}', true),
+              ('${ESTIMATOR}', 'est@t.test', 'Estimator', 'rep', '${OFFICE}', true)`,
+    );
+    await pg.exec(
+      `INSERT INTO public.user_commission_settings
+         (user_id, commission_rate, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate, is_active)
+       VALUES ('${OWNER}', 0.030000, 'solo', 0.030000, 0.020000, 0.000000, true),
+              ('${ESTIMATOR}', 0.040000, 'solo', 0.040000, 0.010000, 0.000000, true)`,
+    );
+    // Deal owned by OWNER with ESTIMATOR set → calculateCommissionForDeal mints an owner row AND an
+    // additive estimator row, so the deal carries two reps' rows.
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, estimator_user_id, awarded_amount,
+          bid_estimate, dd_estimate, is_change_order, on_hold, office_code, contract_signed_date)
+       VALUES ('${DEAL3}', 'D-0c03', 'Shared Deal', '${STAGE}', '${OWNER}', '${ESTIMATOR}', 100000,
+          NULL, NULL, false, false, NULL, '2026-09-15')`,
+    );
+    await calculateCommissionForDeal(tdb, {
+      dealId: DEAL3,
+      contractSignedDate: "2026-09-15",
+      triggeredByUserId: ADMIN,
+    });
+
+    const rowFor = async (rep: string) => {
+      const { rows } = await pg.query<{ amount: string; applied_rate: string }>(
+        `SELECT amount, applied_rate FROM public.deal_signed_commissions
+         WHERE deal_id = $1 AND rep_user_id = $2 LIMIT 1`,
+        [DEAL3, rep],
+      );
+      return rows[0];
+    };
+    // Baseline: owner 3000.00 @ 0.03, estimator 4000.00 @ 0.04.
+    expect(await rowFor(OWNER)).toEqual({ amount: "3000.00", applied_rate: "0.030000" });
+    expect(await rowFor(ESTIMATOR)).toEqual({ amount: "4000.00", applied_rate: "0.040000" });
+
+    // Only OWNER's rate changes; recompute OWNER.
+    await pg.exec(
+      `UPDATE public.user_commission_settings SET commission_rate = 0.020000 WHERE user_id = '${OWNER}'`,
+    );
+    await recalculateRepCommissionsInOffice(tdb, OWNER, ADMIN);
+
+    // OWNER's row re-rated; ESTIMATOR's row on the SAME deal is left untouched.
+    expect(await rowFor(OWNER)).toEqual({ amount: "2000.00", applied_rate: "0.020000" });
+    expect(await rowFor(ESTIMATOR)).toEqual({ amount: "4000.00", applied_rate: "0.040000" });
+  });
 });

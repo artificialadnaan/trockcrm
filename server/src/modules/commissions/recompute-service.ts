@@ -46,6 +46,9 @@ export async function recalculateRepCommissionsInOffice(
       dealId,
       contractSignedDate: signedDate,
       triggeredByUserId,
+      // Re-rate ONLY this rep's rows: a rate edit for one rep must never rewrite a co-booked rep's
+      // row on a shared deal (which would race with that other rep's own recompute).
+      onlyRepUserId: repUserId,
     });
     if (result.status === "created") recomputed += 1;
   }
@@ -104,9 +107,14 @@ export function recalculateAllCommissionsForRep(
     .catch(() => undefined)
     .then(() => runRepRecompute(userId, triggeredByUserId));
   repRecomputeChains.set(userId, run);
-  // Drop the entry once this is the tail of the chain, so the map doesn't grow unbounded.
-  void run.finally(() => {
-    if (repRecomputeChains.get(userId) === run) repRecomputeChains.delete(userId);
-  });
+  // Drop the entry once this is the tail of the chain, so the map doesn't grow unbounded. The
+  // trailing `.catch` swallows this cleanup branch's rejection — `run`'s own rejection is handled
+  // by the caller (the fire-and-forget wrapper), and this branch must not surface as an unhandled
+  // rejection if `runRepRecompute` throws (e.g. listActiveFieldOffices can't reach public.offices).
+  void run
+    .finally(() => {
+      if (repRecomputeChains.get(userId) === run) repRecomputeChains.delete(userId);
+    })
+    .catch(() => undefined);
   return run;
 }

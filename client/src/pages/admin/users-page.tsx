@@ -60,6 +60,14 @@ function formatPercentInput(value: number | undefined) {
   return (value * 100).toFixed(2);
 }
 
+// capX/service-source rates are numeric(7,6) → up to 4 percent decimals. Render full precision so
+// tabbing through a field can't truncate a migrated rate (e.g. 0.012345 → "1.23") and silently
+// persist the truncated value on blur. Trailing zeros trimmed for readability (0.03 → "3").
+function formatRatePercentInput(value: number | undefined) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "";
+  return (value * 100).toFixed(4).replace(/\.?0+$/, "");
+}
+
 export function UsersPage() {
   const {
     users,
@@ -722,7 +730,7 @@ export function UsersPage() {
                         <p className="text-[10px] uppercase tracking-wide text-slate-400">capX Solo %</p>
                         <Input
                           className="h-8 text-xs"
-                          defaultValue={formatPercentInput(user.capxRateSolo)}
+                          defaultValue={formatRatePercentInput(user.capxRateSolo)}
                           onBlur={(event) => handleCommissionFieldUpdate(user.id, "capxRateSolo", event.target.value)}
                           disabled={updatingId === user.id || bulkUpdating}
                         />
@@ -731,7 +739,7 @@ export function UsersPage() {
                         <p className="text-[10px] uppercase tracking-wide text-slate-400">capX Mixed %</p>
                         <Input
                           className="h-8 text-xs"
-                          defaultValue={formatPercentInput(user.capxRateMixed)}
+                          defaultValue={formatRatePercentInput(user.capxRateMixed)}
                           onBlur={(event) => handleCommissionFieldUpdate(user.id, "capxRateMixed", event.target.value)}
                           disabled={updatingId === user.id || bulkUpdating}
                         />
@@ -740,7 +748,7 @@ export function UsersPage() {
                         <p className="text-[10px] uppercase tracking-wide text-slate-400">Service Src %</p>
                         <Input
                           className="h-8 text-xs"
-                          defaultValue={formatPercentInput(user.serviceSourceRate)}
+                          defaultValue={formatRatePercentInput(user.serviceSourceRate)}
                           onBlur={(event) => handleCommissionFieldUpdate(user.id, "serviceSourceRate", event.target.value)}
                           disabled={updatingId === user.id || bulkUpdating}
                         />

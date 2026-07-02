@@ -424,7 +424,10 @@ export async function updateUser(
         capxRateMixed: Number(current?.capxRateMixed ?? 0),
         serviceSourceRate: Number(current?.serviceSourceRate ?? 0),
       });
-      commissionRatesChanged = commissionRate !== previousCommissionRate;
+      // Compare at the column's scale (numeric(7,6)). A raw float compare would treat a no-op blur
+      // as a change — e.g. a stored 0.029000 comes back from the client as 2.9/100 = 0.02899999…,
+      // which !== 0.029 and would spuriously fan out. Normalising both to 6 decimals avoids that.
+      commissionRatesChanged = commissionRate.toFixed(6) !== previousCommissionRate.toFixed(6);
     }
 
     return { updated, closeStreams: plan.closeStreams, commissionRatesChanged };
