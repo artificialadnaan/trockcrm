@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
-import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
+import { requireRole, requireRfpReviewer, requireRfpVoter } from "../../middleware/rbac.js";
 import {
   addDealChangeOrder,
   deleteDealChangeOrder,
@@ -177,7 +177,7 @@ import {
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 import { insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
-import { isServiceRfp, openRfpVoteRound } from "./rfp-vote-service.js";
+import { castRfpVote, isServiceRfp, openRfpVoteRound } from "./rfp-vote-service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -1584,6 +1584,42 @@ router.get("/:id/rfp-review", requireRfpReviewer, async (req, res, next) => {
     if (!detail) throw new AppError(404, "Deal not found");
     await req.commitTransaction!();
     res.json({ review: detail });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/rfp-vote — cast a three-voter RFP vote (Sidney / Tim / James). requireRfpVoter gates
+// to the RFP_VOTER_EMAILS allowlist; 2-of-3 decides. Reject requires a reason; approve ignores it.
+router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
+  try {
+    const decision = req.body?.decision;
+    if (decision !== "approve" && decision !== "reject") {
+      throw new AppError(400, "decision must be 'approve' or 'reject'.", "RFP_VOTE_DECISION_INVALID");
+    }
+    const rawReason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (decision === "reject" && rawReason.length === 0) {
+      throw new AppError(400, "A reason is required to reject an RFP.", "RFP_VOTE_REASON_REQUIRED");
+    }
+    const deal = await loadTriggerRfpDeal(req.tenantDb!, req.params.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+    if (isServiceRfp(deal)) {
+      throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
+    }
+    if (!deal.rfpApprovalRequestEventId || deal.rfpApprovalStatus !== "pending") {
+      throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
+    }
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+    const result = await castRfpVote({
+      tenantDb: req.tenantDb!,
+      officeId,
+      deal,
+      voter: { userId: req.user!.id, email: req.user!.email },
+      decision,
+      reason: decision === "reject" ? rawReason : null,
+    });
+    await req.commitTransaction!();
+    res.json(toJsonSafe({ success: true, outcome: result.outcome, votes: result.votes }));
   } catch (err) {
     next(err);
   }
