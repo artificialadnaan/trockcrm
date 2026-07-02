@@ -2,6 +2,8 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { eq } from "drizzle-orm";
 import { dealSignedCommissions, deals } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+// Cross-office fan-out infra lives in the field module by historical convention;
+// nothing imported here is field-feature-specific.
 import {
   listActiveFieldOffices,
   runInOfficeTransaction,
@@ -40,12 +42,12 @@ export async function recalculateRepCommissionsInOffice(
     const signedDate = deal ? effectiveSignedDateOf(deal) : null;
     if (!signedDate) continue;
 
-    await recalculateCommissionForDeal(officeDb, {
+    const result = await recalculateCommissionForDeal(officeDb, {
       dealId,
       contractSignedDate: signedDate,
       triggeredByUserId,
     });
-    recomputed += 1;
+    if (result.status === "created") recomputed += 1;
   }
   return recomputed;
 }
