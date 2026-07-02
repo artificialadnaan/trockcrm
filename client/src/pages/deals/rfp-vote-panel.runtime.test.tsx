@@ -59,4 +59,22 @@ describe("RfpVotePanel", () => {
     await render(<RfpVotePanel deal={baseDeal} user={{ id: "u-sid", email: "sidney@trockgc.com", isRfpVoter: true, officeId: null } as never} officeId={null} />);
     expect(container.querySelector('a[href*="/rfp-vote/deal-1"]')).toBeNull();
   });
+
+  it("after a decision shows the decided header, drops awaiting slots, and hides the cast link", async () => {
+    const decidedDeal = {
+      id: "deal-1",
+      rfpApprovalStatus: "pending",
+      rfpVotes: [
+        { voterUserId: "u-sid", voterName: "Sidney Gibson", voterEmail: "sidney@trockgc.com", decision: "approve", reason: null, votedAt: "2026-07-02T19:14:00Z" },
+        { voterUserId: "u-jam", voterName: "James Helms", voterEmail: "james@trockgc.com", decision: "approve", reason: null, votedAt: "2026-07-02T19:20:00Z" },
+      ],
+      rfpVoteState: { approvals: 2, rejections: 0, outcome: "approved", decidedAt: "2026-07-02T19:20:00Z" },
+    } as never;
+    // An eligible voter who hasn't voted still gets NO cast link once the round is decided.
+    await render(<RfpVotePanel deal={decidedDeal} user={{ id: "u-tim", email: "tim@trockgc.com", isRfpVoter: true, officeId: null } as never} officeId={null} />);
+    expect(container.textContent).toContain("Approved (2 of 3)");
+    expect(container.textContent).not.toContain("needs 2 of 3");
+    expect(container.textContent).not.toContain("Awaiting vote");
+    expect(container.querySelector('a[href*="/rfp-vote/deal-1"]')).toBeNull();
+  });
 });

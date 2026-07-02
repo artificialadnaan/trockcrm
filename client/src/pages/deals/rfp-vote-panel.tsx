@@ -26,7 +26,8 @@ export function RfpVotePanel({
   if (!state) return null;
 
   const votes = deal.rfpVotes ?? [];
-  const awaiting = Math.max(0, 3 - votes.length);
+  // Only show "awaiting" slots while the round is open — after a decision the panel is a historical record.
+  const awaiting = state.outcome === "pending" ? Math.max(0, 3 - votes.length) : 0;
   const hasVoted = votes.some(
     (v) => (user?.id != null && v.voterUserId === user.id) || (!!user?.email && v.voterEmail.toLowerCase() === user.email.toLowerCase())
   );
@@ -40,11 +41,18 @@ export function RfpVotePanel({
         ? "Rejected by vote (2 of 3)"
         : `${state.approvals} approve · ${state.rejections} reject — no decision yet`;
 
+  const headerLabel =
+    state.outcome === "approved"
+      ? "Approved (2 of 3)"
+      : state.outcome === "rejected"
+        ? "Rejected (2 of 3)"
+        : "Pending · needs 2 of 3";
+
   return (
     <div className="mt-3 rounded-md border border-border bg-background/60 p-3">
       <div className="flex items-center justify-between">
         <p className="text-sm font-semibold">RFP Approval Vote</p>
-        <span className="text-xs text-muted-foreground">Pending · needs 2 of 3</span>
+        <span className="text-xs text-muted-foreground">{headerLabel}</span>
       </div>
       <ul className="mt-2 divide-y divide-border">
         {votes.map((vote) => (
