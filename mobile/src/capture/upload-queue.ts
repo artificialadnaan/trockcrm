@@ -115,6 +115,11 @@ export async function getQueuedUploads(ownerKey: string): Promise<QueuedUpload[]
   return readQueue(ownerKey);
 }
 
+/** True iff the id is still present in the queue — the drain's pre-confirm cancellation check. */
+async function queueHasClientUploadId(ownerKey: string, clientUploadId: string): Promise<boolean> {
+  return (await readQueue(ownerKey)).some((item) => item.clientUploadId === clientUploadId);
+}
+
 /** Count of still-DRAINABLE items (excludes terminal/failed) — drives the "waiting" banner + resume. */
 export async function getQueuedCount(ownerKey: string): Promise<number> {
   return (await readQueue(ownerKey)).filter(isDrainable).length;
@@ -257,7 +262,11 @@ export async function drainUploadQueue(
           .filter((item): item is QueuedUpload => !!item && isDrainable(item));
       });
       if (chunk.length === 0) continue;
-      const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) => uploadCapture(fetcher, item));
+      const results = await runConcurrentUploads(chunk, UPLOAD_CONCURRENCY, (item) =>
+        // Re-check right before the confirm step: if the item was cancelled while this chunk was uploading
+        // (user pulled a photo off the card), skip confirm so the removed evidence never links to the deal.
+        uploadCapture(fetcher, item, { shouldConfirm: () => queueHasClientUploadId(ownerKey, item.clientUploadId) }),
+      );
       const { succeededIds, failedIds } = partitionResults(chunk, results);
       await removeQueuedItems(ownerKey, succeededIds);
       await recordFailedAttempts(ownerKey, failedIds);

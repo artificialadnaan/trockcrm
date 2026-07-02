@@ -145,6 +145,21 @@ describe("photos", () => {
     d = scorecardDraftReducer(d, { type: "removePhoto", key: "p1" });
     expect(scorecardDraftPhotosForSection(d, "schedule")).toHaveLength(0);
   });
+
+  it("setPhotoUri swaps a photo's uri (raw → durable) without touching others", () => {
+    let d = newDraft();
+    d = scorecardDraftReducer(d, {
+      type: "addPhoto",
+      photo: { key: "p1", uri: "file://raw1", clientUploadId: "cu-1", sectionKey: "schedule", caption: "" },
+    });
+    d = scorecardDraftReducer(d, {
+      type: "addPhoto",
+      photo: { key: "p2", uri: "file://raw2", clientUploadId: "cu-2", sectionKey: "quality", caption: "" },
+    });
+    d = scorecardDraftReducer(d, { type: "setPhotoUri", key: "p1", uri: "file://durable1" });
+    expect(d.photos.find((p) => p.key === "p1")?.uri).toBe("file://durable1");
+    expect(d.photos.find((p) => p.key === "p2")?.uri).toBe("file://raw2");
+  });
 });
 
 describe("appendNote", () => {

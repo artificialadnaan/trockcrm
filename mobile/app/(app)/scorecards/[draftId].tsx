@@ -1,4 +1,4 @@
-import React, { Suspense, useEffect, useReducer, useRef, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -6,7 +6,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
 import { theme } from "../../../src/theme/theme";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getTranscriptionConfig } from "../../../src/api/endpoints";
+import { getTranscriptionConfig, type Fetcher } from "../../../src/api/endpoints";
+import { apiFetch } from "../../../src/api/client";
 import { uploadOwnerKey, newClientUploadId, removeQueuedUploads } from "../../../src/capture/upload-queue";
 import { qk } from "../../../src/query/keys";
 import { extractExifMetadata } from "../../../src/capture/metadata";
@@ -48,9 +49,19 @@ function toStr(v: string | string[] | undefined): string {
 export default function ScorecardWizardScreen() {
   const router = useRouter();
   const draftId = toStr(useLocalSearchParams<{ draftId: string }>().draftId);
-  const { fetcher, user, activeOfficeId } = useAuth();
+  const { fetcher, user, activeOfficeId, token, signOut } = useAuth();
   const qc = useQueryClient();
-  const ownerKey = uploadOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? undefined);
+  // Bind the queue owner + its drain fetcher to the RESOLVED office (activeOfficeId ?? primary). The
+  // AuthContext fetcher omits x-office-id for a primary session, so a re-homed user would otherwise drain
+  // an offline draft's photos against their NEW primary office. queueFetcher pins x-office-id to the office
+  // the draft was captured under — matching ownerKey + capture.tsx's queueFetcher.
+  const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
+  const ownerKey = uploadOwnerKey(user?.id, resolvedOfficeId ?? undefined);
+  const queueFetcher = useCallback<Fetcher>(
+    (path, opts) =>
+      apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
+    [token, resolvedOfficeId, signOut],
+  );
 
   const [loaded, setLoaded] = useState<ScorecardDraft | null | "missing">(null);
   const [step, setStep] = useState(0);
@@ -126,7 +137,7 @@ export default function ScorecardWizardScreen() {
         }
         router.back();
       }}
-      fetcher={fetcher}
+      fetcher={queueFetcher}
     />
   );
 }
@@ -185,13 +196,15 @@ function Wizard(props: {
     if (cameraSection === null) return;
     const sectionKey = FIELD_SCORECARD_SECTIONS[cameraSection].key;
     const clientUploadId = newClientUploadId();
-    const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, shot.uri).catch(() => shot.uri);
     const exif = extractExifMetadata(shot.exif);
+    // Add with the RAW uri IMMEDIATELY (synchronously after capture) so a crew tapping Save then instantly
+    // closing the camera or submitting can't drop a photo the UI already accepted — the draft always
+    // reflects what was captured. The raw uri is still uploadable this session (enqueue re-copies it).
     dispatch({
       type: "addPhoto",
       photo: {
         key: clientUploadId, // stable + globally unique → survives resume; removePhoto(by key) can't collide
-        uri: durableUri,
+        uri: shot.uri,
         clientUploadId,
         sectionKey,
         caption,
@@ -202,6 +215,14 @@ function Wizard(props: {
         height: shot.height,
       },
     });
+    // Then copy into durable per-draft storage and swap the uri (so it survives app-kill while the draft
+    // sits unsubmitted); keep the raw uri if the copy fails.
+    try {
+      const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, shot.uri);
+      dispatch({ type: "setPhotoUri", key: clientUploadId, uri: durableUri });
+    } catch {
+      /* keep the raw uri */
+    }
   }
 
   async function importForSection(sectionIndex: number) {
@@ -215,12 +236,18 @@ function Wizard(props: {
     const sectionKey = FIELD_SCORECARD_SECTIONS[sectionIndex].key;
     for (const asset of result.assets) {
       const clientUploadId = newClientUploadId();
-      const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri).catch(() => asset.uri);
       const exif = extractExifMetadata(asset.exif as Record<string, unknown>);
+      // Add with the raw uri first (see onCameraCapture), then swap to the durable copy.
       dispatch({
         type: "addPhoto",
-        photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, width: asset.width, height: asset.height },
+        photo: { key: clientUploadId, uri: asset.uri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, width: asset.width, height: asset.height },
       });
+      try {
+        const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
+        dispatch({ type: "setPhotoUri", key: clientUploadId, uri: durableUri });
+      } catch {
+        /* keep the raw uri */
+      }
     }
   }
 

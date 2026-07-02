@@ -306,7 +306,20 @@ describe("field routes", () => {
     }), {
       search: "waters",
       limit: 15,
+      dealsOnly: false,
     });
+  });
+
+  it("passes dealsOnly=true to the search service when ?dealsOnly=true (scorecard picker)", async () => {
+    projectMocks.searchFieldCaptureTargets.mockResolvedValueOnce({ targets: [] });
+
+    await invokeRoute("get", "/photo-targets/search", { query: { search: "waters", dealsOnly: "true" } });
+
+    expect(projectMocks.searchFieldCaptureTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "admin-1" }),
+      expect.objectContaining({ search: "waters", dealsOnly: true }),
+    );
   });
 
   it("routes nearby field targets through the deal/project-only nearby service with a default limit of 3", async () => {
