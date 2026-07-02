@@ -16,6 +16,7 @@ import { authLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
+import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 import {
   exchangeCodeForTokens,
   getConsentUrl,
@@ -183,6 +184,9 @@ async function withOnboardingGate<T extends { id: string; email: string; officeI
     // Whether this user is one of the designated RFP override reviewers (Takashi/Adam). Lets the frontend gate
     // the /rfp-review page; the server endpoints enforce the same allowlist as the hard boundary.
     isRfpReviewer: isRfpReviewerEmail(user.email, process.env),
+    // Whether this user is one of the 3 RFP voters (Sidney/Tim/James). Gates the vote UI + /rfp-vote page;
+    // the vote endpoint enforces the same allowlist (requireRfpVoter) as the hard boundary.
+    isRfpVoter: isRfpVoterEmail(user.email, process.env),
   };
 }
 
