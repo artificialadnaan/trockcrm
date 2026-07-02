@@ -230,9 +230,11 @@ export default function CaptureScreen() {
     drainingRef.current = false;
     redrainRef.current = false;
     drainBackoffUntilRef.current = 0;
-    // Security: buffered shots are bound to the owner that captured them — drop any from a DIFFERENT owner
-    // (user/office) when the owner changes, so one account can never retry a prior account's photo.
-    setFailedShots((prev) => prev.filter((f) => f.ownerKey === ownerKey));
+    // Security: buffered shots are bound to the owner that captured them — drop any from a DIFFERENT
+    // authenticated owner (user/office) so one account can never retry a prior account's photo. Ownerless
+    // shots (captured during a transient sign-out — no authenticated owner) are KEPT so the next signer can
+    // claim + retry them; they are never another authenticated user's photo.
+    setFailedShots((prev) => prev.filter((f) => f.ownerKey === ownerKey || f.ownerKey === ""));
   }, [ownerKey]);
   const kickDrain = useCallback(
     async (force = false) => {
@@ -265,10 +267,17 @@ export default function CaptureScreen() {
             const summary = await drainUploadQueue(ownerKey, queueFetcher);
             succeeded += summary.succeeded;
             remaining = summary.remaining;
-            drainBackoffUntilRef.current = 0;
+            if (summary.succeeded > 0) {
+              drainBackoffUntilRef.current = 0; // made progress — clear any backoff
+            } else if (summary.remaining > 0) {
+              // Nothing got through but items remain (offline/stuck). drainUploadQueue reports upload
+              // failures via the summary rather than throwing, so back off HERE — otherwise every offline
+              // shot would re-attempt the whole backlog and drive queued items to terminal. Lifecycle/user
+              // triggers force through; the background task + foreground resume retry later.
+              drainBackoffUntilRef.current = Date.now() + 30_000;
+              break;
+            }
           } catch {
-            // Offline/transient: stop and back off per-shot auto-drains for a window. The background task,
-            // the return-to-foreground resume, and later captures all retry.
             remaining = await getQueuedCount(ownerKey).catch(() => remaining);
             drainBackoffUntilRef.current = Date.now() + 30_000;
             break;
@@ -322,7 +331,11 @@ export default function CaptureScreen() {
   // full, or a transient sign-out clearing ownerKey) is NEVER dropped: it's kept in the failedShots retry
   // buffer and drops off the session counter, with a sticky error, so a real photo can't vanish silently.
   const streamPhoto = useCallback(
-    async (sp: SessionPhoto, ctx: { target: CaptureTargetRef; category: string | null; tags: string[] }) => {
+    async (
+      sp: SessionPhoto,
+      ctx: { target: CaptureTargetRef; category: string | null; tags: string[] },
+      opts?: { deferDrain?: boolean },
+    ) => {
       // Build the FULL upload payload from the CAPTURE-TIME context snapshot the caller passes (never live
       // refs), so a shot enqueued after the crew switched projects — or buffered and retried later — uploads
       // to the destination it was captured for.
@@ -354,7 +367,9 @@ export default function CaptureScreen() {
       // Enqueued OK — clear it from the retry buffer if a prior attempt had parked it there.
       setFailedShots((prev) => prev.filter((f) => f.input.clientUploadId !== input.clientUploadId));
       await refreshQueuedCount();
-      void kickDrain();
+      // A coordless shot defers its drain until the session GPS fix lands (openCamera's settle patches the
+      // coords onto the queue entry, THEN drains) — so it uploads geotagged instead of racing the patch.
+      if (!opts?.deferDrain) void kickDrain();
     },
     [ownerKey, refreshQueuedCount, kickDrain],
   );
@@ -366,10 +381,13 @@ export default function CaptureScreen() {
       setNotice({ tone: "error", text: "Sign in again before retrying failed photos." });
       return;
     }
-    const mine = failedShotsRef.current.filter((f) => f.ownerKey === ownerKey);
+    // Current owner's shots + ownerless ones captured during a transient sign-out (claimed under the now-
+    // signed-in owner). A different authenticated owner's shots were already dropped by the owner-change effect.
+    const claimable = (f: { ownerKey: string }) => f.ownerKey === ownerKey || f.ownerKey === "";
+    const mine = failedShotsRef.current.filter(claimable);
     if (mine.length === 0) return;
     setNotice(null);
-    setFailedShots((prev) => prev.filter((f) => f.ownerKey !== ownerKey));
+    setFailedShots((prev) => prev.filter((f) => !claimable(f)));
     let anyFailed = false;
     for (const f of mine) {
       try {
@@ -416,6 +434,10 @@ export default function CaptureScreen() {
   }
 
   async function importPhotos() {
+    if (!ownerKey) {
+      setNotice({ tone: "error", text: "Sign in again to import photos." });
+      return;
+    }
     setNotice(null);
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
@@ -432,31 +454,42 @@ export default function CaptureScreen() {
   }
 
   function openCamera() {
+    if (!ownerKey) {
+      setNotice({ tone: "error", text: "Sign in again to capture photos." });
+      return;
+    }
     setNotice(null);
     cameraGpsRef.current = null;
     cameraGpsSessionRef.current = null;
     setSessionShots([]);
     const session = (cameraSessionRef.current += 1);
     const owner = ownerKey;
-    void getLiveGps().then((m) => {
-      // Drop a fix from a previous camera session (reopened before this resolved) so it can't overwrite
-      // cameraGpsRef for the new session.
-      if (cameraSessionRef.current !== session) return;
-      cameraGpsRef.current = m;
-      cameraGpsSessionRef.current = session;
-      // Durably geotag shots already streamed COORDLESS in this session (the durable analogue of the old
-      // in-memory back-patch). Best-effort: a shot that already uploaded is simply skipped.
-      if (owner && hasCoords(m)) {
-        const ids = pendingGpsRef.current.filter((p) => p.session === session).map((p) => p.clientUploadId);
-        pendingGpsRef.current = pendingGpsRef.current.filter((p) => p.session !== session);
-        for (const id of ids) {
-          void patchQueuedMetadata(owner, id, {
-            latitude: m.latitude!,
-            longitude: m.longitude!,
-            addressSource: m.addressSource,
-          }).catch(() => undefined);
-        }
+    void getLiveGps().then(async (m) => {
+      const withCoords = hasCoords(m);
+      // Adopt the fix as the live session GPS only if THIS is still the active session (don't clobber a
+      // later session's ref). getLiveGps always resolves (coordless on denial/timeout), so this runs once.
+      if (cameraSessionRef.current === session && withCoords) {
+        cameraGpsRef.current = m;
+        cameraGpsSessionRef.current = session;
       }
+      // ALWAYS release THIS session's deferred coordless shots (even if a newer session is now open, so
+      // they can't strand). Patch coords onto their queue entries FIRST — awaited, so the subsequent drain
+      // reads geotagged items — then drain. A coordless fix just uploads them as-is.
+      const pending = pendingGpsRef.current.filter((p) => p.session === session);
+      pendingGpsRef.current = pendingGpsRef.current.filter((p) => p.session !== session);
+      if (pending.length === 0) return;
+      if (withCoords) {
+        await Promise.all(
+          pending.map((p) =>
+            patchQueuedMetadata(owner, p.clientUploadId, {
+              latitude: m.latitude!,
+              longitude: m.longitude!,
+              addressSource: m.addressSource,
+            }).catch(() => undefined),
+          ),
+        );
+      }
+      void kickDrain();
     });
     setCameraOpen(true);
   }
@@ -475,6 +508,7 @@ export default function CaptureScreen() {
     setSessionShots((prev) => [...prev, { key, uri: shot.uri }]);
 
     let metadata: PhotoMetadata;
+    let coordless = false;
     if (hasCoords(exifMeta)) {
       metadata = { ...exifMeta, takenAt };
     } else if (cameraGpsRef.current && hasCoords(cameraGpsRef.current)) {
@@ -482,6 +516,7 @@ export default function CaptureScreen() {
     } else {
       // No coords yet — enqueue coordless NOW and remember to patch when the session fix resolves.
       metadata = { takenAt };
+      coordless = true;
       pendingGpsRef.current.push({ clientUploadId, session });
     }
 
@@ -490,6 +525,7 @@ export default function CaptureScreen() {
     await streamPhoto(
       { key, clientUploadId, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: session },
       ctx,
+      { deferDrain: coordless },
     );
   }
 
