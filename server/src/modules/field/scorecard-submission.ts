@@ -69,13 +69,24 @@ export function parseScorecardSubmission(body: unknown): ParsedScorecardSubmissi
   const photos = Array.isArray(b.photos)
     ? b.photos.map((raw) => {
         const p = (raw ?? {}) as Record<string, unknown>;
-        return { sectionKey: String(p.sectionKey ?? ""), clientUploadId: String(p.clientUploadId ?? "") };
+        // A blank/non-string clientUploadId would normalize to "" and could match a file row with an
+        // empty client_upload_id — reject it at the boundary instead of linking unrelated evidence.
+        const clientUploadId = typeof p.clientUploadId === "string" ? p.clientUploadId.trim() : "";
+        if (!clientUploadId) throw new AppError(400, "Each evidence photo needs a clientUploadId.");
+        return { sectionKey: String(p.sectionKey ?? ""), clientUploadId };
       })
     : [];
   if (photos.length > 100) throw new AppError(400, "Too many evidence photos.");
 
-  const criticalDeficiencies = Array.isArray(b.criticalDeficiencies) ? b.criticalDeficiencies.map(String) : [];
-  const actionItems = Array.isArray(b.actionItems) ? b.actionItems.map(String) : [];
+  // Keep only real strings: `.map(String)` would turn null/{} into "null"/"[object Object]" — for
+  // actionItems that would pass the required-action gate as bogus remediation. Deficiencies keep only
+  // strings too (the service then validates them against the known keys).
+  const criticalDeficiencies = Array.isArray(b.criticalDeficiencies)
+    ? b.criticalDeficiencies.filter((x): x is string => typeof x === "string")
+    : [];
+  const actionItems = Array.isArray(b.actionItems)
+    ? b.actionItems.filter((x): x is string => typeof x === "string" && x.trim().length > 0).map((x) => x.trim())
+    : [];
   if (criticalDeficiencies.length > 30) throw new AppError(400, "Too many critical deficiencies.");
   if (actionItems.length > 50) throw new AppError(400, "Too many action items.");
 

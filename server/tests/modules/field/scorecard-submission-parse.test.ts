@@ -80,6 +80,17 @@ describe("parseScorecardSubmission", () => {
     expect(() => parseScorecardSubmission(body({ items: [] }))).toThrow(/items/i);
   });
 
+  it("keeps only real action items (drops null / non-string / blank) so bogus entries can't satisfy the gate", () => {
+    const parsed = parseScorecardSubmission(body({ actionItems: [null, "   ", "Fix the slab", 42, {}] }));
+    expect(parsed.actionItems).toEqual(["Fix the slab"]);
+  });
+
+  it("rejects an evidence photo with a blank / missing / non-string clientUploadId", () => {
+    expect(() => parseScorecardSubmission(body({ photos: [{ sectionKey: "schedule", clientUploadId: "" }] }))).toThrow(/clientUploadId/i);
+    expect(() => parseScorecardSubmission(body({ photos: [{ sectionKey: "schedule" }] }))).toThrow(/clientUploadId/i);
+    expect(() => parseScorecardSubmission(body({ photos: [{ sectionKey: "schedule", clientUploadId: null }] }))).toThrow(/clientUploadId/i);
+  });
+
   it("caps oversized arrays", () => {
     const manyPhotos = Array.from({ length: 101 }, (_, i) => ({ sectionKey: "schedule", clientUploadId: `cu-${i}` }));
     expect(() => parseScorecardSubmission(body({ photos: manyPhotos }))).toThrow(/many/i);

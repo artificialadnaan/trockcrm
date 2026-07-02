@@ -85,11 +85,11 @@ beforeAll(async () => {
     INSERT INTO public.pipeline_stage_config (id, name, slug, is_terminal) VALUES
       ('${STAGE_ACTIVE}','Estimating','estimating',false),
       ('${STAGE_LOST}','Lost','lost',true);
-    INSERT INTO deals (id, name, stage_id, is_active) VALUES
-      ('${DEAL}','Maple St','${STAGE_ACTIVE}', true),
-      ('${OTHER_DEAL}','Oak Ave','${STAGE_ACTIVE}', true),
-      ('${RETRY_DEAL}','Retry Rd','${STAGE_ACTIVE}', true),
-      ('${LOST_DEAL}','Elm Rd','${STAGE_LOST}', true);
+    INSERT INTO deals (id, name, project_number, stage_id, is_active) VALUES
+      ('${DEAL}','Maple St','DFW-10432','${STAGE_ACTIVE}', true),
+      ('${OTHER_DEAL}','Oak Ave',NULL,'${STAGE_ACTIVE}', true),
+      ('${RETRY_DEAL}','Retry Rd',NULL,'${STAGE_ACTIVE}', true),
+      ('${LOST_DEAL}','Elm Rd',NULL,'${STAGE_LOST}', true);
     INSERT INTO files (id, deal_id, client_upload_id, uploaded_by, description, is_active, deleted_at) VALUES
       ('${FILE1}','${DEAL}','cu-1','${USER}','Slab crack', true, NULL),
       ('${FILE2}','${DEAL}','cu-2','${USER}','Rebar', true, NULL),
@@ -123,6 +123,14 @@ describe("createFieldScorecard", () => {
 
     const items = await tdb.execute(sql`SELECT count(*)::int AS n FROM field_scorecard_items`);
     expect(items.rows[0].n).toBe(7);
+  });
+
+  it("snapshots the server-resolved project number, ignoring the client-sent value", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      submission({ clientSubmissionId: csid(30), projectNumber: "CLIENT-SPOOFED-999" }),
+    );
+    expect(scorecard.projectNumber).toBe("DFW-10432"); // the deal's number, not the client body's
   });
 
   it("is idempotent on clientSubmissionId (a retried submit does not duplicate)", async () => {

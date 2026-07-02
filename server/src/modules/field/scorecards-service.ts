@@ -75,7 +75,11 @@ export async function createFieldScorecard(
   // Only browsable field projects (active pipeline OR Won-family, never Lost/terminal/inactive) may be
   // scored — same gate the field project reads use. Runs in the resolved office; an off-office deal isn't
   // present here, so this 404s cleanly instead of failing later on the deal_id FK.
-  await assertActiveFieldProject(tenantDb, { userId: input.userId, userRole: input.userRole }, input.dealId);
+  const project = await assertActiveFieldProject(
+    tenantDb,
+    { userId: input.userId, userRole: input.userRole },
+    input.dealId,
+  );
 
   const items = validateItems(input.items);
   const deficiencies = validateDeficiencies(input.criticalDeficiencies);
@@ -100,7 +104,9 @@ export async function createFieldScorecard(
       clientSubmissionId: input.clientSubmissionId,
       dealId: input.dealId,
       weekOf: input.weekOf,
-      projectNumber: input.projectNumber ?? null,
+      // Snapshot the SERVER-resolved canonical display number (project_number, else non-HubSpot
+      // deal_number, else null) — never the client-sent value, which may be stale/spoofed/absent.
+      projectNumber: project.projectNumber ?? null,
       superintendentName: input.superintendentName ?? null,
       pmName: input.pmName ?? null,
       totalScore: total,
