@@ -16,7 +16,7 @@
 
 ALTER TABLE public.user_commission_settings
   ADD COLUMN IF NOT EXISTS commission_structure text NOT NULL DEFAULT 'solo'
-    CHECK (commission_structure IN ('solo', 'mixed'));
+    CONSTRAINT user_commission_settings_structure_check CHECK (commission_structure IN ('solo', 'mixed'));
 ALTER TABLE public.user_commission_settings
   ADD COLUMN IF NOT EXISTS capx_rate_solo numeric(7,6) NOT NULL DEFAULT 0;
 ALTER TABLE public.user_commission_settings
