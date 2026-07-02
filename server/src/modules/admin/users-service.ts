@@ -233,8 +233,6 @@ export async function updateUser(
     reportsTo: string | null;
     isActive: boolean;
     notificationPrefs: Record<string, unknown>;
-    /** @deprecated superseded by capxRateSolo/capxRateMixed; still accepted but no longer drives commission_rate */
-    commissionRate: number;
     commissionStructure: "solo" | "mixed";
     capxRateSolo: number;
     capxRateMixed: number;
@@ -321,7 +319,6 @@ export async function updateUser(
     if (plan.clearLocalAuthRevocation) await clearLocalAuthRevocation(tx, id, now);
 
     const hasCommissionPatch =
-      input.commissionRate !== undefined ||
       input.commissionStructure !== undefined ||
       input.capxRateSolo !== undefined ||
       input.capxRateMixed !== undefined ||
@@ -368,8 +365,8 @@ export async function updateUser(
 
       // Denormalized mirror: commission_rate = the EFFECTIVE capX rate for the active structure,
       // so every existing engine read of commission_rate keeps working. This SINGLE line is the
-      // only place the mirror is maintained. (input.commissionRate is superseded by the capX
-      // rates and no longer drives the stored rate.)
+      // only place the mirror is maintained; commission_rate is never written directly (the
+      // structure + capX rates are the sole inputs).
       const commissionRate = resolveEffectiveCapxRate({
         commissionStructure,
         capxRateSolo,

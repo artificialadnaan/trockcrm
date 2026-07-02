@@ -191,7 +191,6 @@ export function UsersPage() {
   const handleCommissionFieldUpdate = async (
     userId: string,
     field:
-      | "commissionRate"
       | "capxRateSolo"
       | "capxRateMixed"
       | "serviceSourceRate"
@@ -209,7 +208,6 @@ export function UsersPage() {
     }
 
     const decimalFields = new Set([
-      "commissionRate",
       "capxRateSolo",
       "capxRateMixed",
       "serviceSourceRate",
@@ -745,13 +743,20 @@ export function UsersPage() {
                         />
                       </div>
                       <div>
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Service Src %</p>
+                        <p
+                          className="text-[10px] uppercase tracking-wide text-slate-400"
+                          title="Stored now; does not affect payouts until service-source commissions ship (PR2)."
+                        >
+                          Service Src %
+                        </p>
                         <Input
                           className="h-8 text-xs"
                           defaultValue={formatRatePercentInput(user.serviceSourceRate)}
                           onBlur={(event) => handleCommissionFieldUpdate(user.id, "serviceSourceRate", event.target.value)}
                           disabled={updatingId === user.id || bulkUpdating}
+                          title="Stored now; does not affect payouts until service-source commissions ship (PR2)."
                         />
+                        <p className="text-[9px] text-slate-400/80">stored · not paid yet</p>
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
