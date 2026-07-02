@@ -20,6 +20,7 @@ import { runAiDisconnectDigest } from "./jobs/ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./jobs/ai-disconnect-escalation.js";
 import { runAiDisconnectAdminTaskGeneration } from "./jobs/ai-disconnect-admin-tasks.js";
 import { runAiInterventionManagerAlerts } from "./jobs/ai-intervention-manager-alerts.js";
+import { runRfpPendingSlaScan } from "./jobs/rfp-pending-sla.js";
 import { runCallRecordingCleanup } from "./jobs/call-recording-cleanup.js";
 import { runCallRecordingTranscription } from "./jobs/call-recording-transcribe.js";
 import { runRfpRequestDeadLetterSweep } from "./jobs/rfp-request-delivery.js";
@@ -267,6 +268,19 @@ async function main() {
     }
   }, { timezone: "America/Chicago" });
   console.log("[Worker] Cron scheduled: rep performance rollup at 4:00 AM CT daily");
+
+  // Pending RFP 24h SLA: hourly scan that emails leadership once per pending cycle when an RFP has been
+  // awaiting approval > 24h. Inert until RFP_PENDING_SLA_ENABLED=true (the job self-gates); a receipts
+  // ledger keeps it exactly-once, so scanning hourly never double-sends.
+  cron.schedule("0 * * * *", async () => {
+    console.log("[Worker:cron] Running pending RFP SLA scan...");
+    try {
+      await runRfpPendingSlaScan();
+    } catch (err) {
+      console.error("[Worker:cron] Pending RFP SLA scan failed:", err);
+    }
+  }, { timezone: "America/Chicago" });
+  console.log("[Worker] Cron scheduled: pending RFP SLA scan hourly");
 
   // Manager alerts: evaluate every 5 minutes and let office-local due gating decide when to send.
   cron.schedule("*/5 * * * *", async () => {
