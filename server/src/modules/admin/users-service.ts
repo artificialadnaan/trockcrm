@@ -16,12 +16,14 @@ import {
   evaluateUpdateUserGuards,
   planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
+import { resolveEffectiveCapxRate } from "@trock-crm/shared/lib/commission-structure";
 import {
   incrementTokenVersion,
   revokeLocalAuthOnDeactivate,
   clearLocalAuthRevocation,
   closeUserSseConnections,
 } from "../auth/session-invalidation.js";
+import { recalculateAllCommissionsForRep } from "../commissions/recompute-service.js";
 import {
   getLocalAuthStatus,
   type LocalAuthStatus,
@@ -65,6 +67,12 @@ function assertNonNegative(name: string, value: number) {
 function assertPositiveInteger(name: string, value: number) {
   if (!Number.isInteger(value) || value < 1) {
     throw new AppError(400, `${name} must be an integer greater than or equal to 1`);
+  }
+}
+
+function assertCommissionStructure(value: string): asserts value is "solo" | "mixed" {
+  if (value !== "solo" && value !== "mixed") {
+    throw new AppError(400, "commissionStructure must be 'solo' or 'mixed'");
   }
 }
 
@@ -225,7 +233,14 @@ export async function updateUser(
     reportsTo: string | null;
     isActive: boolean;
     notificationPrefs: Record<string, unknown>;
+    /** Legacy alias: pre-structure callers set a single rate here. Mapped to capxRateSolo (the
+     *  effective rate under the default 'solo' structure) so a stale bundle / old script isn't
+     *  silently dropped during rollout. New clients send capxRateSolo/capxRateMixed directly. */
     commissionRate: number;
+    commissionStructure: "solo" | "mixed";
+    capxRateSolo: number;
+    capxRateMixed: number;
+    serviceSourceRate: number;
     rollingFloor: number;
     overrideRate: number;
     estimatedMarginRate: number;
@@ -237,6 +252,7 @@ export async function updateUser(
   actorUserId: string
 ) {
   const result = await db.transaction(async (tx) => {
+    let commissionRatesChanged = false;
     const existing = await tx
       .select()
       .from(users)
@@ -308,6 +324,10 @@ export async function updateUser(
 
     const hasCommissionPatch =
       input.commissionRate !== undefined ||
+      input.commissionStructure !== undefined ||
+      input.capxRateSolo !== undefined ||
+      input.capxRateMixed !== undefined ||
+      input.serviceSourceRate !== undefined ||
       input.rollingFloor !== undefined ||
       input.overrideRate !== undefined ||
       input.estimatedMarginRate !== undefined ||
@@ -321,10 +341,26 @@ export async function updateUser(
         .select()
         .from(userCommissionSettings)
         .where(eq(userCommissionSettings.userId, id))
-        .limit(1);
+        .limit(1)
+        // Lock the row so concurrent PATCHes for the same rep serialize: the second tx blocks here,
+        // then re-reads the first's committed values before deriving fallbacks — no lost update on
+        // a field the other request didn't touch. (No row yet ⇒ the unique key serializes the insert.)
+        .for("update");
       const current = existingConfig[0];
 
-      const commissionRate = input.commissionRate ?? Number(current?.commissionRate ?? 0);
+      const commissionStructure = input.commissionStructure ?? current?.commissionStructure ?? "solo";
+      // Legacy commissionRate is a pre-structure single-rate alias → map it to whichever capX rate is
+      // ACTIVE under the resolved structure, so a stale client/integration editing a MIXED rep moves
+      // the effective mirror (not the inactive Solo field). New clients send the capX fields directly.
+      const capxRateSolo =
+        input.capxRateSolo ??
+        (commissionStructure === "solo" ? input.commissionRate : undefined) ??
+        Number(current?.capxRateSolo ?? 0);
+      const capxRateMixed =
+        input.capxRateMixed ??
+        (commissionStructure === "mixed" ? input.commissionRate : undefined) ??
+        Number(current?.capxRateMixed ?? 0);
+      const serviceSourceRate = input.serviceSourceRate ?? Number(current?.serviceSourceRate ?? 0);
       const rollingFloor = input.rollingFloor ?? Number(current?.rollingFloor ?? 0);
       const overrideRate = input.overrideRate ?? Number(current?.overrideRate ?? 0);
       const estimatedMarginRate = input.estimatedMarginRate ?? Number(current?.estimatedMarginRate ?? 0.3);
@@ -333,7 +369,10 @@ export async function updateUser(
       const newCustomerWindowMonths = input.newCustomerWindowMonths ?? Number(current?.newCustomerWindowMonths ?? 6);
       const isActive = input.commissionConfigActive ?? Boolean(current?.isActive ?? true);
 
-      assertRate("commissionRate", commissionRate);
+      assertCommissionStructure(commissionStructure);
+      assertRate("capxRateSolo", capxRateSolo);
+      assertRate("capxRateMixed", capxRateMixed);
+      assertRate("serviceSourceRate", serviceSourceRate);
       assertNonNegative("rollingFloor", rollingFloor);
       assertRate("overrideRate", overrideRate);
       assertRate("estimatedMarginRate", estimatedMarginRate);
@@ -341,11 +380,26 @@ export async function updateUser(
       assertRate("newCustomerShareFloor", newCustomerShareFloor);
       assertPositiveInteger("newCustomerWindowMonths", newCustomerWindowMonths);
 
+      // Denormalized mirror: commission_rate = the EFFECTIVE capX rate for the active structure,
+      // so every existing engine read of commission_rate keeps working. This SINGLE line is the
+      // only place the mirror is maintained; commission_rate is never written directly (the
+      // structure + capX rates are the sole inputs).
+      const commissionRate = resolveEffectiveCapxRate({
+        commissionStructure,
+        capxRateSolo,
+        capxRateMixed,
+        serviceSourceRate,
+      });
+
       await tx
         .insert(userCommissionSettings)
         .values({
           userId: id,
           commissionRate: String(commissionRate),
+          commissionStructure,
+          capxRateSolo: String(capxRateSolo),
+          capxRateMixed: String(capxRateMixed),
+          serviceSourceRate: String(serviceSourceRate),
           rollingFloor: String(rollingFloor),
           overrideRate: String(overrideRate),
           estimatedMarginRate: String(estimatedMarginRate),
@@ -358,6 +412,10 @@ export async function updateUser(
           target: userCommissionSettings.userId,
           set: {
             commissionRate: String(commissionRate),
+            commissionStructure,
+            capxRateSolo: String(capxRateSolo),
+            capxRateMixed: String(capxRateMixed),
+            serviceSourceRate: String(serviceSourceRate),
             rollingFloor: String(rollingFloor),
             overrideRate: String(overrideRate),
             estimatedMarginRate: String(estimatedMarginRate),
@@ -368,14 +426,50 @@ export async function updateUser(
             updatedAt: new Date(),
           },
         });
+
+      // Only recompute when the EFFECTIVE capX rate actually moved. Editing an INACTIVE rate
+      // (e.g. Mixed % while the rep is Solo), the service-source rate (unused for owner/estimator
+      // rows in PR1), or a non-rate field leaves the mirror unchanged — so it must NOT trigger a
+      // fan-out (which would otherwise re-rate deals to their current values for no reason). PR2
+      // will additionally gate on the effective service-source rate once sales_source rows exist.
+      const previousCommissionRate = resolveEffectiveCapxRate({
+        commissionStructure: current?.commissionStructure ?? "solo",
+        capxRateSolo: Number(current?.capxRateSolo ?? 0),
+        capxRateMixed: Number(current?.capxRateMixed ?? 0),
+        serviceSourceRate: Number(current?.serviceSourceRate ?? 0),
+      });
+      // Compare at the column's scale (numeric(7,6)). A raw float compare would treat a no-op blur
+      // as a change — e.g. a stored 0.029000 comes back from the client as 2.9/100 = 0.02899999…,
+      // which !== 0.029 and would spuriously fan out. Normalising both to 6 decimals avoids that.
+      commissionRatesChanged = commissionRate.toFixed(6) !== previousCommissionRate.toFixed(6);
     }
 
-    return { updated, closeStreams: plan.closeStreams };
+    return { updated, closeStreams: plan.closeStreams, commissionRatesChanged };
   });
 
   // Best-effort, post-commit: drop the deactivated user's live SSE streams immediately. The
   // authoritative gate remains the per-request is_active + token-version re-check.
   if (result.closeStreams) closeUserSseConnections(id);
+
+  // Fire-and-forget, post-commit: re-rating is best-effort and must never block the admin's save
+  // nor fail the already-committed settings write (kicked off like closeUserSseConnections above).
+  // The task owns its own logging. Only fires when the effective capX rate actually changed.
+  if (result.commissionRatesChanged) {
+    void (async () => {
+      try {
+        const summary = await recalculateAllCommissionsForRep(id, actorUserId);
+        if (summary.officeFailures.length > 0) {
+          console.error(
+            `[commissions] rep ${id} recompute had office failures:`,
+            JSON.stringify(summary.officeFailures),
+          );
+        }
+      } catch (err) {
+        console.error(`[commissions] rep ${id} recompute could not start:`, err);
+      }
+    })();
+  }
+
   return result.updated;
 }
 
@@ -441,6 +535,10 @@ export async function getUsersWithStats() {
       o.name AS office_name,
       COUNT(uoa.office_id)::int AS extra_office_count,
       cs.commission_rate,
+      cs.commission_structure,
+      cs.capx_rate_solo,
+      cs.capx_rate_mixed,
+      cs.service_source_rate,
       cs.rolling_floor,
       cs.override_rate,
       cs.estimated_margin_rate,
@@ -462,6 +560,10 @@ export async function getUsersWithStats() {
       u.is_active,
       o.name,
       cs.commission_rate,
+      cs.commission_structure,
+      cs.capx_rate_solo,
+      cs.capx_rate_mixed,
+      cs.service_source_rate,
       cs.rolling_floor,
       cs.override_rate,
       cs.estimated_margin_rate,
@@ -561,6 +663,10 @@ export async function getUsersWithStats() {
     isActive: r.is_active,
     extraOfficeCount: Number(r.extra_office_count ?? 0),
     commissionRate: Number(r.commission_rate ?? 0),
+    commissionStructure: (r.commission_structure ?? "solo") as "solo" | "mixed",
+    capxRateSolo: Number(r.capx_rate_solo ?? 0),
+    capxRateMixed: Number(r.capx_rate_mixed ?? 0),
+    serviceSourceRate: Number(r.service_source_rate ?? 0),
     rollingFloor: Number(r.rolling_floor ?? 0),
     overrideRate: Number(r.override_rate ?? 0),
     estimatedMarginRate: Number(r.estimated_margin_rate ?? 0.30),

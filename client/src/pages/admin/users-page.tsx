@@ -60,6 +60,14 @@ function formatPercentInput(value: number | undefined) {
   return (value * 100).toFixed(2);
 }
 
+// capX/service-source rates are numeric(7,6) → up to 4 percent decimals. Render full precision so
+// tabbing through a field can't truncate a migrated rate (e.g. 0.012345 → "1.23") and silently
+// persist the truncated value on blur. Trailing zeros trimmed for readability (0.03 → "3").
+function formatRatePercentInput(value: number | undefined) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "";
+  return (value * 100).toFixed(4).replace(/\.?0+$/, "");
+}
+
 export function UsersPage() {
   const {
     users,
@@ -183,7 +191,9 @@ export function UsersPage() {
   const handleCommissionFieldUpdate = async (
     userId: string,
     field:
-      | "commissionRate"
+      | "capxRateSolo"
+      | "capxRateMixed"
+      | "serviceSourceRate"
       | "rollingFloor"
       | "overrideRate"
       | "estimatedMarginRate"
@@ -191,6 +201,12 @@ export function UsersPage() {
       | "newCustomerShareFloor",
     rawValue: string
   ) => {
+    // A cleared/whitespace-only field must NOT be treated as 0 — Number("") is 0, which would
+    // silently persist a 0% rate (and trigger a recompute). Reject it; an explicit "0" still passes.
+    if (rawValue.trim() === "") {
+      toast.error("Enter a numeric value");
+      return;
+    }
     const parsed = Number(rawValue);
     if (Number.isNaN(parsed)) {
       toast.error("Enter a numeric value");
@@ -198,7 +214,9 @@ export function UsersPage() {
     }
 
     const decimalFields = new Set([
-      "commissionRate",
+      "capxRateSolo",
+      "capxRateMixed",
+      "serviceSourceRate",
       "overrideRate",
       "estimatedMarginRate",
       "minMarginPercent",
@@ -212,6 +230,18 @@ export function UsersPage() {
       toast.success("Commission setting updated");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update commission setting");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const handleStructureChange = async (userId: string, value: "solo" | "mixed") => {
+    setUpdatingId(userId);
+    try {
+      await updateUser(userId, { commissionStructure: value });
+      toast.success("Commission structure updated");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update commission structure");
     } finally {
       setUpdatingId(null);
     }
@@ -682,33 +712,92 @@ export function UsersPage() {
                   </Select>
                 </TableCell>
                 <TableCell>
-                  <div className="grid min-w-[260px] grid-cols-3 gap-2">
+                  <div className="min-w-[320px] space-y-2">
                     <div>
-                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Rate %</p>
-                      <Input
-                        className="h-8 text-xs"
-                        defaultValue={formatPercentInput(user.commissionRate)}
-                        onBlur={(event) => handleCommissionFieldUpdate(user.id, "commissionRate", event.target.value)}
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Structure</p>
+                      <Select
+                        value={user.commissionStructure ?? "solo"}
+                        onValueChange={(value) => handleStructureChange(user.id, value as "solo" | "mixed")}
                         disabled={updatingId === user.id || bulkUpdating}
-                      />
+                      >
+                        <SelectTrigger className="h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="solo">Solo</SelectItem>
+                          <SelectItem value="mixed">Mixed</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Floor</p>
-                      <Input
-                        className="h-8 text-xs"
-                        defaultValue={String(Math.round(user.rollingFloor ?? 0))}
-                        onBlur={(event) => handleCommissionFieldUpdate(user.id, "rollingFloor", event.target.value)}
-                        disabled={updatingId === user.id || bulkUpdating}
-                      />
+                    <div className="grid grid-cols-3 gap-2">
+                      <div className={(user.commissionStructure ?? "solo") === "solo" ? "" : "opacity-50"}>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">
+                          capX Solo %{(user.commissionStructure ?? "solo") === "solo" ? " · active" : ""}
+                        </p>
+                        <Input
+                          className="h-8 text-xs"
+                          defaultValue={formatRatePercentInput(user.capxRateSolo)}
+                          onBlur={(event) => handleCommissionFieldUpdate(user.id, "capxRateSolo", event.target.value)}
+                          disabled={updatingId === user.id || bulkUpdating}
+                          title={
+                            (user.commissionStructure ?? "solo") === "solo"
+                              ? "Active capX rate under the Solo structure."
+                              : "Inactive under the current (Mixed) structure — does not affect payouts."
+                          }
+                        />
+                      </div>
+                      <div className={(user.commissionStructure ?? "solo") === "mixed" ? "" : "opacity-50"}>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">
+                          capX Mixed %{(user.commissionStructure ?? "solo") === "mixed" ? " · active" : ""}
+                        </p>
+                        <Input
+                          className="h-8 text-xs"
+                          defaultValue={formatRatePercentInput(user.capxRateMixed)}
+                          onBlur={(event) => handleCommissionFieldUpdate(user.id, "capxRateMixed", event.target.value)}
+                          disabled={updatingId === user.id || bulkUpdating}
+                          title={
+                            (user.commissionStructure ?? "solo") === "mixed"
+                              ? "Active capX rate under the Mixed structure."
+                              : "Inactive under the current (Solo) structure — does not affect payouts."
+                          }
+                        />
+                      </div>
+                      <div>
+                        <p
+                          className="text-[10px] uppercase tracking-wide text-slate-400"
+                          title="Stored now; does not affect payouts until service-source commissions ship (PR2)."
+                        >
+                          Service Src %
+                        </p>
+                        <Input
+                          className="h-8 text-xs"
+                          defaultValue={formatRatePercentInput(user.serviceSourceRate)}
+                          onBlur={(event) => handleCommissionFieldUpdate(user.id, "serviceSourceRate", event.target.value)}
+                          disabled={updatingId === user.id || bulkUpdating}
+                          title="Stored now; does not affect payouts until service-source commissions ship (PR2)."
+                        />
+                        <p className="text-[9px] text-slate-400/80">stored · not paid yet</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Override %</p>
-                      <Input
-                        className="h-8 text-xs"
-                        defaultValue={formatPercentInput(user.overrideRate)}
-                        onBlur={(event) => handleCommissionFieldUpdate(user.id, "overrideRate", event.target.value)}
-                        disabled={updatingId === user.id || bulkUpdating}
-                      />
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Floor</p>
+                        <Input
+                          className="h-8 text-xs"
+                          defaultValue={String(Math.round(user.rollingFloor ?? 0))}
+                          onBlur={(event) => handleCommissionFieldUpdate(user.id, "rollingFloor", event.target.value)}
+                          disabled={updatingId === user.id || bulkUpdating}
+                        />
+                      </div>
+                      <div>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Override %</p>
+                        <Input
+                          className="h-8 text-xs"
+                          defaultValue={formatPercentInput(user.overrideRate)}
+                          onBlur={(event) => handleCommissionFieldUpdate(user.id, "overrideRate", event.target.value)}
+                          disabled={updatingId === user.id || bulkUpdating}
+                        />
+                      </div>
                     </div>
                   </div>
                 </TableCell>

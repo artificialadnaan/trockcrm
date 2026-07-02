@@ -13,6 +13,10 @@ export interface AdminUser {
   isActive: boolean;
   extraOfficeCount: number;
   commissionRate?: number;
+  commissionStructure?: "solo" | "mixed";
+  capxRateSolo?: number;
+  capxRateMixed?: number;
+  serviceSourceRate?: number;
   rollingFloor?: number;
   overrideRate?: number;
   estimatedMarginRate?: number;
