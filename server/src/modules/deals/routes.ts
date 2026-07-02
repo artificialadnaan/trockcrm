@@ -176,7 +176,8 @@ import {
 } from "../estimating/deal-market-override-service.js";
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 import { insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
-import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
+import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
+import { isServiceRfp, openRfpVoteRound } from "./rfp-vote-service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -1265,6 +1266,31 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     }
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+
+    // Non-service deals with voting ENABLED open a three-voter round instead of the SyncHub email path.
+    // Service / type-4 (and voting-disabled) deals fall through to the unchanged SyncHub delivery below.
+    if (!isServiceRfp(deal) && isRfpVotingEnabled()) {
+      await openRfpVoteRound({
+        tenantDb: req.tenantDb!,
+        officeId,
+        deal,
+        requestedByUserId: userId,
+      });
+      const [voted] = await req.tenantDb!
+        .select({ status: deals.rfpApprovalStatus, eventId: deals.rfpApprovalRequestEventId })
+        .from(deals)
+        .where(eq(deals.id, deal.id))
+        .limit(1);
+      await req.commitTransaction!();
+      res.json(toJsonSafe({
+        success: true,
+        mode: "vote",
+        status: voted?.status ?? "pending",
+        eventId: voted?.eventId ?? null,
+      }));
+      return;
+    }
+
     const requestedAt = new Date();
     const eventId = randomUUID();
     const updateConditions = [

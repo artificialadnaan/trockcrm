@@ -111,6 +111,8 @@ vi.mock("../../../src/modules/deals/rfp-enqueue.js", () => ({
 
 vi.mock("../../../src/config/feature-flags.js", () => ({
   isOpportunityRfpEventEnabled: isRfpEnabledMock,
+  // Voting is OFF in these tests — non-service deals fall through to the existing SyncHub path.
+  isRfpVotingEnabled: () => false,
 }));
 
 vi.mock("../../../src/lib/collaboration-access.js", () => ({
