@@ -4,6 +4,7 @@ import {
   numeric,
   integer,
   boolean,
+  text,
   timestamp,
 } from "drizzle-orm/pg-core";
 import { users } from "./users.js";
@@ -11,6 +12,10 @@ import { users } from "./users.js";
 export const userCommissionSettings = pgTable("user_commission_settings", {
   userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
   commissionRate: numeric("commission_rate", { precision: 7, scale: 6 }).notNull().default("0"),
+  commissionStructure: text("commission_structure").notNull().default("solo"),
+  capxRateSolo: numeric("capx_rate_solo", { precision: 7, scale: 6 }).notNull().default("0"),
+  capxRateMixed: numeric("capx_rate_mixed", { precision: 7, scale: 6 }).notNull().default("0"),
+  serviceSourceRate: numeric("service_source_rate", { precision: 7, scale: 6 }).notNull().default("0"),
   rollingFloor: numeric("rolling_floor", { precision: 14, scale: 2 }).notNull().default("0"),
   overrideRate: numeric("override_rate", { precision: 7, scale: 6 }).notNull().default("0"),
   estimatedMarginRate: numeric("estimated_margin_rate", { precision: 7, scale: 6 }).notNull().default("0.30"),
