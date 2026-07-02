@@ -24,7 +24,7 @@ export function scorecardPhotoUploadInput(photo: ScorecardDraftPhoto, dealId: st
     category: null,
     caption: photo.caption.trim() ? photo.caption.trim() : null,
     tags: ["scorecard", photo.sectionKey],
-    metadata: { takenAt: photo.takenAt, latitude: photo.latitude, longitude: photo.longitude },
+    metadata: { takenAt: photo.takenAt, latitude: photo.latitude, longitude: photo.longitude, addressSource: photo.addressSource },
     clientUploadId: photo.clientUploadId,
   };
 }

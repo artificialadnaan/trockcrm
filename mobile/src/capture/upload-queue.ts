@@ -51,6 +51,13 @@ export type DrainSummary = { succeeded: number; failed: number; remaining: numbe
 // (tmp+move), so a read always sees a whole index, never a torn one.
 const withQueueLock = createAsyncMutex();
 
+// Because enqueue copies the file OUTSIDE the lock, a removeQueuedUploads can run while a photo is still
+// copying (before it's in the index). `enqueueing` holds ids currently mid-copy (registered under the
+// lock); a concurrent cancel tombstones them in `cancelledMidEnqueue`, and enqueue drops the item instead
+// of appending it. Both sets are consumed by the enqueue write → bounded, no leak.
+const enqueueing = new Set<string>();
+const cancelledMidEnqueue = new Set<string>();
+
 // ── Disk-backed index + file lifecycle ─────────────────────────────────────────
 
 async function ensureDir(ownerKey: string): Promise<void> {
@@ -152,6 +159,9 @@ export async function removeQueuedUploads(ownerKey: string, clientUploadIds: str
   await withQueueLock(async () => {
     const current = await readQueue(ownerKey);
     const toRemove = current.filter((item) => ids.has(item.clientUploadId));
+    // Tombstone any requested id whose enqueue copy is IN FLIGHT (not yet in the index) so the pending
+    // write drops it instead of resurrecting removed evidence.
+    for (const id of ids) if (enqueueing.has(id)) cancelledMidEnqueue.add(id);
     if (toRemove.length === 0) return;
     await writeQueue(ownerKey, current.filter((item) => !ids.has(item.clientUploadId)));
     await deleteQueuedFiles(toRemove);
@@ -169,17 +179,28 @@ export async function enqueueUploads(ownerKey: string, inputs: CaptureUploadInpu
   const dir = ownerDir(ownerKey);
   const queued: QueuedUpload[] = [];
   for (const input of inputs) {
+    const id = input.clientUploadId;
     const ext = input.uri.includes(".") ? input.uri.slice(input.uri.lastIndexOf(".")) : ".jpg";
-    const dest = `${dir}${input.clientUploadId}${ext}`;
-    // Copy OUTSIDE the lock — a large photo's copy is slow and must not block removeQueuedUploads /
-    // drain re-selection from making progress during a big batch.
+    const dest = `${dir}${id}${ext}`;
+    // Register as in-flight under the lock, then copy OUTSIDE the lock — a large photo's copy is slow and
+    // must not block removeQueuedUploads / drain re-selection during a big batch.
+    await withQueueLock(async () => {
+      enqueueing.add(id);
+    });
     await FileSystem.copyAsync({ from: input.uri, to: dest });
     const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
-    // Persist immediately (read-modify-write UNDER the lock) so a crash right after the copy still recovers
-    // the item, without holding the lock across the copy above.
-    await withQueueLock(async () => {
+    // Persist under the lock — but if a cancel arrived WHILE copying, drop the item (delete the copy)
+    // instead of appending removed evidence. A crash right after the copy still recovers via the index.
+    const cancelled = await withQueueLock(async () => {
+      enqueueing.delete(id);
+      if (cancelledMidEnqueue.delete(id)) return true;
       await writeQueue(ownerKey, dedupeQueue(await readQueue(ownerKey), [item]));
+      return false;
     });
+    if (cancelled) {
+      await FileSystem.deleteAsync(dest, { idempotent: true }).catch(() => undefined);
+      continue;
+    }
     queued.push(item);
   }
   return queued;

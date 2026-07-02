@@ -37,6 +37,16 @@ describe("scorecardPhotoUploadInput", () => {
     const photo: ScorecardDraftPhoto = { key: "p", uri: "u", clientUploadId: "c", sectionKey: "quality", caption: "   " };
     expect(scorecardPhotoUploadInput(photo, "d").caption).toBeNull();
   });
+
+  it("forwards capture metadata incl. addressSource (live_gps evidence isn't audited as exif)", () => {
+    const photo: ScorecardDraftPhoto = {
+      key: "p", uri: "u", clientUploadId: "c", sectionKey: "quality", caption: "",
+      takenAt: "2026-06-30T18:00:00Z", latitude: 32.9, longitude: -96.7, addressSource: "live_gps",
+    };
+    expect(scorecardPhotoUploadInput(photo, "d").metadata).toEqual({
+      takenAt: "2026-06-30T18:00:00Z", latitude: 32.9, longitude: -96.7, addressSource: "live_gps",
+    });
+  });
 });
 
 describe("pendingScorecardPhotoIds", () => {

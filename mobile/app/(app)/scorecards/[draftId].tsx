@@ -185,9 +185,10 @@ function Wizard(props: {
   // and resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted.
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const finalized = useRef(false);
-  // In-flight photo-cancellation promises — onSubmit awaits these so a fast Remove → Submit can't drain
-  // (upload) a just-removed photo before its queue removal settles.
-  const pendingRemovals = useRef<Promise<unknown>[]>([]);
+  // Ids of removed photos whose queue-cancellation hasn't confirmed yet. onSubmit retries the cancellation
+  // for all still-pending ids and only proceeds once it succeeds — a FAILED removal stays in the set (and
+  // blocks submit) instead of being cleared, so the drain can never upload evidence the user removed.
+  const pendingRemovalIds = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (finalized.current) return;
     saveChain.current = saveChain.current
@@ -199,7 +200,20 @@ function Wizard(props: {
   const validation = validateScorecardDraft(draft);
 
   const goNext = () => setStep(Math.min(LAST_STEP, step + 1));
-  const goBack = () => (step === 0 ? router.back() : setStep(step - 1));
+  const goBack = () => {
+    // Leaving the wizard (step 0 → router.back) unmounts it; if a photo copy is still in flight, its
+    // pending dispatch would be lost (the accepted photo never lands in the draft). Block until it settles.
+    // Step-back keeps the screen mounted, so it's always safe.
+    if (step === 0) {
+      if (savingPhotos > 0) {
+        setNotice({ tone: "error", text: "Saving a photo — one moment…" });
+        return;
+      }
+      router.back();
+      return;
+    }
+    setStep(step - 1);
+  };
 
   // Remove a photo from the draft AND cancel any already-queued upload for it (a prior offline submit may
   // have enqueued it) so a later drain can't upload evidence that's no longer part of the card. The
@@ -209,9 +223,13 @@ function Wizard(props: {
   // concurrent submit enqueues.
   const removePhotoAndCancelUpload = (photo: ScorecardDraftPhoto) => {
     dispatch({ type: "removePhoto", key: photo.key });
-    const task = removeQueuedUploads(ownerKey, [photo.clientUploadId]);
-    pendingRemovals.current.push(task);
-    void task.catch(() => undefined); // avoid an unhandled rejection; onSubmit inspects the settled result
+    const id = photo.clientUploadId;
+    pendingRemovalIds.current.add(id);
+    // Best-effort now; on success drop it from the pending set. On failure it STAYS pending so onSubmit
+    // retries the cancellation before allowing the drain.
+    void removeQueuedUploads(ownerKey, [id])
+      .then(() => pendingRemovalIds.current.delete(id))
+      .catch(() => undefined);
   };
 
   async function onCameraCapture(shot: CapturedShot, caption: string) {
@@ -236,6 +254,7 @@ function Wizard(props: {
           takenAt: exif.takenAt ?? shot.capturedAt,
           latitude: exif.latitude,
           longitude: exif.longitude,
+          addressSource: exif.addressSource,
           width: shot.width,
           height: shot.height,
         },
@@ -265,7 +284,7 @@ function Wizard(props: {
         const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
         dispatch({
           type: "addPhoto",
-          photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, width: asset.width, height: asset.height },
+          photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
         });
       } catch {
         setNotice({ tone: "error", text: "Couldn’t import that photo — please try again." });
@@ -279,12 +298,14 @@ function Wizard(props: {
     if (submitting) return;
     setSubmitting(true);
     setNotice(null);
-    // Let any in-flight photo removals settle first, so the drain in submitScorecard can't upload a
-    // just-removed photo. A failed removal blocks submit (rather than silently shipping stale evidence).
-    if (pendingRemovals.current.length > 0) {
-      const results = await Promise.allSettled(pendingRemovals.current);
-      pendingRemovals.current = [];
-      if (results.some((r) => r.status === "rejected")) {
+    // Retry-cancel any still-pending photo removals, so the drain in submitScorecard can't upload a
+    // just-removed photo. Only clear on success — a failure keeps the ids pending AND blocks submit
+    // (rather than silently shipping stale evidence).
+    if (pendingRemovalIds.current.size > 0) {
+      try {
+        await removeQueuedUploads(ownerKey, [...pendingRemovalIds.current]);
+        pendingRemovalIds.current.clear();
+      } catch {
         setNotice({ tone: "error", text: "Couldn’t finish removing a photo — please try again." });
         setSubmitting(false);
         return;

@@ -22,6 +22,9 @@ export interface ScorecardDraftPhoto {
   takenAt?: string;
   latitude?: number;
   longitude?: number;
+  // Source of the coordinates ("exif" vs live-GPS fallback) — forwarded to the upload so live_gps evidence
+  // isn't audited as EXIF-sourced (matches the Capture screen).
+  addressSource?: "exif" | "live_gps";
   width?: number;
   height?: number;
 }
