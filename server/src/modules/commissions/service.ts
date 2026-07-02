@@ -743,3 +743,47 @@ export async function removeEstimatorCommissionForDeal(
   }
   return removed.length;
 }
+
+/**
+ * Removes the attribution_role='sales_source' commission row for a given deal + sales source rep.
+ * Role-scoped: can NEVER delete the owner or estimator row, even if the source rep is also the owner.
+ * Mirrors removeEstimatorCommissionForDeal. Each deleted row is audited. Returns the count removed.
+ * MUST run inside the caller's transaction.
+ */
+export async function removeSalesSourceCommissionForDeal(
+  tx: TenantDb,
+  input: {
+    dealId: string;
+    salesSourceUserId: string;
+    triggeredByUserId: string | null;
+  }
+): Promise<number> {
+  const removed = await tx
+    .delete(dealSignedCommissions)
+    .where(
+      and(
+        eq(dealSignedCommissions.dealId, input.dealId),
+        eq(dealSignedCommissions.repUserId, input.salesSourceUserId),
+        eq(dealSignedCommissions.attributionRole, "sales_source")
+      )
+    )
+    .returning({
+      id: dealSignedCommissions.id,
+      amount: dealSignedCommissions.amount,
+      repUserId: dealSignedCommissions.repUserId,
+    });
+  for (const row of removed) {
+    await writeAuditLog(tx, {
+      tableName: "deal_signed_commissions",
+      recordId: row.id,
+      action: "delete",
+      changedBy: input.triggeredByUserId,
+      changes: {
+        amount: { from: row.amount, to: null },
+        repUserId: { from: row.repUserId, to: null },
+        dealId: { from: input.dealId, to: null },
+      },
+    });
+  }
+  return removed.length;
+}

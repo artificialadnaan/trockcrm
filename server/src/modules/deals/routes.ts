@@ -34,6 +34,7 @@ import {
   getDealSources,
   setDealContractSignedDate,
   setDealEstimator,
+  setDealSalesSource,
 } from "./service.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
@@ -1960,6 +1961,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       projectType,
       officeCode,
       projectNumber,
+      salesSourceUserId,
     } = body;
     if (!name) {
       throw new AppError(400, "Name is required");
@@ -2015,6 +2017,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       projectTypeId: serviceProjectType.id,
       projectNumber,
       officeCode: officeCodeResolution.officeCode,
+      salesSourceUserId: typeof salesSourceUserId === "string" && salesSourceUserId.trim() !== "" ? salesSourceUserId.trim() : null,
       auditContext: buildRouteAuditContext(req),
     });
     await req.commitTransaction!();
@@ -2047,6 +2050,10 @@ router.post("/", async (req, res, next) => {
       // and the client-side WritableDealFields Omit). estimatorUserName is a read-only display alias.
       estimatorUserId: _estimatorUserId,
       estimatorUserName: _estimatorUserName,
+      // salesSourceUserId is set once at service-opportunity creation and may ONLY be changed via the
+      // dedicated, leadership-gated PATCH /:id/sales-source route. Strip it here so the generic update
+      // path can never smuggle it in — mirrors the estimatorUserId exclusion above.
+      salesSourceUserId: _salesSourceUserId,
       ...rest
     } = body;
     if (!name || !stageId) {
@@ -2165,6 +2172,55 @@ router.patch(
         req.tenantDb!,
         req.params.id as string,
         estimatorUserId,
+        req.user!.id,
+        req.user!.activeOfficeId ?? req.user!.officeId
+      );
+      if (!deal) throw new AppError(404, "Deal not found");
+      await req.commitTransaction!();
+      const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+      res.json({ deal: redactDealResponse(deal, { includeHubspotId }) });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// PATCH /api/deals/:id/sales-source — set or clear the deal's sales source.
+// Admin/director ONLY, dedicated route: salesSourceUserId is deliberately OUT of updateDeal's
+// allowlist so it can NEVER be set through the generic PATCH /:id. Editing the sales source
+// re-attributes the additive sales_source commission row and must stay leadership-gated.
+// setDealSalesSource rejects change-order children (409 CHANGE_ORDER_FIELD_LOCKED).
+router.patch(
+  "/:id/sales-source",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      // Per-deal access gate: prove the caller can reach THIS specific deal before any mutation.
+      await assertDealRouteAccess(req, req.params.id as string);
+
+      // Distinguish an ABSENT field from an explicit null: a `{}` body must NOT silently CLEAR the
+      // sales source — that requires an explicit `salesSourceUserId: null`. An omitted key is a
+      // client bug, so reject it (422) rather than wiping commission attribution by accident.
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!("salesSourceUserId" in body)) {
+        throw new AppError(422, "salesSourceUserId is required (send null to clear the sales source)");
+      }
+      const raw = body.salesSourceUserId;
+      let salesSourceUserId: string | null;
+      if (raw == null || raw === "") {
+        salesSourceUserId = null;
+      } else if (
+        typeof raw === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.trim())
+      ) {
+        salesSourceUserId = raw.trim();
+      } else {
+        throw new AppError(422, "salesSourceUserId must be a valid UUID or null");
+      }
+      const deal = await setDealSalesSource(
+        req.tenantDb!,
+        req.params.id as string,
+        salesSourceUserId,
         req.user!.id,
         req.user!.activeOfficeId ?? req.user!.officeId
       );

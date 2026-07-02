@@ -41,9 +41,11 @@ import { writeAuditLog } from "../../lib/audit-log.js";
 import {
   calculateCommissionForDeal,
   mintEstimatorCommissionForDeal,
+  mintSalesSourceCommissionForDeal,
   recalculateCommissionForDeal,
   removeCommissionForDeal,
   removeEstimatorCommissionForDeal,
+  removeSalesSourceCommissionForDeal,
 } from "../commissions/service.js";
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
@@ -358,6 +360,7 @@ export interface CreateDealInput {
   source?: string;
   winProbability?: number;
   expectedCloseDate?: string;
+  salesSourceUserId?: string | null;
   auditContext?: AuditContext;
 }
 
@@ -2158,6 +2161,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       createdByUserId: input.actorUserId ?? null,
       winProbability: input.winProbability ?? null,
       expectedCloseDate: input.expectedCloseDate ?? null,
+      salesSourceUserId: input.salesSourceUserId ?? null,
       workflowRoute,
       createdAt,
       updatedAt: createdAt,
@@ -3804,6 +3808,103 @@ export async function setDealEstimator(
       await mintEstimatorCommissionForDeal(tx, {
         dealId,
         estimatorUserId: newEstimator,
+        triggeredByUserId: userId,
+      });
+    }
+
+    return updated;
+  });
+}
+
+/**
+ * Set or clear the sales source on a deal (leadership-gated; dedicated route only).
+ * Mirrors setDealEstimator in structure: SELECT … FOR UPDATE, change-order 409 lock, no-op
+ * short-circuit, validateAssignee for a non-null new source, UPDATE, audit, CO propagation.
+ * Does NOT include the estimator-only bid-board first-fill lock (sales source has no such guard).
+ * Re-attribution order: remove old source's 'sales_source' row first, then mint the new source's.
+ */
+export async function setDealSalesSource(
+  tenantDb: TenantDb,
+  dealId: string,
+  newSalesSourceUserId: string | null,
+  userId: string,
+  officeId: string | null = null
+): Promise<typeof deals.$inferSelect | null> {
+  return tenantDb.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(deals)
+      .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
+      .limit(1)
+      .for("update");
+    if (!existing) return null;
+
+    // A change order's sales source is inherited from the parent deal.
+    if (existing.isChangeOrder === true) {
+      throw new AppError(
+        409,
+        "A change order's sales source is inherited from the parent deal, not editable here.",
+        "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
+
+    const oldSalesSourceUserId = existing.salesSourceUserId ?? null;
+    const newSource = newSalesSourceUserId ?? null;
+
+    // No-op short-circuit — preserve: an unchanged source's commission row is never re-evaluated.
+    if (oldSalesSourceUserId === newSource) {
+      return existing;
+    }
+
+    // A NEW sales source must be an active user with access to the active office.
+    if (newSource != null) {
+      await validateAssignee(tx, newSource, officeId ?? undefined);
+    }
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(deals)
+      .set({ salesSourceUserId: newSource, updatedAt: now })
+      .where(eq(deals.id, dealId))
+      .returning();
+    if (!updated) return null;
+
+    await writeAuditLog(tx, {
+      tableName: "deals",
+      recordId: dealId,
+      action: "update",
+      changedBy: userId,
+      changes: {
+        salesSourceUserId: { from: oldSalesSourceUserId, to: newSource },
+      },
+    });
+
+    // Propagate to active change-order children (display/attribution sync only; no commission mutation
+    // on CO children — only the base deal mints/removes the sales_source commission row).
+    await tx
+      .update(deals)
+      .set({ salesSourceUserId: newSource, updatedAt: now })
+      .where(
+        and(
+          eq(deals.parentDealId, dealId),
+          eq(deals.isChangeOrder, true),
+          eq(deals.isActive, true)
+        )
+      );
+
+    // Re-attribute the additive sales_source commission on the BASE deal.
+    // Remove order: old source first, then mint new — never the reverse.
+    if (oldSalesSourceUserId != null) {
+      await removeSalesSourceCommissionForDeal(tx, {
+        dealId,
+        salesSourceUserId: oldSalesSourceUserId,
+        triggeredByUserId: userId,
+      });
+    }
+    if (newSource != null) {
+      await mintSalesSourceCommissionForDeal(tx, {
+        dealId,
+        salesSourceUserId: newSource,
         triggeredByUserId: userId,
       });
     }
