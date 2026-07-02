@@ -83,6 +83,17 @@ export async function sendSystemEmailWithMetadata(
     return { success: false, messageId: null };
   }
 
+  // Resend's post-encoding attachment limit is ~40MB and base64 inflates raw bytes by ~33%, so warn well
+  // before that (Resend still rejects oversized payloads via result.error as the backstop). Makes an
+  // oversized scorecard PDF easy to diagnose instead of a bare provider error.
+  const attachmentBytes = (options.attachments ?? []).reduce((sum, a) => sum + (a.content?.length ?? 0), 0);
+  if (attachmentBytes > 28 * 1024 * 1024) {
+    console.warn(
+      `[Email] Attachments total ${(attachmentBytes / (1024 * 1024)).toFixed(1)}MB — near Resend's ~40MB post-encoding limit; the send may be rejected.`,
+      { subject: subjectLine }
+    );
+  }
+
   const result = await resend.emails.send({
     from: fromAddress(),
     to: recipients,

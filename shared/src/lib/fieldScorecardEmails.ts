@@ -8,7 +8,10 @@
  */
 import { parseReviewerEmails } from "./rfpReviewerEmails.js";
 
-export const DEFAULT_NON_PROD_FIELD_SCORECARD_RECIPIENT = "adnaan.iqbal@gmail.com";
+// Non-personal placeholder for the dev/test fallback (never used in prod — see resolve below). Real dev
+// recipients come from FIELD_SCORECARD_EMAIL_RECIPIENTS or DEV_FIELD_SCORECARD_RECIPIENT; this avoids
+// embedding anyone's real address in shared source.
+export const DEFAULT_NON_PROD_FIELD_SCORECARD_RECIPIENT = "field-scorecards-dev@trockconstruction.com";
 
 const DEV_FALLBACK_NODE_ENVS = new Set(["development", "test"]);
 
@@ -22,5 +25,8 @@ export function resolveFieldScorecardRecipients(env: NodeJS.ProcessEnv): string[
   const parsed = parseReviewerEmails(env.FIELD_SCORECARD_EMAIL_RECIPIENTS);
   if (parsed.length > 0) return parsed;
   const isDev = typeof env.NODE_ENV === "string" && DEV_FALLBACK_NODE_ENVS.has(env.NODE_ENV);
-  return isDev ? [DEFAULT_NON_PROD_FIELD_SCORECARD_RECIPIENT] : [];
+  if (!isDev) return [];
+  // Dev/test only: an explicit DEV_FIELD_SCORECARD_RECIPIENT wins, else the non-personal placeholder.
+  const devOverride = parseReviewerEmails(env.DEV_FIELD_SCORECARD_RECIPIENT);
+  return devOverride.length > 0 ? devOverride.slice(0, 1) : [DEFAULT_NON_PROD_FIELD_SCORECARD_RECIPIENT];
 }

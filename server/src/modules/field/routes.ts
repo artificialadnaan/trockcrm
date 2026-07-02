@@ -852,6 +852,7 @@ fieldRoutes.post("/scorecards", requireFieldContractor, async (req, res, next) =
           userId: req.fieldUser!.id,
           userRole: req.fieldUser!.role,
           submittedByName,
+          office: { id: office.id, slug: office.slug },
           ...parsed,
         });
       },

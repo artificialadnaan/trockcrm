@@ -6,6 +6,7 @@ import {
 } from "../lib/system-email.js";
 import { getObjectBuffer } from "../lib/r2-client.js";
 import { resolveFieldScorecardRecipients } from "@trock-crm/shared/lib/fieldScorecardEmails";
+import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 // Reuse the branded-email primitives (frontend URL + hosted logo) so the scorecard email points at
 // trockcrm.com and matches the RFP / project-number emails' look.
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
@@ -279,22 +280,3 @@ export function buildFieldScorecardEmail(input: {
   return { subject, html, text, dealUrl };
 }
 
-// --- small local utilities (mirror rfp-rejection-email.ts) ---
-
-function normalizeText(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function isSafeTenantSchema(value: unknown): value is string {
-  return typeof value === "string" && /^office_[a-z0-9_]+$/.test(value);
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}

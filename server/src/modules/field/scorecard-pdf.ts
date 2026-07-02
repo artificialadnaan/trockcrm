@@ -196,5 +196,6 @@ function hairline(doc: PDFKit.PDFDocument): void {
 function formatDate(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  // Format in UTC so the same submittedAt renders identically regardless of the server's local timezone.
+  return d.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
 }

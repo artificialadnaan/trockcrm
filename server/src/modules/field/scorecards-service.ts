@@ -30,6 +30,8 @@ export interface CreateFieldScorecardInput {
   userRole: FieldAccessContext["userRole"];
   submittedByName?: string | null;
   dealId: string;
+  /** Owning office (id + slug) — used to enqueue the email job IN the submit txn (durable outbox). */
+  office: { id: string; slug: string };
   clientSubmissionId: string;
   weekOf: string;
   superintendentName?: string | null;
@@ -59,12 +61,38 @@ interface ScorecardSummarySource {
   submittedAt: unknown;
 }
 
+// job_type string — MUST match the worker's registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, ...). The server
+// can't import from the worker package, so the string is duplicated (as with the other enqueue sites).
+const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
+const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
+// Give the synchronous render + R2 upload (sub-second) a head start over the worker's poll, so the email
+// job normally finds the PDF already stored. If render/upload failed, the worker degrades to a
+// no-attachment notice — the notification is never lost.
+const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 30;
+
+/**
+ * Deterministic R2 key for a scorecard's PDF. Shared by the enqueue (createFieldScorecard, which stamps it
+ * into the job payload IN the submit txn) and the render/upload (finalizeFieldScorecardArtifacts), so the
+ * worker fetches exactly what was stored. RAW deal_number (photo-report key convention), else the deal id.
+ */
+export function scorecardPdfR2Key(
+  officeSlug: string,
+  dealNumber: string | null | undefined,
+  dealId: string,
+  scorecardId: string,
+): string {
+  const segment = dealNumber?.trim() || dealId;
+  return `office_${officeSlug}/deals/${segment}/documents/scorecards/${scorecardId}.pdf`;
+}
+
 /**
  * Persist a submitted scorecard. Server is the scoring authority: it gates on the deal being a
  * browsable field project, re-validates every section, recomputes total + rating, enforces the
  * action-item gate, and resolves photo evidence by clientUploadId (asserting each belongs to this deal
  * and is still active). Idempotent on `clientSubmissionId` — a retried offline submit returns the
- * existing card, never duplicates. The caller (route) wraps this in an office transaction.
+ * existing card, never duplicates. The caller (route) wraps this in an office transaction; the email job
+ * is enqueued in that SAME txn (durable outbox) so a post-response render/upload failure or process death
+ * can't drop the notification.
  */
 export async function createFieldScorecard(
   tenantDb: TenantDb,
@@ -142,6 +170,32 @@ export async function createFieldScorecard(
       .insert(fieldScorecardPhotos)
       .values(photoLinks.map((p) => ({ scorecardId: card.id, sectionKey: p.sectionKey, fileId: p.fileId })));
   }
+
+  // Durable outbox: enqueue the email job IN THIS TRANSACTION so it commits atomically with the scorecard.
+  // The PDF is rendered + stored post-response (best-effort); if that fails or the process dies first, the
+  // job still exists and the worker sends a no-attachment fallback — the notification is never dropped.
+  // Deterministic key matches what finalizeFieldScorecardArtifacts uploads.
+  const pdfR2Key = scorecardPdfR2Key(input.office.slug, project.dealNumber, input.dealId, card.id);
+  await tenantDb.insert(jobQueue).values({
+    jobType: FIELD_SCORECARD_EMAIL_JOB,
+    payload: {
+      tenantSchema: `office_${input.office.slug}`,
+      scorecardId: card.id,
+      dealId: input.dealId,
+      dealName: project.name,
+      projectNumber: project.projectNumber ?? null,
+      weekOf: input.weekOf,
+      totalScore: total,
+      ratingLabel: scorecardRatingLabel(rating),
+      submittedByName: input.submittedByName ?? null,
+      pdfR2Key,
+      officeId: input.office.id,
+    },
+    officeId: input.office.id,
+    status: "pending",
+    runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
+    maxAttempts: 6,
+  });
 
   return { scorecard: toSummary(card), created: true };
 }
@@ -253,21 +307,12 @@ export async function getFieldScorecardDetail(
   };
 }
 
-// job_type string — MUST match the worker's registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, ...). The server
-// can't import from the worker package, so the string is duplicated (as with the other enqueue sites).
-const FIELD_SCORECARD_EMAIL_JOB = "field_scorecard_email";
-const SCORECARD_PDF_DOWNLOAD_EXPIRY_SECONDS = 60 * 60;
-// Give the synchronous render + R2 upload (sub-second) a head start over the worker's poll, so the email
-// job normally finds the PDF already stored. If render/upload failed, the worker degrades to a
-// no-attachment notice — the notification is never lost.
-const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 30;
-
 /**
- * Enqueue the scorecard email (durable) then render + store its PDF (best-effort). Called POST-COMMIT
- * (outside the submit txn) so R2 I/O never holds a DB txn open and a PDF/R2 hiccup can NEVER lose the
- * submission. The ENQUEUE happens FIRST so a later render/upload failure can't drop the notification — the
- * worker then sends with the PDF attached if it's there, or a no-attachment fallback if not. Manages its
- * own connections (read via runInOffice, writes via runInOfficeTransaction); the caller swallows failures.
+ * Render + store the scorecard PDF (best-effort), then record its key. The email job was ALREADY enqueued
+ * durably in the submit txn (createFieldScorecard), so this is purely artifact production: called
+ * POST-COMMIT so R2 I/O never holds a txn open, and a throw here is harmless (the caller swallows it; the
+ * worker sends a no-attachment fallback if the PDF isn't there). Uses the SAME key builder as the enqueue,
+ * so the worker fetches exactly what this uploads. Manages its own connections.
  */
 export async function finalizeFieldScorecardArtifacts(
   office: { id: string; slug: string },
@@ -307,38 +352,11 @@ export async function finalizeFieldScorecardArtifacts(
     actionItems: card.actionItems ?? [],
   });
   const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
-  // Deterministic key (organised under the deal like photo reports; scorecardId keeps it unique). RAW
-  // deal_number (the photo-report key convention), falling back to the deal id when a deal has none.
-  const dealKeySegment = deal?.dealNumber?.trim() || card.dealId;
-  const r2Key = `office_${office.slug}/deals/${dealKeySegment}/documents/scorecards/${scorecardId}.pdf`;
+  // Same deterministic key the enqueue (createFieldScorecard) stamped into the job payload.
+  const r2Key = scorecardPdfR2Key(office.slug, deal?.dealNumber, card.dealId, scorecardId);
 
-  // 2. ENQUEUE FIRST (durable outbox) with the intended key — so a render/upload failure below can't drop
-  // the notification.
-  await runInOfficeTransaction(office, userId, async (db) => {
-    await db.insert(jobQueue).values({
-      jobType: FIELD_SCORECARD_EMAIL_JOB,
-      payload: {
-        tenantSchema: `office_${office.slug}`,
-        scorecardId,
-        dealId: card.dealId,
-        dealName: deal?.name ?? null,
-        projectNumber: card.projectNumber ?? null,
-        weekOf: pdfData.weekOf,
-        totalScore: card.totalScore,
-        ratingLabel: pdfData.ratingLabel,
-        submittedByName: card.submittedByName ?? null,
-        pdfR2Key: r2Key,
-        officeId: office.id,
-      },
-      officeId: office.id,
-      status: "pending",
-      runAfter: new Date(Date.now() + SCORECARD_EMAIL_RUN_AFTER_SECONDS * 1000),
-      maxAttempts: 6,
-    });
-  });
-
-  // 3. BEST-EFFORT: render + store the PDF, then record its key. A throw here propagates to the caller's
-  // .catch — harmless, the job is already enqueued and will send the no-attachment fallback.
+  // Render + store the PDF. A throw propagates to the caller's .catch — harmless, the email job is already
+  // enqueued (submit txn) and the worker sends the no-attachment fallback if this key stays empty.
   const pdf = await renderFieldScorecardPdf(pdfData);
   await putObject(r2Key, pdf, "application/pdf");
   await runInOfficeTransaction(office, userId, async (db) => {
