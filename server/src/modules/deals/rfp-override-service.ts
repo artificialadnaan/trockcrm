@@ -142,6 +142,13 @@ export async function requestOverrideApproval(
       name: deals.name,
       projectNumber: deals.projectNumber,
       dealNumber: deals.dealNumber,
+      // Read by resolveDealOwner (inside enqueueRfpBidBoardCreate -> loadRfpPayloadDeal) BEFORE its DB re-fetch,
+      // so they must be on the returned row or the voting-path create loses the deal owner (no owner email).
+      assignedRepId: deals.assignedRepId,
+      hubspotOwnerEmail: deals.hubspotOwnerEmail,
+      createdByUserId: deals.createdByUserId,
+      // Round-precise sourceEventId for the create-from-rfp job (falls back to id if absent).
+      rfpApprovalRequestEventId: deals.rfpApprovalRequestEventId,
     });
 
   if (!reset) {
@@ -179,8 +186,10 @@ export async function requestOverrideApproval(
       fieldChanges: { rfpOverrideState: { from: priorOverrideState, to: "approving" } },
       metadata: { rfpOverrideAction: "override_approve_via_create_from_rfp", approverEmail: input.approverEmail, rfpOverrideNote: input.note },
     });
-    // reset is the partial row from .returning(); enqueueRfpBidBoardCreate uses reset.id to re-fetch via
-    // loadRfpPayloadDeal, so the partial type is safe at runtime (cast required for the TypeScript signature).
+    // reset is the projected row from .returning() — it deliberately includes the owner-resolution columns
+    // (assignedRepId / hubspotOwnerEmail / createdByUserId) that resolveDealOwner reads directly, plus the round
+    // event id; enqueueRfpBidBoardCreate re-fetches the remaining deal columns via loadRfpPayloadDeal by id.
+    // The cast only satisfies the full deals.$inferSelect TypeScript signature.
     await enqueueRfpBidBoardCreate({
       tenantDb: input.tenantDb,
       officeId: input.officeId,

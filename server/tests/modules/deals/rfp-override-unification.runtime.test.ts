@@ -28,6 +28,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text, deal_number text, project_number text,
       rfp_approval_status text, rfp_approval_request_id bigint,
+      rfp_approval_request_event_id uuid, assigned_rep_id uuid, hubspot_owner_email text, created_by_user_id uuid,
       rfp_override_state text, rfp_override_error text, rfp_override_reviewed_at timestamptz,
       rfp_override_reviewed_by uuid, rfp_override_decision text, rfp_override_note text, updated_at timestamptz
     );
