@@ -35,5 +35,9 @@ export const userCommissionSettings = pgTable(
     // that flow into resolveEffectiveCapxRate can never see an invalid structure. Complements the
     // write-path assertCommissionStructure guard.
     check("user_commission_settings_structure_check", sql`${table.commissionStructure} IN ('solo', 'mixed')`),
+    // 0..1 bounds, matching the old columns' user_commission_settings_rate_bounds_chk (migration 0043).
+    check("user_commission_settings_capx_rate_solo_bounds_chk", sql`${table.capxRateSolo} >= 0 AND ${table.capxRateSolo} <= 1`),
+    check("user_commission_settings_capx_rate_mixed_bounds_chk", sql`${table.capxRateMixed} >= 0 AND ${table.capxRateMixed} <= 1`),
+    check("user_commission_settings_service_source_rate_bounds_chk", sql`${table.serviceSourceRate} >= 0 AND ${table.serviceSourceRate} <= 1`),
   ],
 );

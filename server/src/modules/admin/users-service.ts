@@ -349,10 +349,17 @@ export async function updateUser(
       const current = existingConfig[0];
 
       const commissionStructure = input.commissionStructure ?? current?.commissionStructure ?? "solo";
-      // Legacy commissionRate maps to capxRateSolo (see the input-type note): a pre-structure caller
-      // sets the single rate, which becomes the effective rate under the default 'solo' structure.
-      const capxRateSolo = input.capxRateSolo ?? input.commissionRate ?? Number(current?.capxRateSolo ?? 0);
-      const capxRateMixed = input.capxRateMixed ?? Number(current?.capxRateMixed ?? 0);
+      // Legacy commissionRate is a pre-structure single-rate alias → map it to whichever capX rate is
+      // ACTIVE under the resolved structure, so a stale client/integration editing a MIXED rep moves
+      // the effective mirror (not the inactive Solo field). New clients send the capX fields directly.
+      const capxRateSolo =
+        input.capxRateSolo ??
+        (commissionStructure === "solo" ? input.commissionRate : undefined) ??
+        Number(current?.capxRateSolo ?? 0);
+      const capxRateMixed =
+        input.capxRateMixed ??
+        (commissionStructure === "mixed" ? input.commissionRate : undefined) ??
+        Number(current?.capxRateMixed ?? 0);
       const serviceSourceRate = input.serviceSourceRate ?? Number(current?.serviceSourceRate ?? 0);
       const rollingFloor = input.rollingFloor ?? Number(current?.rollingFloor ?? 0);
       const overrideRate = input.overrideRate ?? Number(current?.overrideRate ?? 0);

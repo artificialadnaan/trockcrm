@@ -17,12 +17,18 @@
 ALTER TABLE public.user_commission_settings
   ADD COLUMN IF NOT EXISTS commission_structure text NOT NULL DEFAULT 'solo'
     CONSTRAINT user_commission_settings_structure_check CHECK (commission_structure IN ('solo', 'mixed'));
+-- New rate columns carry the same 0..1 invariant the old percentage columns get from
+-- user_commission_settings_rate_bounds_chk (migration 0043), so direct migration/seed/repair SQL
+-- can't persist a negative or >100% rate that would later break app reads/saves.
 ALTER TABLE public.user_commission_settings
-  ADD COLUMN IF NOT EXISTS capx_rate_solo numeric(7,6) NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS capx_rate_solo numeric(7,6) NOT NULL DEFAULT 0
+    CONSTRAINT user_commission_settings_capx_rate_solo_bounds_chk CHECK (capx_rate_solo >= 0 AND capx_rate_solo <= 1);
 ALTER TABLE public.user_commission_settings
-  ADD COLUMN IF NOT EXISTS capx_rate_mixed numeric(7,6) NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS capx_rate_mixed numeric(7,6) NOT NULL DEFAULT 0
+    CONSTRAINT user_commission_settings_capx_rate_mixed_bounds_chk CHECK (capx_rate_mixed >= 0 AND capx_rate_mixed <= 1);
 ALTER TABLE public.user_commission_settings
-  ADD COLUMN IF NOT EXISTS service_source_rate numeric(7,6) NOT NULL DEFAULT 0;
+  ADD COLUMN IF NOT EXISTS service_source_rate numeric(7,6) NOT NULL DEFAULT 0
+    CONSTRAINT user_commission_settings_service_source_rate_bounds_chk CHECK (service_source_rate >= 0 AND service_source_rate <= 1);
 
 -- Backfill: existing reps keep their current effective rate. Both capX rates start equal to
 -- commission_rate; structure stays 'solo' (the default). Re-runnable (guarded so it only seeds
