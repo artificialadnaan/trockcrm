@@ -286,6 +286,9 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
             key={r.scorecardId}
             onClick={() => onRowClick(r)}
             onKeyDown={(e) => {
+              // Only the row itself opens the drawer — ignore keydowns bubbling up from the nested PDF
+              // download button, whose own Enter/Space should trigger the download, not this handler.
+              if (e.target !== e.currentTarget) return;
               if (e.key === "Enter" || e.key === " ") {
                 e.preventDefault();
                 onRowClick(r);

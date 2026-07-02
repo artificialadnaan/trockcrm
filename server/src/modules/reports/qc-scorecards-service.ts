@@ -63,7 +63,11 @@ export async function getQcScorecardsReport(
     sql`sc.is_active = true`,
     sql`d.is_active = true`,
     sql`(COALESCE(psc.is_terminal, false) = false OR ${stageSlug} = ANY(${textArray(WON_STAGE_SLUGS)}))`,
-    sql`${stageSlug} <> ALL(${textArray(LOST_STAGE_SLUGS)})`,
+    // A deal is Lost if EITHER its CRM stage slug OR its Bid Board mirror slug is Lost — a BB-owned deal can
+    // be closed_lost in bid_board_stage_slug while its CRM stage_id is still open (see deal-filter-
+    // predicates). Checking only the COALESCE'd slug (psc.slug first) would let that stale row through.
+    sql`COALESCE(psc.slug, '') <> ALL(${textArray(LOST_STAGE_SLUGS)})`,
+    sql`COALESCE(d.bid_board_stage_slug, '') <> ALL(${textArray(LOST_STAGE_SLUGS)})`,
     sql`sc.week_of >= ${filters.from}`,
     sql`sc.week_of <= ${filters.to}`,
   ];
@@ -73,7 +77,9 @@ export async function getQcScorecardsReport(
   if (filters.region) rowConditions.push(sql`rc.name = ${filters.region}`);
   if (filters.rating) rowConditions.push(sql`sc.rating = ${filters.rating}`);
   if (filters.flaggedOnly) rowConditions.push(sql`COALESCE(array_length(sc.critical_deficiencies, 1), 0) > 0`);
-  if (filters.superintendent) rowConditions.push(sql`sc.superintendent_name ILIKE ${`%${filters.superintendent}%`}`);
+  // Exact match, not a contains-ILIKE: the dropdown options are verbatim names from this same column, so a
+  // substring predicate would over-match (selecting "Ann" would also return "Joann", "Sam Reyes" → "…Jr").
+  if (filters.superintendent) rowConditions.push(sql`sc.superintendent_name = ${filters.superintendent}`);
   if (filters.search) {
     const term = `%${filters.search}%`;
     rowConditions.push(
@@ -110,12 +116,16 @@ export async function getQcScorecardsReport(
     ${FROM}
     WHERE ${sql.join(rowConditions, sql` AND `)}
     ORDER BY sc.submitted_at DESC
-    LIMIT ${MAX_ROWS}
+    LIMIT ${MAX_ROWS + 1}
   `);
 
-  const rows = (((result as any).rows ?? result) as any[]) ?? [];
+  // Fetch one extra row so an exact-MAX_ROWS match isn't mislabeled as truncated. If the sentinel row came
+  // back, drop it and flag truncated; otherwise nothing was cut.
+  const allRows = (((result as any).rows ?? result) as any[]) ?? [];
+  const truncated = allRows.length > MAX_ROWS;
+  const rows = truncated ? allRows.slice(0, MAX_ROWS) : allRows;
   return {
-    truncated: rows.length >= MAX_ROWS,
+    truncated,
     regions: (optRow.regions ?? []).slice().sort(),
     superintendents: (optRow.superintendents ?? []).slice().sort(),
     scorecards: rows.map((r) => ({

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 
@@ -51,9 +51,14 @@ export function useQcScorecards(filters: QcScorecardFilters) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Monotonic request id: filters are server-side now, so quick filter changes can leave several requests in
+  // flight. Only the newest request is allowed to commit its response — a slower older one is discarded.
+  const requestIdRef = useRef(0);
+
   const { from, to, region, superintendent, rating, flaggedOnly, search } = filters;
 
   const refetch = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -66,14 +71,16 @@ export function useQcScorecards(filters: QcScorecardFilters) {
       if (flaggedOnly) qs.set("flaggedOnly", "true");
       if (search) qs.set("search", search);
       const res = await api<{ data: QcScorecardsResponse }>(`/reports/qc-scorecards?${qs.toString()}`);
+      if (requestId !== requestIdRef.current) return; // a newer request superseded this one
       setScorecards(res.data.scorecards);
       setTruncated(res.data.truncated ?? false);
       setRegions(res.data.regions ?? []);
       setSuperintendents(res.data.superintendents ?? []);
     } catch (e) {
+      if (requestId !== requestIdRef.current) return;
       setError(e instanceof Error ? e.message : "Failed to load QC reports");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [from, to, region, superintendent, rating, flaggedOnly, search, officeId]);
 
