@@ -233,6 +233,10 @@ export async function updateUser(
     reportsTo: string | null;
     isActive: boolean;
     notificationPrefs: Record<string, unknown>;
+    /** Legacy alias: pre-structure callers set a single rate here. Mapped to capxRateSolo (the
+     *  effective rate under the default 'solo' structure) so a stale bundle / old script isn't
+     *  silently dropped during rollout. New clients send capxRateSolo/capxRateMixed directly. */
+    commissionRate: number;
     commissionStructure: "solo" | "mixed";
     capxRateSolo: number;
     capxRateMixed: number;
@@ -319,6 +323,7 @@ export async function updateUser(
     if (plan.clearLocalAuthRevocation) await clearLocalAuthRevocation(tx, id, now);
 
     const hasCommissionPatch =
+      input.commissionRate !== undefined ||
       input.commissionStructure !== undefined ||
       input.capxRateSolo !== undefined ||
       input.capxRateMixed !== undefined ||
@@ -344,7 +349,9 @@ export async function updateUser(
       const current = existingConfig[0];
 
       const commissionStructure = input.commissionStructure ?? current?.commissionStructure ?? "solo";
-      const capxRateSolo = input.capxRateSolo ?? Number(current?.capxRateSolo ?? 0);
+      // Legacy commissionRate maps to capxRateSolo (see the input-type note): a pre-structure caller
+      // sets the single rate, which becomes the effective rate under the default 'solo' structure.
+      const capxRateSolo = input.capxRateSolo ?? input.commissionRate ?? Number(current?.capxRateSolo ?? 0);
       const capxRateMixed = input.capxRateMixed ?? Number(current?.capxRateMixed ?? 0);
       const serviceSourceRate = input.serviceSourceRate ?? Number(current?.serviceSourceRate ?? 0);
       const rollingFloor = input.rollingFloor ?? Number(current?.rollingFloor ?? 0);
