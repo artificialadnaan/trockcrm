@@ -29,6 +29,10 @@
       "types": "./dist/lib/rfpReviewerEmails.d.ts",
       "default": "./dist/lib/rfpReviewerEmails.js"
     },
+    "./lib/rfpVoterEmails": {
+      "types": "./dist/lib/rfpVoterEmails.d.ts",
+      "default": "./dist/lib/rfpVoterEmails.js"
+    },
     "./lib/userProvisioningGuards": {
       "types": "./dist/lib/userProvisioningGuards.d.ts",
       "default": "./dist/lib/userProvisioningGuards.js"
