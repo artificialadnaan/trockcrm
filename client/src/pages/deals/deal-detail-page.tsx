@@ -1199,7 +1199,11 @@ function DealRightRail({
   const canEditSalesSource = canEditEstimator;
   const [savingSalesSource, setSavingSalesSource] = useState(false);
   const [salesSourceError, setSalesSourceError] = useState<string | null>(null);
-  const salesSourceOptions = [...salesReps];
+  // Exclude the owner + estimator from the source picker (the server rejects those with 422); mirrors
+  // the create form's exclusion so a leader can't pick a conflicting source and only learn via a toast.
+  const salesSourceOptions = salesReps.filter(
+    (rep) => rep.id !== deal.assignedRepId && rep.id !== deal.estimatorUserId,
+  );
   if (deal.salesSourceUserId && !salesSourceOptions.some((rep) => rep.id === deal.salesSourceUserId)) {
     salesSourceOptions.unshift({
       id: deal.salesSourceUserId,

@@ -74,7 +74,7 @@ export async function computeRepEarnedFloorGate(
   // Source-leg signed date: only the deal's own contract dates — there is no lateral owner-row join in the
   // source leg (a source rep holds no dsc row on the sourced deal before the source commission row is
   // minted), so oq.owner_signed_date does not exist in that subquery context.
-  const sourceSignedDate = sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date)`;
+  const sourceSignedDate = sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, sq.contract_signed_date_at_signing)`;
   const earnedSignedDate = sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing)`;
   const notLost = sql`psc.slug NOT IN ('lost', 'production_lost', 'service_lost', 'closed_lost')`;
 
@@ -130,12 +130,15 @@ export async function computeRepEarnedFloorGate(
         ), 0)
         -- Sales-source qualifying leg: credit the rep's BOOKED source_value_amount (the value their
         -- commission row was computed from) for each deal where they hold a 'sales_source' commission row.
-        -- Keying on the dsc row (rather than d.sales_source_user_id) eliminates three overlap hazards:
-        --   1. Owner/source same rep: when a rep is both owner and source, no sales_source row is minted
-        --      (calculateCommissionForDeal skips the source cut), so this leg contributes 0 — the owner leg
-        --      counts the deal exactly once and there is no double-count.
+        -- Keying on the dsc row (rather than d.sales_source_user_id) eliminates the overlap hazards:
+        --   1. Owner/source same rep at sign: when a rep is both owner and source, no sales_source row is
+        --      minted (calculateCommissionForDeal skips the source cut), so this leg contributes 0 — the
+        --      owner leg counts the deal exactly once and there is no double-count.
         --   2. Estimator/source same rep: same mint-skip logic applies, zero phantom credit.
         --   3. Solo rep / no rate config: mint produces no row → source leg 0, matching earned = 0.
+        --   4. Source rep later REASSIGNED onto the deal (now its owner while still holding the earlier
+        --      sales_source row): the assigned_rep_id IS DISTINCT FROM repId term below drops the deal
+        --      from this leg (the owner leg already counts it via current ownership).
         -- source_value_amount is the snapshot value the commission was computed from, so a later live-value
         -- edit to the deal cannot shift the source rep's floor credit off their commission basis.
         + COALESCE((
@@ -145,6 +148,7 @@ export async function computeRepEarnedFloorGate(
           JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
           WHERE sq.rep_user_id = ${repId}
             AND sq.attribution_role = 'sales_source'
+            AND d.assigned_rep_id IS DISTINCT FROM ${repId}
             AND COALESCE(d.is_test_data, false) = false
             AND ${sourceSignedDate} IS NOT NULL
             AND ${notLost}

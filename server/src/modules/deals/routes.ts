@@ -2008,7 +2008,7 @@ router.post("/service-opportunity", async (req, res, next) => {
         req.user!.activeOfficeId ?? req.user!.officeId ?? undefined
       );
       if (resolvedSalesSource === repId) {
-        throw new AppError(400, "Sales source cannot be the assigned rep", "SALES_SOURCE_OWNER_CONFLICT");
+        throw new AppError(422, "Sales source cannot be the assigned rep", "SALES_SOURCE_CONFLICT");
       }
     }
 

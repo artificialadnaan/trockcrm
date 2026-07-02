@@ -20,6 +20,7 @@ const SVC = U("c02"); // service-rep who OWNS the sourced deals; floor 0
 const OTHER = U("c03"); // rep who owns nothing and sources nothing; floor 0
 const SOLO = U("c04"); // sources a deal but has NO sales_source dsc row (no rate config / skipped)
 const SELF = U("c05"); // both owns AND sources one deal (owner == source); floor 50000
+const REASSIGN = U("c06"); // holds a sales_source row on a deal LATER reassigned to them (now its owner)
 
 const ST_OPEN = U("68001"); // 'opportunity'
 const ST_LOST = U("68002"); // 'lost'
@@ -34,6 +35,7 @@ const D = {
   sourcedOld: U("e07"), // sourced by SRC, signed 2025 (before 2026 RANGE) — has dsc row
   selfOwned: U("e08"), // owned AND sourced by SELF, signed 2027; no sales_source dsc row (owner==source skip)
   soloSourced: U("e09"), // sourced by SOLO, signed 2027; NO dsc row (SOLO has no rate config)
+  reassigned: U("e10"), // owned by REASSIGN now AND has REASSIGN's earlier sales_source row (reassignment)
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -90,14 +92,16 @@ beforeAll(async () => {
       ('${SVC}', 'Service Rep', true, 'rep'),
       ('${OTHER}', 'Other Rep', true, 'rep'),
       ('${SOLO}', 'Solo Source Rep', true, 'rep'),
-      ('${SELF}', 'Self Source Rep', true, 'rep');
+      ('${SELF}', 'Self Source Rep', true, 'rep'),
+      ('${REASSIGN}', 'Reassigned Rep', true, 'rep');
 
     INSERT INTO user_commission_settings (user_id, commission_rate, rolling_floor, override_rate) VALUES
       ('${SRC}', 0.005, 50000, 0),
       ('${SVC}', 0.030, 0, 0),
       ('${OTHER}', 0.030, 0, 0),
       ('${SOLO}', 0.005, 10000, 0),
-      ('${SELF}', 0.005, 50000, 0);
+      ('${SELF}', 0.005, 50000, 0),
+      ('${REASSIGN}', 0.005, 50000, 0);
 
     -- D.sourced1: signed 2026-04-01, non-lost, active, owned by SVC, sourced by SRC, $100k
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, sales_source_user_id, stage_id,
@@ -158,14 +162,24 @@ beforeAll(async () => {
       '2027-06-01T00:00:00Z', 120000, '2027-01-10T00:00:00Z');
     -- Intentionally NO deal_signed_commissions row for SOLO on D.soloSourced.
 
-    -- sales_source dsc rows for SRC on the two signed sourced deals.
+    -- D.reassigned: REASSIGN sourced this deal earlier (has a sales_source dsc row), then the deal was
+    -- REASSIGNED to REASSIGN — so they are now its assigned_rep AND still hold the sales_source row.
+    -- The owner leg counts it via ownership; the source leg must EXCLUDE it (assigned_rep_id = repId) to
+    -- avoid a double-count.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, sales_source_user_id, stage_id,
+      contract_signed_at, awarded_amount, created_at)
+    VALUES ('${D.reassigned}', 'SS-10', 'Reassigned onto own source', '${REASSIGN}', '${REASSIGN}', '${ST_OPEN}',
+      '2027-06-01T00:00:00Z', 70000, '2027-01-10T00:00:00Z');
+
+    -- sales_source dsc rows.
     -- The new source leg keys exclusively on these rows (not d.sales_source_user_id), so they MUST exist
     -- for D.sourced1 and D.sourcedOld to appear in SRC's qualifying revenue.
     INSERT INTO deal_signed_commissions (deal_id, rep_user_id, attribution_role, source_value_amount,
       amount, applied_rate, contract_signed_date_at_signing)
     VALUES
       ('${D.sourced1}', '${SRC}', 'sales_source', 100000, 500, 0.005, '2026-04-01'),
-      ('${D.sourcedOld}', '${SRC}', 'sales_source', 80000, 400, 0.005, '2025-11-01');
+      ('${D.sourcedOld}', '${SRC}', 'sales_source', 80000, 400, 0.005, '2025-11-01'),
+      ('${D.reassigned}', '${REASSIGN}', 'sales_source', 70000, 350, 0.005, '2027-06-01');
   `);
   tdb = drizzle(pg);
 });
@@ -280,5 +294,13 @@ describe("computeRepEarnedFloorGate – sales-source qualifying leg", () => {
     expect(Number(gate2027.qualifyingRevenue)).toBe(200000); // owner leg only, not $400k
     expect(gate2027.floor).toBeCloseTo(50000, 2);
     expect(gate2027.met).toBe(true); // 200000 >= 50000
+  });
+
+  it("P2: source rep REASSIGNED onto their own sourced deal is not double-counted", async () => {
+    // D.reassigned: REASSIGN holds a sales_source dsc row ($70k) AND is now assigned_rep_id (reassigned
+    // onto it). The owner leg counts it via ownership; the source leg excludes it via
+    // `d.assigned_rep_id IS DISTINCT FROM repId`. Without that predicate qualifying would be $140k.
+    const gate = await computeRepEarnedFloorGate(tdb, REASSIGN, { from: "2027-01-01", to: "2027-12-31" });
+    expect(Number(gate.qualifyingRevenue)).toBe(70000); // owner leg once, source leg 0 — not $140k
   });
 });
