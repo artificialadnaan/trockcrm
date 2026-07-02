@@ -33,6 +33,11 @@ export function computeRfpVoteState(
   opts?: { threshold?: number },
 ): RfpVoteState {
   const threshold = opts?.threshold ?? DEFAULT_VOTE_THRESHOLD;
+  // Defensive: a threshold < 1 would make decidedAtFor index sorted[threshold-1] out of bounds (a 0/negative
+  // threshold also "decides" an empty set). No caller passes one today; fail loud rather than crash obscurely.
+  if (threshold < 1) {
+    throw new Error(`computeRfpVoteState: threshold must be >= 1, got ${threshold}`);
+  }
   const approveVotes = votes.filter((v) => v.decision === "approve");
   const rejectVotes = votes.filter((v) => v.decision === "reject");
   const approvals = approveVotes.length;

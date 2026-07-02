@@ -112,4 +112,9 @@ describe("computeRfpVoteState", () => {
     expect(r.outcome).toBe("approved");
     expect(r.decidedAt).toEqual(new Date("2026-07-02T11:00:00Z"));
   });
+
+  it("throws on a threshold < 1 (defensive — never a real caller)", () => {
+    expect(() => computeRfpVoteState([], { threshold: 0 })).toThrow(/threshold must be >= 1/);
+    expect(() => computeRfpVoteState([], { threshold: -2 })).toThrow(/threshold must be >= 1/);
+  });
 });
