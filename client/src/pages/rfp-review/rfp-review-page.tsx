@@ -61,6 +61,31 @@ function DealFacts({ review }: { review: RfpReviewDetail }) {
   );
 }
 
+function VotesPanel({ review }: { review: RfpReviewDetail }) {
+  if (!review.votes || review.votes.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-border">
+      <div className="border-b border-border px-4 py-2.5">
+        <span className="text-sm font-medium text-foreground">Vote record (2/3 no-go)</span>
+      </div>
+      <ul className="divide-y divide-border px-4">
+        {review.votes.map((vote) => (
+          <li key={`${vote.voterEmail}-${vote.votedAt}`} className="flex items-start justify-between gap-3 py-2.5">
+            <div>
+              <span className="text-sm font-medium text-foreground">{vote.voterName ?? vote.voterEmail}</span>
+              <span className={`ml-2 text-sm ${vote.decision === "reject" ? "text-destructive" : "text-emerald-600"}`}>
+                {vote.decision === "reject" ? "Rejected" : "Approved"}
+              </span>
+              {vote.reason ? <p className="mt-0.5 text-sm text-muted-foreground">{vote.reason}</p> : null}
+            </div>
+            <span className="whitespace-nowrap text-xs text-muted-foreground">{formatDateTime(vote.votedAt)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function RfpReviewPage() {
   const { dealId } = useParams<{ dealId: string }>();
   const [searchParams] = useSearchParams();
@@ -222,6 +247,7 @@ export function RfpReviewPage() {
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
           <DealFacts review={review} />
+          <VotesPanel review={review} />
 
           {review.overrideState === "approving" ? (
             <ApprovingPanel

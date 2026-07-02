@@ -5,6 +5,7 @@ import { deals } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
 import { resolveSyncHubOverrideApproveUrl } from "./rfp-payload.js";
+import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -58,6 +59,8 @@ export interface RfpReviewDetail {
   overrideError: string | null;
   /** True when a reviewer can act now: declined, not currently approving, and not already a re-confirmed denial. */
   actionable: boolean;
+  /** The round's recorded votes (voter + choice + reason + time), for the escalation summary. */
+  votes: RfpVoteView[];
 }
 
 function signBody(rawBody: string, secret: string): string {
@@ -308,6 +311,7 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
            d.project_number AS "projectNumber",
            d.rfp_approval_status AS "rfpApprovalStatus",
            d.rfp_approval_request_id AS "rfpApprovalRequestId",
+           d.rfp_approval_request_event_id AS "roundEventId",
            d.rfp_approval_requested_at AS "requestedAt",
            d.rfp_approval_requested_by AS "requestedById",
            req.display_name AS "requestedByName",
@@ -330,6 +334,8 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
   const rows = (Array.isArray(result) ? result : result.rows ?? []) as Array<Record<string, any>>;
   const row = rows[0];
   if (!row) return null;
+
+  const { rfpVotes } = await loadRfpVoteDetail(tenantDb, dealId, (row.roundEventId as string | null) ?? null);
 
   return {
     dealId: row.dealId,
@@ -355,6 +361,7 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
       row.rfpApprovalStatus === "declined" &&
       row.overrideState !== "approving" &&
       row.reviewDecision !== "denial_reconfirmed",
+    votes: rfpVotes,
   };
 }
 

@@ -25,6 +25,14 @@ export interface RfpReviewDetail {
   overrideError: string | null;
   /** True when a reviewer can act now: declined, not currently approving, and not already a re-confirmed denial. */
   actionable: boolean;
+  votes: Array<{
+    voterUserId: string | null;
+    voterName: string | null;
+    voterEmail: string;
+    decision: "approve" | "reject";
+    reason: string | null;
+    votedAt: string;
+  }>;
 }
 
 export function useRfpReview(dealId: string | undefined, officeId?: string | null) {
