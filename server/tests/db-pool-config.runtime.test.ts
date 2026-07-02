@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { pool } from "../src/db.js";
+import { describe, expect, it, vi } from "vitest";
+import { pool, isBrokenConnectionError, releasePooledClient } from "../src/db.js";
 
 // The API server's pool had no defense against a dead/half-open socket: node-pg's connectionTimeoutMillis
 // only bounds ACQUIRING a connection, not a query on one already checked out. When Railway's private
@@ -24,5 +24,46 @@ describe("API DB pool resilience config", () => {
     // Auth, office lookups, LISTEN/NOTIFY setup, and direct pool.query calls never run the tenant
     // middleware's `SET LOCAL statement_timeout`, so give the pool a default ceiling too.
     expect(pool.options.statement_timeout).toBe(30000);
+  });
+});
+
+// A pool-level query_timeout can reject a query on a DEAD socket without node-pg auto-removing the
+// checked-out client (unlike pool.query()), so callers holding a client (tenant middleware, cross-office
+// fan-out) must destroy it on a broken-connection error — else the next request inherits the dead socket.
+describe("isBrokenConnectionError", () => {
+  it("flags dead-socket / shutdown / timeout errors as broken", () => {
+    expect(isBrokenConnectionError({ code: "ECONNRESET" })).toBe(true);
+    expect(isBrokenConnectionError({ code: "57P01" })).toBe(true); // admin_shutdown
+    expect(isBrokenConnectionError({ code: "08006" })).toBe(true); // connection_failure
+    expect(isBrokenConnectionError(new Error("Connection terminated unexpectedly"))).toBe(true);
+    expect(isBrokenConnectionError(new Error("Query read timeout"))).toBe(true);
+  });
+
+  it("does NOT flag normal query errors or absent errors (connection stays reusable)", () => {
+    expect(isBrokenConnectionError({ code: "23505" })).toBe(false); // unique_violation
+    expect(isBrokenConnectionError(new Error("null value violates not-null constraint"))).toBe(false);
+    expect(isBrokenConnectionError(null)).toBe(false);
+    expect(isBrokenConnectionError(undefined)).toBe(false);
+  });
+});
+
+describe("releasePooledClient", () => {
+  it("destroys the client (release(err)) on a broken-connection error", () => {
+    const client = { release: vi.fn() } as any;
+    releasePooledClient(client, { code: "ECONNRESET" });
+    expect(client.release).toHaveBeenCalledTimes(1);
+    expect(client.release.mock.calls[0][0]).toBeInstanceOf(Error);
+  });
+
+  it("releases cleanly (no arg) on a normal query error", () => {
+    const client = { release: vi.fn() } as any;
+    releasePooledClient(client, { code: "23505" });
+    expect(client.release).toHaveBeenCalledWith();
+  });
+
+  it("releases cleanly when there is no error", () => {
+    const client = { release: vi.fn() } as any;
+    releasePooledClient(client);
+    expect(client.release).toHaveBeenCalledWith();
   });
 });

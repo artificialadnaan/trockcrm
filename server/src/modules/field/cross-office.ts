@@ -15,7 +15,7 @@
 import { sql } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
-import { pool } from "../../db.js";
+import { pool, releasePooledClient } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
 export type FieldOffice = { id: string; slug: string };
@@ -99,17 +99,22 @@ export async function listActiveFieldOffices(): Promise<FieldOffice[]> {
  */
 export async function runInOffice<T>(office: FieldOffice, run: (officeDb: FieldTenantDb) => Promise<T>): Promise<T> {
   const client = await pool.connect();
+  let brokenErr: unknown;
   try {
     await client.query("SELECT set_config('search_path', $1, false)", [`office_${office.slug},public`]);
     const officeDb = drizzle(client, { schema });
     return await run(officeDb);
+  } catch (err) {
+    brokenErr = err;
+    throw err;
   } finally {
     try {
       await client.query("SELECT set_config('search_path', 'public', false)");
-    } catch {
-      /* best-effort reset; the client is released regardless */
+    } catch (resetErr) {
+      // A failed reset means the connection is unusable — ensure it's destroyed, not recycled.
+      brokenErr = brokenErr ?? resetErr;
     }
-    client.release();
+    releasePooledClient(client, brokenErr);
   }
 }
 
@@ -241,6 +246,7 @@ export async function runInOfficeTransaction<T>(
   run: (officeDb: FieldTenantDb, office: FieldOffice) => Promise<T>,
 ): Promise<T> {
   const client = await pool.connect();
+  let brokenErr: unknown;
   try {
     await client.query("BEGIN");
     await client.query("SET LOCAL statement_timeout = '30s'");
@@ -251,11 +257,13 @@ export async function runInOfficeTransaction<T>(
     await client.query("COMMIT");
     return result;
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {
-      /* best-effort; the client is released regardless */
+    brokenErr = err;
+    await client.query("ROLLBACK").catch((rbErr) => {
+      // A failed rollback means the connection itself is unusable — destroy it, don't recycle.
+      brokenErr = rbErr;
     });
     throw err;
   } finally {
-    client.release();
+    releasePooledClient(client, brokenErr);
   }
 }

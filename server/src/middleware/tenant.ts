@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import type { PoolClient } from "pg";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { pool } from "../db.js";
+import { pool, releasePooledClient } from "../db.js";
 import { AppError } from "./error-handler.js";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
@@ -104,20 +104,27 @@ export async function tenantMiddleware(req: Request, res: Response, next: NextFu
 
     // Commit helper — route handlers call this before sending a response
     req.commitTransaction = async () => {
-      if (!committed) {
-        committed = true;
+      if (committed) return;
+      committed = true;
+      try {
         await client.query("COMMIT");
         client.release();
+      } catch (err) {
+        // COMMIT on a dead/timed-out socket: destroy the client so it isn't recycled, then surface.
+        releasePooledClient(client, err);
+        throw err;
       }
     };
 
     // Cleanup on connection close or error — rollback if commit never happened
     const cleanup = async () => {
-      if (!committed) {
-        committed = true;
-        await client.query("ROLLBACK").catch(() => {});
-        client.release();
-      }
+      if (committed) return;
+      committed = true;
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => {
+        rollbackErr = e; // a failed rollback means the connection is unusable → destroy on release
+      });
+      releasePooledClient(client, rollbackErr);
     };
     res.on("close", cleanup);
     res.on("error", cleanup);
@@ -126,8 +133,12 @@ export async function tenantMiddleware(req: Request, res: Response, next: NextFu
   } catch (err) {
     if (!committed) {
       committed = true;
-      await client.query("ROLLBACK").catch(() => {});
-      client.release();
+      let rollbackErr: unknown;
+      await client.query("ROLLBACK").catch((e) => {
+        rollbackErr = e;
+      });
+      // Destroy the client if the request error OR the failed rollback indicates a broken connection.
+      releasePooledClient(client, rollbackErr ?? err);
     }
     next(err);
   }
