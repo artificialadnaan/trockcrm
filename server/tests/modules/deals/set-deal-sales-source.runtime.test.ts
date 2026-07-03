@@ -131,7 +131,9 @@ describe("setDealSalesSource (runtime)", () => {
   });
 
   it("sets a sales source: mints the sales_source commission row, updates the deal", async () => {
-    const db = makeTenantDb({ id: "d", salesSourceUserId: null, assignedRepId: OWNER });
+    // workflowRoute: 'service' so the F3a gate inside mintSalesSourceCommissionForDeal passes (mocked here,
+    // but set for accuracy — any real call path that reaches this would need the service route).
+    const db = makeTenantDb({ id: "d", salesSourceUserId: null, assignedRepId: OWNER, workflowRoute: "service" });
     const result = await setDealSalesSource(db, "d", SRC_A, OWNER, "o1");
     expect(result).toBeTruthy();
     expect((result as FakeDeal).salesSourceUserId).toBe(SRC_A);
@@ -148,7 +150,7 @@ describe("setDealSalesSource (runtime)", () => {
   });
 
   it("changes sales source: removes old source's row first, then mints new source's row", async () => {
-    const db = makeTenantDb({ id: "d", salesSourceUserId: SRC_A, assignedRepId: OWNER });
+    const db = makeTenantDb({ id: "d", salesSourceUserId: SRC_A, assignedRepId: OWNER, workflowRoute: "service" });
     const result = await setDealSalesSource(db, "d", SRC_B, OWNER, "o1");
     expect(result).toBeTruthy();
     expect((result as FakeDeal).salesSourceUserId).toBe(SRC_B);
@@ -171,7 +173,7 @@ describe("setDealSalesSource (runtime)", () => {
   });
 
   it("clears sales source (null): removes old row, does not mint", async () => {
-    const db = makeTenantDb({ id: "d", salesSourceUserId: SRC_A, assignedRepId: OWNER });
+    const db = makeTenantDb({ id: "d", salesSourceUserId: SRC_A, assignedRepId: OWNER, workflowRoute: "service" });
     const result = await setDealSalesSource(db, "d", null, OWNER, "o1");
     expect(result).toBeTruthy();
     expect((result as FakeDeal).salesSourceUserId).toBeNull();

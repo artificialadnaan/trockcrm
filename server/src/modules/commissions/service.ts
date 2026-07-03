@@ -78,7 +78,22 @@ function multiplyDecimalStrings(value: string, rate: string): string {
 }
 
 /**
- * The applied rate (numeric(7,6) string) for a rep in a given role, or null to skip (no active rate).
+ * Discriminated union result for resolveAppliedRateForRole:
+ *   "rate"     — active settings, effective role rate > 0  (use appliedRate to compute commission)
+ *   "zero"     — active settings, effective role rate == 0 (deliberate zero — zeroes the row under zeroOnNoRate)
+ *   "inactive" — missing OR inactive settings (PRESERVE the historical row; never zero on inactive/missing)
+ *
+ * The "inactive" vs "zero" split is the load-bearing fix for the recompute bug: a deactivated rep's
+ * historical rows must be preserved, but a still-ACTIVE settings row with a deliberate 0% rate should
+ * zero the row when the settings-change recompute fires (zeroOnNoRate).
+ */
+export type RoleRateResolution =
+  | { status: "rate"; appliedRate: string }
+  | { status: "zero" }
+  | { status: "inactive" };
+
+/**
+ * Attribution-role-aware rate resolution for a rep, returned as a discriminated union (see above).
  * owner/estimator use the capX commission_rate mirror; sales_source uses the effective service-source rate
  * (0 unless the rep is 'mixed'). Single source of rate truth — used by BOTH the mint (insertCommissionRowForRep)
  * AND the settings-change recompute (recalculateCommissionForDeal) so a sales_source row is NEVER rated at
@@ -88,7 +103,7 @@ export async function resolveAppliedRateForRole(
   tx: TenantDb,
   repUserId: string,
   role: CommissionRole,
-): Promise<string | null> {
+): Promise<RoleRateResolution> {
   const [s] = await tx
     .select({
       commissionRate: userCommissionSettings.commissionRate,
@@ -101,7 +116,7 @@ export async function resolveAppliedRateForRole(
     .from(userCommissionSettings)
     .where(eq(userCommissionSettings.userId, repUserId))
     .limit(1);
-  if (!s || !s.isActive) return null;
+  if (!s || !s.isActive) return { status: "inactive" };
 
   if (role === "sales_source") {
     const rate = resolveEffectiveServiceSourceRate({
@@ -110,11 +125,13 @@ export async function resolveAppliedRateForRole(
       capxRateMixed: Number(s.capxRateMixed ?? 0),
       serviceSourceRate: Number(s.serviceSourceRate ?? 0),
     });
-    return rate > 0 ? rate.toFixed(6) : null;
+    return rate > 0 ? { status: "rate", appliedRate: rate.toFixed(6) } : { status: "zero" };
   }
   // owner / estimator: use the capX commission_rate mirror (the denormalized field kept in sync by the
-  // settings-save). A rate of 0 on an ACTIVE settings row = deliberate "no commission" → null to skip.
-  return Number(s.commissionRate) > 0 ? s.commissionRate : null;
+  // settings-save). A rate of 0 on an ACTIVE settings row = deliberate "no commission" → { status: "zero" }.
+  return Number(s.commissionRate) > 0
+    ? { status: "rate", appliedRate: s.commissionRate }
+    : { status: "zero" };
 }
 
 /**
@@ -154,10 +171,11 @@ async function insertCommissionRowForRep(
   // Role-aware rate resolution (INV-1): owner/estimator use the capX commission_rate mirror;
   // sales_source uses resolveEffectiveServiceSourceRate (0 for solo reps). Single call site —
   // no inline settings read — so the rate contract is ALWAYS attribution-role-correct here.
-  const appliedRate = await resolveAppliedRateForRole(tx, repUserId, role);
-  if (appliedRate === null) {
-    return { status: "skipped_no_rate" };
-  }
+  // Both "zero" (active deliberate 0%) and "inactive" (missing/deactivated) skip the mint —
+  // an unsigned/rateless rep earns nothing at sign time regardless of WHY they have no rate.
+  const res = await resolveAppliedRateForRole(tx, repUserId, role);
+  if (res.status !== "rate") return { status: "skipped_no_rate" };
+  const appliedRate = res.appliedRate;
 
   const amount = multiplyDecimalStrings(sourceValue.amount, appliedRate);
 
@@ -245,6 +263,7 @@ export async function calculateCommissionForDeal(
       estimatorUserId: deals.estimatorUserId,
       salesSourceUserId: deals.salesSourceUserId,
       isChangeOrder: deals.isChangeOrder,
+      workflowRoute: deals.workflowRoute,
       awardedAmount: deals.awardedAmount,
       bidEstimate: deals.bidEstimate,
       ddEstimate: deals.ddEstimate,
@@ -298,14 +317,15 @@ export async function calculateCommissionForDeal(
     });
   }
 
-  // Additive sales_source row: a mixed rep who SOURCED this service deal earns an ADDITIONAL row at their
+  // Additive sales_source row: a mixed rep who SOURCED this SERVICE deal earns an ADDITIONAL row at their
   // effective service-source rate (resolveEffectiveServiceSourceRate, via resolveAppliedRateForRole —
-  // NEVER the capX mirror). Guards: non-CO, source set, source ≠ owner, source ≠ estimator (so a rep can
-  // never hold two rows for the same deal). The rate check lives in mintSalesSourceCommissionForDeal
-  // (a solo-or-zero source simply yields skipped_no_rate and no row).
+  // NEVER the capX mirror). Guards: non-CO, service workflow only (never capX), source set, source ≠ owner,
+  // source ≠ estimator (so a rep can never hold two rows for the same deal). The rate check lives in
+  // mintSalesSourceCommissionForDeal (a solo-or-zero source simply yields skipped_no_rate and no row).
   let salesSourceResult: CalculateCommissionResult | undefined;
   if (
     !deal.isChangeOrder &&
+    deal.workflowRoute === "service" &&
     deal.salesSourceUserId != null &&
     deal.salesSourceUserId !== deal.assignedRepId &&
     deal.salesSourceUserId !== deal.estimatorUserId
@@ -450,15 +470,19 @@ export async function recalculateCommissionForDeal(
     // attribution_role, not a single "the rep's capX rate" read. A sales_source row uses the service-source
     // rate; owner/estimator rows use the capX mirror. This is the exact fix that prevents a settings-change
     // recompute from silently re-rating a sales_source row at the owner's capX rate.
-    const appliedRate = await resolveAppliedRateForRole(
+    const res = await resolveAppliedRateForRole(
       tenantDb, row.repUserId, row.attributionRole as CommissionRole,
     );
 
     // ALL-OR-NOTHING preserve when no valid rate — EXCEPT a deliberate 0% under zeroOnNoRate (settings-
     // change recompute). No source value is always a preserve (no basis to recompute from).
+    // "inactive" (missing/deactivated settings) is ALWAYS preserved regardless of zeroOnNoRate — only a
+    // still-ACTIVE settings row with a deliberate 0% rate may zero the row under zeroOnNoRate. This is the
+    // F1 fix: a deactivated rep's historical rows survive a settings-change recompute for another rep.
     if (!sourceValue) continue;
-    if (appliedRate === null && !input.zeroOnNoRate) continue;
-    const effectiveAppliedRate = appliedRate ?? "0";
+    if (res.status === "inactive") continue;
+    if (res.status === "zero" && !input.zeroOnNoRate) continue;
+    const effectiveAppliedRate = res.status === "rate" ? res.appliedRate : "0";
 
     const amount = multiplyDecimalStrings(sourceValue.amount, effectiveAppliedRate);
     // In-place, keyed on row.id. Deliberately recomputes ONLY amount/rate/source/date — it never touches
@@ -644,6 +668,7 @@ export async function mintSalesSourceCommissionForDeal(
       id: deals.id,
       assignedRepId: deals.assignedRepId,
       isChangeOrder: deals.isChangeOrder,
+      workflowRoute: deals.workflowRoute,
       awardedAmount: deals.awardedAmount,
       bidEstimate: deals.bidEstimate,
       ddEstimate: deals.ddEstimate,
@@ -655,6 +680,9 @@ export async function mintSalesSourceCommissionForDeal(
     .limit(1);
   if (!deal) return { status: "skipped_no_value" };
   if (deal.isChangeOrder) return { status: "skipped_change_order" };
+  // F3a: a sales_source cut is ONLY valid on SERVICE (not capX/normal) workflow deals. Gate minting here
+  // so a capX deal that happens to have sales_source_user_id set never earns a row for the source rep.
+  if (deal.workflowRoute !== "service") return { status: "skipped_no_value" };
 
   // Does this source rep ALREADY book a row on this deal (as any role)? Never mint a 2nd cut for them.
   const [existing] = await tx

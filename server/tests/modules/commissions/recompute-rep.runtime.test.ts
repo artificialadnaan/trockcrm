@@ -213,9 +213,10 @@ describe("recalculateRepCommissionsInOffice", () => {
     await pg.exec(
       `INSERT INTO public.deals
          (id, deal_number, name, stage_id, assigned_rep_id, sales_source_user_id,
-          awarded_amount, bid_estimate, dd_estimate, is_change_order, on_hold, office_code, contract_signed_date)
+          awarded_amount, bid_estimate, dd_estimate, is_change_order, on_hold, office_code, contract_signed_date,
+          workflow_route)
        VALUES ('${D}', 'D-0c20', 'Sourced', '${STAGE}', '${SVC}', '${SRC}',
-               100000, NULL, NULL, false, false, NULL, '2026-09-15')`,
+               100000, NULL, NULL, false, false, NULL, '2026-09-15', 'service')`,
     );
     await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
 
@@ -239,6 +240,54 @@ describe("recalculateRepCommissionsInOffice", () => {
 
     // MUST re-rate at the SERVICE-SOURCE rate (0.008 → 800.00), NOT the capX mirror (0.02 → 2000.00).
     expect(await srcRow()).toEqual({ amount: "800.00", applied_rate: "0.008000" });
+  });
+
+  it("PRESERVES a rep's rows when their settings are DEACTIVATED even under zeroOnNoRate", async () => {
+    // F1 fix verification: deactivating a rep's settings must NOT zero their historical rows when a
+    // co-booked rep's settings-change recompute fires (zeroOnNoRate=true). The distinguishing logic:
+    //   "inactive" (deactivated settings) → ALWAYS preserve
+    //   "zero"     (active, deliberate 0%) → zero under zeroOnNoRate
+    const INACT_REP = U("0a06");
+    const INACT_DEAL = U("0c05");
+    await pg.exec(
+      `INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+       VALUES ('${INACT_REP}', 'inact@rep.test', 'InactRep', 'rep', '${OFFICE}', true)`,
+    );
+    await pg.exec(
+      `INSERT INTO public.user_commission_settings
+         (user_id, commission_rate, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate, is_active)
+       VALUES ('${INACT_REP}', 0.030000, 'solo', 0.030000, 0.020000, 0.000000, true)`,
+    );
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, bid_estimate, dd_estimate,
+          is_change_order, on_hold, office_code, contract_signed_date)
+       VALUES ('${INACT_DEAL}', 'D-0c05', 'Inact Deal', '${STAGE}', '${INACT_REP}', 100000, NULL, NULL,
+          false, false, NULL, '2026-09-15')`,
+    );
+    await calculateCommissionForDeal(tdb, {
+      dealId: INACT_DEAL,
+      contractSignedDate: "2026-09-15",
+      triggeredByUserId: ADMIN,
+    });
+    // Baseline: 3000.00 @ 0.03 while settings are active.
+    const before = await ownerRow(INACT_DEAL);
+    expect(before).toEqual({ amount: "3000.00", applied_rate: "0.030000" });
+
+    // Deactivate the rep's settings (is_active=false). This simulates a rep leaving or being off-boarded.
+    await pg.exec(
+      `UPDATE public.user_commission_settings SET is_active = false WHERE user_id = '${INACT_REP}'`,
+    );
+
+    // Trigger a settings-change recompute with zeroOnNoRate (the path that a rate edit for ANY rep takes).
+    // With the old `null`-based logic, `resolveAppliedRateForRole` returns null for both inactive AND
+    // active-0% reps, and zeroOnNoRate would zero the row. With the new union, inactive must be preserved.
+    const count = await recalculateRepCommissionsInOffice(tdb, INACT_REP, ADMIN);
+    expect(count).toBe(0); // PRESERVED — not recomputed, not zeroed.
+
+    // The row must remain at the original 3000.00, not be wiped to 0.00.
+    const after = await ownerRow(INACT_DEAL);
+    expect(after).toEqual({ amount: "3000.00", applied_rate: "0.030000" });
   });
 
   it("re-rates a rep's rows to $0 when the effective rate is deliberately set to 0%", async () => {
