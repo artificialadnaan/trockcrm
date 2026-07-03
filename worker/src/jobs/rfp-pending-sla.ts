@@ -33,6 +33,9 @@ interface RunDeps {
   env?: NodeJS.ProcessEnv;
   logger?: Pick<Console, "log" | "warn" | "error">;
   slaHours?: number;
+  /** Single-flight guard: resolves to a release fn if this run acquired the lock, or null if another run
+   * holds it (this run should then skip). Default = a Postgres session advisory lock over the pool. */
+  acquireLock?: () => Promise<null | (() => Promise<void>)>;
 }
 
 export interface RfpPendingSlaBreach {
@@ -119,10 +122,13 @@ export async function findPendingRfpSlaBreaches(
 
 /**
  * Scan every active office for RFPs breaching the 24h pending SLA and email leadership once per pending
- * cycle. Exactly-once + retry-safe: a claim row in public.rfp_pending_sla_email_receipts (keyed
- * tenant_schema, deal_id, rfp_approval_requested_at) is inserted ON CONFLICT DO NOTHING BEFORE the send —
- * a conflict means this cycle already alerted (skip), and a send failure DELETEs the claim so the next scan
- * retries. A re-triggered RFP gets a fresh rfp_approval_requested_at -> a new cycle -> a new alert.
+ * cycle. Exactly-once + retry-safe:
+ *  - a single-flight Postgres advisory lock serializes runs (a still-running or second-instance run skips),
+ *    so two runs can't both submit the same alert;
+ *  - the receipt row (keyed tenant_schema, deal_id, rfp_approval_requested_at) is written only AFTER a
+ *    durable send, so a crash before the send leaves no receipt and the next scan retries;
+ *  - the email payload is stable per cycle, so a crash-then-retry reuses the same Resend idempotencyKey.
+ * A re-triggered RFP gets a fresh rfp_approval_requested_at -> a new cycle -> a new alert.
  */
 export async function runRfpPendingSlaScan(deps: RunDeps = {}): Promise<RfpPendingSlaScanSummary> {
   const env = deps.env ?? process.env;
@@ -146,35 +152,72 @@ export async function runRfpPendingSlaScan(deps: RunDeps = {}): Promise<RfpPendi
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
   const frontendUrl = resolveFrontendUrl(env);
 
-  const offices = await query(`SELECT id, slug FROM public.offices WHERE is_active = true`);
-  for (const office of offices.rows) {
-    if (!OFFICE_SLUG_REGEX.test(String(office.slug ?? ""))) {
-      logger.error(`[RfpPendingSla] Invalid office slug "${office.slug}" - skipping`);
-      continue;
+  // Single-flight: if another scan holds the lock, skip this tick rather than double-submit alerts.
+  const acquireLock = deps.acquireLock ?? acquireScanAdvisoryLock;
+  const releaseLock = await acquireLock();
+  if (!releaseLock) {
+    logger.log("[RfpPendingSla] Another scan is already running - skipping this tick");
+    return summary;
+  }
+
+  try {
+    const offices = await query(`SELECT id, slug FROM public.offices WHERE is_active = true`);
+    for (const office of offices.rows) {
+      if (!OFFICE_SLUG_REGEX.test(String(office.slug ?? ""))) {
+        logger.error(`[RfpPendingSla] Invalid office slug "${office.slug}" - skipping`);
+        continue;
+      }
+      const tenantSchema = `office_${office.slug}`;
+      let breaches: RfpPendingSlaBreach[];
+      try {
+        breaches = await findPendingRfpSlaBreaches(query, tenantSchema, slaHours);
+      } catch (err) {
+        logger.error("[RfpPendingSla] Breach scan failed for office - skipping", { tenantSchema, err });
+        continue;
+      }
+      summary.scanned += breaches.length;
+      for (const breach of breaches) {
+        const outcome = await processBreach(query, sendEmail, logger, {
+          tenantSchema,
+          officeId: (office.id as string | null) ?? null,
+          breach,
+          recipients,
+          frontendUrl,
+          slaHours,
+        });
+        summary[outcome] += 1;
+      }
     }
-    const tenantSchema = `office_${office.slug}`;
-    let breaches: RfpPendingSlaBreach[];
-    try {
-      breaches = await findPendingRfpSlaBreaches(query, tenantSchema, slaHours);
-    } catch (err) {
-      logger.error("[RfpPendingSla] Breach scan failed for office - skipping", { tenantSchema, err });
-      continue;
-    }
-    summary.scanned += breaches.length;
-    for (const breach of breaches) {
-      const outcome = await processBreach(query, sendEmail, logger, {
-        tenantSchema,
-        officeId: (office.id as string | null) ?? null,
-        breach,
-        recipients,
-        frontendUrl,
-        slaHours,
-      });
-      summary[outcome] += 1;
-    }
+  } finally {
+    await releaseLock().catch(() => undefined);
   }
   logger.log("[RfpPendingSla] Scan complete", summary);
   return summary;
+}
+
+// Postgres session advisory lock over a dedicated pooled client (a session lock must be acquired + released
+// on the SAME connection, so it can't go through pool.query which hands out arbitrary connections). Global
+// across worker instances, so a second instance's tick skips too. Returns null if the lock is already held.
+async function acquireScanAdvisoryLock(): Promise<null | (() => Promise<void>)> {
+  const LOCK_KEY = 0x52_46_50_53; // "RFPS" — stable, arbitrary
+  const client = await pool.connect();
+  try {
+    const res = await client.query("SELECT pg_try_advisory_lock($1) AS locked", [LOCK_KEY]);
+    if (res.rows[0]?.locked !== true) {
+      client.release();
+      return null;
+    }
+  } catch (err) {
+    client.release();
+    throw err;
+  }
+  return async () => {
+    try {
+      await client.query("SELECT pg_advisory_unlock($1)", [LOCK_KEY]);
+    } finally {
+      client.release();
+    }
+  };
 }
 
 async function processBreach(
@@ -213,7 +256,6 @@ async function processBreach(
       dealName: breach.dealName,
       dealNumber: breach.dealNumber,
       pendingSinceLabel: formatPendingSince(breach.requestedAt),
-      hoursPending: breach.hoursPending,
       slaHours,
       officeId,
       frontendUrl,
@@ -262,6 +304,7 @@ async function isStillBreaching(
   const result = await query(
     `SELECT d.rfp_approval_status AS status,
             d.rfp_approval_requested_at AS requested_at,
+            psc.slug AS stage_slug,
             COALESCE(d.is_bid_board_owned, false) AS bbo,
             COALESCE(d.is_active, false) AS active,
             COALESCE(d.is_test_data, false) AS test_data,
@@ -269,13 +312,22 @@ async function isStillBreaching(
             COALESCE(d.rfp_override_decision, '') AS override_decision,
             COALESCE(d.rfp_override_state, '') AS override_state
        FROM ${schemaName}.deals d
+       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
       WHERE d.id = $1::uuid
       LIMIT 1`,
     [breach.dealId],
   );
   const row = result.rows[0];
   if (!row) return false;
+  // The stage must STILL canonicalize to Opportunity — a deal moved out of Opportunity via POST /stage does
+  // not clear rfp_approval_status, so the status check alone would let a moved deal slip through.
+  const slug = row.stage_slug == null ? null : String(row.stage_slug);
+  const stageIsOpportunity =
+    slug != null &&
+    (toCanonicalDealStageSlug(slug, "normal") === "opportunity" ||
+      toCanonicalDealStageSlug(slug, "service") === "opportunity");
   return (
+    stageIsOpportunity &&
     (PENDING_RFP_AWAITING_STATUSES as readonly string[]).includes(String(row.status)) &&
     row.requested_at != null &&
     new Date(row.requested_at).toISOString() === breach.requestedAt &&
@@ -305,7 +357,6 @@ export function buildRfpPendingSlaEmail(input: {
   dealName: string;
   dealNumber: string | null;
   pendingSinceLabel: string;
-  hoursPending: number;
   slaHours: number;
   officeId?: string | null;
   frontendUrl: string;
@@ -318,17 +369,20 @@ export function buildRfpPendingSlaEmail(input: {
   const queueUrl = `${baseUrl}/deals/pending-rfp${officeParam}`;
   const safeDealUrl = escapeHtml(dealUrl);
   const safeQueueUrl = escapeHtml(queueUrl);
-  const hours = Math.floor(input.hoursPending);
 
+  // The payload is deliberately STABLE per pending cycle (no live "hours pending" count): the Resend
+  // idempotencyKey is keyed on rfp_approval_requested_at, and Resend rejects a same-key/different-payload
+  // retry. "more than {slaHours}h" + the fixed "Pending since" instant convey urgency without drifting each
+  // hour, so a crash-then-retry re-sends cleanly instead of being rejected until the key TTL expires.
   const subject = input.dealNumber
-    ? `RFP pending approval ${hours}h: ${input.dealNumber} (${input.dealName})`
-    : `RFP pending approval ${hours}h: ${input.dealName}`;
+    ? `RFP pending approval >${input.slaHours}h: ${input.dealNumber} (${input.dealName})`
+    : `RFP pending approval >${input.slaHours}h: ${input.dealName}`;
 
   const rows = [
     ["Deal name", input.dealName],
     ["Project number", input.dealNumber ?? "Pending"],
     ["Pending since", input.pendingSinceLabel],
-    ["Time pending", `${hours} hours (SLA ${input.slaHours}h)`],
+    ["Time pending", `More than ${input.slaHours} hours`],
   ] as const;
 
   const htmlRows = rows

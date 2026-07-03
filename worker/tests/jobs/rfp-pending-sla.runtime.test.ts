@@ -26,16 +26,16 @@ describe("buildRfpPendingSlaEmail", () => {
     dealName: "Sunrise <Terraces>",
     dealNumber: "DFW-1-17326",
     pendingSinceLabel: "Jan 1, 2026, 9:00 AM CT",
-    hoursPending: 31,
     slaHours: 24,
     officeId: "office-uuid",
     frontendUrl: "https://trockcrm.com",
   };
 
-  it("subject names the deal number + name", () => {
+  it("subject names the deal number + name, with a STABLE '>24h' (no live hours) for idempotent retries", () => {
     const email = buildRfpPendingSlaEmail(base);
     expect(email.subject).toContain("DFW-1-17326");
     expect(email.subject.toLowerCase()).toContain("pending");
+    expect(email.subject).toContain(">24h");
   });
 
   it("links to the deal with its officeId so a cross-office reviewer doesn't 404", () => {
@@ -49,11 +49,10 @@ describe("buildRfpPendingSlaEmail", () => {
     expect(email.html).toContain("/deals/pending-rfp?officeId=office-uuid");
   });
 
-  it("states how long it's been pending and the SLA, and escapes the deal name", () => {
+  it("shows the stable pending-since instant + SLA (not a drifting live count) and escapes the deal name", () => {
     const email = buildRfpPendingSlaEmail(base);
-    expect(email.html).toContain("Jan 1, 2026, 9:00 AM CT");
-    expect(email.html).toContain("31");
-    expect(email.html).toContain("24");
+    expect(email.html).toContain("Jan 1, 2026, 9:00 AM CT"); // stable per cycle
+    expect(email.html).toContain("More than 24 hours");
     expect(email.html).toContain("Sunrise &lt;Terraces&gt;"); // escaped, not raw <Terraces>
     expect(email.html).not.toContain("Sunrise <Terraces>");
   });
@@ -118,7 +117,9 @@ beforeAll(async () => {
       ('${U("db")}', 'OverrideApproving', '${OPP}', 'P-B', 'HS-B', false, 'pending', NOW() - INTERVAL '30 hours', true, false, false, NULL, 'approving');
   `);
   query = (sql: string, params?: unknown[]) => pg.query(sql, params as never[]);
-});
+  // 30s (up from the 10s default): under the full `test:runtime` gate several PGlite suites set up
+  // concurrently (maxWorkers 4), and the shared cold-start can push this hook past 10s.
+}, 30_000);
 
 afterAll(async () => {
   await pg?.close?.();
@@ -146,10 +147,11 @@ describe("findPendingRfpSlaBreaches (real SQL)", () => {
   });
 });
 
-// ---- Orchestration test (mock query + send): exactly-once (record-after-send) + pre-send re-check ----
-function makeScanMocks(opts: { receiptExists?: boolean; stillBreaching?: boolean } = {}) {
+// ---- Orchestration test (mock query + send): single-flight + exactly-once (record-after-send) + re-check ----
+function makeScanMocks(opts: { receiptExists?: boolean; stillBreaching?: boolean; stageSlug?: string } = {}) {
   const receiptExists = opts.receiptExists ?? false;
   const stillBreaching = opts.stillBreaching ?? true;
+  const stageSlug = opts.stageSlug ?? "opportunity";
   const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "msg-1" });
   const calls: string[] = [];
   const q = vi.fn(async (sql: string) => {
@@ -170,12 +172,16 @@ function makeScanMocks(opts: { receiptExists?: boolean; stillBreaching?: boolean
         ],
       };
     }
-    // The pre-send re-check re-reads the deal row (no hours_pending).
+    // The pre-send re-check re-reads the deal row (no hours_pending) incl. the current stage slug.
     if (sql.includes(".deals") && sql.includes("WHERE d.id")) {
       return {
-        rows: stillBreaching
-          ? [{ status: "pending", requested_at: "2026-01-01T00:00:00.000Z", bbo: false, active: true, test_data: false, on_hold: false, override_decision: "", override_state: "" }]
-          : [{ status: "approved", requested_at: "2026-01-01T00:00:00.000Z", bbo: false, active: true, test_data: false, on_hold: false, override_decision: "", override_state: "" }],
+        rows: [{
+          status: stillBreaching ? "pending" : "approved",
+          requested_at: "2026-01-01T00:00:00.000Z",
+          stage_slug: stageSlug,
+          bbo: false, active: true, test_data: false, on_hold: false,
+          override_decision: "", override_state: "",
+        }],
       };
     }
     if (sql.includes("SELECT 1") && sql.includes("rfp_pending_sla_email_receipts")) {
@@ -186,6 +192,8 @@ function makeScanMocks(opts: { receiptExists?: boolean; stillBreaching?: boolean
   return { sendEmail, q, calls };
 }
 
+// Always-acquires lock stub (no-op release) so tests exercise the scan body deterministically.
+const noLock = async () => async () => {};
 const enabledEnv = { RFP_PENDING_SLA_ENABLED: "true", RFP_REJECTION_EMAIL_RECIPIENTS: "boss@trock.test" };
 const silent = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
@@ -194,7 +202,7 @@ describe("runRfpPendingSlaScan orchestration", () => {
 
   it("is inert (no query, no send) when the flag is off", async () => {
     const { sendEmail, q } = makeScanMocks();
-    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, env: { RFP_REJECTION_EMAIL_RECIPIENTS: "boss@trock.test" }, logger: silent });
+    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: { RFP_REJECTION_EMAIL_RECIPIENTS: "boss@trock.test" }, logger: silent });
     expect(q).not.toHaveBeenCalled();
     expect(sendEmail).not.toHaveBeenCalled();
     expect(summary.sent).toBe(0);
@@ -202,13 +210,21 @@ describe("runRfpPendingSlaScan orchestration", () => {
 
   it("does not send (and logs) when no leadership recipients are configured", async () => {
     const { sendEmail, q } = makeScanMocks();
-    await runRfpPendingSlaScan({ query: q, sendEmail, env: { RFP_PENDING_SLA_ENABLED: "true" }, logger: silent });
+    await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: { RFP_PENDING_SLA_ENABLED: "true" }, logger: silent });
     expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("skips the whole tick (no query, no send) when another scan already holds the lock", async () => {
+    const { sendEmail, q } = makeScanMocks();
+    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: async () => null, env: enabledEnv, logger: silent });
+    expect(q).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(summary.sent).toBe(0);
   });
 
   it("sends exactly once for a breaching deal, recording the receipt only AFTER a durable send", async () => {
     const { sendEmail, q, calls } = makeScanMocks();
-    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, env: enabledEnv, logger: silent });
+    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: enabledEnv, logger: silent });
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(sendEmail.mock.calls[0][0]).toEqual(["boss@trock.test"]);
     expect(summary.sent).toBe(1);
@@ -219,14 +235,21 @@ describe("runRfpPendingSlaScan orchestration", () => {
 
   it("skips sending when a receipt already exists for this cycle", async () => {
     const { sendEmail, q } = makeScanMocks({ receiptExists: true });
-    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, env: enabledEnv, logger: silent });
+    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: enabledEnv, logger: silent });
     expect(sendEmail).not.toHaveBeenCalled();
     expect(summary.skipped).toBe(1);
   });
 
   it("skips (no send) when the deal is no longer awaiting by the time we go to send", async () => {
     const { sendEmail, q } = makeScanMocks({ stillBreaching: false });
-    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, env: enabledEnv, logger: silent });
+    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: enabledEnv, logger: silent });
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(summary.skipped).toBe(1);
+  });
+
+  it("skips (no send) when the deal has moved out of Opportunity before the send", async () => {
+    const { sendEmail, q } = makeScanMocks({ stageSlug: "won" });
+    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: enabledEnv, logger: silent });
     expect(sendEmail).not.toHaveBeenCalled();
     expect(summary.skipped).toBe(1);
   });
@@ -234,7 +257,7 @@ describe("runRfpPendingSlaScan orchestration", () => {
   it("writes NO receipt (so the next scan retries) and does not throw when the send fails", async () => {
     const { q, calls } = makeScanMocks();
     const sendEmail = vi.fn().mockRejectedValue(new Error("provider down"));
-    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, env: enabledEnv, logger: silent });
+    const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: enabledEnv, logger: silent });
     expect(summary.failed).toBe(1);
     expect(calls.some((s) => s.includes("INSERT INTO public.rfp_pending_sla_email_receipts"))).toBe(false);
   });
