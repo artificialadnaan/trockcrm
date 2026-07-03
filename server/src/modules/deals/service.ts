@@ -2049,8 +2049,9 @@ export async function getDealDetail(
   // Current-round RFP votes for the vote panel / focused vote page. Scoped to the deal's live round event id
   // so a re-trigger shows a clean tally. rfpVoteState comes from the ONE shared helper (reconciliation rule).
   // Gated on the feature flag so getDealDetail stays inert (no query) if rfp_votes doesn't yet exist
-  // (flag off or migration 0175 not applied). loadRfpVoteDetail also catches the 42P01 relation-not-found
-  // error as belt-and-suspenders if the table is missing while the flag is on.
+  // (flag off or migration 0175 not applied). As belt-and-suspenders when the flag is on but the table is
+  // missing, loadRfpVoteDetail probes with to_regclass first and returns an empty tally — never running a
+  // SELECT that would 42P01-poison this tenant transaction.
   const { rfpVotes: rfpVotesView, rfpVoteState } = isRfpVotingEnabled()
     ? await loadRfpVoteDetail(tenantDb, dealId, dealWithMetadata.rfpApprovalRequestEventId ?? null)
     : { rfpVotes: [] as RfpVoteView[], rfpVoteState: computeRfpVoteState([]) };

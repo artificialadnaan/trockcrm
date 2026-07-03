@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { sql } from "drizzle-orm";
 
 // Resolve the workspace package specifiers to their src under vitest (mirrors conversion-service.test).
 vi.mock("@trock-crm/shared/schema", async () => import("../../../../shared/src/schema/index.js"));
@@ -84,7 +85,7 @@ describe("loadRfpVoteDetail", () => {
     expect(rfpVoteState).toEqual(computeRfpVoteState([]));
   });
 
-  it("returns empty + zero-state (no throw) when the rfp_votes table does not exist (42P01 belt-and-suspenders)", async () => {
+  it("returns empty + zero-state (no throw) when rfp_votes is missing — probing with to_regclass, not a failing SELECT", async () => {
     // Simulate the pre-migration state: rfp_votes table absent; users table present for the JOIN path.
     const rawPg = new PGlite();
     await rawPg.exec(`CREATE TABLE users (id uuid PRIMARY KEY, display_name text);`);
@@ -94,6 +95,29 @@ describe("loadRfpVoteDetail", () => {
       const { rfpVotes: votes, rfpVoteState: state } = await loadRfpVoteDetail(noTableDb as any, DEAL, ROUND);
       expect(votes).toEqual([]);
       expect(state).toEqual(computeRfpVoteState([]));
+    } finally {
+      await rawPg.close();
+    }
+  });
+
+  it("does NOT poison the surrounding transaction when rfp_votes is missing (to_regclass probe never aborts it)", async () => {
+    // getDealDetail runs loadRfpVoteDetail inside a tenant TRANSACTION. If it ran a SELECT against a missing
+    // rfp_votes, the 42P01 would abort the whole transaction and every later statement would fail with "current
+    // transaction is aborted". The to_regclass probe raises nothing, so a follow-up query in the SAME txn still
+    // works — this asserts exactly that.
+    const rawPg = new PGlite();
+    await rawPg.exec(`CREATE TABLE users (id uuid PRIMARY KEY, display_name text);`);
+    const noTableDb = drizzle(rawPg);
+    try {
+      await noTableDb.transaction(async (tx: any) => {
+        const { rfpVotes: votes } = await loadRfpVoteDetail(tx, DEAL, ROUND);
+        expect(votes).toEqual([]);
+        // The transaction must still be usable — this throws "current transaction is aborted" if the probe had
+        // instead run a failing SELECT.
+        const after = await tx.execute(sql`SELECT 1 AS ok`);
+        const afterRows = Array.isArray(after) ? after : (after as { rows?: { ok: number }[] }).rows ?? [];
+        expect(Number(afterRows[0]?.ok)).toBe(1);
+      });
     } finally {
       await rawPg.close();
     }
