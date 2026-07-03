@@ -1119,7 +1119,8 @@ function DealRightRail({
   const assignedRep = formatNullable(deal.assignedRepName ?? deal.assignedRepId);
   const assignedRepInitials = initials(deal.assignedRepName ?? deal.assignedRepId ?? "NA");
   const assignedRepColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
-  const ownerOptions = [...salesReps];
+  // Exclude the current sales source — the server rejects reassigning the owner to it (SALES_SOURCE_CONFLICT).
+  const ownerOptions = salesReps.filter((rep) => rep.id !== deal.salesSourceUserId);
   if (deal.assignedRepId && !ownerOptions.some((rep) => rep.id === deal.assignedRepId)) {
     ownerOptions.unshift({
       id: deal.assignedRepId,
@@ -1159,7 +1160,8 @@ function DealRightRail({
   const [savingEstimator, setSavingEstimator] = useState(false);
   const [estimatorError, setEstimatorError] = useState<string | null>(null);
   const estimatorName = formatNullable(deal.estimatorUserName ?? deal.estimatorUserId);
-  const estimatorOptions = [...salesReps];
+  // Exclude the current sales source — the server rejects an estimator == sales source (SALES_SOURCE_CONFLICT).
+  const estimatorOptions = salesReps.filter((rep) => rep.id !== deal.salesSourceUserId);
   if (deal.estimatorUserId && !estimatorOptions.some((rep) => rep.id === deal.estimatorUserId)) {
     estimatorOptions.unshift({
       id: deal.estimatorUserId,

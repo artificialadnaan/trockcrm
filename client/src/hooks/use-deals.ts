@@ -644,7 +644,10 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
 // estimator field. It changes ONLY through the dedicated, leadership-gated estimator route
 // (PATCH /deals/:id/estimator). The server already excludes estimator from both the create insert/forward
 // and updateDeal's allowlist; this shared Omit closes the client-type hole on BOTH paths (defense in depth).
-export type WritableDealFields = Omit<Deal, "estimatorUserId" | "estimatorUserName" | "salesSourceUserId">;
+export type WritableDealFields = Omit<
+  Deal,
+  "estimatorUserId" | "estimatorUserName" | "salesSourceUserId" | "salesSourceUserName"
+>;
 
 export async function createDeal(input: Partial<WritableDealFields> & { name: string; stageId: string }, options: OfficeRequestOptions = {}) {
   return api<{ deal: Deal }>("/deals", {
