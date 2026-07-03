@@ -33,7 +33,7 @@ beforeAll(async () => {
     CREATE TABLE contacts (id uuid PRIMARY KEY, first_name text, last_name text);
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, project_number text, description text,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text, deal_number text, project_number text, description text,
       property_address text, property_city text, property_state text, bid_board_customer_name text,
       company_id uuid, primary_contact_id uuid, assigned_rep_id uuid,
       on_hold boolean DEFAULT false, is_change_order boolean DEFAULT false,

@@ -131,6 +131,8 @@ export interface Deal {
   // getDealById/getDealDetail's estimator-user join for the read-only/edit picker.
   estimatorUserId?: string | null;
   estimatorUserName?: string | null;
+  salesSourceUserId?: string | null;
+  salesSourceUserName?: string | null;
   propertyAddress: string | null;
   propertyCity: string | null;
   propertyState: string | null;
@@ -660,7 +662,10 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
 // estimator field. It changes ONLY through the dedicated, leadership-gated estimator route
 // (PATCH /deals/:id/estimator). The server already excludes estimator from both the create insert/forward
 // and updateDeal's allowlist; this shared Omit closes the client-type hole on BOTH paths (defense in depth).
-export type WritableDealFields = Omit<Deal, "estimatorUserId" | "estimatorUserName">;
+export type WritableDealFields = Omit<
+  Deal,
+  "estimatorUserId" | "estimatorUserName" | "salesSourceUserId" | "salesSourceUserName"
+>;
 
 export async function createDeal(input: Partial<WritableDealFields> & { name: string; stageId: string }, options: OfficeRequestOptions = {}) {
   return api<{ deal: Deal }>("/deals", {
@@ -682,6 +687,7 @@ export type CreateServiceOpportunityInput = Partial<Pick<
   | "projectTypeId"
   | "propertyId"
   | "regionId"
+  | "salesSourceUserId"
   | "source"
   | "winProbability"
 >> & { name: string };
@@ -735,6 +741,22 @@ export async function updateDealEstimator(
   return api<{ deal: Deal }>(`/deals/${dealId}/estimator`, {
     method: "PATCH",
     json: { estimatorUserId },
+    ...getOfficeRequestOptions(options.officeId),
+  });
+}
+
+// Dedicated sales-source mutation — hits PATCH /deals/:id/sales-source (admin/director only), NOT the
+// generic updateDeal: salesSourceUserId is intentionally excluded from updateDeal's allowlist (see
+// WritableDealFields above) so the generic path can never change it. Pass null to clear.
+// The office option mirrors the deal record load so a cross-office edit targets the SAME tenant.
+export async function updateDealSalesSource(
+  dealId: string,
+  salesSourceUserId: string | null,
+  options: OfficeRequestOptions = {}
+) {
+  return api<{ deal: Deal }>(`/deals/${dealId}/sales-source`, {
+    method: "PATCH",
+    json: { salesSourceUserId },
     ...getOfficeRequestOptions(options.officeId),
   });
 }

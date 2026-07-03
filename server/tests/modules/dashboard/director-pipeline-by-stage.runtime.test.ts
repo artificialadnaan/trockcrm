@@ -35,7 +35,7 @@ const PIPELINE_STAGE_CONFIG_COLUMNS =
   "id uuid PRIMARY KEY, name text, slug text, display_order integer, workflow_family text, is_active_pipeline boolean, is_terminal boolean, required_fields jsonb, required_documents jsonb, required_approvals jsonb, touchpoint_cadence_days integer, stale_escalation_tiers jsonb, procore_stage_mapping text, color text";
 
 const DEALS_COLUMNS =
-  "id uuid PRIMARY KEY, deal_number text, name text, stage_id uuid, assigned_rep_id uuid, dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, is_active boolean, workflow_route text, is_test_data boolean, on_hold boolean, expected_close_date date, bid_board_total_sales numeric, bid_board_stage_slug text, created_at timestamptz, updated_at timestamptz";
+  "id uuid PRIMARY KEY, deal_number text, name text, stage_id uuid, assigned_rep_id uuid, sales_source_user_id uuid, dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, is_active boolean, workflow_route text, is_test_data boolean, on_hold boolean, expected_close_date date, bid_board_total_sales numeric, bid_board_stage_slug text, created_at timestamptz, updated_at timestamptz";
 
 const OPP = "11111111-1111-1111-1111-111111111111";
 const EST = "22222222-2222-2222-2222-222222222222";

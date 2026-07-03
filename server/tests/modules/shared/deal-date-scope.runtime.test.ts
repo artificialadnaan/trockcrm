@@ -33,7 +33,7 @@ beforeAll(async () => {
   db = new PGlite();
   await db.exec(`
     CREATE TABLE deals (
-      id text PRIMARY KEY,
+      id text PRIMARY KEY, sales_source_user_id uuid,
       stage_id text NOT NULL,
       won_closed_date date,
       lost_at timestamptz,

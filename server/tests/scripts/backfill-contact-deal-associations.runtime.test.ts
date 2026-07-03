@@ -27,7 +27,7 @@ beforeAll(async () => {
     CREATE SCHEMA ${T};
     CREATE TABLE ${T}.contacts (id uuid PRIMARY KEY, is_active boolean NOT NULL DEFAULT true);
     CREATE TABLE ${T}.deals (
-      id uuid PRIMARY KEY, primary_contact_id uuid, is_active boolean NOT NULL DEFAULT true
+      id uuid PRIMARY KEY, sales_source_user_id uuid, primary_contact_id uuid, is_active boolean NOT NULL DEFAULT true
     );
     CREATE TABLE ${T}.contact_deal_associations (
       contact_id uuid NOT NULL, deal_id uuid NOT NULL, role varchar(100),

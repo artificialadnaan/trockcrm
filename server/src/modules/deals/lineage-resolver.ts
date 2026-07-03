@@ -11,7 +11,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { applyProjectTypeChange, normalizeOptionalDealBidDueDate } from "./service.js";
+import { applyProjectTypeChange, clearSalesSource, normalizeOptionalDealBidDueDate } from "./service.js";
 import { lockCurrentDealDescription, recordDescriptionHistoryChange } from "./deal-description-history.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -385,6 +385,33 @@ export async function writeResolvedDealFields(
     const field = rawField as ResolvedDealField;
     const writePlan = planDealFieldWrite({ field, hasSourceLead: Boolean(sourceLead) });
 
+    // Reciprocal conflict guard: the new owner cannot be the deal's current sales source.
+    // Mirrors the identical check in updateDeal (service.ts) — closes the bypass path where
+    // PATCH /resolved-fields could move the sales-source rep into the owner slot and produce
+    // a double commission cut (owner row + the existing additive sales_source row).
+    if (field === "assignedRepId") {
+      const newAssignedRepId = normalizeOptionalText(value);
+      // L (P3): allow reassigning to the current source when the SAME patch also moves the deal OUT of the
+      // service workflow — the F9 block below then clears the now-invalid source, so owner==source is only
+      // transient (no double-count). Otherwise a valid single-save correction would be forced into two
+      // requests. Mirrors the identical carve-out in updateDeal (service.ts).
+      const leavingServiceWorkflow =
+        resolvedDeal.deal.workflowRoute === "service" &&
+        "workflowRoute" in patch &&
+        (patch as { workflowRoute?: unknown }).workflowRoute !== "service";
+      if (
+        newAssignedRepId != null &&
+        newAssignedRepId === (resolvedDeal.deal.salesSourceUserId ?? null) &&
+        !leavingServiceWorkflow
+      ) {
+        throw new AppError(
+          422,
+          "Cannot reassign a deal to its sales source",
+          "SALES_SOURCE_CONFLICT"
+        );
+      }
+    }
+
     if (writePlan.target === "deal_scoping") {
       scopingValues.push([field, value]);
       continue;
@@ -510,6 +537,20 @@ export async function writeResolvedDealFields(
     officeId: input.officeId,
     now,
   });
+
+  // F9 (resolved-fields bypass): if this write just transitioned the deal out of the service
+  // workflow, clear any stale sales-source attribution. The PATCH /deals/:id/resolved-fields
+  // route writes workflowRoute directly via dealUpdates without going through updateDeal, so the
+  // guard there does not fire. Mirror the identical condition from updateDeal in service.ts so
+  // the invariant holds regardless of which write path changes the route.
+  if (
+    "workflowRoute" in dealUpdates &&
+    resolvedDeal.deal.workflowRoute === "service" &&
+    dealUpdates.workflowRoute !== "service" &&
+    (resolvedDeal.deal.salesSourceUserId ?? null) !== null
+  ) {
+    await clearSalesSource(tenantDb, dealId, input.userId);
+  }
 
   return getResolvedDeal(tenantDb, dealId);
 }

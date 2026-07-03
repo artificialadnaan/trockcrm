@@ -532,10 +532,11 @@ export interface RepCommissionDealEarning {
   earnedCommission: number;
   paymentCount: number;
   lastPaidAt: string | null;
-  // Which cut this row represents for the rep on this deal — 'owner' (they own the deal) or
-  // 'estimator' (the additive estimator cut, #742). Lets the drill-down split owner vs estimator
-  // earnings. Purely descriptive: the sum across rows is unchanged (== directEarnedCommission).
-  attributionRole: "owner" | "estimator";
+  // Which cut this row represents for the rep on this deal — 'owner' (they own the deal),
+  // 'estimator' (the additive estimator cut, #742), or 'sales_source' (the additive source cut).
+  // Lets the drill-down split owner vs estimator vs sales_source earnings. Purely descriptive:
+  // the sum across rows is unchanged (== directEarnedCommission).
+  attributionRole: "owner" | "estimator" | "sales_source";
 }
 
 export interface RepWonMissingContractDeal {
@@ -1056,7 +1057,7 @@ type CommissionDealRollup = {
   earnedCommission: number;
   paymentCount: number;
   lastPaidAt: string | null;
-  attributionRole: "owner" | "estimator";
+  attributionRole: "owner" | "estimator" | "sales_source";
 };
 
 function dashboardEarnedSignedDateSql() {
@@ -1185,7 +1186,10 @@ async function getCommissionDealRollups(
     commissionableMargin: Number(row.commissionable_margin ?? 0),
     earnedCommission: Number(row.earned_commission ?? 0),
     paymentCount: Number(row.payment_count ?? 0),
-    attributionRole: String(row.attribution_role) === "estimator" ? "estimator" : "owner",
+    attributionRole: (() => {
+      const role = String(row.attribution_role);
+      return role === "estimator" ? "estimator" : role === "sales_source" ? "sales_source" : "owner";
+    })() as "owner" | "estimator" | "sales_source",
     lastPaidAt: row.last_paid_at ? new Date(`${String(row.last_paid_at).slice(0, 10)}T00:00:00.000Z`).toISOString() : null,
   }));
 }
@@ -2998,7 +3002,12 @@ export async function getDirectorCommissionEvidence(
       navId: r.dealId,
       primary: r.dealNumber,
       name: r.dealName,
-      stageLabel: r.attributionRole === "estimator" ? "Estimator cut" : "Owner",
+      stageLabel:
+        r.attributionRole === "estimator"
+          ? "Estimator cut"
+          : r.attributionRole === "sales_source"
+            ? "Sales source cut"
+            : "Owner",
       value: r.earnedCommission,
       date: r.lastPaidAt ? r.lastPaidAt.slice(0, 10) : null,
       companyName: r.companyName,

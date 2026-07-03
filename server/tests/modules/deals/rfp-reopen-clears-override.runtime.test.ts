@@ -45,7 +45,7 @@ async function setup(): Promise<PGlite> {
     );
     CREATE SCHEMA ${SCHEMA};
     CREATE TABLE ${SCHEMA}.deals (
-      id uuid PRIMARY KEY, name text NOT NULL, deal_number text NOT NULL,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text NOT NULL, deal_number text NOT NULL,
       rfp_approval_status text, rfp_approval_request_id integer, rfp_approval_token text,
       rfp_approval_requested_by uuid, rfp_declined_reason text,
       rfp_conflict_reason text, rfp_conflict_with jsonb, rfp_last_attempt_error text,

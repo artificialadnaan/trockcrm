@@ -37,7 +37,7 @@ beforeAll(async () => {
     CREATE TABLE project_type_config (id uuid PRIMARY KEY, name text NOT NULL);
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL, is_terminal boolean NOT NULL DEFAULT false);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, assigned_rep_id uuid, stage_id uuid NOT NULL, project_type_id uuid,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, assigned_rep_id uuid, stage_id uuid NOT NULL, project_type_id uuid,
       is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_change_order boolean NOT NULL DEFAULT false, parent_deal_id uuid,
       won_closed_date date, actual_close_date date, updated_at timestamptz, created_at timestamptz,

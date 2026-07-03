@@ -70,7 +70,7 @@ beforeAll(async () => {
   db = new PGlite();
   await db.exec(`
     CREATE TABLE deals (
-      id text PRIMARY KEY,
+      id text PRIMARY KEY, sales_source_user_id uuid,
       stage_id text NOT NULL,
       bid_board_stage_slug text,
       on_hold boolean NOT NULL DEFAULT false,

@@ -53,8 +53,13 @@ router.get("/sales-reps", async (req, res, next) => {
   try {
     const purpose = typeof req.query.purpose === "string" ? req.query.purpose : undefined;
     const isDealReassignmentPicker = purpose === "deal-reassignment";
+    // The sales-source picker needs the active office's rep roster (role === 'rep' only, matching the
+    // assertSalesSourceIsRep gate) — NOT the self-only feed a plain rep otherwise gets. Without this a rep
+    // creating a service opportunity would see only themselves (then excluded as the owner) → an empty
+    // source list, and a leader could pick a non-rep that 422s on submit.
+    const isSalesSourcePicker = purpose === "sales-source";
 
-    if (req.user!.role === "rep" && !isDealReassignmentPicker) {
+    if (req.user!.role === "rep" && !isDealReassignmentPicker && !isSalesSourcePicker) {
       await req.commitTransaction!();
       res.json({ users: [{ id: req.user!.id, displayName: req.user!.displayName, email: req.user!.email }] });
       return;
@@ -84,11 +89,15 @@ router.get("/sales-reps", async (req, res, next) => {
     res.json({
       users: rows
         .filter((user) => user.isActive)
-        .filter((user) =>
-          isDealReassignmentPicker && "role" in user && typeof user.role === "string"
-            ? isCrmUserRole(user.role)
-            : true
-        )
+        .filter((user) => {
+          // Sales-source: role === 'rep' ONLY (the assertSalesSourceIsRep gate). Deal-reassignment: any
+          // CRM role. Otherwise (legacy callers): no role filter.
+          if (isSalesSourcePicker) return user.role === "rep";
+          if (isDealReassignmentPicker && "role" in user && typeof user.role === "string") {
+            return isCrmUserRole(user.role);
+          }
+          return true;
+        })
         // Do NOT re-filter to `user.officeId === officeId`. listUsers(officeId) already scopes the rows to
         // the active office via "office_id = officeId OR has a user_office_access grant to it", so a
         // primary-office-only filter STRIPS grant-holders — exactly the multi-office users the deal

@@ -44,7 +44,7 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
     CREATE TABLE deals (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY, sales_source_user_id uuid,
       name text NOT NULL,
       company_id uuid,
       property_id uuid,

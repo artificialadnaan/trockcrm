@@ -32,7 +32,7 @@ beforeAll(async () => {
     CREATE TABLE office_test.usage_session (id uuid PRIMARY KEY, user_id uuid, impersonator_id uuid);
     CREATE TABLE office_test.usage_heartbeat (id bigint, session_id uuid, user_id uuid, at timestamptz);
     CREATE TABLE office_test.deals (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY, sales_source_user_id uuid,
       name text,
       assigned_rep_id uuid,
       stage_id uuid,

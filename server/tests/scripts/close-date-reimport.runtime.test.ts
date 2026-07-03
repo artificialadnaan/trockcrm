@@ -62,7 +62,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE SCHEMA office_dallas;
     CREATE SCHEMA office_atlanta;
-    CREATE TABLE office_dallas.deals (id uuid PRIMARY KEY, deal_number text, expected_close_date date, updated_at timestamptz DEFAULT now());
+    CREATE TABLE office_dallas.deals (id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, expected_close_date date, updated_at timestamptz DEFAULT now());
     CREATE TABLE office_atlanta.deals (id uuid PRIMARY KEY, deal_number text, expected_close_date date, updated_at timestamptz DEFAULT now());
   `);
 });

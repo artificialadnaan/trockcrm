@@ -39,7 +39,7 @@ beforeAll(async () => {
   // host TZ (the canonical helper casts stage_entered_at::date without AT TIME ZONE).
   await db.exec(`SET TIME ZONE 'UTC';`);
   await db.exec(`
-    CREATE TABLE deals ( id text PRIMARY KEY, stage_entered_at timestamptz );
+    CREATE TABLE deals ( id text PRIMARY KEY, sales_source_user_id uuid, stage_entered_at timestamptz );
     INSERT INTO deals (id, stage_entered_at) VALUES
       ('before',  '2026-04-30T23:59:59Z'),
       ('on_from', '2026-05-01T00:00:00Z'),

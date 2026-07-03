@@ -63,7 +63,7 @@ beforeAll(async () => {
       bid_board_stage_family varchar(50), bid_board_stage_status varchar(50),
       bid_board_stage_entered_at timestamptz, bid_board_stage_exited_at timestamptz,
       bid_board_stage_duration text, bid_board_loss_outcome varchar(100), bid_board_estimator text,
-      estimator_user_id uuid, bid_board_office text, bid_board_status text,
+      estimator_user_id uuid, sales_source_user_id uuid, bid_board_office text, bid_board_status text,
       bid_board_sales_price_per_area text, bid_board_project_cost numeric(14, 2),
       bid_board_profit_margin_pct numeric(9, 4), bid_board_total_sales numeric(14, 2),
       bid_board_created_at timestamptz, bid_board_due_date date, bid_board_customer_name text,
