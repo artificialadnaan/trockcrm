@@ -1611,7 +1611,7 @@ router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
     if (isServiceRfp(deal)) {
       throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
     }
-    if (!deal.rfpApprovalRequestEventId || deal.rfpApprovalStatus !== "pending") {
+    if (!deal.rfpApprovalRequestEventId || deal.rfpApprovalStatus !== "pending" || deal.rfpApprovalRequestId != null) {
       throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
     }
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;

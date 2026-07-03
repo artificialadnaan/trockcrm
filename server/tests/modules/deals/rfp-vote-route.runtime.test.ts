@@ -79,7 +79,7 @@ function buildApp(pgDb: PGlite, user: { id: string; email: string }) {
       }).from(deals).where(eq(deals.id, req.params.id)).limit(1);
       if (!deal) throw new AppError(404, "Deal not found");
       if (isServiceRfp(deal)) throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
-      if (!deal.rfpApprovalRequestEventId || deal.rfpApprovalStatus !== "pending") throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
+      if (!deal.rfpApprovalRequestEventId || deal.rfpApprovalStatus !== "pending" || deal.rfpApprovalRequestId != null) throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
       const officeId = req.user.activeOfficeId ?? req.user.officeId ?? null;
       const result = await castRfpVote({ tenantDb: req.tenantDb, officeId, deal, voter: { userId: req.user.id, email: req.user.email }, decision, reason: decision === "reject" ? rawReason : null });
       await req.commitTransaction();
@@ -126,6 +126,18 @@ describe("POST /deals/:id/rfp-vote", () => {
     const votes = (await pg.query(`SELECT decision FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
     expect(votes).toHaveLength(1);
     expect(votes[0].decision).toBe("approve");
+  });
+
+  it("409 RFP_NO_VOTE_ROUND for a legacy deal that has a SyncHub rfp_approval_request_id (non-null)", async () => {
+    pg = await setup();
+    // Stamp a SyncHub request_id so the deal looks like a legacy single-approver deal.
+    await pg.query(`UPDATE deals SET rfp_approval_request_id = 42 WHERE id = $1`, [DEAL]);
+    const res = await request(buildApp(pg, VOTER)).post(`/deals/${DEAL}/rfp-vote`).send({ decision: "approve" });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("RFP_NO_VOTE_ROUND");
+    // No vote row must be inserted — the guard fires before castRfpVote.
+    const votes = (await pg.query(`SELECT decision FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(0);
   });
 
   it("409 when the same voter votes twice (locked on cast)", async () => {
