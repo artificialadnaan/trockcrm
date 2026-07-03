@@ -214,8 +214,13 @@ async function acquireScanAdvisoryLock(): Promise<null | (() => Promise<void>)> 
   return async () => {
     try {
       await client.query("SELECT pg_advisory_unlock($1)", [LOCK_KEY]);
-    } finally {
       client.release();
+    } catch (err) {
+      // The unlock query failed — the session may still hold the advisory lock, so DESTROY the connection
+      // (release(err)) rather than returning a possibly-still-locked session to the pool. Postgres frees a
+      // session-level advisory lock when its backend disconnects, so dropping the client also drops the lock.
+      client.release(err as Error);
+      throw err;
     }
   };
 }
