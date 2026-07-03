@@ -63,8 +63,9 @@ import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
-import { loadRfpVoteDetail } from "./rfp-vote-detail.js";
+import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
+import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
@@ -2047,11 +2048,12 @@ export async function getDealDetail(
 
   // Current-round RFP votes for the vote panel / focused vote page. Scoped to the deal's live round event id
   // so a re-trigger shows a clean tally. rfpVoteState comes from the ONE shared helper (reconciliation rule).
-  const { rfpVotes: rfpVotesView, rfpVoteState } = await loadRfpVoteDetail(
-    tenantDb,
-    dealId,
-    dealWithMetadata.rfpApprovalRequestEventId ?? null
-  );
+  // Gated on the feature flag so getDealDetail stays inert (no query) if rfp_votes doesn't yet exist
+  // (flag off or migration 0175 not applied). loadRfpVoteDetail also catches the 42P01 relation-not-found
+  // error as belt-and-suspenders if the table is missing while the flag is on.
+  const { rfpVotes: rfpVotesView, rfpVoteState } = isRfpVotingEnabled()
+    ? await loadRfpVoteDetail(tenantDb, dealId, dealWithMetadata.rfpApprovalRequestEventId ?? null)
+    : { rfpVotes: [] as RfpVoteView[], rfpVoteState: computeRfpVoteState([]) };
 
   // The vote panel + focused vote page must be INERT for non-vote deals. A deal is in a vote round ONLY when
   // it's non-service AND either (a) it has recorded votes, or (b) it's a freshly-opened round (flag on, status
