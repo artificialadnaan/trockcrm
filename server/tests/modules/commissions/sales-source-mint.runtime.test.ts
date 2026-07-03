@@ -31,6 +31,8 @@ const REP_MIX = U("0a11");
 const REP_SOLO = U("0a12");
 /** inactive rep: is_active=false → resolveAppliedRateForRole must return { status: "inactive" } */
 const REP_INACT = U("0a13");
+/** demoted source: was a rep when assigned, now role='director' with ACTIVE mixed settings (Finding H) */
+const SRC_NONREP = U("0a14");
 const STAGE = U("0502");
 
 let pg: PGlite;
@@ -89,10 +91,11 @@ beforeAll(async () => {
 
   await pg.exec(
     `INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
-     VALUES ('${ADMIN}',     'admin2@t.test', 'Admin2', 'admin', '${OFFICE}', true),
-            ('${REP_MIX}',  'mix@t.test',   'Mix',    'rep',   '${OFFICE}', true),
-            ('${REP_SOLO}', 'solo@t.test',  'Solo',   'rep',   '${OFFICE}', true),
-            ('${REP_INACT}','inact@t.test', 'Inact',  'rep',   '${OFFICE}', false)`,
+     VALUES ('${ADMIN}',     'admin2@t.test', 'Admin2', 'admin',    '${OFFICE}', true),
+            ('${REP_MIX}',  'mix@t.test',   'Mix',    'rep',      '${OFFICE}', true),
+            ('${REP_SOLO}', 'solo@t.test',  'Solo',   'rep',      '${OFFICE}', true),
+            ('${REP_INACT}','inact@t.test', 'Inact',  'rep',      '${OFFICE}', false),
+            ('${SRC_NONREP}','demoted@t.test','Demoted','director', '${OFFICE}', true)`,
   );
   // REP_MIX:   mixed → capX mirror = capx_rate_mixed = 0.020000; service-source effective = 0.005000.
   // REP_SOLO:  solo  → capX mirror = capx_rate_solo  = 0.030000; service-source effective = 0 (stray).
@@ -102,7 +105,8 @@ beforeAll(async () => {
        (user_id, commission_rate, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate, is_active)
      VALUES ('${REP_MIX}',   0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
             ('${REP_SOLO}',  0.030000, 'solo',  0.030000, 0.020000, 0.005000, true),
-            ('${REP_INACT}', 0.025000, 'solo',  0.025000, 0.015000, 0.000000, false)`,
+            ('${REP_INACT}', 0.025000, 'solo',  0.025000, 0.015000, 0.000000, false),
+            ('${SRC_NONREP}',0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true)`,
   );
 }, 30_000);
 
@@ -184,5 +188,19 @@ describe("mintSalesSourceCommissionForDeal (via calculateCommissionForDeal)", ()
     await seedDeal(D, { rep: REP_MIX, awarded: 30000, salesSource: REP_MIX, workflowRoute: "service" });
     await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
     expect((await dscRows(D)).filter((r) => r.rep_user_id === REP_MIX)).toHaveLength(1); // only the owner row
+  });
+
+  it("does NOT mint a sales_source row when the source's role is no longer 'rep' (Finding H — demoted after assignment)", async () => {
+    const D = U("0c13");
+    // SRC_NONREP was a rep when the deal was sourced, but has since been demoted to 'director' while keeping
+    // ACTIVE mixed settings (service_source_rate 0.005). assertSalesSourceIsRep only gates SET-time
+    // selection; the mint must re-check the CURRENT role and skip, so a former rep can't keep earning a
+    // sales_source cut on deals signed / recompute-discovered after the demotion.
+    await seedDeal(D, { rep: REP_SOLO, awarded: 30000, salesSource: SRC_NONREP, workflowRoute: "service" });
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
+    const rows = await dscRows(D);
+    expect(rows.some((r) => r.attribution_role === "sales_source")).toBe(false);
+    // The owner row is unaffected (the source-role guard only blocks the additive sales_source leg).
+    expect(rows.find((r) => r.attribution_role === "owner")).toMatchObject({ rep_user_id: REP_SOLO });
   });
 });

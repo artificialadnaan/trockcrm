@@ -1146,7 +1146,7 @@ function DealRightRail({
   // director/admin/construction user here and only learn it's invalid via a 422 on submit. Load it
   // separately, gated to leadership (admin/director, == canEditSalesSource) so a rep viewing the page
   // issues no extra fetch.
-  const { salesReps: sourceSalesReps } = useSalesReps(
+  const { salesReps: sourceSalesReps, loading: sourceSalesRepsLoading } = useSalesReps(
     officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
     {
       purpose: "sales-source",
@@ -1417,7 +1417,10 @@ function DealRightRail({
                     <select
                       aria-label="Edit sales source"
                       className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900"
-                      disabled={salesRepsLoading || savingSalesSource}
+                      // Watch the sales-source feed's own loading flag (it populates salesSourceOptions),
+                      // NOT the deal-reassignment salesRepsLoading — else the picker could go interactive
+                      // with a stale/empty list before its own fetch resolves.
+                      disabled={sourceSalesRepsLoading || savingSalesSource}
                       value={deal.salesSourceUserId ?? ""}
                       onChange={(event) => {
                         void handleSalesSourceChange(event.currentTarget.value);

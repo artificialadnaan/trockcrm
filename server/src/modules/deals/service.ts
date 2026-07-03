@@ -3942,10 +3942,19 @@ export async function clearSalesSource(
   const oldSourceId = existing.salesSourceUserId!;
   const now = new Date();
 
-  await tenantDb
+  // Guard the clear against a concurrent source change: the sync-path callers don't hold this deal's row
+  // lock, so between the read above and this UPDATE an admin/director could set a DIFFERENT source (and
+  // mint its row). Scope the null-out to `sales_source_user_id = oldSourceId` so a concurrent change makes
+  // this a no-op (0 rows) instead of clobbering the new source to null while removing only the OLD source's
+  // commission row (which would orphan the newly-minted row behind a null column).
+  const cleared = await tenantDb
     .update(deals)
     .set({ salesSourceUserId: null, updatedAt: now })
-    .where(eq(deals.id, dealId));
+    .where(and(eq(deals.id, dealId), eq(deals.salesSourceUserId, oldSourceId)))
+    .returning({ id: deals.id });
+  if (cleared.length === 0) {
+    return; // the source changed under us — leave the new source (and its row) intact
+  }
 
   await writeAuditLog(tenantDb, {
     tableName: "deals",
