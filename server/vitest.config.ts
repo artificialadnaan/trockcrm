@@ -12,6 +12,7 @@ export default defineConfig({
       "@trock-crm/shared/lib/rfpVoterEmails": path.resolve(__dirname, "../shared/src/lib/rfpVoterEmails.ts"),
       "@trock-crm/shared/lib/rfpVoteState": path.resolve(__dirname, "../shared/src/lib/rfpVoteState.ts"),
       "@trock-crm/shared/lib/userProvisioningGuards": path.resolve(__dirname, "../shared/src/lib/userProvisioningGuards.ts"),
+      "@trock-crm/shared/lib/commission-structure": path.resolve(__dirname, "../shared/src/lib/commission-structure.ts"),
       "@trock-crm/shared": path.resolve(__dirname, "../shared/src/schema/index.ts"),
     },
   },

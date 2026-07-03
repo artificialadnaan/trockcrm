@@ -40,6 +40,10 @@
     "./lib/userProvisioningGuards": {
       "types": "./dist/lib/userProvisioningGuards.d.ts",
       "default": "./dist/lib/userProvisioningGuards.js"
+    },
+    "./lib/commission-structure": {
+      "types": "./dist/lib/commission-structure.d.ts",
+      "default": "./dist/lib/commission-structure.js"
     }
   },
   "scripts": {

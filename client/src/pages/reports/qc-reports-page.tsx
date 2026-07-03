@@ -392,41 +392,46 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
 
   return (
     <Sheet open={!!row} onOpenChange={(o) => !o && onClose()}>
-      <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
+      <SheetContent className="flex w-full flex-col gap-0 p-0 sm:max-w-lg">
         {row && (
           <>
-            <SheetHeader>
-              <SheetTitle className="pr-6 leading-snug">{row.projectName}</SheetTitle>
+            <SheetHeader className="shrink-0 border-b border-slate-100 px-6 py-5">
+              <SheetTitle className="pr-8 leading-snug">{row.projectName}</SheetTitle>
               <div className="text-[12.5px] text-slate-500">
                 {[row.projectNumber, `Week of ${fmtWeek(row.weekOf)}`, row.superintendentName ? `Supt. ${row.superintendentName}` : null].filter(Boolean).join(" · ")}
               </div>
             </SheetHeader>
-            <div className="mt-4 flex items-center gap-4 rounded-xl border border-slate-100 bg-slate-50 p-4">
-              <div className={`text-[38px] font-black leading-none tracking-tight ${SCORE_COLOR[row.rating] ?? "text-slate-800"}`}>
-                {row.totalScore}<span className="text-[15px] font-semibold text-slate-300">/100</span>
+
+            {/* Scrollable body between the fixed header and the pinned action bar, so the drawer never
+                leaves the buttons floating in the middle with dead space below them. */}
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+              <div className="flex items-center gap-4 rounded-xl border border-slate-100 bg-slate-50 p-4">
+                <div className={`text-[38px] font-black leading-none tracking-tight ${SCORE_COLOR[row.rating] ?? "text-slate-800"}`}>
+                  {row.totalScore}<span className="text-[15px] font-semibold text-slate-300">/100</span>
+                </div>
+                <div>
+                  <Badge variant="outline" className={RATING_BADGE[row.rating] ?? ""}>{label(row.rating)}</Badge>
+                  <div className="mt-1.5 text-[12px] text-slate-500">Submitted by {row.submittedByName ?? "—"} · {fmtDate(row.submittedAt)}</div>
+                </div>
               </div>
-              <div>
-                <Badge variant="outline" className={RATING_BADGE[row.rating] ?? ""}>{label(row.rating)}</Badge>
-                <div className="mt-1.5 text-[12px] text-slate-500">Submitted by {row.submittedByName ?? "—"} · {fmtDate(row.submittedAt)}</div>
+
+              <div className="mt-4">
+                {loading ? (
+                  <div className="flex items-center justify-center py-8 text-sm text-slate-500">
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading detail…
+                  </div>
+                ) : detailError ? (
+                  <div className="py-8 text-center">
+                    <p className="text-sm text-brand-red">{detailError}</p>
+                    <Button variant="outline" size="sm" className="mt-3" onClick={() => setReloadKey((k) => k + 1)}>Try again</Button>
+                  </div>
+                ) : detail ? (
+                  <ScorecardDetailView detail={detail} />
+                ) : null}
               </div>
             </div>
 
-            <div className="mt-4">
-              {loading ? (
-                <div className="flex items-center justify-center py-8 text-sm text-slate-500">
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading detail…
-                </div>
-              ) : detailError ? (
-                <div className="py-8 text-center">
-                  <p className="text-sm text-brand-red">{detailError}</p>
-                  <Button variant="outline" size="sm" className="mt-3" onClick={() => setReloadKey((k) => k + 1)}>Try again</Button>
-                </div>
-              ) : detail ? (
-                <ScorecardDetailView detail={detail} />
-              ) : null}
-            </div>
-
-            <div className="mt-5 flex gap-2 border-t border-slate-100 pt-4">
+            <div className="flex shrink-0 gap-2 border-t border-slate-100 bg-white px-6 py-4">
               <Button className="flex-1 bg-brand-red text-white hover:bg-brand-red/90" onClick={() => void triggerDownload(row)}>
                 <Download className="mr-2 h-4 w-4" /> Download PDF
               </Button>

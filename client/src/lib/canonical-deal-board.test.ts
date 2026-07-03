@@ -295,6 +295,8 @@ describe("buildCanonicalDealBoardColumns", () => {
 
     expect(columns.map((column) => column.stage.slug)).toEqual([
       "opportunity",
+      // The Pending RFP column is now always inserted after Opportunity (empty here — no pending RFP deals).
+      "pending_rfp",
       "estimating",
       "service_estimating",
       "estimate_under_review",
@@ -1175,6 +1177,37 @@ describe("buildCanonicalDealBoardColumns", () => {
     expect(columns[oppIndex]!.count).toBe(1);
   });
 
+  it("always shows an empty Pending RFP column immediately after Opportunity, even with zero pending-RFP deals", () => {
+    // The Pending RFP bucket must stay on the board whether or not any RFP is currently pending, so the
+    // stage never vanishes when the queue drains to empty. An empty column contributes 0 to every rollup
+    // and leaves the opportunity aggregate untouched (nothing is moved out).
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 1,
+          totalValue: 90000,
+          cards: [
+            { id: "o1", stageId: "opp-stage", workflowRoute: "normal", isBidBoardOwned: false, bidBoardStageSlug: null, readOnlySyncedAt: null, rfpApprovalStatus: null, bidEstimate: "90000", ddEstimate: null, awardedAmount: null, onHold: false },
+          ],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+    const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
+    const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
+
+    // Column exists, immediately after opportunity, empty, and does not disturb the opportunity aggregate.
+    expect(prfpIndex).toBe(oppIndex + 1);
+    expect(columns[prfpIndex]!.stage.name).toBe("Pending RFP");
+    expect(columns[prfpIndex]!.count).toBe(0);
+    expect(columns[prfpIndex]!.totalValue).toBe(0);
+    expect(columns[prfpIndex]!.cards).toEqual([]);
+    expect(columns[oppIndex]!.count).toBe(1);
+    expect(columns[oppIndex]!.totalValue).toBe(90000);
+    expect(columns[oppIndex]!.cards.map((d) => d.id)).toEqual(["o1"]);
+  });
+
   it("keeps an in-flight override approval (rfpOverrideState='approving') in Opportunity, out of pending_rfp", () => {
     const columns = buildCanonicalDealBoardColumns(
       [
@@ -1195,8 +1228,11 @@ describe("buildCanonicalDealBoardColumns", () => {
     const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
     const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
 
-    // No pending RFP cards → no synthetic column is inserted, and opportunity is untouched.
-    expect(prfpIndex).toBe(-1);
+    // No pending RFP cards → the synthetic column is still present (always-visible), but empty; the
+    // approving card stays in opportunity and the opportunity aggregate is untouched.
+    expect(prfpIndex).toBe(oppIndex + 1);
+    expect(columns[prfpIndex]!.count).toBe(0);
+    expect(columns[prfpIndex]!.cards).toEqual([]);
     expect(columns[oppIndex]!.cards.map((d) => d.id)).toContain("ia");
     expect(columns[oppIndex]!.count).toBe(1);
     expect(columns[oppIndex]!.totalValue).toBe(80000);

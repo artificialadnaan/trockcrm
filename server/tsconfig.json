@@ -10,7 +10,8 @@
       "@trock-crm/shared/utils": ["../shared/dist/utils/normalize.d.ts"],
       "@trock-crm/shared/lib/bidBoardStatusMap": ["../shared/dist/lib/bidBoardStatusMap.d.ts"],
       "@trock-crm/shared/lib/rfpReviewerEmails": ["../shared/dist/lib/rfpReviewerEmails.d.ts"],
-      "@trock-crm/shared/lib/userProvisioningGuards": ["../shared/dist/lib/userProvisioningGuards.d.ts"]
+      "@trock-crm/shared/lib/userProvisioningGuards": ["../shared/dist/lib/userProvisioningGuards.d.ts"],
+      "@trock-crm/shared/lib/commission-structure": ["../shared/dist/lib/commission-structure.d.ts"]
     }
   },
   "include": ["src/**/*"],

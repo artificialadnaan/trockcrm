@@ -330,6 +330,15 @@ export async function recalculateCommissionForDeal(
     dealId: string;
     contractSignedDate: string;
     triggeredByUserId: string;
+    // When set, re-rate ONLY this rep's rows on the deal. Used by the settings-change recompute so
+    // one rep's rate edit can never touch a co-booked rep's row (e.g. owner vs estimator on a shared
+    // deal), which would otherwise let concurrent cross-rep edits lose the later rate. Omitted →
+    // re-rate every row on the deal (the deal date/amount edit path, where the whole deal changed).
+    onlyRepUserId?: string;
+    // When set (settings-change recompute), a deliberate 0% rate on an ACTIVE settings row re-rates
+    // the row to $0 rather than preserving the stale payout. Omitted (deal date/amount edit) keeps
+    // the all-or-nothing preserve (#732), so a transient config never wipes an earned row.
+    zeroOnNoRate?: boolean;
   }
 ): Promise<CalculateCommissionResult> {
   const existingRows = await tenantDb
@@ -345,8 +354,10 @@ export async function recalculateCommissionForDeal(
     .from(dealSignedCommissions)
     .where(eq(dealSignedCommissions.dealId, input.dealId));
 
-  // No prior commission → behave as a fresh calc for the deal's CURRENT assigned rep.
+  // No prior commission → behave as a fresh calc for the deal's CURRENT assigned rep. A rep-scoped
+  // recompute never mints a fresh row (minting belongs to the owner/estimator/backfill paths).
   if (existingRows.length === 0) {
+    if (input.onlyRepUserId) return { status: "skipped_no_rate" };
     return calculateCommissionForDeal(tenantDb, input);
   }
 
@@ -361,8 +372,12 @@ export async function recalculateCommissionForDeal(
     .limit(1);
   const sourceValue = deal ? resolveSourceValue(deal) : null;
 
+  const rowsToRecompute = input.onlyRepUserId
+    ? existingRows.filter((row) => row.repUserId === input.onlyRepUserId)
+    : existingRows;
+
   let recomputed = 0;
-  for (const row of existingRows) {
+  for (const row of rowsToRecompute) {
     // The rate is the BOOKED rep's current rate — attribution stays with row.repUserId, never the deal's
     // (possibly reassigned) current assignedRepId.
     const [settings] = await tenantDb
@@ -374,8 +389,16 @@ export async function recalculateCommissionForDeal(
       .where(eq(userCommissionSettings.userId, row.repUserId))
       .limit(1);
 
-    // ALL-OR-NOTHING: cannot validly recompute → LEAVE THE ROW INTACT (no delete, no zeroing).
-    if (!sourceValue || !settings || !settings.isActive || Number(settings.commissionRate) <= 0) {
+    // ALL-OR-NOTHING preserve when intent is indeterminate: no source value to compute against, or
+    // no active settings row (missing / inactive) → LEAVE THE ROW INTACT (no delete, no zeroing).
+    if (!sourceValue || !settings || !settings.isActive) {
+      continue;
+    }
+    // A rate of exactly 0 on an ACTIVE settings row is a deliberate "no commission". The deal
+    // date/amount edit path still preserves the row (all-or-nothing, #732), but the settings-change
+    // recompute (zeroOnNoRate) re-rates it to $0 — the admin explicitly set 0, so the earned row
+    // must not keep a stale positive payout. Below, appliedRate "0" → amount "0.00".
+    if (Number(settings.commissionRate) <= 0 && !input.zeroOnNoRate) {
       continue;
     }
 
@@ -419,7 +442,7 @@ export async function recalculateCommissionForDeal(
 
 /** Date-only (YYYY-MM-DD, UTC) of a contract_signed_at timestamp. The app stores _at at UTC midnight of
  *  the signed date, so this round-trips the canonical effective signed date. */
-function effectiveSignedDateOf(deal: {
+export function effectiveSignedDateOf(deal: {
   contractSignedAt: Date | string | null;
   contractSignedDate: string | null;
 }): string | null {
