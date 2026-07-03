@@ -67,12 +67,18 @@ export interface BackfillSummary {
   // historical meaning while the estimator rows this backfill also writes are not silently undercounted.
   estimatorByStatus: Record<CalculateCommissionStatus, number>;
   totalEstimatorCommissionCreated: number;
+  // The ADDITIVE sales_source rows minted as a side effect (a mixed-structure source rep on a service deal).
+  // Tracked separately for the same reason as estimator — owner-only totals stay unchanged.
+  salesSourceByStatus: Record<CalculateCommissionStatus, number>;
+  totalSalesSourceCommissionCreated: number;
   rows: Array<
     BackfillCandidate & {
       status: CalculateCommissionStatus;
       amount: string | null;
       estimatorStatus: CalculateCommissionStatus | null;
       estimatorAmount: string | null;
+      salesSourceStatus: CalculateCommissionStatus | null;
+      salesSourceAmount: string | null;
     }
   >;
 }
@@ -190,8 +196,21 @@ export async function backfillTenantCommissions(
     // the gated estimator mint is skipped_no_owner_row and the deal stays at ZERO rows (still backfillable).
     skipped_no_owner_row: 0,
   };
+  // Separate tally for the additive sales_source rows (a mixed-structure source rep on a service deal).
+  // Same structure as the estimator tally — owner-only totals stay unchanged.
+  const salesSourceByStatus: Record<CalculateCommissionStatus, number> = {
+    created: 0,
+    skipped_existing: 0,
+    skipped_no_rep: 0,
+    skipped_no_value: 0,
+    skipped_no_rate: 0,
+    skipped_change_order: 0,
+    // sales_source CAN return this when the owner row wasn't minted (no rate) — the invariant gate fires.
+    skipped_no_owner_row: 0,
+  };
   let totalCommissionCreated = 0;
   let totalEstimatorCommissionCreated = 0;
+  let totalSalesSourceCommissionCreated = 0;
   const rows: BackfillSummary["rows"] = [];
 
   for (const candidate of candidates) {
@@ -208,12 +227,22 @@ export async function backfillTenantCommissions(
         totalEstimatorCommissionCreated += Number(estimator.amount);
       }
     }
+    // Account for the additive sales_source row (if calculateCommissionForDeal minted/skipped one).
+    const salesSource = result.salesSource;
+    if (salesSource) {
+      salesSourceByStatus[salesSource.status] += 1;
+      if (salesSource.status === "created" && salesSource.amount) {
+        totalSalesSourceCommissionCreated += Number(salesSource.amount);
+      }
+    }
     rows.push({
       ...candidate,
       status: result.status,
       amount: result.amount ?? null,
       estimatorStatus: estimator?.status ?? null,
       estimatorAmount: estimator?.amount ?? null,
+      salesSourceStatus: salesSource?.status ?? null,
+      salesSourceAmount: salesSource?.amount ?? null,
     });
   }
 
@@ -225,6 +254,8 @@ export async function backfillTenantCommissions(
     totalCommissionCreated: Number(totalCommissionCreated.toFixed(2)),
     estimatorByStatus,
     totalEstimatorCommissionCreated: Number(totalEstimatorCommissionCreated.toFixed(2)),
+    salesSourceByStatus,
+    totalSalesSourceCommissionCreated: Number(totalSalesSourceCommissionCreated.toFixed(2)),
     rows,
   };
 }
@@ -282,7 +313,13 @@ function printSummary(s: BackfillSummary): void {
         ? `  +est $${Number(row.estimatorAmount ?? 0).toLocaleString()}`
         : `  +est ${row.estimatorStatus}`
       : "";
-    console.log(`  ${(row.dealNumber ?? "(none)").padEnd(16)} ${(row.repName ?? row.repId).padEnd(20)} ${row.signedDate}  -> ${tag}${estTag}`);
+    // Append the additive sales_source outcome only when one applied for this deal.
+    const srcTag = row.salesSourceStatus
+      ? row.salesSourceStatus === "created"
+        ? `  +src $${Number(row.salesSourceAmount ?? 0).toLocaleString()}`
+        : `  +src ${row.salesSourceStatus}`
+      : "";
+    console.log(`  ${(row.dealNumber ?? "(none)").padEnd(16)} ${(row.repName ?? row.repId).padEnd(20)} ${row.signedDate}  -> ${tag}${estTag}${srcTag}`);
   }
   console.log(
     `  totals: created=${s.byStatus.created} ($${s.totalCommissionCreated.toLocaleString()}), ` +
@@ -294,6 +331,12 @@ function printSummary(s: BackfillSummary): void {
       `($${s.totalEstimatorCommissionCreated.toLocaleString()}), ` +
       `skipped_existing=${s.estimatorByStatus.skipped_existing}, no_rate=${s.estimatorByStatus.skipped_no_rate}, ` +
       `no_value=${s.estimatorByStatus.skipped_no_value}`
+  );
+  console.log(
+    `  sales_source (additive side effect): created=${s.salesSourceByStatus.created} ` +
+      `($${s.totalSalesSourceCommissionCreated.toLocaleString()}), ` +
+      `skipped_existing=${s.salesSourceByStatus.skipped_existing}, no_rate=${s.salesSourceByStatus.skipped_no_rate}, ` +
+      `no_value=${s.salesSourceByStatus.skipped_no_value}`
   );
 }
 
@@ -315,6 +358,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     let grandAmount = 0;
     let grandEstimatorCreated = 0;
     let grandEstimatorAmount = 0;
+    let grandSalesSourceCreated = 0;
+    let grandSalesSourceAmount = 0;
     for (const t of tenants) {
       await client.query(`SET search_path TO ${t}, public`);
       const tenantDb = drizzle(client, { schema });
@@ -328,11 +373,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       grandAmount += summary.totalCommissionCreated;
       grandEstimatorCreated += summary.estimatorByStatus.created;
       grandEstimatorAmount += summary.totalEstimatorCommissionCreated;
+      grandSalesSourceCreated += summary.salesSourceByStatus.created;
+      grandSalesSourceAmount += summary.totalSalesSourceCommissionCreated;
     }
     console.log(
       `\n=== GRAND TOTAL ${execute ? "WRITTEN" : "(dry-run) WOULD WRITE"}: ${grandCreated} owner row(s), ` +
         `$${grandAmount.toLocaleString()} + ${grandEstimatorCreated} estimator row(s), ` +
-        `$${grandEstimatorAmount.toLocaleString()} ===`
+        `$${grandEstimatorAmount.toLocaleString()} + ${grandSalesSourceCreated} sales_source row(s), ` +
+        `$${grandSalesSourceAmount.toLocaleString()} ===`
     );
     console.log("(No contract dates were read-modified: this script only inserts commission rows.)");
   } finally {
