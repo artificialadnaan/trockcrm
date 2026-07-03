@@ -15,6 +15,7 @@ import {
   type HubSpotDeal,
   type HubSpotOwner,
 } from "../migration/hubspot-client.js";
+import { clearSalesSource } from "../deals/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExternalUserSource = (typeof externalUserSourceEnum.enumValues)[number];
@@ -25,6 +26,8 @@ type CurrentDeal = {
   hubspotDealId: string | null;
   assignedRepId: string | null;
   ownershipSyncStatus: string | null;
+  /** F10: needed to detect owner==source conflict before writing the new owner. */
+  salesSourceUserId: string | null;
 };
 
 type OwnerResolution = {
@@ -292,6 +295,7 @@ export async function previewOwnershipSync(tenantDb: TenantDb, officeId: string)
         hubspotDealId: deals.hubspotDealId,
         assignedRepId: deals.assignedRepId,
         ownershipSyncStatus: deals.ownershipSyncStatus,
+        salesSourceUserId: deals.salesSourceUserId,
       })
       .from(deals)
       .where(and(eq(deals.isActive, true), isNotNull(deals.hubspotDealId)));
@@ -316,6 +320,18 @@ export async function applyOwnershipSync(tenantDb: TenantDb, officeId: string) {
 
   for (const row of preview.rows) {
     if (row.summaryBucket === "unchanged") continue;
+
+    // F10: if the incoming owner is the deal's current sales source, the attribution would be
+    // invalid (same rep in both owner + sales_source slots → double commission cut). The
+    // updateDeal guard normally blocks this, but the HubSpot sync bypasses updateDeal. Mirror
+    // the admin ownership-sync fix: detect here and clear the source before writing the new owner.
+    if (
+      row.targetAssignedRepId != null &&
+      row.salesSourceUserId != null &&
+      row.targetAssignedRepId === row.salesSourceUserId
+    ) {
+      await clearSalesSource(tenantDb, row.id, null);
+    }
 
     await tenantDb
       .update(deals)
@@ -381,6 +397,7 @@ export async function reassignOwnedDeal(input: {
     .select({
       id: deals.id,
       assignedRepId: deals.assignedRepId,
+      salesSourceUserId: deals.salesSourceUserId,
     })
     .from(deals)
     .where(eq(deals.id, input.dealId))
@@ -421,6 +438,13 @@ export async function reassignOwnedDeal(input: {
 
   if (!hasOfficeAccess) {
     throw new AppError(400, "Target user does not have access to this office");
+  }
+
+  // F10: if the new owner is the deal's current sales source, the attribution would produce a
+  // double commission cut (same rep in both owner + sales_source slots). The updateDeal guard
+  // normally catches this, but reassignOwnedDeal bypasses updateDeal. Clear the source first.
+  if (input.userId === (dealRow.salesSourceUserId ?? null)) {
+    await clearSalesSource(input.tenantDb, input.dealId, input.actor.id);
   }
 
   await input.tenantDb

@@ -11,7 +11,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { applyProjectTypeChange, normalizeOptionalDealBidDueDate } from "./service.js";
+import { applyProjectTypeChange, clearSalesSource, normalizeOptionalDealBidDueDate } from "./service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -507,6 +507,20 @@ export async function writeResolvedDealFields(
     officeId: input.officeId,
     now,
   });
+
+  // F9 (resolved-fields bypass): if this write just transitioned the deal out of the service
+  // workflow, clear any stale sales-source attribution. The PATCH /deals/:id/resolved-fields
+  // route writes workflowRoute directly via dealUpdates without going through updateDeal, so the
+  // guard there does not fire. Mirror the identical condition from updateDeal in service.ts so
+  // the invariant holds regardless of which write path changes the route.
+  if (
+    "workflowRoute" in dealUpdates &&
+    resolvedDeal.deal.workflowRoute === "service" &&
+    dealUpdates.workflowRoute !== "service" &&
+    (resolvedDeal.deal.salesSourceUserId ?? null) !== null
+  ) {
+    await clearSalesSource(tenantDb, dealId, input.userId);
+  }
 
   return getResolvedDeal(tenantDb, dealId);
 }
