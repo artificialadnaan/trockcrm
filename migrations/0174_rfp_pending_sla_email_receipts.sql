@@ -20,10 +20,14 @@ CREATE TABLE IF NOT EXISTS public.rfp_pending_sla_email_receipts (
   tenant_schema text NOT NULL,
   deal_id uuid NOT NULL,
   rfp_approval_requested_at timestamptz NOT NULL,
+  -- Display snapshot captured at claim time so a retry after a rename renders an identical Resend payload.
+  deal_name text,
   deal_number text,
   recipient_emails text,
   resend_message_id text,
-  sent_at timestamptz NOT NULL DEFAULT NOW(),
+  -- NULLABLE, no default: the row is a CLAIM at insert (sent_at NULL) and is stamped only after a durable
+  -- send. A failed send leaves it NULL so the next scan retries.
+  sent_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT NOW(),
   updated_at timestamptz NOT NULL DEFAULT NOW(),
   PRIMARY KEY (tenant_schema, deal_id, rfp_approval_requested_at)

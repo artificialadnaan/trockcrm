@@ -129,9 +129,12 @@ export async function findPendingRfpSlaBreaches(
  * cycle. Exactly-once + retry-safe:
  *  - a single-flight Postgres advisory lock serializes runs (a still-running or second-instance run skips),
  *    so two runs can't both submit the same alert;
- *  - the receipt row (keyed tenant_schema, deal_id, rfp_approval_requested_at) is written only AFTER a
- *    durable send, so a crash before the send leaves no receipt and the next scan retries;
- *  - the email payload is stable per cycle, so a crash-then-retry reuses the same Resend idempotencyKey.
+ *  - before sending, the scan writes a CLAIM row (keyed tenant_schema, deal_id, rfp_approval_requested_at)
+ *    carrying a display snapshot (deal_name/deal_number as first seen); the claim is NEVER deleted and
+ *    `sent_at` (nullable) marks completion. A failed send leaves sent_at NULL, so the next scan retries;
+ *  - retries render the email from the STORED snapshot, so a rename/renumber between attempts can't change
+ *    the payload — the same Resend idempotencyKey stays valid instead of being rejected as a key/payload
+ *    mismatch.
  * A re-triggered RFP gets a fresh rfp_approval_requested_at -> a new cycle -> a new alert.
  */
 export async function runRfpPendingSlaScan(deps: RunDeps = {}): Promise<RfpPendingSlaScanSummary> {
@@ -250,26 +253,52 @@ async function processBreach(
 ): Promise<"sent" | "skipped" | "failed"> {
   const { tenantSchema, officeId, breach, recipients, frontendUrl, slaHours } = args;
 
-  // Already alerted for this pending cycle? The receipt is written only AFTER a durable send (below), so a
-  // crash between "decided to send" and "sent" leaves NO receipt and the next scan retries — the alert is
-  // never permanently suppressed.
-  const existing = await query(
-    `SELECT 1 FROM public.rfp_pending_sla_email_receipts
+  // The claim row (written BEFORE the send, never deleted) is the exactly-once ledger: sent_at IS NOT NULL
+  // means this cycle already alerted. sent_at NULL (or no row yet) means it still needs a send — a crash
+  // between claim and send, or a failed send, leaves sent_at NULL and the next scan retries.
+  const claimBefore = await query(
+    `SELECT deal_name, deal_number, sent_at
+       FROM public.rfp_pending_sla_email_receipts
       WHERE tenant_schema = $1 AND deal_id = $2::uuid AND rfp_approval_requested_at = $3
       LIMIT 1`,
     [tenantSchema, breach.dealId, breach.requestedAt],
   );
-  if (existing.rows.length > 0) return "skipped";
+  if (claimBefore.rows[0]?.sent_at != null) return "skipped";
 
   // Re-check the deal is STILL a breach right before sending: a reviewer may approve/decline (or an override
   // may resolve) between the batch scan and this send, and those transitions are async. Skip a stale alert.
   if (!(await isStillBreaching(query, tenantSchema, breach))) return "skipped";
 
+  // Ensure a claim row exists carrying a STABLE display snapshot (deal_name/deal_number as first seen). On a
+  // crash-retry after a rename, the read-back below reuses these STORED values, so the rebuilt Resend payload
+  // is byte-identical and the idempotencyKey is honored rather than rejected as a key/payload mismatch.
+  await query(
+    `INSERT INTO public.rfp_pending_sla_email_receipts
+        (tenant_schema, deal_id, rfp_approval_requested_at, deal_name, deal_number, created_at, updated_at)
+      VALUES ($1, $2::uuid, $3, $4, $5, NOW(), NOW())
+      ON CONFLICT (tenant_schema, deal_id, rfp_approval_requested_at) DO NOTHING`,
+    [tenantSchema, breach.dealId, breach.requestedAt, breach.dealName, breach.dealNumber],
+  );
+
+  // Read back the AUTHORITATIVE snapshot: the first-seen values win, even if THIS scan observed a renamed
+  // deal (its INSERT was a DO NOTHING no-op). Fall back to the fresh breach only if the row somehow vanished.
+  const claim = await query(
+    `SELECT deal_name, deal_number
+       FROM public.rfp_pending_sla_email_receipts
+      WHERE tenant_schema = $1 AND deal_id = $2::uuid AND rfp_approval_requested_at = $3
+      LIMIT 1`,
+    [tenantSchema, breach.dealId, breach.requestedAt],
+  );
+  const snapshotRow = claim.rows[0] ?? { deal_name: breach.dealName, deal_number: breach.dealNumber };
+  const snapshotName =
+    typeof snapshotRow.deal_name === "string" && snapshotRow.deal_name.trim() ? snapshotRow.deal_name : "Deal";
+  const snapshotNumber = snapshotRow.deal_number ?? null;
+
   try {
     const email = buildRfpPendingSlaEmail({
       dealId: breach.dealId,
-      dealName: breach.dealName,
-      dealNumber: breach.dealNumber,
+      dealName: snapshotName,
+      dealNumber: snapshotNumber,
       pendingSinceLabel: formatPendingSince(breach.requestedAt),
       slaHours,
       officeId,
@@ -280,14 +309,13 @@ async function processBreach(
       idempotencyKey: `rfp-pending-sla-${tenantSchema}-${breach.dealId}-${breach.requestedAt}`,
     });
     if (!result.success) throw new Error("Email provider returned unsuccessful result");
-    // Record the receipt ONLY after the send is durable, so a failed send never suppresses a retry. ON
-    // CONFLICT DO NOTHING guards the (single-worker) case of an overlapping run that already recorded it.
+    // Mark the claim complete only AFTER a durable send. `sent_at IS NULL` guards against a double-complete
+    // (e.g. an overlapping run in the single-worker case) — the first completer wins.
     await query(
-      `INSERT INTO public.rfp_pending_sla_email_receipts
-          (tenant_schema, deal_id, rfp_approval_requested_at, deal_number, recipient_emails, resend_message_id, sent_at, created_at, updated_at)
-        VALUES ($1, $2::uuid, $3, $4, $5, $6, NOW(), NOW(), NOW())
-        ON CONFLICT (tenant_schema, deal_id, rfp_approval_requested_at) DO NOTHING`,
-      [tenantSchema, breach.dealId, breach.requestedAt, breach.dealNumber, recipients.join(", "), result.messageId],
+      `UPDATE public.rfp_pending_sla_email_receipts
+          SET sent_at = NOW(), recipient_emails = $4, resend_message_id = $5, updated_at = NOW()
+        WHERE tenant_schema = $1 AND deal_id = $2::uuid AND rfp_approval_requested_at = $3 AND sent_at IS NULL`,
+      [tenantSchema, breach.dealId, breach.requestedAt, recipients.join(", "), result.messageId],
     );
     logger.log("[RfpPendingSla] Sent SLA breach alert", {
       tenantSchema,
@@ -297,8 +325,8 @@ async function processBreach(
     });
     return "sent";
   } catch (err) {
-    // No receipt was written, so the next hourly scan retries. One deal's failure must not abort the rest of
-    // the scan, so we swallow + log here.
+    // The claim stays with sent_at NULL (not deleted), so the next hourly scan retries with the SAME stored
+    // snapshot -> a stable Resend payload. One deal's failure must not abort the scan, so we swallow + log.
     logger.error("[RfpPendingSla] Failed to send SLA breach alert", {
       tenantSchema,
       dealId: breach.dealId,

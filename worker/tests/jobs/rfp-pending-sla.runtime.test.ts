@@ -191,10 +191,10 @@ function makeScanMocks(
       return {
         rows: [
           {
-            id: "deal-1",
-            name: "Deal One",
-            deal_number: "P-1",
-            rfp_approval_requested_at: "2026-01-01T00:00:00.000Z",
+            id: deal.id,
+            name: deal.name,
+            deal_number: deal.deal_number,
+            rfp_approval_requested_at: deal.requestedAt,
             hours_pending: 30,
           },
         ],
@@ -205,19 +205,35 @@ function makeScanMocks(
       return {
         rows: [{
           status: stillBreaching ? "pending" : "approved",
-          requested_at: "2026-01-01T00:00:00.000Z",
+          requested_at: deal.requestedAt,
           stage_slug: stageSlug,
           bbo: false, active: true, test_data: false, on_hold: false,
           override_decision: "", override_state: "",
         }],
       };
     }
-    if (sql.includes("SELECT 1") && sql.includes("rfp_pending_sla_email_receipts")) {
-      return { rows: receiptExists ? [{ "?column?": 1 }] : [] };
+    if (sql.includes("rfp_pending_sla_email_receipts")) {
+      const k = key(params ?? []);
+      if (sql.includes("INSERT")) {
+        // (tenant, deal, requested_at, deal_name, deal_number) — ON CONFLICT DO NOTHING preserves first-seen.
+        if (!receipts.has(k)) {
+          receipts.set(k, { deal_name: params?.[3] as string, deal_number: (params?.[4] as string) ?? null, sent_at: null });
+        }
+        return { rows: [] };
+      }
+      if (sql.includes("UPDATE")) {
+        // SET sent_at = NOW() ... WHERE (pk) AND sent_at IS NULL — first completer wins.
+        const row = receipts.get(k);
+        if (row && row.sent_at == null) row.sent_at = new Date().toISOString();
+        return { rows: [] };
+      }
+      // SELECT (claim read-back / already-sent check)
+      const row = receipts.get(k);
+      return { rows: row ? [row] : [] };
     }
     return { rows: [] };
   });
-  return { sendEmail, q, calls };
+  return { sendEmail, q, calls, receipts, deal };
 }
 
 // Always-acquires lock stub (no-op release) so tests exercise the scan body deterministically.
@@ -250,19 +266,23 @@ describe("runRfpPendingSlaScan orchestration", () => {
     expect(summary.sent).toBe(0);
   });
 
-  it("sends exactly once for a breaching deal, recording the receipt only AFTER a durable send", async () => {
-    const { sendEmail, q, calls } = makeScanMocks();
+  it("claims BEFORE sending, then stamps sent_at AFTER a durable send (exactly-once)", async () => {
+    const { sendEmail, q, calls, receipts } = makeScanMocks();
     const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: enabledEnv, logger: silent });
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect(sendEmail.mock.calls[0][0]).toEqual(["boss@trock.test"]);
     expect(summary.sent).toBe(1);
-    // The receipt INSERT happens after the send resolves.
-    const sendIdx = calls.findIndex((s) => s.includes("INSERT INTO public.rfp_pending_sla_email_receipts"));
-    expect(sendIdx).toBeGreaterThan(-1);
+    // The claim INSERT precedes the send; the sent_at UPDATE follows it.
+    const insertIdx = calls.findIndex((s) => s.includes("INSERT INTO public.rfp_pending_sla_email_receipts"));
+    const updateIdx = calls.findIndex((s) => s.includes("UPDATE public.rfp_pending_sla_email_receipts"));
+    expect(insertIdx).toBeGreaterThan(-1);
+    expect(updateIdx).toBeGreaterThan(insertIdx);
+    // The claim row now records completion.
+    expect(receipts.get("office_beta|deal-1|2026-01-01T00:00:00.000Z")?.sent_at).not.toBeNull();
   });
 
-  it("skips sending when a receipt already exists for this cycle", async () => {
-    const { sendEmail, q } = makeScanMocks({ receiptExists: true });
+  it("skips sending when the claim for this cycle is already sent (sent_at not null)", async () => {
+    const { sendEmail, q } = makeScanMocks({ alreadySent: true });
     const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: enabledEnv, logger: silent });
     expect(sendEmail).not.toHaveBeenCalled();
     expect(summary.skipped).toBe(1);
@@ -282,11 +302,39 @@ describe("runRfpPendingSlaScan orchestration", () => {
     expect(summary.skipped).toBe(1);
   });
 
-  it("writes NO receipt (so the next scan retries) and does not throw when the send fails", async () => {
-    const { q, calls } = makeScanMocks();
+  it("leaves the claim with sent_at NULL (retryable, never deleted) and does not throw when the send fails", async () => {
+    const { q, calls, receipts } = makeScanMocks();
     const sendEmail = vi.fn().mockRejectedValue(new Error("provider down"));
     const summary = await runRfpPendingSlaScan({ query: q, sendEmail, acquireLock: noLock, env: enabledEnv, logger: silent });
     expect(summary.failed).toBe(1);
-    expect(calls.some((s) => s.includes("INSERT INTO public.rfp_pending_sla_email_receipts"))).toBe(false);
+    // The claim WAS written (so the snapshot is pinned), but it is NOT marked sent and NOT deleted.
+    expect(calls.some((s) => s.includes("INSERT INTO public.rfp_pending_sla_email_receipts"))).toBe(true);
+    expect(calls.some((s) => s.includes("UPDATE public.rfp_pending_sla_email_receipts"))).toBe(false);
+    expect(receipts.get("office_beta|deal-1|2026-01-01T00:00:00.000Z")?.sent_at).toBeNull();
+  });
+
+  it("retries render from the STORED snapshot, so a rename between attempts keeps the Resend payload stable", async () => {
+    const mocks = makeScanMocks();
+    // First attempt: the send fails, so the claim persists with the FIRST-SEEN snapshot and sent_at NULL.
+    const failing = vi.fn().mockRejectedValue(new Error("provider down"));
+    await runRfpPendingSlaScan({ query: mocks.q, sendEmail: failing, acquireLock: noLock, env: enabledEnv, logger: silent });
+    expect(failing).toHaveBeenCalledTimes(1);
+
+    // The deal is renamed + renumbered between scans.
+    mocks.deal.name = "Renamed Deal";
+    mocks.deal.deal_number = "P-999";
+
+    // Second attempt succeeds: it must render from the STORED snapshot, not the fresh (renamed) fields.
+    const sending = vi.fn().mockResolvedValue({ success: true, messageId: "msg-2" });
+    const summary = await runRfpPendingSlaScan({ query: mocks.q, sendEmail: sending, acquireLock: noLock, env: enabledEnv, logger: silent });
+    expect(summary.sent).toBe(1);
+    const [, subject, html, options] = sending.mock.calls[0];
+    expect(subject).toContain("P-1"); // original number, pinned
+    expect(subject).toContain("Deal One"); // original name, pinned
+    expect(subject).not.toContain("P-999");
+    expect(html).toContain("Deal One");
+    expect(html).not.toContain("Renamed Deal");
+    // Same idempotencyKey across both attempts (keyed on requested_at, which never changed).
+    expect(options.idempotencyKey).toBe(failing.mock.calls[0][3].idempotencyKey);
   });
 });
