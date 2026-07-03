@@ -748,12 +748,22 @@ internalRfpRoutes.post(
           //   (2) the override sub-case (finding G3): reviewed_at is set → the reviewed_at freshness needs it;
           //   (1-retry) a 2/3-yes RETRY (finding H7): /rfp-retry stamped rfp_bidboard_attempt_at → the attempt
           //       freshness needs it. Only the FIRST 2/3-yes attempt (attempt_at NULL) stays timestamp-less/exempt.
+          // finding Z7: read the freshness-relevant fields FRESH. found.deal is a snapshot from findDeal() and can
+          // be stale if /rfp-retry or an override stamped a marker since; the guarded UPDATE below reads the
+          // CURRENT row, so the 422 decision must too — otherwise a since-retried deal misses its 422 and the
+          // UPDATE no-ops at 200 applied:false, so SyncHub stops retrying.
+          const freshRes = await pool.query(
+            `SELECT rfp_approval_status, rfp_override_state, rfp_override_reviewed_at, rfp_bidboard_attempt_at
+               FROM ${quoteIdent(found.schemaName)}.deals WHERE id = $1`,
+            [sourceDealId]
+          );
+          const freshDeal = freshRes.rows[0] ?? found.deal;
           const isOverrideApproveSubcase =
-            found.deal.rfp_approval_status === "declined" &&
-            found.deal.rfp_override_state === "approving" &&
-            found.deal.rfp_override_reviewed_at != null;
+            freshDeal.rfp_approval_status === "declined" &&
+            freshDeal.rfp_override_state === "approving" &&
+            freshDeal.rfp_override_reviewed_at != null;
           const isRetriedPendingSubcase =
-            found.deal.rfp_approval_status === "pending" && found.deal.rfp_bidboard_attempt_at != null;
+            freshDeal.rfp_approval_status === "pending" && freshDeal.rfp_bidboard_attempt_at != null;
           if ((isOverrideApproveSubcase || isRetriedPendingSubcase) && !votingFailedCreatedAt) {
             console.warn(
               `[RFP callback] request-less 'failed' for deal ${sourceDealId} is missing a parseable createdAt while a freshness marker is set; returning 422 so SyncHub retries instead of silently dropping it`

@@ -187,10 +187,12 @@ async function resolveOfficeSchema(db: Queryable, officeId: string | null): Prom
  * round is open but nobody was invited — and 'pending' is NOT a cancellable attention state, so the deal strands
  * with no recovery. This sweep surfaces the failure as the VISIBLE, cancellable send_failed state (the same
  * Pending-RFP attention status pendingRfpSubStateForStatus renders + cancel-rfp allows Returning to Opportunity),
- * so the rep can recover the deal and re-trigger. Guarded so it only touches a still-open, request-less round
- * with NO votes yet — a round that already has a cast vote is progressing (a voter DID get the link) and must
- * not be nuked. Claim is single-transaction (mirrors runRfpBidBoardCreateDeadLetterSweep): the per-row 'claimed'
- * marker is written in the SAME txn as the deal update, so a throw leaves the row unclaimed + retryable.
+ * so the rep can recover the deal and re-trigger. Guarded (finding H6) so it only touches a still-open,
+ * request-less round for THIS job's round event (finding Y10) that has NOT YET reached the 2-of-3 decision
+ * threshold (<2 approvals AND <2 rejections) — a single cast vote does NOT prove the invitations reached the
+ * other voters, so a one-vote, undecided round is still surfaced; only an already-decided round is left alone.
+ * Claim is single-transaction (mirrors runRfpBidBoardCreateDeadLetterSweep): the per-row 'claimed' marker is
+ * written in the SAME txn as the deal update, so a throw leaves the row unclaimed + retryable.
  */
 export async function runRfpVoteInvitationDeadLetterSweep(
   deps: { db?: PoolLike; limit?: number } = {}

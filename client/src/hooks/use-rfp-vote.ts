@@ -22,6 +22,10 @@ export function useRfpVote(dealId: string | undefined, officeId?: string | null)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
+  // Monotonic marker for the latest in-flight request (finding Z1). Only the most recent invocation may commit
+  // setDeal/setError/setLoading — otherwise a slower earlier request (e.g. after a fast dealId/officeId change)
+  // can resolve last and overwrite newer state.
+  const requestIdRef = useRef(0);
 
   const fetchDeal = useCallback(async () => {
     if (!dealId) {
@@ -29,6 +33,7 @@ export function useRfpVote(dealId: string | undefined, officeId?: string | null)
       return;
     }
     const key = `${dealId}|${officeId ?? ""}`;
+    const myRequest = ++requestIdRef.current;
     const isTargetChange = loadedKeyRef.current !== key;
     if (isTargetChange) {
       setLoading(true);
@@ -37,6 +42,7 @@ export function useRfpVote(dealId: string | undefined, officeId?: string | null)
     }
     try {
       const data = await api<{ deal: DealDetail }>(`/deals/${dealId}/detail`, getOfficeRequestOptions(officeId));
+      if (requestIdRef.current !== myRequest) return; // superseded by a newer request
       setDeal({
         id: data.deal.id,
         name: data.deal.name,
@@ -48,9 +54,10 @@ export function useRfpVote(dealId: string | undefined, officeId?: string | null)
       setError(null);
       loadedKeyRef.current = key;
     } catch (err: unknown) {
+      if (requestIdRef.current !== myRequest) return; // superseded — don't clobber newer state with a stale error
       if (isTargetChange) setError(err instanceof Error ? err.message : "Failed to load the RFP vote");
     } finally {
-      if (isTargetChange) setLoading(false);
+      if (requestIdRef.current === myRequest && isTargetChange) setLoading(false);
     }
   }, [dealId, officeId]);
 

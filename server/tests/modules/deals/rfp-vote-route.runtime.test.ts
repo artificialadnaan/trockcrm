@@ -20,7 +20,7 @@ const ROUND = "00000000-0000-0000-0000-0000000000e1";
 const ENV = { RFP_VOTER_EMAILS: "sidney@x.com,james@x.com,tim@x.com", ENABLE_RFP_VOTING: "true", NODE_ENV: "test" } as any;
 
 let pg: PGlite | null = null;
-afterEach(async () => { await pg?.close(); pg = null; process.env.RFP_VOTER_EMAILS = undefined as any; process.env.ENABLE_RFP_VOTING = undefined as any; });
+afterEach(async () => { await pg?.close(); pg = null; delete process.env.RFP_VOTER_EMAILS; delete process.env.ENABLE_RFP_VOTING; });
 
 async function setup() {
   const db = new PGlite();

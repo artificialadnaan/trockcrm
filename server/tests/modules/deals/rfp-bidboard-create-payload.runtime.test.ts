@@ -126,4 +126,25 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
     expect(deal.clientEmail).toBe("pat@client.com");
     expect(deal.clientPhone).toBe("555-1212");
   });
+
+  it("[Z8] uses the well-formed 'not found' shell (not DB data) when the deal id doesn't exist", async () => {
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+    const MISSING = "00000000-0000-0000-0000-0000deadbeef";
+
+    await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: MISSING } });
+
+    const jobs = (await pg.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+    expect(jobs).toHaveLength(1);
+    const body = jobs[0].payload.body;
+    expect(body.decision).toBe("approved");
+    // No round event id on the shell -> sourceEventId falls back to the deal id, never throws.
+    expect(body.sourceEventId).toBe(`crm:rfp-vote:approved:${MISSING}`);
+    expect(body.sourceDealId).toBe(MISSING);
+    // Empty-shell deal fields (no DB row): the builder normalizes the blank name to its "Untitled Deal" default
+    // (a real deal would carry its own name), and there's no resolved owner/company/contact.
+    expect(body.deal.name).toBe("Untitled Deal");
+    expect(body.deal.ownerEmail ?? null).toBeNull();
+    expect(body.deal.companyName ?? null).toBeNull();
+  });
 });

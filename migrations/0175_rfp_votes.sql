@@ -19,6 +19,12 @@ BEGIN
     WHERE nspname LIKE 'office\_%' ESCAPE '\'
     ORDER BY nspname
   LOOP
+    -- Skip a partially-provisioned office schema that has no deals table yet: the REFERENCES clause below would
+    -- otherwise raise and abort the whole migration (and every other tenant) for one incomplete schema.
+    IF to_regclass(format('%I.deals', schema_name)) IS NULL THEN
+      CONTINUE;
+    END IF;
+
     EXECUTE format(
       $sql$
         CREATE TABLE IF NOT EXISTS %1$I.rfp_votes (

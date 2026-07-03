@@ -7,7 +7,9 @@
  * never drift apart. Mirrors rfpReviewerEmails.ts (RFP override reviewers) with its own env var.
  */
 
-export const DEFAULT_NON_PROD_RFP_VOTER = "adnaan.iqbal@gmail.com";
+// Generic, non-deliverable example address (not a real personal inbox) so a dev/test run with RFP_VOTER_EMAILS
+// unset can't accidentally email a real person. Real dev testing sets RFP_VOTER_EMAILS explicitly.
+export const DEFAULT_NON_PROD_RFP_VOTER = "rfp-voter@example.com";
 
 const DEV_FALLBACK_NODE_ENVS = new Set(["development", "test"]);
 

@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { rfpVotes, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { computeRfpVoteState, type RfpVoteRecord } from "@trock-crm/shared/lib/rfpVoteState";
+import { unwrapExecRows } from "../../lib/exec-rows.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -38,7 +39,7 @@ export async function loadRfpVoteDetail(
   // can't undo that. to_regclass returns NULL (no error, no abort) for a missing relation, so we bail cleanly.
   // It resolves against the tenant search_path, exactly how the rfpVotes table itself is queried.
   const probe = await tenantDb.execute(sql`SELECT to_regclass('rfp_votes') AS reg`);
-  const probeRows = Array.isArray(probe) ? probe : (probe as { rows?: Record<string, unknown>[] }).rows ?? [];
+  const probeRows = unwrapExecRows<{ reg: string | null }>(probe);
   if (probeRows[0]?.reg == null) {
     return { rfpVotes: [], rfpVoteState: computeRfpVoteState([]) };
   }

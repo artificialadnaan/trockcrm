@@ -134,7 +134,7 @@ export function RfpVotePage() {
             Tally so far: {voteState.approvals} approve · {voteState.rejections} reject — needs 2 of 3.
           </p>
 
-          {alreadyVoted || decided || !roundOpen ? (
+          {alreadyVoted || decided || !roundOpen || voted ? (
             <div className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
               <p className="font-medium text-foreground">
                 {decided

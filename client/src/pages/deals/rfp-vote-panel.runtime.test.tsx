@@ -90,4 +90,22 @@ describe("RfpVotePanel", () => {
     expect(container.textContent).not.toContain("Awaiting vote");
     expect(container.querySelector('a[href*="/rfp-vote/deal-1"]')).toBeNull();
   });
+
+  it("[Z2] renders the REJECTED decision header + tally, and hides the cast link / awaiting slots", async () => {
+    const rejectedDeal = {
+      id: "deal-1",
+      rfpApprovalStatus: "declined",
+      rfpVotes: [
+        { voterUserId: "u-sid", voterName: "Sidney Gibson", voterEmail: "sidney@trockgc.com", decision: "reject", reason: "Margins too thin", votedAt: "2026-07-02T19:14:00Z" },
+        { voterUserId: "u-jam", voterName: "James Helms", voterEmail: "james@trockgc.com", decision: "reject", reason: "Scope unclear", votedAt: "2026-07-02T19:20:00Z" },
+      ],
+      rfpVoteState: { approvals: 0, rejections: 2, outcome: "rejected", decidedAt: "2026-07-02T19:20:00Z" },
+    } as never;
+    await render(<RfpVotePanel deal={rejectedDeal} user={{ id: "u-tim", email: "tim@trockgc.com", isRfpVoter: true, officeId: null } as never} officeId={null} />);
+    expect(container.textContent).toContain("Rejected (2 of 3)");
+    expect(container.textContent).toContain("Rejected by vote (2 of 3)");
+    expect(container.textContent).not.toContain("needs 2 of 3");
+    expect(container.textContent).not.toContain("Awaiting vote");
+    expect(container.querySelector('a[href*="/rfp-vote/deal-1"]')).toBeNull();
+  });
 });
