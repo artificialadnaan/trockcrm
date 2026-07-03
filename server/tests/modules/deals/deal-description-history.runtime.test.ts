@@ -153,6 +153,17 @@ describe("recordDescriptionHistoryChange (the shared write seam)", () => {
     await recordDescriptionHistoryChange(tdb, { dealId: NOOP, oldDescription: null, newDescription: undefined, changedBy: ALICE });
     expect(await listDealDescriptionHistory(tdb, NOOP)).toEqual([]);
   });
+
+  it("stamps changedAt from the DB clock (clock_timestamp) when no changedAt is passed", async () => {
+    const before = Date.now();
+    await recordDescriptionHistoryChange(tdb, { dealId: U("dab3"), oldDescription: "a", newDescription: "b", changedBy: ALICE });
+    const [row] = await listDealDescriptionHistory(tdb, U("dab3"));
+    expect(row).toBeDefined();
+    // A real timestamp near "now" (not null, not the epoch) — proves the insert stamped it.
+    const stamped = Date.parse(row.changedAt);
+    expect(stamped).toBeGreaterThanOrEqual(before - 60_000);
+    expect(stamped).toBeLessThanOrEqual(Date.now() + 60_000);
+  });
 });
 
 describe("lockCurrentDealDescription (deal-mirror locked before-value)", () => {
