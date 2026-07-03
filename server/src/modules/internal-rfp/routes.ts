@@ -95,6 +95,7 @@ async function findDeal(sourceDealId: string) {
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
               d.rfp_approval_request_id,
+              d.rfp_approval_requested_at,
               d.workflow_route,
               d.stage_entered_at,
               d.on_hold,
@@ -814,6 +815,18 @@ internalRfpRoutes.post(
                     rfp_bidboard_attempt_at IS NULL
                     OR ($3::timestamptz IS NOT NULL AND $3::timestamptz >= rfp_bidboard_attempt_at)
                   )
+                  -- request-less CROSS-ROUND freshness (finding BC1): mirror the 'created' path's Y6 guard. Once a
+                  -- deal is Returned to Opportunity and a FRESH round opens, BOTH per-attempt markers are NULL again
+                  -- (reviewed_at + attempt_at), so a very delayed 'failed' from the OLD round's create (matched only
+                  -- by sourceDealId) would otherwise mark the NEW pending round send_failed. Require the callback
+                  -- createdAt to be no older than the CURRENT round's open time. A timestamp-less FIRST failure
+                  -- ($3 NULL) stays exempt so a genuine first-attempt failure still surfaces even if SyncHub omitted
+                  -- createdAt (the same fail-safe the reviewed_at/attempt_at clauses above keep).
+                  AND (
+                    rfp_approval_requested_at IS NULL
+                    OR $3::timestamptz IS NULL
+                    OR $3::timestamptz >= rfp_approval_requested_at
+                  )
                   -- idempotency: re-applying the same failure is a no-op. Keyed on override_state/error only
                   -- (NOT status) since the status transition now differs per sub-case (send_failed vs. kept
                   -- 'declined') — override_state going to 'failed' already distinguishes the first application.
@@ -975,7 +988,19 @@ internalRfpRoutes.post(
       // no-ops silently at 200 and SyncHub stops retrying the fresh attempt.
       const retriedPendingAwaitingCreated =
         found.deal.rfp_bidboard_attempt_at != null && found.deal.rfp_approval_status === "pending";
-      if ((overrideAwaitingCreated || retriedPendingAwaitingCreated) && !createdCallbackAt) {
+      // finding BC3: a FIRST request-less create (2/3-yes 'pending' or an override-approve 'declined'+'approving',
+      // both with attempt_at + reviewed_at still NULL) ALSO needs a parseable createdAt. The linkage below carries
+      // the Y6 cross-round guard (request_id IS NULL + a round open ⇒ createdAt required), so a timestamp-less
+      // 'created' would match 0 rows yet still 200 — SyncHub treats that as delivered and stops retrying, stranding
+      // the deal. 422 it so SyncHub resends with a well-formed callback. (Request-BACKED creates keep their round
+      // identity from the request-id reconciliation and are exempt; a re-confirmed denial no-ops idempotently.)
+      const requestlessFirstCreateAwaiting =
+        dealRequestId == null &&
+        found.deal.rfp_approval_requested_at != null &&
+        found.deal.rfp_override_decision !== "denial_reconfirmed" &&
+        (found.deal.rfp_approval_status === "pending" ||
+          (found.deal.rfp_approval_status === "declined" && found.deal.rfp_override_state === "approving"));
+      if ((overrideAwaitingCreated || retriedPendingAwaitingCreated || requestlessFirstCreateAwaiting) && !createdCallbackAt) {
         console.warn(
           `[RFP callback] 'created' for deal ${sourceDealId} is missing a parseable createdAt while a freshness marker is set; returning 422 so SyncHub retries instead of silently dropping it`
         );

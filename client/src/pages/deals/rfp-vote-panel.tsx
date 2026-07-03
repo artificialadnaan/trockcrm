@@ -38,9 +38,18 @@ export function RfpVotePanel({
     state.outcome === "pending" && deal.rfpApprovalStatus === "pending" && Boolean(user?.isRfpVoter) && !hasVoted;
   const voteHref = `/rfp-vote/${deal.id}${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`;
 
+  // After a 2/3 approve the vote OUTCOME stays 'approved' forever, but the Bid Board create then moves the deal's
+  // rfpApprovalStatus onward — so read the current status, not just the outcome, or the panel keeps saying
+  // "creating…" next to a send_failed/approved deal and contradicts the rest of the detail page.
+  const approvedTally =
+    deal.rfpApprovalStatus === "send_failed"
+      ? "Approved by vote (2 of 3) — Bid Board creation failed"
+      : deal.rfpApprovalStatus === "approved"
+        ? "Approved by vote (2 of 3) — Bid Board created"
+        : "Approved by vote (2 of 3) — creating Bid Board…";
   const tally =
     state.outcome === "approved"
-      ? "Approved by vote (2 of 3) — creating Bid Board…"
+      ? approvedTally
       : state.outcome === "rejected"
         ? "Rejected by vote (2 of 3)"
         : `${state.approvals} approve · ${state.rejections} reject — no decision yet`;

@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
-import { requireRole, requireRfpReviewer, requireRfpVoter } from "../../middleware/rbac.js";
+import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
+import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 import {
   addDealChangeOrder,
   deleteDealChangeOrder,
@@ -1526,7 +1527,14 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
           // Stamp THIS retry as the current attempt (finding F4/F5). The failed callback + dead-letter sweep
           // ignore any 'failed'/dead signal older than this, so a late duplicate from the prior attempt can't
           // flip this fresh in-flight retry back to send_failed.
-          rfpBidboardAttemptAt: new Date(),
+          // finding BC5: stamp with the transaction's now() (NOT a JS `new Date()`). The replacement
+          // rfp_bidboard_create job is INSERTed in this same transaction with created_at = now() (its column
+          // default), and the dead-letter sweep compares that created_at to this marker. A JS Date is computed
+          // mid-transaction and is a few ms LATER than now() (the transaction-start timestamp), so created_at <
+          // marker would make the sweep treat the retry's OWN dead job as stale and never surface send_failed.
+          // Using now() makes the marker EQUAL the job's created_at, so the current attempt passes (>=) while a
+          // prior attempt's older dead job is still correctly skipped.
+          rfpBidboardAttemptAt: sql`now()`,
           updatedAt: new Date(),
         })
         .where(
@@ -1721,9 +1729,12 @@ router.get("/:id/rfp-review", requireRfpReviewer, async (req, res, next) => {
   }
 });
 
-// POST /api/deals/:id/rfp-vote — cast a three-voter RFP vote (Sidney / Tim / James). requireRfpVoter gates
-// to the RFP_VOTER_EMAILS allowlist; 2-of-3 decides. Reject requires a reason; approve ignores it.
-router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
+// POST /api/deals/:id/rfp-vote — cast a three-voter RFP vote (Sidney / Tim / James). 2-of-3 decides. Reject
+// requires a reason; approve ignores it. Voter authorization is done IN-HANDLER (finding BC2), NOT via the
+// requireRfpVoter middleware: for an open round the round's invitation SNAPSHOT is authoritative, so a voter who
+// was invited when the round opened can still cast even if RFP_VOTER_EMAILS changed since. The env allowlist is
+// the fallback only when no snapshot exists (legacy round / pruned job).
+router.post("/:id/rfp-vote", async (req, res, next) => {
   try {
     const decision = req.body?.decision;
     if (decision !== "approve" && decision !== "reject") {
@@ -1773,10 +1784,17 @@ router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
     const inviteRows = Array.isArray(inviteSnap) ? inviteSnap : (inviteSnap as { rows?: any[] }).rows ?? [];
     const snapshot = inviteRows[0]?.recipients;
     if (Array.isArray(snapshot) && snapshot.length > 0) {
+      // Snapshot-backed round: the round's OWN invited set is authoritative — a voter invited when the round
+      // opened can still cast even after RFP_VOTER_EMAILS changed (finding BC2), and a since-added address that was
+      // never invited cannot cast a deciding 2-of-3. This supersedes the env allowlist for open rounds.
       const invited = snapshot.map((e: unknown) => String(e).trim().toLowerCase());
       if (!invited.includes((req.user!.email ?? "").trim().toLowerCase())) {
         throw new AppError(403, "You were not one of the invited voters for this RFP round.", "RFP_VOTE_NOT_INVITED");
       }
+    } else if (!isRfpVoterEmail(req.user!.email, process.env)) {
+      // No snapshot (a legacy round or a pruned invitation job): fall back to the current env allowlist — the same
+      // gate the removed requireRfpVoter middleware enforced, replicated here so the snapshot can take precedence.
+      throw new AppError(403, "Only the designated RFP voters can vote on RFPs.", "RFP_VOTER_ONLY");
     }
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
     const result = await castRfpVote({

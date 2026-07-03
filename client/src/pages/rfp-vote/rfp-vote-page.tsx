@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
@@ -22,6 +22,17 @@ export function RfpVotePage() {
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [voted, setVoted] = useState(false);
+
+  // finding BC6: React Router reuses this same component instance when navigating between /rfp-vote/:dealId
+  // targets (e.g. opening a second invitation in-app), so the local vote lock + draft would leak from the previous
+  // deal — the next deal could load with alreadyVoted=false yet canSubmit=false because `voted` stayed true. Reset
+  // all local vote state whenever the deal (or office) identity changes.
+  useEffect(() => {
+    setVoted(false);
+    setDecision(null);
+    setReason("");
+    setSubmitting(false);
+  }, [dealId, officeId]);
 
   if (!user?.isRfpVoter) {
     return (

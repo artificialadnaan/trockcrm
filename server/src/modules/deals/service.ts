@@ -2057,14 +2057,23 @@ export async function getDealDetail(
   // can only have been opened while the flag was on. Load its detail regardless of the CURRENT flag (finding
   // Y5): flipping ENABLE_RFP_VOTING off as the rollback lever must NOT hide an already-open round's tally — the
   // route-side W7 guard still lets voters cast, so the panel + /rfp-vote page have to keep rendering the state.
-  const isRequestlessVoteRound =
+  const requestlessRound =
     !isServiceRfp(dealWithMetadata) &&
     dealWithMetadata.rfpApprovalRequestId == null &&
-    dealWithMetadata.rfpApprovalRequestEventId != null &&
-    (dealWithMetadata.rfpApprovalStatus === "pending" || dealWithMetadata.rfpApprovalStatus === "send_failed");
-  const { rfpVotes: rfpVotesView, rfpVoteState } = (isRfpVotingEnabled() || isRequestlessVoteRound)
-    ? await loadRfpVoteDetail(tenantDb, dealId, dealWithMetadata.rfpApprovalRequestEventId ?? null)
-    : { rfpVotes: [] as RfpVoteView[], rfpVoteState: computeRfpVoteState([]) };
+    dealWithMetadata.rfpApprovalRequestEventId != null;
+  const isPendingVoteRound = requestlessRound && dealWithMetadata.rfpApprovalStatus === "pending";
+  // A `send_failed` request-less deal MIGHT be a voting-path create/invitation failure — but a LEGACY
+  // rfp_request_delivery that dead-lettered BEFORE SyncHub returned a request id also lands here: it too stamps a
+  // round event id at trigger time (routes.ts trigger reserve) yet holds no vote. So load the detail for the
+  // send_failed candidate but treat it as a vote round ONLY if it actually recorded votes (finding BC4) — a real
+  // voting create failure always carries >=2 approve votes, whereas a legacy delivery failure has none, so this
+  // stops rendering the vote panel / focused page as a paused vote-with-awaiting-slots for a legacy failure.
+  const isSendFailedRequestless = requestlessRound && dealWithMetadata.rfpApprovalStatus === "send_failed";
+  const { rfpVotes: rfpVotesView, rfpVoteState } =
+    (isRfpVotingEnabled() || isPendingVoteRound || isSendFailedRequestless)
+      ? await loadRfpVoteDetail(tenantDb, dealId, dealWithMetadata.rfpApprovalRequestEventId ?? null)
+      : { rfpVotes: [] as RfpVoteView[], rfpVoteState: computeRfpVoteState([]) };
+  const isRequestlessVoteRound = isPendingVoteRound || (isSendFailedRequestless && rfpVotesView.length > 0);
 
   // The vote panel + focused vote page must be INERT for non-vote deals. A deal is in a vote round ONLY when it's
   // non-service AND either (a) it has recorded votes, or (b) it's an open/paused request-less round (above).

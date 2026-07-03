@@ -116,6 +116,12 @@ export async function openRfpVoteRound(args: {
     isNull(deals.readOnlySyncedAt),
     isNull(deals.bidBoardStageEnteredAt),
     isNull(deals.bidBoardMirrorSourceEnteredAt),
+    // Re-assert the deal is STILL non-service at reserve time. isServiceRfp() was evaluated from the caller's
+    // pre-reservation read; a concurrent edit could flip project_type/workflow_route to service (type 4) in the
+    // gap. Binding both columns into the atomic reserve makes a re-typed deal 409 here instead of opening a CRM
+    // 3-voter round for a service RFP (which must stay on the SyncHub service-approval path).
+    args.deal.projectType == null ? isNull(deals.projectType) : eq(deals.projectType, args.deal.projectType),
+    eq(deals.workflowRoute, args.deal.workflowRoute ?? "normal"),
   ];
   if (args.enforceAssignedRepId != null) {
     reserveConditions.push(eq(deals.assignedRepId, args.enforceAssignedRepId));

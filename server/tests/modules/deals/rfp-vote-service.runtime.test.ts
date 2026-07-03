@@ -278,4 +278,26 @@ describe("openRfpVoteRound", () => {
     expect(jobs[0].job_type).toBe("rfp_vote_invitation");
     expect(jobs[0].payload.dealId).toBe(DEAL);
   });
+
+  it("409s (no round, no invitation) if the deal was re-typed to service between the caller's read and the reserve", async () => {
+    pg = await setup();
+    await pg.query(`UPDATE deals SET rfp_approval_status=NULL, rfp_approval_request_event_id=NULL WHERE id=$1`, [DEAL]);
+    // A concurrent edit flips the deal onto the SERVICE route AFTER the caller read it as non-service.
+    await pg.query(`UPDATE deals SET workflow_route='service' WHERE id=$1`, [DEAL]);
+    const tdb: any = drizzle(pg as any);
+    await expect(
+      openRfpVoteRound({
+        tenantDb: tdb,
+        officeId: "00000000-0000-0000-0000-0000000000ff",
+        // args.deal reflects the STALE non-service read (workflow_route 'normal').
+        deal: dealRow({ rfpApprovalStatus: null, rfpApprovalRequestEventId: null, workflowRoute: "normal" }),
+        requestedByUserId: V1,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_ALREADY_TRIGGERED" });
+    // The service RFP must NOT get a CRM 3-voter round or an invitation.
+    const deal = (await pg.query(`SELECT rfp_approval_status FROM deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(deal[0].rfp_approval_status).toBeNull();
+    const jobs = (await pg.query(`SELECT job_type FROM public.job_queue`)).rows as any[];
+    expect(jobs).toHaveLength(0);
+  });
 });

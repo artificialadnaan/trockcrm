@@ -134,6 +134,52 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(rows[0].rfp_override_error).toBe("boom");
   });
 
+  it("[BC1] cross-round: a STALE request-less 'failed' (createdAt older than the CURRENT round's rfp_approval_requested_at) does NOT mark the fresh round send_failed; a fresh one does", async () => {
+    await seed();
+    // A fresh round reopened at this time. Both per-attempt markers (attempt_at + reviewed_at) are NULL — this is
+    // the first attempt of the new round — so ONLY the cross-round guard can reject an old round's late 'failed'.
+    await holder.pg.query(`UPDATE office_test.deals SET rfp_approval_requested_at = $2 WHERE id = $1`, [DEAL, "2026-07-03T00:00:00.000Z"]);
+    const app = await buildApp();
+    // A late 'failed' from the PRIOR round (createdAt before this round opened) must be a no-op.
+    const staleRaw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "old round failure", createdAt: "2026-06-01T00:00:00.000Z" });
+    const stale = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(staleRaw)).send(staleRaw);
+    expect(stale.status).toBe(200);
+    expect(stale.body.applied).toBe(false);
+    let rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("pending"); // fresh round untouched
+    expect(rows[0].rfp_override_state).toBeNull();
+    // A 'failed' from THIS round (createdAt at/after it opened) surfaces the visible send_failed marker.
+    const freshRaw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "this round failed", createdAt: "2026-07-03T01:00:00.000Z" });
+    const fresh = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(freshRaw)).send(freshRaw);
+    expect(fresh.body.applied).toBe(true);
+    rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("send_failed");
+    expect(rows[0].rfp_override_state).toBe("failed");
+  });
+
+  it("[BC3] 422s a FIRST request-less 'created' that is missing createdAt (so SyncHub retries), then links a well-formed one", async () => {
+    await seed();
+    // A live round is open (requested_at set); attempt_at + reviewed_at are NULL (first create).
+    await holder.pg.query(`UPDATE office_test.deals SET rfp_approval_requested_at = $2 WHERE id = $1`, [DEAL, "2026-07-03T00:00:00.000Z"]);
+    const app = await buildApp();
+    // Missing createdAt: the cross-round guard on the linkage would no-op it at 200, so 422 instead → SyncHub retries.
+    const badRaw = JSON.stringify({ status: "created", sourceDealId: DEAL, bidboardProjectId: "88123", procoreCompanyId: "42" });
+    const bad = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(badRaw)).send(badRaw);
+    expect(bad.status).toBe(422);
+    let rows = (await holder.pg.query(`SELECT rfp_approval_status, is_bid_board_owned FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("pending"); // NOT approved/linked
+    expect(rows[0].is_bid_board_owned).toBe(false);
+    // A well-formed 'created' (createdAt at/after the round opened) still links + approves — BC3 only blocks the
+    // timestamp-less callback, never a valid one.
+    const goodRaw = JSON.stringify({ status: "created", sourceDealId: DEAL, bidboardProjectId: "88123", procoreCompanyId: "42", createdAt: "2026-07-03T01:00:00.000Z" });
+    const good = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(goodRaw)).send(goodRaw);
+    expect(good.status).toBe(200);
+    rows = (await holder.pg.query(`SELECT rfp_approval_status, is_bid_board_owned, procore_bid_id FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("approved");
+    expect(rows[0].is_bid_board_owned).toBe(true);
+    expect(String(rows[0].procore_bid_id)).toBe("88123");
+  });
+
   it("[#1] stale-ignores a request-backed 'created' callback (numeric rfpApprovalRequestId) after the request id was cleared — never approves a canceled deal", async () => {
     await seed();
     // Simulate cancelPendingRfp on a legacy/service/override deal: Return to Opportunity clears the request id +
