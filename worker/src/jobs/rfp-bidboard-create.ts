@@ -53,14 +53,50 @@ function assertPayload(payload: any): asserts payload is RfpRequestDeliveryPaylo
  */
 export async function handleRfpBidBoardCreate(
   payload: unknown,
-  _officeId: string | null,
-  deps: { fetchImpl?: typeof fetch; secret?: string } = {},
+  officeId: string | null,
+  deps: { fetchImpl?: typeof fetch; secret?: string; db?: PoolLike } = {},
 ): Promise<void> {
   assertPayload(payload);
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
   const secret = deps.secret ?? process.env.SYNCHUB_SHARED_SECRET;
   if (!secret) {
     throw new Error("SYNCHUB_SHARED_SECRET is not configured for rfp_bidboard_create delivery");
+  }
+
+  // finding: re-read the CURRENT deal before POSTing. The command's payload was built at approve time; if the deal
+  // was soft-deleted or Returned to Opportunity since (cleared/re-triggered), posting would create an external Bid
+  // Board project the bid-board-created callback (findDeal filters is_active=true) can never link/advance —
+  // orphaning it. Skip the POST unless the deal is still ACTIVE and in a matching request-less create-in-flight
+  // state: a 2/3-yes 'pending', or an override-approve 'declined'+'approving', with NO SyncHub request id. FAIL-OPEN
+  // on a recheck error (DB blip / schema resolve) — better to attempt a legit GO; the callback's own status/round
+  // guards still reject a stale/cancelled link.
+  const db = deps.db ?? (pool as PoolLike);
+  if (officeId && db) {
+    try {
+      const schemaName = await resolveOfficeSchema(db, officeId);
+      const res = await db.query(
+        `SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_override_state
+           FROM ${quoteIdent(schemaName)}.deals WHERE id = $1`,
+        [payload.dealId],
+      );
+      const deal = res.rows[0];
+      const stillCreatable =
+        !!deal &&
+        deal.is_active === true &&
+        deal.rfp_approval_request_id == null &&
+        (deal.rfp_approval_status === "pending" ||
+          (deal.rfp_approval_status === "declined" && deal.rfp_override_state === "approving"));
+      if (!stillCreatable) {
+        console.warn(
+          `[Worker:rfp_bidboard_create] Skipping create POST for deal ${payload.dealId}: no longer active / in a request-less create state (active=${deal?.is_active ?? "missing"}, status=${deal?.rfp_approval_status ?? "null"}, requestId=${deal?.rfp_approval_request_id ?? "null"})`,
+        );
+        return;
+      }
+    } catch (err) {
+      console.warn(
+        `[Worker:rfp_bidboard_create] deal recheck failed for ${payload.dealId} (posting anyway): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   const rawBody = JSON.stringify(payload.body);

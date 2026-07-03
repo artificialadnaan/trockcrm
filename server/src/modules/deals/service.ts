@@ -2101,8 +2101,13 @@ export async function getDealDetail(
   // can only have been opened while the flag was on. Load its detail regardless of the CURRENT flag (finding
   // Y5): flipping ENABLE_RFP_VOTING off as the rollback lever must NOT hide an already-open round's tally — the
   // route-side W7 guard still lets voters cast, so the panel + /rfp-vote page have to keep rendering the state.
+  // finding: base vote-round detection on the request-less ROUND identity (no SyncHub request id + a round event
+  // id), NOT the deal's CURRENT service classification. A non-service round that opened and was later edited to
+  // service/type-4 mid-round is still an OPEN vote round the cast route accepts ballots for (finding #2) — gating
+  // visibility on isServiceRfp here would suppress rfpVoteState and hide the tally/link from remaining voters. A
+  // genuinely-service deal never reaches this shape: the SyncHub service path stamps a request id at 'pending', and
+  // a legacy send_failed carries no votes (excluded below), so dropping the isServiceRfp gate stays inert for them.
   const requestlessRound =
-    !isServiceRfp(dealWithMetadata) &&
     dealWithMetadata.rfpApprovalRequestId == null &&
     dealWithMetadata.rfpApprovalRequestEventId != null;
   const isPendingVoteRound = requestlessRound && dealWithMetadata.rfpApprovalStatus === "pending";
@@ -2119,14 +2124,12 @@ export async function getDealDetail(
       : { rfpVotes: [] as RfpVoteView[], rfpVoteState: computeRfpVoteState([]) };
   const isRequestlessVoteRound = isPendingVoteRound || (isSendFailedRequestless && rfpVotesView.length > 0);
 
-  // The vote panel + focused vote page must be INERT for non-vote deals. A deal is in a vote round ONLY when it's
-  // non-service AND either (a) it has recorded votes, or (b) it's an open/paused request-less round (above).
-  // Flag-independent so rollback keeps rounds visible. Otherwise emit a null rfpVoteState so the client's
-  // `if (!state) return null` guard fires (loadRfpVoteDetail returns a non-null zero-state that would otherwise
-  // render the panel on every RFP).
-  const isVoteRound =
-    !isServiceRfp(dealWithMetadata) &&
-    (rfpVotesView.length > 0 || isRequestlessVoteRound);
+  // The vote panel + focused vote page must be INERT for non-vote deals. A deal is in a vote round when it has
+  // recorded votes OR is an open/paused request-less round (above) — independent of the CURRENT service
+  // classification (finding), so a mid-round reclassification can't hide an open round. Flag-independent so
+  // rollback keeps rounds visible. Otherwise emit a null rfpVoteState so the client's `if (!state) return null`
+  // guard fires (loadRfpVoteDetail returns a non-null zero-state that would otherwise render the panel on every RFP).
+  const isVoteRound = rfpVotesView.length > 0 || isRequestlessVoteRound;
 
   return {
     ...dealWithMetadata,

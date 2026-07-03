@@ -19,6 +19,18 @@ function makePayload() {
   };
 }
 
+// A db mock for the pre-POST deal recheck (finding): answers the office-schema lookup + the deals recheck SELECT.
+// Default = a still-creatable 2/3-yes deal; pass null for a deleted/not-found deal, or override the deal fields.
+function recheckDb(deal: any = { is_active: true, rfp_approval_status: "pending", rfp_approval_request_id: null, rfp_override_state: null }) {
+  return {
+    query: async (sql: string) => {
+      if (sql.includes("FROM public.offices")) return { rows: [{ slug: "test" }] };
+      if (/\.deals\b/.test(sql)) return { rows: deal ? [deal] : [] };
+      return { rows: [] };
+    },
+  } as any;
+}
+
 describe("handleRfpBidBoardCreate", () => {
   it("HMAC-POSTs the body (with decision:'approved') to the create-from-rfp URL", async () => {
     const captured: any = {};
@@ -27,7 +39,7 @@ describe("handleRfpBidBoardCreate", () => {
       captured.init = init;
       return { status: 202, ok: true, text: async () => "" } as any;
     });
-    await handleRfpBidBoardCreate(makePayload(), "office-9", { fetchImpl: fetchImpl as any, secret: SECRET });
+    await handleRfpBidBoardCreate(makePayload(), "office-9", { fetchImpl: fetchImpl as any, secret: SECRET, db: recheckDb() });
 
     expect(captured.url).toBe("https://synchub.example.com/api/bid-board/create-from-rfp");
     expect(captured.init.method).toBe("POST");
@@ -43,8 +55,35 @@ describe("handleRfpBidBoardCreate", () => {
   it("throws on a non-2xx SyncHub response so the job retries", async () => {
     const fetchImpl = vi.fn(async () => ({ status: 500, ok: false, text: async () => "boom" } as any));
     await expect(
-      handleRfpBidBoardCreate(makePayload(), "office-9", { fetchImpl: fetchImpl as any, secret: SECRET }),
+      handleRfpBidBoardCreate(makePayload(), "office-9", { fetchImpl: fetchImpl as any, secret: SECRET, db: recheckDb() }),
     ).rejects.toThrow(/rfp_bidboard_create failed with 500/);
+  });
+
+  it("[finding] SKIPS the POST for a deal soft-deleted / returned since approve (no orphaned Bid Board project)", async () => {
+    const fetchImpl = vi.fn(async () => ({ status: 202, ok: true, text: async () => "" } as any));
+    // Deleted (not found) -> skip.
+    await handleRfpBidBoardCreate(makePayload(), "office-9", { fetchImpl: fetchImpl as any, secret: SECRET, db: recheckDb(null) });
+    // Soft-deleted -> skip.
+    await handleRfpBidBoardCreate(makePayload(), "office-9", { fetchImpl: fetchImpl as any, secret: SECRET, db: recheckDb({ is_active: false, rfp_approval_status: "pending", rfp_approval_request_id: null }) });
+    // Returned to Opportunity (status cleared) -> skip.
+    await handleRfpBidBoardCreate(makePayload(), "office-9", { fetchImpl: fetchImpl as any, secret: SECRET, db: recheckDb({ is_active: true, rfp_approval_status: null, rfp_approval_request_id: null }) });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("[finding] POSTs for an override-approve deal still in declined+approving", async () => {
+    const fetchImpl = vi.fn(async () => ({ status: 202, ok: true, text: async () => "" } as any));
+    await handleRfpBidBoardCreate(makePayload(), "office-9", {
+      fetchImpl: fetchImpl as any, secret: SECRET,
+      db: recheckDb({ is_active: true, rfp_approval_status: "declined", rfp_approval_request_id: null, rfp_override_state: "approving" }),
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("[finding] fails OPEN (posts anyway) when the recheck query errors", async () => {
+    const fetchImpl = vi.fn(async () => ({ status: 202, ok: true, text: async () => "" } as any));
+    const errDb = { query: async () => { throw new Error("db blip"); } } as any;
+    await handleRfpBidBoardCreate(makePayload(), "office-9", { fetchImpl: fetchImpl as any, secret: SECRET, db: errDb });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
