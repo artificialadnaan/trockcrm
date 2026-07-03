@@ -200,6 +200,38 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(rows[0].stage_id).toBe(OPP);
   });
 
+  it("[H4] a 2/3-yes retry is protected on the 'created' path too: a STALE 'created' (createdAt < attempt_at) does NOT link the old project; a FRESH one links", async () => {
+    await seed();
+    const ATTEMPT_AT = "2026-07-02T00:00:00.000Z";
+    // A Retry re-set the deal to 'pending' and stamped rfp_bidboard_attempt_at as the CURRENT attempt.
+    await holder.pg.query(
+      `UPDATE office_test.deals SET rfp_approval_status = 'pending', rfp_bidboard_attempt_at = $2 WHERE id = $1`,
+      [DEAL, ATTEMPT_AT],
+    );
+    const app = await buildApp();
+
+    // STALE 'created' from the PRIOR exhausted attempt (createdAt < attempt_at) must NOT link the old project.
+    const staleRaw = JSON.stringify({ status: "created", sourceDealId: DEAL, bidboardProjectId: "77001", procoreCompanyId: "42", createdAt: "2026-06-01T00:00:00.000Z" });
+    const stale = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(staleRaw)).send(staleRaw);
+    expect(stale.status).toBe(200);
+    let rows = (await holder.pg.query(`SELECT rfp_approval_status, is_bid_board_owned, procore_bid_id, stage_id FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("pending"); // still awaiting the fresh attempt
+    expect(rows[0].is_bid_board_owned).toBe(false);
+    expect(rows[0].procore_bid_id).toBeNull();
+    expect(rows[0].stage_id).toBe(OPP);
+
+    // FRESH 'created' (createdAt >= attempt_at) links + approves + clears the marker.
+    const freshRaw = JSON.stringify({ status: "created", sourceDealId: DEAL, bidboardProjectId: "88123", procoreCompanyId: "42", createdAt: "2026-07-03T00:00:00.000Z" });
+    const fresh = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(freshRaw)).send(freshRaw);
+    expect(fresh.status).toBe(200);
+    rows = (await holder.pg.query(`SELECT rfp_approval_status, is_bid_board_owned, procore_bid_id, rfp_bidboard_attempt_at, stage_id FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("approved");
+    expect(rows[0].is_bid_board_owned).toBe(true);
+    expect(String(rows[0].procore_bid_id)).toBe("88123");
+    expect(rows[0].rfp_bidboard_attempt_at).toBeNull(); // cleared on link
+    expect(rows[0].stage_id).toBe(EST);
+  });
+
   it("[F4] a 2/3-yes retry is protected: a STALE 'failed' (createdAt < rfp_bidboard_attempt_at) is a no-op; a FRESH one flips to send_failed", async () => {
     await seed();
     const ATTEMPT_AT = "2026-07-02T00:00:00.000Z";

@@ -740,17 +740,22 @@ internalRfpRoutes.post(
           // that path we do NOT 422 a missing createdAt for sub-case (1) ('pending', rfp_override_reviewed_at IS
           // NULL) — it's legitimately timestamp-less and exempt from the guard below.
           const votingFailedCreatedAt = asDateOrNull(payload.createdAt);
-          // ...BUT the override sub-case (2) DOES require it (finding G3): with reviewed_at set the freshness
-          // clause needs a real timestamp, so a missing/mangled createdAt would match 0 rows and 200 applied:false
-          // — SyncHub treats that as delivered and stops retrying, leaving the deal stuck 'declined'/'approving'.
-          // 422 it (like the request-backed failed path) so SyncHub retries with a well-formed callback.
+          // ...BUT once a freshness marker is set, a missing/mangled createdAt would match 0 rows and 200
+          // applied:false — SyncHub treats that as delivered and stops retrying, leaving the deal stuck. So
+          // 422 it (like the request-backed failed path) so SyncHub retries with a well-formed callback, in
+          // BOTH marker sub-cases:
+          //   (2) the override sub-case (finding G3): reviewed_at is set → the reviewed_at freshness needs it;
+          //   (1-retry) a 2/3-yes RETRY (finding H7): /rfp-retry stamped rfp_bidboard_attempt_at → the attempt
+          //       freshness needs it. Only the FIRST 2/3-yes attempt (attempt_at NULL) stays timestamp-less/exempt.
           const isOverrideApproveSubcase =
             found.deal.rfp_approval_status === "declined" &&
             found.deal.rfp_override_state === "approving" &&
             found.deal.rfp_override_reviewed_at != null;
-          if (isOverrideApproveSubcase && !votingFailedCreatedAt) {
+          const isRetriedPendingSubcase =
+            found.deal.rfp_approval_status === "pending" && found.deal.rfp_bidboard_attempt_at != null;
+          if ((isOverrideApproveSubcase || isRetriedPendingSubcase) && !votingFailedCreatedAt) {
             console.warn(
-              `[RFP callback] override-approve 'failed' for deal ${sourceDealId} is missing a parseable createdAt; returning 422 so SyncHub retries instead of silently dropping it`
+              `[RFP callback] request-less 'failed' for deal ${sourceDealId} is missing a parseable createdAt while a freshness marker is set; returning 422 so SyncHub retries instead of silently dropping it`
             );
             res.status(422).json({ success: false, error: "invalid_payload" });
             return;
@@ -942,9 +947,14 @@ internalRfpRoutes.post(
         found.deal.rfp_override_reviewed_at != null &&
         found.deal.rfp_approval_status === "declined" &&
         found.deal.rfp_override_decision !== "denial_reconfirmed";
-      if (overrideAwaitingCreated && !createdCallbackAt) {
+      // Finding H4: a 2/3-yes RETRY (rfp_bidboard_attempt_at stamped, status 'pending') likewise needs a real
+      // createdAt for the attempt-freshness guard added to the linkage below — else a timestamp-less 'created'
+      // no-ops silently at 200 and SyncHub stops retrying the fresh attempt.
+      const retriedPendingAwaitingCreated =
+        found.deal.rfp_bidboard_attempt_at != null && found.deal.rfp_approval_status === "pending";
+      if ((overrideAwaitingCreated || retriedPendingAwaitingCreated) && !createdCallbackAt) {
         console.warn(
-          `[RFP callback] override 'created' for deal ${sourceDealId} (request ${currentRequestId}) is missing a parseable createdAt; returning 422 so SyncHub retries instead of silently dropping it`
+          `[RFP callback] 'created' for deal ${sourceDealId} is missing a parseable createdAt while a freshness marker is set; returning 422 so SyncHub retries instead of silently dropping it`
         );
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
@@ -1009,6 +1019,11 @@ internalRfpRoutes.post(
               -- timestamp is treated as not-fresh and ignored, never as current. The original (non-override) flow
               -- has rfp_override_reviewed_at IS NULL and is unaffected.
               AND (rfp_override_reviewed_at IS NULL OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_override_reviewed_at))
+              -- request-less (2/3-yes) per-attempt freshness (finding H4): a delayed 'created' from a PRIOR
+              -- exhausted attempt must not link the OLD project while a fresh /rfp-retry is in flight. Each retry
+              -- stamps rfp_bidboard_attempt_at, so a 'created' older than it is ignored; the fresh attempt's
+              -- 'created' (createdAt >= the stamp) links + clears the marker. First attempt: attempt_at NULL/exempt.
+              AND (rfp_bidboard_attempt_at IS NULL OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_bidboard_attempt_at))
               AND (
                 procore_bid_id IS DISTINCT FROM $1::bigint OR
                 procore_company_id IS DISTINCT FROM $2 OR
@@ -1083,6 +1098,10 @@ internalRfpRoutes.post(
                 -- txn a successful linkage has already set status='approved' (non-null), so legit flows pass.
                 AND rfp_approval_status IS NOT NULL
                 AND (rfp_override_reviewed_at IS NULL OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_override_reviewed_at))
+                -- ...and the request-less per-attempt freshness (finding H4): don't advance the stage on a stale
+                -- prior-attempt 'created'. A successful linkage above already cleared attempt_at (→ exempt here);
+                -- a no-op'd stale 'created' leaves it set, so $8 < attempt_at blocks the move.
+                AND (rfp_bidboard_attempt_at IS NULL OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_bidboard_attempt_at))
               RETURNING id`,
             [
               targetStage.id,

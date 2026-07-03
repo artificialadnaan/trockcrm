@@ -159,8 +159,30 @@ export async function castRfpVote(
     throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
   }
 
-  // Serialize concurrent votes on this deal so the pending->decided transition below is race-free.
-  await args.tenantDb.execute(sql`SELECT id FROM deals WHERE id = ${args.deal.id} FOR UPDATE`);
+  // Serialize concurrent votes on this deal so the pending->decided transition below is race-free, AND re-read
+  // the deal's AUTHORITATIVE state under the lock (finding H3). The route's pre-checks (is_active, open round)
+  // can go stale in the gap before this lock — a soft-delete or a Return-to-Opportunity/re-trigger can land
+  // between them. Voting on a since-deleted/closed/re-triggered deal would (for an approving vote) enqueue
+  // rfp_bidboard_create for a deal the bid-board-created callback can't reconcile (its findDeal filters
+  // is_active=true), so validate the locked row before recording the vote. The decided-round case is left to
+  // priorState below (so it still returns the specific RFP_ROUND_DECIDED).
+  const lockedRes: any = await args.tenantDb.execute(
+    sql`SELECT is_active, rfp_approval_request_id, rfp_approval_request_event_id
+          FROM deals WHERE id = ${args.deal.id} FOR UPDATE`
+  );
+  const lockedRows = Array.isArray(lockedRes) ? lockedRes : lockedRes.rows ?? [];
+  const locked = lockedRows[0];
+  if (!locked || locked.is_active === false) {
+    throw new AppError(404, "Deal not found.");
+  }
+  if (locked.rfp_approval_request_id != null) {
+    // a legacy SyncHub-request deal is not decided by vote (mirrors the route's pre-check, re-verified locked)
+    throw new AppError(409, "This RFP is not decided by vote.", "RFP_NO_VOTE_ROUND");
+  }
+  if (locked.rfp_approval_request_event_id !== roundEventId) {
+    // the round was cleared (Return to Opportunity → NULL) or re-triggered (new event id) since the route read
+    throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
+  }
 
   const priorState = computeRfpVoteState(await loadRoundVotes(args.tenantDb, args.deal.id, roundEventId));
 

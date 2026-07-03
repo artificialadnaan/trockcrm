@@ -12,6 +12,8 @@ interface RfpVoteInvitationPayload {
   dealName?: string | null;
   officeId?: string | null;
   roundEventId?: string | null;
+  // Server-resolved authoritative voter set (finding H5); present on jobs enqueued after that change.
+  recipients?: unknown;
 }
 
 interface HandlerDeps {
@@ -43,7 +45,13 @@ export async function handleRfpVoteInvitation(
     return;
   }
 
-  const recipients = resolveRfpVoterEmails(env);
+  // Prefer the SERVER-resolved recipient set snapshotted into the payload (finding H5): the server gated the
+  // round on its own RFP_VOTER_EMAILS (the exact authorized trio), so emailing that list is authoritative even
+  // if THIS worker's env is stale/incomplete. Fall back to the worker's env only for legacy jobs (no snapshot).
+  const payloadRecipients = Array.isArray(payload.recipients)
+    ? (payload.recipients as unknown[]).filter((r): r is string => typeof r === "string" && r.trim().length > 0).map((r) => r.trim())
+    : [];
+  const recipients = payloadRecipients.length > 0 ? payloadRecipients : resolveRfpVoterEmails(env);
   if (recipients.length === 0) {
     const error = new Error("RFP_VOTER_EMAILS is not configured");
     logger.error(
@@ -241,9 +249,15 @@ export async function runRfpVoteInvitationDeadLetterSweep(
               -- still an open, request-less (voting) round the invitation was for
               AND rfp_approval_status = 'pending'
               AND rfp_approval_request_id IS NULL
-              -- don't nuke a progressing round: if ANY vote was cast, a voter got the link (surface it as-is)
-              AND NOT EXISTS (
-                SELECT 1 FROM ${quoteIdent(schemaName)}.rfp_votes v
+              -- Surface the failure until the round is actually DECIDED (finding H6). A single cast vote does NOT
+              -- mean the invitations were delivered — the OTHER voters may never have been notified, so a one-vote
+              -- round would otherwise sit pending forever, uncancellable. Only a round that already reached the
+              -- 2-of-3 threshold (>=2 approvals OR >=2 rejections) is left alone; anything short of that is
+              -- surfaced as send_failed so the rep can recover. (Threshold mirrors DEFAULT_VOTE_THRESHOLD=2.)
+              AND (
+                SELECT COUNT(*) FILTER (WHERE v.decision = 'approve') < 2
+                   AND COUNT(*) FILTER (WHERE v.decision = 'reject') < 2
+                  FROM ${quoteIdent(schemaName)}.rfp_votes v
                  WHERE v.deal_id = $2
                    AND v.round_event_id = (
                      SELECT d2.rfp_approval_request_event_id FROM ${quoteIdent(schemaName)}.deals d2 WHERE d2.id = $2

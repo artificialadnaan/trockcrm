@@ -176,7 +176,7 @@ import {
   setDealMarketOverride,
 } from "../estimating/deal-market-override-service.js";
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
-import { enqueueRfpBidBoardCreate, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
+import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
 import { castRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
@@ -1549,6 +1549,57 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       await req.commitTransaction!();
       res.status(202).json({ success: true, status: "pending" });
       return;
+    }
+
+    // Voting INVITATION failure (finding H2): openRfpVoteRound reserved the round but the rfp_vote_invitation
+    // email job dead-lettered, so runRfpVoteInvitationDeadLetterSweep stamped send_failed with rfp_override_state
+    // NULL (distinct from a create failure's 'failed') + left the round event id. Distinguish it from a legacy
+    // rfp_request_delivery failure by the dead job TYPE, then re-enqueue a fresh invitation for the SAME round —
+    // no attempt marker (this isn't a Bid Board create). Without this the request-less send_failed would fall
+    // through to the legacy path, find no rfp_request_delivery dead job, and 409 — the visible Retry would break.
+    if (
+      deal.rfpApprovalRequestId == null &&
+      deal.rfpOverrideState == null &&
+      deal.rfpApprovalRequestEventId != null
+    ) {
+      const deadInvite = await req.tenantDb!.execute(sql`
+        SELECT id FROM public.job_queue
+         WHERE job_type = 'rfp_vote_invitation' AND status = 'dead' AND payload->>'dealId' = ${deal.id}
+         LIMIT 1`);
+      const deadInviteRows = Array.isArray(deadInvite) ? deadInvite : (deadInvite as { rows?: unknown[] }).rows ?? [];
+      if (deadInviteRows.length > 0) {
+        const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+        // Atomically re-claim send_failed -> the open 'pending' round state, clearing the surfaced error, BEFORE
+        // re-enqueuing (so a concurrent Return to Opportunity that cleared the fields matches nothing and 409s).
+        const [reclaimed] = await req.tenantDb!
+          .update(deals)
+          .set({ rfpApprovalStatus: "pending", rfpLastAttemptError: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(deals.id, deal.id),
+              eq(deals.rfpApprovalStatus, "send_failed"),
+              isNull(deals.rfpApprovalRequestId),
+              isNull(deals.rfpOverrideState),
+            )
+          )
+          .returning({ id: deals.id });
+        if (!reclaimed) {
+          throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
+        }
+        await enqueueRfpVoteInvitation({
+          tenantDb: req.tenantDb!,
+          deal: {
+            id: deal.id,
+            dealNumber: deal.dealNumber ?? null,
+            name: deal.name ?? null,
+            rfpApprovalRequestEventId: deal.rfpApprovalRequestEventId,
+          },
+          officeId,
+        });
+        await req.commitTransaction!();
+        res.status(202).json({ success: true, status: "pending" });
+        return;
+      }
     }
 
     const deadJobResult = await req.tenantDb!.execute(sql`

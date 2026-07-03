@@ -5,6 +5,7 @@ const loadRfpAttachmentsForDealMock = vi.hoisted(() =>
   vi.fn(async () => [] as Array<{ name: string; url: string; contentType: string }>)
 );
 const enqueueRfpBidBoardCreateMock = vi.hoisted(() => vi.fn(async () => ({ jobId: 77 })));
+const enqueueRfpVoteInvitationMock = vi.hoisted(() => vi.fn(async () => ({ jobId: 78 })));
 const accessMocks = vi.hoisted(() => ({
   assertDealCollaboratorAccess: vi.fn(),
   assertDealOwnerAccess: vi.fn(),
@@ -116,6 +117,7 @@ vi.mock("../../../src/modules/deals/rfp-enqueue.js", () => ({
   insertOpportunityRfpRequestJob: vi.fn(),
   loadRfpAttachmentsForDeal: loadRfpAttachmentsForDealMock,
   enqueueRfpBidBoardCreate: enqueueRfpBidBoardCreateMock,
+  enqueueRfpVoteInvitation: enqueueRfpVoteInvitationMock,
 }));
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
@@ -456,6 +458,50 @@ describe("POST /api/deals/:id/rfp-retry", () => {
     // Never touches the SyncHub delivery path: no dead-job lookup, no direct rfp_request_delivery insert.
     expect(executeMock).not.toHaveBeenCalled();
     expect(inserted).toHaveLength(0);
+  });
+
+  it("[H2] a voting INVITATION failure re-enqueues rfp_vote_invitation (not a create) for the same round", async () => {
+    // Invitation dead-lettered: send_failed with rfp_override_state NULL (distinct from a create failure's
+    // 'failed'), request id NULL, round event id present.
+    getDealByIdMock.mockResolvedValueOnce({
+      id: "deal-1",
+      dealNumber: "TR-1",
+      name: "d",
+      rfpApprovalStatus: "send_failed",
+      rfpApprovalRequestId: null,
+      rfpOverrideState: null,
+      rfpApprovalRequestEventId: "round-1",
+    });
+    const updated: any[] = [];
+    // The dead-invitation lookup returns one row → the invitation-retry branch is taken.
+    const executeMock = vi.fn(async () => ({ rows: [{ id: 5 }] as any[] }));
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: executeMock,
+        update: vi.fn(() => ({
+          set: vi.fn((value) => { updated.push(value); return { where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) }; }),
+        })),
+      },
+      user: { id: "admin-1", role: "admin", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {
+      statusCode: 200, body: undefined as any,
+      status(code: number) { this.statusCode = code; return this; },
+      json(payload: any) { this.body = payload; return this; },
+    } as any;
+    const next = vi.fn((err?: unknown) => { if (err) throw err; });
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toMatchObject({ success: true, status: "pending" });
+    // Re-enqueues the INVITATION (not a Bid Board create), and re-claims to 'pending' clearing the surfaced error.
+    expect(enqueueRfpVoteInvitationMock).toHaveBeenCalledTimes(1);
+    expect(enqueueRfpBidBoardCreateMock).not.toHaveBeenCalled();
+    expect(updated[0]).toMatchObject({ rfpApprovalStatus: "pending", rfpLastAttemptError: null });
+    expect(updated[0].rfpBidboardAttemptAt).toBeUndefined(); // NOT a create retry — no attempt marker
   });
 
   it("a voting-path retry 409s (without enqueuing) when the atomic re-claim matches nothing", async () => {

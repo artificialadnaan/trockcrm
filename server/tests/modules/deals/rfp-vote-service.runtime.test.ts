@@ -47,7 +47,7 @@ async function setup() {
       rfp_approval_status text, rfp_approval_requested_at timestamptz,
       rfp_approval_request_event_id uuid, rfp_approval_requested_by uuid,
       rfp_approval_request_id integer, rfp_declined_reason text, rfp_declined_at timestamptz,
-      updated_at timestamptz
+      is_active boolean NOT NULL DEFAULT true, updated_at timestamptz
     );
     CREATE TABLE rfp_votes (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, round_event_id uuid NOT NULL,
@@ -206,6 +206,37 @@ describe("castRfpVote", () => {
         {},
       ),
     ).rejects.toMatchObject({ statusCode: 409, code: "RFP_ALREADY_VOTED" });
+  });
+
+  it("[H3] 404s a deal soft-deleted between the route pre-check and the lock (no vote recorded, no enqueue)", async () => {
+    pg = await setup();
+    await pg.query(`UPDATE deals SET is_active = false WHERE id = $1`, [DEAL]);
+    const tdb: any = drizzle(pg as any);
+    const enqueue = vi.fn(async () => ({ jobId: 1 }));
+    await expect(
+      castRfpVote(
+        { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V1, email: "sidney@x.com" }, decision: "approve", reason: null },
+        { enqueueBidBoardCreate: enqueue },
+      ),
+    ).rejects.toMatchObject({ statusCode: 404 });
+    expect(enqueue).not.toHaveBeenCalled();
+    const votes = (await pg.query(`SELECT id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(0);
+  });
+
+  it("[H3] 409 RFP_NO_VOTE_ROUND when the round was cleared/re-triggered (locked event id no longer matches)", async () => {
+    pg = await setup();
+    // Return to Opportunity between the route read and the lock: event id cleared under us.
+    await pg.query(`UPDATE deals SET rfp_approval_status = NULL, rfp_approval_request_event_id = NULL WHERE id = $1`, [DEAL]);
+    const tdb: any = drizzle(pg as any);
+    const enqueue = vi.fn(async () => ({ jobId: 1 }));
+    await expect(
+      castRfpVote(
+        { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V1, email: "sidney@x.com" }, decision: "approve", reason: null },
+        { enqueueBidBoardCreate: enqueue },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_NO_VOTE_ROUND" });
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });
 
