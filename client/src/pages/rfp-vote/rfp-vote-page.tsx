@@ -83,8 +83,12 @@ export function RfpVotePage() {
     (v) => (user.id != null && v.voterUserId === user.id) || (!!user.email && v.voterEmail.toLowerCase() === user.email.toLowerCase())
   );
   const decided = voteState.outcome !== "pending";
+  // finding W6: the detail payload stays non-null for an H6-recovered round (send_failed with a vote already
+  // cast), so gate submission on the round still being OPEN ('pending'). Otherwise remaining voters hit a
+  // preventable 409 (the server rejects a cast on a non-pending round) until someone retries the invitation.
+  const roundOpen = deal.rfpApprovalStatus === "pending";
   const rejectNeedsReason = decision === "reject" && reason.trim().length === 0;
-  const canSubmit = decision !== null && !rejectNeedsReason && !submitting && !alreadyVoted && !decided && !voted;
+  const canSubmit = decision !== null && !rejectNeedsReason && !submitting && !alreadyVoted && !decided && !voted && roundOpen;
 
   async function onSubmit() {
     if (!dealId || decision === null) return;
@@ -130,12 +134,20 @@ export function RfpVotePage() {
             Tally so far: {voteState.approvals} approve · {voteState.rejections} reject — needs 2 of 3.
           </p>
 
-          {alreadyVoted || decided ? (
+          {alreadyVoted || decided || !roundOpen ? (
             <div className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
               <p className="font-medium text-foreground">
-                {decided ? "This round has been decided." : "You've already cast your vote."}
+                {decided
+                  ? "This round has been decided."
+                  : !roundOpen
+                    ? "This vote round needs attention and is paused."
+                    : "You've already cast your vote."}
               </p>
-              <p className="mt-1 text-muted-foreground">Votes are final. Open the deal to see the live tally.</p>
+              <p className="mt-1 text-muted-foreground">
+                {!roundOpen && !decided
+                  ? "The invitation couldn't be delivered to all voters. Open the deal to recover it before voting continues."
+                  : "Votes are final. Open the deal to see the live tally."}
+              </p>
             </div>
           ) : (
             <>

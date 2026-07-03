@@ -109,6 +109,11 @@ describe("runRfpBidBoardCreateDeadLetterSweep", () => {
     // rfp_bidboard_attempt_at) must be skipped. The update carries the job's created_at ($3) and the SQL gates on it.
     expect(sqlText).toContain("rfp_bidboard_attempt_at IS NULL");
     expect(sqlText).toContain("$3::timestamptz >= rfp_bidboard_attempt_at");
+    // finding W3: the override sub-case's freshness (reviewed_at) is ALSO enforced (attempt_at is NULL for it).
+    expect(sqlText).toContain("rfp_override_reviewed_at IS NULL");
+    expect(sqlText).toContain("$3::timestamptz >= rfp_override_reviewed_at");
+    // finding W8: the visible send_failed reason is populated for the pending sub-case.
+    expect(sqlText).toContain("rfp_last_attempt_error = CASE WHEN rfp_approval_status = 'pending' THEN $1");
     // the deal update is keyed by the job's dealId + carries the exhaustion error + the job's created_at (freshness)
     expect(dealUpdates).toHaveLength(1);
     expect(dealUpdates[0]?.[0]).toBe("rfp_bidboard_create failed with 500: boom");

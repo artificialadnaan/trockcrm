@@ -90,6 +90,7 @@ async function findDeal(sourceDealId: string) {
               d.rfp_override_error,
               d.rfp_override_decision,
               d.rfp_override_reviewed_at,
+              d.rfp_bidboard_attempt_at,
               d.bid_board_linked_at,
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
@@ -775,6 +776,10 @@ internalRfpRoutes.post(
                       -- buttons keep working — requestOverrideApproval + reconfirmRfpDecline are both
                       -- status='declined'-gated; /rfp-retry still recovers it via rfp_override_state='failed'.
                       rfp_approval_status = CASE WHEN rfp_approval_status = 'pending' THEN 'send_failed' ELSE rfp_approval_status END,
+                      -- finding W8: the Pending-RFP surface + deal detail render the send_failed reason from
+                      -- rfp_last_attempt_error, so populate it on the send_failed (pending) sub-case (the override
+                      -- sub-case stays declined + shows rfp_override_error on the review page, so leave it).
+                      rfp_last_attempt_error = CASE WHEN rfp_approval_status = 'pending' THEN $1 ELSE rfp_last_attempt_error END,
                       updated_at = NOW()
                 WHERE id = $2
                   AND rfp_approval_request_id IS NULL
@@ -811,6 +816,18 @@ internalRfpRoutes.post(
             failedApplied = (failedUpdate.rowCount ?? 0) > 0;
             if (failedApplied) {
               console.warn(`[RFP callback] voting-path Bid Board creation FAILED for deal ${sourceDealId}: ${overrideError}`);
+              // finding W9: record the ACTUAL retained status. The 2/3-yes sub-case moves 'pending'->'send_failed';
+              // the override sub-case KEEPS 'declined' (G4). Logging 'send_failed' unconditionally would make the
+              // activity history contradict the row while reviewers decide whether to re-attempt or uphold.
+              const priorStatus = found.deal.rfp_approval_status ?? null;
+              const retainedStatus = priorStatus === "pending" ? "send_failed" : priorStatus;
+              const fieldChanges: Record<string, { from: unknown; to: unknown }> = {
+                rfpOverrideState: { from: found.deal.rfp_override_state ?? null, to: "failed" },
+                rfpOverrideError: { from: found.deal.rfp_override_error ?? null, to: overrideError },
+              };
+              if (retainedStatus !== priorStatus) {
+                fieldChanges.rfpApprovalStatus = { from: priorStatus, to: retainedStatus };
+              }
               await logActivityWithPgClient({
                 client,
                 schemaName: found.schemaName,
@@ -823,11 +840,7 @@ internalRfpRoutes.post(
                   nameSnapshot: String(found.deal.name ?? "Deal"),
                   secondaryIdSnapshot: (found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
                 },
-                fieldChanges: {
-                  rfpApprovalStatus: { from: found.deal.rfp_approval_status ?? null, to: "send_failed" },
-                  rfpOverrideState: { from: found.deal.rfp_override_state ?? null, to: "failed" },
-                  rfpOverrideError: { from: found.deal.rfp_override_error ?? null, to: overrideError },
-                },
+                fieldChanges,
                 metadata: { rfpApprovalRequestId: null },
               });
             }

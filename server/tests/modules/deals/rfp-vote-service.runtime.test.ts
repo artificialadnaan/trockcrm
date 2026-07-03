@@ -47,6 +47,9 @@ async function setup() {
       rfp_approval_status text, rfp_approval_requested_at timestamptz,
       rfp_approval_request_event_id uuid, rfp_approval_requested_by uuid,
       rfp_approval_request_id integer, rfp_declined_reason text, rfp_declined_at timestamptz,
+      rfp_override_state text, rfp_override_error text, rfp_override_decision text, rfp_override_note text,
+      rfp_override_reviewed_at timestamptz, rfp_bidboard_attempt_at timestamptz, rfp_conflict_reason text,
+      rfp_conflict_with jsonb, rfp_last_attempt_error text,
       is_active boolean NOT NULL DEFAULT true, updated_at timestamptz
     );
     CREATE TABLE rfp_votes (
@@ -222,6 +225,21 @@ describe("castRfpVote", () => {
     expect(enqueue).not.toHaveBeenCalled();
     const votes = (await pg.query(`SELECT id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
     expect(votes).toHaveLength(0);
+  });
+
+  it("[W2] 409 RFP_NO_VOTE_ROUND when the invitation sweep flipped an UNDECIDED round to send_failed under us", async () => {
+    pg = await setup();
+    // The round is still on the same event id (not cleared) but the sweep changed status pending -> send_failed.
+    await pg.query(`UPDATE deals SET rfp_approval_status = 'send_failed' WHERE id = $1`, [DEAL]);
+    const tdb: any = drizzle(pg as any);
+    const enqueue = vi.fn(async () => ({ jobId: 1 }));
+    await expect(
+      castRfpVote(
+        { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V1, email: "sidney@x.com" }, decision: "approve", reason: null },
+        { enqueueBidBoardCreate: enqueue },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_NO_VOTE_ROUND" });
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it("[H3] 409 RFP_NO_VOTE_ROUND when the round was cleared/re-triggered (locked event id no longer matches)", async () => {

@@ -89,6 +89,21 @@ export async function openRfpVoteRound(args: {
     rfpApprovalRequestEventId: eventId,
     rfpApprovalRequestedBy: args.requestedByUserId,
     rfpApprovalStatus: "pending",
+    // finding W4: clear any STALE RFP state from a prior cycle when opening a fresh round (the legacy delivery
+    // path resets these too). Otherwise a lingering rfp_override_decision='denial_reconfirmed' (or a stale
+    // failed/attempt marker) would be evaluated by the later Bid Board callback guards, making a 2/3-approve
+    // no-op or a 2/3-reject non-actionable for review.
+    rfpOverrideState: null,
+    rfpOverrideError: null,
+    rfpOverrideDecision: null,
+    rfpOverrideReviewedAt: null,
+    rfpOverrideNote: null,
+    rfpBidboardAttemptAt: null,
+    rfpDeclinedReason: null,
+    rfpDeclinedAt: null,
+    rfpConflictReason: null,
+    rfpConflictWith: null,
+    rfpLastAttemptError: null,
   } as const;
   const reserveConditions = [
     eq(deals.id, args.deal.id),
@@ -167,7 +182,7 @@ export async function castRfpVote(
   // is_active=true), so validate the locked row before recording the vote. The decided-round case is left to
   // priorState below (so it still returns the specific RFP_ROUND_DECIDED).
   const lockedRes: any = await args.tenantDb.execute(
-    sql`SELECT is_active, rfp_approval_request_id, rfp_approval_request_event_id
+    sql`SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_approval_request_event_id
           FROM deals WHERE id = ${args.deal.id} FOR UPDATE`
   );
   const lockedRows = Array.isArray(lockedRes) ? lockedRes : lockedRes.rows ?? [];
@@ -187,9 +202,18 @@ export async function castRfpVote(
   const priorState = computeRfpVoteState(await loadRoundVotes(args.tenantDb, args.deal.id, roundEventId));
 
   // Reject late votes once the round is already decided (2-of-3 threshold crossed). Without this a 3rd
-  // voter can POST a valid vote row that never triggers an action but silently lands in rfp_votes.
+  // voter can POST a valid vote row that never triggers an action but silently lands in rfp_votes. Checked
+  // BEFORE the open-status check so a reject-decided round (status now 'declined') still returns the specific
+  // RFP_ROUND_DECIDED rather than the generic not-open error.
   if (priorState.outcome !== "pending") {
     throw new AppError(409, "This RFP vote round has already been decided.", "RFP_ROUND_DECIDED");
+  }
+  // finding W2: after ruling out a decided round, the round must still be OPEN ('pending'). The invitation
+  // dead-letter sweep can flip an UNDECIDED round to send_failed in the route→lock gap; recording a vote then
+  // would (approve) enqueue a create for a send_failed deal the create callbacks/sweeps can't reconcile, or
+  // (reject) no-op applyRfpDeclineToDeal while still firing the outcome.
+  if (locked.rfp_approval_status !== "pending") {
+    throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
   }
 
   try {

@@ -181,6 +181,9 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
                   -- working; /rfp-retry still recovers it via rfp_override_state='failed'. Both failure paths
                   -- (callback + this sweep) converge on the same per-sub-case status.
                   rfp_approval_status = CASE WHEN rfp_approval_status = 'pending' THEN 'send_failed' ELSE rfp_approval_status END,
+                  -- finding W8: populate the visible send_failed reason (Pending-RFP + deal detail read
+                  -- rfp_last_attempt_error) on the send_failed sub-case, mirroring the internal-rfp failed callback.
+                  rfp_last_attempt_error = CASE WHEN rfp_approval_status = 'pending' THEN $1 ELSE rfp_last_attempt_error END,
                   updated_at = NOW()
             WHERE id = $2
               -- request-less (voting-path) only: every rfp_bidboard_create job is a voting 2/3-yes or a voting
@@ -202,6 +205,14 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
               AND (
                 rfp_bidboard_attempt_at IS NULL
                 OR $3::timestamptz >= rfp_bidboard_attempt_at
+              )
+              -- ...and the SAME freshness against rfp_override_reviewed_at (finding W3): the override-approve
+              -- sub-case tracks its current attempt with reviewed_at (NOT the bidboard attempt column), so without
+              -- this a dead job from a PRIOR override attempt (created_at < the bumped reviewed_at) — where
+              -- attempt_at IS NULL and is exempt above — would still flip the fresh 'approving' retry to failed.
+              AND (
+                rfp_override_reviewed_at IS NULL
+                OR $3::timestamptz >= rfp_override_reviewed_at
               )
               -- idempotency keyed on override_state/error only (NOT status), since the status transition now
               -- differs per sub-case (send_failed vs. kept 'declined') — override_state -> 'failed' already marks

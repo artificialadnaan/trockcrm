@@ -32,7 +32,11 @@ async function setup() {
       bid_board_stage_slug text, is_read_only_mirror boolean NOT NULL DEFAULT false, read_only_synced_at timestamptz,
       bid_board_stage_entered_at timestamptz, bid_board_mirror_source_entered_at timestamptz, rfp_approval_status text,
       rfp_approval_requested_at timestamptz, rfp_approval_request_event_id uuid, rfp_approval_requested_by uuid,
-      rfp_approval_request_id integer, assigned_rep_id uuid, updated_at timestamptz
+      rfp_approval_request_id integer, assigned_rep_id uuid,
+      rfp_declined_reason text, rfp_declined_at timestamptz, rfp_override_state text, rfp_override_error text,
+      rfp_override_decision text, rfp_override_note text, rfp_override_reviewed_at timestamptz,
+      rfp_bidboard_attempt_at timestamptz, rfp_conflict_reason text, rfp_conflict_with jsonb, rfp_last_attempt_error text,
+      updated_at timestamptz
     );
   `);
   await db.query(

@@ -1562,9 +1562,15 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       deal.rfpOverrideState == null &&
       deal.rfpApprovalRequestEventId != null
     ) {
+      // finding W5: match the dead invitation to the deal's CURRENT round (payload roundEventId ==
+      // rfpApprovalRequestEventId). Otherwise, after an OLD invitation failure was surfaced and the deal was
+      // returned + re-triggered through the LEGACY delivery path, retrying that legacy send_failed could match
+      // the stale dead invitation and misroute into re-enqueuing a vote invitation for a non-voting round.
       const deadInvite = await req.tenantDb!.execute(sql`
         SELECT id FROM public.job_queue
-         WHERE job_type = 'rfp_vote_invitation' AND status = 'dead' AND payload->>'dealId' = ${deal.id}
+         WHERE job_type = 'rfp_vote_invitation' AND status = 'dead'
+           AND payload->>'dealId' = ${deal.id}
+           AND payload->>'roundEventId' = ${deal.rfpApprovalRequestEventId}
          LIMIT 1`);
       const deadInviteRows = Array.isArray(deadInvite) ? deadInvite : (deadInvite as { rows?: unknown[] }).rows ?? [];
       if (deadInviteRows.length > 0) {
@@ -1719,11 +1725,6 @@ router.get("/:id/rfp-review", requireRfpReviewer, async (req, res, next) => {
 // to the RFP_VOTER_EMAILS allowlist; 2-of-3 decides. Reject requires a reason; approve ignores it.
 router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
   try {
-    // Flag-gate the cast itself. In the rollout window (RFP_VOTER_EMAILS set but ENABLE_RFP_VOTING off) a voter
-    // could otherwise vote on a legacy non-service deal, firing a double escalation email + premature create.
-    if (!isRfpVotingEnabled()) {
-      throw new AppError(503, "RFP voting is not enabled.", "RFP_VOTING_DISABLED");
-    }
     const decision = req.body?.decision;
     if (decision !== "approve" && decision !== "reject") {
       throw new AppError(400, "decision must be 'approve' or 'reject'.", "RFP_VOTE_DECISION_INVALID");
@@ -1741,7 +1742,19 @@ router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
     if (isServiceRfp(deal)) {
       throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
     }
-    if (!deal.rfpApprovalRequestEventId || deal.rfpApprovalStatus !== "pending" || deal.rfpApprovalRequestId != null) {
+    const isOpenVoteRound =
+      deal.rfpApprovalRequestEventId != null &&
+      deal.rfpApprovalStatus === "pending" &&
+      deal.rfpApprovalRequestId == null;
+    // Flag-gate the cast, but ONLY for a deal that is NOT already in an open vote round (finding W7). The gate
+    // exists so a voter can't cast on a legacy non-service deal during the rollout window (RFP_VOTER_EMAILS set,
+    // ENABLE_RFP_VOTING off) — firing a double escalation + premature create. An ALREADY-open round was opened
+    // while the flag was on, so keep it votable even after the flag is flipped off as the rollback lever;
+    // otherwise those in-flight rounds strand ('pending' isn't a cancellable attention state).
+    if (!isRfpVotingEnabled() && !isOpenVoteRound) {
+      throw new AppError(503, "RFP voting is not enabled.", "RFP_VOTING_DISABLED");
+    }
+    if (!isOpenVoteRound) {
       throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
     }
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
