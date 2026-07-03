@@ -10,6 +10,9 @@ export default defineConfig({
       "@trock-crm/shared/schema": path.resolve(__dirname, "../shared/src/schema/index.ts"),
       "@trock-crm/shared/types": path.resolve(__dirname, "../shared/src/types/index.ts"),
       "@trock-crm/shared/utils": path.resolve(__dirname, "../shared/src/utils/normalize.ts"),
+      // Subpath lib exports must be aliased individually and BEFORE the catch-all below, else the broad
+      // "@trock-crm/shared" alias rewrites them to the schema entrypoint and resolution fails.
+      "@trock-crm/shared/lib/rfpReviewerEmails": path.resolve(__dirname, "../shared/src/lib/rfpReviewerEmails.ts"),
       "@trock-crm/shared": path.resolve(__dirname, "../shared/src/schema/index.ts"),
     },
   },

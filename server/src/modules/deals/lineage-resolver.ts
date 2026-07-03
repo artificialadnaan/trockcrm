@@ -12,6 +12,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { applyProjectTypeChange, clearSalesSource, normalizeOptionalDealBidDueDate } from "./service.js";
+import { lockCurrentDealDescription, recordDescriptionHistoryChange } from "./deal-description-history.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -479,6 +480,13 @@ export async function writeResolvedDealFields(
     }
   }
 
+  // Lock + read the current deals.description (what the deal-detail panel shows) BEFORE any write, so a
+  // concurrent resolved-fields save on the same deal can't slip a stale intermediate into the history row.
+  const oldDealDescription =
+    dealUpdates.description !== undefined
+      ? await lockCurrentDealDescription(tenantDb, resolvedDeal.deal.id)
+      : null;
+
   if (sourceLead && Object.keys(leadUpdates).length > 0) {
     await tenantDb
       .update(leads)
@@ -497,6 +505,19 @@ export async function writeResolvedDealFields(
         updatedAt: now,
       })
       .where(eq(deals.id, resolvedDeal.deal.id));
+
+    // The resolved-fields path also writes deals.description (lead compatibility write-through or a direct
+    // deal edit), so record the change-log row here too, using the locked deals.description before-value above.
+    if (dealUpdates.description !== undefined) {
+      await recordDescriptionHistoryChange(tenantDb, {
+        dealId: resolvedDeal.deal.id,
+        oldDescription: oldDealDescription,
+        newDescription: dealUpdates.description as string | null,
+        changedBy: input.userId,
+        source: "resolved_fields",
+        // changedAt omitted -> DB now() at insert (post-lock), so concurrent same-deal saves order correctly.
+      });
+    }
   }
 
   await writeScopingFields({

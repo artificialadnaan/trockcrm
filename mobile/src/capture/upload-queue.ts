@@ -4,6 +4,7 @@ import type { Fetcher } from "../api/endpoints";
 import { runConcurrentUploads, uploadCapture, UploadCancelledError, type CaptureUploadInput } from "./upload";
 import {
   UPLOAD_CONCURRENCY,
+  applyGpsPatch,
   bumpAttempts,
   createAsyncMutex,
   dedupeQueue,
@@ -165,6 +166,25 @@ export async function removeQueuedUploads(ownerKey: string, clientUploadIds: str
     if (toRemove.length === 0) return;
     await writeQueue(ownerKey, current.filter((item) => !ids.has(item.clientUploadId)));
     await deleteQueuedFiles(toRemove);
+  });
+}
+
+/**
+ * Best-effort: stamp GPS coordinates onto a still-queued item — the DURABLE analogue of the old in-memory
+ * back-patch. Used when a camera session's GPS fix lands after shots were already streamed coordless (so a
+ * shot can be persisted immediately, before the fix, without losing geotags). Only fills a coordinate-LESS
+ * item (never overwrites EXIF/existing coords) and is a no-op if the item has already uploaded/left the
+ * queue. Returns true iff an item was patched.
+ */
+export async function patchQueuedMetadata(
+  ownerKey: string,
+  clientUploadId: string,
+  coords: { latitude: number; longitude: number; addressSource?: "exif" | "live_gps" },
+): Promise<boolean> {
+  return withQueueLock(async () => {
+    const { queue, changed } = applyGpsPatch(await readQueue(ownerKey), clientUploadId, coords);
+    if (changed) await writeQueue(ownerKey, queue);
+    return changed;
   });
 }
 

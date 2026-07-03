@@ -242,7 +242,10 @@ export function buildCanonicalDealBoardColumns(
   const pendingRfpValue = activePendingRfp.reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0);
 
   const oppIndex = columns.findIndex((column) => column.stage.slug === "opportunity");
-  if (oppIndex !== -1 && pendingRfpCards.length > 0) {
+  // Always insert the synthetic Pending RFP column after Opportunity — even with zero pending cards — so the
+  // stage stays visible on the board instead of vanishing when the queue drains to empty. An empty column is
+  // count 0 / value 0 / cards [] and the opportunity adjustment below subtracts 0, so no rollup is disturbed.
+  if (oppIndex !== -1) {
     const opp = columns[oppIndex]!;
     // Subtract the moved pending-RFP cards from the opportunity column's backend aggregate so
     // the two columns don't double-count (opportunity header would over-report otherwise).
