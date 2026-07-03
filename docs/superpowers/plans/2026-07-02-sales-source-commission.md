@@ -58,7 +58,7 @@ Both are covered by tasks below and re-checked in the Task 12 review.
 
 - [ ] **Step 1: Find the sibling estimator_user_id migration to mirror**
 
-Run: `grep -rl "estimator_user_id" /Users/adnaaniqbal/Developer/trockcrm/.worktrees/sales-source/migrations/ | head`
+Run (from the repo root): `grep -rl "estimator_user_id" migrations/ | head`
 Read that file. Note exactly: (a) the `DO $tenant$ … LIKE 'office\_%'` loop with `ADD COLUMN IF NOT EXISTS estimator_user_id uuid`, (b) whether it adds a FK constraint to `public.users` (and its `ON DELETE` action), and (c) the `-- TENANT_SCHEMA_START/END` block against `office_dallas`.
 
 - [ ] **Step 2: Write the migration mirroring that structure**
@@ -150,21 +150,24 @@ Extract a single helper that resolves the applied rate for a rep+role, so the mi
 
 Create `server/tests/modules/commissions/sales-source-mint.runtime.test.ts` with the standard PGlite harness (copy the `beforeAll`/imports from `server/tests/modules/commissions/calculate.runtime.test.ts` — `tenantSchemaSql([deals, userCommissionSettings, dealSignedCommissions, auditLog, users, offices])` + the `deal_signed_commissions_dedup` UNIQUE). Then this first test:
 
+`resolveAppliedRateForRole` returns a discriminated `RoleRateResolution` union — `{ status: "rate"; appliedRate }` (active, effective rate > 0), `{ status: "zero" }` (active settings, effective rate 0), or `{ status: "inactive" }` (missing/inactive settings). Assert on `status` (+ `appliedRate` when `"rate"`):
+
 ```ts
 import { resolveAppliedRateForRole } from "../../../src/modules/commissions/service.js";
 
 // ... inside describe, after harness seeds a mixed rep REP_MIX with capx_rate_mixed=0.02, service_source_rate=0.005:
 it("resolves owner/estimator rate from the capX mirror and sales_source from the service-source rate", async () => {
   // REP_MIX: commission_rate (mirror) = 0.020000, service_source_rate = 0.005000, structure = mixed
-  expect(await resolveAppliedRateForRole(tdb, REP_MIX, "owner")).toBe("0.020000");
-  expect(await resolveAppliedRateForRole(tdb, REP_MIX, "estimator")).toBe("0.020000");
-  expect(await resolveAppliedRateForRole(tdb, REP_MIX, "sales_source")).toBe("0.005000");
+  expect(await resolveAppliedRateForRole(tdb, REP_MIX, "owner")).toEqual({ status: "rate", appliedRate: "0.020000" });
+  expect(await resolveAppliedRateForRole(tdb, REP_MIX, "estimator")).toEqual({ status: "rate", appliedRate: "0.020000" });
+  expect(await resolveAppliedRateForRole(tdb, REP_MIX, "sales_source")).toEqual({ status: "rate", appliedRate: "0.005000" });
 });
 
-it("returns null for a solo rep's sales_source (no service-source cut)", async () => {
-  // REP_SOLO: structure = solo, service_source_rate = 0.005 (stray) → effective 0
-  expect(await resolveAppliedRateForRole(tdb, REP_SOLO, "sales_source")).toBeNull();
-  expect(await resolveAppliedRateForRole(tdb, REP_SOLO, "owner")).toBe("0.030000");
+it("a solo rep's sales_source resolves to zero (no service-source cut), and inactive settings to inactive", async () => {
+  // REP_SOLO: structure = solo, service_source_rate = 0.005 (stray) → effective 0 (active settings → "zero")
+  expect(await resolveAppliedRateForRole(tdb, REP_SOLO, "sales_source")).toEqual({ status: "zero" });
+  expect(await resolveAppliedRateForRole(tdb, REP_SOLO, "owner")).toEqual({ status: "rate", appliedRate: "0.030000" });
+  // A rep whose settings row is inactive → { status: "inactive" } (recompute PRESERVES; mint skips).
 });
 ```
 
