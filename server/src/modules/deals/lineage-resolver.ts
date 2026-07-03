@@ -497,7 +497,7 @@ export async function writeResolvedDealFields(
         newDescription: dealUpdates.description as string | null,
         changedBy: input.userId,
         source: "resolved_fields",
-        changedAt: now,
+        // changedAt omitted -> DB now() at insert (post-lock), so concurrent same-deal saves order correctly.
       });
     }
   }

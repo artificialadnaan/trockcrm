@@ -49,7 +49,10 @@ export function buildDescriptionHistoryEntry(
  * every write path (updateDeal, scoping workspace, resolved-fields, change orders) funnels through, so the
  * build + skip-null + insert logic lives in ONE place. Runs in the caller's per-request transaction, so it
  * is atomic with the deal update (an audit-row failure rolls back the edit — deliberately all-or-nothing,
- * same as the sibling project_type history write). Pass `changedAt` to share the update's timestamp.
+ * same as the sibling project_type history write). When `changedAt` is omitted the DB `now()` default stamps
+ * the row AT INSERT TIME — which, because the callers hold a FOR UPDATE lock on the deal until commit, orders
+ * concurrent edits of the same deal correctly (the second committer stamps a strictly later changed_at, so
+ * the newest-first panel can't render a stale intermediate ahead of the value that superseded it).
  */
 export async function recordDescriptionHistoryChange(
   tenantDb: TenantDb,
@@ -67,7 +70,8 @@ export async function recordDescriptionHistoryChange(
   await tenantDb.insert(dealHistory).values({
     dealId: args.dealId,
     ...entry,
-    changedAt: args.changedAt ?? new Date(),
+    // Omit -> the deal_history.changed_at DEFAULT now() stamps it at insert (post-lock, commit-order-correct).
+    ...(args.changedAt !== undefined ? { changedAt: args.changedAt } : {}),
   });
 }
 

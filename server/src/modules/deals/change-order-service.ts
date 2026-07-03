@@ -641,7 +641,7 @@ export async function updateDealChangeOrder(
         newDescription: child.description,
         changedBy: input.updatedBy,
         source: "change_order",
-        changedAt: childUpdates.updatedAt as Date,
+        // changedAt omitted -> DB now() at insert (post-lock), so concurrent CO edits order correctly.
       });
     }
     // A change order earns commission, so commission must track the CURRENT CO value. When the amount or
