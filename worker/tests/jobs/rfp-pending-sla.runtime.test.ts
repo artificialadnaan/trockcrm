@@ -145,16 +145,44 @@ describe("findPendingRfpSlaBreaches (real SQL)", () => {
     const breaches = await findPendingRfpSlaBreaches(query, "office_test", 24);
     expect(breaches.every((b) => b.dealNumber?.startsWith("P-"))).toBe(true);
   });
+
+  it("uses caller-supplied oppStageIds when provided (hoisted once per scan), and fast-paths an empty set", async () => {
+    // Passing the full Opportunity-canonical set (as runRfpPendingSlaScan does) matches resolving internally.
+    const withIds = await findPendingRfpSlaBreaches(query, "office_test", 24, [OPP, DD]);
+    expect(withIds.map((b) => b.dealId)).toEqual([U("d2"), U("dd"), U("d1")]);
+    // The finder trusts the SUPPLIED ids: narrowing to just [OPP] drops the legacy dd-staged breach, proving
+    // the passed set (not an internal re-resolution) drives the stage filter.
+    const oppOnly = await findPendingRfpSlaBreaches(query, "office_test", 24, [OPP]);
+    expect(oppOnly.map((b) => b.dealId)).toEqual([U("d2"), U("d1")]);
+    // Empty set short-circuits before touching .deals.
+    expect(await findPendingRfpSlaBreaches(query, "office_test", 24, [])).toEqual([]);
+  });
 });
 
-// ---- Orchestration test (mock query + send): single-flight + exactly-once (record-after-send) + re-check ----
-function makeScanMocks(opts: { receiptExists?: boolean; stillBreaching?: boolean; stageSlug?: string } = {}) {
-  const receiptExists = opts.receiptExists ?? false;
+// ---- Orchestration test (mock query + send): single-flight + claim-then-send exactly-once + re-check ----
+// The receipts table is modeled as a real in-memory store keyed by cycle so the claim-before-send lifecycle
+// (INSERT claim -> render from stored snapshot -> stamp sent_at on success) is exercised end-to-end, incl.
+// the rename-stability guarantee.
+function makeScanMocks(
+  opts: { stillBreaching?: boolean; stageSlug?: string; alreadySent?: boolean } = {},
+) {
   const stillBreaching = opts.stillBreaching ?? true;
   const stageSlug = opts.stageSlug ?? "opportunity";
+  // Mutable so a test can rename the deal BETWEEN scans and assert the payload stays pinned to the snapshot.
+  const deal = { id: "deal-1", name: "Deal One", deal_number: "P-1", requestedAt: "2026-01-01T00:00:00.000Z" };
+  // key = tenant_schema | deal_id | rfp_approval_requested_at (the first 3 bound params of every receipts query)
+  const receipts = new Map<string, { deal_name: string; deal_number: string | null; sent_at: string | null }>();
+  const key = (p: unknown[]) => `${p[0]}|${p[1]}|${p[2]}`;
+  if (opts.alreadySent) {
+    receipts.set(`office_beta|${deal.id}|${deal.requestedAt}`, {
+      deal_name: "Deal One",
+      deal_number: "P-1",
+      sent_at: "2026-01-02T00:00:00.000Z",
+    });
+  }
   const sendEmail = vi.fn().mockResolvedValue({ success: true, messageId: "msg-1" });
   const calls: string[] = [];
-  const q = vi.fn(async (sql: string) => {
+  const q = vi.fn(async (sql: string, params?: unknown[]) => {
     calls.push(sql);
     if (sql.includes("FROM public.offices")) return { rows: [{ id: "office-1", slug: "beta" }] };
     if (sql.includes("FROM public.pipeline_stage_config")) return { rows: [{ id: "opp-stage", slug: "opportunity" }] };

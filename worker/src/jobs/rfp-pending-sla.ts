@@ -85,12 +85,16 @@ export async function findPendingRfpSlaBreaches(
   query: PgQuery,
   schemaName: string,
   slaHours: number,
+  oppStageIds?: string[],
 ): Promise<RfpPendingSlaBreach[]> {
   if (!TENANT_SCHEMA_REGEX.test(schemaName)) {
     throw new Error(`Unsafe tenant schema: ${schemaName}`);
   }
-  const oppStageIds = await opportunityStageIds(query);
-  if (oppStageIds.length === 0) return [];
+  // opportunityStageIds reads office-invariant public.pipeline_stage_config, so the caller resolves it ONCE
+  // per scan and passes it in (avoids one full-table read per office). Direct callers (tests) may omit it and
+  // we resolve internally. Either way the empty-set fast path stands.
+  const stageIds = oppStageIds ?? (await opportunityStageIds(query));
+  if (stageIds.length === 0) return [];
   const result = await query(
     `SELECT d.id,
             d.name,
@@ -109,7 +113,7 @@ export async function findPendingRfpSlaBreaches(
         AND COALESCE(d.rfp_override_decision, '') <> 'denial_reconfirmed'
         AND COALESCE(d.rfp_override_state, '') <> 'approving'
       ORDER BY d.rfp_approval_requested_at ASC`,
-    [oppStageIds, [...PENDING_RFP_AWAITING_STATUSES], String(slaHours)],
+    [stageIds, [...PENDING_RFP_AWAITING_STATUSES], String(slaHours)],
   );
   return result.rows.map((row) => ({
     dealId: String(row.id),
@@ -161,6 +165,12 @@ export async function runRfpPendingSlaScan(deps: RunDeps = {}): Promise<RfpPendi
   }
 
   try {
+    // Resolve the Opportunity-canonical stage ids ONCE (they live in office-invariant
+    // public.pipeline_stage_config), then reuse them for every office instead of re-reading per office.
+    const oppStageIds = await opportunityStageIds(query);
+    if (oppStageIds.length === 0) {
+      logger.warn("[RfpPendingSla] No Opportunity-canonical stage ids resolved - no breaches possible this scan");
+    }
     const offices = await query(`SELECT id, slug FROM public.offices WHERE is_active = true`);
     for (const office of offices.rows) {
       if (!OFFICE_SLUG_REGEX.test(String(office.slug ?? ""))) {
@@ -170,7 +180,7 @@ export async function runRfpPendingSlaScan(deps: RunDeps = {}): Promise<RfpPendi
       const tenantSchema = `office_${office.slug}`;
       let breaches: RfpPendingSlaBreach[];
       try {
-        breaches = await findPendingRfpSlaBreaches(query, tenantSchema, slaHours);
+        breaches = await findPendingRfpSlaBreaches(query, tenantSchema, slaHours, oppStageIds);
       } catch (err) {
         logger.error("[RfpPendingSla] Breach scan failed for office - skipping", { tenantSchema, err });
         continue;
