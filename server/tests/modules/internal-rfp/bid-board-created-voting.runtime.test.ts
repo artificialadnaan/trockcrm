@@ -193,6 +193,28 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(String(rows[0].procore_bid_id)).toBe("88123");
   });
 
+  it("[finding] ACKs a stale request-less callback (no id) after a legacy re-trigger, but 422s a current-round malformed one", async () => {
+    await seed();
+    // The deal was Returned to Opportunity + RE-TRIGGERED through the LEGACY path: it now carries a SyncHub request
+    // id and a fresh round open time. An OLD request-less create-from-rfp callback (no id) is now arriving late.
+    await holder.pg.query(
+      `UPDATE office_test.deals SET rfp_approval_request_id = 555, rfp_approval_requested_at = $2 WHERE id = $1`,
+      [DEAL, "2026-07-03T12:00:00.000Z"],
+    );
+    const app = await buildApp();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // Stale request-less callback: createdAt BEFORE the current (legacy) round opened -> ACK (stop retrying), NOT 422.
+    const staleRaw = JSON.stringify({ status: "created", sourceDealId: DEAL, bidboardProjectId: "77001", procoreCompanyId: "42", createdAt: "2026-07-03T09:00:00.000Z" });
+    const stale = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(staleRaw)).send(staleRaw);
+    expect(stale.status).toBe(200);
+    expect(stale.body).toMatchObject({ success: true, idempotent: true, reason: "stale_callback_ignored" });
+    // A current-round malformed callback (createdAt AT/AFTER the round opened) is still 422 (retryable, resend id).
+    const freshRaw = JSON.stringify({ status: "created", sourceDealId: DEAL, bidboardProjectId: "77002", procoreCompanyId: "42", createdAt: "2026-07-03T13:00:00.000Z" });
+    const fresh = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(freshRaw)).send(freshRaw);
+    expect(fresh.status).toBe(422);
+    warnSpy.mockRestore();
+  });
+
   it("[#1] stale-ignores a request-backed 'created' callback (numeric rfpApprovalRequestId) after the request id was cleared — never approves a canceled deal", async () => {
     await seed();
     // Simulate cancelPendingRfp on a legacy/service/override deal: Return to Opportunity clears the request id +

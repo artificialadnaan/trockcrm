@@ -699,6 +699,24 @@ internalRfpRoutes.post(
         // well-formed numeric id is MALFORMED — not stale — so 422 it (like the other request-backed callbacks)
         // and let SyncHub retry; ACKing it as stale would stop the retries and strand the deal.
         if (dealHasRequestId && !payloadHasRequestId) {
+          // A request-BACKED deal whose callback OMITS a well-formed id is normally MALFORMED -> 422 (retryable).
+          // BUT a STALE request-LESS voting callback also lands here (finding): after a request-less vote-create
+          // failed and the deal was Returned to Opportunity and RE-TRIGGERED through the LEGACY SyncHub path, the
+          // deal now carries a request id while the OLD create-from-rfp payload never can. That callback is STALE,
+          // not malformed — ACK it (stale_callback_ignored) so SyncHub stops retrying an obsolete callback. Tell the
+          // two apart by the callback's createdAt: a stale request-less callback predates the CURRENT round's open
+          // time (rfp_approval_requested_at). A current-round malformed callback (createdAt >= requested_at, or no
+          // parseable createdAt) still 422s so SyncHub resends a well-formed id.
+          // asDateOrNull returns an ISO-8601 string (or null); ISO strings compare chronologically with `<`.
+          const staleCbCreatedAt = asDateOrNull(payload.createdAt);
+          const currentRoundOpenedAt = asDateOrNull(found.deal.rfp_approval_requested_at);
+          if (staleCbCreatedAt && currentRoundOpenedAt && staleCbCreatedAt < currentRoundOpenedAt) {
+            console.warn(
+              `[RFP callback] stale request-less callback ignored for sourceDealId=${sourceDealId} (createdAt ${staleCbCreatedAt} < current round opened ${currentRoundOpenedAt}); the deal was re-triggered through the legacy path`
+            );
+            res.json({ success: true, idempotent: true, reason: "stale_callback_ignored" });
+            return;
+          }
           console.warn(
             `[RFP callback] malformed callback for request-backed deal sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"} -> 422 (retryable, not stale-ACKed)`
           );

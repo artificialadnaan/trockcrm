@@ -1602,6 +1602,11 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
               eq(deals.rfpApprovalStatus, "send_failed"),
               isNull(deals.rfpApprovalRequestId),
               isNull(deals.rfpOverrideState),
+              // finding: bind the reclaim to the CURRENT round event id. Otherwise a stale Retry racing with a
+              // Return-to-Opportunity + a fresh round that ALSO surfaced send_failed could reclaim the NEW round and
+              // re-enqueue an invitation stamped with the OLD roundEventId (which the dead-letter sweep then ignores
+              // as stale), leaving the current round stranded. deal.rfpApprovalRequestEventId is non-null here.
+              eq(deals.rfpApprovalRequestEventId, deal.rfpApprovalRequestEventId!),
             )
           )
           .returning({ id: deals.id });
