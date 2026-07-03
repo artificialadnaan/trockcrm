@@ -94,6 +94,7 @@ interface DealMatch {
   bid_board_project_number: string | null;
   bid_board_estimator: string | null;
   estimator_user_id: string | null;
+  sales_source_user_id: string | null;
   bid_board_office: string | null;
   bid_board_status: string | null;
   bid_board_sales_price_per_area: string | null;
@@ -397,6 +398,7 @@ function dealMatchSelectSql(schemaName: string): string {
            d.bid_board_project_number,
            d.bid_board_estimator,
            d.estimator_user_id,
+           d.sales_source_user_id,
            d.bid_board_office,
            d.bid_board_status,
            d.bid_board_sales_price_per_area,
@@ -1093,6 +1095,22 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
               : `Bid Board estimator "${normalized.bidBoardEstimator}" maps to ${resolvedEstimatorUserId}, which is not an active CRM user — estimator_user_id left null (check BID_BOARD_ESTIMATOR_USER_MAP)`
           );
         }
+      }
+      // Invariant guard (mirrors the manual estimator/source conflict rejection in setDealEstimator):
+      // never let the empties-only fill land the SAME user as the deal's sales source. estimator == source
+      // makes calculateCommissionForDeal skip the additive sales_source cut and mint an estimator cut for
+      // that rep instead — silently re-attributing the sourced-book commission + floor credit. Drop the
+      // incoming id (leave estimator null) so the sales-source attribution wins. Only bites on a genuine
+      // fill (existing estimator null); when one is already set the COALESCE preserves it and this incoming
+      // id is dropped anyway, so we skip the noisy warning in that case.
+      const dealSalesSourceUserId = (matches[0].sales_source_user_id ?? null) as string | null;
+      if (estimatorUserId && estimatorUserId === dealSalesSourceUserId) {
+        if (!existingEstimatorUserId) {
+          warnings.push(
+            `Bid Board estimator "${normalized.bidBoardEstimator}" maps to ${estimatorUserId}, which is already the deal's sales source — estimator_user_id left null to preserve the sales-source commission attribution (deal ${matches[0].id})`
+          );
+        }
+        estimatorUserId = null;
       }
       // Empties-only guard (SET estimator_user_id = COALESCE(estimator_user_id, $16) above): when the
       // deal already has an estimator, the DB keeps it and this resolved value is dropped on the floor.

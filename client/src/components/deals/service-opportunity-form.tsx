@@ -115,7 +115,11 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const selectedOfficeLabel =
     officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
   const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: homeOfficeId });
-  const { salesReps, loading: salesRepsLoading } = useSalesReps(homeOfficeId ?? undefined);
+  // "sales-source" scopes the feed to the office's role === 'rep' roster (the assertSalesSourceIsRep gate),
+  // so a plain rep sees real source choices (not just themselves) and no pick 422s on submit.
+  const { salesReps, loading: salesRepsLoading } = useSalesReps(homeOfficeId ?? undefined, {
+    purpose: "sales-source",
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

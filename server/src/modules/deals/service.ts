@@ -2769,6 +2769,13 @@ export async function updateDeal(
     (existing.salesSourceUserId ?? null) !== null
   ) {
     await clearSalesSource(tenantDb, dealId, userId);
+    // clearSalesSource nulls the column in a SEPARATE write AFTER the update query already returned
+    // updatedDeal, so the row we're about to return still carries the now-removed attribution. Reflect
+    // the clear on the returned object so a client that trusts the PATCH response doesn't keep showing or
+    // reusing the stale sales source until a separate refetch.
+    if (updatedDeal) {
+      updatedDeal.salesSourceUserId = null;
+    }
   }
 
   return updatedDeal;
