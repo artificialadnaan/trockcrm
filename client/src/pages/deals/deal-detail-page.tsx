@@ -1141,6 +1141,18 @@ function DealRightRail({
     officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
     { purpose: "deal-reassignment", enabled: canReassignDeal }
   );
+  // The sales-source picker needs the role==='rep' roster (the assertSalesSourceIsRep gate), NOT the
+  // broader CRM list the owner/estimator reassignment pickers use — otherwise a leader could pick a
+  // director/admin/construction user here and only learn it's invalid via a 422 on submit. Load it
+  // separately, gated to leadership (admin/director, == canEditSalesSource) so a rep viewing the page
+  // issues no extra fetch.
+  const { salesReps: sourceSalesReps } = useSalesReps(
+    officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
+    {
+      purpose: "sales-source",
+      enabled: currentUser?.role === "admin" || currentUser?.role === "director",
+    }
+  );
   const [reassigning, setReassigning] = useState(false);
   const [reassignError, setReassignError] = useState<string | null>(null);
   const assignedRep = formatNullable(deal.assignedRepName ?? deal.assignedRepId);
@@ -1222,13 +1234,14 @@ function DealRightRail({
   }
 
   // Sales Source editing is leadership-only (matches the PATCH /deals/:id/sales-source RBAC).
-  // Reuses the same canEditEstimator condition and the already-loaded salesReps list.
+  // Reuses the same canEditEstimator condition; the picker is fed by the rep-only sourceSalesReps feed.
   const canEditSalesSource = canEditEstimator;
   const [savingSalesSource, setSavingSalesSource] = useState(false);
   const [salesSourceError, setSalesSourceError] = useState<string | null>(null);
   // Exclude the owner + estimator from the source picker (the server rejects those with 422); mirrors
   // the create form's exclusion so a leader can't pick a conflicting source and only learn via a toast.
-  const salesSourceOptions = buildRepOptions(salesReps, {
+  // Built from sourceSalesReps (role==='rep' only) so a leader is never offered a non-rep that would 422.
+  const salesSourceOptions = buildRepOptions(sourceSalesReps, {
     excludeIds: [deal.assignedRepId, deal.estimatorUserId],
     currentId: deal.salesSourceUserId,
     currentServerName: deal.salesSourceUserName,
