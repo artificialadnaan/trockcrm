@@ -90,11 +90,20 @@ export async function handleRfpBidBoardCreate(
  * advances later via the bid-board-created callback, and on a non-2xx it throws so the queue retries. But if
  * SyncHub keeps 500ing (or the secret/URL is misconfigured) the job eventually exhausts maxAttempts and the queue
  * marks it 'dead' — with nothing surfaced on the deal, a 2/3-approved voting deal (or an override-approve) would
- * sit forever with no failure the rep/reviewer can see. This sweep mirrors runRfpRequestDeadLetterSweep: it claims
- * dead rows (FOR UPDATE SKIP LOCKED + a dealHandled marker so it's idempotent + concurrency-safe) and stamps the
- * SAME visible failed marker the failure callback sets (rfp_override_state='failed' + rfp_override_error), scoped
- * to a create-in-flight deal so it never clobbers an already-approved deal or a re-confirmed denial. Because the
- * marker is per-deal (no request id), it covers both the request-less voting create and the override-approve.
+ * sit forever with no failure the rep/reviewer can see. This sweep mirrors runRfpRequestDeadLetterSweep AND the
+ * internal-rfp failed callback: it claims dead rows and stamps the SAME visible, recoverable failed marker the
+ * failure callback sets — rfp_approval_status='send_failed' (the Pending-RFP attention status that
+ * pendingRfpSubStateForStatus surfaces + offers Retry for) PLUS rfp_override_state='failed' + rfp_override_error
+ * for the audit — scoped to a create-in-flight, request-less (voting-path) deal so it never clobbers an
+ * already-approved deal or a re-confirmed denial. Because the marker is per-deal (no request id), it covers both
+ * the request-less voting create and the override-approve.
+ *
+ * CLAIM IS SINGLE-TRANSACTION (finding #4): the batch SELECT below only reads + briefly locks; the 'claimed'
+ * marker is written per-row INSIDE the same per-job transaction as the deal update, after re-locking the row with
+ * FOR UPDATE SKIP LOCKED. So a throw anywhere in the per-job work (office-schema resolve, deal update) rolls the
+ * 'claimed' write back too, leaving the row unclaimed (dealHandled null/false) and RETRYABLE for the next sweep —
+ * never stranded permanently 'claimed'. The claim filter also treats a stray committed 'claimed' as retryable, so
+ * any row left 'claimed' by an older build is recovered rather than filtered out forever.
  */
 export async function runRfpBidBoardCreateDeadLetterSweep(
   deps: {
@@ -108,31 +117,48 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
   let handled = 0;
 
   try {
+    // Candidate dead rows. This SELECT only READS + briefly locks (FOR UPDATE SKIP LOCKED); it does NOT write the
+    // 'claimed' marker. The claim is written per-row inside the transaction below so a later throw rolls it back.
     const result = await client.query(
-      `WITH claimed AS (
-         SELECT id
-           FROM public.job_queue
-          WHERE status = 'dead'
-            AND job_type = 'rfp_bidboard_create'
-            AND (payload->>'dealHandled' IS NULL OR payload->>'dealHandled' = 'false')
-          ORDER BY id ASC
-          LIMIT $1
-          FOR UPDATE SKIP LOCKED
-       )
-       UPDATE public.job_queue
-          SET payload = jsonb_set(payload, '{dealHandled}', '"claimed"'::jsonb, true)
-         FROM claimed
-        WHERE public.job_queue.id = claimed.id
-        RETURNING public.job_queue.id,
-                  public.job_queue.payload,
-                  public.job_queue.office_id,
-                  public.job_queue.last_error`,
+      `SELECT id, payload, office_id, last_error
+         FROM public.job_queue
+        WHERE status = 'dead'
+          AND job_type = 'rfp_bidboard_create'
+          AND (payload->>'dealHandled' IS NULL
+               OR payload->>'dealHandled' IN ('false', 'claimed'))
+        ORDER BY id ASC
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED`,
       [limit]
     );
 
     for (const job of result.rows) {
       try {
         await client.query("BEGIN");
+        // Re-lock the row inside the txn and re-check it's still unclaimed, so a concurrent sweep tick can't
+        // double-process it: FOR UPDATE SKIP LOCKED returns 0 rows if another tick holds the row, and the WHERE
+        // excludes it once that tick has committed dealHandled='true'. Everything below shares THIS transaction.
+        const locked = await client.query(
+          `SELECT id
+             FROM public.job_queue
+            WHERE id = $1
+              AND status = 'dead'
+              AND (payload->>'dealHandled' IS NULL
+                   OR payload->>'dealHandled' IN ('false', 'claimed'))
+            FOR UPDATE SKIP LOCKED`,
+          [job.id]
+        );
+        if (locked.rows.length === 0) {
+          await client.query("ROLLBACK");
+          continue;
+        }
+        // Claim marker — written in the SAME transaction as the deal update (finding #4). A throw before COMMIT
+        // rolls this back too, leaving the row unclaimed + retryable for the next sweep instead of stuck 'claimed'.
+        await client.query(
+          "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', '\"claimed\"'::jsonb, true) WHERE id = $1",
+          [job.id]
+        );
+
         const payload = job.payload as RfpRequestDeliveryPayload;
         if (!payload?.dealId) {
           await client.query(
@@ -149,8 +175,15 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
           `UPDATE ${quoteIdent(schemaName)}.deals
               SET rfp_override_state = 'failed',
                   rfp_override_error = $1,
+                  -- Visible, recoverable state (finding #2): send_failed is the Pending-RFP attention status the
+                  -- surface renders + offers Retry for — the SAME state the internal-rfp failed callback sets, so
+                  -- both failure paths (SyncHub callback + this dead-letter sweep) converge on one recoverable status.
+                  rfp_approval_status = 'send_failed',
                   updated_at = NOW()
             WHERE id = $2
+              -- request-less (voting-path) only: every rfp_bidboard_create job is a voting 2/3-yes or a voting
+              -- override-approve, both of which keep rfp_approval_request_id NULL (mirrors the failed callback).
+              AND rfp_approval_request_id IS NULL
               -- never resurrect a failure onto a terminally re-confirmed denial
               AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
               -- only a deal whose create was still in flight (mirrors the failure callback's guards): a 2/3-YES
@@ -160,7 +193,11 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
                 rfp_approval_status = 'pending'
                 OR (rfp_approval_status = 'declined' AND rfp_override_state = 'approving')
               )
-              AND (rfp_override_state IS DISTINCT FROM 'failed' OR rfp_override_error IS DISTINCT FROM $1)`,
+              AND (
+                rfp_override_state IS DISTINCT FROM 'failed'
+                OR rfp_override_error IS DISTINCT FROM $1
+                OR rfp_approval_status IS DISTINCT FROM 'send_failed'
+              )`,
           [overrideError, payload.dealId]
         );
         await client.query(

@@ -49,11 +49,14 @@ describe("handleRfpBidBoardCreate", () => {
 });
 
 describe("runRfpBidBoardCreateDeadLetterSweep", () => {
-  it("stamps a visible override 'failed' marker on the deal for an exhausted create job", async () => {
+  // A single-client mock for the happy path: the batch candidate SELECT (LIMIT $1) returns one dead row, the
+  // per-row re-lock (WHERE id = $1) confirms it's still claimable, the office resolves, and the deal update runs.
+  function makeHappyClient(overrides: { officeSlug?: string | null } = {}) {
     const dealUpdates: unknown[][] = [];
-    const clientQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
-      if (sql.includes("FROM public.job_queue") && sql.includes("FOR UPDATE SKIP LOCKED")) {
+      // Batch candidate SELECT (reads only, no 'claimed' write).
+      if (sql.includes("FROM public.job_queue") && sql.includes("LIMIT $1")) {
         return {
           rows: [{
             id: 91,
@@ -63,10 +66,14 @@ describe("runRfpBidBoardCreateDeadLetterSweep", () => {
           }],
         };
       }
+      // Per-row re-lock inside the txn.
+      if (sql.includes("FROM public.job_queue") && sql.includes("FOR UPDATE SKIP LOCKED")) {
+        return { rows: [{ id: 91 }] };
+      }
       if (sql.includes("SELECT slug FROM public.offices")) {
         // requireActive:false — a since-deactivated office's dead job still gets its deal marked.
         expect(sql).not.toContain("is_active = true");
-        return { rows: [{ slug: "dallas" }] };
+        return { rows: overrides.officeSlug === undefined ? [{ slug: "dallas" }] : [{ slug: overrides.officeSlug }] };
       }
       if (sql.includes("rfp_override_state = 'failed'")) {
         dealUpdates.push(params ?? []);
@@ -74,6 +81,11 @@ describe("runRfpBidBoardCreateDeadLetterSweep", () => {
       }
       return { rows: [] };
     });
+    return { query, dealUpdates };
+  }
+
+  it("stamps a visible send_failed + override 'failed' marker on the deal for an exhausted create job", async () => {
+    const { query: clientQuery, dealUpdates } = makeHappyClient();
     const release = vi.fn();
     const db = { query: vi.fn(), connect: vi.fn(async () => ({ query: clientQuery, release })) };
 
@@ -83,6 +95,11 @@ describe("runRfpBidBoardCreateDeadLetterSweep", () => {
     const sqlText = clientQuery.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).toContain('"office_dallas".deals');
     expect(sqlText).toContain("rfp_override_state = 'failed'");
+    // finding #2: the deal is driven to the VISIBLE, recoverable send_failed status (same as the failed callback),
+    // scoped to a request-less voting-path deal.
+    expect(sqlText).toContain("rfp_approval_status = 'send_failed'");
+    expect(sqlText).toContain("rfp_approval_request_id IS NULL");
+    expect(sqlText).toContain("rfp_approval_status IS DISTINCT FROM 'send_failed'");
     // never touches an already-approved deal or a re-confirmed denial
     expect(sqlText).toContain("rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'");
     expect(sqlText).toContain("rfp_approval_status = 'pending'");
@@ -95,15 +112,57 @@ describe("runRfpBidBoardCreateDeadLetterSweep", () => {
     expect(release).toHaveBeenCalled();
   });
 
+  it("writes the 'claimed' marker INSIDE the per-job txn (after re-lock), not in the batch SELECT", async () => {
+    // finding #4: the batch candidate SELECT must NOT write 'claimed'; the claim happens after BEGIN so it can be
+    // rolled back on failure. Assert the ordering: BEGIN -> re-lock -> claim marker (all before the deal update).
+    const { query: clientQuery } = makeHappyClient();
+    const db = { query: vi.fn(), connect: vi.fn(async () => ({ query: clientQuery, release: vi.fn() })) };
+
+    await runRfpBidBoardCreateDeadLetterSweep({ db });
+
+    const calls = clientQuery.mock.calls.map((call) => String(call[0]));
+    const batchIdx = calls.findIndex((s) => s.includes("FROM public.job_queue") && s.includes("LIMIT $1"));
+    const beginIdx = calls.findIndex((s) => s === "BEGIN");
+    const claimIdx = calls.findIndex((s) => s.includes('jsonb_set(payload, \'{dealHandled}\', \'"claimed"'));
+    // The batch SELECT (which never writes 'claimed') runs first, and the 'claimed' write happens AFTER BEGIN.
+    expect(batchIdx).toBeGreaterThanOrEqual(0);
+    expect(beginIdx).toBeGreaterThan(batchIdx);
+    expect(claimIdx).toBeGreaterThan(beginIdx);
+    // The batch SELECT itself must NOT write the marker (no jsonb_set) — proving 'claimed' isn't pre-committed
+    // outside the txn. (Its WHERE filter mentions 'claimed' as a retryable value, but it performs no write.)
+    expect(calls[batchIdx]).not.toContain("jsonb_set");
+  });
+
+  it("leaves the job RETRYABLE (not stuck 'claimed') when the per-job handler throws after the claim", async () => {
+    // finding #4: a throw AFTER the 'claimed' write (here: office-schema resolve fails) must ROLLBACK — undoing the
+    // 'claimed' marker in the SAME txn — and must NOT COMMIT or mark the job dealHandled='true'.
+    const { query: clientQuery, dealUpdates } = makeHappyClient({ officeSlug: null }); // bad slug -> resolveOfficeSchema throws
+    const db = { query: vi.fn(), connect: vi.fn(async () => ({ query: clientQuery, release: vi.fn() })) };
+
+    const handled = await runRfpBidBoardCreateDeadLetterSweep({ db });
+
+    expect(handled).toBe(0);
+    const calls = clientQuery.mock.calls.map((call) => String(call[0]));
+    // The claim WAS attempted inside the txn...
+    expect(calls.some((s) => s.includes('jsonb_set(payload, \'{dealHandled}\', \'"claimed"'))).toBe(true);
+    // ...and the txn ROLLED BACK (so the claim is undone -> row stays unclaimed/retryable)...
+    expect(calls).toContain("ROLLBACK");
+    // ...never committing, and never marking the job done ('true') or updating the deal.
+    expect(calls).not.toContain("COMMIT");
+    expect(calls.some((s) => s.includes('jsonb_set(payload, \'{dealHandled}\', \'true\''))).toBe(false);
+    expect(dealUpdates).toHaveLength(0);
+  });
+
   it("atomically claims dead rows so concurrent sweep ticks do not double-process one row", async () => {
-    let claimed = false;
+    // Concurrency is now enforced by the per-row re-lock (FOR UPDATE SKIP LOCKED on WHERE id = $1): both ticks'
+    // batch SELECT can return the same candidate, but only the first re-lock wins; the second gets 0 rows.
+    let rowLocked = false;
     const dealUpdates: unknown[][] = [];
     const makeClient = () => ({
       query: vi.fn(async (sql: string, params?: unknown[]) => {
         if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
-        if (sql.includes("UPDATE public.job_queue") && sql.includes("RETURNING")) {
-          if (claimed) return { rows: [] };
-          claimed = true;
+        // Batch candidate SELECT — both ticks see the candidate.
+        if (sql.includes("FROM public.job_queue") && sql.includes("LIMIT $1")) {
           return {
             rows: [{
               id: 92,
@@ -112,6 +171,12 @@ describe("runRfpBidBoardCreateDeadLetterSweep", () => {
               payload: { dealId: "deal-9", syncHubUrl: "https://synchub.example.com", body: {} },
             }],
           };
+        }
+        // Per-row re-lock — first caller wins the row, the concurrent caller is skipped (SKIP LOCKED -> 0 rows).
+        if (sql.includes("FROM public.job_queue") && sql.includes("FOR UPDATE SKIP LOCKED")) {
+          if (rowLocked) return { rows: [] };
+          rowLocked = true;
+          return { rows: [{ id: 92 }] };
         }
         if (sql.includes("SELECT slug FROM public.offices")) return { rows: [{ slug: "dallas" }] };
         if (sql.includes("rfp_override_state = 'failed'")) {
