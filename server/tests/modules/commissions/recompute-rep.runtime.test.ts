@@ -492,4 +492,64 @@ describe("recalculateRepCommissionsInOffice", () => {
     // zeroes on a deliberate 0% rate; the deal-edit path would preserve it).
     expect(await ownerRow(DEAL4)).toEqual({ amount: "0.00", applied_rate: "0.000000" });
   });
+
+  it("MINTS a sales_source row on recompute for a deal signed while the source rate was 0% (solo→mixed)", async () => {
+    // Finding E: a sourced service deal signed while the source rep is SOLO (effective service-source
+    // rate 0) mints NO sales_source row at sign. The row-scan recompute only sees deals where the rep
+    // already books a row, so WITHOUT mint-on-discover this deal would never gain a source cut once the
+    // rep becomes mixed. Verify the recompute now DISCOVERS the sourced deal (by deals.sales_source_user_id)
+    // and mints the now-earned row.
+    const SRC_E = U("0a40"); // starts SOLO → no source cut at sign
+    const SVC_E = U("0a41"); // solo owner (its owner row satisfies the mint's owner-row invariant)
+    const DEAL_E = U("0c40");
+    await pg.exec(
+      `INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+       VALUES ('${SRC_E}', 'srce@t.test', 'SrcE', 'rep', '${OFFICE}', true),
+              ('${SVC_E}', 'svce@t.test', 'SvcE', 'rep', '${OFFICE}', true)`,
+    );
+    // SRC_E is SOLO → resolveEffectiveServiceSourceRate = 0 despite the stray service_source_rate 0.005.
+    await pg.exec(
+      `INSERT INTO public.user_commission_settings
+         (user_id, commission_rate, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate, is_active)
+       VALUES ('${SRC_E}', 0.030000, 'solo', 0.030000, 0.020000, 0.005000, true),
+              ('${SVC_E}', 0.030000, 'solo', 0.030000, 0.020000, 0.000000, true)`,
+    );
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, sales_source_user_id,
+          awarded_amount, bid_estimate, dd_estimate, is_change_order, on_hold, office_code, contract_signed_date,
+          workflow_route)
+       VALUES ('${DEAL_E}', 'D-0c40', 'Sourced-0', '${STAGE}', '${SVC_E}', '${SRC_E}',
+               100000, NULL, NULL, false, false, NULL, '2026-09-15', 'service')`,
+    );
+    await calculateCommissionForDeal(tdb, { dealId: DEAL_E, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
+
+    const srcRow = async () =>
+      pg.query<{ amount: string; applied_rate: string }>(
+        `SELECT amount, applied_rate FROM public.deal_signed_commissions
+         WHERE deal_id = $1 AND rep_user_id = $2 AND attribution_role = 'sales_source' LIMIT 1`,
+        [DEAL_E, SRC_E],
+      ).then((r) => r.rows[0]);
+
+    // No source row exists at sign (solo → effective 0%).
+    expect(await srcRow()).toBeUndefined();
+
+    // Flip SRC_E to mixed with a positive service-source rate (0.006).
+    await pg.exec(
+      `UPDATE public.user_commission_settings
+       SET commission_structure = 'mixed', commission_rate = 0.020000, service_source_rate = 0.006000
+       WHERE user_id = '${SRC_E}'`,
+    );
+
+    // Recompute (sales_source scope) must DISCOVER the sourced deal and MINT: 100000 × 0.006 = 600.00.
+    const count = await recalculateRepCommissionsInOffice(tdb, SRC_E, ADMIN, ["sales_source"]);
+    expect(count).toBe(1);
+    expect(await srcRow()).toEqual({ amount: "600.00", applied_rate: "0.006000" });
+
+    // Idempotent: a second recompute re-rates the now-existing row via the row-scan (count 1) but the
+    // mint-on-discover pass sees the existing row and no-ops (skipped_existing) — never a duplicate.
+    const count2 = await recalculateRepCommissionsInOffice(tdb, SRC_E, ADMIN, ["sales_source"]);
+    expect(count2).toBe(1);
+    expect(await srcRow()).toEqual({ amount: "600.00", applied_rate: "0.006000" });
+  });
 });

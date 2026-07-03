@@ -1,5 +1,5 @@
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { dealSignedCommissions, deals } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 // Cross-office fan-out infra lives in the field module by historical convention;
@@ -8,7 +8,11 @@ import {
   listActiveFieldOffices,
   runInOfficeTransaction,
 } from "../field/cross-office.js";
-import { effectiveSignedDateOf, recalculateCommissionForDeal } from "./service.js";
+import {
+  effectiveSignedDateOf,
+  mintSalesSourceCommissionForDeal,
+  recalculateCommissionForDeal,
+} from "./service.js";
 import type { CommissionRole } from "./service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -61,6 +65,39 @@ export async function recalculateRepCommissionsInOffice(
     });
     if (result.status === "created") recomputed += 1;
   }
+
+  // Sales-source recompute must ALSO discover sourced deals that have NO sales_source row yet. A deal
+  // signed while the rep had a 0% effective service-source rate (solo structure / serviceSourceRate 0)
+  // mints no row (skipped_no_rate), so the row-scan above — which only sees deals where the rep already
+  // books a dsc row — can never revisit it. When the rep later gains a positive source rate (solo→mixed
+  // or a raised rate), mint the now-earned row here so the live "rewrite all" recompute actually creates
+  // it (what a manual backfill would otherwise be needed for). mintSalesSourceCommissionForDeal is
+  // idempotent (an existing row → skipped_existing) and still no-ops while the effective rate is 0 or the
+  // deal is unsigned, so running it over every sourced deal is safe and never double-counts the row-scan.
+  // Deliberately sales_source-specific: owner rows are discoverable via assigned_rep_id but keep the
+  // backfill-only convention, whereas the sourced-deal link is a first-class column and a solo↔mixed
+  // switch is the designed 0↔positive flow.
+  if (!roles || roles.includes("sales_source")) {
+    const sourcedDeals = await officeDb
+      .select({ id: deals.id })
+      .from(deals)
+      .where(
+        and(
+          eq(deals.salesSourceUserId, repUserId),
+          eq(deals.workflowRoute, "service"),
+          eq(deals.isActive, true)
+        )
+      );
+    for (const { id: dealId } of sourcedDeals) {
+      const result = await mintSalesSourceCommissionForDeal(officeDb, {
+        dealId,
+        salesSourceUserId: repUserId,
+        triggeredByUserId,
+      });
+      if (result.status === "created") recomputed += 1;
+    }
+  }
+
   return recomputed;
 }
 

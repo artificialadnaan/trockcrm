@@ -35,15 +35,20 @@ interface FakeDeal {
   [k: string]: unknown;
 }
 
-function makeTenantDb(initial: FakeDeal) {
+function makeTenantDb(initial: FakeDeal & { existingSourceRowRole?: string | null }) {
+  const { existingSourceRowRole = null, ...dealInit } = initial;
   const state = {
     deal: {
       isChangeOrder: false,
       isBidBoardOwned: false,
       officeCode: null as string | null,
       isActive: true,
-      ...initial,
+      ...dealInit,
     } as FakeDeal,
+    // The dsc row (if any) the Finding-D guard should see for the NEW source rep on this deal. `null` =
+    // no pre-existing commission row (the happy path); a role string simulates a retained owner/estimator
+    // row from a prior reassignment (the guard must reject that source).
+    existingSourceRowRole: existingSourceRowRole as string | null,
     updateCalls: [] as Array<Record<string, unknown>>,
     auditInserts: [] as Array<Record<string, unknown>>,
     lockedSelects: 0,
@@ -61,9 +66,13 @@ function makeTenantDb(initial: FakeDeal) {
               ? cannedUser
               : tableName === "offices"
                 ? [{ id: "o1", slug: "dfw", name: "Dallas" }]
-                : state.deal.isActive === false
-                  ? []
-                  : [{ ...state.deal }];
+                : tableName === "deal_signed_commissions"
+                  ? state.existingSourceRowRole
+                    ? [{ role: state.existingSourceRowRole }]
+                    : []
+                  : state.deal.isActive === false
+                    ? []
+                    : [{ ...state.deal }];
           return {
             where(_condition: unknown) {
               return {
@@ -223,6 +232,26 @@ describe("setDealSalesSource (runtime)", () => {
     await expect(setDealSalesSource(db, "d", OWNER, OWNER, "o1")).rejects.toMatchObject({
       statusCode: 422,
       code: "SALES_SOURCE_CONFLICT",
+    });
+    expect(db._state.updateCalls).toHaveLength(0);
+    expect(commissions.mintSalesSourceCommissionForDeal).not.toHaveBeenCalled();
+  });
+
+  it("throws 422 SALES_SOURCE_HAS_EXISTING_ROW when the new source already books a prior owner/estimator row", async () => {
+    // Finding D: a rep who retains an owner/estimator commission row on this deal (e.g. a prior owner after
+    // reassignment) can't also be the sales source — the (deal_id, rep_user_id) row is unique, so the mint
+    // would no-op (skipped_existing) and the column would point at a rep whose payout is still booked under
+    // the OLD role. Reject BEFORE mutating so the displayed attribution can't diverge from the ledger.
+    const db = makeTenantDb({
+      id: "d",
+      salesSourceUserId: null,
+      assignedRepId: OWNER,
+      workflowRoute: "service",
+      existingSourceRowRole: "owner", // SRC_A retains an owner row from a prior reassignment
+    });
+    await expect(setDealSalesSource(db, "d", SRC_A, OWNER, "o1")).rejects.toMatchObject({
+      statusCode: 422,
+      code: "SALES_SOURCE_HAS_EXISTING_ROW",
     });
     expect(db._state.updateCalls).toHaveLength(0);
     expect(commissions.mintSalesSourceCommissionForDeal).not.toHaveBeenCalled();

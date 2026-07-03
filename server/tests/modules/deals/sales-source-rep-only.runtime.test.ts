@@ -71,9 +71,13 @@ function makeTenantDb(deal: FakeDeal, userRole: UserRole) {
               ? cannedUser
               : tableName === "offices"
                 ? [{ id: "o1", slug: "dfw", name: "Dallas" }]
-                : state.deal.isActive === false
+                : // No pre-existing commission row for the new source (the Finding-D guard queries this):
+                  // these tests exercise the rep/non-rep gate, not the existing-row conflict.
+                  tableName === "deal_signed_commissions"
                   ? []
-                  : [{ ...state.deal }];
+                  : state.deal.isActive === false
+                    ? []
+                    : [{ ...state.deal }];
           return {
             where(_condition: unknown) {
               return {

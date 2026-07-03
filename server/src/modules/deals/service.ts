@@ -19,6 +19,7 @@ import {
   projectTypeConfig,
   offices,
   projects,
+  dealSignedCommissions,
 } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
@@ -4035,6 +4036,28 @@ export async function setDealSalesSource(
     if (newSource != null) {
       await validateAssignee(tx, newSource, officeId ?? undefined);
       await assertSalesSourceIsRep(tx, newSource);
+      // A rep who ALREADY books a commission row on this deal — a retained owner/estimator row from a
+      // prior reassignment or correction — cannot also be the sales source. The (deal_id, rep_user_id)
+      // row is UNIQUE, so mintSalesSourceCommissionForDeal would collide with that existing row and no-op
+      // (skipped_existing), leaving the column pointing at a rep whose actual rate/payout/floor is still
+      // booked under the OLD role. Reject so the displayed attribution can't diverge from the ledger.
+      const [existingRow] = await tx
+        .select({ role: dealSignedCommissions.attributionRole })
+        .from(dealSignedCommissions)
+        .where(
+          and(
+            eq(dealSignedCommissions.dealId, dealId),
+            eq(dealSignedCommissions.repUserId, newSource)
+          )
+        )
+        .limit(1);
+      if (existingRow && existingRow.role !== "sales_source") {
+        throw new AppError(
+          422,
+          "That rep already books a commission row on this deal (as a prior owner or estimator) and cannot also be the sales source.",
+          "SALES_SOURCE_HAS_EXISTING_ROW"
+        );
+      }
     }
 
     const now = new Date();
