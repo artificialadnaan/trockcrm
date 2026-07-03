@@ -6,8 +6,14 @@
 -- rfp_approval_status in pending_outbox/pending) longer than 24h should alert leadership. Unlike the
 -- decline email (0148), an SLA breach is TIME-based, not a status transition, so no DB trigger fires it —
 -- the worker runs an hourly cron scan instead. Scanning hourly means the same breach is seen many times, so
--- this ledger is the exactly-once guard: the scan INSERTs a claim row ON CONFLICT DO NOTHING BEFORE sending,
--- and a send failure DELETEs the claim so the next scan retries.
+-- this ledger is the exactly-once guard, and the protocol is:
+--   1. a single-flight Postgres advisory lock serializes runs cross-instance (no two scans race a send);
+--   2. BEFORE sending, the scan INSERTs a CLAIM row (ON CONFLICT DO NOTHING) carrying a display snapshot
+--      (deal_name/deal_number as first seen). The claim is NEVER deleted.
+--   3. `sent_at` (nullable, no default) marks completion: it is set only AFTER a durable send. A crash
+--      between claim and send, or a failed send, leaves sent_at NULL, so the next scan retries.
+-- Because retries render the email from the STORED snapshot, a rename/renumber between attempts can't change
+-- the payload — the same Resend idempotencyKey stays valid instead of being rejected as a key/payload mismatch.
 --
 -- CYCLE IDENTITY: keyed (tenant_schema, deal_id, rfp_approval_requested_at). rfp_approval_requested_at is
 -- the instant the RFP entered pending; a re-triggered RFP gets a NEW requested_at -> a fresh cycle -> a new
