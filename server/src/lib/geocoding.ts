@@ -119,7 +119,16 @@ export function createGeocodingCacheStore(database: typeof db = db): GeocodingCa
   };
 }
 
-const defaultCacheStore = createGeocodingCacheStore();
+// Lazily instantiated (mirroring getGoogleClient below) instead of a module-load `const`. Building it at
+// import time would evaluate createGeocodingCacheStore()'s `= db` default arg on every import of this module,
+// forcing any test whose graph transitively reaches geocoding to add a `db` export to its db.js mock or crash
+// at load. Deferring to first geocode keeps the same single instance without that import-time db dependency.
+let defaultCacheStore: GeocodingCacheStore | null = null;
+
+function getDefaultCacheStore(): GeocodingCacheStore {
+  defaultCacheStore ??= createGeocodingCacheStore();
+  return defaultCacheStore;
+}
 
 let defaultClient: Client | null = null;
 
@@ -179,7 +188,7 @@ export async function reverseGeocode(
   const longitudeKey = roundedLongitude.toFixed(5);
   const now = deps.now?.() ?? new Date();
   const freshAfter = new Date(now.getTime() - CACHE_TTL_DAYS * MS_PER_DAY);
-  const cacheStore = deps.cacheStore ?? defaultCacheStore;
+  const cacheStore = deps.cacheStore ?? getDefaultCacheStore();
   const logger = deps.logger ?? console;
 
   const cached = await cacheStore.findFresh(latitudeKey, longitudeKey, GOOGLE_GEOCODING_PROVIDER, freshAfter);
