@@ -9,6 +9,7 @@ import {
   runInOfficeTransaction,
 } from "../field/cross-office.js";
 import { effectiveSignedDateOf, recalculateCommissionForDeal } from "./service.js";
+import type { CommissionRole } from "./service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -22,6 +23,7 @@ export async function recalculateRepCommissionsInOffice(
   officeDb: TenantDb,
   repUserId: string,
   triggeredByUserId: string,
+  roles?: CommissionRole[],
 ): Promise<number> {
   const dealRows = await officeDb
     .selectDistinct({ dealId: dealSignedCommissions.dealId })
@@ -49,6 +51,10 @@ export async function recalculateRepCommissionsInOffice(
       // Re-rate ONLY this rep's rows: a rate edit for one rep must never rewrite a co-booked rep's
       // row on a shared deal (which would race with that other rep's own recompute).
       onlyRepUserId: repUserId,
+      // When a roles filter is provided (e.g. only "sales_source" changed), re-rate ONLY rows whose
+      // attribution_role is in the set — so a service-source-only edit never rewrites the same rep's
+      // owner/estimator rows against the deal's current value.
+      onlyRoles: roles,
       // A settings change is deliberate, so a 0% effective rate must re-rate the rep's rows to $0
       // (not preserve a stale payout). The deal-edit path leaves this off to keep #732 all-or-nothing.
       zeroOnNoRate: true,
@@ -72,6 +78,7 @@ export interface RepRecomputeSummary {
 async function runRepRecompute(
   userId: string,
   triggeredByUserId: string,
+  roles?: CommissionRole[],
 ): Promise<RepRecomputeSummary> {
   const offices = await listActiveFieldOffices();
   let recomputed = 0;
@@ -80,7 +87,7 @@ async function runRepRecompute(
   for (const office of offices) {
     try {
       recomputed += await runInOfficeTransaction(office, triggeredByUserId, (officeDb) =>
-        recalculateRepCommissionsInOffice(officeDb, userId, triggeredByUserId),
+        recalculateRepCommissionsInOffice(officeDb, userId, triggeredByUserId, roles),
       );
     } catch (err) {
       officeFailures.push({
@@ -104,11 +111,12 @@ const repRecomputeChains = new Map<string, Promise<unknown>>();
 export function recalculateAllCommissionsForRep(
   userId: string,
   triggeredByUserId: string,
+  roles?: CommissionRole[],
 ): Promise<RepRecomputeSummary> {
   const prior = repRecomputeChains.get(userId) ?? Promise.resolve();
   const run = prior
     .catch(() => undefined)
-    .then(() => runRepRecompute(userId, triggeredByUserId));
+    .then(() => runRepRecompute(userId, triggeredByUserId, roles));
   repRecomputeChains.set(userId, run);
   // Drop the entry once this is the tail of the chain, so the map doesn't grow unbounded. The
   // trailing `.catch` swallows this cleanup branch's rejection — `run`'s own rejection is handled

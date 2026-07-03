@@ -422,6 +422,11 @@ export async function recalculateCommissionForDeal(
     // deal), which would otherwise let concurrent cross-rep edits lose the later rate. Omitted →
     // re-rate every row on the deal (the deal date/amount edit path, where the whole deal changed).
     onlyRepUserId?: string;
+    // When set alongside onlyRepUserId (settings-change recompute), further constrains which of that
+    // rep's rows are re-rated by attribution_role. A service-source-only rate change should only
+    // re-rate "sales_source" rows; a capX-only change should only re-rate "owner"/"estimator" rows.
+    // Omitted → re-rate all roles for the scoped rep (or all reps when onlyRepUserId is also omitted).
+    onlyRoles?: CommissionRole[];
     // When set (settings-change recompute), a deliberate 0% rate on an ACTIVE settings row re-rates
     // the row to $0 rather than preserving the stale payout. Omitted (deal date/amount edit) keeps
     // the all-or-nothing preserve (#732), so a transient config never wipes an earned row.
@@ -460,9 +465,11 @@ export async function recalculateCommissionForDeal(
     .limit(1);
   const sourceValue = deal ? resolveSourceValue(deal) : null;
 
-  const rowsToRecompute = input.onlyRepUserId
-    ? existingRows.filter((row) => row.repUserId === input.onlyRepUserId)
-    : existingRows;
+  const rowsToRecompute = existingRows.filter((row) => {
+    if (input.onlyRepUserId && row.repUserId !== input.onlyRepUserId) return false;
+    if (input.onlyRoles && !input.onlyRoles.includes(row.attributionRole as CommissionRole)) return false;
+    return true;
+  });
 
   let recomputed = 0;
   for (const row of rowsToRecompute) {

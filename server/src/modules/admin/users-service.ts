@@ -24,6 +24,7 @@ import {
   closeUserSseConnections,
 } from "../auth/session-invalidation.js";
 import { recalculateAllCommissionsForRep } from "../commissions/recompute-service.js";
+import type { CommissionRole } from "../commissions/service.js";
 import {
   getLocalAuthStatus,
   type LocalAuthStatus,
@@ -253,6 +254,7 @@ export async function updateUser(
 ) {
   const result = await db.transaction(async (tx) => {
     let commissionRatesChanged = false;
+    let affectedRoles: CommissionRole[] | undefined;
     const existing = await tx
       .select()
       .from(users)
@@ -453,12 +455,21 @@ export async function updateUser(
       // Compare at the column's scale (numeric(7,6)). A raw float compare would treat a no-op blur
       // as a change — e.g. a stored 0.029000 comes back from the client as 2.9/100 = 0.02899999…,
       // which !== 0.029 and would spuriously fan out. Normalising both to 6 decimals avoids that.
-      commissionRatesChanged =
-        commissionRate.toFixed(6) !== previousCommissionRate.toFixed(6) ||
-        nextServiceSourceRate.toFixed(6) !== previousServiceSourceRate.toFixed(6);
+      // Split into two booleans so we can pass a precise role set to the recompute: a service-source-
+      // only change must not re-rate the rep's owner/estimator rows (and vice versa for capX changes).
+      const capxChanged = commissionRate.toFixed(6) !== previousCommissionRate.toFixed(6);
+      const serviceSourceChanged = nextServiceSourceRate.toFixed(6) !== previousServiceSourceRate.toFixed(6);
+      commissionRatesChanged = capxChanged || serviceSourceChanged;
+      // Build the minimal affected-role set so the recompute is scoped to only the changed rows.
+      if (commissionRatesChanged) {
+        const roles: CommissionRole[] = [];
+        if (capxChanged) roles.push("owner", "estimator");
+        if (serviceSourceChanged) roles.push("sales_source");
+        affectedRoles = roles;
+      }
     }
 
-    return { updated, closeStreams: plan.closeStreams, commissionRatesChanged };
+    return { updated, closeStreams: plan.closeStreams, commissionRatesChanged, affectedRoles };
   });
 
   // Best-effort, post-commit: drop the deactivated user's live SSE streams immediately. The
@@ -467,11 +478,13 @@ export async function updateUser(
 
   // Fire-and-forget, post-commit: re-rating is best-effort and must never block the admin's save
   // nor fail the already-committed settings write (kicked off like closeUserSseConnections above).
-  // The task owns its own logging. Only fires when the effective capX rate actually changed.
+  // The task owns its own logging. Only fires when a rate that affects commission rows actually changed.
+  // `affectedRoles` scopes the recompute to only the rows whose rate changed (e.g. a service-source-
+  // only edit must not touch the rep's owner/estimator rows, avoiding value drift and audit noise).
   if (result.commissionRatesChanged) {
     void (async () => {
       try {
-        const summary = await recalculateAllCommissionsForRep(id, actorUserId);
+        const summary = await recalculateAllCommissionsForRep(id, actorUserId, result.affectedRoles);
         if (summary.officeFailures.length > 0) {
           console.error(
             `[commissions] rep ${id} recompute had office failures:`,

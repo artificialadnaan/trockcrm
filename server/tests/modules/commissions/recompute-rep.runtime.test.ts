@@ -290,6 +290,170 @@ describe("recalculateRepCommissionsInOffice", () => {
     expect(after).toEqual({ amount: "3000.00", applied_rate: "0.030000" });
   });
 
+  it("role-scoped: sales_source-only recompute leaves owner row at drifted value unchanged", async () => {
+    // A rep has BOTH an owner row (deal A at original deal value) AND a sales_source row (deal B).
+    // After minting the rows we change deal A's awarded_amount to simulate value drift, then run
+    // recalculateRepCommissionsInOffice scoped to ["sales_source"] and verify:
+    //   - sales_source row is re-rated (picks up the current service-source rate)
+    //   - owner row is NOT touched (its amount stays at the pre-drift value, not the new current value)
+    const MREP = U("0a30");
+    const DEAL_A = U("0c30"); // MREP is OWNER
+    const DEAL_B = U("0c31"); // MREP is SALES_SOURCE; SVC_REP is the owner
+
+    const SVC_REP2 = U("0a31");
+
+    await pg.exec(
+      `INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+       VALUES ('${MREP}',    'mrep@t.test',    'MRep',   'rep', '${OFFICE}', true),
+              ('${SVC_REP2}','svcrep2@t.test', 'SvcRep2','rep', '${OFFICE}', true)`,
+    );
+    // MREP must be "mixed" structure — resolveEffectiveServiceSourceRate returns 0 for solo reps, so
+    // a solo source rep never earns a sales_source cut (mintSalesSourceCommissionForDeal skipped_no_rate).
+    await pg.exec(
+      `INSERT INTO public.user_commission_settings
+         (user_id, commission_rate, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate, is_active)
+       VALUES ('${MREP}',     0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
+              ('${SVC_REP2}', 0.030000, 'solo',  0.030000, 0.020000, 0.000000, true)`,
+    );
+    // commission_rate mirror for MREP = capxRateMixed = 0.020000
+
+    // Deal A: MREP is owner, value = 200000 → owner row 200000 × 0.020000 = 4000.00.
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, bid_estimate, dd_estimate,
+          is_change_order, on_hold, office_code, contract_signed_date)
+       VALUES ('${DEAL_A}', 'D-0c30', 'DealA', '${STAGE}', '${MREP}', 200000, NULL, NULL,
+          false, false, NULL, '2026-09-15')`,
+    );
+    await calculateCommissionForDeal(tdb, { dealId: DEAL_A, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
+
+    // Deal B: SVC_REP2 is owner, MREP is sales_source, value = 100000 → sales_source 100000 × 0.005 = 500.00.
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, sales_source_user_id,
+          awarded_amount, bid_estimate, dd_estimate, is_change_order, on_hold, office_code, contract_signed_date,
+          workflow_route)
+       VALUES ('${DEAL_B}', 'D-0c31', 'DealB', '${STAGE}', '${SVC_REP2}', '${MREP}',
+               100000, NULL, NULL, false, false, NULL, '2026-09-15', 'service')`,
+    );
+    await calculateCommissionForDeal(tdb, { dealId: DEAL_B, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
+
+    // Baseline: owner 4000.00, sales_source 500.00.
+    const ownerA = await pg.query<{ amount: string }>(
+      `SELECT amount FROM public.deal_signed_commissions WHERE deal_id = $1 AND rep_user_id = $2 AND attribution_role = 'owner' LIMIT 1`,
+      [DEAL_A, MREP],
+    );
+    const srcB = await pg.query<{ amount: string; applied_rate: string }>(
+      `SELECT amount, applied_rate FROM public.deal_signed_commissions WHERE deal_id = $1 AND rep_user_id = $2 AND attribution_role = 'sales_source' LIMIT 1`,
+      [DEAL_B, MREP],
+    );
+    expect(ownerA.rows[0]).toEqual({ amount: "4000.00" });
+    expect(srcB.rows[0]).toEqual({ amount: "500.00", applied_rate: "0.005000" });
+
+    // Simulate value drift on Deal A: bump awarded_amount to 300000.
+    // If onlyRoles is respected, the owner row must stay at 4000.00 (booked at 200000 × 0.02 = 4000).
+    await pg.exec(`UPDATE public.deals SET awarded_amount = 300000 WHERE id = '${DEAL_A}'`);
+
+    // Change MREP's service-source rate to 0.008 (capX unchanged).
+    await pg.exec(
+      `UPDATE public.user_commission_settings SET service_source_rate = 0.008000 WHERE user_id = '${MREP}'`,
+    );
+
+    // Run recompute scoped to sales_source only.
+    const count = await recalculateRepCommissionsInOffice(tdb, MREP, ADMIN, ["sales_source"]);
+    expect(count).toBe(1); // only deal B re-rated.
+
+    // Owner row on deal A must NOT pick up the drift (still 4000.00, not 6000.00 = 300000 × 0.02).
+    const ownerAAfter = await pg.query<{ amount: string }>(
+      `SELECT amount FROM public.deal_signed_commissions WHERE deal_id = $1 AND rep_user_id = $2 AND attribution_role = 'owner' LIMIT 1`,
+      [DEAL_A, MREP],
+    );
+    expect(ownerAAfter.rows[0]).toEqual({ amount: "4000.00" });
+
+    // Sales_source row on deal B must be re-rated at the new 0.008 rate: 100000 × 0.008 = 800.00.
+    const srcBAfter = await pg.query<{ amount: string; applied_rate: string }>(
+      `SELECT amount, applied_rate FROM public.deal_signed_commissions WHERE deal_id = $1 AND rep_user_id = $2 AND attribution_role = 'sales_source' LIMIT 1`,
+      [DEAL_B, MREP],
+    );
+    expect(srcBAfter.rows[0]).toEqual({ amount: "800.00", applied_rate: "0.008000" });
+  });
+
+  it("role-scoped: owner+estimator-only recompute leaves sales_source row unchanged", async () => {
+    // Complement of the test above: a capX-only recompute must NOT touch the sales_source row.
+    const CREP = U("0a32");
+    const DEAL_C = U("0c32"); // CREP is owner
+    const DEAL_D = U("0c33"); // CREP is sales_source; SVC_REP3 is owner
+
+    const SVC_REP3 = U("0a33");
+
+    await pg.exec(
+      `INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+       VALUES ('${CREP}',    'crep@t.test',    'CRep',   'rep', '${OFFICE}', true),
+              ('${SVC_REP3}','svcrep3@t.test', 'SvcRep3','rep', '${OFFICE}', true)`,
+    );
+    // CREP must be "mixed" to earn a sales_source row on service deals (solo → service-source rate = 0).
+    await pg.exec(
+      `INSERT INTO public.user_commission_settings
+         (user_id, commission_rate, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate, is_active)
+       VALUES ('${CREP}',     0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
+              ('${SVC_REP3}', 0.030000, 'solo',  0.030000, 0.020000, 0.000000, true)`,
+    );
+    // commission_rate mirror for CREP = capxRateMixed = 0.020000
+
+    // Deal C: CREP is owner, value = 100000 → owner row 100000 × 0.020000 = 2000.00.
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, bid_estimate, dd_estimate,
+          is_change_order, on_hold, office_code, contract_signed_date)
+       VALUES ('${DEAL_C}', 'D-0c32', 'DealC', '${STAGE}', '${CREP}', 100000, NULL, NULL,
+          false, false, NULL, '2026-09-15')`,
+    );
+    await calculateCommissionForDeal(tdb, { dealId: DEAL_C, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
+
+    // Deal D: SVC_REP3 is owner, CREP is sales_source, value = 100000 → sales_source row 500.00.
+    await pg.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, sales_source_user_id,
+          awarded_amount, bid_estimate, dd_estimate, is_change_order, on_hold, office_code, contract_signed_date,
+          workflow_route)
+       VALUES ('${DEAL_D}', 'D-0c33', 'DealD', '${STAGE}', '${SVC_REP3}', '${CREP}',
+               100000, NULL, NULL, false, false, NULL, '2026-09-15', 'service')`,
+    );
+    await calculateCommissionForDeal(tdb, { dealId: DEAL_D, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
+
+    // Baseline: owner 3000.00, sales_source 500.00.
+    const ownerC = async () =>
+      pg.query<{ amount: string; applied_rate: string }>(
+        `SELECT amount, applied_rate FROM public.deal_signed_commissions WHERE deal_id = $1 AND rep_user_id = $2 AND attribution_role = 'owner' LIMIT 1`,
+        [DEAL_C, CREP],
+      ).then((r) => r.rows[0]);
+    const srcD = async () =>
+      pg.query<{ amount: string; applied_rate: string }>(
+        `SELECT amount, applied_rate FROM public.deal_signed_commissions WHERE deal_id = $1 AND rep_user_id = $2 AND attribution_role = 'sales_source' LIMIT 1`,
+        [DEAL_D, CREP],
+      ).then((r) => r.rows[0]);
+
+    expect(await ownerC()).toEqual({ amount: "2000.00", applied_rate: "0.020000" });
+    expect(await srcD()).toEqual({ amount: "500.00", applied_rate: "0.005000" });
+
+    // Change CREP's capX mixed rate to 0.04, update commission_rate mirror accordingly.
+    // The service-source rate is intentionally left unchanged at 0.005000.
+    await pg.exec(
+      `UPDATE public.user_commission_settings
+       SET capx_rate_mixed = 0.040000, commission_rate = 0.040000 WHERE user_id = '${CREP}'`,
+    );
+
+    // Run recompute scoped to owner+estimator only.
+    const count = await recalculateRepCommissionsInOffice(tdb, CREP, ADMIN, ["owner", "estimator"]);
+    expect(count).toBe(1); // only deal C (owner row) is re-rated.
+
+    // Owner row on deal C must re-rate: 100000 × 0.040000 = 4000.00.
+    expect(await ownerC()).toEqual({ amount: "4000.00", applied_rate: "0.040000" });
+
+    // Sales_source row on deal D must be UNCHANGED.
+    expect(await srcD()).toEqual({ amount: "500.00", applied_rate: "0.005000" });
+  });
+
   it("re-rates a rep's rows to $0 when the effective rate is deliberately set to 0%", async () => {
     const REP3 = U("0a05");
     const DEAL4 = U("0c04");
