@@ -1946,7 +1946,14 @@ export async function getDealById(
   // per-deal action routes — so a deleted deal must 404 there (otherwise a soft-deleted Won deal
   // stays openable AND editable, the data-integrity hole this guards). Opt in only for a future
   // restore/admin view; no production caller passes true today.
-  includeInactive: boolean = false
+  includeInactive: boolean = false,
+  // getDealById is BOTH the deal-detail READ gate and the RBAC gate for many WRITE routes (estimating
+  // uploads, contact associations, deal edits/reassignments). A rep who ESTIMATED or SOURCED a deal
+  // may READ it (the /deals/:id link from the commission dashboard must not 403), but must NOT be able
+  // to WRITE to a deal they don't own. So the involved-rep widening is READ-only and opt-in: pass
+  // { involvedReadAccess: true } ONLY from the detail read route. Every write/mutation caller leaves
+  // this DEFAULT (false) → strict owner-only for reps, the pre-widening behavior.
+  opts: { involvedReadAccess?: boolean } = {}
 ) {
   // estimatorUserId already comes through getTableColumns(deals); join users to surface the estimator's
   // display name for the PR3 estimator picker (mirrors the assignedRep name join in getDealDetail).
@@ -1969,13 +1976,15 @@ export async function getDealById(
   const deal = result[0] ?? null;
   if (!deal) return null;
 
-  // Reps can only see their own deals — or deals where they are the estimator or sales source
-  // (a source rep sees their earned commission on the dashboard; the /deals/:id link must not 403).
+  // Reps can only see their OWN deals. READ intent only (opts.involvedReadAccess) additionally admits a
+  // rep who is the estimator or sales source (a source rep sees their earned commission on the dashboard;
+  // the /deals/:id detail link must not 403). WRITE gates leave the flag off, so this stays strict
+  // owner-only for them — an estimator/source rep can OPEN a deal they're involved in but cannot mutate it.
+  const allowInvolvedRead = opts.involvedReadAccess === true;
   if (
     userRole === "rep" &&
     deal.assignedRepId !== userId &&
-    deal.estimatorUserId !== userId &&
-    deal.salesSourceUserId !== userId
+    !(allowInvolvedRead && (deal.estimatorUserId === userId || deal.salesSourceUserId === userId))
   ) {
     throw new AppError(403, "You can only view your own deals");
   }
@@ -1993,9 +2002,12 @@ export async function getDealDetail(
   dealId: string,
   userRole: string,
   userId: string,
-  atRiskViewerRole: string = userRole
+  atRiskViewerRole: string = userRole,
+  // Detail page is a READ surface; thread the involved-read intent to the internal gate so an
+  // estimator/source rep can open a deal they don't own (writes never route through here).
+  opts: { involvedReadAccess?: boolean } = {}
 ) {
-  const deal = await getDealById(tenantDb, dealId, userRole, userId, atRiskViewerRole);
+  const deal = await getDealById(tenantDb, dealId, userRole, userId, atRiskViewerRole, false, opts);
   if (!deal) return null;
 
   // Second users alias so the estimator name can be joined alongside the assigned-rep name.

@@ -1099,7 +1099,11 @@ router.get("/:id", async (req, res, next) => {
       req.params.id,
       getCollaborativeReadRole(req.user!.role, dealAccess.assignedRepId === req.user!.id ? "mine" : "all"),
       req.user!.id,
-      req.user!.role
+      req.user!.role,
+      // READ route: an estimator/source rep may OPEN a deal they're involved in (commission-dashboard
+      // link) even though they can't write to it. Write routes leave this off → strict owner-only.
+      false,
+      { involvedReadAccess: true }
     );
     if (!deal) throw new AppError(404, "Deal not found");
     const isWatching = await isDealWatchedByUser(req.tenantDb!, req.params.id, req.user!.id);
@@ -1128,7 +1132,9 @@ router.get("/:id/detail", async (req, res, next) => {
       req.params.id,
       getCollaborativeReadRole(req.user!.role, dealAccess.assignedRepId === req.user!.id ? "mine" : "all"),
       req.user!.id,
-      req.user!.role
+      req.user!.role,
+      // READ route: same involved-rep read intent as GET /:id (detail is the richer read).
+      { involvedReadAccess: true }
     );
     if (!detail) throw new AppError(404, "Deal not found");
     const isWatching = await isDealWatchedByUser(req.tenantDb!, req.params.id, req.user!.id);
