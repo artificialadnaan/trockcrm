@@ -1163,7 +1163,11 @@ internalRfpRoutes.post(
           // 'created' no-ops the linkage and never re-enqueues. Best-effort (mirrors the trigger's EXCEPTION-swallow):
           // a notification failure must NEVER abort the linkage commit.
           if (dealRequestId == null && found.deal.rfp_override_decision === "override_approved") {
+            // SAVEPOINT-isolate the best-effort enqueue: in Postgres a failed statement ABORTS the whole
+            // transaction even when the JS error is caught, which would roll back the linkage this trigger fired
+            // on. Wrapping in a savepoint means a failed enqueue only rolls back ITSELF, never the linkage.
             try {
+              await client.query("SAVEPOINT rfp_override_email");
               await client.query(
                 `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
                  VALUES ('rfp_override_approved_email', $1::jsonb, NULL, 'pending', NOW())`,
@@ -1179,7 +1183,9 @@ internalRfpRoutes.post(
                   }),
                 ]
               );
+              await client.query("RELEASE SAVEPOINT rfp_override_email");
             } catch (notifyErr) {
+              await client.query("ROLLBACK TO SAVEPOINT rfp_override_email").catch(() => {});
               console.warn(
                 `[RFP callback] failed to enqueue request-less override-approved email for deal ${sourceDealId} (linkage preserved): ${notifyErr instanceof Error ? notifyErr.message : notifyErr}`
               );

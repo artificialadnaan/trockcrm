@@ -3,7 +3,6 @@ import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
-import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 import {
   addDealChangeOrder,
   deleteDealChangeOrder,
@@ -179,7 +178,7 @@ import {
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
-import { allRfpVotersHaveOfficeAccess, castRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
+import { allRfpVotersHaveOfficeAccess, authorizeAndCastRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -1548,6 +1547,11 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
             eq(deals.rfpApprovalStatus, "send_failed"),
             isNull(deals.rfpApprovalRequestId),
             eq(deals.rfpOverrideState, "failed"),
+            // finding: require the deal to still be ACTIVE. If it was soft-deleted between the getDealById read
+            // and here, retrying would enqueue rfp_bidboard_create (whose payload loader reads the inactive row),
+            // but the bid-board-created callback resolves via findDeal (is_active=true) and could never reconcile
+            // the external project. A deleted deal matches 0 rows -> 409, no create.
+            eq(deals.isActive, true),
           )
         )
         .returning({ id: deals.id });
@@ -1755,74 +1759,18 @@ router.get("/:id/rfp-review", requireRfpReviewer, async (req, res, next) => {
 // the fallback only when no snapshot exists (legacy round / pruned job).
 router.post("/:id/rfp-vote", async (req, res, next) => {
   try {
-    const decision = req.body?.decision;
-    if (decision !== "approve" && decision !== "reject") {
-      throw new AppError(400, "decision must be 'approve' or 'reject'.", "RFP_VOTE_DECISION_INVALID");
-    }
-    const rawReason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
-    if (decision === "reject" && rawReason.length === 0) {
-      throw new AppError(400, "A reason is required to reject an RFP.", "RFP_VOTE_REASON_REQUIRED");
-    }
+    // The whole handler body lives in authorizeAndCastRfpVote (rfp-vote-service) so the route + its runtime test
+    // share ONE implementation and can't drift. loadTriggerRfpDeal selects the full row (isActive present).
     const deal = await loadTriggerRfpDeal(req.tenantDb!, req.params.id as string);
-    // Treat a soft-deleted (is_active=false) deal as not-found: loadTriggerRfpDeal has no is_active filter, so
-    // without this a deleted CRM deal could still be voted on → an approve enqueues rfp_bidboard_create, and the
-    // bid-board-created callback (findDeal filters is_active=true) can never reconcile it, spawning a Bid Board
-    // project for a deal that no longer exists. loadTriggerRfpDeal selects the full row, so isActive is present.
-    if (!deal || deal.isActive === false) throw new AppError(404, "Deal not found");
-    if (isServiceRfp(deal)) {
-      throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
-    }
-    const isOpenVoteRound =
-      deal.rfpApprovalRequestEventId != null &&
-      deal.rfpApprovalStatus === "pending" &&
-      deal.rfpApprovalRequestId == null;
-    // Flag-gate the cast, but ONLY for a deal that is NOT already in an open vote round (finding W7). The gate
-    // exists so a voter can't cast on a legacy non-service deal during the rollout window (RFP_VOTER_EMAILS set,
-    // ENABLE_RFP_VOTING off) — firing a double escalation + premature create. An ALREADY-open round was opened
-    // while the flag was on, so keep it votable even after the flag is flipped off as the rollback lever;
-    // otherwise those in-flight rounds strand ('pending' isn't a cancellable attention state).
-    if (!isRfpVotingEnabled() && !isOpenVoteRound) {
-      throw new AppError(503, "RFP voting is not enabled.", "RFP_VOTING_DISABLED");
-    }
-    if (!isOpenVoteRound) {
-      throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
-    }
-    // finding Y8: authorize the cast against the round's INVITED voter set (snapshotted into the
-    // rfp_vote_invitation job when the round opened), not the current mutable RFP_VOTER_EMAILS the requireRfpVoter
-    // middleware checks. If the env changed while the round was pending, a newly-added 4th address must not cast a
-    // deciding 2-of-3 vote for a round it was never invited to. Falls back to the env gate (already passed) only
-    // if no snapshot is found (a legacy round or a pruned job).
-    const inviteSnap = await req.tenantDb!.execute(sql`
-      SELECT payload->'recipients' AS recipients
-        FROM public.job_queue
-       WHERE job_type = 'rfp_vote_invitation'
-         AND payload->>'dealId' = ${deal.id}
-         AND payload->>'roundEventId' = ${deal.rfpApprovalRequestEventId}
-       ORDER BY id DESC
-       LIMIT 1`);
-    const inviteRows = Array.isArray(inviteSnap) ? inviteSnap : (inviteSnap as { rows?: any[] }).rows ?? [];
-    const snapshot = inviteRows[0]?.recipients;
-    if (Array.isArray(snapshot) && snapshot.length > 0) {
-      // Snapshot-backed round: the round's OWN invited set is authoritative — a voter invited when the round
-      // opened can still cast even after RFP_VOTER_EMAILS changed (finding BC2), and a since-added address that was
-      // never invited cannot cast a deciding 2-of-3. This supersedes the env allowlist for open rounds.
-      const invited = snapshot.map((e: unknown) => String(e).trim().toLowerCase());
-      if (!invited.includes((req.user!.email ?? "").trim().toLowerCase())) {
-        throw new AppError(403, "You were not one of the invited voters for this RFP round.", "RFP_VOTE_NOT_INVITED");
-      }
-    } else if (!isRfpVoterEmail(req.user!.email, process.env)) {
-      // No snapshot (a legacy round or a pruned invitation job): fall back to the current env allowlist — the same
-      // gate the removed requireRfpVoter middleware enforced, replicated here so the snapshot can take precedence.
-      throw new AppError(403, "Only the designated RFP voters can vote on RFPs.", "RFP_VOTER_ONLY");
-    }
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
-    const result = await castRfpVote({
+    const result = await authorizeAndCastRfpVote({
       tenantDb: req.tenantDb!,
-      officeId,
       deal,
-      voter: { userId: req.user!.id, email: req.user!.email },
-      decision,
-      reason: decision === "reject" ? rawReason : null,
+      user: { id: req.user!.id, email: req.user!.email },
+      decision: req.body?.decision,
+      reason: req.body?.reason,
+      officeId,
+      votingEnabled: isRfpVotingEnabled(),
     });
     await req.commitTransaction!();
     res.json(toJsonSafe({ success: true, outcome: result.outcome, votes: result.votes }));

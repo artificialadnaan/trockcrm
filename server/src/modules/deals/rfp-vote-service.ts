@@ -9,7 +9,7 @@ import {
   type RfpVoteOutcome,
   type RfpVoteRecord,
 } from "@trock-crm/shared/lib/rfpVoteState";
-import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
+import { isRfpVoterEmail, resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { AppError } from "../../middleware/error-handler.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { applyRfpDeclineToDeal } from "./rfp-decline-service.js";
@@ -71,7 +71,10 @@ export async function allRfpVotersHaveOfficeAccess(
       userOfficeAccess,
       and(eq(userOfficeAccess.userId, users.id), eq(userOfficeAccess.officeId, officeId)),
     )
-    .where(inArray(sql`lower(${users.email})`, emails));
+    // finding: also require the user to be ACTIVE — authMiddleware rejects a deactivated user before they can load
+    // or cast, so a configured-but-deactivated voter must not count toward the trio (else the round can open with
+    // fewer than three votable voters and strand).
+    .where(and(inArray(sql`lower(${users.email})`, emails), eq(users.isActive, true)));
   const accessible = new Set(
     rows
       .filter((r) => r.primaryOfficeId === officeId || r.grantOfficeId != null)
@@ -85,6 +88,89 @@ export interface CastRfpVoteDeps {
   enqueueBidBoardCreate?: typeof enqueueRfpBidBoardCreate;
   enqueueOutcome?: typeof enqueueRfpVoteOutcome;
   now?: () => Date;
+}
+
+/**
+ * The FULL /deals/:id/rfp-vote handler body: request validation, open-round + flag gating, the service-vs-open-round
+ * check, invitation-snapshot authorization (env fallback), and the atomic cast. Shared by the Express route AND its
+ * runtime test so the two can never drift (the test used to re-implement this inline). Throws AppError; the route
+ * translates errors + owns transaction commit. `votingEnabled` is injected so the service needn't import the flag.
+ */
+export async function authorizeAndCastRfpVote(
+  input: {
+    tenantDb: TenantDb;
+    deal: (DealRow & { isActive?: boolean }) | null | undefined;
+    user: { id: string; email: string | null };
+    decision: unknown;
+    reason: unknown;
+    officeId: string | null;
+    votingEnabled: boolean;
+    env?: NodeJS.ProcessEnv;
+  },
+  deps: CastRfpVoteDeps = {},
+): Promise<{ outcome: RfpVoteOutcome; votes: RfpVoteRecord[] }> {
+  const env = input.env ?? process.env;
+  if (input.decision !== "approve" && input.decision !== "reject") {
+    throw new AppError(400, "decision must be 'approve' or 'reject'.", "RFP_VOTE_DECISION_INVALID");
+  }
+  const decision = input.decision;
+  const rawReason = typeof input.reason === "string" ? input.reason.trim() : "";
+  if (decision === "reject" && rawReason.length === 0) {
+    throw new AppError(400, "A reason is required to reject an RFP.", "RFP_VOTE_REASON_REQUIRED");
+  }
+  // A soft-deleted (is_active=false) deal reads as not-found: an approve would enqueue rfp_bidboard_create the
+  // bid-board-created callback (findDeal filters is_active=true) could never reconcile.
+  const deal = input.deal;
+  if (!deal || deal.isActive === false) throw new AppError(404, "Deal not found");
+  const isOpenVoteRound =
+    deal.rfpApprovalRequestEventId != null &&
+    deal.rfpApprovalStatus === "pending" &&
+    deal.rfpApprovalRequestId == null;
+  // Authorize on the EXISTING open round, not the deal's CURRENT service classification: a non-service round edited
+  // to service/type-4 mid-round would otherwise strand (pending isn't cancellable; no SyncHub request exists).
+  if (isServiceRfp(deal) && !isOpenVoteRound) {
+    throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
+  }
+  // W7 flag-gate: an already-open round stays votable even after the flag is flipped off (rollback lever); the gate
+  // only blocks a NON-open round during the rollout window (so a legacy non-service deal can't be voted on).
+  if (!input.votingEnabled && !isOpenVoteRound) {
+    throw new AppError(503, "RFP voting is not enabled.", "RFP_VOTING_DISABLED");
+  }
+  if (!isOpenVoteRound) {
+    throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
+  }
+  // BC2: authorize the cast against the round's INVITED voter set (snapshotted into the rfp_vote_invitation job when
+  // the round opened), not the current mutable RFP_VOTER_EMAILS — so an invited voter can still cast after the env
+  // changes, and a since-added address can't. Env allowlist is the fallback only when no snapshot exists.
+  const inviteSnap = await input.tenantDb.execute(sql`
+    SELECT payload->'recipients' AS recipients
+      FROM public.job_queue
+     WHERE job_type = 'rfp_vote_invitation'
+       AND payload->>'dealId' = ${deal.id}
+       AND payload->>'roundEventId' = ${deal.rfpApprovalRequestEventId}
+     ORDER BY id DESC
+     LIMIT 1`);
+  const inviteRows = Array.isArray(inviteSnap) ? inviteSnap : (inviteSnap as { rows?: any[] }).rows ?? [];
+  const snapshot = inviteRows[0]?.recipients;
+  if (Array.isArray(snapshot) && snapshot.length > 0) {
+    const invited = snapshot.map((e: unknown) => String(e).trim().toLowerCase());
+    if (!invited.includes((input.user.email ?? "").trim().toLowerCase())) {
+      throw new AppError(403, "You were not one of the invited voters for this RFP round.", "RFP_VOTE_NOT_INVITED");
+    }
+  } else if (!isRfpVoterEmail(input.user.email, env)) {
+    throw new AppError(403, "Only the designated RFP voters can vote on RFPs.", "RFP_VOTER_ONLY");
+  }
+  return castRfpVote(
+    {
+      tenantDb: input.tenantDb,
+      officeId: input.officeId,
+      deal,
+      voter: { userId: input.user.id, email: input.user.email ?? "" },
+      decision,
+      reason: decision === "reject" ? rawReason : null,
+    },
+    deps,
+  );
 }
 
 /** Service / type-4 == project-type code '4'. Voting applies ONLY to non-service deals. */

@@ -34,8 +34,12 @@ export function RfpVotePanel({
   // finding Y9: also require the round to still be OPEN. After an invitation failure is surfaced (H6), the
   // outcome is still 'pending' but rfpApprovalStatus is send_failed — the "Cast your vote" link would then reach
   // the paused vote page / a server 409 until Retry runs. Gate on rfpApprovalStatus like the focused page (W6).
+  // finding: do NOT gate on the mutable user.isRfpVoter flag. The server authorizes the cast against the round's
+  // invitation SNAPSHOT (BC2), so an invited voter dropped from RFP_VOTER_EMAILS after the round opened must still
+  // find the link on the deal page. Show it to any signed-in user for an open, not-yet-voted round; the /rfp-vote
+  // page loads for any authenticated user (finding 1) and the cast route 403s a genuinely non-invited caster.
   const canCast =
-    state.outcome === "pending" && deal.rfpApprovalStatus === "pending" && Boolean(user?.isRfpVoter) && !hasVoted;
+    state.outcome === "pending" && deal.rfpApprovalStatus === "pending" && Boolean(user) && !hasVoted;
   const voteHref = `/rfp-vote/${deal.id}${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`;
 
   // After a 2/3 approve the vote OUTCOME stays 'approved' forever, but the Bid Board create then moves the deal's

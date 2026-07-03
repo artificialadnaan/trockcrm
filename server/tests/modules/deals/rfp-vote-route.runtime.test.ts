@@ -3,11 +3,9 @@ import express from "express";
 import request from "supertest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { eq, sql } from "drizzle-orm";
-import { deals, rfpVotes } from "@trock-crm/shared/schema";
-import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
-import { castRfpVote, isServiceRfp } from "../../../src/modules/deals/rfp-vote-service.js";
-import { AppError } from "../../../src/middleware/error-handler.js";
+import { eq } from "drizzle-orm";
+import { deals } from "@trock-crm/shared/schema";
+import { authorizeAndCastRfpVote } from "../../../src/modules/deals/rfp-vote-service.js";
 import { isRfpVotingEnabled } from "../../../src/config/feature-flags.js";
 
 const DEAL = "00000000-0000-0000-0000-0000000000d1";
@@ -49,10 +47,9 @@ async function setup() {
   return db;
 }
 
-// Mirror of the production route body (same handler code) so the test exercises validation + middleware.
-// Note: uses a selective column query instead of select().from(deals) to avoid hitting Drizzle columns that
-// don't exist in the minimal test DDL. The production route uses loadTriggerRfpDeal (full select) which works
-// fine because the real DB has all columns.
+// The route calls the SHARED authorizeAndCastRfpVote (rfp-vote-service) — the same function the production
+// /deals/:id/rfp-vote route uses — so this test can't drift from the real handler. The app just resolves the deal
+// (selective columns to fit the minimal DDL) + wires req context, then delegates all validation/gating/authz/cast.
 function buildApp(pgDb: PGlite, user: { id: string; email: string }) {
   const app = express();
   app.use(express.json());
@@ -63,48 +60,26 @@ function buildApp(pgDb: PGlite, user: { id: string; email: string }) {
     req.commitTransaction = async () => {};
     next();
   });
-  // Mirror of the production route (deals/routes.ts). Voter authorization is IN-HANDLER (finding BC2): NO
-  // requireRfpVoter middleware — the round's invitation snapshot is authoritative, with the env allowlist as the
-  // fallback only when no snapshot exists.
   app.post("/deals/:id/rfp-vote", async (req: any, res, next) => {
     try {
-      const decision = req.body?.decision;
-      if (decision !== "approve" && decision !== "reject") throw new AppError(400, "decision must be 'approve' or 'reject'.", "RFP_VOTE_DECISION_INVALID");
-      const rawReason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
-      if (decision === "reject" && rawReason.length === 0) throw new AppError(400, "A reason is required to reject an RFP.", "RFP_VOTE_REASON_REQUIRED");
-      // Selective columns only — avoids selecting Drizzle-schema columns absent from the minimal test DDL.
+      // Selective columns only — avoids selecting Drizzle-schema columns absent from the minimal test DDL. The real
+      // route uses loadTriggerRfpDeal (full select), which works because the real DB has every column.
       const [deal] = await req.tenantDb.select({
         id: deals.id, name: deals.name, dealNumber: deals.dealNumber, projectNumber: deals.projectNumber,
         workflowRoute: deals.workflowRoute, projectType: deals.projectType,
         rfpApprovalStatus: deals.rfpApprovalStatus, rfpApprovalRequestEventId: deals.rfpApprovalRequestEventId,
         rfpApprovalRequestId: deals.rfpApprovalRequestId, isActive: deals.isActive,
       }).from(deals).where(eq(deals.id, req.params.id)).limit(1);
-      // Mirror of the production route: a soft-deleted (is_active=false) deal reads as not-found so a deleted
-      // deal can't be voted on (the create callback filters is_active=true and could never reconcile it).
-      if (!deal || deal.isActive === false) throw new AppError(404, "Deal not found");
-      if (isServiceRfp(deal)) throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
-      const isOpenVoteRound =
-        deal.rfpApprovalRequestEventId != null && deal.rfpApprovalStatus === "pending" && deal.rfpApprovalRequestId == null;
-      // W7 flag-gate: an already-open round stays votable even after the flag is flipped off (rollback lever); the
-      // gate only blocks NON-open rounds during the rollout window.
-      if (!isRfpVotingEnabled() && !isOpenVoteRound) throw new AppError(503, "RFP voting is not enabled.", "RFP_VOTING_DISABLED");
-      if (!isOpenVoteRound) throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
-      // finding BC2: authorize against the round's invitation snapshot; env allowlist is the fallback.
-      const inviteSnap = await req.tenantDb.execute(sql`
-        SELECT payload->'recipients' AS recipients FROM public.job_queue
-         WHERE job_type = 'rfp_vote_invitation' AND payload->>'dealId' = ${deal.id}
-           AND payload->>'roundEventId' = ${deal.rfpApprovalRequestEventId}
-         ORDER BY id DESC LIMIT 1`);
-      const inviteRows = Array.isArray(inviteSnap) ? inviteSnap : (inviteSnap as { rows?: any[] }).rows ?? [];
-      const snapshot = inviteRows[0]?.recipients;
-      if (Array.isArray(snapshot) && snapshot.length > 0) {
-        const invited = snapshot.map((e: unknown) => String(e).trim().toLowerCase());
-        if (!invited.includes((req.user.email ?? "").trim().toLowerCase())) throw new AppError(403, "You were not one of the invited voters for this RFP round.", "RFP_VOTE_NOT_INVITED");
-      } else if (!isRfpVoterEmail(req.user.email, process.env)) {
-        throw new AppError(403, "Only the designated RFP voters can vote on RFPs.", "RFP_VOTER_ONLY");
-      }
       const officeId = req.user.activeOfficeId ?? req.user.officeId ?? null;
-      const result = await castRfpVote({ tenantDb: req.tenantDb, officeId, deal, voter: { userId: req.user.id, email: req.user.email }, decision, reason: decision === "reject" ? rawReason : null });
+      const result = await authorizeAndCastRfpVote({
+        tenantDb: req.tenantDb,
+        deal: deal as any,
+        user: { id: req.user.id, email: req.user.email },
+        decision: req.body?.decision,
+        reason: req.body?.reason,
+        officeId,
+        votingEnabled: isRfpVotingEnabled(),
+      });
       await req.commitTransaction();
       res.json({ success: true, outcome: result.outcome, votes: result.votes });
     } catch (err) { next(err); }
@@ -134,6 +109,18 @@ describe("POST /deals/:id/rfp-vote", () => {
     // Nothing was recorded — the cast never ran.
     const votes = (await pg.query(`SELECT decision FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
     expect(votes).toHaveLength(0);
+  });
+
+  it("[finding] a deal RECLASSIFIED to service while its round is OPEN can still be voted on (not stranded)", async () => {
+    pg = await setup();
+    // The round is open (pending, request-less), but the deal was edited to the service route after it opened.
+    // The cast must authorize on the open round, not the current service classification.
+    await pg.query(`UPDATE deals SET workflow_route = 'service' WHERE id = $1`, [DEAL]);
+    const res = await request(buildApp(pg, VOTER)).post(`/deals/${DEAL}/rfp-vote`).send({ decision: "approve" });
+    expect(res.status).toBe(200);
+    expect(res.body.outcome).toBe("pending");
+    const votes = (await pg.query(`SELECT decision FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(1);
   });
 
   it("[W7] an ALREADY-open round stays votable even with the flag flipped off (rollback lever)", async () => {

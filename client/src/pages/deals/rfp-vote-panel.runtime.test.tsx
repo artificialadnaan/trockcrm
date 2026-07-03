@@ -73,6 +73,13 @@ describe("RfpVotePanel", () => {
     expect(container.querySelector('a[href*="/rfp-vote/deal-1"]')).toBeNull();
   });
 
+  it("[finding] shows the link for a signed-in user whose isRfpVoter is now false (snapshot-authorized voter after env drift)", async () => {
+    // An originally-invited voter dropped from RFP_VOTER_EMAILS: isRfpVoter=false, but the server still authorizes
+    // the cast against the round snapshot, so the deal panel must NOT hide the link on the mutable flag.
+    await render(<RfpVotePanel deal={baseDeal} user={{ id: "u-invited", email: "invited@trockgc.com", isRfpVoter: false, officeId: null } as never} officeId="office-1" />);
+    expect(container.querySelector('a[href*="/rfp-vote/deal-1"]')).not.toBeNull();
+  });
+
   it("after a decision shows the decided header, drops awaiting slots, and hides the cast link", async () => {
     const decidedDeal = {
       id: "deal-1",

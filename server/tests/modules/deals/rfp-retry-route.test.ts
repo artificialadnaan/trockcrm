@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { SQL } from "drizzle-orm";
+import { is, SQL } from "drizzle-orm";
 
 const getDealByIdMock = vi.hoisted(() => vi.fn());
 const loadRfpAttachmentsForDealMock = vi.hoisted(() =>
@@ -459,7 +459,8 @@ describe("POST /api/deals/:id/rfp-retry", () => {
     // it EQUALS the replacement create job's created_at (same-txn now() default) — otherwise a JS Date computed
     // mid-txn is slightly later than the job's created_at and the dead-letter sweep would treat the retry's OWN
     // dead job as stale and never surface send_failed.
-    expect(updated[0].rfpBidboardAttemptAt).toBeInstanceOf(SQL);
+    // is() (not instanceof) so the check survives separate workspace copies of drizzle-orm.
+    expect(is(updated[0].rfpBidboardAttemptAt, SQL)).toBe(true);
     // Never touches the SyncHub delivery path: no dead-job lookup, no direct rfp_request_delivery insert.
     expect(executeMock).not.toHaveBeenCalled();
     expect(inserted).toHaveLength(0);

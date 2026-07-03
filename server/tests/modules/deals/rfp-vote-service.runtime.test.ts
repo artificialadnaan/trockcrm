@@ -317,7 +317,7 @@ describe("allRfpVotersHaveOfficeAccess", () => {
     const db = new PGlite();
     apg = db;
     await db.exec(`
-      CREATE TABLE users (id uuid PRIMARY KEY, email text, office_id uuid);
+      CREATE TABLE users (id uuid PRIMARY KEY, email text, office_id uuid, is_active boolean NOT NULL DEFAULT true);
       CREATE TABLE user_office_access (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL, office_id uuid NOT NULL, role_override text);
     `);
     return drizzle(db as any) as any;
@@ -341,6 +341,13 @@ describe("allRfpVotersHaveOfficeAccess", () => {
   it("false when a configured voter isn't a CRM user at all", async () => {
     const tdb = await setupAccess();
     await apg!.query(`INSERT INTO users (id, email, office_id) VALUES ($1,'sidney@x.com',$3),($2,'james@x.com',$3)`, [SID, JAMES, OFFICE]); // no tim
+    expect(await allRfpVotersHaveOfficeAccess(tdb, OFFICE, ENV)).toBe(false);
+  });
+
+  it("false when a configured voter exists for the office but is DEACTIVATED (is_active=false)", async () => {
+    const tdb = await setupAccess();
+    // All three have office access, but Tim is deactivated -> authMiddleware would reject him, so he can't vote.
+    await apg!.query(`INSERT INTO users (id, email, office_id, is_active) VALUES ($1,'sidney@x.com',$4,true),($2,'tim@x.com',$4,false),($3,'james@x.com',$4,true)`, [SID, TIM, JAMES, OFFICE]);
     expect(await allRfpVotersHaveOfficeAccess(tdb, OFFICE, ENV)).toBe(false);
   });
 });
