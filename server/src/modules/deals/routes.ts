@@ -35,6 +35,7 @@ import {
   setDealContractSignedDate,
   setDealEstimator,
 } from "./service.js";
+import { listDealDescriptionHistory } from "./deal-description-history.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
@@ -2366,6 +2367,26 @@ router.get("/:id/scorecards/:scorecardId/download", async (req, res, next) => {
     const result = await getDealScorecardPdfDownload(req.tenantDb!, req.params.id, req.params.scorecardId);
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/:id/description-history — the deal's description change-log (newest first)
+router.get("/:id/description-history", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    // Mirror /detail's soft-delete hiding: a deactivated (is_active=false) deal 404s there via getDealById's
+    // active filter, so its description audit trail must not be reachable here either.
+    const [active] = await req.tenantDb!
+      .select({ isActive: deals.isActive })
+      .from(deals)
+      .where(eq(deals.id, req.params.id))
+      .limit(1);
+    if (!active || active.isActive === false) throw new AppError(404, "Deal not found");
+    const history = await listDealDescriptionHistory(req.tenantDb!, req.params.id);
+    await req.commitTransaction!();
+    res.json({ history });
   } catch (err) {
     next(err);
   }

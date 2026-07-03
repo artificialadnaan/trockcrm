@@ -1257,6 +1257,14 @@ describe("Deal Service", () => {
             },
           };
         },
+        // A description change appends a deal_history row (change-log); accept the insert.
+        insert() {
+          return {
+            values() {
+              return Promise.resolve(undefined);
+            },
+          };
+        },
       };
     }
 

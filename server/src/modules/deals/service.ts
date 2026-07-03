@@ -66,6 +66,7 @@ import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrder
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
+import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
@@ -2592,6 +2593,21 @@ export async function updateDeal(
     .returning();
 
   const updatedDeal = result[0];
+
+  // Append a description change-log row when deals.description actually changed, so the deal detail page can
+  // show how the scope evolved over time (who changed it, from what, to what). The panel renders
+  // deals.description (getDealDetail does not resolve it), so this tracks that column for EVERY deal incl.
+  // source-lead-backed ones — the deal form edits deals.description for those too. `existing` was read FOR
+  // UPDATE above, so the old value is concurrency-safe. The generic audit_log row (below) is the forensic copy.
+  if (updatedDeal) {
+    await recordDescriptionHistoryChange(tenantDb, {
+      dealId,
+      oldDescription: existing.description,
+      newDescription: updatedDeal.description,
+      changedBy: userId,
+    });
+  }
+
   const auditFieldChanges = buildRawFieldChanges(
     existing as Record<string, unknown>,
     updatedDeal as Record<string, unknown>,

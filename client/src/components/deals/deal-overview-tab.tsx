@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 import { useNavigate } from "react-router-dom";
 import { DealCopilotPanel } from "@/components/ai/deal-copilot-panel";
 import { DealEstimatesCard } from "./deal-estimates-card";
+import { DealDescriptionHistory } from "./deal-description-history";
 import { DealStageBadge } from "./deal-stage-badge";
 import { RecordAssignmentCard } from "@/components/assignment/record-assignment-card";
 import { formatDate, winProbabilityColor, formatCurrency, formatDealDisplayNumber } from "@/lib/deal-utils";
@@ -105,6 +106,7 @@ export function DealOverviewTab({ deal, officeId, onDealUpdated }: DealOverviewT
             {deal.description && (
               <p className="text-sm text-muted-foreground">{deal.description}</p>
             )}
+            <DealDescriptionHistory dealId={deal.id} refreshKey={deal.description} />
           </CardContent>
         </Card>
 

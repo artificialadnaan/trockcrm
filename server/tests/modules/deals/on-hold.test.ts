@@ -170,6 +170,15 @@ function createTenantDb(initialDeal: FakeDealRow) {
         },
       };
     },
+    // A description change appends a deal_history row after the update; route it through startQuery so the
+    // single-in-flight-query guard still holds (the insert is awaited after the update completes).
+    insert() {
+      return {
+        values() {
+          return startQuery("insert-deal-history", undefined);
+        },
+      };
+    },
   };
 
   return tenantDb;
