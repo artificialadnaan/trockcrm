@@ -77,7 +77,7 @@ beforeAll(async () => {
       rfp_approval_request_event_id uuid, rfp_approval_requested_by uuid, rfp_approval_request_id integer,
       rfp_approval_token text, rfp_approval_status text, rfp_declined_reason text, rfp_declined_at timestamptz,
       rfp_override_reviewed_at timestamptz, rfp_override_reviewed_by uuid, rfp_override_decision text,
-      rfp_override_note text, rfp_override_state text, rfp_override_error text, rfp_conflict_reason text,
+      rfp_override_note text, rfp_override_state text, rfp_override_error text, rfp_bidboard_attempt_at timestamptz, rfp_conflict_reason text,
       rfp_conflict_with jsonb, rfp_last_attempt_error text, last_synced_from_hubspot_at timestamptz,
       workflow_route text, pipeline_disposition text, last_activity_at timestamptz, on_hold boolean,
       on_hold_started_at timestamptz, on_hold_accumulated_seconds bigint,

@@ -697,7 +697,7 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
   });
 
   it("voting ENABLED + full trio but rfp_votes table ABSENT falls back to SyncHub (finding G1)", async () => {
-    // Flag on for an office whose migration 0175 hasn't run: opening a round would let a voter reach a form
+    // Flag on for an office whose migration 0176 hasn't run: opening a round would let a voter reach a form
     // whose first cast 500s on the missing table, stranding the deal 'pending'. Fall back to SyncHub instead.
     isRfpVotingEnabledMock.mockReturnValue(true);
     resolveRfpVoterEmailsMock.mockReturnValue(["sidney@x.com", "tim@x.com", "james@x.com"]);

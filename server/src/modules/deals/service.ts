@@ -2094,7 +2094,7 @@ export async function getDealDetail(
   // Current-round RFP votes for the vote panel / focused vote page. Scoped to the deal's live round event id
   // so a re-trigger shows a clean tally. rfpVoteState comes from the ONE shared helper (reconciliation rule).
   // Gated on the feature flag so getDealDetail stays inert (no query) if rfp_votes doesn't yet exist
-  // (flag off or migration 0175 not applied). As belt-and-suspenders when the flag is on but the table is
+  // (flag off or migration 0176 not applied). As belt-and-suspenders when the flag is on but the table is
   // missing, loadRfpVoteDetail probes with to_regclass first and returns an empty tally — never running a
   // SELECT that would 42P01-poison this tenant transaction.
   // A request-less vote round (non-service, no SyncHub request id, has a round event id, status pending/paused)

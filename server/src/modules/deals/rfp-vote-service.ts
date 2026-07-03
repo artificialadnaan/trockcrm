@@ -36,7 +36,7 @@ export function hasSufficientRfpVoters(env: NodeJS.ProcessEnv): boolean {
 }
 
 /**
- * True iff the tenant's rfp_votes table exists (migration 0175 applied for THIS office). The trigger-rfp voting
+ * True iff the tenant's rfp_votes table exists (migration 0176 applied for THIS office). The trigger-rfp voting
  * branch probes this so that, if ENABLE_RFP_VOTING is on for an office whose migration hasn't run, it falls back
  * to the SyncHub path instead of opening a round whose first /rfp-vote POST would 500 on `insert(rfpVotes)` and
  * strand the deal 'pending' (uncancellable) — the detail loader tolerates the missing table, so voters would

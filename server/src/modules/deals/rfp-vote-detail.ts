@@ -32,7 +32,7 @@ export async function loadRfpVoteDetail(
     return { rfpVotes: [], rfpVoteState: computeRfpVoteState([]) };
   }
 
-  // Probe for the table with to_regclass BEFORE querying it. If migration 0175 has not been applied yet, a
+  // Probe for the table with to_regclass BEFORE querying it. If migration 0176 has not been applied yet, a
   // direct SELECT raises Postgres 42P01 — and because getDealDetail runs this inside a tenant TRANSACTION, that
   // error POISONS the whole transaction ("current transaction is aborted, commands ignored until end of
   // transaction block"), so every later statement in the detail load fails too — a try/catch around the SELECT

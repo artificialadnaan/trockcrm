@@ -89,7 +89,7 @@ describe("loadRfpVoteDetail", () => {
     // Simulate the pre-migration state: rfp_votes table absent; users table present for the JOIN path.
     const rawPg = new PGlite();
     await rawPg.exec(`CREATE TABLE users (id uuid PRIMARY KEY, display_name text);`);
-    // Do NOT create rfp_votes — this mirrors a tenant that hasn't run migration 0175 yet.
+    // Do NOT create rfp_votes — this mirrors a tenant that hasn't run migration 0176 yet.
     const noTableDb = drizzle(rawPg);
     try {
       const { rfpVotes: votes, rfpVoteState: state } = await loadRfpVoteDetail(noTableDb as any, DEAL, ROUND);

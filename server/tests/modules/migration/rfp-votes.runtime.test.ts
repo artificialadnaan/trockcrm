@@ -7,7 +7,7 @@ import { PGlite } from "@electric-sql/pglite";
 // every office_* schema — both create the table here, exercising both paths idempotently. Mirrors
 // server/tests/modules/migration/deal-change-orders.runtime.test.ts (the 0153 runtime test).
 const MIGRATION_SQL = readFileSync(
-  new URL("../../../../migrations/0175_rfp_votes.sql", import.meta.url),
+  new URL("../../../../migrations/0176_rfp_votes.sql", import.meta.url),
   "utf8",
 );
 
