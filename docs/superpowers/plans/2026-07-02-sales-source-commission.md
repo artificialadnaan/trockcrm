@@ -27,7 +27,7 @@ Both are covered by tasks below and re-checked in the Task 12 review.
 ## File Structure
 
 **Create:**
-- `migrations/0174_deals_sales_source_user_id.sql` — add `deals.sales_source_user_id` to every `office_*` tenant schema (mirrors the sibling `estimator_user_id` migration).
+- `migrations/0175_deals_sales_source_user_id.sql` — add `deals.sales_source_user_id` to every `office_*` tenant schema (mirrors the sibling `estimator_user_id` migration).
 - `server/tests/modules/commissions/sales-source-mint.runtime.test.ts` — PGlite: additive sales_source mint + guards + role-aware rate.
 - `server/tests/modules/commissions/floor-gate-sales-source.runtime.test.ts` — PGlite: sourced deal credits the source rep's floor.
 
@@ -52,7 +52,7 @@ Both are covered by tasks below and re-checked in the Task 12 review.
 ## Task 1: Migration — `deals.sales_source_user_id`
 
 **Files:**
-- Create: `migrations/0174_deals_sales_source_user_id.sql`
+- Create: `migrations/0175_deals_sales_source_user_id.sql`
 
 `deals` is a per-tenant (`office_*`) table, so this needs the DO-loop over existing office schemas PLUS the `-- TENANT_SCHEMA_START/END` block for new-office provisioning. Mirror the exact structure of the sibling `estimator_user_id` migration.
 
@@ -63,10 +63,10 @@ Read that file. Note exactly: (a) the `DO $tenant$ … LIKE 'office\_%'` loop wi
 
 - [ ] **Step 2: Write the migration mirroring that structure**
 
-Create `migrations/0174_deals_sales_source_user_id.sql` — copy the estimator migration's structure verbatim, substituting `sales_source_user_id` for `estimator_user_id`. It MUST have: the header comment, the existing-tenants `DO $tenant$` loop guarded by `to_regclass(format('%I.deals', schema_name)) IS NULL … CONTINUE`, and the `-- TENANT_SCHEMA_START` / `-- TENANT_SCHEMA_END` block. If the estimator migration added a FK to `public.users`, add the identical FK for sales_source (same `ON DELETE`); if it did not, do not add one (match the sibling exactly). Example skeleton (fill the FK clause per Step 1):
+Create `migrations/0175_deals_sales_source_user_id.sql` — copy the estimator migration's structure verbatim, substituting `sales_source_user_id` for `estimator_user_id`. It MUST have: the header comment, the existing-tenants `DO $tenant$` loop guarded by `to_regclass(format('%I.deals', schema_name)) IS NULL … CONTINUE`, and the `-- TENANT_SCHEMA_START` / `-- TENANT_SCHEMA_END` block. If the estimator migration added a FK to `public.users`, add the identical FK for sales_source (same `ON DELETE`); if it did not, do not add one (match the sibling exactly). Example skeleton (fill the FK clause per Step 1):
 
 ```sql
--- Migration 0174: sales_source_user_id on the per-tenant deals table.
+-- Migration 0175: sales_source_user_id on the per-tenant deals table.
 --
 -- The capX rep who SOURCED a service opportunity (set once at creation, locked after; admin/director
 -- override only). Nullable. Drives the additive attribution_role='sales_source' commission row and the
@@ -105,8 +105,8 @@ The migration runs at deploy (and is Adnaan's prod-write). Do NOT run the runner
 - [ ] **Step 4: Commit**
 
 ```bash
-git add migrations/0174_deals_sales_source_user_id.sql
-git commit -m "feat(commissions): migration 0174 - deals.sales_source_user_id"
+git add migrations/0175_deals_sales_source_user_id.sql
+git commit -m "feat(commissions): migration 0175 - deals.sales_source_user_id"
 ```
 
 ---
@@ -806,13 +806,13 @@ Run these review lenses (each a fresh subagent reading the branch diff `git diff
 2. **INV-1 (role-aware rate):** prove no path rates a sales_source row at the capX mirror — mint AND recompute AND `setDealSalesSource` re-mint.
 3. **INV-2 (recompute gate):** a service-source-rate-only edit fires the recompute; a no-op edit does not.
 4. **Floor gate:** no double-count (owner+source same rep can't happen); source leg uses the source-specific signed-date predicate; existing floor tests unaffected.
-5. **DB integrity:** migration 0174 loops tenants + has the TENANT_SCHEMA block + matches the estimator FK pattern; `attribution_role='sales_source'` needs no enum change.
+5. **DB integrity:** migration 0175 loops tenants + has the TENANT_SCHEMA block + matches the estimator FK pattern; `attribution_role='sales_source'` needs no enum change.
 6. **Back-compat / gating:** sales_source is set-once at creation, excluded from the generic update allowlist, only the leadership route changes it; the change-order inheritance case is handled.
 7. **UX / reconciliation:** the detail item + form label read clearly; per the [[reconciliation-consistency-rule]], sales_source earned flows to the rep's earned aggregate (it does, via `dsc.rep_user_id`) AND the floor qualifying leg — card/drawer/aggregate move together.
 
 - [ ] **Step 3: Re-run the full gate after fixes, then open the PR**
 
-Once the gate is green AND the review lenses are clean, push and open the PR. Deferred/live-DB steps (apply migration 0174, manual smoke of a sourced service deal) go in the PR body as Adnaan's checklist.
+Once the gate is green AND the review lenses are clean, push and open the PR. Deferred/live-DB steps (apply migration 0175, manual smoke of a sourced service deal) go in the PR body as Adnaan's checklist.
 
 ```bash
 git push -u origin feat/sales-source-commission

@@ -1,4 +1,4 @@
--- Migration 0174: deals.sales_source_user_id (the capX rep who SOURCED a service opportunity).
+-- Migration 0175: deals.sales_source_user_id (the capX rep who SOURCED a service opportunity).
 --
 -- Set once at service-opportunity creation, locked afterward (admin/director override only). Nullable
 -- FK to public.users, ON DELETE SET NULL (FK-safety guard, matching estimator_user_id / migration 0150).
