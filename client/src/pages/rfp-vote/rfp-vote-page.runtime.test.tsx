@@ -98,10 +98,22 @@ describe("RfpVotePage", () => {
     expect(container.querySelector('a[href*="/deals/deal-1"]')).not.toBeNull();
   });
 
-  it("blocks a non-voter with an access-restricted message", async () => {
+  it("[finding] an authenticated non-voter still loads the vote page (server authorizes the cast via the snapshot)", async () => {
+    // isRfpVoter=false must NOT hard-block: an originally-invited voter dropped from RFP_VOTER_EMAILS after the
+    // round opened is still authorized server-side (BC2). The page loads and the cast route is the authority.
     mocks.useAuthMock.mockReturnValue({ user: { id: "u-x", email: "x@trockgc.com", isRfpVoter: false, officeId: null } });
+    mocks.apiMock.mockResolvedValueOnce(detail); // GET /deals/deal-1/detail — loaded, not blocked
     await render();
-    expect(container.textContent).toMatch(/only the designated rfp voters/i);
+    expect(mocks.apiMock).toHaveBeenCalled();
+    expect(container.textContent).not.toMatch(/vote access restricted|only the designated rfp voters/i);
+    // The vote UI renders — the cast is gated server-side, not by the client isRfpVoter flag.
+    expect(container.querySelector('input[value="approve"]')).not.toBeNull();
+  });
+
+  it("blocks an unauthenticated (null user) visitor with a sign-in message and no fetch", async () => {
+    mocks.useAuthMock.mockReturnValue({ user: null });
+    await render();
+    expect(container.textContent).toMatch(/sign in to vote/i);
     expect(mocks.apiMock).not.toHaveBeenCalled();
   });
 });

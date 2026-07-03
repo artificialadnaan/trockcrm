@@ -271,7 +271,14 @@ export async function enqueueRfpVoteInvitation(input: {
   // row) and the /rfp-retry re-invite path (a getDealById result) call it without a cast.
   deal: { id: string; dealNumber?: string | null; name?: string | null; rfpApprovalRequestEventId?: string | null };
   officeId: string | null;
+  // finding: an explicit invited set to snapshot. openRfpVoteRound omits it (resolves the exact trio from env,
+  // already gated by hasSufficientRfpVoters). The /rfp-retry re-invite MUST pass the ORIGINAL round's set here so a
+  // since-drifted RFP_VOTER_EMAILS can't turn the round into 2-of-4 or strand it — the invitation snapshot is the
+  // authoritative voter set the cast route (BC2) checks, so the retry must not re-derive it from a mutable env.
+  recipients?: string[];
 }): Promise<{ jobId: number }> {
+  const recipients =
+    input.recipients && input.recipients.length > 0 ? input.recipients : resolveRfpVoterEmails(process.env);
   const jobRows = await input.tenantDb
     .insert(jobQueue)
     .values({
@@ -282,11 +289,11 @@ export async function enqueueRfpVoteInvitation(input: {
         dealName: input.deal.name ?? null,
         officeId: input.officeId,
         roundEventId: input.deal.rfpApprovalRequestEventId ?? null,
-        // Carry the SERVER-resolved voter set (finding H5). The trigger already gated on hasSufficientRfpVoters
-        // (the exact trio) against the server's RFP_VOTER_EMAILS; snapshot that authoritative list into the job
-        // so the worker emails EXACTLY those voters even if its own env is stale/incomplete — otherwise a
-        // divergent worker env could invite the wrong people or omit a real voter and strand the round.
-        recipients: resolveRfpVoterEmails(process.env),
+        // The SERVER-resolved voter set (finding H5). openRfpVoteRound snapshots the exact trio from env (already
+        // gated by hasSufficientRfpVoters) so the worker emails EXACTLY those voters even if its own env is
+        // stale/incomplete; the /rfp-retry re-invite passes the ORIGINAL round's set (finding) so the round's
+        // authoritative voter set never drifts on retry.
+        recipients,
       },
       officeId: input.officeId,
       status: "pending",

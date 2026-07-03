@@ -319,17 +319,19 @@ export function DealDetailPage() {
   const detailOfficeId = searchParams.get("officeId");
   const { deal, loading, error, refetch } = useDealDetail(id, { officeId: detailOfficeId });
 
-  // Poll the detail every 5s while the RFP vote round is unresolved so the panel flips to decided (go/no-go)
-  // without a manual refresh. Mirrors the /rfp-review 5s interval; stops once the outcome is decided (votes are
-  // final) or there's no open round.
+  // Poll the detail every 5s while an RFP is in flight so the panel flips to its resolved state without a manual
+  // refresh. Gate SOLELY on rfpApprovalStatus (finding): after a 2/3 approve the vote outcome is already 'approved'
+  // but the Bid Board create runs AFTER that while the status is still 'pending' — stopping on the vote outcome
+  // would freeze the panel on "creating Bid Board…" and hide the later approved / send_failed (Retry) state. The
+  // status leaves pending/pending_outbox once the create callback lands (approved) or fails (send_failed), which
+  // stops the poll.
   useEffect(() => {
-    if (deal?.rfpVoteState?.outcome !== "pending") return;
     if (deal?.rfpApprovalStatus !== "pending" && deal?.rfpApprovalStatus !== "pending_outbox") return;
     const interval = setInterval(() => {
       refetch();
     }, 5000);
     return () => clearInterval(interval);
-  }, [deal?.rfpVoteState?.outcome, deal?.rfpApprovalStatus, refetch]);
+  }, [deal?.rfpApprovalStatus, refetch]);
 
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<Tab>("overview");

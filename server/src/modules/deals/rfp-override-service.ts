@@ -131,7 +131,13 @@ export async function requestOverrideApproval(
     .set({
       rfpOverrideState: "approving",
       rfpOverrideError: null,
-      rfpOverrideReviewedAt: new Date(),
+      // finding (override BC5): stamp with the transaction's now() (NOT a JS Date). The request-less branch below
+      // enqueues rfp_bidboard_create in THIS same transaction with created_at = now() (its column default), and the
+      // dead-letter sweep compares that job created_at to rfp_override_reviewed_at. A JS Date is computed
+      // mid-transaction and is a few ms LATER than now() (the transaction-start timestamp), so created_at <
+      // reviewed_at would make the sweep treat this override's OWN dead job as stale — leaving the review stuck in
+      // 'approving' instead of surfacing 'failed'. now() makes reviewed_at EQUAL the job's created_at.
+      rfpOverrideReviewedAt: sql`now()`,
       rfpOverrideReviewedBy: input.actor.userId,
       rfpOverrideDecision: "override_approved",
       rfpOverrideNote: input.note,

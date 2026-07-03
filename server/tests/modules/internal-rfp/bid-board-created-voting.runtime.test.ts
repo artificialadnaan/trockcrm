@@ -47,7 +47,7 @@ async function seed() {
       procore_company_id text, is_bid_board_owned boolean NOT NULL DEFAULT false, rfp_approval_status text, rfp_declined_reason text,
       rfp_declined_at timestamptz, rfp_override_state text, rfp_override_error text, rfp_override_decision text,
       rfp_override_reviewed_at timestamptz, rfp_bidboard_attempt_at timestamptz, rfp_last_attempt_error text, bid_board_linked_at timestamptz, assigned_rep_id uuid, rfp_approval_requested_by uuid,
-      rfp_approval_request_id integer, rfp_approval_requested_at timestamptz, workflow_route text NOT NULL DEFAULT 'normal', stage_entered_at timestamptz,
+      rfp_approval_request_id integer, rfp_approval_requested_at timestamptz, rfp_approval_request_event_id uuid, workflow_route text NOT NULL DEFAULT 'normal', stage_entered_at timestamptz,
       on_hold boolean NOT NULL DEFAULT false, on_hold_started_at timestamptz, on_hold_accumulated_seconds bigint DEFAULT 0,
       on_hold_accumulated_seconds_at_stage_entry bigint DEFAULT 0, is_active boolean NOT NULL DEFAULT true, updated_at timestamptz
     );
@@ -155,6 +155,19 @@ describe("POST /bid-board-created (voting path)", () => {
     rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
     expect(rows[0].rfp_approval_status).toBe("send_failed");
     expect(rows[0].rfp_override_state).toBe("failed");
+  });
+
+  it("[finding] 422s a timestamp-less request-less 'failed' on an OPEN pending round (so SyncHub resends), applying nothing", async () => {
+    await seed();
+    // A live round is open (requested_at set); attempt_at + reviewed_at are NULL (first create).
+    await holder.pg.query(`UPDATE office_test.deals SET rfp_approval_requested_at = $2 WHERE id = $1`, [DEAL, "2026-07-03T00:00:00.000Z"]);
+    const app = await buildApp();
+    const raw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "no timestamp here" }); // NO createdAt
+    const res = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+    expect(res.status).toBe(422); // resend a well-formed one rather than silently no-op at 200
+    const rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("pending"); // untouched — NOT flipped to send_failed
+    expect(rows[0].rfp_override_state).toBeNull();
   });
 
   it("[BC3] 422s a FIRST request-less 'created' that is missing createdAt (so SyncHub retries), then links a well-formed one", async () => {

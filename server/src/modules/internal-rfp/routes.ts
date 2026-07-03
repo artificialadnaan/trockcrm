@@ -96,6 +96,7 @@ async function findDeal(sourceDealId: string) {
               d.rfp_approval_requested_by,
               d.rfp_approval_request_id,
               d.rfp_approval_requested_at,
+              d.rfp_approval_request_event_id,
               d.workflow_route,
               d.stage_entered_at,
               d.on_hold,
@@ -754,18 +755,26 @@ internalRfpRoutes.post(
           // CURRENT row, so the 422 decision must too — otherwise a since-retried deal misses its 422 and the
           // UPDATE no-ops at 200 applied:false, so SyncHub stops retrying.
           const freshRes = await pool.query(
-            `SELECT rfp_approval_status, rfp_override_state, rfp_override_reviewed_at, rfp_bidboard_attempt_at
+            `SELECT rfp_approval_status, rfp_override_state, rfp_override_reviewed_at, rfp_bidboard_attempt_at, rfp_approval_requested_at
                FROM ${quoteIdent(found.schemaName)}.deals WHERE id = $1`,
             [sourceDealId]
           );
           const freshDeal = freshRes.rows[0] ?? found.deal;
+          // A request-less 'failed' that lands while a create is in flight MUST carry a parseable createdAt, else a
+          // timestamp-less callback would silently no-op the guarded UPDATE at 200 (SyncHub stops retrying) — 422 it.
           const isOverrideApproveSubcase =
             freshDeal.rfp_approval_status === "declined" &&
             freshDeal.rfp_override_state === "approving" &&
             freshDeal.rfp_override_reviewed_at != null;
-          const isRetriedPendingSubcase =
-            freshDeal.rfp_approval_status === "pending" && freshDeal.rfp_bidboard_attempt_at != null;
-          if ((isOverrideApproveSubcase || isRetriedPendingSubcase) && !votingFailedCreatedAt) {
+          // finding: a request-less PENDING round that's open (requested_at set) — first attempt OR retried
+          // (attempt_at set is a subset). Mirrors the 'created' path's BC3 422: without it a timestamp-less 'failed'
+          // redelivered from an OLD first attempt would slip past the cross-round guard's `$3 IS NULL` exemption and
+          // mark the fresh round send_failed. SyncHub always stamps createdAt (AA3), so this just makes it resend a
+          // well-formed one. (A pending deal WITHOUT requested_at — only an artificial state — stays exempt so a
+          // genuine first failure can still surface.)
+          const isPendingRoundOpen =
+            freshDeal.rfp_approval_status === "pending" && freshDeal.rfp_approval_requested_at != null;
+          if ((isOverrideApproveSubcase || isPendingRoundOpen) && !votingFailedCreatedAt) {
             console.warn(
               `[RFP callback] request-less 'failed' for deal ${sourceDealId} is missing a parseable createdAt while a freshness marker is set; returning 422 so SyncHub retries instead of silently dropping it`
             );
@@ -1126,6 +1135,38 @@ internalRfpRoutes.post(
             },
             metadata: { rfpApprovalRequestId: payload.rfpApprovalRequestId, bidboardProjectId },
           });
+
+          // finding: the migration 0155 trigger fires the "override approved" email on the declined->approved
+          // transition ONLY for request-BACKED deals (it returns early on a NULL rfp_approval_request_id). A
+          // voting-path no-go that a reviewer OVERRIDE-approved carries no request id, so the requesting rep +
+          // leadership would never be notified when THIS callback flips it declined->approved. Enqueue the SAME
+          // job app-side for that case, keyed on the round event id (the worker uses it for idempotency when there
+          // is no request id). This runs only on the real transition (rowCount>0), so it's once-only; a replayed
+          // 'created' no-ops the linkage and never re-enqueues. Best-effort (mirrors the trigger's EXCEPTION-swallow):
+          // a notification failure must NEVER abort the linkage commit.
+          if (dealRequestId == null && found.deal.rfp_override_decision === "override_approved") {
+            try {
+              await client.query(
+                `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+                 VALUES ('rfp_override_approved_email', $1::jsonb, NULL, 'pending', NOW())`,
+                [
+                  JSON.stringify({
+                    tenantSchema: found.schemaName,
+                    dealId: sourceDealId,
+                    dealNumber: (found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
+                    dealName: found.deal.name ?? null,
+                    rfpApprovalRequestId: null,
+                    rfpVoteRoundId: found.deal.rfp_approval_request_event_id ?? null,
+                    requestedByUserId: found.deal.rfp_approval_requested_by ?? null,
+                  }),
+                ]
+              );
+            } catch (notifyErr) {
+              console.warn(
+                `[RFP callback] failed to enqueue request-less override-approved email for deal ${sourceDealId} (linkage preserved): ${notifyErr instanceof Error ? notifyErr.message : notifyErr}`
+              );
+            }
+          }
         }
 
         if (canApplyStage) {

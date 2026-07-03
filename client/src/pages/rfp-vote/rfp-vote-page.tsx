@@ -17,7 +17,11 @@ export function RfpVotePage() {
   const [searchParams] = useSearchParams();
   const officeId = searchParams.get("officeId");
   const { user } = useAuth();
-  const { deal, loading, error, refetch } = useRfpVote(user?.isRfpVoter ? dealId : undefined, officeId);
+  // finding: do NOT gate the load on the mutable user.isRfpVoter flag. When RFP_VOTER_EMAILS changes after a round
+  // opens, the server still authorizes voters from that round's invitation SNAPSHOT (BC2) — an originally invited
+  // voter whose /auth/me now says isRfpVoter=false must still be able to open the emailed link and cast. Load for
+  // any authenticated user and let the server be the authority (the cast route 403s a genuinely non-invited user).
+  const { deal, loading, error, refetch } = useRfpVote(user ? dealId : undefined, officeId);
   const [decision, setDecision] = useState<"approve" | "reject" | null>(null);
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -34,13 +38,16 @@ export function RfpVotePage() {
     setSubmitting(false);
   }, [dealId, officeId]);
 
-  if (!user?.isRfpVoter) {
+  // Only a null user (not signed in) is blocked here — authorization for the actual cast is server-side (BC2), so a
+  // snapshot-invited voter whose current isRfpVoter flag is false still reaches the vote UI. A genuinely
+  // non-invited user who reaches this page gets a clear 403 from the server on submit.
+  if (!user) {
     return (
       <PageFrame>
         <Card>
           <CardHeader>
-            <CardTitle>Vote access restricted</CardTitle>
-            <CardDescription>Only the designated RFP voters can open this page. Contact an administrator if this is a mistake.</CardDescription>
+            <CardTitle>Sign in to vote</CardTitle>
+            <CardDescription>You need to be signed in to open this RFP vote. Sign in and follow the link again.</CardDescription>
           </CardHeader>
           <CardFooter>
             <Link to="/" className={buttonVariants({ variant: "outline" })}>Back to dashboard</Link>

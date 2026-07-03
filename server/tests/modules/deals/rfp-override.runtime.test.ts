@@ -71,6 +71,7 @@ async function setup(): Promise<PGlite> {
       deal_number text NOT NULL,
       rfp_approval_status text,
       rfp_approval_request_id integer,
+      rfp_approval_request_event_id uuid,
       rfp_approval_requested_by uuid,
       rfp_declined_reason text,
       rfp_override_reviewed_at timestamptz,

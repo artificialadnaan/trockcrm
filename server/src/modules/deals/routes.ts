@@ -1575,13 +1575,21 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       // returned + re-triggered through the LEGACY delivery path, retrying that legacy send_failed could match
       // the stale dead invitation and misroute into re-enqueuing a vote invitation for a non-voting round.
       const deadInvite = await req.tenantDb!.execute(sql`
-        SELECT id FROM public.job_queue
+        SELECT id, payload->'recipients' AS recipients FROM public.job_queue
          WHERE job_type = 'rfp_vote_invitation' AND status = 'dead'
            AND payload->>'dealId' = ${deal.id}
            AND payload->>'roundEventId' = ${deal.rfpApprovalRequestEventId}
+         ORDER BY id DESC
          LIMIT 1`);
-      const deadInviteRows = Array.isArray(deadInvite) ? deadInvite : (deadInvite as { rows?: unknown[] }).rows ?? [];
+      const deadInviteRows = (Array.isArray(deadInvite) ? deadInvite : (deadInvite as { rows?: unknown[] }).rows ?? []) as Array<{ recipients?: unknown }>;
       if (deadInviteRows.length > 0) {
+        // finding: re-invite the ORIGINAL round's snapshotted voter set (the dead invitation's recipients), NOT a
+        // re-resolution of the current RFP_VOTER_EMAILS. Since the invitation snapshot is what the cast route
+        // authorizes against (BC2), re-deriving from a since-drifted env could make the round 2-of-4 or strand it.
+        const originalRecipients = deadInviteRows[0]?.recipients;
+        const retryRecipients = Array.isArray(originalRecipients)
+          ? originalRecipients.map((e) => String(e)).filter((e) => e.length > 0)
+          : undefined;
         const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
         // Atomically re-claim send_failed -> the open 'pending' round state, clearing the surfaced error, BEFORE
         // re-enqueuing (so a concurrent Return to Opportunity that cleared the fields matches nothing and 409s).
@@ -1609,6 +1617,7 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
             rfpApprovalRequestEventId: deal.rfpApprovalRequestEventId,
           },
           officeId,
+          recipients: retryRecipients,
         });
         await req.commitTransaction!();
         res.status(202).json({ success: true, status: "pending" });
