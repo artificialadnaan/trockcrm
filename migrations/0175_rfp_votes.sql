@@ -1,4 +1,4 @@
--- Migration 0173: rfp_votes (CRM-owned RFP approval voting for non-service deals)
+-- Migration 0175: rfp_votes (CRM-owned RFP approval voting for non-service deals)
 --
 -- One row per voter per RFP vote round. A "round" is scoped by round_event_id (=
 -- deals.rfp_approval_request_event_id at trigger time) so a cancel/re-trigger starts a fresh tally
