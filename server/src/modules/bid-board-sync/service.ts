@@ -319,7 +319,11 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
            bid_board_customer_name = $12,
            bid_board_customer_contact_raw = $13,
            bid_board_project_number = $14,
-           estimator_user_id = COALESCE(estimator_user_id, $16::uuid),
+           -- Empties-only estimator fill, TOCTOU-guarded against the LIVE locked row: NULLIF drops the
+           -- incoming id when it equals the deal's CURRENT sales_source_user_id, so an admin setting the
+           -- source to the mapped estimator between findDealMatches (the snapshot the JS guard reads) and
+           -- this UPDATE's row lock can never recreate the estimator == source conflict.
+           estimator_user_id = COALESCE(estimator_user_id, NULLIF($16::uuid, sales_source_user_id)),
            -- Bid Board exports do not include a per-row updated-at, so this stores the sync cycle timestamp.
            bid_board_last_updated_at = $15::timestamptz,
            updated_at = NOW()
@@ -339,7 +343,10 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
             bid_board_customer_contact_raw IS DISTINCT FROM $13 OR
             bid_board_project_number IS DISTINCT FROM $14 OR
             bid_board_last_updated_at IS DISTINCT FROM $15::timestamptz OR
-            (estimator_user_id IS NULL AND $16::uuid IS NOT NULL)
+            -- Only trigger an estimator-fill write when it would actually land: the incoming id is set,
+            -- the slot is empty, AND it isn't the live sales source (matches the NULLIF guard above, so
+            -- the UPDATE doesn't churn updated_at just to no-op a blocked fill).
+            (estimator_user_id IS NULL AND $16::uuid IS NOT NULL AND $16::uuid IS DISTINCT FROM sales_source_user_id)
        )
      RETURNING id, name, deal_number, project_number, estimator_user_id
   `;
@@ -1103,6 +1110,10 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       // incoming id (leave estimator null) so the sales-source attribution wins. Only bites on a genuine
       // fill (existing estimator null); when one is already set the COALESCE preserves it and this incoming
       // id is dropped anyway, so we skip the noisy warning in that case.
+      // NOTE: this JS check reads the findDealMatches SNAPSHOT — it is the observability/warning layer. The
+      // AUTHORITATIVE guard is the SQL NULLIF($16, sales_source_user_id) in buildBidBoardDealUpdateSql,
+      // which evaluates against the LIVE locked row and so also catches a source set between this SELECT
+      // and the UPDATE's row lock (TOCTOU).
       const dealSalesSourceUserId = (matches[0].sales_source_user_id ?? null) as string | null;
       if (estimatorUserId && estimatorUserId === dealSalesSourceUserId) {
         if (!existingEstimatorUserId) {

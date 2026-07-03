@@ -146,4 +146,43 @@ describe("Bid Board deal-mirror UPDATE — $16 (estimator_user_id) parameter typ
 
     expect(await estimatorOf(DEAL_ID)).toBe(ESTIMATOR_ID);
   });
+
+  const SOURCE_ID = "33333333-3333-4333-8333-333333333333";
+
+  async function seedDealWithSource(estimatorUserId: string | null, salesSourceUserId: string | null) {
+    await client.query(`DELETE FROM ${SCHEMA}.deals WHERE id = $1`, [DEAL_ID]);
+    await client.query(
+      `INSERT INTO ${SCHEMA}.deals (id, name, estimator_user_id, sales_source_user_id)
+       VALUES ($1, $2, $3::uuid, $4::uuid)`,
+      [DEAL_ID, "Bellamy Executive Park", estimatorUserId, salesSourceUserId]
+    );
+  }
+
+  it("does NOT fill an empty estimator when the incoming id equals the deal's live sales source (TOCTOU guard)", async () => {
+    // Finding F: even if an admin sets the sales source to the mapped estimator AFTER findDealMatches but
+    // before this UPDATE's row lock, the SQL NULLIF($16, sales_source_user_id) evaluates against the LIVE
+    // row and drops the incoming id — so estimator_user_id can never equal sales_source_user_id (which
+    // would make calculateCommissionForDeal skip the sales_source cut and mint an estimator cut instead).
+    await seedDealWithSource(null, SOURCE_ID);
+    const sql = buildBidBoardDealUpdateSql(SCHEMA);
+
+    // $16 == the deal's current sales source. The name differs from the seed, so the UPDATE fires on the
+    // name change — but the estimator fill must be suppressed.
+    const res = await client.query(
+      sql,
+      updateParams(DEAL_ID, normalizedRow(), "2026-06-18T20:32:00Z", SOURCE_ID)
+    );
+    expect(res.rowCount ?? 0).toBeGreaterThan(0); // the name change still lands
+    expect(await estimatorOf(DEAL_ID)).toBeNull(); // but the estimator stays null (NULLIF blocked the fill)
+  });
+
+  it("still fills an empty estimator with an incoming id that is NOT the sales source", async () => {
+    // Control: the guard only suppresses the fill on a source collision — a normal mapped estimator that
+    // is distinct from the source still lands.
+    await seedDealWithSource(null, SOURCE_ID);
+    const sql = buildBidBoardDealUpdateSql(SCHEMA);
+
+    await client.query(sql, updateParams(DEAL_ID, normalizedRow(), "2026-06-18T20:32:00Z", ESTIMATOR_ID));
+    expect(await estimatorOf(DEAL_ID)).toBe(ESTIMATOR_ID);
+  });
 });

@@ -36,6 +36,32 @@ function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
   return Array.isArray(result) ? result : result.rows;
 }
 
+/**
+ * Decide whether a commission-settings save should trigger the cross-office recompute, and the minimal
+ * role set it should touch. Pure so the gate logic is unit-testable without DB plumbing.
+ *
+ * - capxChanged → owner + estimator rows re-rate at the new capX mirror.
+ * - serviceSourceChanged → sales_source rows re-rate at the new service-source rate.
+ * - reactivated (inactive → active) → run the sales_source pass EVEN at an unchanged rate: while the
+ *   config was inactive, resolveAppliedRateForRole returned "inactive" so mint/recompute PRESERVED (never
+ *   created) rows — a sourced service deal signed during inactivity has no sales_source row. Reactivating
+ *   makes the rep eligible again, so the sales-source discovery must run to mint those now-earned rows.
+ *   Deliberately sales_source-only: owner rows keep the backfill-only convention (recompute never mints
+ *   owner rows) and, being preserved at their signed rate, are already correct once active again.
+ */
+export function resolveCommissionRecomputeScope(flags: {
+  capxChanged: boolean;
+  serviceSourceChanged: boolean;
+  reactivated: boolean;
+}): { commissionRatesChanged: boolean; affectedRoles: CommissionRole[] | undefined } {
+  const commissionRatesChanged = flags.capxChanged || flags.serviceSourceChanged || flags.reactivated;
+  if (!commissionRatesChanged) return { commissionRatesChanged, affectedRoles: undefined };
+  const roles: CommissionRole[] = [];
+  if (flags.capxChanged) roles.push("owner", "estimator");
+  if (flags.serviceSourceChanged || flags.reactivated) roles.push("sales_source");
+  return { commissionRatesChanged, affectedRoles: roles };
+}
+
 interface UserLocalAuthEventSqlRow extends Record<string, unknown> {
   id: string;
   event_type: string;
@@ -459,14 +485,15 @@ export async function updateUser(
       // only change must not re-rate the rep's owner/estimator rows (and vice versa for capX changes).
       const capxChanged = commissionRate.toFixed(6) !== previousCommissionRate.toFixed(6);
       const serviceSourceChanged = nextServiceSourceRate.toFixed(6) !== previousServiceSourceRate.toFixed(6);
-      commissionRatesChanged = capxChanged || serviceSourceChanged;
-      // Build the minimal affected-role set so the recompute is scoped to only the changed rows.
-      if (commissionRatesChanged) {
-        const roles: CommissionRole[] = [];
-        if (capxChanged) roles.push("owner", "estimator");
-        if (serviceSourceChanged) roles.push("sales_source");
-        affectedRoles = roles;
-      }
+      const wasActive = Boolean(current?.isActive ?? true);
+      const scope = resolveCommissionRecomputeScope({
+        capxChanged,
+        serviceSourceChanged,
+        // A REACTIVATION (inactive → active) counts as a change even at an unchanged rate (see the helper).
+        reactivated: !wasActive && isActive,
+      });
+      commissionRatesChanged = scope.commissionRatesChanged;
+      affectedRoles = scope.affectedRoles;
     }
 
     return { updated, closeStreams: plan.closeStreams, commissionRatesChanged, affectedRoles };
