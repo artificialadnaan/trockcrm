@@ -17,6 +17,7 @@ import { PropertySelector } from "@/components/properties/property-selector";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { useSalesReps } from "@/hooks/use-sales-reps";
 import { createServiceOpportunity, type Deal } from "@/hooks/use-deals";
 import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
 import { getSelectedOptionLabel } from "./deal-form.helpers";
@@ -114,6 +115,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const selectedOfficeLabel =
     officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
   const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: homeOfficeId });
+  const { salesReps, loading: salesRepsLoading } = useSalesReps(homeOfficeId ?? undefined);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -313,13 +315,13 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
               onValueChange={(v) => handleChange("salesSourceUserId", v && v !== "__none__" ? v : "")}
             >
               <SelectTrigger>
-                <SelectValue placeholder="None" />
+                <SelectValue placeholder={salesRepsLoading ? "Loading reps..." : "None"} />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__none__">None</SelectItem>
-                {assignees.filter((a) => a.id !== formData.assignedRepId).map((a) => (
-                  <SelectItem key={a.id} value={a.id}>
-                    {a.displayName}
+                {salesReps.filter((r) => r.id !== formData.assignedRepId).map((r) => (
+                  <SelectItem key={r.id} value={r.id}>
+                    {r.displayName}
                   </SelectItem>
                 ))}
               </SelectContent>
