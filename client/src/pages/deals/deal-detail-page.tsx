@@ -1365,49 +1365,55 @@ function DealRightRail({
               )
             }
           />
-          <DetailRailItem
-            label="Sales Source"
-            value={
-              // Change orders inherit their sales source from the parent deal — no own source to set.
-              deal.isChangeOrder ? (
-                <div className="space-y-1">
-                  <span>{salesSourceName ?? "Not set"}</span>
-                  <p className="text-xs italic text-slate-500">
-                    Inherited from the parent deal.
-                  </p>
-                </div>
-              ) : canEditSalesSource ? (
-                <div className="space-y-1">
-                  <select
-                    aria-label="Edit sales source"
-                    className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900"
-                    disabled={salesRepsLoading || savingSalesSource}
-                    value={deal.salesSourceUserId ?? ""}
-                    onChange={(event) => {
-                      void handleSalesSourceChange(event.currentTarget.value);
-                    }}
-                  >
-                    <option value="">— None —</option>
-                    {salesSourceOptions.map((rep) => (
-                      <option key={rep.id} value={rep.id}>
-                        {rep.displayName}
-                      </option>
-                    ))}
-                  </select>
-                  {salesSourceError ? (
-                    <p className="text-xs font-medium text-red-600">{salesSourceError}</p>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  <span>{salesSourceName ?? "Not set"}</span>
-                  <p className="text-xs italic text-slate-500">
-                    Only admins and directors can edit the sales source.
-                  </p>
-                </div>
-              )
-            }
-          />
+          {/* F3c: Sales source is a service-opportunity-only concept. Hide on capX/normal deals.
+               Change orders are exempted: a CO may inherit a source from a service-deal parent
+               and should still display that read-only value even if the CO's own workflowRoute
+               resolves differently (the CO branch is always read-only regardless). */}
+          {(deal.isChangeOrder === true || deal.workflowRoute === "service") && (
+            <DetailRailItem
+              label="Sales Source"
+              value={
+                // Change orders inherit their sales source from the parent deal — no own source to set.
+                deal.isChangeOrder ? (
+                  <div className="space-y-1">
+                    <span>{salesSourceName ?? "Not set"}</span>
+                    <p className="text-xs italic text-slate-500">
+                      Inherited from the parent deal.
+                    </p>
+                  </div>
+                ) : canEditSalesSource ? (
+                  <div className="space-y-1">
+                    <select
+                      aria-label="Edit sales source"
+                      className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900"
+                      disabled={salesRepsLoading || savingSalesSource}
+                      value={deal.salesSourceUserId ?? ""}
+                      onChange={(event) => {
+                        void handleSalesSourceChange(event.currentTarget.value);
+                      }}
+                    >
+                      <option value="">— None —</option>
+                      {salesSourceOptions.map((rep) => (
+                        <option key={rep.id} value={rep.id}>
+                          {rep.displayName}
+                        </option>
+                      ))}
+                    </select>
+                    {salesSourceError ? (
+                      <p className="text-xs font-medium text-red-600">{salesSourceError}</p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <span>{salesSourceName ?? "Not set"}</span>
+                    <p className="text-xs italic text-slate-500">
+                      Only admins and directors can edit the sales source.
+                    </p>
+                  </div>
+                )
+              }
+            />
+          )}
         </DetailRailSection>
 
         <DetailRailSection title="Account">

@@ -2237,6 +2237,26 @@ router.patch(
       } else {
         throw new AppError(422, "salesSourceUserId must be a valid UUID or null");
       }
+      // F3b: Sales source is a service-deal-only concept. Reject setting a non-null source on a
+      // non-service (capX / normal) deal before delegating to the service fn. Clearing (null) is
+      // always permitted so a stale value left from a workflow-route change can be wiped.
+      if (salesSourceUserId !== null) {
+        const targetDeal = await getDealById(
+          req.tenantDb!,
+          req.params.id as string,
+          req.user!.role,
+          req.user!.id
+        );
+        if (!targetDeal) throw new AppError(404, "Deal not found");
+        if (targetDeal.workflowRoute !== "service") {
+          throw new AppError(
+            422,
+            "Sales source can only be set on a service opportunity",
+            "SALES_SOURCE_NOT_SERVICE"
+          );
+        }
+      }
+
       const deal = await setDealSalesSource(
         req.tenantDb!,
         req.params.id as string,
