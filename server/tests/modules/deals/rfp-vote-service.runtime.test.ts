@@ -99,7 +99,7 @@ describe("buildRfpVoteDeclineReason", () => {
 });
 
 describe("castRfpVote", () => {
-  it("approve-majority enqueues rfp_bidboard_create exactly once (2nd fires, 3rd does not)", async () => {
+  it("approve-majority enqueues rfp_bidboard_create exactly once (2nd fires, 3rd is rejected)", async () => {
     pg = await setup();
     const tdb: any = drizzle(pg as any);
     const enqueueBidBoardCreate = vi.fn(async () => ({ jobId: 1 }));
@@ -115,15 +115,20 @@ describe("castRfpVote", () => {
       { enqueueBidBoardCreate, enqueueOutcome },
     );
     expect(r2.outcome).toBe("approved");
-    const r3 = await castRfpVote(
-      { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V3, email: "tim@x.com" }, decision: "approve", reason: null },
-      { enqueueBidBoardCreate, enqueueOutcome },
-    );
-    expect(r3.outcome).toBe("approved");
+    // 3rd vote arrives after the round is already decided — must be rejected, not silently stored.
+    await expect(
+      castRfpVote(
+        { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V3, email: "tim@x.com" }, decision: "approve", reason: null },
+        { enqueueBidBoardCreate, enqueueOutcome },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_ROUND_DECIDED" });
     expect(enqueueBidBoardCreate).toHaveBeenCalledTimes(1);
     // The outcome-email enqueue (rep GO notification) must also fire exactly once, on the deciding vote.
     expect(enqueueOutcome).toHaveBeenCalledTimes(1);
     expect(enqueueOutcome.mock.calls[0][0]).toMatchObject({ outcome: "approved", approvals: 2 });
+    // No 3rd row was inserted.
+    const rows = (await pg!.query(`SELECT voter_user_id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(rows).toHaveLength(2);
   });
 
   it("reject-majority calls applyDecline with the aggregated reason and flips status to declined", async () => {
@@ -154,6 +159,38 @@ describe("castRfpVote", () => {
     expect(enqueueOutcome.mock.calls[0][0]).toMatchObject({ outcome: "rejected", rejections: 2 });
     const rows = (await pg!.query(`SELECT rfp_approval_status, rfp_declined_reason FROM deals WHERE id=$1`, [DEAL])).rows as any[];
     expect(rows[0].rfp_approval_status).toBe("declined");
+  });
+
+  it("409 RFP_ROUND_DECIDED for a vote arriving after the 2-of-3 threshold is already crossed", async () => {
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+    const applyDecline = vi.fn(async (input: any) => {
+      await pg!.query(`UPDATE deals SET rfp_approval_status='declined', rfp_declined_reason=$1 WHERE id=$2`, [input.denialReason, input.sourceDealId]);
+      return { applied: true, declinedDeal: null };
+    });
+    const enqueueOutcome = vi.fn(async () => ({ jobId: 99 }));
+    // V1 + V2 reject => round decided
+    await castRfpVote(
+      { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V1, email: "sidney@x.com" }, decision: "reject", reason: "Margins thin" },
+      { applyDecline, enqueueOutcome },
+    );
+    await castRfpVote(
+      { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V2, email: "james@x.com" }, decision: "reject", reason: "Scope unclear" },
+      { applyDecline, enqueueOutcome },
+    );
+    // V3 arrives late — must be rejected BEFORE any insert
+    await expect(
+      castRfpVote(
+        { tenantDb: tdb, officeId: "00000000-0000-0000-0000-0000000000ff", deal: dealRow(), voter: { userId: V3, email: "tim@x.com" }, decision: "approve", reason: null },
+        { applyDecline, enqueueOutcome },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_ROUND_DECIDED" });
+    // applyDecline and enqueueOutcome fire exactly once (on the deciding vote, not again)
+    expect(applyDecline).toHaveBeenCalledTimes(1);
+    expect(enqueueOutcome).toHaveBeenCalledTimes(1);
+    // Exactly 2 rows in rfp_votes — the late vote was NOT inserted
+    const rows = (await pg!.query(`SELECT voter_user_id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(rows).toHaveLength(2);
   });
 
   it("second vote by the same voter -> 409 RFP_ALREADY_VOTED", async () => {

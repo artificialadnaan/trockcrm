@@ -128,6 +128,12 @@ export async function castRfpVote(
 
   const priorState = computeRfpVoteState(await loadRoundVotes(args.tenantDb, args.deal.id, roundEventId));
 
+  // Reject late votes once the round is already decided (2-of-3 threshold crossed). Without this a 3rd
+  // voter can POST a valid vote row that never triggers an action but silently lands in rfp_votes.
+  if (priorState.outcome !== "pending") {
+    throw new AppError(409, "This RFP vote round has already been decided.", "RFP_ROUND_DECIDED");
+  }
+
   try {
     await args.tenantDb.insert(rfpVotes).values({
       dealId: args.deal.id,
