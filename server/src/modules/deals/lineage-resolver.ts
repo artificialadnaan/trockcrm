@@ -12,7 +12,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { applyProjectTypeChange, normalizeOptionalDealBidDueDate } from "./service.js";
-import { lockCurrentResolvedDescription, recordDescriptionHistoryChange } from "./deal-description-history.js";
+import { lockCurrentDealDescription, recordDescriptionHistoryChange } from "./deal-description-history.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -462,16 +462,11 @@ export async function writeResolvedDealFields(
     }
   }
 
-  // Lock + read the authoritative (source-lead-aware) old description BEFORE any write (the lead update below
-  // writes the authoritative value for source-lead deals), so a concurrent resolved-fields save on the same
-  // deal can't slip a stale intermediate into the history row. Using the resolved value also keeps a mirror-
-  // only re-sync a no-op for source-lead deals.
-  const oldResolvedDescription =
+  // Lock + read the current deals.description (what the deal-detail panel shows) BEFORE any write, so a
+  // concurrent resolved-fields save on the same deal can't slip a stale intermediate into the history row.
+  const oldDealDescription =
     dealUpdates.description !== undefined
-      ? await lockCurrentResolvedDescription(tenantDb, {
-          dealId: resolvedDeal.deal.id,
-          sourceLeadId: sourceLead?.id ?? null,
-        })
+      ? await lockCurrentDealDescription(tenantDb, resolvedDeal.deal.id)
       : null;
 
   if (sourceLead && Object.keys(leadUpdates).length > 0) {
@@ -494,11 +489,11 @@ export async function writeResolvedDealFields(
       .where(eq(deals.id, resolvedDeal.deal.id));
 
     // The resolved-fields path also writes deals.description (lead compatibility write-through or a direct
-    // deal edit), so record the change-log row here too, using the locked resolved before-value above.
+    // deal edit), so record the change-log row here too, using the locked deals.description before-value above.
     if (dealUpdates.description !== undefined) {
       await recordDescriptionHistoryChange(tenantDb, {
         dealId: resolvedDeal.deal.id,
-        oldDescription: oldResolvedDescription,
+        oldDescription: oldDealDescription,
         newDescription: dealUpdates.description as string | null,
         changedBy: input.userId,
         source: "resolved_fields",

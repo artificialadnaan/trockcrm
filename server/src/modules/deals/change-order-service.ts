@@ -597,9 +597,12 @@ export async function updateDealChangeOrder(
 
   // Capture the child CO's current description before the update so the edit can be logged (a CO child has
   // its own deal detail page + description-history panel). Only when a description edit is actually happening.
+  // Read FOR UPDATE so two concurrent CO description edits can't both capture the same old value and log a
+  // stale intermediate (A->C instead of B->C) — same serialization the other description-history paths use.
   let previousChildDescription: string | null | undefined;
   if (input.description !== undefined && input.updatedBy) {
-    const [existingChild] = (await tenantDb
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const childDescQuery = (tenantDb
       .select({ description: deals.description })
       .from(deals)
       .where(
@@ -610,7 +613,10 @@ export async function updateDealChangeOrder(
           eq(deals.isActive, true)
         )
       )
-      .limit(1)) as Array<{ description: string | null }>;
+      .limit(1)) as any;
+    const [existingChild] = (typeof childDescQuery.for === "function"
+      ? await childDescQuery.for("update")
+      : await childDescQuery) as Array<{ description: string | null }>;
     previousChildDescription = existingChild?.description ?? null;
   }
 

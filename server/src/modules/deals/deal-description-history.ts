@@ -1,6 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { dealHistory, deals, leads, users } from "@trock-crm/shared/schema";
+import { dealHistory, deals, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { DealDescriptionHistoryEntry } from "@trock-crm/shared/types";
 
@@ -9,25 +9,19 @@ type TenantDb = NodePgDatabase<typeof schema>;
 const DESCRIPTION_FIELD = "description";
 
 /**
- * The deal's CURRENT authoritative (source-lead-aware) description, read under a row lock, for use as the
- * BEFORE value of a history row. Locking the authoritative row — the source lead when the deal is lead-backed
- * (its description is authoritative; deals.description is only a mirror), else the deal — serializes
- * concurrent same-deal edits so a recorded old->new can't capture a stale intermediate (A->C instead of
- * B->C). Call this BEFORE the update, inside the same transaction. Falls back to an unlocked read when the
- * driver has no `.for` (test mocks), which is harmless.
+ * The deal's CURRENT deals.description, read under a row lock, for use as the BEFORE value of a history row.
+ *
+ * The description-history panel lives on the deal-detail overview, and getDealDetail renders the raw
+ * deals.description column (it resolves bid_due_date from the source lead but NOT description) — so THAT
+ * mirror is the value the panel shows for every deal, source-lead-backed or not. The log therefore tracks
+ * deals.description uniformly. Reading it under FOR UPDATE before the write serializes concurrent same-deal
+ * edits so a recorded old->new can't capture a stale intermediate (A->C instead of B->C). Call this BEFORE
+ * the update, in the same transaction. Falls back to an unlocked read when the driver has no `.for` (test
+ * mocks), which is harmless.
  */
-export async function lockCurrentResolvedDescription(
-  tenantDb: TenantDb,
-  args: { dealId: string; sourceLeadId: string | null | undefined },
-): Promise<string | null> {
-  if (args.sourceLeadId) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const q = tenantDb.select({ description: leads.description }).from(leads).where(eq(leads.id, args.sourceLeadId)).limit(1) as any;
-    const rows = typeof q.for === "function" ? await q.for("update") : await q;
-    return rows[0]?.description ?? null;
-  }
+export async function lockCurrentDealDescription(tenantDb: TenantDb, dealId: string): Promise<string | null> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const q = tenantDb.select({ description: deals.description }).from(deals).where(eq(deals.id, args.dealId)).limit(1) as any;
+  const q = tenantDb.select({ description: deals.description }).from(deals).where(eq(deals.id, dealId)).limit(1) as any;
   const rows = typeof q.for === "function" ? await q.for("update") : await q;
   return rows[0]?.description ?? null;
 }

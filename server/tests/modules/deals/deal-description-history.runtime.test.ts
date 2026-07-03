@@ -4,7 +4,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import {
   buildDescriptionHistoryEntry,
   listDealDescriptionHistory,
-  lockCurrentResolvedDescription,
+  lockCurrentDealDescription,
   recordDescriptionHistoryChange,
 } from "../../../src/modules/deals/deal-description-history.js";
 
@@ -155,17 +155,16 @@ describe("recordDescriptionHistoryChange (the shared write seam)", () => {
   });
 });
 
-describe("lockCurrentResolvedDescription (source-lead-aware locked before-value)", () => {
-  it("reads the DEAL description for a non-source-lead deal", async () => {
-    expect(await lockCurrentResolvedDescription(tdb, { dealId: DEAL_PLAIN, sourceLeadId: null })).toBe("plain deal desc");
+describe("lockCurrentDealDescription (deal-mirror locked before-value)", () => {
+  it("reads deals.description for a non-source-lead deal", async () => {
+    expect(await lockCurrentDealDescription(tdb, DEAL_PLAIN)).toBe("plain deal desc");
   });
 
-  it("reads the LEAD (authoritative) description for a source-lead deal, ignoring the stale deal mirror", async () => {
-    expect(await lockCurrentResolvedDescription(tdb, { dealId: DEAL_LEAD, sourceLeadId: LEAD })).toBe("lead authoritative desc");
+  it("reads the DEAL mirror even for a source-lead deal (the detail panel renders deals.description, not the lead)", async () => {
+    expect(await lockCurrentDealDescription(tdb, DEAL_LEAD)).toBe("stale deal mirror");
   });
 
-  it("returns null when the authoritative row is absent", async () => {
-    expect(await lockCurrentResolvedDescription(tdb, { dealId: U("deadbee1"), sourceLeadId: null })).toBeNull();
-    expect(await lockCurrentResolvedDescription(tdb, { dealId: DEAL_LEAD, sourceLeadId: U("eadbee1") })).toBeNull();
+  it("returns null when the deal is absent", async () => {
+    expect(await lockCurrentDealDescription(tdb, U("deadbee1"))).toBeNull();
   });
 });

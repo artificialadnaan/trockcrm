@@ -2567,13 +2567,12 @@ export async function updateDeal(
 
   const updatedDeal = result[0];
 
-  // Append a description change-log row when the description actually changed, so the deal detail page can
-  // show how the scope evolved over time (who changed it, from what, to what). The generic audit_log row
-  // (below) remains the admin forensic copy. `existing` was read FOR UPDATE above, so the old value is
-  // concurrency-safe. Skip source-lead-backed deals: for them deals.description is only a mirror (the resolver
-  // treats sourceLead.description as authoritative), so a mirror-only edit here is not a real description
-  // change — those deals' description history comes from the resolved-fields path.
-  if (updatedDeal && !existing.sourceLeadId) {
+  // Append a description change-log row when deals.description actually changed, so the deal detail page can
+  // show how the scope evolved over time (who changed it, from what, to what). The panel renders
+  // deals.description (getDealDetail does not resolve it), so this tracks that column for EVERY deal incl.
+  // source-lead-backed ones — the deal form edits deals.description for those too. `existing` was read FOR
+  // UPDATE above, so the old value is concurrency-safe. The generic audit_log row (below) is the forensic copy.
+  if (updatedDeal) {
     await recordDescriptionHistoryChange(tenantDb, {
       dealId,
       oldDescription: existing.description,
