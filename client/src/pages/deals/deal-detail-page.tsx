@@ -77,7 +77,7 @@ import {
 } from "@/hooks/use-deals";
 import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
-import { useSalesReps } from "@/hooks/use-sales-reps";
+import { useSalesReps, type SalesRepOption } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -155,6 +155,33 @@ type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "scorecards" |
 function formatNullable(value: string | number | null | undefined) {
   if (value == null || value === "") return "Not set";
   return String(value);
+}
+
+// Shared builder for the owner / estimator / sales-source rep pickers: drop the excluded reps, then if the
+// current value isn't in the remaining list (an inactive rep, or one excluded by an invariant) pin it to the
+// top with a readable label — prefer the server-provided name, else the active-list name, else a fallback.
+// One place so the three pickers can't drift on exclusion or fallback behavior.
+function buildRepOptions(
+  reps: SalesRepOption[],
+  opts: {
+    excludeIds: (string | null | undefined)[];
+    currentId: string | null | undefined;
+    currentServerName?: string | null;
+    fallbackLabel: string;
+  }
+): SalesRepOption[] {
+  const excluded = new Set(opts.excludeIds.filter((id): id is string => Boolean(id)));
+  const options = reps.filter((rep) => !excluded.has(rep.id));
+  if (opts.currentId && !options.some((rep) => rep.id === opts.currentId)) {
+    options.unshift({
+      id: opts.currentId,
+      displayName:
+        opts.currentServerName ??
+        reps.find((rep) => rep.id === opts.currentId)?.displayName ??
+        opts.fallbackLabel,
+    });
+  }
+  return options;
 }
 
 function initials(value: string) {
@@ -1120,13 +1147,12 @@ function DealRightRail({
   const assignedRepInitials = initials(deal.assignedRepName ?? deal.assignedRepId ?? "NA");
   const assignedRepColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
   // Exclude the current sales source — the server rejects reassigning the owner to it (SALES_SOURCE_CONFLICT).
-  const ownerOptions = salesReps.filter((rep) => rep.id !== deal.salesSourceUserId);
-  if (deal.assignedRepId && !ownerOptions.some((rep) => rep.id === deal.assignedRepId)) {
-    ownerOptions.unshift({
-      id: deal.assignedRepId,
-      displayName: deal.assignedRepName ?? "Current assigned rep",
-    });
-  }
+  const ownerOptions = buildRepOptions(salesReps, {
+    excludeIds: [deal.salesSourceUserId],
+    currentId: deal.assignedRepId,
+    currentServerName: deal.assignedRepName,
+    fallbackLabel: "Current assigned rep",
+  });
 
   async function handleReassign(nextRepId: string) {
     if (!nextRepId || nextRepId === deal.assignedRepId || reassigning) return;
@@ -1161,13 +1187,12 @@ function DealRightRail({
   const [estimatorError, setEstimatorError] = useState<string | null>(null);
   const estimatorName = formatNullable(deal.estimatorUserName ?? deal.estimatorUserId);
   // Exclude the current sales source — the server rejects an estimator == sales source (SALES_SOURCE_CONFLICT).
-  const estimatorOptions = salesReps.filter((rep) => rep.id !== deal.salesSourceUserId);
-  if (deal.estimatorUserId && !estimatorOptions.some((rep) => rep.id === deal.estimatorUserId)) {
-    estimatorOptions.unshift({
-      id: deal.estimatorUserId,
-      displayName: deal.estimatorUserName ?? "Current estimator",
-    });
-  }
+  const estimatorOptions = buildRepOptions(salesReps, {
+    excludeIds: [deal.salesSourceUserId],
+    currentId: deal.estimatorUserId,
+    currentServerName: deal.estimatorUserName,
+    fallbackLabel: "Current estimator",
+  });
 
   async function handleEstimatorChange(nextIdRaw: string) {
     const nextId = nextIdRaw || null;
@@ -1203,21 +1228,12 @@ function DealRightRail({
   const [salesSourceError, setSalesSourceError] = useState<string | null>(null);
   // Exclude the owner + estimator from the source picker (the server rejects those with 422); mirrors
   // the create form's exclusion so a leader can't pick a conflicting source and only learn via a toast.
-  const salesSourceOptions = salesReps.filter(
-    (rep) => rep.id !== deal.assignedRepId && rep.id !== deal.estimatorUserId,
-  );
-  if (deal.salesSourceUserId && !salesSourceOptions.some((rep) => rep.id === deal.salesSourceUserId)) {
-    salesSourceOptions.unshift({
-      id: deal.salesSourceUserId,
-      // Prefer the server-provided name (survives inactive reps); fall back to the client list, then a
-      // sentinel. Mirrors the estimator injection pattern so the dropdown always has a readable label even
-      // when the source rep is no longer in the active salesReps list.
-      displayName:
-        deal.salesSourceUserName ??
-        salesReps.find((r) => r.id === deal.salesSourceUserId)?.displayName ??
-        "Current sales source",
-    });
-  }
+  const salesSourceOptions = buildRepOptions(salesReps, {
+    excludeIds: [deal.assignedRepId, deal.estimatorUserId],
+    currentId: deal.salesSourceUserId,
+    currentServerName: deal.salesSourceUserName,
+    fallbackLabel: "Current sales source",
+  });
   // Prefer the server-provided name so a deactivated source rep doesn't show a raw UUID.
   // Mirrors how estimatorUserName is used for the estimator read-only display above.
   const salesSourceName =

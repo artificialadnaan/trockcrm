@@ -164,50 +164,49 @@ async function runOne(
   return captured;
 }
 
+// A fresh zeroed tally over the FULL CalculateCommissionStatus union. Each commission leg (owner, estimator,
+// sales_source) tallies into its own copy. Two statuses only some legs can reach are enumerated regardless so
+// every counter stays total:
+//   • skipped_change_order — calculateCommissionForDeal (the backfill path) excludes change orders upstream,
+//     so the owner leg never returns it, but the shared union carries it (estimator/sales_source mint only).
+//   • skipped_no_owner_row — the owner row IS the gate, so owner rows never carry it; the additive
+//     estimator/sales_source legs CAN (a candidate whose owner has no active rate mints no owner row, so the
+//     gated additive mint is skipped and the deal stays at ZERO rows — still backfillable later).
+function emptyStatusTally(): Record<CalculateCommissionStatus, number> {
+  return {
+    created: 0,
+    skipped_existing: 0,
+    skipped_no_rep: 0,
+    skipped_no_value: 0,
+    skipped_no_rate: 0,
+    skipped_change_order: 0,
+    skipped_no_owner_row: 0,
+  };
+}
+
+// Tally one additive leg (estimator / sales_source) minted as a side effect of calculateCommissionForDeal,
+// returning the dollar amount of a freshly-created row (0 otherwise) so the caller accumulates the leg total.
+function accountLeg(
+  leg: CalculateCommissionResult["estimator"],
+  tally: Record<CalculateCommissionStatus, number>
+): number {
+  if (!leg) return 0;
+  tally[leg.status] += 1;
+  return leg.status === "created" && leg.amount ? Number(leg.amount) : 0;
+}
+
 export async function backfillTenantCommissions(
   tenantDb: TenantDb,
   query: QueryFn,
   opts: { schema: string; execute: boolean; actorUserId: string | null }
 ): Promise<BackfillSummary> {
   const candidates = await findBackfillCandidates(query);
-  const byStatus: Record<CalculateCommissionStatus, number> = {
-    created: 0,
-    skipped_existing: 0,
-    skipped_no_rep: 0,
-    skipped_no_value: 0,
-    skipped_no_rate: 0,
-    // calculateCommissionForDeal (the backfill path) never returns this — change orders are excluded
-    // upstream — but the shared status union now carries it (estimator-mint only), so the counter must too.
-    skipped_change_order: 0,
-    // Owner-row-gate status — owner-side rows never carry it (the owner row IS the gate), but the shared
-    // status union now includes it (estimator-mint only), so the counter must enumerate it too.
-    skipped_no_owner_row: 0,
-  };
+  const byStatus = emptyStatusTally();
   // Separate tally for the additive estimator rows minted as a side effect (calculateCommissionForDeal
-  // now reports its estimator outcome under `.estimator`). Same status union as the owner tally.
-  const estimatorByStatus: Record<CalculateCommissionStatus, number> = {
-    created: 0,
-    skipped_existing: 0,
-    skipped_no_rep: 0,
-    skipped_no_value: 0,
-    skipped_no_rate: 0,
-    skipped_change_order: 0,
-    // The estimator side CAN return this: a candidate whose owner has no active rate mints no owner row, so
-    // the gated estimator mint is skipped_no_owner_row and the deal stays at ZERO rows (still backfillable).
-    skipped_no_owner_row: 0,
-  };
+  // reports its estimator outcome under `.estimator`); owner-only totals stay unchanged.
+  const estimatorByStatus = emptyStatusTally();
   // Separate tally for the additive sales_source rows (a mixed-structure source rep on a service deal).
-  // Same structure as the estimator tally — owner-only totals stay unchanged.
-  const salesSourceByStatus: Record<CalculateCommissionStatus, number> = {
-    created: 0,
-    skipped_existing: 0,
-    skipped_no_rep: 0,
-    skipped_no_value: 0,
-    skipped_no_rate: 0,
-    skipped_change_order: 0,
-    // sales_source CAN return this when the owner row wasn't minted (no rate) — the invariant gate fires.
-    skipped_no_owner_row: 0,
-  };
+  const salesSourceByStatus = emptyStatusTally();
   let totalCommissionCreated = 0;
   let totalEstimatorCommissionCreated = 0;
   let totalSalesSourceCommissionCreated = 0;
@@ -219,22 +218,11 @@ export async function backfillTenantCommissions(
     if (result.status === "created" && result.amount) {
       totalCommissionCreated += Number(result.amount);
     }
-    // Account for the additive estimator row (if calculateCommissionForDeal minted/skipped one).
+    // Account for the additive estimator / sales_source rows (if calculateCommissionForDeal minted/skipped one).
     const estimator = result.estimator;
-    if (estimator) {
-      estimatorByStatus[estimator.status] += 1;
-      if (estimator.status === "created" && estimator.amount) {
-        totalEstimatorCommissionCreated += Number(estimator.amount);
-      }
-    }
-    // Account for the additive sales_source row (if calculateCommissionForDeal minted/skipped one).
     const salesSource = result.salesSource;
-    if (salesSource) {
-      salesSourceByStatus[salesSource.status] += 1;
-      if (salesSource.status === "created" && salesSource.amount) {
-        totalSalesSourceCommissionCreated += Number(salesSource.amount);
-      }
-    }
+    totalEstimatorCommissionCreated += accountLeg(estimator, estimatorByStatus);
+    totalSalesSourceCommissionCreated += accountLeg(salesSource, salesSourceByStatus);
     rows.push({
       ...candidate,
       status: result.status,

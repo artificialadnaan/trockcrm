@@ -192,16 +192,28 @@ Add this exported helper (place it just above `insertCommissionRowForRep`):
 export type CommissionRole = "owner" | "estimator" | "sales_source";
 
 /**
- * The applied rate (numeric(7,6) string) for a rep in a given role, or null to skip (no active
- * rate). owner/estimator use the capX commission_rate mirror; sales_source uses the effective
- * service-source rate (0 unless the rep is 'mixed'). Single source of rate truth — used by the
- * mint AND the settings-change recompute so a sales_source row is never rated at the capX rate.
+ * Discriminated union so the recompute can tell a deliberate active-0% ("zero") apart from a
+ * deactivated/missing settings row ("inactive" — PRESERVE the historical row, never zero it):
+ *   "rate"     — active settings, effective role rate > 0  (use appliedRate to compute commission)
+ *   "zero"     — active settings, effective role rate == 0 (deliberate — zeroed under zeroOnNoRate)
+ *   "inactive" — missing OR inactive settings (preserve; never zero on inactive/missing)
+ */
+export type RoleRateResolution =
+  | { status: "rate"; appliedRate: string }
+  | { status: "zero" }
+  | { status: "inactive" };
+
+/**
+ * Attribution-role-aware rate for a rep. owner/estimator use the capX commission_rate mirror;
+ * sales_source uses the effective service-source rate (0 unless the rep is 'mixed'). Single source of
+ * rate truth — used by BOTH the mint AND the settings-change recompute so a sales_source row is never
+ * rated at the capX rate.
  */
 export async function resolveAppliedRateForRole(
   tx: TenantDb,
   repUserId: string,
   role: CommissionRole,
-): Promise<string | null> {
+): Promise<RoleRateResolution> {
   const [s] = await tx
     .select({
       commissionRate: userCommissionSettings.commissionRate,
@@ -214,7 +226,7 @@ export async function resolveAppliedRateForRole(
     .from(userCommissionSettings)
     .where(eq(userCommissionSettings.userId, repUserId))
     .limit(1);
-  if (!s || !s.isActive) return null;
+  if (!s || !s.isActive) return { status: "inactive" };
 
   if (role === "sales_source") {
     const rate = resolveEffectiveServiceSourceRate({
@@ -223,9 +235,11 @@ export async function resolveAppliedRateForRole(
       capxRateMixed: Number(s.capxRateMixed ?? 0),
       serviceSourceRate: Number(s.serviceSourceRate ?? 0),
     });
-    return rate > 0 ? rate.toFixed(6) : null;
+    return rate > 0 ? { status: "rate", appliedRate: rate.toFixed(6) } : { status: "zero" };
   }
-  return Number(s.commissionRate) > 0 ? s.commissionRate : null;
+  return Number(s.commissionRate) > 0
+    ? { status: "rate", appliedRate: s.commissionRate }
+    : { status: "zero" };
 }
 ```
 
