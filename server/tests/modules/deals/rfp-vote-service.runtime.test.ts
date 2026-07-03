@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import {
+  allRfpVotersHaveOfficeAccess,
   castRfpVote,
   isServiceRfp,
   buildRfpVoteDeclineReason,
@@ -299,5 +300,47 @@ describe("openRfpVoteRound", () => {
     expect(deal[0].rfp_approval_status).toBeNull();
     const jobs = (await pg.query(`SELECT job_type FROM public.job_queue`)).rows as any[];
     expect(jobs).toHaveLength(0);
+  });
+});
+
+describe("allRfpVotersHaveOfficeAccess", () => {
+  const OFFICE = "00000000-0000-0000-0000-0000000000ff";
+  const OTHER = "00000000-0000-0000-0000-0000000000fe";
+  const SID = "00000000-0000-0000-0000-00000000a001";
+  const TIM = "00000000-0000-0000-0000-00000000a002";
+  const JAMES = "00000000-0000-0000-0000-00000000a003";
+  const ENV = { RFP_VOTER_EMAILS: "sidney@x.com,tim@x.com,james@x.com" } as any;
+  let apg: PGlite | null = null;
+  afterEach(async () => { await apg?.close(); apg = null; });
+
+  async function setupAccess() {
+    const db = new PGlite();
+    apg = db;
+    await db.exec(`
+      CREATE TABLE users (id uuid PRIMARY KEY, email text, office_id uuid);
+      CREATE TABLE user_office_access (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL, office_id uuid NOT NULL, role_override text);
+    `);
+    return drizzle(db as any) as any;
+  }
+
+  it("true when all three voters can access the office (primary office OR an explicit grant)", async () => {
+    const tdb = await setupAccess();
+    // Sidney + James: primary office = OFFICE. Tim: primary OTHER, but holds a grant to OFFICE.
+    await apg!.query(`INSERT INTO users (id, email, office_id) VALUES ($1,'Sidney@x.com',$4),($2,'tim@x.com',$5),($3,'james@x.com',$4)`, [SID, TIM, JAMES, OFFICE, OTHER]);
+    await apg!.query(`INSERT INTO user_office_access (id, user_id, office_id) VALUES (gen_random_uuid(), $1, $2)`, [TIM, OFFICE]);
+    expect(await allRfpVotersHaveOfficeAccess(tdb, OFFICE, ENV)).toBe(true);
+  });
+
+  it("false when a voter's only office is elsewhere with no grant to this office", async () => {
+    const tdb = await setupAccess();
+    // Tim's primary is OTHER and he has NO grant to OFFICE -> he can't enter this tenant.
+    await apg!.query(`INSERT INTO users (id, email, office_id) VALUES ($1,'sidney@x.com',$4),($2,'tim@x.com',$5),($3,'james@x.com',$4)`, [SID, TIM, JAMES, OFFICE, OTHER]);
+    expect(await allRfpVotersHaveOfficeAccess(tdb, OFFICE, ENV)).toBe(false);
+  });
+
+  it("false when a configured voter isn't a CRM user at all", async () => {
+    const tdb = await setupAccess();
+    await apg!.query(`INSERT INTO users (id, email, office_id) VALUES ($1,'sidney@x.com',$3),($2,'james@x.com',$3)`, [SID, JAMES, OFFICE]); // no tim
+    expect(await allRfpVotersHaveOfficeAccess(tdb, OFFICE, ENV)).toBe(false);
   });
 });

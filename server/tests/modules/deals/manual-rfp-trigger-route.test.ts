@@ -9,6 +9,7 @@ const isRfpVotingEnabledMock = vi.hoisted(() => vi.fn(() => false));
 const resolveRfpVoterEmailsMock = vi.hoisted(() => vi.fn(() => [] as string[]));
 const openRfpVoteRoundMock = vi.hoisted(() => vi.fn());
 const rfpVotesTableExistsMock = vi.hoisted(() => vi.fn(async () => true));
+const allRfpVotersHaveOfficeAccessMock = vi.hoisted(() => vi.fn(async () => true));
 const accessMocks = vi.hoisted(() => ({
   assertDealCollaboratorAccess: vi.fn(),
   assertDealOwnerAccess: vi.fn(),
@@ -143,6 +144,9 @@ vi.mock("../../../src/modules/deals/rfp-vote-service.js", () => ({
   // Table-availability probe (finding G1): default true so the voting-branch tests open a round; the
   // table-absent test overrides it to false to assert the SyncHub fallback.
   rfpVotesTableExists: rfpVotesTableExistsMock,
+  // Voter office-access probe (finding): default true so the voting-branch tests open a round; the
+  // no-access test overrides it to false to assert the SyncHub fallback.
+  allRfpVotersHaveOfficeAccess: allRfpVotersHaveOfficeAccessMock,
   castRfpVote: vi.fn(),
 }));
 
@@ -339,6 +343,8 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     openRfpVoteRoundMock.mockResolvedValue(undefined);
     rfpVotesTableExistsMock.mockReset();
     rfpVotesTableExistsMock.mockResolvedValue(true);
+    allRfpVotersHaveOfficeAccessMock.mockReset();
+    allRfpVotersHaveOfficeAccessMock.mockResolvedValue(true);
   });
 
   it("enqueues an RFP request for an assigned rep when Opportunity scope is ready", async () => {
@@ -696,6 +702,28 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     isRfpVotingEnabledMock.mockReturnValue(true);
     resolveRfpVoterEmailsMock.mockReturnValue(["sidney@x.com", "tim@x.com", "james@x.com"]);
     rfpVotesTableExistsMock.mockResolvedValue(false);
+    const { req, state } = makeReq();
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ success: true, status: "pending_outbox" });
+    expect(openRfpVoteRoundMock).not.toHaveBeenCalled();
+    expect(insertRfpJobMock).toHaveBeenCalledTimes(1);
+    expect(state.updatesAttempted).toBe(1);
+  });
+
+  it("voting ENABLED + full trio + table present but a voter LACKS office access falls back to SyncHub (finding)", async () => {
+    // A configured voter isn't a CRM user with access to this office, so the invite link (which carries officeId)
+    // would be rejected by authMiddleware and fewer than the trio could vote — stranding a 'pending' round. Fall
+    // back to SyncHub instead of opening a round nobody can decide.
+    isRfpVotingEnabledMock.mockReturnValue(true);
+    resolveRfpVoterEmailsMock.mockReturnValue(["sidney@x.com", "tim@x.com", "james@x.com"]);
+    rfpVotesTableExistsMock.mockResolvedValue(true);
+    allRfpVotersHaveOfficeAccessMock.mockResolvedValue(false);
     const { req, state } = makeReq();
     const res = makeRes();
     const next = vi.fn();

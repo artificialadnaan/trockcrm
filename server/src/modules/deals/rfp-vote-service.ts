@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { PoolClient } from "pg";
-import { deals, rfpVotes } from "@trock-crm/shared/schema";
+import { deals, rfpVotes, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   computeRfpVoteState,
@@ -47,6 +47,37 @@ export async function rfpVotesTableExists(tenantDb: TenantDb): Promise<boolean> 
   const res: any = await tenantDb.execute(sql`SELECT to_regclass('rfp_votes') AS reg`);
   const rows = Array.isArray(res) ? res : res.rows ?? [];
   return rows[0]?.reg != null;
+}
+
+/**
+ * True iff EVERY configured RFP voter email resolves to a CRM user WITH access to `officeId`. Access mirrors the
+ * auth middleware's getOfficeAccess: the user's primary office is `officeId`, OR they hold a user_office_access
+ * grant for it. The trigger-rfp guard requires this before opening a request-less round — otherwise the invite
+ * link (which carries officeId) is rejected by authMiddleware for a voter who can't enter the tenant, and if fewer
+ * than the trio can vote the deal is stranded 'pending' with no cancel path. When it's not satisfied the trigger
+ * falls back to the SyncHub delivery path. (Called only after hasSufficientRfpVoters, so the trio is configured.)
+ */
+export async function allRfpVotersHaveOfficeAccess(
+  tenantDb: TenantDb,
+  officeId: string | null,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const emails = resolveRfpVoterEmails(env).map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0);
+  if (emails.length === 0 || !officeId) return false;
+  const rows = await tenantDb
+    .select({ email: users.email, primaryOfficeId: users.officeId, grantOfficeId: userOfficeAccess.officeId })
+    .from(users)
+    .leftJoin(
+      userOfficeAccess,
+      and(eq(userOfficeAccess.userId, users.id), eq(userOfficeAccess.officeId, officeId)),
+    )
+    .where(inArray(sql`lower(${users.email})`, emails));
+  const accessible = new Set(
+    rows
+      .filter((r) => r.primaryOfficeId === officeId || r.grantOfficeId != null)
+      .map((r) => (r.email ?? "").trim().toLowerCase()),
+  );
+  return emails.every((e) => accessible.has(e));
 }
 
 export interface CastRfpVoteDeps {

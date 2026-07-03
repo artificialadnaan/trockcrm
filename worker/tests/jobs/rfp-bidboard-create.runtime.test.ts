@@ -112,6 +112,10 @@ describe("runRfpBidBoardCreateDeadLetterSweep", () => {
     // finding W3: the override sub-case's freshness (reviewed_at) is ALSO enforced (attempt_at is NULL for it).
     expect(sqlText).toContain("rfp_override_reviewed_at IS NULL");
     expect(sqlText).toContain("$3::timestamptz >= rfp_override_reviewed_at");
+    // finding (cross-round): a dead job from an OLD round can't mark a freshly-reopened round send_failed (both
+    // per-attempt markers are NULL again) — the job created_at ($3) must be no older than the current round's open.
+    expect(sqlText).toContain("rfp_approval_requested_at IS NULL");
+    expect(sqlText).toContain("$3::timestamptz >= rfp_approval_requested_at");
     // finding W8: the visible send_failed reason is populated for the pending sub-case.
     expect(sqlText).toContain("rfp_last_attempt_error = CASE WHEN rfp_approval_status = 'pending' THEN $1");
     // the deal update is keyed by the job's dealId + carries the exhaustion error + the job's created_at (freshness)

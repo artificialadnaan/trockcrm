@@ -214,6 +214,16 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
                 rfp_override_reviewed_at IS NULL
                 OR $3::timestamptz >= rfp_override_reviewed_at
               )
+              -- request-less CROSS-ROUND freshness (finding, mirror of the callback path's Y6/BC1): once a deal is
+              -- Returned to Opportunity and a FRESH round opens, rfp_bidboard_attempt_at + rfp_override_reviewed_at
+              -- are both NULL again, so an OLD round's dead job (enqueued BEFORE the new round opened) would slip
+              -- past the per-attempt guards above and mark the fresh round send_failed. Require the dead job's
+              -- created_at ($3) to be no older than the CURRENT round's open time. (request-less only — this branch
+              -- already requires rfp_approval_request_id IS NULL, and a job always has a created_at.)
+              AND (
+                rfp_approval_requested_at IS NULL
+                OR $3::timestamptz >= rfp_approval_requested_at
+              )
               -- idempotency keyed on override_state/error only (NOT status), since the status transition now
               -- differs per sub-case (send_failed vs. kept 'declined') — override_state -> 'failed' already marks
               -- the first application. (finding G4)

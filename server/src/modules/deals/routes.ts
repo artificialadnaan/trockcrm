@@ -179,7 +179,7 @@ import {
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
-import { castRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
+import { allRfpVotersHaveOfficeAccess, castRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -1279,11 +1279,16 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     // Also require the rfp_votes table to exist for THIS office (finding G1): if the flag is on but migration
     // 0175 hasn't run here, opening a round would let voters reach a form whose first cast 500s on the missing
     // table, leaving the deal stranded 'pending'. Probe with to_regclass and fall back to SyncHub if absent.
+    // Also require every configured voter to have ACCESS to this office (finding): the invite link carries
+    // officeId and authMiddleware rejects an x-office-id a voter can't reach, so a voter without primary/granted
+    // access to this tenant can't load or cast — if fewer than the trio can vote, the 'pending' round strands with
+    // no cancel path. Fall back to SyncHub when any configured voter lacks access here.
     if (
       !isServiceRfp(deal) &&
       isRfpVotingEnabled() &&
       hasSufficientRfpVoters(process.env) &&
-      (await rfpVotesTableExists(req.tenantDb!))
+      (await rfpVotesTableExists(req.tenantDb!)) &&
+      (await allRfpVotersHaveOfficeAccess(req.tenantDb!, officeId, process.env))
     ) {
       await openRfpVoteRound({
         tenantDb: req.tenantDb!,
