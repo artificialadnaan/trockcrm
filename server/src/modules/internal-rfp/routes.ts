@@ -677,19 +677,31 @@ internalRfpRoutes.post(
       // callback carries no rfpApprovalRequestId and is resolved purely by sourceDealId (found via findDeal).
       const dealRequestId = found.deal.rfp_approval_request_id;
       const currentRequestId = dealRequestId == null ? null : Number(dealRequestId);
-      if (dealRequestId != null) {
-        // Request-backed (legacy / service / override) deal: the callback MUST carry a well-formed numeric
-        // rfpApprovalRequestId. A missing / non-numeric id is MALFORMED — not stale — so 422 it (like the
-        // other request-backed callbacks) and let SyncHub retry; ACKing it as stale would stop the retries
-        // and strand the deal. Only a WELL-FORMED but mismatched id below is a safe stale no-op.
-        if (typeof payload.rfpApprovalRequestId !== "number" || !Number.isFinite(payload.rfpApprovalRequestId)) {
+      const dealHasRequestId = currentRequestId != null && Number.isFinite(currentRequestId);
+      const payloadHasRequestId =
+        typeof payload.rfpApprovalRequestId === "number" && Number.isFinite(payload.rfpApprovalRequestId);
+      // A callback is REQUEST-BACKED if EITHER side carries a request id. This is deliberately broader than
+      // "the deal still has a request id": after cancelPendingRfp clears rfp_approval_request_id to NULL on a
+      // legacy/service/override deal (Return to Opportunity), a late callback can STILL carry a numeric
+      // rfpApprovalRequestId. Without treating that as request-backed it would fall through to the request-less
+      // voting path and its 'created' branch could re-approve + Bid-Board-own a CANCELED Opportunity deal.
+      // Only when BOTH ids are absent is it a genuine request-less voting callback (resolved by sourceDealId).
+      if (dealHasRequestId || payloadHasRequestId) {
+        // Round-1 rule preserved: a request-BACKED deal (its request id is still present) whose callback OMITS a
+        // well-formed numeric id is MALFORMED — not stale — so 422 it (like the other request-backed callbacks)
+        // and let SyncHub retry; ACKing it as stale would stop the retries and strand the deal.
+        if (dealHasRequestId && !payloadHasRequestId) {
           console.warn(
             `[RFP callback] malformed callback for request-backed deal sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"} -> 422 (retryable, not stale-ACKed)`
           );
           res.status(422).json({ success: false, error: "invalid_payload" });
           return;
         }
-        if (!Number.isFinite(currentRequestId as number) || payload.rfpApprovalRequestId !== currentRequestId) {
+        // Reconcile: the deal's request id was cleared/canceled (now NULL), or the ids don't match -> stale,
+        // idempotent no-op (200). payloadHasRequestId is guaranteed true here (the malformed-id case above
+        // already returned 422), so this only stale-ACKs a WELL-FORMED payload id against a cleared/mismatched
+        // deal — including the cancel case (deal id NULL) that must NOT be treated as a request-less approve.
+        if (!dealHasRequestId || payload.rfpApprovalRequestId !== currentRequestId) {
           console.warn(
             `[RFP callback] stale callback ignored for sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"}`
           );
@@ -707,15 +719,23 @@ internalRfpRoutes.post(
 
         // VOTING-PATH failure (no SyncHub request id): a request-less create failed. The legacy update below
         // keys on `rfp_approval_request_id = $3` (NULL matches nothing), so without this branch a voting create
-        // failure is a silent no-op and the deal sits with no visible failure. Surface a failed/attention marker
-        // (rfp_override_state='failed' + error) keyed by sourceDealId. Two request-less sub-cases:
+        // failure is a silent no-op and the deal sits with no visible failure. Surface a VISIBLE, retryable
+        // marker keyed by sourceDealId: rfp_approval_status='send_failed' (the status the Pending-RFP surface +
+        // pendingRfpSubStateForStatus render + offer Retry for, matching the dead-letter sweep) PLUS
+        // rfp_override_state='failed' + rfp_override_error for the audit. Two request-less sub-cases:
         //   (1) a 2/3-YES create in flight       -> rfp_approval_status='pending' (finding B2), or
         //   (2) a reviewer override-approve of a NO-GO'd voting deal -> 'declined' + rfp_override_state='approving'.
-        // Never resurrect onto a terminally re-confirmed denial. Idempotent via the value-distinct guard; a later
-        // 'created' callback clears the marker and approves + advances the deal. NOTE (flagged for human): unlike
-        // the legacy path this omits the createdAt freshness guard, so a late duplicate of an OLD 'failed' could
-        // re-mark a sub-case (2) deal that a reviewer has since retried ('approving'); rare + reviewer-recoverable.
+        // Never resurrect onto a terminally re-confirmed denial. FRESHNESS: the same createdAt-vs-
+        // rfp_override_reviewed_at guard the legacy failed path uses now also gates this branch, so a late
+        // duplicate of an OLD 'failed' can't flip a fresh in-flight retry (sub-case (2), 'approving' with a bumped
+        // reviewed_at) back to failed; sub-case (1) has reviewed_at IS NULL and is exempt. Idempotent via the
+        // value-distinct + status guards; a later 'created' callback clears the marker and approves + advances.
         if (dealRequestId == null) {
+          // Freshness input for the request-less failed path (same guard the request-backed path uses). Unlike
+          // that path we do NOT 422 a missing createdAt: sub-case (1) ('pending', rfp_override_reviewed_at IS
+          // NULL) is legitimately timestamp-less and exempt from the guard below; only sub-case (2) (an override
+          // retry with reviewed_at set) enforces createdAt >= reviewed_at.
+          const votingFailedCreatedAt = asDateOrNull(payload.createdAt);
           let failedApplied = false;
           const client = await pool.connect();
           let releaseErr: unknown;
@@ -725,6 +745,9 @@ internalRfpRoutes.post(
               `UPDATE ${quoteIdent(found.schemaName)}.deals
                   SET rfp_override_state = 'failed',
                       rfp_override_error = $1,
+                      -- leave the "creating" limbo: send_failed is the Pending-RFP attention state that
+                      -- surfaces the failure and offers Retry (mirrors the dead-letter sweep's intent).
+                      rfp_approval_status = 'send_failed',
                       updated_at = NOW()
                 WHERE id = $2
                   AND rfp_approval_request_id IS NULL
@@ -733,8 +756,19 @@ internalRfpRoutes.post(
                     rfp_approval_status = 'pending'
                     OR (rfp_approval_status = 'declined' AND rfp_override_state = 'approving')
                   )
-                  AND (rfp_override_state IS DISTINCT FROM 'failed' OR rfp_override_error IS DISTINCT FROM $1)`,
-              [overrideError, sourceDealId]
+                  -- freshness: ignore a stale failed callback from a PRIOR attempt (createdAt older than the
+                  -- current attempt's rfp_override_reviewed_at) so a duplicate of the old failure can't flip a
+                  -- fresh retry back to failed. The 'pending' sub-case has reviewed_at IS NULL and is exempt.
+                  AND (
+                    rfp_override_reviewed_at IS NULL
+                    OR ($3::timestamptz IS NOT NULL AND $3::timestamptz >= rfp_override_reviewed_at)
+                  )
+                  AND (
+                    rfp_override_state IS DISTINCT FROM 'failed'
+                    OR rfp_override_error IS DISTINCT FROM $1
+                    OR rfp_approval_status IS DISTINCT FROM 'send_failed'
+                  )`,
+              [overrideError, sourceDealId, votingFailedCreatedAt]
             );
             failedApplied = (failedUpdate.rowCount ?? 0) > 0;
             if (failedApplied) {
@@ -752,6 +786,7 @@ internalRfpRoutes.post(
                   secondaryIdSnapshot: (found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
                 },
                 fieldChanges: {
+                  rfpApprovalStatus: { from: found.deal.rfp_approval_status ?? null, to: "send_failed" },
                   rfpOverrideState: { from: found.deal.rfp_override_state ?? null, to: "failed" },
                   rfpOverrideError: { from: found.deal.rfp_override_error ?? null, to: overrideError },
                 },

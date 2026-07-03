@@ -110,12 +110,13 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ success: true, status: "failed", dealId: DEAL, applied: true });
 
-    // The GO create failed -> the deal must show a failed/attention state rather than sitting silently pending.
+    // The GO create failed -> the deal must leave the "creating" limbo into the VISIBLE send_failed attention
+    // state (the Pending-RFP surface renders it + offers Retry) while also stamping the override audit marker.
     const rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state, rfp_override_error, is_bid_board_owned FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
     expect(rows[0].rfp_override_state).toBe("failed");
     expect(rows[0].rfp_override_error).toBe("Procore Bid Board form timed out");
-    // never links / approves the deal on failure
-    expect(rows[0].rfp_approval_status).toBe("pending");
+    // surfaced + retryable (send_failed), and never links / approves the deal on failure
+    expect(rows[0].rfp_approval_status).toBe("send_failed");
     expect(rows[0].is_bid_board_owned).toBe(false);
   });
 
@@ -127,8 +128,78 @@ describe("POST /bid-board-created (voting path)", () => {
     const second = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
     expect(first.body.applied).toBe(true);
     expect(second.body.applied).toBe(false);
-    const rows = (await holder.pg.query(`SELECT rfp_override_state, rfp_override_error FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    const rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state, rfp_override_error FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("send_failed");
     expect(rows[0].rfp_override_state).toBe("failed");
     expect(rows[0].rfp_override_error).toBe("boom");
+  });
+
+  it("[#1] stale-ignores a request-backed 'created' callback (numeric rfpApprovalRequestId) after the request id was cleared — never approves a canceled deal", async () => {
+    await seed();
+    // Simulate cancelPendingRfp on a legacy/service/override deal: Return to Opportunity clears the request id +
+    // status to NULL, leaves it on the opportunity stage, not Bid-Board-owned.
+    await holder.pg.query(
+      `UPDATE office_test.deals SET rfp_approval_status = NULL, rfp_approval_request_id = NULL, stage_id = $2, is_bid_board_owned = false WHERE id = $1`,
+      [DEAL, OPP],
+    );
+    const app = await buildApp();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // A late callback STILL carries the OLD numeric request id — must be reconciled as stale, not treated like a
+    // request-less voting 'created' (which would approve + Bid-Board-own the canceled Opportunity deal).
+    const raw = JSON.stringify({
+      status: "created",
+      sourceDealId: DEAL,
+      rfpApprovalRequestId: 4242,
+      bidboardProjectId: "88123",
+      procoreCompanyId: "42",
+      createdAt: new Date().toISOString(),
+    });
+    const res = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ success: true, idempotent: true, reason: "stale_callback_ignored" });
+
+    const rows = (await holder.pg.query(`SELECT rfp_approval_status, is_bid_board_owned, procore_bid_id, stage_id FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBeNull();
+    expect(rows[0].is_bid_board_owned).toBe(false);
+    expect(rows[0].procore_bid_id).toBeNull();
+    expect(rows[0].stage_id).toBe(OPP);
+    warnSpy.mockRestore();
+  });
+
+  it("[#3] freshness: a STALE request-less 'failed' (createdAt older than the attempt's reviewed_at) is a no-op; a FRESH one flips to send_failed", async () => {
+    await seed();
+    const REVIEWED_AT = "2026-07-01T00:00:00.000Z";
+    // A reviewer override-approve of a NO-GO'd voting deal is in flight: declined + 'approving' with a bumped
+    // rfp_override_reviewed_at marking the CURRENT attempt.
+    await holder.pg.query(
+      `UPDATE office_test.deals
+          SET rfp_approval_status = 'declined',
+              rfp_override_state = 'approving',
+              rfp_override_decision = 'override_approved',
+              rfp_override_reviewed_at = $2
+        WHERE id = $1`,
+      [DEAL, REVIEWED_AT],
+    );
+    const app = await buildApp();
+
+    // STALE failed from a PRIOR attempt (createdAt < reviewed_at) must NOT clobber the fresh retry.
+    const staleRaw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "old failure", createdAt: "2026-06-01T00:00:00.000Z" });
+    const stale = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(staleRaw)).send(staleRaw);
+    expect(stale.status).toBe(200);
+    expect(stale.body.applied).toBe(false);
+    let rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state, rfp_override_error FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("declined");
+    expect(rows[0].rfp_override_state).toBe("approving");
+    expect(rows[0].rfp_override_error).toBeNull();
+
+    // FRESH failed (createdAt >= reviewed_at) surfaces the visible send_failed marker.
+    const freshRaw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "new failure", createdAt: "2026-07-02T00:00:00.000Z" });
+    const fresh = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(freshRaw)).send(freshRaw);
+    expect(fresh.status).toBe(200);
+    expect(fresh.body.applied).toBe(true);
+    rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state, rfp_override_error FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("send_failed");
+    expect(rows[0].rfp_override_state).toBe("failed");
+    expect(rows[0].rfp_override_error).toBe("new failure");
   });
 });
