@@ -1955,8 +1955,14 @@ export async function getDealById(
   const deal = result[0] ?? null;
   if (!deal) return null;
 
-  // Reps can only see their own deals
-  if (userRole === "rep" && deal.assignedRepId !== userId) {
+  // Reps can only see their own deals — or deals where they are the estimator or sales source
+  // (a source rep sees their earned commission on the dashboard; the /deals/:id link must not 403).
+  if (
+    userRole === "rep" &&
+    deal.assignedRepId !== userId &&
+    deal.estimatorUserId !== userId &&
+    deal.salesSourceUserId !== userId
+  ) {
     throw new AppError(403, "You can only view your own deals");
   }
 
@@ -2319,6 +2325,21 @@ export async function updateDeal(
 
   // Validate assignee if being changed
   if (input.assignedRepId !== undefined) {
+    // Reciprocal conflict guard: the new owner cannot be the deal's sales source. setDealSalesSource
+    // already blocks setting source == owner (forward direction); this closes the reverse path where
+    // a reassignment would move the sales-source rep into the owner slot and mint a double commission
+    // cut (owner row + the existing additive sales_source row that remains on the deal).
+    if (
+      input.assignedRepId != null &&
+      input.assignedRepId === (existing.salesSourceUserId ?? null)
+    ) {
+      throw new AppError(
+        422,
+        "Cannot reassign a deal to its sales source",
+        "SALES_SOURCE_CONFLICT"
+      );
+    }
+
     await validateDealReassignmentAssignee(
       tenantDb,
       input.assignedRepId,
@@ -3735,6 +3756,14 @@ export async function setDealEstimator(
     // re-evaluated, so it stands even if that estimator's rate was later deactivated.
     if (oldEstimator === newEstimator) {
       return existing;
+    }
+
+    // Reciprocal conflict guard: the estimator cannot be the deal's sales source. setDealSalesSource
+    // already blocks the forward direction (source == owner/estimator); this closes the reverse path
+    // where the estimator route would place the same person in both roles, minting a double commission
+    // cut (owner/estimator row + additive sales_source row).
+    if (newEstimator != null && newEstimator === (existing.salesSourceUserId ?? null)) {
+      throw new AppError(422, "Estimator cannot be the deal's sales source", "SALES_SOURCE_CONFLICT");
     }
 
     // P1 — Bid-Board-owned estimator policy, NARROWED to FIRST-FILL only (money-attribution decision).
