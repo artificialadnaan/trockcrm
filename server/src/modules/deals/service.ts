@@ -2732,6 +2732,17 @@ export async function updateDeal(
     }
   }
 
+  // F9: if the deal just transitioned out of the service workflow, clear any stale
+  // sales-source attribution. A service-source commission cut (service_source_rate)
+  // only applies to service-route deals; leaving that route makes the source invalid.
+  if (
+    existing.workflowRoute === "service" &&
+    (updatedDeal?.workflowRoute ?? "normal") !== "service" &&
+    (existing.salesSourceUserId ?? null) !== null
+  ) {
+    await clearSalesSource(tenantDb, dealId, userId);
+  }
+
   return updatedDeal;
 }
 
@@ -3864,6 +3875,69 @@ export async function setDealEstimator(
     }
 
     return updated;
+  });
+}
+
+/**
+ * Clear the sales-source attribution on a deal unconditionally.
+ * Idempotent: no-op when the deal has no current source.
+ * Called when a source attribution becomes invalid — e.g. the deal leaves the service
+ * workflow (F9) or the HubSpot ownership sync moves the source rep into the owner slot (F10).
+ *
+ * Mirrors the removal half of setDealSalesSource: nulls sales_source_user_id on the base deal,
+ * propagates null to active CO children (display sync only), removes the `sales_source` DSC row,
+ * and writes an audit log entry — all in the caller's db context (no inner transaction wrap).
+ */
+export async function clearSalesSource(
+  tenantDb: TenantDb,
+  dealId: string,
+  triggeredByUserId: string | null
+): Promise<void> {
+  const [existing] = await tenantDb
+    .select({ salesSourceUserId: deals.salesSourceUserId })
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1);
+
+  if (!existing || (existing.salesSourceUserId ?? null) === null) {
+    return; // no-op: deal not found or has no source to clear
+  }
+
+  const oldSourceId = existing.salesSourceUserId!;
+  const now = new Date();
+
+  await tenantDb
+    .update(deals)
+    .set({ salesSourceUserId: null, updatedAt: now })
+    .where(eq(deals.id, dealId));
+
+  await writeAuditLog(tenantDb, {
+    tableName: "deals",
+    recordId: dealId,
+    action: "update",
+    changedBy: triggeredByUserId,
+    changes: {
+      salesSourceUserId: { from: oldSourceId, to: null },
+    },
+  });
+
+  // Propagate null to active CO children — display/attribution sync only;
+  // no commission row exists on CO children for the sales source.
+  await tenantDb
+    .update(deals)
+    .set({ salesSourceUserId: null, updatedAt: now })
+    .where(
+      and(
+        eq(deals.parentDealId, dealId),
+        eq(deals.isChangeOrder, true),
+        eq(deals.isActive, true)
+      )
+    );
+
+  await removeSalesSourceCommissionForDeal(tenantDb, {
+    dealId,
+    salesSourceUserId: oldSourceId,
+    triggeredByUserId,
   });
 }
 
