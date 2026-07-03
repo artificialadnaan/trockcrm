@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { isServiceRfp, openRfpVoteRound } from "../../../src/modules/deals/rfp-vote-service.js";
+import { hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound } from "../../../src/modules/deals/rfp-vote-service.js";
 import { isRfpVotingEnabled } from "../../../src/config/feature-flags.js";
 
 const DEAL = "00000000-0000-0000-0000-0000000000d1";
+const REP = "00000000-0000-0000-0000-0000000000f1";
+const OTHER_REP = "00000000-0000-0000-0000-0000000000f2";
 
 let pg: PGlite | null = null;
 afterEach(async () => {
@@ -30,12 +32,12 @@ async function setup() {
       bid_board_stage_slug text, is_read_only_mirror boolean NOT NULL DEFAULT false, read_only_synced_at timestamptz,
       bid_board_stage_entered_at timestamptz, bid_board_mirror_source_entered_at timestamptz, rfp_approval_status text,
       rfp_approval_requested_at timestamptz, rfp_approval_request_event_id uuid, rfp_approval_requested_by uuid,
-      rfp_approval_request_id integer, updated_at timestamptz
+      rfp_approval_request_id integer, assigned_rep_id uuid, updated_at timestamptz
     );
   `);
   await db.query(
-    `INSERT INTO deals (id, name, deal_number, stage_id, workflow_route) VALUES ($1, 'd', 'TR-1', '00000000-0000-0000-0000-0000000000aa', 'normal')`,
-    [DEAL],
+    `INSERT INTO deals (id, name, deal_number, stage_id, workflow_route, assigned_rep_id) VALUES ($1, 'd', 'TR-1', '00000000-0000-0000-0000-0000000000aa', 'normal', $2)`,
+    [DEAL, REP],
   );
   return db;
 }
@@ -51,6 +53,7 @@ function dealRow(overrides: Record<string, unknown> = {}) {
     projectType: null,
     rfpApprovalStatus: null,
     rfpApprovalRequestEventId: null,
+    assignedRepId: REP,
     ...overrides,
   } as any;
 }
@@ -63,6 +66,14 @@ describe("trigger-rfp voting branch", () => {
 
   it("service deal is NOT routed to voting", () => {
     expect(isServiceRfp(dealRow({ workflowRoute: "service" }))).toBe(true);
+  });
+
+  it("hasSufficientRfpVoters requires the full trio (a partial RFP_VOTER_EMAILS falls back to SyncHub)", () => {
+    expect(hasSufficientRfpVoters({ RFP_VOTER_EMAILS: "a@x.com, b@x.com, c@x.com" } as any)).toBe(true);
+    // A dropped-comma / partial config can never reach 2-of-3 — must NOT open the voting branch.
+    expect(hasSufficientRfpVoters({ RFP_VOTER_EMAILS: "a@x.com, b@x.com" } as any)).toBe(false);
+    expect(hasSufficientRfpVoters({ RFP_VOTER_EMAILS: "only.one@x.com" } as any)).toBe(false);
+    expect(hasSufficientRfpVoters({} as any)).toBe(false);
   });
 
   it("non-service deal opens a round (status pending + invitation job, no SyncHub delivery job)", async () => {
@@ -79,5 +90,38 @@ describe("trigger-rfp voting branch", () => {
     expect(deal[0].rfp_approval_status).toBe("pending");
     const jobs = (await pg.query(`SELECT job_type FROM public.job_queue`)).rows as any[];
     expect(jobs.map((j) => j.job_type)).toEqual(["rfp_vote_invitation"]);
+  });
+
+  it("enforceAssignedRepId re-binds ownership: a reassigned deal 409s the former owner (no round, no invite)", async () => {
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+    // The deal is owned by REP; a trigger enforcing OTHER_REP must match nothing and 409 without side effects.
+    await expect(
+      openRfpVoteRound({
+        tenantDb: tdb,
+        officeId: null,
+        deal: dealRow(),
+        requestedByUserId: OTHER_REP,
+        enforceAssignedRepId: OTHER_REP,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_ALREADY_TRIGGERED" });
+    const deal = (await pg.query(`SELECT rfp_approval_status FROM deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(deal[0].rfp_approval_status).toBeNull();
+    const jobs = (await pg.query(`SELECT job_type FROM public.job_queue`)).rows as any[];
+    expect(jobs).toHaveLength(0);
+  });
+
+  it("enforceAssignedRepId lets the true owner open the round; null (director/admin) opens regardless of owner", async () => {
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+    await openRfpVoteRound({
+      tenantDb: tdb,
+      officeId: null,
+      deal: dealRow(),
+      requestedByUserId: REP,
+      enforceAssignedRepId: REP,
+    });
+    const deal = (await pg.query(`SELECT rfp_approval_status FROM deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(deal[0].rfp_approval_status).toBe("pending");
   });
 });

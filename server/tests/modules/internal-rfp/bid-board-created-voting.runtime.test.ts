@@ -166,6 +166,40 @@ describe("POST /bid-board-created (voting path)", () => {
     warnSpy.mockRestore();
   });
 
+  it("[F1] does NOT resurrect a request-less deal returned to Opportunity: a late 'created' with no rfpApprovalRequestId is a no-op when status is NULL", async () => {
+    await seed();
+    // Voting create failed -> user Returned to Opportunity: cancelPendingRfp cleared rfp_approval_status to NULL
+    // (+ all RFP fields), left it on the opportunity stage, not Bid-Board-owned.
+    await holder.pg.query(
+      `UPDATE office_test.deals
+          SET rfp_approval_status = NULL, rfp_approval_request_id = NULL, rfp_override_state = NULL,
+              rfp_override_reviewed_at = NULL, stage_id = $2, is_bid_board_owned = false
+        WHERE id = $1`,
+      [DEAL, OPP],
+    );
+    const app = await buildApp();
+    // A DELAYED 'created' from the prior request-less create — no rfpApprovalRequestId (voting never mints one),
+    // reviewed_at is NULL (so the override freshness clause would exempt it) and the value-distinct guard passes.
+    // Only the new `rfp_approval_status IS NOT NULL` guard stops it from re-approving + Bid-Board-owning the deal.
+    const raw = JSON.stringify({
+      status: "created",
+      sourceDealId: DEAL,
+      bidboardProjectId: "88123",
+      procoreCompanyId: "42",
+      createdAt: new Date().toISOString(),
+    });
+    const res = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+    // Acknowledged as an idempotent no-op (nothing to link) — SyncHub stops retrying without any resurrection.
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+
+    const rows = (await holder.pg.query(`SELECT rfp_approval_status, is_bid_board_owned, procore_bid_id, stage_id FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBeNull();
+    expect(rows[0].is_bid_board_owned).toBe(false);
+    expect(rows[0].procore_bid_id).toBeNull();
+    expect(rows[0].stage_id).toBe(OPP);
+  });
+
   it("[#3] freshness: a STALE request-less 'failed' (createdAt older than the attempt's reviewed_at) is a no-op; a FRESH one flips to send_failed", async () => {
     await seed();
     const REVIEWED_AT = "2026-07-01T00:00:00.000Z";

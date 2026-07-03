@@ -9,6 +9,7 @@ import {
   type RfpVoteOutcome,
   type RfpVoteRecord,
 } from "@trock-crm/shared/lib/rfpVoteState";
+import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { AppError } from "../../middleware/error-handler.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { applyRfpDeclineToDeal } from "./rfp-decline-service.js";
@@ -19,6 +20,18 @@ type DealRow = typeof deals.$inferSelect;
 
 // v1 is a fixed global trio (Sidney, Tim, James); the decline summary reads "(N of 3)".
 const RFP_VOTER_COUNT = 3;
+
+/**
+ * True iff the configured voter allowlist can actually produce a decision — i.e. it holds the full
+ * RFP_VOTER_COUNT-sized trio. A partial config (0/1/2 emails, e.g. a RFP_VOTER_EMAILS typo that drops a comma)
+ * can never reach the 2-of-3 tally: requireRfpVoter authorizes only listed voters, so with <3 configured the
+ * round would sit 'pending' forever — and 'pending' is not a cancellable attention state, so the deal strands
+ * with no recovery. The trigger-rfp guard uses this to fall back to the existing SyncHub delivery path on a
+ * misconfigured flag rather than opening an undecidable round.
+ */
+export function hasSufficientRfpVoters(env: NodeJS.ProcessEnv): boolean {
+  return resolveRfpVoterEmails(env).length >= RFP_VOTER_COUNT;
+}
 
 export interface CastRfpVoteDeps {
   applyDecline?: typeof applyRfpDeclineToDeal;
@@ -47,6 +60,11 @@ export async function openRfpVoteRound(args: {
   officeId: string | null;
   deal: DealRow;
   requestedByUserId: string;
+  // When set (a rep-triggered request), the atomic reserve re-binds ownership to this rep so a deal reassigned
+  // between the route's read and this UPDATE no longer matches — the former owner 409s instead of opening a
+  // round for another rep's deal. Directors/admins pass null (reserve regardless of owner). Mirrors the rep
+  // guard the SyncHub trigger-rfp reservation adds.
+  enforceAssignedRepId?: string | null;
 }): Promise<void> {
   const eventId = randomUUID();
   const requestedAt = new Date();
@@ -56,23 +74,25 @@ export async function openRfpVoteRound(args: {
     rfpApprovalRequestedBy: args.requestedByUserId,
     rfpApprovalStatus: "pending",
   } as const;
+  const reserveConditions = [
+    eq(deals.id, args.deal.id),
+    eq(deals.stageId, args.deal.stageId),
+    isNull(deals.rfpApprovalStatus),
+    isNull(deals.rfpApprovalRequestedAt),
+    eq(deals.isBidBoardOwned, false),
+    or(isNull(deals.bidBoardStageSlug), eq(deals.bidBoardStageSlug, ""))!,
+    eq(deals.isReadOnlyMirror, false),
+    isNull(deals.readOnlySyncedAt),
+    isNull(deals.bidBoardStageEnteredAt),
+    isNull(deals.bidBoardMirrorSourceEnteredAt),
+  ];
+  if (args.enforceAssignedRepId != null) {
+    reserveConditions.push(eq(deals.assignedRepId, args.enforceAssignedRepId));
+  }
   const [reserved] = await args.tenantDb
     .update(deals)
     .set(reserveStamps)
-    .where(
-      and(
-        eq(deals.id, args.deal.id),
-        eq(deals.stageId, args.deal.stageId),
-        isNull(deals.rfpApprovalStatus),
-        isNull(deals.rfpApprovalRequestedAt),
-        eq(deals.isBidBoardOwned, false),
-        or(isNull(deals.bidBoardStageSlug), eq(deals.bidBoardStageSlug, ""))!,
-        eq(deals.isReadOnlyMirror, false),
-        isNull(deals.readOnlySyncedAt),
-        isNull(deals.bidBoardStageEnteredAt),
-        isNull(deals.bidBoardMirrorSourceEnteredAt),
-      ),
-    )
+    .where(and(...reserveConditions))
     .returning({ id: deals.id });
 
   if (!reserved) {

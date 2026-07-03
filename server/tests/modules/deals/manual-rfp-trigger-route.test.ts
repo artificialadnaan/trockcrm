@@ -132,9 +132,12 @@ vi.mock("@trock-crm/shared/lib/rfpVoterEmails", () => ({
 
 // Mock rfp-vote-service so the voting branch is observable without a real round: isServiceRfp mirrors the
 // prod predicate for these normal-route deals; openRfpVoteRound is a spy (asserted called / not-called).
+// hasSufficientRfpVoters mirrors the real predicate (full RFP_VOTER_COUNT trio, finding F2) off the same
+// resolveRfpVoterEmailsMock the tests already drive, so a partial config falls back to SyncHub.
 vi.mock("../../../src/modules/deals/rfp-vote-service.js", () => ({
   isServiceRfp: (deal: any) => deal?.workflowRoute === "service",
   openRfpVoteRound: openRfpVoteRoundMock,
+  hasSufficientRfpVoters: (env: any) => resolveRfpVoterEmailsMock(env).length >= 3,
   castRfpVote: vi.fn(),
 }));
 
@@ -635,9 +638,28 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     expect(state.updatesAttempted).toBe(1);
   });
 
-  it("voting ENABLED WITH voters configured opens a vote round (no SyncHub delivery)", async () => {
+  it("voting ENABLED with a PARTIAL voter list (< the trio) falls back to SyncHub (finding F2)", async () => {
+    // A dropped-comma typo leaves < RFP_VOTER_COUNT voters: the 2-of-3 tally is unreachable, so the round would
+    // strand 'pending'. Must degrade to SyncHub instead of opening an undecidable round.
     isRfpVotingEnabledMock.mockReturnValue(true);
-    resolveRfpVoterEmailsMock.mockReturnValue(["sidney@x.com"]);
+    resolveRfpVoterEmailsMock.mockReturnValue(["sidney@x.com", "tim@x.com"]);
+    const { req, state } = makeReq();
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ success: true, status: "pending_outbox" });
+    expect(openRfpVoteRoundMock).not.toHaveBeenCalled();
+    expect(insertRfpJobMock).toHaveBeenCalledTimes(1);
+    expect(state.updatesAttempted).toBe(1);
+  });
+
+  it("voting ENABLED WITH the full trio configured opens a vote round (no SyncHub delivery)", async () => {
+    isRfpVotingEnabledMock.mockReturnValue(true);
+    resolveRfpVoterEmailsMock.mockReturnValue(["sidney@x.com", "tim@x.com", "james@x.com"]);
     const { req, state } = makeReq();
     const res = makeRes();
     const next = vi.fn();
@@ -652,6 +674,8 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
         officeId: "office-1",
         requestedByUserId: "rep-1",
         deal: expect.objectContaining({ id: "deal-1" }),
+        // finding F3: a rep-triggered round re-binds ownership in the reserve.
+        enforceAssignedRepId: "rep-1",
       })
     );
     // Voting branch does NOT run the SyncHub reserve/enqueue.

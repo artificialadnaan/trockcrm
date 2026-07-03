@@ -177,8 +177,7 @@ import {
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 import { enqueueRfpBidBoardCreate, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
-import { castRfpVote, isServiceRfp, openRfpVoteRound } from "./rfp-vote-service.js";
-import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
+import { castRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound } from "./rfp-vote-service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -1270,18 +1269,29 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
 
     // Non-service deals with voting ENABLED open a three-voter round instead of the SyncHub email path.
     // Service / type-4 (and voting-disabled) deals fall through to the unchanged SyncHub delivery below.
-    // Guard: only take the voting branch when the voter allowlist is non-empty. With RFP_VOTER_EMAILS unset
-    // resolveRfpVoterEmails() returns [] in prod, so opening a round would strand the deal — isRfpVoter is
-    // false for everyone, requireRfpVoter 403s every cast, nobody can reach 2/3, and the still-'pending' round
-    // can't be returned to Opportunity (cancel only clears an attention-state RFP). A misconfigured flag must
-    // degrade safely, so fall back to the existing SyncHub delivery path below instead.
-    if (!isServiceRfp(deal) && isRfpVotingEnabled() && resolveRfpVoterEmails(process.env).length > 0) {
+    // Guard: only take the voting branch when the full RFP_VOTER_COUNT trio is configured. A partial/empty
+    // RFP_VOTER_EMAILS (unset, or a typo that drops a voter) can never reach the 2-of-3 tally — isRfpVoter is
+    // false for the missing voters, nobody can push it to a decision, and the still-'pending' round can't be
+    // returned to Opportunity (cancel only clears an attention-state RFP). A misconfigured flag must degrade
+    // safely, so fall back to the existing SyncHub delivery path below instead. (See hasSufficientRfpVoters.)
+    if (!isServiceRfp(deal) && isRfpVotingEnabled() && hasSufficientRfpVoters(process.env)) {
       await openRfpVoteRound({
         tenantDb: req.tenantDb!,
         officeId,
         deal,
         requestedByUserId: userId,
+        // Re-bind rep ownership in the atomic reservation, mirroring the SyncHub path below: if the deal is
+        // reassigned between the read above and the reserve, a former owner's trigger must match nothing (409)
+        // rather than opening a round + emailing voters for another rep's deal.
+        enforceAssignedRepId: userRole === "rep" ? userId : null,
       });
+      // Post-reservation scope recheck, mirroring the SyncHub path: a file/scoping field removed between the
+      // initial readiness check above and the reserve must abort the round (throw rolls back the still-open
+      // transaction — the round + invitation enqueue) rather than inviting voters to an incomplete RFP.
+      const votingReadiness = await evaluateDealScopingReadiness(req.tenantDb!, deal.id);
+      if (hasBlockingScopingReadinessErrors(votingReadiness)) {
+        throw buildScopeIncompleteError(votingReadiness);
+      }
       const [voted] = await req.tenantDb!
         .select({ status: deals.rfpApprovalStatus, eventId: deals.rfpApprovalRequestEventId })
         .from(deals)

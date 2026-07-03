@@ -983,6 +983,14 @@ internalRfpRoutes.post(
                 rfp_override_state IS NOT NULL OR
                 rfp_override_error IS NOT NULL
               )
+              -- A request-less (voting) 'created' must NOT resurrect a deal that was Returned to Opportunity.
+              -- cancelPendingRfp clears rfp_approval_status to NULL (+ every RFP field), and a delayed 'created'
+              -- from the prior request-less create would otherwise re-approve + Bid-Board-own it: reviewed_at is
+              -- NULL so the freshness clause above exempts it, and the value-distinct guard passes. A NULL status
+              -- means "no RFP in flight" — never link it. Every LEGIT 'created' has a non-null status (voting
+              -- 'pending', override 'declined', legacy 'pending'/'pending_outbox'), so this is a no-op for them.
+              -- (Request-BACKED callbacks with a cleared id are already stale-ACKed above and never reach here.)
+              AND rfp_approval_status IS NOT NULL
             RETURNING id, name, deal_number, project_number, bid_board_linked_at`,
           [bidboardProjectId, procoreCompanyId, sourceDealId, createdCallbackAt]
         );
@@ -1034,6 +1042,11 @@ internalRfpRoutes.post(
                 -- same guards as the linkage update: a re-confirmed denial (or a stale prior-attempt 'created')
                 -- must not advance the stage
                 AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+                -- ...including the request-less resurrection guard: a deal Returned to Opportunity (status NULL)
+                -- must not be advanced to estimating by a late 'created' — the linkage update above no-ops it, and
+                -- without this the stage move would still fire (it's an independent guarded UPDATE). Within this
+                -- txn a successful linkage has already set status='approved' (non-null), so legit flows pass.
+                AND rfp_approval_status IS NOT NULL
                 AND (rfp_override_reviewed_at IS NULL OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_override_reviewed_at))
               RETURNING id`,
             [
