@@ -55,6 +55,30 @@ describe("handleRfpVoteOutcomeEmail (GO)", () => {
     expect(sendEmail).not.toHaveBeenCalled();
   });
 
+  it("REJECTED outcome with no reviewer config throws (fail-loud) instead of silently emailing only the rep", async () => {
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m-loud" }));
+    const query = makeQuery({ users: [{ email: "rep@trockgc.com" }], offices: [{ id: "office-1" }] });
+    // No RFP_REJECTION_EMAIL_RECIPIENTS and not dev/test NODE_ENV → resolveRfpReviewerEmails returns [].
+    await expect(
+      handleRfpVoteOutcomeEmail(
+        {
+          tenantSchema: "office_dallas",
+          dealId: "00000000-0000-0000-0000-000000000d01",
+          dealName: "Terraces Re-Roof",
+          dealNumber: "DFW-1-100",
+          requestedByUserId: "00000000-0000-0000-0000-000000000a09",
+          outcome: "rejected",
+          approvals: 1,
+          rejections: 2,
+        },
+        null,
+        { query: query as never, sendEmail: sendEmail as never, env: { FRONTEND_URL: "https://trockcrm.com" } }
+      )
+    ).rejects.toThrow(/RFP_REJECTION_EMAIL_RECIPIENTS/);
+    // Must not silently send to just the rep.
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
   it("NO-GO emails the requesting rep AND the Takashi/Adam reviewers with the /rfp-review link", async () => {
     const sendEmail = vi.fn(async () => ({ success: true, messageId: "m-3" }));
     const query = makeQuery({ users: [{ email: "rep@trockgc.com" }], offices: [{ id: "office-1" }] });

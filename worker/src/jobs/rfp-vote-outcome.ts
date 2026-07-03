@@ -95,9 +95,18 @@ export async function handleRfpVoteOutcomeEmail(
   }
 
   // GO -> just the requesting rep. NO-GO -> rep + the Takashi/Adam reviewers (same allowlist the
-  // DB-trigger escalation would have used), deduped case-insensitively. If nothing resolves we log +
-  // no-op (the create/decline already happened — this is an FYI notification, not a gate).
+  // DB-trigger escalation would have used), deduped case-insensitively.
   const reviewerEmails = outcome === "rejected" ? resolveRfpReviewerEmails(env) : [];
+  // For a REJECTED outcome, reviewer emails are load-bearing: the /rfp-review gate only admits users in
+  // that set, so if the set is empty nobody can act on the escalation. Fail loud (throw → retry →
+  // dead-letter) rather than silently completing after emailing only the rep. Mirrors legacy
+  // rfp_rejected_email hard-fail behaviour. The GO/approved path is unaffected — rep-only is correct.
+  if (outcome === "rejected" && reviewerEmails.length === 0) {
+    throw new Error(
+      "[RfpVoteOutcome] RFP_REJECTION_EMAIL_RECIPIENTS is not configured — cannot send rejection escalation. " +
+        "Configure the env var and redeploy, or dead-letter this job."
+    );
+  }
   // FIX 2: case-insensitive dedup — mirrors rfp-rejection-email.ts dedupeEmails helper.
   const recipients = dedupeEmails([repEmail, ...reviewerEmails].filter((e): e is string => !!e));
   if (recipients.length === 0) {
