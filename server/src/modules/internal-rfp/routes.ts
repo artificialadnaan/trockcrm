@@ -678,6 +678,17 @@ internalRfpRoutes.post(
       const dealRequestId = found.deal.rfp_approval_request_id;
       const currentRequestId = dealRequestId == null ? null : Number(dealRequestId);
       if (dealRequestId != null) {
+        // Request-backed (legacy / service / override) deal: the callback MUST carry a well-formed numeric
+        // rfpApprovalRequestId. A missing / non-numeric id is MALFORMED — not stale — so 422 it (like the
+        // other request-backed callbacks) and let SyncHub retry; ACKing it as stale would stop the retries
+        // and strand the deal. Only a WELL-FORMED but mismatched id below is a safe stale no-op.
+        if (typeof payload.rfpApprovalRequestId !== "number" || !Number.isFinite(payload.rfpApprovalRequestId)) {
+          console.warn(
+            `[RFP callback] malformed callback for request-backed deal sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"} -> 422 (retryable, not stale-ACKed)`
+          );
+          res.status(422).json({ success: false, error: "invalid_payload" });
+          return;
+        }
         if (!Number.isFinite(currentRequestId as number) || payload.rfpApprovalRequestId !== currentRequestId) {
           console.warn(
             `[RFP callback] stale callback ignored for sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"}`
@@ -693,6 +704,78 @@ internalRfpRoutes.post(
       if (callbackStatus === "failed") {
         // Cap the free-text reason so an oversized SyncHub error can't bloat the column / audit log.
         const overrideError = (asStringOrNull(payload.error) ?? "Bid Board project creation failed").slice(0, 2000);
+
+        // VOTING-PATH failure (no SyncHub request id): a request-less create failed. The legacy update below
+        // keys on `rfp_approval_request_id = $3` (NULL matches nothing), so without this branch a voting create
+        // failure is a silent no-op and the deal sits with no visible failure. Surface a failed/attention marker
+        // (rfp_override_state='failed' + error) keyed by sourceDealId. Two request-less sub-cases:
+        //   (1) a 2/3-YES create in flight       -> rfp_approval_status='pending' (finding B2), or
+        //   (2) a reviewer override-approve of a NO-GO'd voting deal -> 'declined' + rfp_override_state='approving'.
+        // Never resurrect onto a terminally re-confirmed denial. Idempotent via the value-distinct guard; a later
+        // 'created' callback clears the marker and approves + advances the deal. NOTE (flagged for human): unlike
+        // the legacy path this omits the createdAt freshness guard, so a late duplicate of an OLD 'failed' could
+        // re-mark a sub-case (2) deal that a reviewer has since retried ('approving'); rare + reviewer-recoverable.
+        if (dealRequestId == null) {
+          let failedApplied = false;
+          const client = await pool.connect();
+          let releaseErr: unknown;
+          try {
+            await client.query("BEGIN");
+            const failedUpdate = await client.query(
+              `UPDATE ${quoteIdent(found.schemaName)}.deals
+                  SET rfp_override_state = 'failed',
+                      rfp_override_error = $1,
+                      updated_at = NOW()
+                WHERE id = $2
+                  AND rfp_approval_request_id IS NULL
+                  AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+                  AND (
+                    rfp_approval_status = 'pending'
+                    OR (rfp_approval_status = 'declined' AND rfp_override_state = 'approving')
+                  )
+                  AND (rfp_override_state IS DISTINCT FROM 'failed' OR rfp_override_error IS DISTINCT FROM $1)`,
+              [overrideError, sourceDealId]
+            );
+            failedApplied = (failedUpdate.rowCount ?? 0) > 0;
+            if (failedApplied) {
+              console.warn(`[RFP callback] voting-path Bid Board creation FAILED for deal ${sourceDealId}: ${overrideError}`);
+              await logActivityWithPgClient({
+                client,
+                schemaName: found.schemaName,
+                actor: buildAuditActorFromSystem({ systemProcess: INTERNAL_RFP_RECEIVER }),
+                action: "update",
+                entity: {
+                  tableName: "deals",
+                  entityType: "deal",
+                  recordId: sourceDealId,
+                  nameSnapshot: String(found.deal.name ?? "Deal"),
+                  secondaryIdSnapshot: (found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
+                },
+                fieldChanges: {
+                  rfpOverrideState: { from: found.deal.rfp_override_state ?? null, to: "failed" },
+                  rfpOverrideError: { from: found.deal.rfp_override_error ?? null, to: overrideError },
+                },
+                metadata: { rfpApprovalRequestId: null },
+              });
+            }
+            await client.query("COMMIT");
+          } catch (err) {
+            if (isBrokenConnectionError(err)) {
+              // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+              releaseErr = err;
+            } else {
+              let rollbackErr: unknown;
+              await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+              releaseErr = rollbackErr ?? err;
+            }
+            throw err;
+          } finally {
+            releasePooledClient(client, releaseErr);
+          }
+          res.json({ success: true, status: "failed", dealId: sourceDealId, applied: failedApplied });
+          return;
+        }
+
         // The callback's createdAt is required for the freshness guard below (it's compared against the current
         // attempt's start, rfp_override_reviewed_at). Reject a missing/unparseable timestamp rather than defaulting
         // to NOW() — a NOW() default would always look "fresh" and let a stale failed clobber a fresh retry.

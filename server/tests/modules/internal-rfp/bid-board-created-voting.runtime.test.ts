@@ -97,4 +97,38 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(String(rows[0].procore_bid_id)).toBe("88123");
     expect(rows[0].stage_id).toBe(EST);
   });
+
+  it("surfaces a visible failed marker on a voting deal (no rfp_approval_request_id) when the 'failed' callback lands", async () => {
+    await seed();
+    const app = await buildApp();
+    const raw = JSON.stringify({
+      status: "failed",
+      sourceDealId: DEAL,
+      error: "Procore Bid Board form timed out",
+    });
+    const res = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ success: true, status: "failed", dealId: DEAL, applied: true });
+
+    // The GO create failed -> the deal must show a failed/attention state rather than sitting silently pending.
+    const rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state, rfp_override_error, is_bid_board_owned FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_override_state).toBe("failed");
+    expect(rows[0].rfp_override_error).toBe("Procore Bid Board form timed out");
+    // never links / approves the deal on failure
+    expect(rows[0].rfp_approval_status).toBe("pending");
+    expect(rows[0].is_bid_board_owned).toBe(false);
+  });
+
+  it("is idempotent: a duplicate 'failed' callback re-reports applied:false without changing state", async () => {
+    await seed();
+    const app = await buildApp();
+    const raw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "boom" });
+    const first = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+    const second = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+    expect(first.body.applied).toBe(true);
+    expect(second.body.applied).toBe(false);
+    const rows = (await holder.pg.query(`SELECT rfp_override_state, rfp_override_error FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_override_state).toBe("failed");
+    expect(rows[0].rfp_override_error).toBe("boom");
+  });
 });
