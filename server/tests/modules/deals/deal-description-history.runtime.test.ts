@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import {
   buildDescriptionHistoryEntry,
   listDealDescriptionHistory,
+  lockCurrentResolvedDescription,
   recordDescriptionHistoryChange,
 } from "../../../src/modules/deals/deal-description-history.js";
 
@@ -12,6 +13,9 @@ const DEAL = U("d01");
 const OTHER_DEAL = U("d02");
 const ALICE = U("a01");
 const BOB = U("b01");
+const LEAD = U("ea01");
+const DEAL_PLAIN = U("dead01");
+const DEAL_LEAD = U("dead02");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -44,6 +48,14 @@ beforeAll(async () => {
       ('${U("04")}', '${OTHER_DEAL}', 'description', NULL, 'Someone else', '${ALICE}', 'deal_edit', '2026-01-15T10:00:00Z'),
       -- a description edit by a since-deleted user (no users row) -> changedByName null
       ('${U("05")}', '${DEAL}', 'description', 'Second, clearer scope', 'Third revision', '${U("f01")}', 'deal_edit', '2026-04-01T10:00:00Z');
+
+    -- minimal deals/leads for the locked-old-value helper
+    CREATE TABLE leads (id uuid PRIMARY KEY, description text);
+    CREATE TABLE deals (id uuid PRIMARY KEY, description text, source_lead_id uuid);
+    INSERT INTO leads (id, description) VALUES ('${LEAD}', 'lead authoritative desc');
+    INSERT INTO deals (id, description, source_lead_id) VALUES
+      ('${DEAL_PLAIN}', 'plain deal desc', NULL),
+      ('${DEAL_LEAD}', 'stale deal mirror', '${LEAD}');
   `);
   tdb = drizzle(pg);
 });
@@ -140,5 +152,20 @@ describe("recordDescriptionHistoryChange (the shared write seam)", () => {
     await recordDescriptionHistoryChange(tdb, { dealId: NOOP, oldDescription: "same", newDescription: "same", changedBy: ALICE });
     await recordDescriptionHistoryChange(tdb, { dealId: NOOP, oldDescription: null, newDescription: undefined, changedBy: ALICE });
     expect(await listDealDescriptionHistory(tdb, NOOP)).toEqual([]);
+  });
+});
+
+describe("lockCurrentResolvedDescription (source-lead-aware locked before-value)", () => {
+  it("reads the DEAL description for a non-source-lead deal", async () => {
+    expect(await lockCurrentResolvedDescription(tdb, { dealId: DEAL_PLAIN, sourceLeadId: null })).toBe("plain deal desc");
+  });
+
+  it("reads the LEAD (authoritative) description for a source-lead deal, ignoring the stale deal mirror", async () => {
+    expect(await lockCurrentResolvedDescription(tdb, { dealId: DEAL_LEAD, sourceLeadId: LEAD })).toBe("lead authoritative desc");
+  });
+
+  it("returns null when the authoritative row is absent", async () => {
+    expect(await lockCurrentResolvedDescription(tdb, { dealId: U("deadbee1"), sourceLeadId: null })).toBeNull();
+    expect(await lockCurrentResolvedDescription(tdb, { dealId: DEAL_LEAD, sourceLeadId: U("eadbee1") })).toBeNull();
   });
 });

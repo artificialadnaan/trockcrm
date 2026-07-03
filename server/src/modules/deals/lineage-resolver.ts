@@ -12,7 +12,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { applyProjectTypeChange, normalizeOptionalDealBidDueDate } from "./service.js";
-import { recordDescriptionHistoryChange } from "./deal-description-history.js";
+import { lockCurrentResolvedDescription, recordDescriptionHistoryChange } from "./deal-description-history.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -462,6 +462,18 @@ export async function writeResolvedDealFields(
     }
   }
 
+  // Lock + read the authoritative (source-lead-aware) old description BEFORE any write (the lead update below
+  // writes the authoritative value for source-lead deals), so a concurrent resolved-fields save on the same
+  // deal can't slip a stale intermediate into the history row. Using the resolved value also keeps a mirror-
+  // only re-sync a no-op for source-lead deals.
+  const oldResolvedDescription =
+    dealUpdates.description !== undefined
+      ? await lockCurrentResolvedDescription(tenantDb, {
+          dealId: resolvedDeal.deal.id,
+          sourceLeadId: sourceLead?.id ?? null,
+        })
+      : null;
+
   if (sourceLead && Object.keys(leadUpdates).length > 0) {
     await tenantDb
       .update(leads)
@@ -482,13 +494,11 @@ export async function writeResolvedDealFields(
       .where(eq(deals.id, resolvedDeal.deal.id));
 
     // The resolved-fields path also writes deals.description (lead compatibility write-through or a direct
-    // deal edit), so record the change-log row here too. Use the RESOLVED (source-lead-aware) description as
-    // the before-value — for a converted deal the lead description is authoritative, so comparing against the
-    // denormalized deals.description mirror could record a stale old value (or miss the change entirely).
+    // deal edit), so record the change-log row here too, using the locked resolved before-value above.
     if (dealUpdates.description !== undefined) {
       await recordDescriptionHistoryChange(tenantDb, {
         dealId: resolvedDeal.deal.id,
-        oldDescription: resolvedDeal.resolved.description,
+        oldDescription: oldResolvedDescription,
         newDescription: dealUpdates.description as string | null,
         changedBy: input.userId,
         source: "resolved_fields",

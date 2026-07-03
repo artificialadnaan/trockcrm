@@ -14,7 +14,7 @@ import { writeAuditLog } from "../../lib/audit-log.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { applyProjectTypeChange, BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
-import { recordDescriptionHistoryChange } from "./deal-description-history.js";
+import { lockCurrentResolvedDescription, recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { inferDealBidBoardOwnership, type PlanDealWorkflowBackfillInput } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
 import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
@@ -1296,6 +1296,14 @@ export async function upsertDealScopingIntake(
   if (Object.keys(dealUpdates).length > 0) {
     // One timestamp shared by the deal update and the history row so updatedAt == changedAt.
     const now = new Date();
+    // Lock + read the authoritative (source-lead-aware) old description BEFORE the update so a concurrent
+    // scope-summary save on the same deal can't slip a stale intermediate into the history row. For a
+    // source-lead deal deals.description is only a mirror that a scoping save re-syncs from the resolved lead
+    // value, so comparing against the resolved value also makes that mirror-only re-sync a no-op (old == new).
+    const oldDescription =
+      dealUpdates.description !== undefined
+        ? await lockCurrentResolvedDescription(tenantDb, { dealId, sourceLeadId: deal.sourceLeadId })
+        : null;
     await tenantDb
       .update(deals)
       .set({
@@ -1310,11 +1318,7 @@ export async function upsertDealScopingIntake(
     if (dealUpdates.description !== undefined) {
       await recordDescriptionHistoryChange(tenantDb, {
         dealId,
-        // RESOLVED (source-lead-aware) old value, matching the resolved-fields write: for a source-lead deal
-        // deals.description is only a compatibility mirror, and a scoping save re-syncs it from the resolved
-        // lead description. Comparing against the raw mirror would log a spurious scope_summary row on a
-        // mirror-only re-sync; comparing against the resolved value makes that a no-op (old == new).
-        oldDescription: resolvedDeal.resolved.description,
+        oldDescription,
         newDescription: dealUpdates.description as string | null,
         changedBy: userId,
         source: "scope_summary",

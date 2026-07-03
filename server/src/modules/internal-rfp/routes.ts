@@ -302,6 +302,11 @@ internalRfpRoutes.post(
           if (field === "projectType") dealUpdates.project_type = asStringOrNull(value);
           if (field === "amount") dealUpdates.bid_estimate = asNumberStringOrNull(value);
           if (field === "estimator") dealUpdates.estimator = asStringOrNull(value);
+          // NOTE: description edits from this SyncHub/RFP-review relay are DELIBERATELY not written to the
+          // deal_history description change-log. That table's changed_by is NOT NULL + FK to users.id, and
+          // this is a SYSTEM actor (buildAuditActorFromSystem) with no CRM user to attribute; the edit is
+          // still captured in audit_log (below) as the forensic copy. Recording it here would require a
+          // nullable changed_by (a cross-tenant migration) — a deliberate out-of-scope boundary, not an omission.
           if (field === "description") dealUpdates.description = asStringOrNull(value);
           if (field === "dueDate") dealUpdates.bid_due_date = asDateOrNull(value);
           if (field === "address.street") dealUpdates.property_address = asStringOrNull(value);
