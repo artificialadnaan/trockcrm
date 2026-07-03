@@ -106,7 +106,7 @@ export function DealOverviewTab({ deal, officeId, onDealUpdated }: DealOverviewT
             {deal.description && (
               <p className="text-sm text-muted-foreground">{deal.description}</p>
             )}
-            <DealDescriptionHistory dealId={deal.id} />
+            <DealDescriptionHistory dealId={deal.id} refreshKey={deal.description} />
           </CardContent>
         </Card>
 

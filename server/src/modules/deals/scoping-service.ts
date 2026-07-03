@@ -1,6 +1,6 @@
 import { and, eq, isNull, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { dealHistory, dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "@trock-crm/shared/schema";
+import { dealScopingIntake, dealTeamMembers, deals, files, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   isScopeLockedAttachmentKey,
@@ -14,7 +14,7 @@ import { writeAuditLog } from "../../lib/audit-log.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { applyProjectTypeChange, BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
-import { buildDescriptionHistoryEntry } from "./deal-description-history.js";
+import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { inferDealBidBoardOwnership, type PlanDealWorkflowBackfillInput } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
 import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
@@ -1294,11 +1294,13 @@ export async function upsertDealScopingIntake(
   }
 
   if (Object.keys(dealUpdates).length > 0) {
+    // One timestamp shared by the deal update and the history row so updatedAt == changedAt.
+    const now = new Date();
     await tenantDb
       .update(deals)
       .set({
         ...dealUpdates,
-        updatedAt: new Date(),
+        updatedAt: now,
       })
       .where(eq(deals.id, dealId))
       .returning();
@@ -1306,19 +1308,14 @@ export async function upsertDealScopingIntake(
     // The scope-summary field writes back to deals.description outside updateDeal, so record the change-log
     // row here too (source "scope_summary") — otherwise the description-history panel misses scoping edits.
     if (dealUpdates.description !== undefined) {
-      const descriptionHistoryEntry = buildDescriptionHistoryEntry(
-        deal.description,
-        dealUpdates.description,
-        userId,
-        "scope_summary",
-      );
-      if (descriptionHistoryEntry) {
-        await tenantDb.insert(dealHistory).values({
-          dealId,
-          ...descriptionHistoryEntry,
-          changedAt: new Date(),
-        });
-      }
+      await recordDescriptionHistoryChange(tenantDb, {
+        dealId,
+        oldDescription: deal.description,
+        newDescription: dealUpdates.description as string | null,
+        changedBy: userId,
+        source: "scope_summary",
+        changedAt: now,
+      });
     }
   }
 

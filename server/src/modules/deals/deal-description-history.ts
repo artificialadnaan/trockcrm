@@ -27,6 +27,33 @@ export function buildDescriptionHistoryEntry(
 }
 
 /**
+ * Record a description change-log row if (and only if) the description actually changed — the single seam
+ * every write path (updateDeal, scoping workspace, resolved-fields, change orders) funnels through, so the
+ * build + skip-null + insert logic lives in ONE place. Runs in the caller's per-request transaction, so it
+ * is atomic with the deal update (an audit-row failure rolls back the edit — deliberately all-or-nothing,
+ * same as the sibling project_type history write). Pass `changedAt` to share the update's timestamp.
+ */
+export async function recordDescriptionHistoryChange(
+  tenantDb: TenantDb,
+  args: {
+    dealId: string;
+    oldDescription: string | null | undefined;
+    newDescription: string | null | undefined;
+    changedBy: string;
+    source?: string;
+    changedAt?: Date;
+  },
+): Promise<void> {
+  const entry = buildDescriptionHistoryEntry(args.oldDescription, args.newDescription, args.changedBy, args.source);
+  if (!entry) return;
+  await tenantDb.insert(dealHistory).values({
+    dealId: args.dealId,
+    ...entry,
+    changedAt: args.changedAt ?? new Date(),
+  });
+}
+
+/**
  * A deal's DESCRIPTION change-log, newest first, with the editor's display name resolved from the users
  * table (null when the user row is gone). Reads only field_name = "description" rows from the per-tenant
  * deal_history table, so unrelated field-change rows (project_type, etc.) never leak into the log.

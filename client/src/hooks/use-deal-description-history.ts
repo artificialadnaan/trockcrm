@@ -2,8 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import type { DealDescriptionHistoryEntry } from "@trock-crm/shared/types";
 
-/** A deal's description change-log (newest first). Mirrors the hand-rolled deal sub-resource hook style. */
-export function useDealDescriptionHistory(dealId: string) {
+/**
+ * A deal's description change-log (newest first). Mirrors the hand-rolled deal sub-resource hook style.
+ * `refreshKey` re-fetches when it changes (pass the deal's current description) so the panel reflects an
+ * in-place edit immediately, without a remount.
+ */
+export function useDealDescriptionHistory(dealId: string, refreshKey?: unknown) {
   const [history, setHistory] = useState<DealDescriptionHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -26,10 +30,10 @@ export function useDealDescriptionHistory(dealId: string) {
   }, [dealId]);
 
   useEffect(() => {
-    // Clear when switching deals so the prior deal's history never shows under the new deal while loading.
+    // Clear when switching deals (or after a save via refreshKey) so stale rows never linger while loading.
     setHistory([]);
     void refetch();
-  }, [refetch]);
+  }, [refetch, refreshKey]);
 
   return { history, loading, error, refetch };
 }

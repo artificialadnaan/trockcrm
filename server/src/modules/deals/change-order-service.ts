@@ -12,6 +12,7 @@ import {
   removeCommissionForDeal,
 } from "../commissions/service.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -593,6 +594,26 @@ export async function updateDealChangeOrder(
     childUpdates.contractSignedDate = normalized;
   }
   if (input.description !== undefined) childUpdates.description = normalizeDescription(input.description);
+
+  // Capture the child CO's current description before the update so the edit can be logged (a CO child has
+  // its own deal detail page + description-history panel). Only when a description edit is actually happening.
+  let previousChildDescription: string | null | undefined;
+  if (input.description !== undefined && input.updatedBy) {
+    const [existingChild] = (await tenantDb
+      .select({ description: deals.description })
+      .from(deals)
+      .where(
+        and(
+          eq(deals.id, input.id),
+          eq(deals.parentDealId, input.dealId),
+          eq(deals.isChangeOrder, true),
+          eq(deals.isActive, true)
+        )
+      )
+      .limit(1)) as Array<{ description: string | null }>;
+    previousChildDescription = existingChild?.description ?? null;
+  }
+
   const [child] = (await tenantDb
     .update(deals)
     .set(childUpdates)
@@ -606,6 +627,17 @@ export async function updateDealChangeOrder(
     )
     .returning(childChangeOrderColumns)) as ChildCoRow[];
   if (child) {
+    // Record the child CO's description change (source "change_order"), sharing the update's timestamp.
+    if (input.description !== undefined && input.updatedBy) {
+      await recordDescriptionHistoryChange(tenantDb, {
+        dealId: child.id,
+        oldDescription: previousChildDescription,
+        newDescription: child.description,
+        changedBy: input.updatedBy,
+        source: "change_order",
+        changedAt: childUpdates.updatedAt as Date,
+      });
+    }
     // A change order earns commission, so commission must track the CURRENT CO value. When the amount or
     // signed date changes, recompute the child's commission (in-place, attribution-preserving + all-or-
     // nothing) so the payout reflects the edit — never a stale amount, never a duplicate row, and never a

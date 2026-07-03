@@ -1,7 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
-  dealHistory,
   dealScopingIntake,
   deals,
   leadQuestionAnswers,
@@ -13,7 +12,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { applyProjectTypeChange, normalizeOptionalDealBidDueDate } from "./service.js";
-import { buildDescriptionHistoryEntry } from "./deal-description-history.js";
+import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -483,21 +482,18 @@ export async function writeResolvedDealFields(
       .where(eq(deals.id, resolvedDeal.deal.id));
 
     // The resolved-fields path also writes deals.description (lead compatibility write-through or a direct
-    // deal edit), so record the change-log row here too — the third and last description-write path.
+    // deal edit), so record the change-log row here too. Use the RESOLVED (source-lead-aware) description as
+    // the before-value — for a converted deal the lead description is authoritative, so comparing against the
+    // denormalized deals.description mirror could record a stale old value (or miss the change entirely).
     if (dealUpdates.description !== undefined) {
-      const descriptionHistoryEntry = buildDescriptionHistoryEntry(
-        resolvedDeal.deal.description,
-        dealUpdates.description as string | null,
-        input.userId,
-        "resolved_fields",
-      );
-      if (descriptionHistoryEntry) {
-        await tenantDb.insert(dealHistory).values({
-          dealId: resolvedDeal.deal.id,
-          ...descriptionHistoryEntry,
-          changedAt: now,
-        });
-      }
+      await recordDescriptionHistoryChange(tenantDb, {
+        dealId: resolvedDeal.deal.id,
+        oldDescription: resolvedDeal.resolved.description,
+        newDescription: dealUpdates.description as string | null,
+        changedBy: input.userId,
+        source: "resolved_fields",
+        changedAt: now,
+      });
     }
   }
 

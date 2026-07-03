@@ -8,8 +8,8 @@ import { useDealDescriptionHistory } from "@/hooks/use-deal-description-history"
  * Stage & Status card. Self-hides when there is no logged change (a never-edited description has none), so
  * it only appears once the scope has actually changed at least once.
  */
-export function DealDescriptionHistory({ dealId }: { dealId: string }) {
-  const { history, loading } = useDealDescriptionHistory(dealId);
+export function DealDescriptionHistory({ dealId, refreshKey }: { dealId: string; refreshKey?: unknown }) {
+  const { history, loading } = useDealDescriptionHistory(dealId, refreshKey);
   const [open, setOpen] = useState(false);
 
   if (loading || history.length === 0) return null;

@@ -4,6 +4,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import {
   buildDescriptionHistoryEntry,
   listDealDescriptionHistory,
+  recordDescriptionHistoryChange,
 } from "../../../src/modules/deals/deal-description-history.js";
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
@@ -21,7 +22,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text, email text);
     CREATE TABLE deal_history (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       deal_id uuid NOT NULL,
       field_name text NOT NULL,
       old_value text,
@@ -108,5 +109,36 @@ describe("listDealDescriptionHistory", () => {
 
   it("returns an empty array for a deal with no description history", async () => {
     expect(await listDealDescriptionHistory(tdb, U("dff"))).toEqual([]);
+  });
+});
+
+describe("recordDescriptionHistoryChange (the shared write seam)", () => {
+  const REC = U("dab1");
+  const NOOP = U("dab2");
+
+  it("inserts a row (honoring source + a shared changedAt) when the description changed", async () => {
+    await recordDescriptionHistoryChange(tdb, {
+      dealId: REC,
+      oldDescription: "old scope",
+      newDescription: "new scope",
+      changedBy: ALICE,
+      source: "scope_summary",
+      changedAt: new Date("2026-05-01T12:00:00.000Z"),
+    });
+    const rows = await listDealDescriptionHistory(tdb, REC);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      oldValue: "old scope",
+      newValue: "new scope",
+      source: "scope_summary",
+      changedByName: "Alice Rep",
+    });
+    expect(rows[0].changedAt).toContain("2026-05-01");
+  });
+
+  it("is a no-op when the description did not change (null and undefined are the same empty)", async () => {
+    await recordDescriptionHistoryChange(tdb, { dealId: NOOP, oldDescription: "same", newDescription: "same", changedBy: ALICE });
+    await recordDescriptionHistoryChange(tdb, { dealId: NOOP, oldDescription: null, newDescription: undefined, changedBy: ALICE });
+    expect(await listDealDescriptionHistory(tdb, NOOP)).toEqual([]);
   });
 });

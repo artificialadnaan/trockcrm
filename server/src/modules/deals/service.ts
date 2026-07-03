@@ -63,7 +63,7 @@ import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
-import { buildDescriptionHistoryEntry } from "./deal-description-history.js";
+import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
@@ -2568,21 +2568,15 @@ export async function updateDeal(
   const updatedDeal = result[0];
 
   // Append a description change-log row when the description actually changed, so the deal detail page can
-  // show how the scope evolved over time (who changed it, from what, to what). Mirrors the project_type
-  // history write above; the generic audit_log row (below) remains the admin forensic copy.
+  // show how the scope evolved over time (who changed it, from what, to what). The generic audit_log row
+  // (below) remains the admin forensic copy.
   if (updatedDeal) {
-    const descriptionHistoryEntry = buildDescriptionHistoryEntry(
-      existing.description,
-      updatedDeal.description,
-      userId,
-    );
-    if (descriptionHistoryEntry) {
-      await tenantDb.insert(dealHistory).values({
-        dealId,
-        ...descriptionHistoryEntry,
-        changedAt: new Date(),
-      });
-    }
+    await recordDescriptionHistoryChange(tenantDb, {
+      dealId,
+      oldDescription: existing.description,
+      newDescription: updatedDeal.description,
+      changedBy: userId,
+    });
   }
 
   const auditFieldChanges = buildRawFieldChanges(
