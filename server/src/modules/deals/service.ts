@@ -3999,6 +3999,13 @@ export async function setDealSalesSource(
       throw new AppError(422, "Sales source cannot be the deal owner or estimator", "SALES_SOURCE_CONFLICT");
     }
 
+    // TOCTOU-safe service check: a source may only exist on a SERVICE deal. The route pre-reads
+    // workflow_route, but a concurrent service→normal change could slip between that read and this
+    // write — the FOR UPDATE-locked row here is authoritative.
+    if (newSource != null && existing.workflowRoute !== "service") {
+      throw new AppError(422, "Sales source can only be set on a service opportunity", "SALES_SOURCE_NOT_SERVICE");
+    }
+
     // A NEW sales source must be an active user with access to the active office AND must be a rep.
     // Non-rep users (admin / director / construction) have no rep commission settings and do not
     // appear on the rep roster, so attributing them as a source creates an orphaned commission row.

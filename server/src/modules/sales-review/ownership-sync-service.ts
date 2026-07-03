@@ -319,12 +319,10 @@ export async function applyOwnershipSync(tenantDb: TenantDb, officeId: string) {
   const preview = await previewOwnershipSync(tenantDb, officeId);
 
   for (const row of preview.rows) {
-    if (row.summaryBucket === "unchanged") continue;
-
-    // F10: if the incoming owner is the deal's current sales source, the attribution would be
-    // invalid (same rep in both owner + sales_source slots → double commission cut). The
-    // updateDeal guard normally blocks this, but the HubSpot sync bypasses updateDeal. Mirror
-    // the admin ownership-sync fix: detect here and clear the source before writing the new owner.
+    // F10 + I3: if the (current or incoming) owner equals the deal's sales source, that's an invalid
+    // owner==source state (double commission cut). Clear it BEFORE the unchanged-skip, so a pre-existing
+    // conflict (synced before these guards, or externally repaired) on an otherwise-unchanged row still
+    // gets cleared. updateDeal blocks this normally, but the HubSpot sync bypasses updateDeal.
     if (
       row.targetAssignedRepId != null &&
       row.salesSourceUserId != null &&
@@ -332,6 +330,8 @@ export async function applyOwnershipSync(tenantDb: TenantDb, officeId: string) {
     ) {
       await clearSalesSource(tenantDb, row.id, null);
     }
+
+    if (row.summaryBucket === "unchanged") continue;
 
     await tenantDb
       .update(deals)

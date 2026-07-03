@@ -148,6 +148,10 @@ export async function computeRepEarnedFloorGate(
           JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
           WHERE sq.rep_user_id = ${repId}
             AND sq.attribution_role = 'sales_source'
+            -- Only PAYABLE source rows credit the floor: if the rep loses their service-source rate
+            -- (mixed→solo / rate→0) the recompute zeroes the row's rate/amount but keeps it, so a
+            -- $0 cut must not keep satisfying their floor and releasing unrelated earnings.
+            AND sq.amount > 0
             AND d.assigned_rep_id IS DISTINCT FROM ${repId}
             AND COALESCE(d.is_test_data, false) = false
             AND ${sourceSignedDate} IS NOT NULL
