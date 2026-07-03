@@ -384,6 +384,24 @@ export async function writeResolvedDealFields(
     const field = rawField as ResolvedDealField;
     const writePlan = planDealFieldWrite({ field, hasSourceLead: Boolean(sourceLead) });
 
+    // Reciprocal conflict guard: the new owner cannot be the deal's current sales source.
+    // Mirrors the identical check in updateDeal (service.ts) — closes the bypass path where
+    // PATCH /resolved-fields could move the sales-source rep into the owner slot and produce
+    // a double commission cut (owner row + the existing additive sales_source row).
+    if (field === "assignedRepId") {
+      const newAssignedRepId = normalizeOptionalText(value);
+      if (
+        newAssignedRepId != null &&
+        newAssignedRepId === (resolvedDeal.deal.salesSourceUserId ?? null)
+      ) {
+        throw new AppError(
+          422,
+          "Cannot reassign a deal to its sales source",
+          "SALES_SOURCE_CONFLICT"
+        );
+      }
+    }
+
     if (writePlan.target === "deal_scoping") {
       scopingValues.push([field, value]);
       continue;
