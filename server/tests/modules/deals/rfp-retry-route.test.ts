@@ -445,11 +445,13 @@ describe("POST /api/deals/:id/rfp-retry", () => {
       deal: { id: "deal-1" },
       officeId: "office-1",
     });
-    // Re-claims to the create-in-flight 'pending' state, clearing the failure markers.
+    // Re-claims to the create-in-flight 'pending' state, clearing the failure markers, and stamps THIS retry as
+    // the current attempt (finding F4/F5) so a stale prior-attempt failed/dead signal can't clobber it.
     expect(updated[0]).toMatchObject({
       rfpApprovalStatus: "pending",
       rfpOverrideState: null,
       rfpOverrideError: null,
+      rfpBidboardAttemptAt: expect.any(Date),
     });
     // Never touches the SyncHub delivery path: no dead-job lookup, no direct rfp_request_delivery insert.
     expect(executeMock).not.toHaveBeenCalled();

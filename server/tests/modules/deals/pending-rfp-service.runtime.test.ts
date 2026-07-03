@@ -22,6 +22,7 @@ beforeAll(async () => {
       rfp_conflict_reason text, rfp_conflict_with jsonb, rfp_last_attempt_error text,
       rfp_override_state text, rfp_override_decision text, rfp_override_error text,
       rfp_override_note text, rfp_override_reviewed_at timestamptz, rfp_override_reviewed_by uuid,
+      rfp_bidboard_attempt_at timestamptz,
       updated_at timestamptz DEFAULT now()
     );
     INSERT INTO pipeline_stage_config (id, slug) VALUES

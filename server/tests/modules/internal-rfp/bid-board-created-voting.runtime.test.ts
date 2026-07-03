@@ -46,7 +46,7 @@ async function seed() {
       property_zip text, property_country text, stage_id uuid, company_id uuid, primary_contact_id uuid, procore_bid_id bigint,
       procore_company_id text, is_bid_board_owned boolean NOT NULL DEFAULT false, rfp_approval_status text, rfp_declined_reason text,
       rfp_declined_at timestamptz, rfp_override_state text, rfp_override_error text, rfp_override_decision text,
-      rfp_override_reviewed_at timestamptz, bid_board_linked_at timestamptz, assigned_rep_id uuid, rfp_approval_requested_by uuid,
+      rfp_override_reviewed_at timestamptz, rfp_bidboard_attempt_at timestamptz, bid_board_linked_at timestamptz, assigned_rep_id uuid, rfp_approval_requested_by uuid,
       rfp_approval_request_id integer, workflow_route text NOT NULL DEFAULT 'normal', stage_entered_at timestamptz,
       on_hold boolean NOT NULL DEFAULT false, on_hold_started_at timestamptz, on_hold_accumulated_seconds bigint DEFAULT 0,
       on_hold_accumulated_seconds_at_stage_entry bigint DEFAULT 0, is_active boolean NOT NULL DEFAULT true, updated_at timestamptz
@@ -200,6 +200,37 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(rows[0].stage_id).toBe(OPP);
   });
 
+  it("[F4] a 2/3-yes retry is protected: a STALE 'failed' (createdAt < rfp_bidboard_attempt_at) is a no-op; a FRESH one flips to send_failed", async () => {
+    await seed();
+    const ATTEMPT_AT = "2026-07-02T00:00:00.000Z";
+    // A Retry re-set the 2/3-yes deal to 'pending' and stamped rfp_bidboard_attempt_at as the CURRENT attempt
+    // (reviewed_at stays NULL — this is the pending sub-case, not an override).
+    await holder.pg.query(
+      `UPDATE office_test.deals SET rfp_approval_status = 'pending', rfp_bidboard_attempt_at = $2 WHERE id = $1`,
+      [DEAL, ATTEMPT_AT],
+    );
+    const app = await buildApp();
+
+    // STALE 'failed' from the PRIOR attempt (createdAt < attempt_at) must NOT flip the fresh retry to send_failed.
+    const staleRaw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "old failure", createdAt: "2026-06-01T00:00:00.000Z" });
+    const stale = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(staleRaw)).send(staleRaw);
+    expect(stale.status).toBe(200);
+    expect(stale.body.applied).toBe(false);
+    let rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("pending");
+    expect(rows[0].rfp_override_state).toBeNull();
+
+    // FRESH 'failed' (createdAt >= attempt_at) surfaces the visible send_failed marker for THIS attempt.
+    const freshRaw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "this attempt failed", createdAt: "2026-07-03T00:00:00.000Z" });
+    const fresh = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(freshRaw)).send(freshRaw);
+    expect(fresh.status).toBe(200);
+    expect(fresh.body.applied).toBe(true);
+    rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state, rfp_override_error FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("send_failed");
+    expect(rows[0].rfp_override_state).toBe("failed");
+    expect(rows[0].rfp_override_error).toBe("this attempt failed");
+  });
+
   it("[#3] freshness: a STALE request-less 'failed' (createdAt older than the attempt's reviewed_at) is a no-op; a FRESH one flips to send_failed", async () => {
     await seed();
     const REVIEWED_AT = "2026-07-01T00:00:00.000Z";
@@ -226,14 +257,37 @@ describe("POST /bid-board-created (voting path)", () => {
     expect(rows[0].rfp_override_state).toBe("approving");
     expect(rows[0].rfp_override_error).toBeNull();
 
-    // FRESH failed (createdAt >= reviewed_at) surfaces the visible send_failed marker.
+    // FRESH failed (createdAt >= reviewed_at) stamps rfp_override_state='failed' but KEEPS status 'declined'
+    // (finding G4) so the /rfp-review buttons (requestOverrideApproval / reconfirmRfpDecline) stay usable.
     const freshRaw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "new failure", createdAt: "2026-07-02T00:00:00.000Z" });
     const fresh = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(freshRaw)).send(freshRaw);
     expect(fresh.status).toBe(200);
     expect(fresh.body.applied).toBe(true);
     rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state, rfp_override_error FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
-    expect(rows[0].rfp_approval_status).toBe("send_failed");
+    expect(rows[0].rfp_approval_status).toBe("declined"); // kept declined (NOT send_failed) — review buttons stay usable
     expect(rows[0].rfp_override_state).toBe("failed");
     expect(rows[0].rfp_override_error).toBe("new failure");
+  });
+
+  it("[G3] 422s an override-approve 'failed' callback that is missing createdAt (so SyncHub retries, not silently drops)", async () => {
+    await seed();
+    // Override-approve in flight: declined + 'approving' + reviewed_at set. Its freshness needs a real createdAt.
+    await holder.pg.query(
+      `UPDATE office_test.deals SET rfp_approval_status = 'declined', rfp_override_state = 'approving', rfp_override_reviewed_at = '2026-07-01T00:00:00.000Z' WHERE id = $1`,
+      [DEAL],
+    );
+    const app = await buildApp();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // A 'failed' with NO createdAt would otherwise no-op (0 rows) + 200, so SyncHub would stop retrying while the
+    // deal is stuck 'approving'. Must 422 instead.
+    const raw = JSON.stringify({ status: "failed", sourceDealId: DEAL, error: "creation failed" });
+    const res = await request(app).post("/bid-board-created").set("content-type", "application/json").set("x-rfp-request-signature", sign(raw)).send(raw);
+    expect(res.status).toBe(422);
+    // Deal is untouched — still awaiting a well-formed callback.
+    const rows = (await holder.pg.query(`SELECT rfp_approval_status, rfp_override_state, rfp_override_error FROM office_test.deals WHERE id=$1`, [DEAL])).rows as any[];
+    expect(rows[0].rfp_approval_status).toBe("declined");
+    expect(rows[0].rfp_override_state).toBe("approving");
+    expect(rows[0].rfp_override_error).toBeNull();
+    warnSpy.mockRestore();
   });
 });

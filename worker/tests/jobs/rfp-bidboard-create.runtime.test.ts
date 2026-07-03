@@ -62,6 +62,7 @@ describe("runRfpBidBoardCreateDeadLetterSweep", () => {
             id: 91,
             office_id: "office-1",
             last_error: "rfp_bidboard_create failed with 500: boom",
+            created_at: "2026-07-01T00:00:00.000Z",
             payload: { dealId: "deal-9", syncHubUrl: "https://synchub.example.com", body: {} },
           }],
         };
@@ -95,20 +96,24 @@ describe("runRfpBidBoardCreateDeadLetterSweep", () => {
     const sqlText = clientQuery.mock.calls.map((call) => String(call[0])).join("\n");
     expect(sqlText).toContain('"office_dallas".deals');
     expect(sqlText).toContain("rfp_override_state = 'failed'");
-    // finding #2: the deal is driven to the VISIBLE, recoverable send_failed status (same as the failed callback),
-    // scoped to a request-less voting-path deal.
-    expect(sqlText).toContain("rfp_approval_status = 'send_failed'");
+    // finding #2 + G4: the 2/3-yes sub-case ('pending') is driven to the VISIBLE, recoverable send_failed status,
+    // while the override sub-case ('declined') is KEPT declined so the review buttons stay usable — a CASE expr.
+    expect(sqlText).toContain("CASE WHEN rfp_approval_status = 'pending' THEN 'send_failed' ELSE rfp_approval_status END");
     expect(sqlText).toContain("rfp_approval_request_id IS NULL");
-    expect(sqlText).toContain("rfp_approval_status IS DISTINCT FROM 'send_failed'");
     // never touches an already-approved deal or a re-confirmed denial
     expect(sqlText).toContain("rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'");
     expect(sqlText).toContain("rfp_approval_status = 'pending'");
     // marks the job handled so it isn't reprocessed
     expect(sqlText).toContain("jsonb_set(payload, '{dealHandled}'");
-    // the deal update is keyed by the job's dealId + carries the exhaustion error
+    // finding F5: per-attempt freshness — a dead job from a PRIOR attempt (created_at < the deal's current
+    // rfp_bidboard_attempt_at) must be skipped. The update carries the job's created_at ($3) and the SQL gates on it.
+    expect(sqlText).toContain("rfp_bidboard_attempt_at IS NULL");
+    expect(sqlText).toContain("$3::timestamptz >= rfp_bidboard_attempt_at");
+    // the deal update is keyed by the job's dealId + carries the exhaustion error + the job's created_at (freshness)
     expect(dealUpdates).toHaveLength(1);
     expect(dealUpdates[0]?.[0]).toBe("rfp_bidboard_create failed with 500: boom");
     expect(dealUpdates[0]?.[1]).toBe("deal-9");
+    expect(dealUpdates[0]?.[2]).toBe("2026-07-01T00:00:00.000Z");
     expect(release).toHaveBeenCalled();
   });
 

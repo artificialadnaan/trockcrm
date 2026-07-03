@@ -22,15 +22,31 @@ type DealRow = typeof deals.$inferSelect;
 const RFP_VOTER_COUNT = 3;
 
 /**
- * True iff the configured voter allowlist can actually produce a decision — i.e. it holds the full
- * RFP_VOTER_COUNT-sized trio. A partial config (0/1/2 emails, e.g. a RFP_VOTER_EMAILS typo that drops a comma)
- * can never reach the 2-of-3 tally: requireRfpVoter authorizes only listed voters, so with <3 configured the
- * round would sit 'pending' forever — and 'pending' is not a cancellable attention state, so the deal strands
- * with no recovery. The trigger-rfp guard uses this to fall back to the existing SyncHub delivery path on a
- * misconfigured flag rather than opening an undecidable round.
+ * True iff the configured voter allowlist is EXACTLY the fixed RFP_VOTER_COUNT trio. It must be exact, not
+ * "at least": requireRfpVoter and the invitation worker both authorize every address resolveRfpVoterEmails
+ * returns, so
+ *   - FEWER than 3 (a RFP_VOTER_EMAILS typo that drops a comma) can never reach the 2-of-3 tally — the round
+ *     sits 'pending' forever, and 'pending' is not a cancellable attention state, so the deal strands; and
+ *   - MORE than 3 (an accidental 4th address) makes it a 2-of-4 while the UI + decline summary still say
+ *     "(N of 3)" — the extra person can cast a deciding vote (finding G2).
+ * Either misconfiguration falls back to the existing SyncHub delivery path instead of opening a mis-sized round.
  */
 export function hasSufficientRfpVoters(env: NodeJS.ProcessEnv): boolean {
-  return resolveRfpVoterEmails(env).length >= RFP_VOTER_COUNT;
+  return resolveRfpVoterEmails(env).length === RFP_VOTER_COUNT;
+}
+
+/**
+ * True iff the tenant's rfp_votes table exists (migration 0175 applied for THIS office). The trigger-rfp voting
+ * branch probes this so that, if ENABLE_RFP_VOTING is on for an office whose migration hasn't run, it falls back
+ * to the SyncHub path instead of opening a round whose first /rfp-vote POST would 500 on `insert(rfpVotes)` and
+ * strand the deal 'pending' (uncancellable) — the detail loader tolerates the missing table, so voters would
+ * otherwise reach a form that can never record a vote (finding G1). to_regclass returns NULL (no error, no txn
+ * abort) for a missing relation, resolved against the tenant search_path.
+ */
+export async function rfpVotesTableExists(tenantDb: TenantDb): Promise<boolean> {
+  const res: any = await tenantDb.execute(sql`SELECT to_regclass('rfp_votes') AS reg`);
+  const rows = Array.isArray(res) ? res : res.rows ?? [];
+  return rows[0]?.reg != null;
 }
 
 export interface CastRfpVoteDeps {

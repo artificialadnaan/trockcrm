@@ -1,3 +1,4 @@
+import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
 import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
@@ -152,4 +153,118 @@ export function buildRfpVoteInvitationEmail(input: {
 </html>`;
 
   return { subject, html, text, dealNumber: input.dealNumber };
+}
+
+type Queryable = { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> };
+type PoolLike = Queryable & { connect?: () => Promise<Queryable & { release: () => void }> };
+
+function quoteIdent(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+async function resolveOfficeSchema(db: Queryable, officeId: string | null): Promise<string> {
+  if (!officeId) throw new Error("rfp_vote_invitation dead-letter sweep is missing officeId");
+  // requireActive:false — a dead job for a since-deactivated office still needs its deal surfaced.
+  const result = await db.query(`SELECT slug FROM public.offices WHERE id = $1`, [officeId]);
+  const slug = result.rows[0]?.slug;
+  if (typeof slug !== "string" || !/^[a-z][a-z0-9_]*$/.test(slug)) {
+    throw new Error(`Unable to resolve office schema for officeId=${officeId}`);
+  }
+  return `office_${slug}`;
+}
+
+/**
+ * Dead-letter backstop for rfp_vote_invitation (finding F7). openRfpVoteRound reserves the deal ('pending') then
+ * enqueues this email job; if it exhausts maxAttempts (worker lacks RFP_VOTER_EMAILS, provider down, ...) the
+ * round is open but nobody was invited — and 'pending' is NOT a cancellable attention state, so the deal strands
+ * with no recovery. This sweep surfaces the failure as the VISIBLE, cancellable send_failed state (the same
+ * Pending-RFP attention status pendingRfpSubStateForStatus renders + cancel-rfp allows Returning to Opportunity),
+ * so the rep can recover the deal and re-trigger. Guarded so it only touches a still-open, request-less round
+ * with NO votes yet — a round that already has a cast vote is progressing (a voter DID get the link) and must
+ * not be nuked. Claim is single-transaction (mirrors runRfpBidBoardCreateDeadLetterSweep): the per-row 'claimed'
+ * marker is written in the SAME txn as the deal update, so a throw leaves the row unclaimed + retryable.
+ */
+export async function runRfpVoteInvitationDeadLetterSweep(
+  deps: { db?: PoolLike; limit?: number } = {}
+): Promise<number> {
+  const db = deps.db ?? pool;
+  const limit = deps.limit ?? 25;
+  const client: Queryable & { release?: () => void } = db.connect ? await db.connect() : db;
+  let handled = 0;
+  try {
+    const result = await client.query(
+      `SELECT id, payload, office_id, last_error
+         FROM public.job_queue
+        WHERE status = 'dead'
+          AND job_type = 'rfp_vote_invitation'
+          AND (payload->>'dealHandled' IS NULL OR payload->>'dealHandled' IN ('false', 'claimed'))
+        ORDER BY id ASC
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED`,
+      [limit]
+    );
+
+    for (const job of result.rows) {
+      try {
+        await client.query("BEGIN");
+        const locked = await client.query(
+          `SELECT id FROM public.job_queue
+            WHERE id = $1 AND status = 'dead'
+              AND (payload->>'dealHandled' IS NULL OR payload->>'dealHandled' IN ('false', 'claimed'))
+            FOR UPDATE SKIP LOCKED`,
+          [job.id]
+        );
+        if (locked.rows.length === 0) { await client.query("ROLLBACK"); continue; }
+        await client.query(
+          "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', '\"claimed\"'::jsonb, true) WHERE id = $1",
+          [job.id]
+        );
+
+        const payload = job.payload as { dealId?: string };
+        if (!payload?.dealId) {
+          await client.query(
+            "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",
+            [job.id]
+          );
+          await client.query("COMMIT");
+          continue;
+        }
+
+        const schemaName = await resolveOfficeSchema(client, job.office_id);
+        const lastError = String(job.last_error ?? "RFP vote invitations could not be sent").slice(0, 2000);
+        await client.query(
+          `UPDATE ${quoteIdent(schemaName)}.deals
+              SET rfp_approval_status = 'send_failed',
+                  rfp_last_attempt_error = $1,
+                  updated_at = NOW()
+            WHERE id = $2
+              -- still an open, request-less (voting) round the invitation was for
+              AND rfp_approval_status = 'pending'
+              AND rfp_approval_request_id IS NULL
+              -- don't nuke a progressing round: if ANY vote was cast, a voter got the link (surface it as-is)
+              AND NOT EXISTS (
+                SELECT 1 FROM ${quoteIdent(schemaName)}.rfp_votes v
+                 WHERE v.deal_id = $2
+                   AND v.round_event_id = (
+                     SELECT d2.rfp_approval_request_event_id FROM ${quoteIdent(schemaName)}.deals d2 WHERE d2.id = $2
+                   )
+              )
+              AND rfp_last_attempt_error IS DISTINCT FROM $1`,
+          [lastError, payload.dealId]
+        );
+        await client.query(
+          "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",
+          [job.id]
+        );
+        await client.query("COMMIT");
+        handled += 1;
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        console.error(`[Worker:rfp_vote_invitation] Failed to handle dead invitation job ${job.id}`, err);
+      }
+    }
+    return handled;
+  } finally {
+    if ("release" in client && typeof client.release === "function") client.release();
+  }
 }

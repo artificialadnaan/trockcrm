@@ -177,7 +177,7 @@ import {
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 import { enqueueRfpBidBoardCreate, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
-import { castRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound } from "./rfp-vote-service.js";
+import { castRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -1274,7 +1274,15 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     // false for the missing voters, nobody can push it to a decision, and the still-'pending' round can't be
     // returned to Opportunity (cancel only clears an attention-state RFP). A misconfigured flag must degrade
     // safely, so fall back to the existing SyncHub delivery path below instead. (See hasSufficientRfpVoters.)
-    if (!isServiceRfp(deal) && isRfpVotingEnabled() && hasSufficientRfpVoters(process.env)) {
+    // Also require the rfp_votes table to exist for THIS office (finding G1): if the flag is on but migration
+    // 0175 hasn't run here, opening a round would let voters reach a form whose first cast 500s on the missing
+    // table, leaving the deal stranded 'pending'. Probe with to_regclass and fall back to SyncHub if absent.
+    if (
+      !isServiceRfp(deal) &&
+      isRfpVotingEnabled() &&
+      hasSufficientRfpVoters(process.env) &&
+      (await rfpVotesTableExists(req.tenantDb!))
+    ) {
       await openRfpVoteRound({
         tenantDb: req.tenantDb!,
         officeId,
@@ -1514,6 +1522,10 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
           rfpApprovalStatus: "pending",
           rfpOverrideState: null,
           rfpOverrideError: null,
+          // Stamp THIS retry as the current attempt (finding F4/F5). The failed callback + dead-letter sweep
+          // ignore any 'failed'/dead signal older than this, so a late duplicate from the prior attempt can't
+          // flip this fresh in-flight retry back to send_failed.
+          rfpBidboardAttemptAt: new Date(),
           updatedAt: new Date(),
         })
         .where(

@@ -732,10 +732,24 @@ internalRfpRoutes.post(
         // value-distinct + status guards; a later 'created' callback clears the marker and approves + advances.
         if (dealRequestId == null) {
           // Freshness input for the request-less failed path (same guard the request-backed path uses). Unlike
-          // that path we do NOT 422 a missing createdAt: sub-case (1) ('pending', rfp_override_reviewed_at IS
-          // NULL) is legitimately timestamp-less and exempt from the guard below; only sub-case (2) (an override
-          // retry with reviewed_at set) enforces createdAt >= reviewed_at.
+          // that path we do NOT 422 a missing createdAt for sub-case (1) ('pending', rfp_override_reviewed_at IS
+          // NULL) — it's legitimately timestamp-less and exempt from the guard below.
           const votingFailedCreatedAt = asDateOrNull(payload.createdAt);
+          // ...BUT the override sub-case (2) DOES require it (finding G3): with reviewed_at set the freshness
+          // clause needs a real timestamp, so a missing/mangled createdAt would match 0 rows and 200 applied:false
+          // — SyncHub treats that as delivered and stops retrying, leaving the deal stuck 'declined'/'approving'.
+          // 422 it (like the request-backed failed path) so SyncHub retries with a well-formed callback.
+          const isOverrideApproveSubcase =
+            found.deal.rfp_approval_status === "declined" &&
+            found.deal.rfp_override_state === "approving" &&
+            found.deal.rfp_override_reviewed_at != null;
+          if (isOverrideApproveSubcase && !votingFailedCreatedAt) {
+            console.warn(
+              `[RFP callback] override-approve 'failed' for deal ${sourceDealId} is missing a parseable createdAt; returning 422 so SyncHub retries instead of silently dropping it`
+            );
+            res.status(422).json({ success: false, error: "invalid_payload" });
+            return;
+          }
           let failedApplied = false;
           const client = await pool.connect();
           let releaseErr: unknown;
@@ -745,9 +759,12 @@ internalRfpRoutes.post(
               `UPDATE ${quoteIdent(found.schemaName)}.deals
                   SET rfp_override_state = 'failed',
                       rfp_override_error = $1,
-                      -- leave the "creating" limbo: send_failed is the Pending-RFP attention state that
-                      -- surfaces the failure and offers Retry (mirrors the dead-letter sweep's intent).
-                      rfp_approval_status = 'send_failed',
+                      -- 2/3-YES sub-case (was 'pending'): leave the "creating" limbo for send_failed, the
+                      -- Pending-RFP attention state that surfaces the failure + offers Retry. Override sub-case
+                      -- (was 'declined' + 'approving') MUST STAY 'declined' (finding G4) so the /rfp-review
+                      -- buttons keep working — requestOverrideApproval + reconfirmRfpDecline are both
+                      -- status='declined'-gated; /rfp-retry still recovers it via rfp_override_state='failed'.
+                      rfp_approval_status = CASE WHEN rfp_approval_status = 'pending' THEN 'send_failed' ELSE rfp_approval_status END,
                       updated_at = NOW()
                 WHERE id = $2
                   AND rfp_approval_request_id IS NULL
@@ -763,10 +780,21 @@ internalRfpRoutes.post(
                     rfp_override_reviewed_at IS NULL
                     OR ($3::timestamptz IS NOT NULL AND $3::timestamptz >= rfp_override_reviewed_at)
                   )
+                  -- ...and the SAME freshness against the request-less per-attempt marker (finding F4). Each
+                  -- /rfp-retry stamps rfp_bidboard_attempt_at, so once a retry starts, a late duplicate of the
+                  -- PRIOR attempt's 'failed' (createdAt < the new attempt's stamp) is rejected and can't flip the
+                  -- fresh in-flight retry back to send_failed. The FIRST attempt has attempt_at NULL (exempt), so
+                  -- its failure still surfaces immediately (even without a createdAt).
+                  AND (
+                    rfp_bidboard_attempt_at IS NULL
+                    OR ($3::timestamptz IS NOT NULL AND $3::timestamptz >= rfp_bidboard_attempt_at)
+                  )
+                  -- idempotency: re-applying the same failure is a no-op. Keyed on override_state/error only
+                  -- (NOT status) since the status transition now differs per sub-case (send_failed vs. kept
+                  -- 'declined') — override_state going to 'failed' already distinguishes the first application.
                   AND (
                     rfp_override_state IS DISTINCT FROM 'failed'
                     OR rfp_override_error IS DISTINCT FROM $1
-                    OR rfp_approval_status IS DISTINCT FROM 'send_failed'
                   )`,
               [overrideError, sourceDealId, votingFailedCreatedAt]
             );
@@ -965,6 +993,8 @@ internalRfpRoutes.post(
                   bid_board_linked_at = NOW(),
                   rfp_override_state = NULL,
                   rfp_override_error = NULL,
+                  -- clear the per-attempt marker (finding F4/F5): the create succeeded, so no attempt is in flight.
+                  rfp_bidboard_attempt_at = NULL,
                   updated_at = NOW()
             WHERE id = $3
               -- a re-confirmed denial is terminal; never let a (delayed) success callback override it

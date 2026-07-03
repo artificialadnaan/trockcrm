@@ -167,6 +167,9 @@ export async function cancelPendingRfp(
       rfpOverrideNote: null,
       rfpOverrideReviewedAt: null,
       rfpOverrideReviewedBy: null,
+      // Clear the per-attempt marker (finding F4/F5) with the rest of the RFP fields so a fresh re-trigger
+      // starts with no stale attempt timestamp.
+      rfpBidboardAttemptAt: null,
       // Bump updated_at like the other RFP state transitions (rfp-override-service) — deals.updated_at
       // has no $onUpdate, so without this the cancelled deal looks stale in updated_at-ordered lists.
       updatedAt: new Date(),

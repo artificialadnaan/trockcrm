@@ -120,7 +120,7 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
     // Candidate dead rows. This SELECT only READS + briefly locks (FOR UPDATE SKIP LOCKED); it does NOT write the
     // 'claimed' marker. The claim is written per-row inside the transaction below so a later throw rolls it back.
     const result = await client.query(
-      `SELECT id, payload, office_id, last_error
+      `SELECT id, payload, office_id, last_error, created_at
          FROM public.job_queue
         WHERE status = 'dead'
           AND job_type = 'rfp_bidboard_create'
@@ -175,10 +175,12 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
           `UPDATE ${quoteIdent(schemaName)}.deals
               SET rfp_override_state = 'failed',
                   rfp_override_error = $1,
-                  -- Visible, recoverable state (finding #2): send_failed is the Pending-RFP attention status the
-                  -- surface renders + offers Retry for — the SAME state the internal-rfp failed callback sets, so
-                  -- both failure paths (SyncHub callback + this dead-letter sweep) converge on one recoverable status.
-                  rfp_approval_status = 'send_failed',
+                  -- 2/3-YES sub-case (was 'pending') -> send_failed, the Pending-RFP attention status the surface
+                  -- renders + offers Retry for (same as the internal-rfp failed callback). Override sub-case (was
+                  -- 'declined' + 'approving') MUST STAY 'declined' (finding G4) so the /rfp-review buttons keep
+                  -- working; /rfp-retry still recovers it via rfp_override_state='failed'. Both failure paths
+                  -- (callback + this sweep) converge on the same per-sub-case status.
+                  rfp_approval_status = CASE WHEN rfp_approval_status = 'pending' THEN 'send_failed' ELSE rfp_approval_status END,
                   updated_at = NOW()
             WHERE id = $2
               -- request-less (voting-path) only: every rfp_bidboard_create job is a voting 2/3-yes or a voting
@@ -193,12 +195,22 @@ export async function runRfpBidBoardCreateDeadLetterSweep(
                 rfp_approval_status = 'pending'
                 OR (rfp_approval_status = 'declined' AND rfp_override_state = 'approving')
               )
+              -- per-attempt freshness (finding F5): ignore a dead job from a PRIOR attempt. Each /rfp-retry
+              -- stamps rfp_bidboard_attempt_at, so a dead job enqueued BEFORE the current attempt (its created_at
+              -- < the stamp) is skipped and can't flip a fresh in-flight retry to send_failed. The first attempt
+              -- has attempt_at NULL (exempt), so its own dead job still surfaces.
+              AND (
+                rfp_bidboard_attempt_at IS NULL
+                OR $3::timestamptz >= rfp_bidboard_attempt_at
+              )
+              -- idempotency keyed on override_state/error only (NOT status), since the status transition now
+              -- differs per sub-case (send_failed vs. kept 'declined') — override_state -> 'failed' already marks
+              -- the first application. (finding G4)
               AND (
                 rfp_override_state IS DISTINCT FROM 'failed'
                 OR rfp_override_error IS DISTINCT FROM $1
-                OR rfp_approval_status IS DISTINCT FROM 'send_failed'
               )`,
-          [overrideError, payload.dealId]
+          [overrideError, payload.dealId, job.created_at]
         );
         await client.query(
           "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",

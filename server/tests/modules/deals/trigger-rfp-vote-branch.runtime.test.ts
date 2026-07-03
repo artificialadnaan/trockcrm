@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound } from "../../../src/modules/deals/rfp-vote-service.js";
+import { hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "../../../src/modules/deals/rfp-vote-service.js";
 import { isRfpVotingEnabled } from "../../../src/config/feature-flags.js";
 
 const DEAL = "00000000-0000-0000-0000-0000000000d1";
@@ -68,12 +68,22 @@ describe("trigger-rfp voting branch", () => {
     expect(isServiceRfp(dealRow({ workflowRoute: "service" }))).toBe(true);
   });
 
-  it("hasSufficientRfpVoters requires the full trio (a partial RFP_VOTER_EMAILS falls back to SyncHub)", () => {
+  it("hasSufficientRfpVoters requires EXACTLY the trio (finding G2: <3 AND >3 both fall back to SyncHub)", () => {
     expect(hasSufficientRfpVoters({ RFP_VOTER_EMAILS: "a@x.com, b@x.com, c@x.com" } as any)).toBe(true);
     // A dropped-comma / partial config can never reach 2-of-3 — must NOT open the voting branch.
     expect(hasSufficientRfpVoters({ RFP_VOTER_EMAILS: "a@x.com, b@x.com" } as any)).toBe(false);
     expect(hasSufficientRfpVoters({ RFP_VOTER_EMAILS: "only.one@x.com" } as any)).toBe(false);
     expect(hasSufficientRfpVoters({} as any)).toBe(false);
+    // An accidental 4th voter would make it 2-of-4 while the UI still says "of 3" — also fall back.
+    expect(hasSufficientRfpVoters({ RFP_VOTER_EMAILS: "a@x.com, b@x.com, c@x.com, d@x.com" } as any)).toBe(false);
+  });
+
+  it("rfpVotesTableExists is false pre-migration and true once rfp_votes exists (finding G1)", async () => {
+    pg = await setup(); // setup() creates deals + job_queue, but NOT rfp_votes
+    const tdb: any = drizzle(pg as any);
+    expect(await rfpVotesTableExists(tdb)).toBe(false);
+    await pg.exec(`CREATE TABLE rfp_votes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid);`);
+    expect(await rfpVotesTableExists(tdb)).toBe(true);
   });
 
   it("non-service deal opens a round (status pending + invitation job, no SyncHub delivery job)", async () => {
