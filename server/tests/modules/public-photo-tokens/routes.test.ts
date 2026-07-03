@@ -38,13 +38,15 @@ const mocks = vi.hoisted(() => ({
   getPublicPhotoAsset: vi.fn(),
   listTokensForDeal: vi.fn(),
   revokeToken: vi.fn(),
-  assertDealCollaboratorAccess: vi.fn(),
+  getDealById: vi.fn(),
 }));
 
 vi.mock("../../../src/middleware/auth.js", () => ({ authMiddleware: mocks.authMiddleware }));
 vi.mock("../../../src/middleware/field-auth.js", () => ({ requireCrmUser: mocks.requireCrmUser }));
 vi.mock("../../../src/middleware/tenant.js", () => ({ tenantMiddleware: mocks.tenantMiddleware }));
-vi.mock("../../../src/lib/collaboration-access.js", () => ({ assertDealCollaboratorAccess: mocks.assertDealCollaboratorAccess }));
+// The real requireAnyRole (rbac) and getCollaborativeReadRole (collaboration-access) run — only getDealById
+// is mocked (it filters is_active + office; a null result stands in for a soft-deleted / out-of-office deal).
+vi.mock("../../../src/modules/deals/service.js", () => ({ getDealById: mocks.getDealById }));
 vi.mock("../../../src/modules/public-photo-tokens/service.js", () => ({
   generatePublicToken: mocks.generatePublicToken,
   getPublicPhotoViewer: mocks.getPublicPhotoViewer,
@@ -83,7 +85,7 @@ describe("public photo token routes", () => {
     vi.clearAllMocks();
     mocks.userRole = "admin";
     mocks.authEnabled = true;
-    mocks.assertDealCollaboratorAccess.mockResolvedValue({ id: "deal-1" });
+    mocks.getDealById.mockResolvedValue({ id: "deal-1" });
     mocks.generatePublicToken.mockResolvedValue({
       rawToken: "raw-token",
       token: { id: "token-1", dealId: "deal-1", tenantId: "tenant-1", expiresAt: null },
@@ -277,27 +279,41 @@ describe("public photo token routes", () => {
     });
   });
 
-  it("requires CRM auth: 401 unauthenticated, 403 for a non-CRM (field_contractor) user", async () => {
+  it("gates to sales-CRM roles: 401 unauthenticated, 403 for field_contractor AND construction", async () => {
     mocks.authEnabled = false;
     const unauthenticated = await request(createApp()).post("/api/admin/deals/deal-1/photo-tokens").send({});
     expect(unauthenticated.status).toBe(401);
 
     mocks.authEnabled = true;
     mocks.userRole = "field_contractor";
-    const forbidden = await request(createApp()).post("/api/admin/deals/deal-1/photo-tokens").send({});
-    expect(forbidden.status).toBe(403);
+    expect((await request(createApp()).post("/api/admin/deals/deal-1/photo-tokens").send({})).status).toBe(403);
+
+    // construction passes requireCrmUser but is NOT a sales-CRM role — its stricter field-share flow stays
+    // the only path; requireAnyRole (admin/director/rep) rejects it here.
+    mocks.userRole = "construction";
+    expect((await request(createApp()).post("/api/admin/deals/deal-1/photo-tokens").send({})).status).toBe(403);
   });
 
   it("lets a SALES REP generate a share link (sharing is not admin-only) for a deal in their office", async () => {
-    // The regression: a rep (Edward McAfee) got 'admin permission needed'. Any CRM user who can access the
-    // deal may share its photos — the endpoint checks office-collaborator access, not admin role.
+    // The regression: a rep (Edward McAfee) got 'admin permission needed'. Any sales-CRM user who can open
+    // the deal may share its photos — the deal is loaded with a collaborator (non-owner-scoped) read role.
     mocks.userRole = "rep";
 
     const response = await request(createApp()).post("/api/admin/deals/deal-1/photo-tokens").send({});
 
     expect(response.status).toBe(201);
     expect(response.body.rawToken).toBe("raw-token");
-    expect(mocks.assertDealCollaboratorAccess).toHaveBeenCalledWith(expect.anything(), "deal-1", expect.objectContaining({ role: "rep" }));
+    // A rep is elevated off owner-scoping to load a deal in their office (not just their own assigned deals).
+    expect(mocks.getDealById).toHaveBeenCalledWith(expect.anything(), "deal-1", expect.not.stringMatching(/^rep$/), "user-1");
+  });
+
+  it("404s when the deal is soft-deleted / not in the office (getDealById filters is_active) — no link minted", async () => {
+    mocks.getDealById.mockResolvedValueOnce(null);
+
+    const response = await request(createApp()).post("/api/admin/deals/deleted-deal/photo-tokens").send({});
+
+    expect(response.status).toBe(404);
+    expect(mocks.generatePublicToken).not.toHaveBeenCalled();
   });
 
   it("lists admin public tokens without raw or hashed token values", async () => {
@@ -312,8 +328,8 @@ describe("public photo token routes", () => {
     expect(mocks.listTokensForDeal).toHaveBeenCalledWith("deal-1", "tenant-1");
   });
 
-  it("enforces office deal access before listing tokens (deal outside the office -> 404)", async () => {
-    mocks.assertDealCollaboratorAccess.mockRejectedValueOnce(new AppError(404, "Deal not found"));
+  it("enforces office/active deal access before listing tokens (inaccessible deal -> 404)", async () => {
+    mocks.getDealById.mockResolvedValueOnce(null);
 
     const response = await request(createApp()).get("/api/admin/deals/other-deal/photo-tokens");
 

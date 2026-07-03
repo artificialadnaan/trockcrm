@@ -3,6 +3,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { authMiddleware } from "../../middleware/auth.js";
 import { requireCrmUser } from "../../middleware/field-auth.js";
+import { requireAnyRole } from "../../middleware/rbac.js";
 import {
   generatePublicToken,
   getPublicPhotoAsset,
@@ -11,7 +12,8 @@ import {
   listTokensForDeal,
   revokeToken,
 } from "./service.js";
-import { assertDealCollaboratorAccess } from "../../lib/collaboration-access.js";
+import { getDealById } from "../deals/service.js";
+import { getCollaborativeReadRole } from "../../lib/collaboration-access.js";
 import { findJpegHeaderEnd, stripJpegMetadata } from "./image-metadata.js";
 import { publicPhotoShareUrl } from "./public-share-url.js";
 
@@ -156,18 +158,24 @@ publicPhotoViewerRoutes.get("/:token/photos/:photoId/image", async (req, res, ne
   }
 });
 
-// Generating/listing/revoking a photo share link is available to ANY CRM user (the router already applies
-// requireCrmUser, which admits admin/director/rep and rejects field_contractor) — not just admins. Reps
-// share job photos out of the CRM. Access to the specific deal is enforced by assertDealCollaboratorAccess
-// (any member of the deal's office, matching who can open the deal + its Photos tab), NOT by admin role.
+// Generating/listing/revoking a photo share link is for SALES-CRM users (admin/director/rep) — not just
+// admins. Reps share job photos out of the CRM. requireAnyRole intentionally excludes `construction` (which
+// has its own stricter, project/photo-scoped field-share flow) and `field_contractor`. Access to the specific
+// deal uses a COLLABORATOR read role (rep elevated to a non-owner-scoped read), so any office member can
+// share a deal they can open — and getDealById filters is_active, so a soft-deleted job can't be re-shared.
+function dealShareReadRole(req: Request): string {
+  return getCollaborativeReadRole(req.user!.role, "all");
+}
 
 adminPhotoTokenRoutes.post(
   "/admin/deals/:dealId/photo-tokens",
+  requireAnyRole,
   tenantMiddleware,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const dealId = String(req.params.dealId);
-      await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
+      const deal = await getDealById(req.tenantDb!, dealId, dealShareReadRole(req), req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found");
       const expiresAt = typeof req.body?.expiresAt === "string" && req.body.expiresAt
         ? new Date(req.body.expiresAt)
         : null;
@@ -191,11 +199,13 @@ adminPhotoTokenRoutes.post(
 
 adminPhotoTokenRoutes.get(
   "/admin/deals/:dealId/photo-tokens",
+  requireAnyRole,
   tenantMiddleware,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       const dealId = String(req.params.dealId);
-      await assertDealCollaboratorAccess(req.tenantDb!, dealId, req.user!);
+      const deal = await getDealById(req.tenantDb!, dealId, dealShareReadRole(req), req.user!.id);
+      if (!deal) throw new AppError(404, "Deal not found");
       const tokens = await listTokensForDeal(dealId, req.user!.activeOfficeId);
       await req.commitTransaction!();
       res.json({ tokens });
@@ -207,6 +217,7 @@ adminPhotoTokenRoutes.get(
 
 adminPhotoTokenRoutes.post(
   "/admin/photo-tokens/:tokenId/revoke",
+  requireAnyRole,
   async (req: Request, res: Response, next: NextFunction) => {
     try {
       await revokeToken(String(req.params.tokenId), req.user!.id, req.user!.activeOfficeId);
