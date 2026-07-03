@@ -38,6 +38,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import {
   calculateCommissionForDeal,
@@ -987,10 +988,15 @@ export async function validateAssignee(tenantDb: TenantDb, assigneeId: string, o
  * Must be called AFTER validateAssignee so the user's existence and office access are
  * already confirmed.
  */
-export async function assertSalesSourceIsRep(tenantDb: TenantDb, userId: string): Promise<void> {
+// The sales source may be ANY internal CRM user (rep, director, admin, construction) — e.g. a director
+// who sources service opportunities — NOT just a rep. External field_contractors are excluded (they have
+// no CRM standing and can't hold commission settings). Whether the source actually EARNS a service-source
+// cut still follows their commission settings: a source with no active service-source rate is tracked
+// (attribution) but mints no commission row.
+export async function assertSalesSourceIsCrmUser(tenantDb: TenantDb, userId: string): Promise<void> {
   const [u] = await tenantDb.select({ role: users.role }).from(users).where(eq(users.id, userId)).limit(1);
-  if (!u || u.role !== "rep") {
-    throw new AppError(422, "Sales source must be a sales rep", "SALES_SOURCE_NOT_REP");
+  if (!u || !isCrmUserRole(u.role)) {
+    throw new AppError(422, "Sales source must be an internal CRM user", "SALES_SOURCE_NOT_CRM_USER");
   }
 }
 
@@ -4084,7 +4090,7 @@ export async function setDealSalesSource(
     // appear on the rep roster, so attributing them as a source creates an orphaned commission row.
     if (newSource != null) {
       await validateAssignee(tx, newSource, officeId ?? undefined);
-      await assertSalesSourceIsRep(tx, newSource);
+      await assertSalesSourceIsCrmUser(tx, newSource);
       // A rep who ALREADY books a commission row on this deal — a retained owner/estimator row from a
       // prior reassignment or correction — cannot also be the sales source. The (deal_id, rep_user_id)
       // row is UNIQUE, so mintSalesSourceCommissionForDeal would collide with that existing row and no-op

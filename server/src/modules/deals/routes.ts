@@ -36,7 +36,7 @@ import {
   setDealEstimator,
   setDealSalesSource,
   validateAssignee,
-  assertSalesSourceIsRep,
+  assertSalesSourceIsCrmUser,
 } from "./service.js";
 import { listDealDescriptionHistory } from "./deal-description-history.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
@@ -2015,7 +2015,7 @@ router.post("/service-opportunity", async (req, res, next) => {
         resolvedSalesSource,
         req.user!.activeOfficeId ?? req.user!.officeId ?? undefined
       );
-      await assertSalesSourceIsRep(req.tenantDb!, resolvedSalesSource);
+      await assertSalesSourceIsCrmUser(req.tenantDb!, resolvedSalesSource);
       if (resolvedSalesSource === repId) {
         throw new AppError(422, "Sales source cannot be the assigned rep", "SALES_SOURCE_CONFLICT");
       }

@@ -115,8 +115,9 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const selectedOfficeLabel =
     officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
   const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: homeOfficeId });
-  // "sales-source" scopes the feed to the office's role === 'rep' roster (the assertSalesSourceIsRep gate),
-  // so a plain rep sees real source choices (not just themselves) and no pick 422s on submit.
+  // "sales-source" scopes the feed to the office's internal CRM roster (any role except field_contractor —
+  // reps, directors like Chase Kelly, etc., matching assertSalesSourceIsCrmUser), so a plain rep sees real
+  // source choices (not just themselves) and no pick 422s on submit.
   const { salesReps, loading: salesRepsLoading } = useSalesReps(homeOfficeId ?? undefined, {
     purpose: "sales-source",
   });

@@ -1141,11 +1141,11 @@ function DealRightRail({
     officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
     { purpose: "deal-reassignment", enabled: canReassignDeal }
   );
-  // The sales-source picker needs the role==='rep' roster (the assertSalesSourceIsRep gate), NOT the
-  // broader CRM list the owner/estimator reassignment pickers use — otherwise a leader could pick a
-  // director/admin/construction user here and only learn it's invalid via a 422 on submit. Load it
-  // separately, gated to leadership (admin/director, == canEditSalesSource) so a rep viewing the page
-  // issues no extra fetch.
+  // The sales-source picker uses the "sales-source" feed (internal CRM users — any role except
+  // field_contractor, matching assertSalesSourceIsCrmUser). It happens to match the deal-reassignment
+  // roster today, but keep the dedicated purpose so the intent (and any future divergence) stays explicit.
+  // Loaded separately + gated to leadership (admin/director, == canEditSalesSource) so a rep viewing the
+  // page issues no extra fetch.
   const { salesReps: sourceSalesReps, loading: sourceSalesRepsLoading } = useSalesReps(
     officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
     {
