@@ -1,7 +1,15 @@
 import { sql } from "drizzle-orm";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { HubSpotOwner } from "../migration/hubspot-client.js";
 import { fetchAllOwners, normalizeHubSpotOwnerEmail } from "../migration/hubspot-client.js";
 import { db } from "../../db.js";
+import type * as schema from "@trock-crm/shared/schema";
+import { clearSalesSource, hasBookedSalesSourceRow } from "../deals/service.js";
+
+// Local alias matching the TenantDb used in deals/service.ts — the full Drizzle instance.
+// clearSalesSource requires ORM-level access (update/select/insert) rather than the narrow
+// execute-only OwnershipSyncWriteClient, so runSync receives this as a second argument.
+type TenantDb = NodePgDatabase<typeof schema>;
 
 type OwnershipRecordType = "deal" | "lead";
 type OwnershipSyncStatus = "matched" | "unmatched" | "conflict";
@@ -36,6 +44,8 @@ interface OwnershipTargetRow {
   hubspotOwnerEmail: string | null;
   ownershipSyncStatus: string | null;
   unassignedReasonCode: string | null;
+  /** F10: present on deal rows only; null on lead rows (leads have no sales-source concept). */
+  salesSourceUserId: string | null;
 }
 
 interface SyncUserRow {
@@ -108,13 +118,16 @@ async function fetchRowsForOwner(
   recordType: OwnershipRecordType,
   ownerId: string
 ): Promise<OwnershipTargetRow[]> {
+  // sales_source_user_id is only meaningful on deal rows; leads do not have this column, so the
+  // column is conditionally selected to avoid a SQL error on the leads table.
+  const sourceCol = recordType === "deal" ? sql.raw(", sales_source_user_id") : sql.raw("");
   const result = await client.execute(sql`
     SELECT
       id,
       assigned_rep_id,
       hubspot_owner_email,
       ownership_sync_status,
-      unassigned_reason_code
+      unassigned_reason_code${sourceCol}
     FROM ${recordType === "deal" ? sql.raw("deals") : sql.raw("leads")}
     WHERE is_active = true
       AND hubspot_owner_id = ${ownerId}
@@ -126,12 +139,14 @@ async function fetchRowsForOwner(
     hubspot_owner_email: string | null;
     ownership_sync_status: string | null;
     unassigned_reason_code: string | null;
+    sales_source_user_id?: string | null;
   }>(result).map((row) => ({
     id: row.id,
     assignedRepId: row.assigned_rep_id,
     hubspotOwnerEmail: row.hubspot_owner_email,
     ownershipSyncStatus: row.ownership_sync_status,
     unassignedReasonCode: row.unassigned_reason_code,
+    salesSourceUserId: row.sales_source_user_id ?? null,
   }));
 }
 
@@ -318,7 +333,7 @@ export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promis
 
   const hubspotOwners = await fetchAllOwners();
 
-  const runSync = async (client: OwnershipSyncWriteClient) => {
+  const runSync = async (client: OwnershipSyncWriteClient, tenantTx: TenantDb) => {
     const offices = await fetchActiveOffices(client);
     const allUsers = await fetchAllUsersForSync(client);
     const activeUsers = allUsers.filter((user) => user.isActive);
@@ -396,17 +411,37 @@ export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promis
             }
 
             if (mappingStatus === "matched" && matchedUser) {
+              // F10: if the incoming owner equals the deal's current sales source, the attribution
+              // would be invalid (same rep in both owner + sales_source slots → double commission).
+              // The updateDeal guard normally blocks this, but the HubSpot sync bypasses updateDeal.
+              // Detect here and clear the source before writing the new owner.
+              const newOwnerIsDealSalesSource =
+                recordType === "deal" &&
+                row.salesSourceUserId != null &&
+                matchedUser.id === row.salesSourceUserId;
+              // M (P1): only a CLEARABLE conflict (owner==source with NO booked sales_source row) needs to
+              // force the row out of the unchanged bucket to run the cosmetic clear. owner==source is
+              // money-safe, so a BOOKED source row is preserved (clearing it would delete the rep's earned
+              // commission + floor credit). A preserved-booked conflict on an otherwise-matched row is
+              // effectively unchanged — treating it as clearable would churn a no-op reassignment forever.
+              const clearableSourceConflict =
+                newOwnerIsDealSalesSource &&
+                !(await hasBookedSalesSourceRow(tenantTx, row.id, row.salesSourceUserId!));
+
               pushExample(
                 result.examples.matched,
                 createExample(recordType, row, owner, ownerEmail, mappingStatus, null, matchedUser.id)
               );
-              if (rowMatchesMatchedState(row, ownerEmail, matchedUser)) {
+              if (rowMatchesMatchedState(row, ownerEmail, matchedUser) && !clearableSourceConflict) {
                 result.unchanged++;
                 continue;
               }
 
               result.assigned++;
               if (!dryRun) {
+                if (clearableSourceConflict) {
+                  await clearSalesSource(tenantTx, row.id, null);
+                }
                 await updateTargetRow(client, recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, matchedUser);
               }
               continue;
@@ -460,7 +495,9 @@ export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promis
   };
 
   await db.transaction(async (tx) => {
-    await runSync(tx);
+    // tx satisfies both OwnershipSyncWriteClient (has .execute) and TenantDb (full Drizzle instance).
+    // The tenant search_path set earlier in runSync applies to ORM queries from clearSalesSource too.
+    await runSync(tx, tx as unknown as TenantDb);
   });
 
   return result;

@@ -19,6 +19,7 @@ import {
   projectTypeConfig,
   offices,
   projects,
+  dealSignedCommissions,
 } from "@trock-crm/shared/schema";
 import {
   DOMAIN_EVENTS,
@@ -41,9 +42,11 @@ import { writeAuditLog } from "../../lib/audit-log.js";
 import {
   calculateCommissionForDeal,
   mintEstimatorCommissionForDeal,
+  mintSalesSourceCommissionForDeal,
   recalculateCommissionForDeal,
   removeCommissionForDeal,
   removeEstimatorCommissionForDeal,
+  removeSalesSourceCommissionForDeal,
 } from "../commissions/service.js";
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
@@ -359,6 +362,7 @@ export interface CreateDealInput {
   source?: string;
   winProbability?: number;
   expectedCloseDate?: string;
+  salesSourceUserId?: string | null;
   auditContext?: AuditContext;
 }
 
@@ -965,7 +969,7 @@ export interface DealBidBoardOwnershipState {
 /**
  * Validate that the assigned user exists, is active, and has access to the office.
  */
-async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId?: string): Promise<void> {
+export async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId?: string): Promise<void> {
   const [user] = await tenantDb.select().from(users)
     .where(and(eq(users.id, assigneeId), eq(users.isActive, true))).limit(1);
   if (!user) throw new AppError(400, "Assigned user not found or inactive");
@@ -973,6 +977,20 @@ async function validateAssignee(tenantDb: TenantDb, assigneeId: string, officeId
     const [access] = await tenantDb.select().from(userOfficeAccess)
       .where(and(eq(userOfficeAccess.userId, assigneeId), eq(userOfficeAccess.officeId, officeId))).limit(1);
     if (!access) throw new AppError(400, "Assigned user does not have access to this office");
+  }
+}
+
+/**
+ * Assert that the user designated as sales source holds the 'rep' role.
+ * A non-rep source (admin / director / construction) has no rep commission settings and
+ * would not appear on the rep roster, leaving an attribution row with no visible payout.
+ * Must be called AFTER validateAssignee so the user's existence and office access are
+ * already confirmed.
+ */
+export async function assertSalesSourceIsRep(tenantDb: TenantDb, userId: string): Promise<void> {
+  const [u] = await tenantDb.select({ role: users.role }).from(users).where(eq(users.id, userId)).limit(1);
+  if (!u || u.role !== "rep") {
+    throw new AppError(422, "Sales source must be a sales rep", "SALES_SOURCE_NOT_REP");
   }
 }
 
@@ -1930,27 +1948,46 @@ export async function getDealById(
   // per-deal action routes — so a deleted deal must 404 there (otherwise a soft-deleted Won deal
   // stays openable AND editable, the data-integrity hole this guards). Opt in only for a future
   // restore/admin view; no production caller passes true today.
-  includeInactive: boolean = false
+  includeInactive: boolean = false,
+  // getDealById is BOTH the deal-detail READ gate and the RBAC gate for many WRITE routes (estimating
+  // uploads, contact associations, deal edits/reassignments). A rep who ESTIMATED or SOURCED a deal
+  // may READ it (the /deals/:id link from the commission dashboard must not 403), but must NOT be able
+  // to WRITE to a deal they don't own. So the involved-rep widening is READ-only and opt-in: pass
+  // { involvedReadAccess: true } ONLY from the detail read route. Every write/mutation caller leaves
+  // this DEFAULT (false) → strict owner-only for reps, the pre-widening behavior.
+  opts: { involvedReadAccess?: boolean } = {}
 ) {
   // estimatorUserId already comes through getTableColumns(deals); join users to surface the estimator's
   // display name for the PR3 estimator picker (mirrors the assignedRep name join in getDealDetail).
+  // salesSourceUser is a parallel alias so a deactivated source rep shows a name, not a raw UUID.
+  const salesSourceUser = alias(users, "sales_source_user");
   const result = await tenantDb
     .select({
       ...getTableColumns(deals),
       stageSlug: pipelineStageConfig.slug,
       estimatorUserName: users.displayName,
+      salesSourceUserName: salesSourceUser.displayName,
     })
     .from(deals)
     .leftJoin(pipelineStageConfig, eq(pipelineStageConfig.id, deals.stageId))
     .leftJoin(users, eq(users.id, deals.estimatorUserId))
+    .leftJoin(salesSourceUser, eq(salesSourceUser.id, deals.salesSourceUserId))
     .where(includeInactive ? eq(deals.id, dealId) : and(eq(deals.id, dealId), eq(deals.isActive, true)))
     .limit(1);
 
   const deal = result[0] ?? null;
   if (!deal) return null;
 
-  // Reps can only see their own deals
-  if (userRole === "rep" && deal.assignedRepId !== userId) {
+  // Reps can only see their OWN deals. READ intent only (opts.involvedReadAccess) additionally admits a
+  // rep who is the estimator or sales source (a source rep sees their earned commission on the dashboard;
+  // the /deals/:id detail link must not 403). WRITE gates leave the flag off, so this stays strict
+  // owner-only for them — an estimator/source rep can OPEN a deal they're involved in but cannot mutate it.
+  const allowInvolvedRead = opts.involvedReadAccess === true;
+  if (
+    userRole === "rep" &&
+    deal.assignedRepId !== userId &&
+    !(allowInvolvedRead && (deal.estimatorUserId === userId || deal.salesSourceUserId === userId))
+  ) {
     throw new AppError(403, "You can only view your own deals");
   }
 
@@ -1967,18 +2004,24 @@ export async function getDealDetail(
   dealId: string,
   userRole: string,
   userId: string,
-  atRiskViewerRole: string = userRole
+  atRiskViewerRole: string = userRole,
+  // Detail page is a READ surface; thread the involved-read intent to the internal gate so an
+  // estimator/source rep can open a deal they don't own (writes never route through here).
+  opts: { involvedReadAccess?: boolean } = {}
 ) {
-  const deal = await getDealById(tenantDb, dealId, userRole, userId, atRiskViewerRole);
+  const deal = await getDealById(tenantDb, dealId, userRole, userId, atRiskViewerRole, false, opts);
   if (!deal) return null;
 
   // Second users alias so the estimator name can be joined alongside the assigned-rep name.
+  // Third alias for the sales source user so a deactivated rep shows a name, not a raw UUID.
   const estimatorUser = alias(users, "estimator_user");
+  const salesSourceUser = alias(users, "sales_source_user");
   const [detailDeal] = await tenantDb
     .select({
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
       estimatorUserName: estimatorUser.displayName,
+      salesSourceUserName: salesSourceUser.displayName,
       companyName: companies.name,
       companyOwnerUserId: companies.ownerId,
       companyOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${companies.ownerId})`,
@@ -1995,6 +2038,7 @@ export async function getDealDetail(
     .from(deals)
     .leftJoin(users, eq(users.id, deals.assignedRepId))
     .leftJoin(estimatorUser, eq(estimatorUser.id, deals.estimatorUserId))
+    .leftJoin(salesSourceUser, eq(salesSourceUser.id, deals.salesSourceUserId))
     .leftJoin(companies, eq(companies.id, deals.companyId))
     .leftJoin(contacts, eq(contacts.id, deals.primaryContactId))
     .leftJoin(projectTypeConfig, eq(projectTypeConfig.id, deals.projectTypeId))
@@ -2159,6 +2203,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       createdByUserId: input.actorUserId ?? null,
       winProbability: input.winProbability ?? null,
       expectedCloseDate: input.expectedCloseDate ?? null,
+      salesSourceUserId: input.salesSourceUserId ?? null,
       workflowRoute,
       createdAt,
       updatedAt: createdAt,
@@ -2308,6 +2353,29 @@ export async function updateDeal(
 
   // Validate assignee if being changed
   if (input.assignedRepId !== undefined) {
+    // Reciprocal conflict guard: the new owner cannot be the deal's sales source. setDealSalesSource
+    // already blocks setting source == owner (forward direction); this closes the reverse path where
+    // a reassignment would move the sales-source rep into the owner slot and mint a double commission
+    // cut (owner row + the existing additive sales_source row that remains on the deal).
+    // K (P3): EXCEPT when this same PATCH also moves the deal OUT of the service workflow — the F9 block
+    // below then clears the (now-invalid) source, so owner==source is only transient and there is no
+    // double-count. Rejecting here would force the client into two separate saves for a valid correction.
+    const leavingServiceWorkflow =
+      existing.workflowRoute === "service" &&
+      input.workflowRoute !== undefined &&
+      input.workflowRoute !== "service";
+    if (
+      input.assignedRepId != null &&
+      input.assignedRepId === (existing.salesSourceUserId ?? null) &&
+      !leavingServiceWorkflow
+    ) {
+      throw new AppError(
+        422,
+        "Cannot reassign a deal to its sales source",
+        "SALES_SOURCE_CONFLICT"
+      );
+    }
+
     await validateDealReassignmentAssignee(
       tenantDb,
       input.assignedRepId,
@@ -2698,6 +2766,24 @@ export async function updateDeal(
         status: "pending",
         runAfter: new Date(),
       }).catch((err) => console.error("[Deals] Failed to queue geocode job:", err));
+    }
+  }
+
+  // F9: if the deal just transitioned out of the service workflow, clear any stale
+  // sales-source attribution. A service-source commission cut (service_source_rate)
+  // only applies to service-route deals; leaving that route makes the source invalid.
+  if (
+    existing.workflowRoute === "service" &&
+    (updatedDeal?.workflowRoute ?? "normal") !== "service" &&
+    (existing.salesSourceUserId ?? null) !== null
+  ) {
+    await clearSalesSource(tenantDb, dealId, userId);
+    // clearSalesSource nulls the column in a SEPARATE write AFTER the update query already returned
+    // updatedDeal, so the row we're about to return still carries the now-removed attribution. Reflect
+    // the clear on the returned object so a client that trusts the PATCH response doesn't keep showing or
+    // reusing the stale sales source until a separate refetch.
+    if (updatedDeal) {
+      updatedDeal.salesSourceUserId = null;
     }
   }
 
@@ -3741,6 +3827,14 @@ export async function setDealEstimator(
       return existing;
     }
 
+    // Reciprocal conflict guard: the estimator cannot be the deal's sales source. setDealSalesSource
+    // already blocks the forward direction (source == owner/estimator); this closes the reverse path
+    // where the estimator route would place the same person in both roles, minting a double commission
+    // cut (owner/estimator row + additive sales_source row).
+    if (newEstimator != null && newEstimator === (existing.salesSourceUserId ?? null)) {
+      throw new AppError(422, "Estimator cannot be the deal's sales source", "SALES_SOURCE_CONFLICT");
+    }
+
     // P1 — Bid-Board-owned estimator policy, NARROWED to FIRST-FILL only (money-attribution decision).
     // The Bid Board sync OWNS the INITIAL estimator on a BB-owned deal: it stamps estimator_user_id from
     // the Procore/Bid Board mirror. #741 made that sync EMPTIES-ONLY, so it NEVER clobbers a non-null
@@ -3820,6 +3914,245 @@ export async function setDealEstimator(
       await mintEstimatorCommissionForDeal(tx, {
         dealId,
         estimatorUserId: newEstimator,
+        triggeredByUserId: userId,
+      });
+    }
+
+    return updated;
+  });
+}
+
+/**
+ * Clear the sales-source attribution on a deal unconditionally.
+ * Idempotent: no-op when the deal has no current source.
+ * Called when a source attribution becomes invalid — e.g. the deal leaves the service
+ * workflow (F9) or the HubSpot ownership sync moves the source rep into the owner slot (F10).
+ *
+ * Mirrors the removal half of setDealSalesSource: nulls sales_source_user_id on the base deal,
+ * propagates null to active CO children (display sync only), removes the `sales_source` DSC row,
+ * and writes an audit log entry — all in the caller's db context (no inner transaction wrap).
+ */
+/**
+ * True when `repUserId` holds a BOOKED (earned) `sales_source` commission row on this deal.
+ *
+ * The ownership-sync conflict-clears (owner == source) MUST consult this before clearing: owner == source
+ * is already MONEY-SAFE — the mint dispatch skips the source cut when `source == assignedRep`, and the
+ * floor source-leg excludes `assigned_rep_id == rep` — so the clear is only cosmetic field-hygiene. If the
+ * source rep already booked a `sales_source` row (a signed deal), clearing it via clearSalesSource would
+ * DELETE their already-earned commission + floor credit while the reassignment mints NO replacement owner
+ * row, so they'd lose money for no benefit. Preserve the booked row; only clear when nothing is booked.
+ *
+ * NOTE: this is specifically for the reassignment conflict (deal STAYS service). It is NOT consulted by the
+ * F9 / workflow-leave path, where removing the row is correct because the deal is no longer a service deal.
+ */
+export async function hasBookedSalesSourceRow(
+  tenantDb: TenantDb,
+  dealId: string,
+  repUserId: string
+): Promise<boolean> {
+  const [row] = await tenantDb
+    .select({ id: dealSignedCommissions.id })
+    .from(dealSignedCommissions)
+    .where(
+      and(
+        eq(dealSignedCommissions.dealId, dealId),
+        eq(dealSignedCommissions.repUserId, repUserId),
+        eq(dealSignedCommissions.attributionRole, "sales_source")
+      )
+    )
+    .limit(1);
+  return Boolean(row);
+}
+
+export async function clearSalesSource(
+  tenantDb: TenantDb,
+  dealId: string,
+  triggeredByUserId: string | null
+): Promise<void> {
+  const [existing] = await tenantDb
+    .select({ salesSourceUserId: deals.salesSourceUserId })
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .limit(1);
+
+  if (!existing || (existing.salesSourceUserId ?? null) === null) {
+    return; // no-op: deal not found or has no source to clear
+  }
+
+  const oldSourceId = existing.salesSourceUserId!;
+  const now = new Date();
+
+  // Guard the clear against a concurrent source change: the sync-path callers don't hold this deal's row
+  // lock, so between the read above and this UPDATE an admin/director could set a DIFFERENT source (and
+  // mint its row). Scope the null-out to `sales_source_user_id = oldSourceId` so a concurrent change makes
+  // this a no-op (0 rows) instead of clobbering the new source to null while removing only the OLD source's
+  // commission row (which would orphan the newly-minted row behind a null column).
+  const cleared = await tenantDb
+    .update(deals)
+    .set({ salesSourceUserId: null, updatedAt: now })
+    .where(and(eq(deals.id, dealId), eq(deals.salesSourceUserId, oldSourceId)))
+    .returning({ id: deals.id });
+  if (cleared.length === 0) {
+    return; // the source changed under us — leave the new source (and its row) intact
+  }
+
+  await writeAuditLog(tenantDb, {
+    tableName: "deals",
+    recordId: dealId,
+    action: "update",
+    changedBy: triggeredByUserId,
+    changes: {
+      salesSourceUserId: { from: oldSourceId, to: null },
+    },
+  });
+
+  // Propagate null to active CO children — display/attribution sync only;
+  // no commission row exists on CO children for the sales source.
+  await tenantDb
+    .update(deals)
+    .set({ salesSourceUserId: null, updatedAt: now })
+    .where(
+      and(
+        eq(deals.parentDealId, dealId),
+        eq(deals.isChangeOrder, true),
+        eq(deals.isActive, true)
+      )
+    );
+
+  await removeSalesSourceCommissionForDeal(tenantDb, {
+    dealId,
+    salesSourceUserId: oldSourceId,
+    triggeredByUserId,
+  });
+}
+
+/**
+ * Set or clear the sales source on a deal (leadership-gated; dedicated route only).
+ * Mirrors setDealEstimator in structure: SELECT … FOR UPDATE, change-order 409 lock, no-op
+ * short-circuit, validateAssignee for a non-null new source, UPDATE, audit, CO propagation.
+ * Does NOT include the estimator-only bid-board first-fill lock (sales source has no such guard).
+ * Re-attribution order: remove old source's 'sales_source' row first, then mint the new source's.
+ */
+export async function setDealSalesSource(
+  tenantDb: TenantDb,
+  dealId: string,
+  newSalesSourceUserId: string | null,
+  userId: string,
+  officeId: string | null = null
+): Promise<typeof deals.$inferSelect | null> {
+  return tenantDb.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(deals)
+      .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
+      .limit(1)
+      .for("update");
+    if (!existing) return null;
+
+    // A change order's sales source is inherited from the parent deal.
+    if (existing.isChangeOrder === true) {
+      throw new AppError(
+        409,
+        "A change order's sales source is inherited from the parent deal, not editable here.",
+        "CHANGE_ORDER_FIELD_LOCKED"
+      );
+    }
+
+    const oldSalesSourceUserId = existing.salesSourceUserId ?? null;
+    const newSource = newSalesSourceUserId ?? null;
+
+    // No-op short-circuit — preserve: an unchanged source's commission row is never re-evaluated.
+    if (oldSalesSourceUserId === newSource) {
+      return existing;
+    }
+
+    // A sales source cannot be set to the deal owner or estimator — that would allow the
+    // same person to earn a double commission cut (owner row + additive source row).
+    if (newSource != null && (newSource === existing.assignedRepId || newSource === existing.estimatorUserId)) {
+      throw new AppError(422, "Sales source cannot be the deal owner or estimator", "SALES_SOURCE_CONFLICT");
+    }
+
+    // TOCTOU-safe service check: a source may only exist on a SERVICE deal. The route pre-reads
+    // workflow_route, but a concurrent service→normal change could slip between that read and this
+    // write — the FOR UPDATE-locked row here is authoritative.
+    if (newSource != null && existing.workflowRoute !== "service") {
+      throw new AppError(422, "Sales source can only be set on a service opportunity", "SALES_SOURCE_NOT_SERVICE");
+    }
+
+    // A NEW sales source must be an active user with access to the active office AND must be a rep.
+    // Non-rep users (admin / director / construction) have no rep commission settings and do not
+    // appear on the rep roster, so attributing them as a source creates an orphaned commission row.
+    if (newSource != null) {
+      await validateAssignee(tx, newSource, officeId ?? undefined);
+      await assertSalesSourceIsRep(tx, newSource);
+      // A rep who ALREADY books a commission row on this deal — a retained owner/estimator row from a
+      // prior reassignment or correction — cannot also be the sales source. The (deal_id, rep_user_id)
+      // row is UNIQUE, so mintSalesSourceCommissionForDeal would collide with that existing row and no-op
+      // (skipped_existing), leaving the column pointing at a rep whose actual rate/payout/floor is still
+      // booked under the OLD role. Reject so the displayed attribution can't diverge from the ledger.
+      const [existingRow] = await tx
+        .select({ role: dealSignedCommissions.attributionRole })
+        .from(dealSignedCommissions)
+        .where(
+          and(
+            eq(dealSignedCommissions.dealId, dealId),
+            eq(dealSignedCommissions.repUserId, newSource)
+          )
+        )
+        .limit(1);
+      if (existingRow && existingRow.role !== "sales_source") {
+        throw new AppError(
+          422,
+          "That rep already books a commission row on this deal (as a prior owner or estimator) and cannot also be the sales source.",
+          "SALES_SOURCE_HAS_EXISTING_ROW"
+        );
+      }
+    }
+
+    const now = new Date();
+    const [updated] = await tx
+      .update(deals)
+      .set({ salesSourceUserId: newSource, updatedAt: now })
+      .where(eq(deals.id, dealId))
+      .returning();
+    if (!updated) return null;
+
+    await writeAuditLog(tx, {
+      tableName: "deals",
+      recordId: dealId,
+      action: "update",
+      changedBy: userId,
+      changes: {
+        salesSourceUserId: { from: oldSalesSourceUserId, to: newSource },
+      },
+    });
+
+    // Propagate to active change-order children (display/attribution sync only; no commission mutation
+    // on CO children — only the base deal mints/removes the sales_source commission row).
+    await tx
+      .update(deals)
+      .set({ salesSourceUserId: newSource, updatedAt: now })
+      .where(
+        and(
+          eq(deals.parentDealId, dealId),
+          eq(deals.isChangeOrder, true),
+          eq(deals.isActive, true)
+        )
+      );
+
+    // Re-attribute the additive sales_source commission on the BASE deal.
+    // Remove order: old source first, then mint new — never the reverse.
+    if (oldSalesSourceUserId != null) {
+      await removeSalesSourceCommissionForDeal(tx, {
+        dealId,
+        salesSourceUserId: oldSalesSourceUserId,
+        triggeredByUserId: userId,
+      });
+    }
+    if (newSource != null) {
+      await mintSalesSourceCommissionForDeal(tx, {
+        dealId,
+        salesSourceUserId: newSource,
         triggeredByUserId: userId,
       });
     }

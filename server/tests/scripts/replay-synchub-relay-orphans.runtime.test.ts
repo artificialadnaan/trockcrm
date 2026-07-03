@@ -50,7 +50,7 @@ beforeEach(async () => {
     INSERT INTO public.offices (id, slug, is_active) VALUES ('${OFFICE_ID}', 'main', true);
 
     CREATE TABLE office_main.deals (
-      id text PRIMARY KEY, name text, deal_number text, project_number text,
+      id text PRIMARY KEY, sales_source_user_id uuid, name text, deal_number text, project_number text,
       procore_project_id bigint, is_change_order boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true
     );
     INSERT INTO office_main.deals (id, name, deal_number, project_number, procore_project_id, is_change_order, is_active) VALUES

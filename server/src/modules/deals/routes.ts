@@ -34,6 +34,9 @@ import {
   getDealSources,
   setDealContractSignedDate,
   setDealEstimator,
+  setDealSalesSource,
+  validateAssignee,
+  assertSalesSourceIsRep,
 } from "./service.js";
 import { listDealDescriptionHistory } from "./deal-description-history.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
@@ -1097,7 +1100,11 @@ router.get("/:id", async (req, res, next) => {
       req.params.id,
       getCollaborativeReadRole(req.user!.role, dealAccess.assignedRepId === req.user!.id ? "mine" : "all"),
       req.user!.id,
-      req.user!.role
+      req.user!.role,
+      // READ route: an estimator/source rep may OPEN a deal they're involved in (commission-dashboard
+      // link) even though they can't write to it. Write routes leave this off → strict owner-only.
+      false,
+      { involvedReadAccess: true }
     );
     if (!deal) throw new AppError(404, "Deal not found");
     const isWatching = await isDealWatchedByUser(req.tenantDb!, req.params.id, req.user!.id);
@@ -1126,7 +1133,9 @@ router.get("/:id/detail", async (req, res, next) => {
       req.params.id,
       getCollaborativeReadRole(req.user!.role, dealAccess.assignedRepId === req.user!.id ? "mine" : "all"),
       req.user!.id,
-      req.user!.role
+      req.user!.role,
+      // READ route: same involved-rep read intent as GET /:id (detail is the richer read).
+      { involvedReadAccess: true }
     );
     if (!detail) throw new AppError(404, "Deal not found");
     const isWatching = await isDealWatchedByUser(req.tenantDb!, req.params.id, req.user!.id);
@@ -1961,6 +1970,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       projectType,
       officeCode,
       projectNumber,
+      salesSourceUserId,
     } = body;
     if (!name) {
       throw new AppError(400, "Name is required");
@@ -1991,6 +2001,26 @@ router.post("/service-opportunity", async (req, res, next) => {
       throw new AppError(400, officeCodeResolution.error);
     }
 
+    // Validate the sales source user when one is provided.
+    const resolvedSalesSource: string | null =
+      typeof salesSourceUserId === "string" && salesSourceUserId.trim() !== ""
+        ? salesSourceUserId.trim()
+        : null;
+    if (resolvedSalesSource != null) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resolvedSalesSource)) {
+        throw new AppError(422, "salesSourceUserId must be a valid UUID or null");
+      }
+      await validateAssignee(
+        req.tenantDb!,
+        resolvedSalesSource,
+        req.user!.activeOfficeId ?? req.user!.officeId ?? undefined
+      );
+      await assertSalesSourceIsRep(req.tenantDb!, resolvedSalesSource);
+      if (resolvedSalesSource === repId) {
+        throw new AppError(422, "Sales source cannot be the assigned rep", "SALES_SOURCE_CONFLICT");
+      }
+    }
+
     const deal = await createDeal(req.tenantDb!, {
       name,
       assignedRepId: repId,
@@ -2016,6 +2046,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       projectTypeId: serviceProjectType.id,
       projectNumber,
       officeCode: officeCodeResolution.officeCode,
+      salesSourceUserId: resolvedSalesSource,
       auditContext: buildRouteAuditContext(req),
     });
     await req.commitTransaction!();
@@ -2048,6 +2079,10 @@ router.post("/", async (req, res, next) => {
       // and the client-side WritableDealFields Omit). estimatorUserName is a read-only display alias.
       estimatorUserId: _estimatorUserId,
       estimatorUserName: _estimatorUserName,
+      // salesSourceUserId is set once at service-opportunity creation and may ONLY be changed via the
+      // dedicated, leadership-gated PATCH /:id/sales-source route. Strip it here so the generic update
+      // path can never smuggle it in — mirrors the estimatorUserId exclusion above.
+      salesSourceUserId: _salesSourceUserId,
       ...rest
     } = body;
     if (!name || !stageId) {
@@ -2166,6 +2201,75 @@ router.patch(
         req.tenantDb!,
         req.params.id as string,
         estimatorUserId,
+        req.user!.id,
+        req.user!.activeOfficeId ?? req.user!.officeId
+      );
+      if (!deal) throw new AppError(404, "Deal not found");
+      await req.commitTransaction!();
+      const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
+      res.json({ deal: redactDealResponse(deal, { includeHubspotId }) });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// PATCH /api/deals/:id/sales-source — set or clear the deal's sales source.
+// Admin/director ONLY, dedicated route: salesSourceUserId is deliberately OUT of updateDeal's
+// allowlist so it can NEVER be set through the generic PATCH /:id. Editing the sales source
+// re-attributes the additive sales_source commission row and must stay leadership-gated.
+// setDealSalesSource rejects change-order children (409 CHANGE_ORDER_FIELD_LOCKED).
+router.patch(
+  "/:id/sales-source",
+  requireRole("admin", "director"),
+  async (req, res, next) => {
+    try {
+      // Per-deal access gate: prove the caller can reach THIS specific deal before any mutation.
+      await assertDealRouteAccess(req, req.params.id as string);
+
+      // Distinguish an ABSENT field from an explicit null: a `{}` body must NOT silently CLEAR the
+      // sales source — that requires an explicit `salesSourceUserId: null`. An omitted key is a
+      // client bug, so reject it (422) rather than wiping commission attribution by accident.
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!("salesSourceUserId" in body)) {
+        throw new AppError(422, "salesSourceUserId is required (send null to clear the sales source)");
+      }
+      const raw = body.salesSourceUserId;
+      let salesSourceUserId: string | null;
+      if (raw == null || raw === "") {
+        salesSourceUserId = null;
+      } else if (
+        typeof raw === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.trim())
+      ) {
+        salesSourceUserId = raw.trim();
+      } else {
+        throw new AppError(422, "salesSourceUserId must be a valid UUID or null");
+      }
+      // F3b: Sales source is a service-deal-only concept. Reject setting a non-null source on a
+      // non-service (capX / normal) deal before delegating to the service fn. Clearing (null) is
+      // always permitted so a stale value left from a workflow-route change can be wiped.
+      if (salesSourceUserId !== null) {
+        const targetDeal = await getDealById(
+          req.tenantDb!,
+          req.params.id as string,
+          req.user!.role,
+          req.user!.id
+        );
+        if (!targetDeal) throw new AppError(404, "Deal not found");
+        if (targetDeal.workflowRoute !== "service") {
+          throw new AppError(
+            422,
+            "Sales source can only be set on a service opportunity",
+            "SALES_SOURCE_NOT_SERVICE"
+          );
+        }
+      }
+
+      const deal = await setDealSalesSource(
+        req.tenantDb!,
+        req.params.id as string,
+        salesSourceUserId,
         req.user!.id,
         req.user!.activeOfficeId ?? req.user!.officeId
       );

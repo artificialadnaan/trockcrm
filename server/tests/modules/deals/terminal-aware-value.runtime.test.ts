@@ -54,7 +54,7 @@ beforeAll(async () => {
   await db.exec(`
     CREATE TABLE pipeline_stage_config (id text PRIMARY KEY, slug text NOT NULL);
     CREATE TABLE deals (
-      id text PRIMARY KEY,
+      id text PRIMARY KEY, sales_source_user_id uuid,
       stage_id text NOT NULL,
       bid_board_stage_slug text,
       on_hold boolean NOT NULL DEFAULT false,

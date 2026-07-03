@@ -23,7 +23,7 @@ beforeAll(async () => {
   for (const office of OFFICES) {
     await pg.exec(`
       CREATE SCHEMA ${office};
-      CREATE TABLE ${office}.deals (id uuid PRIMARY KEY);
+      CREATE TABLE ${office}.deals (id uuid PRIMARY KEY, sales_source_user_id uuid);
       CREATE TABLE ${office}.files (id uuid PRIMARY KEY);
     `);
   }

@@ -26,7 +26,7 @@ beforeAll(async () => {
   await db.exec(`
     CREATE SCHEMA office_main;
     CREATE TABLE office_main.deals (
-      id text PRIMARY KEY,
+      id text PRIMARY KEY, sales_source_user_id uuid,
       name text,
       deal_number text,
       project_number text,

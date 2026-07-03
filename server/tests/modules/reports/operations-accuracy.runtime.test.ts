@@ -43,7 +43,7 @@ beforeAll(async () => {
     CREATE TABLE properties (id uuid PRIMARY KEY, name text, city text, state text, last_activity_at timestamptz);
     CREATE TABLE deal_scoping_intake (deal_id uuid, status text, completion_state jsonb, readiness_errors jsonb);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, stage_id uuid NOT NULL, assigned_rep_id uuid,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text, stage_id uuid NOT NULL, assigned_rep_id uuid,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, expected_close_date date, on_hold_started_at timestamptz,
       on_hold_accumulated_seconds numeric, on_hold_accumulated_seconds_at_stage_entry numeric,

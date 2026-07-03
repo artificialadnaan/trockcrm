@@ -47,7 +47,7 @@ beforeAll(async () => {
     CREATE TABLE activities (deal_id uuid, occurred_at timestamptz);
     CREATE TABLE deal_stage_history (deal_id uuid, from_stage_id uuid, to_stage_id uuid, created_at timestamptz);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, company_id uuid, property_id uuid, region_id uuid, assigned_rep_id uuid, estimator_user_id uuid,
+      id uuid PRIMARY KEY, company_id uuid, property_id uuid, region_id uuid, assigned_rep_id uuid, estimator_user_id uuid, sales_source_user_id uuid,
       stage_id uuid NOT NULL, is_active boolean NOT NULL DEFAULT true,
       is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, expected_close_date date,
       project_type text, property_city text, property_state text,

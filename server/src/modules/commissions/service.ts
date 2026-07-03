@@ -4,8 +4,10 @@ import {
   dealSignedCommissions,
   deals,
   userCommissionSettings,
+  users,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { resolveEffectiveServiceSourceRate } from "@trock-crm/shared/lib/commission-structure";
 import { writeAuditLog } from "../../lib/audit-log.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -28,6 +30,8 @@ export type CalculateCommissionStatus =
   // gain a rate. Gating the mint on an existing owner row keeps a rateless-owner deal at ZERO rows.
   | "skipped_no_owner_row";
 
+export type CommissionRole = "owner" | "estimator" | "sales_source";
+
 export interface CalculateCommissionResult {
   status: CalculateCommissionStatus;
   commissionId?: string;
@@ -40,6 +44,9 @@ export interface CalculateCommissionResult {
   // existing callers that read `.status`/`.amount` are unaffected. `undefined` when no estimator applies.
   // Consumed by the owner-backfill tally so estimator rows minted as a side effect are not undercounted.
   estimator?: { status: CalculateCommissionStatus; repUserId?: string; amount?: string };
+  // The additive SALES_SOURCE side-effect outcome (the capX rep who sourced a service deal). Mirrors the
+  // estimator field — `undefined` when no sales_source applies. Backward-compatible.
+  salesSource?: { status: CalculateCommissionStatus; repUserId?: string; amount?: string };
 }
 
 interface ResolvedSourceValue {
@@ -72,6 +79,63 @@ function multiplyDecimalStrings(value: string, rate: string): string {
 }
 
 /**
+ * Discriminated union result for resolveAppliedRateForRole:
+ *   "rate"     — active settings, effective role rate > 0  (use appliedRate to compute commission)
+ *   "zero"     — active settings, effective role rate == 0 (deliberate zero — zeroes the row under zeroOnNoRate)
+ *   "inactive" — missing OR inactive settings (PRESERVE the historical row; never zero on inactive/missing)
+ *
+ * The "inactive" vs "zero" split is the load-bearing fix for the recompute bug: a deactivated rep's
+ * historical rows must be preserved, but a still-ACTIVE settings row with a deliberate 0% rate should
+ * zero the row when the settings-change recompute fires (zeroOnNoRate).
+ */
+export type RoleRateResolution =
+  | { status: "rate"; appliedRate: string }
+  | { status: "zero" }
+  | { status: "inactive" };
+
+/**
+ * Attribution-role-aware rate resolution for a rep, returned as a discriminated union (see above).
+ * owner/estimator use the capX commission_rate mirror; sales_source uses the effective service-source rate
+ * (0 unless the rep is 'mixed'). Single source of rate truth — used by BOTH the mint (insertCommissionRowForRep)
+ * AND the settings-change recompute (recalculateCommissionForDeal) so a sales_source row is NEVER rated at
+ * the capX rate. This is the INV-1 foundation: one helper, two call sites, one rate contract.
+ */
+export async function resolveAppliedRateForRole(
+  tx: TenantDb,
+  repUserId: string,
+  role: CommissionRole,
+): Promise<RoleRateResolution> {
+  const [s] = await tx
+    .select({
+      commissionRate: userCommissionSettings.commissionRate,
+      commissionStructure: userCommissionSettings.commissionStructure,
+      capxRateSolo: userCommissionSettings.capxRateSolo,
+      capxRateMixed: userCommissionSettings.capxRateMixed,
+      serviceSourceRate: userCommissionSettings.serviceSourceRate,
+      isActive: userCommissionSettings.isActive,
+    })
+    .from(userCommissionSettings)
+    .where(eq(userCommissionSettings.userId, repUserId))
+    .limit(1);
+  if (!s || !s.isActive) return { status: "inactive" };
+
+  if (role === "sales_source") {
+    const rate = resolveEffectiveServiceSourceRate({
+      commissionStructure: (s.commissionStructure as "solo" | "mixed") ?? "solo",
+      capxRateSolo: Number(s.capxRateSolo ?? 0),
+      capxRateMixed: Number(s.capxRateMixed ?? 0),
+      serviceSourceRate: Number(s.serviceSourceRate ?? 0),
+    });
+    return rate > 0 ? { status: "rate", appliedRate: rate.toFixed(6) } : { status: "zero" };
+  }
+  // owner / estimator: use the capX commission_rate mirror (the denormalized field kept in sync by the
+  // settings-save). A rate of 0 on an ACTIVE settings row = deliberate "no commission" → { status: "zero" }.
+  return Number(s.commissionRate) > 0
+    ? { status: "rate", appliedRate: s.commissionRate }
+    : { status: "zero" };
+}
+
+/**
  * Insert ONE earned-commission row for a single rep at THAT rep's own rate — the shared primitive behind
  * both the owner mint and the estimator mint, so the two can never drift in how they resolve rate / source
  * value / idempotency / audit. Resolves the rep's user_commission_settings (skipped_no_rate when missing,
@@ -98,27 +162,22 @@ async function insertCommissionRowForRep(
   repUserId: string,
   contractSignedDate: string,
   triggeredByUserId: string,
-  role: "owner" | "estimator"
+  role: CommissionRole
 ): Promise<CalculateCommissionResult> {
   const sourceValue = resolveSourceValue(deal);
   if (!sourceValue) {
     return { status: "skipped_no_value" };
   }
 
-  const [settings] = await tx
-    .select({
-      commissionRate: userCommissionSettings.commissionRate,
-      isActive: userCommissionSettings.isActive,
-    })
-    .from(userCommissionSettings)
-    .where(eq(userCommissionSettings.userId, repUserId))
-    .limit(1);
+  // Role-aware rate resolution (INV-1): owner/estimator use the capX commission_rate mirror;
+  // sales_source uses resolveEffectiveServiceSourceRate (0 for solo reps). Single call site —
+  // no inline settings read — so the rate contract is ALWAYS attribution-role-correct here.
+  // Both "zero" (active deliberate 0%) and "inactive" (missing/deactivated) skip the mint —
+  // an unsigned/rateless rep earns nothing at sign time regardless of WHY they have no rate.
+  const res = await resolveAppliedRateForRole(tx, repUserId, role);
+  if (res.status !== "rate") return { status: "skipped_no_rate" };
+  const appliedRate = res.appliedRate;
 
-  if (!settings || !settings.isActive || Number(settings.commissionRate) <= 0) {
-    return { status: "skipped_no_rate" };
-  }
-
-  const appliedRate = settings.commissionRate;
   const amount = multiplyDecimalStrings(sourceValue.amount, appliedRate);
 
   // Tx-safe idempotency: ON CONFLICT (deal_id, rep_user_id) DO NOTHING. An existing row (retry) or a
@@ -203,7 +262,9 @@ export async function calculateCommissionForDeal(
       id: deals.id,
       assignedRepId: deals.assignedRepId,
       estimatorUserId: deals.estimatorUserId,
+      salesSourceUserId: deals.salesSourceUserId,
       isChangeOrder: deals.isChangeOrder,
+      workflowRoute: deals.workflowRoute,
       awardedAmount: deals.awardedAmount,
       bidEstimate: deals.bidEstimate,
       ddEstimate: deals.ddEstimate,
@@ -257,9 +318,29 @@ export async function calculateCommissionForDeal(
     });
   }
 
+  // Additive sales_source row: a mixed rep who SOURCED this SERVICE deal earns an ADDITIONAL row at their
+  // effective service-source rate (resolveEffectiveServiceSourceRate, via resolveAppliedRateForRole —
+  // NEVER the capX mirror). Guards: non-CO, service workflow only (never capX), source set, source ≠ owner,
+  // source ≠ estimator (so a rep can never hold two rows for the same deal). The rate check lives in
+  // mintSalesSourceCommissionForDeal (a solo-or-zero source simply yields skipped_no_rate and no row).
+  let salesSourceResult: CalculateCommissionResult | undefined;
+  if (
+    !deal.isChangeOrder &&
+    deal.workflowRoute === "service" &&
+    deal.salesSourceUserId != null &&
+    deal.salesSourceUserId !== deal.assignedRepId &&
+    deal.salesSourceUserId !== deal.estimatorUserId
+  ) {
+    salesSourceResult = await mintSalesSourceCommissionForDeal(tenantDb, {
+      dealId: deal.id,
+      salesSourceUserId: deal.salesSourceUserId,
+      triggeredByUserId: input.triggeredByUserId,
+    });
+  }
+
   // The top-level status describes the OWNER row (callers historically inspect the owner outcome). The
-  // estimator row is an additive side effect — surfaced under `.estimator` (backward-compatible) so the
-  // owner-backfill tally can account for the estimator rows it mints instead of undercounting them.
+  // estimator and salesSource rows are additive side effects — surfaced under their own keys
+  // (backward-compatible) so the owner-backfill tally can account for rows minted as side effects.
   return {
     ...ownerResult,
     estimator: estimatorResult
@@ -267,6 +348,13 @@ export async function calculateCommissionForDeal(
           status: estimatorResult.status,
           repUserId: deal.estimatorUserId ?? undefined,
           amount: estimatorResult.amount,
+        }
+      : undefined,
+    salesSource: salesSourceResult
+      ? {
+          status: salesSourceResult.status,
+          repUserId: deal.salesSourceUserId ?? undefined,
+          amount: salesSourceResult.amount,
         }
       : undefined,
   };
@@ -335,6 +423,11 @@ export async function recalculateCommissionForDeal(
     // deal), which would otherwise let concurrent cross-rep edits lose the later rate. Omitted →
     // re-rate every row on the deal (the deal date/amount edit path, where the whole deal changed).
     onlyRepUserId?: string;
+    // When set alongside onlyRepUserId (settings-change recompute), further constrains which of that
+    // rep's rows are re-rated by attribution_role. A service-source-only rate change should only
+    // re-rate "sales_source" rows; a capX-only change should only re-rate "owner"/"estimator" rows.
+    // Omitted → re-rate all roles for the scoped rep (or all reps when onlyRepUserId is also omitted).
+    onlyRoles?: CommissionRole[];
     // When set (settings-change recompute), a deliberate 0% rate on an ACTIVE settings row re-rates
     // the row to $0 rather than preserving the stale payout. Omitted (deal date/amount edit) keeps
     // the all-or-nothing preserve (#732), so a transient config never wipes an earned row.
@@ -349,6 +442,7 @@ export async function recalculateCommissionForDeal(
       sourceValueKind: dealSignedCommissions.sourceValueKind,
       sourceValueAmount: dealSignedCommissions.sourceValueAmount,
       appliedRate: dealSignedCommissions.appliedRate,
+      attributionRole: dealSignedCommissions.attributionRole,
       contractSignedDateAtSigning: dealSignedCommissions.contractSignedDateAtSigning,
     })
     .from(dealSignedCommissions)
@@ -372,47 +466,42 @@ export async function recalculateCommissionForDeal(
     .limit(1);
   const sourceValue = deal ? resolveSourceValue(deal) : null;
 
-  const rowsToRecompute = input.onlyRepUserId
-    ? existingRows.filter((row) => row.repUserId === input.onlyRepUserId)
-    : existingRows;
+  const rowsToRecompute = existingRows.filter((row) => {
+    if (input.onlyRepUserId && row.repUserId !== input.onlyRepUserId) return false;
+    if (input.onlyRoles && !input.onlyRoles.includes(row.attributionRole as CommissionRole)) return false;
+    return true;
+  });
 
   let recomputed = 0;
   for (const row of rowsToRecompute) {
-    // The rate is the BOOKED rep's current rate — attribution stays with row.repUserId, never the deal's
-    // (possibly reassigned) current assignedRepId.
-    const [settings] = await tenantDb
-      .select({
-        commissionRate: userCommissionSettings.commissionRate,
-        isActive: userCommissionSettings.isActive,
-      })
-      .from(userCommissionSettings)
-      .where(eq(userCommissionSettings.userId, row.repUserId))
-      .limit(1);
+    // Role-aware rate resolution (INV-1, second half): the rate applied to each row depends on its OWN
+    // attribution_role, not a single "the rep's capX rate" read. A sales_source row uses the service-source
+    // rate; owner/estimator rows use the capX mirror. This is the exact fix that prevents a settings-change
+    // recompute from silently re-rating a sales_source row at the owner's capX rate.
+    const res = await resolveAppliedRateForRole(
+      tenantDb, row.repUserId, row.attributionRole as CommissionRole,
+    );
 
-    // ALL-OR-NOTHING preserve when intent is indeterminate: no source value to compute against, or
-    // no active settings row (missing / inactive) → LEAVE THE ROW INTACT (no delete, no zeroing).
-    if (!sourceValue || !settings || !settings.isActive) {
-      continue;
-    }
-    // A rate of exactly 0 on an ACTIVE settings row is a deliberate "no commission". The deal
-    // date/amount edit path still preserves the row (all-or-nothing, #732), but the settings-change
-    // recompute (zeroOnNoRate) re-rates it to $0 — the admin explicitly set 0, so the earned row
-    // must not keep a stale positive payout. Below, appliedRate "0" → amount "0.00".
-    if (Number(settings.commissionRate) <= 0 && !input.zeroOnNoRate) {
-      continue;
-    }
+    // ALL-OR-NOTHING preserve when no valid rate — EXCEPT a deliberate 0% under zeroOnNoRate (settings-
+    // change recompute). No source value is always a preserve (no basis to recompute from).
+    // "inactive" (missing/deactivated settings) is ALWAYS preserved regardless of zeroOnNoRate — only a
+    // still-ACTIVE settings row with a deliberate 0% rate may zero the row under zeroOnNoRate. This is the
+    // F1 fix: a deactivated rep's historical rows survive a settings-change recompute for another rep.
+    if (!sourceValue) continue;
+    if (res.status === "inactive") continue;
+    if (res.status === "zero" && !input.zeroOnNoRate) continue;
+    const effectiveAppliedRate = res.status === "rate" ? res.appliedRate : "0";
 
-    const appliedRate = settings.commissionRate;
-    const amount = multiplyDecimalStrings(sourceValue.amount, appliedRate);
+    const amount = multiplyDecimalStrings(sourceValue.amount, effectiveAppliedRate);
     // In-place, keyed on row.id. Deliberately recomputes ONLY amount/rate/source/date — it never touches
-    // rep_user_id OR attribution_role, so a row stays booked to its original rep AND keeps its owner-vs-
-    // estimator role across a date/amount correction (attribution-preserving).
+    // rep_user_id OR attribution_role, so a row stays booked to its original rep AND keeps its role
+    // across a date/amount correction (attribution-preserving).
     await tenantDb
       .update(dealSignedCommissions)
       .set({
         sourceValueKind: sourceValue.kind,
         sourceValueAmount: sourceValue.amount,
-        appliedRate,
+        appliedRate: effectiveAppliedRate,
         amount,
         contractSignedDateAtSigning: input.contractSignedDate,
         calculatedAt: new Date(),
@@ -428,7 +517,7 @@ export async function recalculateCommissionForDeal(
         amount: { from: row.amount, to: amount },
         sourceValueKind: { from: row.sourceValueKind, to: sourceValue.kind },
         sourceValueAmount: { from: row.sourceValueAmount, to: sourceValue.amount },
-        appliedRate: { from: row.appliedRate, to: appliedRate },
+        appliedRate: { from: row.appliedRate, to: effectiveAppliedRate },
         contractSignedDateAtSigning: { from: row.contractSignedDateAtSigning, to: input.contractSignedDate },
       },
     });
@@ -563,6 +652,84 @@ export async function mintEstimatorCommissionForDeal(
 }
 
 /**
+ * Mint the ADDITIVE sales_source commission row for a deal (the source rep's service-source-rate cut, on
+ * top of the owner's). Mirrors mintEstimatorCommissionForDeal in structure + guards. Skips (never throws)
+ * when:
+ *   • the deal is a change order              → skipped_change_order (base-deal-only)
+ *   • the source rep already BOOKS a dsc row  → skipped_existing (never a 2nd cut for the same person)
+ *   • the deal has no effective signed date   → skipped_no_value (an unsigned deal earns nothing)
+ *   • the deal has NO booked OWNER row        → skipped_no_owner_row (OWNER-ROW INVARIANT)
+ *   • the source rep has no service-source rate (e.g. solo structure) → skipped_no_rate
+ * Rate is resolved via resolveAppliedRateForRole(…, "sales_source") — NEVER the capX mirror (INV-1).
+ * MUST run inside the caller's transaction.
+ */
+export async function mintSalesSourceCommissionForDeal(
+  tx: TenantDb,
+  input: {
+    dealId: string;
+    salesSourceUserId: string;
+    triggeredByUserId: string;
+  },
+): Promise<CalculateCommissionResult> {
+  const [deal] = await tx
+    .select({
+      id: deals.id,
+      assignedRepId: deals.assignedRepId,
+      isChangeOrder: deals.isChangeOrder,
+      workflowRoute: deals.workflowRoute,
+      awardedAmount: deals.awardedAmount,
+      bidEstimate: deals.bidEstimate,
+      ddEstimate: deals.ddEstimate,
+      contractSignedAt: deals.contractSignedAt,
+      contractSignedDate: deals.contractSignedDate,
+    })
+    .from(deals)
+    .where(eq(deals.id, input.dealId))
+    .limit(1);
+  if (!deal) return { status: "skipped_no_value" };
+  if (deal.isChangeOrder) return { status: "skipped_change_order" };
+  // F3a: a sales_source cut is ONLY valid on SERVICE (not capX/normal) workflow deals. Gate minting here
+  // so a capX deal that happens to have sales_source_user_id set never earns a row for the source rep.
+  if (deal.workflowRoute !== "service") return { status: "skipped_no_value" };
+
+  // The source must STILL be a rep at MINT time. assertSalesSourceIsRep gates SET-time selection, but a
+  // later role change (updateUser: rep → director/admin/construction) does NOT clear the deal's
+  // sales_source_user_id — so a deal signed OR sales-source-recompute-discovered after the demotion would
+  // otherwise mint a sales_source cut for a non-rep. Re-check here so the mint path enforces the same
+  // "source is a rep" invariant as selection, everywhere the row can be created.
+  const [sourceUser] = await tx
+    .select({ role: users.role })
+    .from(users)
+    .where(eq(users.id, input.salesSourceUserId))
+    .limit(1);
+  if (!sourceUser || sourceUser.role !== "rep") return { status: "skipped_no_rep" };
+
+  // Does this source rep ALREADY book a row on this deal (as any role)? Never mint a 2nd cut for them.
+  const [existing] = await tx
+    .select({ id: dealSignedCommissions.id })
+    .from(dealSignedCommissions)
+    .where(and(eq(dealSignedCommissions.dealId, deal.id), eq(dealSignedCommissions.repUserId, input.salesSourceUserId)))
+    .limit(1);
+  if (existing) return { status: "skipped_existing" };
+
+  const effectiveSignedDate = effectiveSignedDateOf(deal);
+  if (!effectiveSignedDate) return { status: "skipped_no_value" };
+
+  // OWNER-ROW INVARIANT: only mint when an owner row already exists — the sales_source row must never be
+  // the first/only dsc row on a deal. Mirrors the estimator invariant exactly.
+  const [ownerRow] = await tx
+    .select({ id: dealSignedCommissions.id })
+    .from(dealSignedCommissions)
+    .where(and(eq(dealSignedCommissions.dealId, deal.id), eq(dealSignedCommissions.attributionRole, "owner")))
+    .limit(1);
+  if (!ownerRow) return { status: "skipped_no_owner_row" };
+
+  return insertCommissionRowForRep(
+    tx, deal, input.salesSourceUserId, effectiveSignedDate, input.triggeredByUserId, "sales_source",
+  );
+}
+
+/**
  * Remove ONLY the estimator's ADDITIVE commission row — the manual estimator-removal counterpart.
  *
  * STRUCTURAL OWNER-ROW GUARD: the DELETE is scoped to (deal_id, rep_user_id = estimator,
@@ -602,6 +769,50 @@ export async function removeEstimatorCommissionForDeal(
         // Role-scoped: an OWNER row (attribution_role = 'owner') can never match, so the owner's full cut
         // is structurally protected even when estimator === the deal's (reassigned) current owner.
         eq(dealSignedCommissions.attributionRole, "estimator")
+      )
+    )
+    .returning({
+      id: dealSignedCommissions.id,
+      amount: dealSignedCommissions.amount,
+      repUserId: dealSignedCommissions.repUserId,
+    });
+  for (const row of removed) {
+    await writeAuditLog(tx, {
+      tableName: "deal_signed_commissions",
+      recordId: row.id,
+      action: "delete",
+      changedBy: input.triggeredByUserId,
+      changes: {
+        amount: { from: row.amount, to: null },
+        repUserId: { from: row.repUserId, to: null },
+        dealId: { from: input.dealId, to: null },
+      },
+    });
+  }
+  return removed.length;
+}
+
+/**
+ * Removes the attribution_role='sales_source' commission row for a given deal + sales source rep.
+ * Role-scoped: can NEVER delete the owner or estimator row, even if the source rep is also the owner.
+ * Mirrors removeEstimatorCommissionForDeal. Each deleted row is audited. Returns the count removed.
+ * MUST run inside the caller's transaction.
+ */
+export async function removeSalesSourceCommissionForDeal(
+  tx: TenantDb,
+  input: {
+    dealId: string;
+    salesSourceUserId: string;
+    triggeredByUserId: string | null;
+  }
+): Promise<number> {
+  const removed = await tx
+    .delete(dealSignedCommissions)
+    .where(
+      and(
+        eq(dealSignedCommissions.dealId, input.dealId),
+        eq(dealSignedCommissions.repUserId, input.salesSourceUserId),
+        eq(dealSignedCommissions.attributionRole, "sales_source")
       )
     )
     .returning({

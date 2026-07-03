@@ -72,11 +72,12 @@ import {
   deleteDeal as apiDeleteDeal,
   updateDeal as apiUpdateDeal,
   updateDealEstimator as apiUpdateDealEstimator,
+  updateDealSalesSource as apiUpdateDealSalesSource,
   type DealDetail,
 } from "@/hooks/use-deals";
 import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
-import { useSalesReps } from "@/hooks/use-sales-reps";
+import { useSalesReps, type SalesRepOption } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -154,6 +155,33 @@ type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "scorecards" |
 function formatNullable(value: string | number | null | undefined) {
   if (value == null || value === "") return "Not set";
   return String(value);
+}
+
+// Shared builder for the owner / estimator / sales-source rep pickers: drop the excluded reps, then if the
+// current value isn't in the remaining list (an inactive rep, or one excluded by an invariant) pin it to the
+// top with a readable label — prefer the server-provided name, else the active-list name, else a fallback.
+// One place so the three pickers can't drift on exclusion or fallback behavior.
+function buildRepOptions(
+  reps: SalesRepOption[],
+  opts: {
+    excludeIds: (string | null | undefined)[];
+    currentId: string | null | undefined;
+    currentServerName?: string | null;
+    fallbackLabel: string;
+  }
+): SalesRepOption[] {
+  const excluded = new Set(opts.excludeIds.filter((id): id is string => Boolean(id)));
+  const options = reps.filter((rep) => !excluded.has(rep.id));
+  if (opts.currentId && !options.some((rep) => rep.id === opts.currentId)) {
+    options.unshift({
+      id: opts.currentId,
+      displayName:
+        opts.currentServerName ??
+        reps.find((rep) => rep.id === opts.currentId)?.displayName ??
+        opts.fallbackLabel,
+    });
+  }
+  return options;
 }
 
 function initials(value: string) {
@@ -1113,18 +1141,30 @@ function DealRightRail({
     officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
     { purpose: "deal-reassignment", enabled: canReassignDeal }
   );
+  // The sales-source picker needs the role==='rep' roster (the assertSalesSourceIsRep gate), NOT the
+  // broader CRM list the owner/estimator reassignment pickers use — otherwise a leader could pick a
+  // director/admin/construction user here and only learn it's invalid via a 422 on submit. Load it
+  // separately, gated to leadership (admin/director, == canEditSalesSource) so a rep viewing the page
+  // issues no extra fetch.
+  const { salesReps: sourceSalesReps, loading: sourceSalesRepsLoading } = useSalesReps(
+    officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
+    {
+      purpose: "sales-source",
+      enabled: currentUser?.role === "admin" || currentUser?.role === "director",
+    }
+  );
   const [reassigning, setReassigning] = useState(false);
   const [reassignError, setReassignError] = useState<string | null>(null);
   const assignedRep = formatNullable(deal.assignedRepName ?? deal.assignedRepId);
   const assignedRepInitials = initials(deal.assignedRepName ?? deal.assignedRepId ?? "NA");
   const assignedRepColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
-  const ownerOptions = [...salesReps];
-  if (deal.assignedRepId && !ownerOptions.some((rep) => rep.id === deal.assignedRepId)) {
-    ownerOptions.unshift({
-      id: deal.assignedRepId,
-      displayName: deal.assignedRepName ?? "Current assigned rep",
-    });
-  }
+  // Exclude the current sales source — the server rejects reassigning the owner to it (SALES_SOURCE_CONFLICT).
+  const ownerOptions = buildRepOptions(salesReps, {
+    excludeIds: [deal.salesSourceUserId],
+    currentId: deal.assignedRepId,
+    currentServerName: deal.assignedRepName,
+    fallbackLabel: "Current assigned rep",
+  });
 
   async function handleReassign(nextRepId: string) {
     if (!nextRepId || nextRepId === deal.assignedRepId || reassigning) return;
@@ -1158,13 +1198,13 @@ function DealRightRail({
   const [savingEstimator, setSavingEstimator] = useState(false);
   const [estimatorError, setEstimatorError] = useState<string | null>(null);
   const estimatorName = formatNullable(deal.estimatorUserName ?? deal.estimatorUserId);
-  const estimatorOptions = [...salesReps];
-  if (deal.estimatorUserId && !estimatorOptions.some((rep) => rep.id === deal.estimatorUserId)) {
-    estimatorOptions.unshift({
-      id: deal.estimatorUserId,
-      displayName: deal.estimatorUserName ?? "Current estimator",
-    });
-  }
+  // Exclude the current sales source — the server rejects an estimator == sales source (SALES_SOURCE_CONFLICT).
+  const estimatorOptions = buildRepOptions(salesReps, {
+    excludeIds: [deal.salesSourceUserId],
+    currentId: deal.estimatorUserId,
+    currentServerName: deal.estimatorUserName,
+    fallbackLabel: "Current estimator",
+  });
 
   async function handleEstimatorChange(nextIdRaw: string) {
     const nextId = nextIdRaw || null;
@@ -1192,6 +1232,50 @@ function DealRightRail({
       setSavingEstimator(false);
     }
   }
+
+  // Sales Source editing is leadership-only (matches the PATCH /deals/:id/sales-source RBAC).
+  // Reuses the same canEditEstimator condition; the picker is fed by the rep-only sourceSalesReps feed.
+  const canEditSalesSource = canEditEstimator;
+  const [savingSalesSource, setSavingSalesSource] = useState(false);
+  const [salesSourceError, setSalesSourceError] = useState<string | null>(null);
+  // Exclude the owner + estimator from the source picker (the server rejects those with 422); mirrors
+  // the create form's exclusion so a leader can't pick a conflicting source and only learn via a toast.
+  // Built from sourceSalesReps (role==='rep' only) so a leader is never offered a non-rep that would 422.
+  const salesSourceOptions = buildRepOptions(sourceSalesReps, {
+    excludeIds: [deal.assignedRepId, deal.estimatorUserId],
+    currentId: deal.salesSourceUserId,
+    currentServerName: deal.salesSourceUserName,
+    fallbackLabel: "Current sales source",
+  });
+  // Prefer the server-provided name so a deactivated source rep doesn't show a raw UUID.
+  // Mirrors how estimatorUserName is used for the estimator read-only display above.
+  const salesSourceName =
+    deal.salesSourceUserName ??
+    salesReps.find((r) => r.id === deal.salesSourceUserId)?.displayName ??
+    (deal.salesSourceUserId ? deal.salesSourceUserId : null);
+
+  async function handleSalesSourceChange(nextIdRaw: string) {
+    const nextId = nextIdRaw || null;
+    if (nextId === (deal.salesSourceUserId ?? null) || savingSalesSource) return;
+    setSavingSalesSource(true);
+    setSalesSourceError(null);
+    try {
+      await apiUpdateDealSalesSource(deal.id, nextId, { officeId });
+      toast.success(nextId ? "Sales source updated" : "Sales source cleared");
+      try {
+        await onReassigned();
+      } catch {
+        toast.info("Sales source updated. Refresh the page to see the latest detail state.");
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to update sales source";
+      setSalesSourceError(message);
+      toast.error(message);
+    } finally {
+      setSavingSalesSource(false);
+    }
+  }
+
   const headerDisplayNumber = formatDealDisplayNumber(deal);
   const dealWithOptionalContact = deal as DealDetail & {
     primaryContactName?: string | null;
@@ -1312,6 +1396,58 @@ function DealRightRail({
               )
             }
           />
+          {/* F3c: Sales source is a service-opportunity-only concept. Hide on capX/normal deals.
+               Change orders are exempted: a CO may inherit a source from a service-deal parent
+               and should still display that read-only value even if the CO's own workflowRoute
+               resolves differently (the CO branch is always read-only regardless). */}
+          {(deal.isChangeOrder === true || deal.workflowRoute === "service") && (
+            <DetailRailItem
+              label="Sales Source"
+              value={
+                // Change orders inherit their sales source from the parent deal — no own source to set.
+                deal.isChangeOrder ? (
+                  <div className="space-y-1">
+                    <span>{salesSourceName ?? "Not set"}</span>
+                    <p className="text-xs italic text-slate-500">
+                      Inherited from the parent deal.
+                    </p>
+                  </div>
+                ) : canEditSalesSource ? (
+                  <div className="space-y-1">
+                    <select
+                      aria-label="Edit sales source"
+                      className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 px-2 text-xs font-semibold text-slate-900"
+                      // Watch the sales-source feed's own loading flag (it populates salesSourceOptions),
+                      // NOT the deal-reassignment salesRepsLoading — else the picker could go interactive
+                      // with a stale/empty list before its own fetch resolves.
+                      disabled={sourceSalesRepsLoading || savingSalesSource}
+                      value={deal.salesSourceUserId ?? ""}
+                      onChange={(event) => {
+                        void handleSalesSourceChange(event.currentTarget.value);
+                      }}
+                    >
+                      <option value="">— None —</option>
+                      {salesSourceOptions.map((rep) => (
+                        <option key={rep.id} value={rep.id}>
+                          {rep.displayName}
+                        </option>
+                      ))}
+                    </select>
+                    {salesSourceError ? (
+                      <p className="text-xs font-medium text-red-600">{salesSourceError}</p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <span>{salesSourceName ?? "Not set"}</span>
+                    <p className="text-xs italic text-slate-500">
+                      Only admins and directors can edit the sales source.
+                    </p>
+                  </div>
+                )
+              }
+            />
+          )}
         </DetailRailSection>
 
         <DetailRailSection title="Account">

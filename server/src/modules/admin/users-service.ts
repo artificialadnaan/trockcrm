@@ -16,7 +16,7 @@ import {
   evaluateUpdateUserGuards,
   planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
-import { resolveEffectiveCapxRate } from "@trock-crm/shared/lib/commission-structure";
+import { resolveEffectiveCapxRate, resolveEffectiveServiceSourceRate } from "@trock-crm/shared/lib/commission-structure";
 import {
   incrementTokenVersion,
   revokeLocalAuthOnDeactivate,
@@ -24,6 +24,7 @@ import {
   closeUserSseConnections,
 } from "../auth/session-invalidation.js";
 import { recalculateAllCommissionsForRep } from "../commissions/recompute-service.js";
+import type { CommissionRole } from "../commissions/service.js";
 import {
   getLocalAuthStatus,
   type LocalAuthStatus,
@@ -33,6 +34,32 @@ type ExecuteRows<T> = { rows: T[] } | T[];
 
 function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
   return Array.isArray(result) ? result : result.rows;
+}
+
+/**
+ * Decide whether a commission-settings save should trigger the cross-office recompute, and the minimal
+ * role set it should touch. Pure so the gate logic is unit-testable without DB plumbing.
+ *
+ * - capxChanged → owner + estimator rows re-rate at the new capX mirror.
+ * - serviceSourceChanged → sales_source rows re-rate at the new service-source rate.
+ * - reactivated (inactive → active) → run the sales_source pass EVEN at an unchanged rate: while the
+ *   config was inactive, resolveAppliedRateForRole returned "inactive" so mint/recompute PRESERVED (never
+ *   created) rows — a sourced service deal signed during inactivity has no sales_source row. Reactivating
+ *   makes the rep eligible again, so the sales-source discovery must run to mint those now-earned rows.
+ *   Deliberately sales_source-only: owner rows keep the backfill-only convention (recompute never mints
+ *   owner rows) and, being preserved at their signed rate, are already correct once active again.
+ */
+export function resolveCommissionRecomputeScope(flags: {
+  capxChanged: boolean;
+  serviceSourceChanged: boolean;
+  reactivated: boolean;
+}): { commissionRatesChanged: boolean; affectedRoles: CommissionRole[] | undefined } {
+  const commissionRatesChanged = flags.capxChanged || flags.serviceSourceChanged || flags.reactivated;
+  if (!commissionRatesChanged) return { commissionRatesChanged, affectedRoles: undefined };
+  const roles: CommissionRole[] = [];
+  if (flags.capxChanged) roles.push("owner", "estimator");
+  if (flags.serviceSourceChanged || flags.reactivated) roles.push("sales_source");
+  return { commissionRatesChanged, affectedRoles: roles };
 }
 
 interface UserLocalAuthEventSqlRow extends Record<string, unknown> {
@@ -253,6 +280,7 @@ export async function updateUser(
 ) {
   const result = await db.transaction(async (tx) => {
     let commissionRatesChanged = false;
+    let affectedRoles: CommissionRole[] | undefined;
     const existing = await tx
       .select()
       .from(users)
@@ -427,24 +455,48 @@ export async function updateUser(
           },
         });
 
-      // Only recompute when the EFFECTIVE capX rate actually moved. Editing an INACTIVE rate
-      // (e.g. Mixed % while the rep is Solo), the service-source rate (unused for owner/estimator
-      // rows in PR1), or a non-rate field leaves the mirror unchanged — so it must NOT trigger a
-      // fan-out (which would otherwise re-rate deals to their current values for no reason). PR2
-      // will additionally gate on the effective service-source rate once sales_source rows exist.
+      // Only recompute when an EFFECTIVE rate actually moved. Editing an INACTIVE rate
+      // (e.g. Mixed % while the rep is Solo) or a non-rate field leaves the mirrors unchanged —
+      // so it must NOT trigger a fan-out (which would otherwise re-rate deals for no reason).
+      // We gate on BOTH the effective capX rate (owner/estimator rows) AND the effective
+      // service-source rate (sales_source rows), so either change triggers a recompute.
       const previousCommissionRate = resolveEffectiveCapxRate({
         commissionStructure: current?.commissionStructure ?? "solo",
         capxRateSolo: Number(current?.capxRateSolo ?? 0),
         capxRateMixed: Number(current?.capxRateMixed ?? 0),
         serviceSourceRate: Number(current?.serviceSourceRate ?? 0),
       });
+      const previousServiceSourceRate = resolveEffectiveServiceSourceRate({
+        commissionStructure: (current?.commissionStructure ?? "solo") as "solo" | "mixed",
+        capxRateSolo: Number(current?.capxRateSolo ?? 0),
+        capxRateMixed: Number(current?.capxRateMixed ?? 0),
+        serviceSourceRate: Number(current?.serviceSourceRate ?? 0),
+      });
+      const nextServiceSourceRate = resolveEffectiveServiceSourceRate({
+        commissionStructure,
+        capxRateSolo,
+        capxRateMixed,
+        serviceSourceRate,
+      });
       // Compare at the column's scale (numeric(7,6)). A raw float compare would treat a no-op blur
       // as a change — e.g. a stored 0.029000 comes back from the client as 2.9/100 = 0.02899999…,
       // which !== 0.029 and would spuriously fan out. Normalising both to 6 decimals avoids that.
-      commissionRatesChanged = commissionRate.toFixed(6) !== previousCommissionRate.toFixed(6);
+      // Split into two booleans so we can pass a precise role set to the recompute: a service-source-
+      // only change must not re-rate the rep's owner/estimator rows (and vice versa for capX changes).
+      const capxChanged = commissionRate.toFixed(6) !== previousCommissionRate.toFixed(6);
+      const serviceSourceChanged = nextServiceSourceRate.toFixed(6) !== previousServiceSourceRate.toFixed(6);
+      const wasActive = Boolean(current?.isActive ?? true);
+      const scope = resolveCommissionRecomputeScope({
+        capxChanged,
+        serviceSourceChanged,
+        // A REACTIVATION (inactive → active) counts as a change even at an unchanged rate (see the helper).
+        reactivated: !wasActive && isActive,
+      });
+      commissionRatesChanged = scope.commissionRatesChanged;
+      affectedRoles = scope.affectedRoles;
     }
 
-    return { updated, closeStreams: plan.closeStreams, commissionRatesChanged };
+    return { updated, closeStreams: plan.closeStreams, commissionRatesChanged, affectedRoles };
   });
 
   // Best-effort, post-commit: drop the deactivated user's live SSE streams immediately. The
@@ -453,11 +505,13 @@ export async function updateUser(
 
   // Fire-and-forget, post-commit: re-rating is best-effort and must never block the admin's save
   // nor fail the already-committed settings write (kicked off like closeUserSseConnections above).
-  // The task owns its own logging. Only fires when the effective capX rate actually changed.
+  // The task owns its own logging. Only fires when a rate that affects commission rows actually changed.
+  // `affectedRoles` scopes the recompute to only the rows whose rate changed (e.g. a service-source-
+  // only edit must not touch the rep's owner/estimator rows, avoiding value drift and audit noise).
   if (result.commissionRatesChanged) {
     void (async () => {
       try {
-        const summary = await recalculateAllCommissionsForRep(id, actorUserId);
+        const summary = await recalculateAllCommissionsForRep(id, actorUserId, result.affectedRoles);
         if (summary.officeFailures.length > 0) {
           console.error(
             `[commissions] rep ${id} recompute had office failures:`,

@@ -36,7 +36,7 @@ beforeAll(async () => {
       on_hold boolean NOT NULL DEFAULT false, on_hold_started_at timestamptz,
       on_hold_accumulated_seconds bigint NOT NULL DEFAULT 0, on_hold_accumulated_seconds_at_stage_entry bigint NOT NULL DEFAULT 0,
       workflow_route text NOT NULL DEFAULT 'normal', deal_number text, project_number text, bid_board_project_number text,
-      bid_board_estimator text, estimator_user_id uuid, bid_board_office text, bid_board_status text,
+      bid_board_estimator text, estimator_user_id uuid, sales_source_user_id uuid, bid_board_office text, bid_board_status text,
       bid_board_sales_price_per_area text, bid_board_project_cost numeric, bid_board_profit_margin_pct numeric,
       bid_board_total_sales numeric, bid_board_created_at timestamptz, bid_board_due_date date,
       bid_board_customer_name text, bid_board_customer_contact_raw text, bid_board_stage_slug text,

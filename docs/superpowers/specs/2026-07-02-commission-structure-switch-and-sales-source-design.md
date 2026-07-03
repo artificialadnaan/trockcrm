@@ -83,7 +83,7 @@ unchanged.
 `commission_structure = 'solo'`, `service_source_rate = 0`. Every rep stays on their current
 rate with no service-source behavior — zero change to existing payouts.
 
-**`tenant.deals`** — migration `0174` (PR2) adds:
+**`tenant.deals`** — migration `0175` (PR2) adds:
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -133,7 +133,7 @@ denormalization is maintained. Live pipeline/potential/earned reads keep reading
 
 ### PR2 — Sales Source end-to-end
 
-1. **Schema:** migration `0174` adds `deals.sales_source_user_id`.
+1. **Schema:** migration `0175` adds `deals.sales_source_user_id`.
 2. **Service-opportunity form** (`client/src/components/deals/service-opportunity-form.tsx`):
    add an optional "Sales Source" dropdown of all office reps; include
    `salesSourceUserId` in the submit payload. Server create route

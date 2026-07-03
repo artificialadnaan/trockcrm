@@ -94,6 +94,7 @@ interface DealMatch {
   bid_board_project_number: string | null;
   bid_board_estimator: string | null;
   estimator_user_id: string | null;
+  sales_source_user_id: string | null;
   bid_board_office: string | null;
   bid_board_status: string | null;
   bid_board_sales_price_per_area: string | null;
@@ -318,7 +319,11 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
            bid_board_customer_name = $12,
            bid_board_customer_contact_raw = $13,
            bid_board_project_number = $14,
-           estimator_user_id = COALESCE(estimator_user_id, $16::uuid),
+           -- Empties-only estimator fill, TOCTOU-guarded against the LIVE locked row: NULLIF drops the
+           -- incoming id when it equals the deal's CURRENT sales_source_user_id, so an admin setting the
+           -- source to the mapped estimator between findDealMatches (the snapshot the JS guard reads) and
+           -- this UPDATE's row lock can never recreate the estimator == source conflict.
+           estimator_user_id = COALESCE(estimator_user_id, NULLIF($16::uuid, sales_source_user_id)),
            -- Bid Board exports do not include a per-row updated-at, so this stores the sync cycle timestamp.
            bid_board_last_updated_at = $15::timestamptz,
            updated_at = NOW()
@@ -338,7 +343,10 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
             bid_board_customer_contact_raw IS DISTINCT FROM $13 OR
             bid_board_project_number IS DISTINCT FROM $14 OR
             bid_board_last_updated_at IS DISTINCT FROM $15::timestamptz OR
-            (estimator_user_id IS NULL AND $16::uuid IS NOT NULL)
+            -- Only trigger an estimator-fill write when it would actually land: the incoming id is set,
+            -- the slot is empty, AND it isn't the live sales source (matches the NULLIF guard above, so
+            -- the UPDATE doesn't churn updated_at just to no-op a blocked fill).
+            (estimator_user_id IS NULL AND $16::uuid IS NOT NULL AND $16::uuid IS DISTINCT FROM sales_source_user_id)
        )
      RETURNING id, name, deal_number, project_number, estimator_user_id
   `;
@@ -397,6 +405,7 @@ function dealMatchSelectSql(schemaName: string): string {
            d.bid_board_project_number,
            d.bid_board_estimator,
            d.estimator_user_id,
+           d.sales_source_user_id,
            d.bid_board_office,
            d.bid_board_status,
            d.bid_board_sales_price_per_area,
@@ -1093,6 +1102,26 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
               : `Bid Board estimator "${normalized.bidBoardEstimator}" maps to ${resolvedEstimatorUserId}, which is not an active CRM user — estimator_user_id left null (check BID_BOARD_ESTIMATOR_USER_MAP)`
           );
         }
+      }
+      // Invariant guard (mirrors the manual estimator/source conflict rejection in setDealEstimator):
+      // never let the empties-only fill land the SAME user as the deal's sales source. estimator == source
+      // makes calculateCommissionForDeal skip the additive sales_source cut and mint an estimator cut for
+      // that rep instead — silently re-attributing the sourced-book commission + floor credit. Drop the
+      // incoming id (leave estimator null) so the sales-source attribution wins. Only bites on a genuine
+      // fill (existing estimator null); when one is already set the COALESCE preserves it and this incoming
+      // id is dropped anyway, so we skip the noisy warning in that case.
+      // NOTE: this JS check reads the findDealMatches SNAPSHOT — it is the observability/warning layer. The
+      // AUTHORITATIVE guard is the SQL NULLIF($16, sales_source_user_id) in buildBidBoardDealUpdateSql,
+      // which evaluates against the LIVE locked row and so also catches a source set between this SELECT
+      // and the UPDATE's row lock (TOCTOU).
+      const dealSalesSourceUserId = (matches[0].sales_source_user_id ?? null) as string | null;
+      if (estimatorUserId && estimatorUserId === dealSalesSourceUserId) {
+        if (!existingEstimatorUserId) {
+          warnings.push(
+            `Bid Board estimator "${normalized.bidBoardEstimator}" maps to ${estimatorUserId}, which is already the deal's sales source — estimator_user_id left null to preserve the sales-source commission attribution (deal ${matches[0].id})`
+          );
+        }
+        estimatorUserId = null;
       }
       // Empties-only guard (SET estimator_user_id = COALESCE(estimator_user_id, $16) above): when the
       // deal already has an estimator, the DB keeps it and this resolved value is dropped on the floor.

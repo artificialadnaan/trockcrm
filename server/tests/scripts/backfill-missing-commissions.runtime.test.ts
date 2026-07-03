@@ -173,6 +173,106 @@ describe("commission backfill", () => {
   });
 });
 
+describe("backfill salesSource tally — sourced service deal", () => {
+  // Isolated PGlite so the salesSource fixture doesn't shift the candidate counts asserted in the
+  // shared-state "commission backfill" describe above (which expects exactly 2 created rows, etc.).
+  const RS = U("0aa1"); // sales-source rep — mixed structure, service_source_rate=0.015
+  const ACTOR2 = U("0ac8");
+  const WON2 = U("0600");
+  const D_SOURCED = U("0de0"); // service deal, signed, sales_source_user_id=RS, assigned_rep=R1
+
+  let pg2: PGlite;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let tdb2: any;
+  const query2 = (sql: string, params?: unknown[]) => pg2.query(sql, params as never[]) as Promise<{ rows: Record<string, unknown>[] }>;
+
+  beforeAll(async () => {
+    pg2 = new PGlite();
+    await pg2.exec(
+      tenantSchemaSql("public", [users, pipelineStageConfig, deals, userCommissionSettings, dealSignedCommissions, auditLog])
+    );
+    await pg2.exec(
+      `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT dsc_dedup2 UNIQUE (deal_id, rep_user_id);`
+    );
+    tdb2 = drizzle(pg2);
+
+    const OFFICE2 = U("0f02");
+    // R1 owns the deal (capX solo structure — commission_rate is the denormalized capX rate mirror).
+    await pg2.exec(
+      `INSERT INTO public.users (id, display_name, email, role, office_id) VALUES
+         ('${R1}','Rep One','r1@x.com','rep','${OFFICE2}'),
+         ('${RS}','Source Rep','rs@x.com','rep','${OFFICE2}')`
+    );
+    // R1: solo structure, commission_rate=0.02 (capX; capx_rate_solo mirrors it).
+    // RS: mixed structure, service_source_rate=0.015 — earns a sales_source cut on service deals.
+    await pg2.exec(
+      `INSERT INTO public.user_commission_settings
+         (user_id, commission_rate, commission_structure, capx_rate_solo, capx_rate_mixed, service_source_rate, is_active)
+       VALUES
+         ('${R1}', 0.020000, 'solo',  0.020000, 0.000000, 0.000000, true),
+         ('${RS}', 0.010000, 'mixed', 0.010000, 0.010000, 0.015000, true)`
+    );
+    await pg2.exec(
+      `INSERT INTO public.pipeline_stage_config (id, name, slug, display_order)
+       VALUES ('${WON2}','Won','won',9)`
+    );
+    // Sourced service deal: workflow_route='service', sales_source_user_id=RS, awarded_amount=200000,
+    // signed 2026-03-01. No commission row yet → backfill candidate.
+    await pg2.exec(
+      `INSERT INTO public.deals
+         (id, deal_number, name, stage_id, assigned_rep_id, awarded_amount, contract_signed_date,
+          workflow_route, sales_source_user_id)
+       VALUES
+         ('${D_SOURCED}','src1','Sourced Deal','${WON2}','${R1}', 200000, '2026-03-01',
+          'service', '${RS}')`
+    );
+  }, 30_000);
+
+  afterAll(async () => {
+    await pg2?.close();
+  });
+
+  it("reports the sales_source row in the summary when a sourced service deal is backfilled", async () => {
+    const summary = await backfillTenantCommissions(tdb2, query2, {
+      schema: "public",
+      execute: true,
+      actorUserId: ACTOR2,
+    });
+    // Owner row created for R1.
+    expect(summary.byStatus.created).toBe(1);
+    expect(summary.totalCommissionCreated).toBe(4000); // 200000 × 0.02
+
+    // sales_source row created for RS (200000 × 0.015 = 3000).
+    expect(summary.salesSourceByStatus.created).toBe(1);
+    expect(summary.totalSalesSourceCommissionCreated).toBe(3000);
+
+    // Per-row fields on the sourced deal.
+    const row = summary.rows.find((r) => r.dealId === D_SOURCED);
+    expect(row?.salesSourceStatus).toBe("created");
+    expect(Number(row?.salesSourceAmount ?? 0)).toBe(3000);
+
+    // Two dsc rows for the deal: owner (R1) + sales_source (RS).
+    const { rows: dscRows } = await pg2.query<{ rep_user_id: string; attribution_role: string; amount: string }>(
+      `SELECT rep_user_id, attribution_role, amount FROM public.deal_signed_commissions WHERE deal_id='${D_SOURCED}' ORDER BY amount DESC`
+    );
+    expect(dscRows).toHaveLength(2);
+    expect(dscRows.find((r) => r.attribution_role === "owner")?.rep_user_id).toBe(R1);
+    expect(dscRows.find((r) => r.attribution_role === "sales_source")?.rep_user_id).toBe(RS);
+    expect(Number(dscRows.find((r) => r.attribution_role === "sales_source")?.amount ?? 0)).toBe(3000);
+  });
+
+  it("idempotent re-run: salesSource already has a row → skipped_existing", async () => {
+    const summary = await backfillTenantCommissions(tdb2, query2, {
+      schema: "public",
+      execute: true,
+      actorUserId: ACTOR2,
+    });
+    // D_SOURCED now has rows → NOT a candidate anymore.
+    expect(summary.candidates).toBe(0);
+    expect(summary.salesSourceByStatus.created).toBe(0);
+  });
+});
+
 describe("backfill parseArgs (execution-safety controls)", () => {
   it("rejects the space-separated --tenant form (would silently widen to ALL tenants)", () => {
     expect(() => parseArgs(["--tenant", "office_dallas"])).toThrow(/with '='/);

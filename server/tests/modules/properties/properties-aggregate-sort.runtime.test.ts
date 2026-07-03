@@ -51,7 +51,7 @@ beforeAll(async () => {
       created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE TABLE ${T}.deals (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), company_id uuid, property_id uuid, source_lead_id uuid,
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), sales_source_user_id uuid, company_id uuid, property_id uuid, source_lead_id uuid,
       forecast_revenue numeric(14,2), awarded_amount numeric(14,2), bid_board_total_sales numeric(14,2),
       bid_estimate numeric(14,2), dd_estimate numeric(14,2),
       stage_id uuid, bid_board_stage_slug text,

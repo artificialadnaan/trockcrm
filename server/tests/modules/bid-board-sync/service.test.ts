@@ -190,12 +190,19 @@ describe("Bid Board sync service", () => {
     // Parse fail with "could not determine data type of parameter $16" (42P18) and aborted
     // the whole ingest → CRM 500 on every Bid Board push (P0, 2026-06-18). See the runtime
     // PGlite proof in estimator-param-type-cast.runtime.test.ts.
-    expect(sql).toContain("estimator_user_id = coalesce(estimator_user_id, $16::uuid)");
+    // The incoming id is also NULLIF'd against the live sales_source_user_id: the fill must
+    // never land the deal's own source as the estimator (estimator == source makes the
+    // commission engine skip the sales_source cut). This is the TOCTOU-authoritative guard,
+    // evaluated against the locked row (Codex F).
+    expect(sql).toContain("estimator_user_id = coalesce(estimator_user_id, nullif($16::uuid, sales_source_user_id))");
     expect(sql).not.toContain("estimator_user_id = $16,");
 
     // Change-detection: the row only updates for the estimator when it is currently
-    // NULL and a new id exists — it no longer fires on a non-null (manual) value.
-    expect(sql).toContain("(estimator_user_id is null and $16::uuid is not null)");
+    // NULL, a new id exists, AND that id isn't the live sales source (so the write doesn't
+    // churn just to no-op a fill the NULLIF would block).
+    expect(sql).toContain(
+      "(estimator_user_id is null and $16::uuid is not null and $16::uuid is distinct from sales_source_user_id)"
+    );
     expect(sql).not.toContain("estimator_user_id is distinct from $16");
 
     const row = normalizeBidBoardRow({

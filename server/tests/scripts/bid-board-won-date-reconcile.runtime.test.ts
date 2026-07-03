@@ -29,7 +29,7 @@ beforeAll(async () => {
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL, name text NOT NULL);
     CREATE SCHEMA office_test;
     CREATE TABLE office_test.deals (
-      id uuid PRIMARY KEY, deal_number text, name text, stage_id uuid NOT NULL,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, name text, stage_id uuid NOT NULL,
       is_active boolean NOT NULL DEFAULT true, is_bid_board_owned boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, bid_board_status text,
       stage_entered_at timestamptz, won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,

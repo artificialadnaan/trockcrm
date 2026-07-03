@@ -52,7 +52,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, stage_id uuid NOT NULL,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, stage_id uuid NOT NULL,
       won_closed_date date, expected_close_date date, actual_close_date date,
       lost_at timestamptz, contract_signed_at timestamptz, contract_signed_date date, updated_at timestamptz
     );

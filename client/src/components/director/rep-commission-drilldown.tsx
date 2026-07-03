@@ -70,17 +70,19 @@ interface Props {
   onDataChanged: () => void;
 }
 
-function RoleBadge({ role }: { role: "owner" | "estimator" }) {
+function RoleBadge({ role }: { role: "owner" | "estimator" | "sales_source" }) {
   return (
     <span
       className={cn(
         "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset",
         role === "owner"
           ? "bg-slate-100 text-slate-700 ring-slate-200"
-          : "bg-violet-50 text-violet-700 ring-violet-200"
+          : role === "sales_source"
+            ? "bg-cyan-50 text-cyan-700 ring-cyan-200"
+            : "bg-violet-50 text-violet-700 ring-violet-200"
       )}
     >
-      {role === "owner" ? "Owner cut" : "Estimator cut"}
+      {role === "owner" ? "Owner cut" : role === "sales_source" ? "Sales source cut" : "Estimator cut"}
     </span>
   );
 }
@@ -98,8 +100,10 @@ export function RepCommissionDrilldown({
 }: Props) {
   const ownerCuts = commissionDeals.filter((d) => d.attributionRole === "owner");
   const estimatorCuts = commissionDeals.filter((d) => d.attributionRole === "estimator");
+  const salesSourceCuts = commissionDeals.filter((d) => d.attributionRole === "sales_source");
   const ownerTotal = ownerCuts.reduce((sum, d) => sum + d.earnedCommission, 0);
   const estimatorTotal = estimatorCuts.reduce((sum, d) => sum + d.earnedCommission, 0);
+  const salesSourceTotal = salesSourceCuts.reduce((sum, d) => sum + d.earnedCommission, 0);
 
   // Uncommissioned: no commission rate AND nothing attributed — show an explicit notice rather than a
   // wall of $0 that reads as "broken". (A rate-0 rep can still earn estimator cuts on others' deals, so
@@ -206,9 +210,9 @@ export function RepCommissionDrilldown({
                 </p>
               </div>
 
-              <EarningsBar owner={ownerTotal} estimator={estimatorTotal} override={cs.overrideEarnedCommission} />
+              <EarningsBar owner={ownerTotal} estimator={estimatorTotal} salesSource={salesSourceTotal} override={cs.overrideEarnedCommission} />
 
-              <div className="mt-3 grid grid-cols-3 gap-2 sm:gap-3">
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
                 <LegendStat
                   dot="bg-slate-400"
                   label="Owner cuts"
@@ -223,6 +227,13 @@ export function RepCommissionDrilldown({
                   accent="text-violet-700"
                 />
                 <LegendStat
+                  dot="bg-cyan-400"
+                  label="Sales source cuts"
+                  value={salesSourceTotal}
+                  sub={`${salesSourceCuts.length} deal${salesSourceCuts.length === 1 ? "" : "s"}`}
+                  accent="text-cyan-700"
+                />
+                <LegendStat
                   dot="bg-amber-400"
                   label="Manager override"
                   value={cs.overrideEarnedCommission}
@@ -231,7 +242,7 @@ export function RepCommissionDrilldown({
               </div>
 
               <p className="mt-3 border-t border-slate-200/70 pt-3 text-xs text-slate-400">
-                Owner + estimator = {formatUsd(cs.directEarnedCommission)} direct; + override ={" "}
+                Owner + estimator + sales source = {formatUsd(cs.directEarnedCommission)} direct; + override ={" "}
                 {formatUsd(cs.totalEarnedCommission)} total for {periodLabel}.
               </p>
             </div>
@@ -389,13 +400,15 @@ function SplitStat({
 function EarningsBar({
   owner,
   estimator,
+  salesSource,
   override,
 }: {
   owner: number;
   estimator: number;
+  salesSource: number;
   override: number;
 }) {
-  const total = owner + estimator + override;
+  const total = owner + estimator + salesSource + override;
   if (total === 0) {
     return <div className="mt-4 h-2.5 w-full rounded-full bg-slate-100" />;
   }
@@ -419,6 +432,9 @@ function EarningsBar({
       ) : null}
       {estimator > 0 ? (
         <div className="h-full bg-violet-400" style={{ width: pct(estimator) }} title="Estimator cuts" />
+      ) : null}
+      {salesSource > 0 ? (
+        <div className="h-full bg-cyan-400" style={{ width: pct(salesSource) }} title="Sales source cuts" />
       ) : null}
       {override > 0 ? (
         <div className="h-full bg-amber-400" style={{ width: pct(override) }} title="Manager override" />

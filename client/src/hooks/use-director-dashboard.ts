@@ -242,7 +242,7 @@ export interface RepDetailData {
     earnedCommission: number;
     paymentCount: number;
     lastPaidAt: string | null;
-    attributionRole: "owner" | "estimator";
+    attributionRole: "owner" | "estimator" | "sales_source";
   }>;
   wonMissingContractDate: Array<{
     dealId: string;

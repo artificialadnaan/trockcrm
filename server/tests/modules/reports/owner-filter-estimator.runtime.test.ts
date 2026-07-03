@@ -40,7 +40,7 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
-    CREATE TABLE deals (id uuid PRIMARY KEY, assigned_rep_id uuid, estimator_user_id uuid);
+    CREATE TABLE deals (id uuid PRIMARY KEY, assigned_rep_id uuid, estimator_user_id uuid, sales_source_user_id uuid);
     INSERT INTO users (id, display_name) VALUES ('${REP_A}','Alice'), ('${REP_B}','Bob');
     INSERT INTO deals (id, assigned_rep_id, estimator_user_id) VALUES
       ('${D.ownA}', '${REP_A}', NULL),

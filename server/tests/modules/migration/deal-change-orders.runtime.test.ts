@@ -26,7 +26,7 @@ async function setup(): Promise<PGlite> {
   await db.exec(`
     CREATE TABLE public.users (id uuid PRIMARY KEY);
     CREATE SCHEMA ${SCHEMA};
-    CREATE TABLE ${SCHEMA}.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
+    CREATE TABLE ${SCHEMA}.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), sales_source_user_id uuid);
     INSERT INTO public.users (id) VALUES ('${USER}');
     INSERT INTO ${SCHEMA}.deals (id) VALUES ('${DEAL}');
   `);

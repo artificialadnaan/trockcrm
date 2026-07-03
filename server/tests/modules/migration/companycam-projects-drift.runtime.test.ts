@@ -24,7 +24,7 @@ beforeAll(async () => {
     CREATE SCHEMA office_dallas;
     CREATE SCHEMA office_normal;
     CREATE SCHEMA office_pwauditoffice; -- drifted: deals has NO companycam_project_id
-    CREATE TABLE office_dallas.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), companycam_project_id varchar(50));
+    CREATE TABLE office_dallas.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), sales_source_user_id uuid, companycam_project_id varchar(50));
     CREATE TABLE office_normal.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), companycam_project_id varchar(50));
     CREATE TABLE office_pwauditoffice.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
     INSERT INTO office_normal.deals (companycam_project_id) VALUES ('cc-100'), (NULL);

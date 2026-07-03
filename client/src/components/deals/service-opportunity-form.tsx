@@ -17,6 +17,7 @@ import { PropertySelector } from "@/components/properties/property-selector";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { useSalesReps } from "@/hooks/use-sales-reps";
 import { createServiceOpportunity, type Deal } from "@/hooks/use-deals";
 import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
 import { getSelectedOptionLabel } from "./deal-form.helpers";
@@ -66,6 +67,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
     propertyId: "",
     description: "",
     assignedRepId: user?.role === "rep" ? user.id : "",
+    salesSourceUserId: "",
     officeCode: initialOfficeCode,
     expectedCloseDate: "",
     winProbability: "",
@@ -113,6 +115,11 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const selectedOfficeLabel =
     officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
   const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: homeOfficeId });
+  // "sales-source" scopes the feed to the office's role === 'rep' roster (the assertSalesSourceIsRep gate),
+  // so a plain rep sees real source choices (not just themselves) and no pick 422s on submit.
+  const { salesReps, loading: salesRepsLoading } = useSalesReps(homeOfficeId ?? undefined, {
+    purpose: "sales-source",
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -141,6 +148,11 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
       }
       // officeCode is a cosmetic prefix that no longer rescopes the data, so changing it must NOT clear the
       // company/property/rep selections (the pickers stay on the home office regardless of the prefix).
+      // If the assigned rep is changed to the current sales source, clear the sales source — self-sourcing
+      // would cause a floor-gate double-count (the same person would appear in both roles).
+      if (field === "assignedRepId" && next.salesSourceUserId && next.salesSourceUserId === value) {
+        next.salesSourceUserId = "";
+      }
       return next;
     });
     setError(null);
@@ -193,6 +205,7 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
           companyId: formData.companyId,
           propertyId: formData.propertyId,
           assignedRepId: formData.assignedRepId,
+          salesSourceUserId: formData.salesSourceUserId || null,
           description: formData.description.trim() || null,
           expectedCloseDate: formData.expectedCloseDate || null,
           winProbability: formData.winProbability !== "" ? Number(formData.winProbability) : null,
@@ -297,6 +310,29 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
                 ))}
               </SelectContent>
             </Select>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Sales Source (optional)</Label>
+            <Select
+              value={formData.salesSourceUserId || "__none__"}
+              onValueChange={(v) => handleChange("salesSourceUserId", v && v !== "__none__" ? v : "")}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder={salesRepsLoading ? "Loading reps..." : "None"} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">None</SelectItem>
+                {salesReps.filter((r) => r.id !== formData.assignedRepId).map((r) => (
+                  <SelectItem key={r.id} value={r.id}>
+                    {r.displayName}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Set at creation. Admins and directors can update it on the deal detail page.
+            </p>
           </div>
 
           <div className="space-y-2">

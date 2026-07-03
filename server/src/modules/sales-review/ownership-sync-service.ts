@@ -15,6 +15,7 @@ import {
   type HubSpotDeal,
   type HubSpotOwner,
 } from "../migration/hubspot-client.js";
+import { clearSalesSource, hasBookedSalesSourceRow } from "../deals/service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 type ExternalUserSource = (typeof externalUserSourceEnum.enumValues)[number];
@@ -25,6 +26,8 @@ type CurrentDeal = {
   hubspotDealId: string | null;
   assignedRepId: string | null;
   ownershipSyncStatus: string | null;
+  /** F10: needed to detect owner==source conflict before writing the new owner. */
+  salesSourceUserId: string | null;
 };
 
 type OwnerResolution = {
@@ -292,6 +295,7 @@ export async function previewOwnershipSync(tenantDb: TenantDb, officeId: string)
         hubspotDealId: deals.hubspotDealId,
         assignedRepId: deals.assignedRepId,
         ownershipSyncStatus: deals.ownershipSyncStatus,
+        salesSourceUserId: deals.salesSourceUserId,
       })
       .from(deals)
       .where(and(eq(deals.isActive, true), isNotNull(deals.hubspotDealId)));
@@ -315,6 +319,22 @@ export async function applyOwnershipSync(tenantDb: TenantDb, officeId: string) {
   const preview = await previewOwnershipSync(tenantDb, officeId);
 
   for (const row of preview.rows) {
+    // F10 + I3: if the (current or incoming) owner equals the deal's sales source, tidy the (cosmetic)
+    // owner==source field state BEFORE the unchanged-skip, so a pre-existing conflict on an otherwise-
+    // unchanged row still gets cleared. updateDeal blocks this normally, but the sync bypasses updateDeal.
+    // M (P1): only clear when the source rep has NO booked sales_source row — owner==source is money-safe
+    // (mint skips the source cut when source==owner; floor source-leg excludes assigned_rep_id==rep), so
+    // clearing a BOOKED row would only delete their earned commission + floor credit (the reassignment
+    // mints no replacement owner row). Preserve the booked row.
+    if (
+      row.targetAssignedRepId != null &&
+      row.salesSourceUserId != null &&
+      row.targetAssignedRepId === row.salesSourceUserId &&
+      !(await hasBookedSalesSourceRow(tenantDb, row.id, row.salesSourceUserId))
+    ) {
+      await clearSalesSource(tenantDb, row.id, null);
+    }
+
     if (row.summaryBucket === "unchanged") continue;
 
     await tenantDb
@@ -381,6 +401,7 @@ export async function reassignOwnedDeal(input: {
     .select({
       id: deals.id,
       assignedRepId: deals.assignedRepId,
+      salesSourceUserId: deals.salesSourceUserId,
     })
     .from(deals)
     .where(eq(deals.id, input.dealId))
@@ -421,6 +442,18 @@ export async function reassignOwnedDeal(input: {
 
   if (!hasOfficeAccess) {
     throw new AppError(400, "Target user does not have access to this office");
+  }
+
+  // F10: if the new owner is the deal's current sales source, tidy the (cosmetic) owner==source field.
+  // reassignOwnedDeal bypasses updateDeal's guard. M (P1): preserve a BOOKED sales_source row — owner==
+  // source is money-safe, so clearing a booked row would only delete the rep's earned commission + floor
+  // credit (no replacement owner row is minted on reassignment).
+  if (
+    dealRow.salesSourceUserId != null &&
+    input.userId === dealRow.salesSourceUserId &&
+    !(await hasBookedSalesSourceRow(input.tenantDb, input.dealId, dealRow.salesSourceUserId))
+  ) {
+    await clearSalesSource(input.tenantDb, input.dealId, input.actor.id);
   }
 
   await input.tenantDb

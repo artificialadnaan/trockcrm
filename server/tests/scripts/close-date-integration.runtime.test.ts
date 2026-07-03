@@ -39,7 +39,7 @@ beforeAll(async () => {
     CREATE SCHEMA office_dallas;
     CREATE TABLE office_dallas.companies (id uuid PRIMARY KEY, name varchar(500) NOT NULL);
     CREATE TABLE office_dallas.deals (
-      id uuid PRIMARY KEY, deal_number varchar(50) NOT NULL, name varchar(500) NOT NULL, stage_id uuid NOT NULL,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number varchar(50) NOT NULL, name varchar(500) NOT NULL, stage_id uuid NOT NULL,
       assigned_rep_id uuid, company_id uuid, expected_close_date date,
       awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, is_read_only_mirror boolean NOT NULL DEFAULT false,

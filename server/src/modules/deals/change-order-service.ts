@@ -106,6 +106,7 @@ interface ParentForChildCreate {
   regionId: string | null;
   pipelineTypeSnapshot: string; // NOT NULL in schema (default 'normal')
   estimatorUserId: string | null;
+  salesSourceUserId: string | null;
   isActive: boolean;
   isTestData: boolean;
 }
@@ -141,6 +142,9 @@ async function loadParentForChildCreate(
       // (not the default 'normal') and an estimator-attributed CO still appears in estimator-filtered reports.
       pipelineTypeSnapshot: deals.pipelineTypeSnapshot,
       estimatorUserId: deals.estimatorUserId,
+      // Inherit the parent's sales source so the CO child shows the correct source attribution
+      // in the UI ("Not set" is visible when salesSourceUserId is null but parent has a source).
+      salesSourceUserId: deals.salesSourceUserId,
       isActive: deals.isActive,
       isTestData: deals.isTestData,
     })
@@ -303,14 +307,14 @@ export async function createChangeOrderChildDeal(
     INSERT INTO deals (
       deal_number, name, stage_id, is_change_order, parent_deal_id, assigned_rep_id, company_id, property_id,
       awarded_amount, won_closed_date, contract_signed_date, project_number, office_code, project_type,
-      project_type_id, region_id, pipeline_type_snapshot, estimator_user_id, source, description,
+      project_type_id, region_id, pipeline_type_snapshot, estimator_user_id, sales_source_user_id, source, description,
       created_by_user_id, workflow_route,
       is_active, on_hold, is_test_data, stage_entered_at, created_at, updated_at
     ) VALUES (
       ${dealNumber}, ${childName}, ${wonStage.id}, true, ${parent.id}, ${parent.assignedRepId},
       ${parent.companyId}, ${parent.propertyId}, ${amount}, ${signedDate}, ${signedDate},
       ${parent.projectNumber}, ${parent.officeCode}, ${parent.projectType}, ${parent.projectTypeId},
-      ${parent.regionId}, ${parent.pipelineTypeSnapshot}, ${parent.estimatorUserId}, 'change_order', ${description}, ${input.createdBy ?? null},
+      ${parent.regionId}, ${parent.pipelineTypeSnapshot}, ${parent.estimatorUserId}, ${parent.salesSourceUserId}, 'change_order', ${description}, ${input.createdBy ?? null},
       ${parent.workflowRoute ?? "normal"}, true, false, ${parent.isTestData}, ${createdAt}, ${createdAt}, ${createdAt}
     )
     RETURNING id, deal_number, created_at, updated_at

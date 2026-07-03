@@ -26,7 +26,7 @@ function officeSchemaDDL(schema: string): string {
   return `
     CREATE SCHEMA ${schema};
     CREATE TABLE ${schema}.deals (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY, sales_source_user_id uuid,
       deal_number text,
       name text,
       is_active boolean NOT NULL DEFAULT true,

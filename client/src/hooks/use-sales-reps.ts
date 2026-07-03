@@ -15,7 +15,15 @@ export interface UseSalesRepsOptions {
    * Defaults to `true`.
    */
   enabled?: boolean;
-  purpose?: "deal-reassignment";
+  /**
+   * Shapes which users the `/users/sales-reps` feed returns:
+   *   "deal-reassignment" — active office users in any CRM role (owner/estimator pickers).
+   *   "sales-source"      — active office users with role === 'rep' ONLY, matching the server's
+   *                         assertSalesSourceIsRep gate, so the source picker can't offer a choice
+   *                         that 422s on submit (and a plain rep sees the full office rep list, not
+   *                         just themselves).
+   */
+  purpose?: "deal-reassignment" | "sales-source";
 }
 
 export function useSalesReps(officeId?: string, options: UseSalesRepsOptions = {}) {
@@ -43,8 +51,8 @@ export function useSalesReps(officeId?: string, options: UseSalesRepsOptions = {
       const headers = officeId && officeId !== "all"
         ? { "x-office-id": officeId }
         : undefined;
-      const path = purpose === "deal-reassignment"
-        ? "/users/sales-reps?purpose=deal-reassignment"
+      const path = purpose
+        ? `/users/sales-reps?purpose=${purpose}`
         : "/users/sales-reps";
       const data = await api<{ users: SalesRepOption[] }>(
         path,

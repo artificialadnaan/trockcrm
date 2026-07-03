@@ -31,7 +31,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug varchar(100) NOT NULL);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY,
+      id uuid PRIMARY KEY, sales_source_user_id uuid,
       stage_id uuid NOT NULL,
       workflow_route text NOT NULL DEFAULT 'normal',
       is_bid_board_owned boolean NOT NULL DEFAULT false,
