@@ -14,6 +14,7 @@ import { writeAuditLog } from "../../lib/audit-log.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { applyProjectTypeChange, BID_BOARD_STAGE_READ_ONLY_MESSAGE } from "./service.js";
+import { lockCurrentDealDescription, recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { inferDealBidBoardOwnership, type PlanDealWorkflowBackfillInput } from "./workflow-backfill.js";
 import { evaluateScopingReadiness, type DealScopingReadinessSnapshot, type DealScopingSectionData } from "./scoping-rules.js";
 import { getResolvedDeal, type ResolvedDealView } from "./lineage-resolver.js";
@@ -1293,14 +1294,37 @@ export async function upsertDealScopingIntake(
   }
 
   if (Object.keys(dealUpdates).length > 0) {
+    const now = new Date();
+    // Only a GENUINE scope-summary edit is a real description change. buildDealWritebackPatch re-derives
+    // dealUpdates.description from the SEEDED section data on every save (for a source-lead deal that re-syncs
+    // the mirror to the lead text; scopeSummary.summary is stripped from source-lead patches), so
+    // dealUpdates.description !== undefined alone would log a spurious row on an unrelated scope/opportunity
+    // save. Gate on the actual incoming (post-strip) summary field.
+    const shouldLogSummary =
+      dealUpdates.description !== undefined && toSectionData(sectionPatch.scopeSummary).summary !== undefined;
+    // Lock + read the current deals.description (what the deal-detail panel shows) BEFORE the update so a
+    // concurrent scope-summary save on the same deal can't slip a stale intermediate into the history row.
+    const oldDescription = shouldLogSummary ? await lockCurrentDealDescription(tenantDb, dealId) : null;
     await tenantDb
       .update(deals)
       .set({
         ...dealUpdates,
-        updatedAt: new Date(),
+        updatedAt: now,
       })
       .where(eq(deals.id, dealId))
       .returning();
+
+    // The scope-summary field writes back to deals.description outside updateDeal, so record the change-log
+    // row here too (source "scope_summary") — otherwise the description-history panel misses scoping edits.
+    if (shouldLogSummary) {
+      await recordDescriptionHistoryChange(tenantDb, {
+        dealId,
+        oldDescription,
+        newDescription: dealUpdates.description as string | null,
+        changedBy: userId,
+        source: "scope_summary",
+      });
+    }
   }
 
   const nextRoute = resolveScopingWorkspaceRoute(resolvedDeal);
