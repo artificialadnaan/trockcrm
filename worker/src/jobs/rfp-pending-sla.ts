@@ -269,30 +269,40 @@ async function processBreach(
   // may resolve) between the batch scan and this send, and those transitions are async. Skip a stale alert.
   if (!(await isStillBreaching(query, tenantSchema, breach))) return "skipped";
 
-  // Ensure a claim row exists carrying a STABLE display snapshot (deal_name/deal_number as first seen). On a
-  // crash-retry after a rename, the read-back below reuses these STORED values, so the rebuilt Resend payload
-  // is byte-identical and the idempotencyKey is honored rather than rejected as a key/payload mismatch.
+  // Ensure a claim row exists carrying a STABLE snapshot (deal_name/deal_number AND the recipient set, as first
+  // seen). On a crash-retry after a rename OR a RFP_REJECTION_EMAIL_RECIPIENTS edit/reorder, the read-back below
+  // reuses these STORED values, so the rebuilt Resend payload (subject/body AND `to`) is byte-identical and the
+  // idempotencyKey is honored rather than rejected as a key/payload mismatch (which would delay or duplicate).
   await query(
     `INSERT INTO public.rfp_pending_sla_email_receipts
-        (tenant_schema, deal_id, rfp_approval_requested_at, deal_name, deal_number, created_at, updated_at)
-      VALUES ($1, $2::uuid, $3, $4, $5, NOW(), NOW())
+        (tenant_schema, deal_id, rfp_approval_requested_at, deal_name, deal_number, recipient_emails, created_at, updated_at)
+      VALUES ($1, $2::uuid, $3, $4, $5, $6, NOW(), NOW())
       ON CONFLICT (tenant_schema, deal_id, rfp_approval_requested_at) DO NOTHING`,
-    [tenantSchema, breach.dealId, breach.requestedAt, breach.dealName, breach.dealNumber],
+    [tenantSchema, breach.dealId, breach.requestedAt, breach.dealName, breach.dealNumber, recipients.join(", ")],
   );
 
-  // Read back the AUTHORITATIVE snapshot: the first-seen values win, even if THIS scan observed a renamed
-  // deal (its INSERT was a DO NOTHING no-op). Fall back to the fresh breach only if the row somehow vanished.
+  // Read back the AUTHORITATIVE snapshot: the first-seen values win, even if THIS scan observed a renamed deal
+  // or a changed recipient list (its INSERT was a DO NOTHING no-op). Fall back to the fresh scan only if the row
+  // somehow vanished.
   const claim = await query(
-    `SELECT deal_name, deal_number
+    `SELECT deal_name, deal_number, recipient_emails
        FROM public.rfp_pending_sla_email_receipts
       WHERE tenant_schema = $1 AND deal_id = $2::uuid AND rfp_approval_requested_at = $3
       LIMIT 1`,
     [tenantSchema, breach.dealId, breach.requestedAt],
   );
-  const snapshotRow = claim.rows[0] ?? { deal_name: breach.dealName, deal_number: breach.dealNumber };
+  const snapshotRow = claim.rows[0] ?? {
+    deal_name: breach.dealName,
+    deal_number: breach.dealNumber,
+    recipient_emails: recipients.join(", "),
+  };
   const snapshotName =
     typeof snapshotRow.deal_name === "string" && snapshotRow.deal_name.trim() ? snapshotRow.deal_name : "Deal";
   const snapshotNumber = snapshotRow.deal_number ?? null;
+  const snapshotRecipients =
+    typeof snapshotRow.recipient_emails === "string" && snapshotRow.recipient_emails.trim()
+      ? snapshotRow.recipient_emails.split(",").map((e: string) => e.trim()).filter(Boolean)
+      : recipients;
 
   try {
     const email = buildRfpPendingSlaEmail({
@@ -304,18 +314,19 @@ async function processBreach(
       officeId,
       frontendUrl,
     });
-    const result = await sendEmail(recipients, email.subject, email.html, {
+    const result = await sendEmail(snapshotRecipients, email.subject, email.html, {
       text: email.text,
       idempotencyKey: `rfp-pending-sla-${tenantSchema}-${breach.dealId}-${breach.requestedAt}`,
     });
     if (!result.success) throw new Error("Email provider returned unsuccessful result");
     // Mark the claim complete only AFTER a durable send. `sent_at IS NULL` guards against a double-complete
-    // (e.g. an overlapping run in the single-worker case) — the first completer wins.
+    // (e.g. an overlapping run in the single-worker case) — the first completer wins. recipient_emails is NOT
+    // re-written here: the claim's snapshot (set at claim time, and what we actually sent to) stays authoritative.
     await query(
       `UPDATE public.rfp_pending_sla_email_receipts
-          SET sent_at = NOW(), recipient_emails = $4, resend_message_id = $5, updated_at = NOW()
+          SET sent_at = NOW(), resend_message_id = $4, updated_at = NOW()
         WHERE tenant_schema = $1 AND deal_id = $2::uuid AND rfp_approval_requested_at = $3 AND sent_at IS NULL`,
-      [tenantSchema, breach.dealId, breach.requestedAt, recipients.join(", "), result.messageId],
+      [tenantSchema, breach.dealId, breach.requestedAt, result.messageId],
     );
     logger.log("[RfpPendingSla] Sent SLA breach alert", {
       tenantSchema,

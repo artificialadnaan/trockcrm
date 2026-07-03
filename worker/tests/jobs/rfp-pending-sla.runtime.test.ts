@@ -171,12 +171,16 @@ function makeScanMocks(
   // Mutable so a test can rename the deal BETWEEN scans and assert the payload stays pinned to the snapshot.
   const deal = { id: "deal-1", name: "Deal One", deal_number: "P-1", requestedAt: "2026-01-01T00:00:00.000Z" };
   // key = tenant_schema | deal_id | rfp_approval_requested_at (the first 3 bound params of every receipts query)
-  const receipts = new Map<string, { deal_name: string; deal_number: string | null; sent_at: string | null }>();
+  const receipts = new Map<
+    string,
+    { deal_name: string; deal_number: string | null; recipient_emails: string | null; sent_at: string | null }
+  >();
   const key = (p: unknown[]) => `${p[0]}|${p[1]}|${p[2]}`;
   if (opts.alreadySent) {
     receipts.set(`office_beta|${deal.id}|${deal.requestedAt}`, {
       deal_name: "Deal One",
       deal_number: "P-1",
+      recipient_emails: "boss@trock.test",
       sent_at: "2026-01-02T00:00:00.000Z",
     });
   }
@@ -215,9 +219,15 @@ function makeScanMocks(
     if (sql.includes("rfp_pending_sla_email_receipts")) {
       const k = key(params ?? []);
       if (sql.includes("INSERT")) {
-        // (tenant, deal, requested_at, deal_name, deal_number) — ON CONFLICT DO NOTHING preserves first-seen.
+        // (tenant, deal, requested_at, deal_name, deal_number, recipient_emails) — ON CONFLICT DO NOTHING
+        // preserves first-seen (the full snapshot: display fields AND the recipient list).
         if (!receipts.has(k)) {
-          receipts.set(k, { deal_name: params?.[3] as string, deal_number: (params?.[4] as string) ?? null, sent_at: null });
+          receipts.set(k, {
+            deal_name: params?.[3] as string,
+            deal_number: (params?.[4] as string) ?? null,
+            recipient_emails: (params?.[5] as string) ?? null,
+            sent_at: null,
+          });
         }
         return { rows: [] };
       }
@@ -336,5 +346,25 @@ describe("runRfpPendingSlaScan orchestration", () => {
     expect(html).not.toContain("Renamed Deal");
     // Same idempotencyKey across both attempts (keyed on requested_at, which never changed).
     expect(options.idempotencyKey).toBe(failing.mock.calls[0][3].idempotencyKey);
+  });
+
+  it("retries send to the STORED recipient snapshot, so a recipient-list change between attempts keeps `to` stable", async () => {
+    const mocks = makeScanMocks();
+    // First attempt: send fails, so the claim persists the FIRST-SEEN recipient set with sent_at NULL.
+    const failing = vi.fn().mockRejectedValue(new Error("provider down"));
+    await runRfpPendingSlaScan({ query: mocks.q, sendEmail: failing, acquireLock: noLock, env: enabledEnv, logger: silent });
+    expect(failing).toHaveBeenCalledTimes(1);
+    expect(failing.mock.calls[0][0]).toEqual(["boss@trock.test"]);
+
+    // RFP_REJECTION_EMAIL_RECIPIENTS is edited between scans (reordered + a new address).
+    const changedEnv = { RFP_PENDING_SLA_ENABLED: "true", RFP_REJECTION_EMAIL_RECIPIENTS: "newboss@trock.test, boss@trock.test" };
+
+    // Second attempt succeeds: it must send to the STORED recipient snapshot, not the fresh env list, so the
+    // Resend payload (`to`) is byte-identical to the first attempt and the idempotencyKey is honored.
+    const sending = vi.fn().mockResolvedValue({ success: true, messageId: "msg-2" });
+    const summary = await runRfpPendingSlaScan({ query: mocks.q, sendEmail: sending, acquireLock: noLock, env: changedEnv, logger: silent });
+    expect(summary.sent).toBe(1);
+    expect(sending.mock.calls[0][0]).toEqual(["boss@trock.test"]); // pinned to the snapshot, not newboss
+    expect(sending.mock.calls[0][3].idempotencyKey).toBe(failing.mock.calls[0][3].idempotencyKey);
   });
 });
