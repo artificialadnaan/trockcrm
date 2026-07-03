@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
+  dealHistory,
   dealScopingIntake,
   deals,
   leadQuestionAnswers,
@@ -12,6 +13,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { applyProjectTypeChange, normalizeOptionalDealBidDueDate } from "./service.js";
+import { buildDescriptionHistoryEntry } from "./deal-description-history.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -479,6 +481,24 @@ export async function writeResolvedDealFields(
         updatedAt: now,
       })
       .where(eq(deals.id, resolvedDeal.deal.id));
+
+    // The resolved-fields path also writes deals.description (lead compatibility write-through or a direct
+    // deal edit), so record the change-log row here too — the third and last description-write path.
+    if (dealUpdates.description !== undefined) {
+      const descriptionHistoryEntry = buildDescriptionHistoryEntry(
+        resolvedDeal.deal.description,
+        dealUpdates.description as string | null,
+        input.userId,
+        "resolved_fields",
+      );
+      if (descriptionHistoryEntry) {
+        await tenantDb.insert(dealHistory).values({
+          dealId: resolvedDeal.deal.id,
+          ...descriptionHistoryEntry,
+          changedAt: now,
+        });
+      }
+    }
   }
 
   await writeScopingFields({
