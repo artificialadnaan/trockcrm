@@ -4,6 +4,7 @@ const getDealByIdMock = vi.hoisted(() => vi.fn());
 const loadRfpAttachmentsForDealMock = vi.hoisted(() =>
   vi.fn(async () => [] as Array<{ name: string; url: string; contentType: string }>)
 );
+const enqueueRfpBidBoardCreateMock = vi.hoisted(() => vi.fn(async () => ({ jobId: 77 })));
 const accessMocks = vi.hoisted(() => ({
   assertDealCollaboratorAccess: vi.fn(),
   assertDealOwnerAccess: vi.fn(),
@@ -114,6 +115,7 @@ vi.mock("../../../src/lib/collaboration-access.js", () => ({
 vi.mock("../../../src/modules/deals/rfp-enqueue.js", () => ({
   insertOpportunityRfpRequestJob: vi.fn(),
   loadRfpAttachmentsForDeal: loadRfpAttachmentsForDealMock,
+  enqueueRfpBidBoardCreate: enqueueRfpBidBoardCreateMock,
 }));
 
 const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
@@ -396,5 +398,126 @@ describe("POST /api/deals/:id/rfp-retry", () => {
 
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: "RFP_RETRY_WRONG_STATE" }));
     expect(inserted).toHaveLength(0); // re-claim failed → never enqueued
+  });
+
+  it("a voting-path send_failed retry re-enqueues rfp_bidboard_create — NOT a SyncHub delivery", async () => {
+    // Voting deal: 2/3-approved, no SyncHub request (rfp_approval_request_id NULL), create failed → the failure
+    // callback / dead-letter sweep stamped rfp_override_state='failed' + rfp_approval_status='send_failed'.
+    getDealByIdMock.mockResolvedValueOnce({
+      id: "deal-1",
+      rfpApprovalStatus: "send_failed",
+      rfpApprovalRequestId: null,
+      rfpOverrideState: "failed",
+    });
+    const inserted: any[] = [];
+    const updated: any[] = [];
+    const executeMock = vi.fn(async () => ({ rows: [] as any[] }));
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: executeMock,
+        insert: vi.fn(() => ({ values: vi.fn(async (value) => { inserted.push(value); return {}; }) })),
+        update: vi.fn(() => ({
+          set: vi.fn((value) => {
+            updated.push(value);
+            return { where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) };
+          }),
+        })),
+      },
+      user: { id: "admin-1", role: "admin", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {
+      statusCode: 200,
+      body: undefined as any,
+      status(code: number) { this.statusCode = code; return this; },
+      json(payload: any) { this.body = payload; return this; },
+    } as any;
+    const next = vi.fn((err?: unknown) => { if (err) throw err; });
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toMatchObject({ success: true, status: "pending" });
+    // Re-enqueues the Bid Board create (mirrors castRfpVote's approve path), keyed by deal id + office.
+    expect(enqueueRfpBidBoardCreateMock).toHaveBeenCalledWith({
+      tenantDb: req.tenantDb,
+      deal: { id: "deal-1" },
+      officeId: "office-1",
+    });
+    // Re-claims to the create-in-flight 'pending' state, clearing the failure markers.
+    expect(updated[0]).toMatchObject({
+      rfpApprovalStatus: "pending",
+      rfpOverrideState: null,
+      rfpOverrideError: null,
+    });
+    // Never touches the SyncHub delivery path: no dead-job lookup, no direct rfp_request_delivery insert.
+    expect(executeMock).not.toHaveBeenCalled();
+    expect(inserted).toHaveLength(0);
+  });
+
+  it("a voting-path retry 409s (without enqueuing) when the atomic re-claim matches nothing", async () => {
+    getDealByIdMock.mockResolvedValueOnce({
+      id: "deal-1",
+      rfpApprovalStatus: "send_failed",
+      rfpApprovalRequestId: null,
+      rfpOverrideState: "failed",
+    });
+    const executeMock = vi.fn(async () => ({ rows: [] as any[] }));
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: executeMock,
+        insert: vi.fn(() => ({ values: vi.fn(async () => ({})) })),
+        update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn(async () => [] as any[]) })) })) })),
+      },
+      user: { id: "admin-1", role: "admin", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = { status: vi.fn(), json: vi.fn() } as any;
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: "RFP_RETRY_WRONG_STATE" }));
+    expect(enqueueRfpBidBoardCreateMock).not.toHaveBeenCalled();
+    expect(executeMock).not.toHaveBeenCalled();
+  });
+
+  it("a legacy send_failed (no override failure) still retries via the SyncHub delivery path", async () => {
+    // rfp_approval_request_id NULL but rfp_override_state NULL => a plain delivery failure, not a voting create.
+    getDealByIdMock.mockResolvedValueOnce({
+      id: "deal-1",
+      rfpApprovalStatus: "send_failed",
+      rfpApprovalRequestId: null,
+      rfpOverrideState: null,
+    });
+    const inserted: any[] = [];
+    const executeMock = vi.fn(async () => ({ rows: [{ id: 10, payload: { dealId: "deal-1", body: { sourceDealId: "deal-1" } } }] }));
+    const req = {
+      params: { id: "deal-1" },
+      tenantDb: {
+        execute: executeMock,
+        insert: vi.fn(() => ({ values: vi.fn(async (value) => { inserted.push(value); return {}; }) })),
+        update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn(() => ({ returning: vi.fn(async () => [{ id: "deal-1" }]) })) })) })),
+      },
+      user: { id: "admin-1", role: "admin", officeId: "office-1", activeOfficeId: "office-1" },
+      commitTransaction: vi.fn(async () => {}),
+    } as any;
+    const res = {
+      statusCode: 200,
+      body: undefined as any,
+      status(code: number) { this.statusCode = code; return this; },
+      json(payload: any) { this.body = payload; return this; },
+    } as any;
+    const next = vi.fn((err?: unknown) => { if (err) throw err; });
+
+    await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
+
+    expect(res.statusCode).toBe(202);
+    expect(res.body).toMatchObject({ status: "pending_outbox" });
+    expect(executeMock).toHaveBeenCalled(); // legacy dead-job lookup ran
+    expect(inserted[0]).toMatchObject({ jobType: "rfp_request_delivery" });
+    expect(enqueueRfpBidBoardCreateMock).not.toHaveBeenCalled();
   });
 });

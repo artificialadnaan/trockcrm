@@ -40,7 +40,8 @@ async function setup() {
       bid_board_stage_slug text, is_read_only_mirror boolean NOT NULL DEFAULT false, read_only_synced_at timestamptz,
       bid_board_stage_entered_at timestamptz, bid_board_mirror_source_entered_at timestamptz, rfp_approval_status text,
       rfp_approval_requested_at timestamptz, rfp_approval_request_event_id uuid, rfp_approval_requested_by uuid,
-      rfp_approval_request_id integer, rfp_declined_reason text, rfp_declined_at timestamptz, updated_at timestamptz
+      rfp_approval_request_id integer, rfp_declined_reason text, rfp_declined_at timestamptz, updated_at timestamptz,
+      is_active boolean NOT NULL DEFAULT true
     );
     CREATE TABLE rfp_votes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, round_event_id uuid NOT NULL, voter_user_id uuid, voter_email text NOT NULL, decision text NOT NULL, reason text, created_at timestamptz NOT NULL DEFAULT now(), CONSTRAINT rfp_votes_deal_round_voter_uq UNIQUE (deal_id, round_event_id, voter_user_id));
   `);
@@ -75,9 +76,11 @@ function buildApp(pgDb: PGlite, user: { id: string; email: string }) {
         id: deals.id, name: deals.name, dealNumber: deals.dealNumber, projectNumber: deals.projectNumber,
         workflowRoute: deals.workflowRoute, projectType: deals.projectType,
         rfpApprovalStatus: deals.rfpApprovalStatus, rfpApprovalRequestEventId: deals.rfpApprovalRequestEventId,
-        rfpApprovalRequestId: deals.rfpApprovalRequestId,
+        rfpApprovalRequestId: deals.rfpApprovalRequestId, isActive: deals.isActive,
       }).from(deals).where(eq(deals.id, req.params.id)).limit(1);
-      if (!deal) throw new AppError(404, "Deal not found");
+      // Mirror of the production route: a soft-deleted (is_active=false) deal reads as not-found so a deleted
+      // deal can't be voted on (the create callback filters is_active=true and could never reconcile it).
+      if (!deal || deal.isActive === false) throw new AppError(404, "Deal not found");
       if (isServiceRfp(deal)) throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
       if (!deal.rfpApprovalRequestEventId || deal.rfpApprovalStatus !== "pending" || deal.rfpApprovalRequestId != null) throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
       const officeId = req.user.activeOfficeId ?? req.user.officeId ?? null;
@@ -136,6 +139,17 @@ describe("POST /deals/:id/rfp-vote", () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("RFP_NO_VOTE_ROUND");
     // No vote row must be inserted — the guard fires before castRfpVote.
+    const votes = (await pg.query(`SELECT decision FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(0);
+  });
+
+  it("404 for a soft-deleted (is_active=false) deal — no vote recorded", async () => {
+    pg = await setup();
+    // Soft-delete the deal (the canonical delete marker). A vote must be refused before castRfpVote so an
+    // approve can't enqueue a create the bid-board-created callback (is_active=true) could never reconcile.
+    await pg.query(`UPDATE deals SET is_active = false WHERE id = $1`, [DEAL]);
+    const res = await request(buildApp(pg, VOTER)).post(`/deals/${DEAL}/rfp-vote`).send({ decision: "approve" });
+    expect(res.status).toBe(404);
     const votes = (await pg.query(`SELECT decision FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
     expect(votes).toHaveLength(0);
   });

@@ -5,6 +5,9 @@ const evaluateReadinessMock = vi.hoisted(() => vi.fn());
 const insertRfpJobMock = vi.hoisted(() => vi.fn());
 const inferBidBoardOwnershipMock = vi.hoisted(() => vi.fn());
 const isRfpEnabledMock = vi.hoisted(() => vi.fn());
+const isRfpVotingEnabledMock = vi.hoisted(() => vi.fn(() => false));
+const resolveRfpVoterEmailsMock = vi.hoisted(() => vi.fn(() => [] as string[]));
+const openRfpVoteRoundMock = vi.hoisted(() => vi.fn());
 const accessMocks = vi.hoisted(() => ({
   assertDealCollaboratorAccess: vi.fn(),
   assertDealOwnerAccess: vi.fn(),
@@ -116,8 +119,23 @@ vi.mock("../../../src/modules/deals/rfp-enqueue.js", () => ({
 
 vi.mock("../../../src/config/feature-flags.js", () => ({
   isOpportunityRfpEventEnabled: isRfpEnabledMock,
-  // Voting is OFF in these tests — non-service deals fall through to the existing SyncHub path.
-  isRfpVotingEnabled: () => false,
+  // Voting defaults OFF (existing SyncHub-path tests); the no-voters-fallback tests flip it on per-case.
+  isRfpVotingEnabled: isRfpVotingEnabledMock,
+}));
+
+// resolveRfpVoterEmails gates the voting branch (finding #5). Default [] so an accidental voting-enabled path
+// still degrades to SyncHub; the voting-branch test overrides it. isRfpVoterEmail is stubbed for the rbac graph.
+vi.mock("@trock-crm/shared/lib/rfpVoterEmails", () => ({
+  resolveRfpVoterEmails: resolveRfpVoterEmailsMock,
+  isRfpVoterEmail: vi.fn(() => false),
+}));
+
+// Mock rfp-vote-service so the voting branch is observable without a real round: isServiceRfp mirrors the
+// prod predicate for these normal-route deals; openRfpVoteRound is a spy (asserted called / not-called).
+vi.mock("../../../src/modules/deals/rfp-vote-service.js", () => ({
+  isServiceRfp: (deal: any) => deal?.workflowRoute === "service",
+  openRfpVoteRound: openRfpVoteRoundMock,
+  castRfpVote: vi.fn(),
 }));
 
 vi.mock("../../../src/lib/collaboration-access.js", () => ({
@@ -306,6 +324,11 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     isRfpEnabledMock.mockReturnValue(true);
     inferBidBoardOwnershipMock.mockReturnValue({ isBidBoardOwned: false });
     insertRfpJobMock.mockResolvedValue({ jobId: 123 });
+    // Voting off + no voters by default; the two fallback tests below override these.
+    isRfpVotingEnabledMock.mockReturnValue(false);
+    resolveRfpVoterEmailsMock.mockReturnValue([]);
+    openRfpVoteRoundMock.mockReset();
+    openRfpVoteRoundMock.mockResolvedValue(undefined);
   });
 
   it("enqueues an RFP request for an assigned rep when Opportunity scope is ready", async () => {
@@ -589,5 +612,50 @@ describe("POST /api/deals/:id/trigger-rfp", () => {
     expect(state.updatesAttempted).toBe(1);
     expect(insertRfpJobMock).not.toHaveBeenCalled();
     expect(req.commitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("voting ENABLED but NO voters configured falls back to the SyncHub path (no vote round opened)", async () => {
+    // [#5] With RFP_VOTER_EMAILS unset, resolveRfpVoterEmails() is empty in prod. Opening a round would
+    // strand the deal (nobody can cast, can't return to Opportunity), so a misconfigured flag must degrade
+    // to the existing SyncHub delivery instead of opening an unreachable vote round.
+    isRfpVotingEnabledMock.mockReturnValue(true);
+    resolveRfpVoterEmailsMock.mockReturnValue([]);
+    const { req, state } = makeReq();
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ success: true, status: "pending_outbox" });
+    // Fell through to SyncHub: the reserve UPDATE ran + a delivery job was inserted; NO vote round opened.
+    expect(openRfpVoteRoundMock).not.toHaveBeenCalled();
+    expect(insertRfpJobMock).toHaveBeenCalledTimes(1);
+    expect(state.updatesAttempted).toBe(1);
+  });
+
+  it("voting ENABLED WITH voters configured opens a vote round (no SyncHub delivery)", async () => {
+    isRfpVotingEnabledMock.mockReturnValue(true);
+    resolveRfpVoterEmailsMock.mockReturnValue(["sidney@x.com"]);
+    const { req, state } = makeReq();
+    const res = makeRes();
+    const next = vi.fn();
+
+    await findRouteHandler("post", "/:id/trigger-rfp")(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toMatchObject({ success: true, mode: "vote" });
+    expect(openRfpVoteRoundMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        officeId: "office-1",
+        requestedByUserId: "rep-1",
+        deal: expect.objectContaining({ id: "deal-1" }),
+      })
+    );
+    // Voting branch does NOT run the SyncHub reserve/enqueue.
+    expect(insertRfpJobMock).not.toHaveBeenCalled();
+    expect(state.updatesAttempted).toBe(0);
   });
 });

@@ -175,9 +175,10 @@ import {
   setDealMarketOverride,
 } from "../estimating/deal-market-override-service.js";
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
-import { insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
+import { enqueueRfpBidBoardCreate, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
 import { castRfpVote, isServiceRfp, openRfpVoteRound } from "./rfp-vote-service.js";
+import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -1269,7 +1270,12 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
 
     // Non-service deals with voting ENABLED open a three-voter round instead of the SyncHub email path.
     // Service / type-4 (and voting-disabled) deals fall through to the unchanged SyncHub delivery below.
-    if (!isServiceRfp(deal) && isRfpVotingEnabled()) {
+    // Guard: only take the voting branch when the voter allowlist is non-empty. With RFP_VOTER_EMAILS unset
+    // resolveRfpVoterEmails() returns [] in prod, so opening a round would strand the deal — isRfpVoter is
+    // false for everyone, requireRfpVoter 403s every cast, nobody can reach 2/3, and the still-'pending' round
+    // can't be returned to Opportunity (cancel only clears an attention-state RFP). A misconfigured flag must
+    // degrade safely, so fall back to the existing SyncHub delivery path below instead.
+    if (!isServiceRfp(deal) && isRfpVotingEnabled() && resolveRfpVoterEmails(process.env).length > 0) {
       await openRfpVoteRound({
         tenantDb: req.tenantDb!,
         officeId,
@@ -1476,6 +1482,52 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
     }
 
+    // Voting-path deals (a 2/3-approved non-service RFP that has NO SyncHub request) fail on the
+    // rfp_bidboard_create job, not the SyncHub rfp_request_delivery job — so their retry must re-enqueue the
+    // Bid Board create (mirroring castRfpVote's approve path), never a SyncHub delivery. Their send_failed is
+    // stamped with rfp_override_state='failed' (by both the bid-board-created failure callback and the create
+    // dead-letter sweep, each scoped to rfp_approval_request_id IS NULL) — that pair (request_id NULL + a failed
+    // override state) is what distinguishes a decided-vote create failure from a legacy delivery send_failed
+    // (which leaves rfp_override_state NULL) and from an override-approve failure (which keeps a non-null id).
+    const isVotingCreateFailure =
+      deal.rfpApprovalRequestId == null && deal.rfpOverrideState === "failed";
+    if (isVotingCreateFailure) {
+      const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+      // Atomically re-claim the failed state — clearing the failure markers back to the create-in-flight
+      // 'pending' state castRfpVote's approve leaves (the same state the create dead-letter sweep re-catches on
+      // a second failure) — BEFORE enqueuing, so a concurrent Return to Opportunity that clears the RFP fields
+      // between the read and here (status no longer 'send_failed') matches nothing and 409s without resurrecting
+      // it. Same transaction, so a later enqueue failure rolls the status back.
+      const [reclaimed] = await req.tenantDb!
+        .update(deals)
+        .set({
+          rfpApprovalStatus: "pending",
+          rfpOverrideState: null,
+          rfpOverrideError: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(deals.id, deal.id),
+            eq(deals.rfpApprovalStatus, "send_failed"),
+            isNull(deals.rfpApprovalRequestId),
+            eq(deals.rfpOverrideState, "failed"),
+          )
+        )
+        .returning({ id: deals.id });
+      if (!reclaimed) {
+        throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
+      }
+      await enqueueRfpBidBoardCreate({
+        tenantDb: req.tenantDb!,
+        deal: { id: deal.id },
+        officeId,
+      });
+      await req.commitTransaction!();
+      res.status(202).json({ success: true, status: "pending" });
+      return;
+    }
+
     const deadJobResult = await req.tenantDb!.execute(sql`
       SELECT id, payload
         FROM public.job_queue
@@ -1607,7 +1659,11 @@ router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
       throw new AppError(400, "A reason is required to reject an RFP.", "RFP_VOTE_REASON_REQUIRED");
     }
     const deal = await loadTriggerRfpDeal(req.tenantDb!, req.params.id as string);
-    if (!deal) throw new AppError(404, "Deal not found");
+    // Treat a soft-deleted (is_active=false) deal as not-found: loadTriggerRfpDeal has no is_active filter, so
+    // without this a deleted CRM deal could still be voted on → an approve enqueues rfp_bidboard_create, and the
+    // bid-board-created callback (findDeal filters is_active=true) can never reconcile it, spawning a Bid Board
+    // project for a deal that no longer exists. loadTriggerRfpDeal selects the full row, so isActive is present.
+    if (!deal || deal.isActive === false) throw new AppError(404, "Deal not found");
     if (isServiceRfp(deal)) {
       throw new AppError(409, "Service RFPs are not decided by vote.", "RFP_VOTE_NOT_APPLICABLE");
     }
