@@ -303,8 +303,9 @@ describe("public photo token routes", () => {
 
     expect(response.status).toBe(201);
     expect(response.body.rawToken).toBe("raw-token");
-    // A rep is elevated off owner-scoping to load a deal in their office (not just their own assigned deals).
-    expect(mocks.getDealById).toHaveBeenCalledWith(expect.anything(), "deal-1", expect.not.stringMatching(/^rep$/), "user-1");
+    // A rep is elevated to a non-owner-scoped read (getCollaborativeReadRole(rep,"all") === "director"), so
+    // they can load ANY deal in their office, not just their own assigned ones.
+    expect(mocks.getDealById).toHaveBeenCalledWith(expect.anything(), "deal-1", "director", "user-1");
   });
 
   it("404s when the deal is soft-deleted / not in the office (getDealById filters is_active) — no link minted", async () => {
