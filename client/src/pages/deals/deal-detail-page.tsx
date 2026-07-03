@@ -1234,13 +1234,14 @@ function DealRightRail({
   }
 
   // Sales Source editing is leadership-only (matches the PATCH /deals/:id/sales-source RBAC).
-  // Reuses the same canEditEstimator condition; the picker is fed by the rep-only sourceSalesReps feed.
+  // Reuses the same canEditEstimator condition; the picker is fed by the sales-source sourceSalesReps feed.
   const canEditSalesSource = canEditEstimator;
   const [savingSalesSource, setSavingSalesSource] = useState(false);
   const [salesSourceError, setSalesSourceError] = useState<string | null>(null);
   // Exclude the owner + estimator from the source picker (the server rejects those with 422); mirrors
   // the create form's exclusion so a leader can't pick a conflicting source and only learn via a toast.
-  // Built from sourceSalesReps (role==='rep' only) so a leader is never offered a non-rep that would 422.
+  // Built from sourceSalesReps (internal CRM users only) so a leader is never offered an external
+  // field_contractor that would 422.
   const salesSourceOptions = buildRepOptions(sourceSalesReps, {
     excludeIds: [deal.assignedRepId, deal.estimatorUserId],
     currentId: deal.salesSourceUserId,

@@ -693,13 +693,13 @@ export async function mintSalesSourceCommissionForDeal(
   // so a capX deal that happens to have sales_source_user_id set never earns a row for the source rep.
   if (deal.workflowRoute !== "service") return { status: "skipped_no_value" };
 
-  // The source must STILL be an internal CRM user at MINT time. assertSalesSourceIsCrmUser gates SET-time
-  // selection, but a later role change (updateUser could move the sourced user to a NON-CRM role, i.e.
-  // field_contractor) does NOT clear the deal's sales_source_user_id — so a deal signed OR sales-source-
-  // recompute-discovered after that change would otherwise mint a sales_source cut for an external user.
-  // Re-check here so the mint path enforces the same "source is a CRM user" invariant as selection. NOTE:
-  // this is a ROLE gate, not an earning gate — whether the (CRM) source actually earns still follows their
-  // commission settings below (a source with no active service-source rate mints no row regardless).
+  // The source must STILL be an internal CRM user at MINT time — defense-in-depth mirroring the SET-time
+  // assertSalesSourceIsCrmUser gate. The set-path already blocks a field_contractor, and updateUser's role
+  // input can't produce one (field users have a separate flow), so in practice this only fires if a source
+  // rep is downgraded to field_contractor OUT OF BAND (direct DB / a data migration) without clearing the
+  // deal's sales_source_user_id — this keeps the mint from ever creating a cut for an external user in that
+  // case. NOTE: this is a ROLE gate, not an earning gate — whether the (CRM) source actually earns still
+  // follows their commission settings below (a source with no active service-source rate mints no row).
   const [sourceUser] = await tx
     .select({ role: users.role })
     .from(users)
