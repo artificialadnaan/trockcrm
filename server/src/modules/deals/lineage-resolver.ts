@@ -391,9 +391,18 @@ export async function writeResolvedDealFields(
     // a double commission cut (owner row + the existing additive sales_source row).
     if (field === "assignedRepId") {
       const newAssignedRepId = normalizeOptionalText(value);
+      // L (P3): allow reassigning to the current source when the SAME patch also moves the deal OUT of the
+      // service workflow — the F9 block below then clears the now-invalid source, so owner==source is only
+      // transient (no double-count). Otherwise a valid single-save correction would be forced into two
+      // requests. Mirrors the identical carve-out in updateDeal (service.ts).
+      const leavingServiceWorkflow =
+        resolvedDeal.deal.workflowRoute === "service" &&
+        "workflowRoute" in patch &&
+        (patch as { workflowRoute?: unknown }).workflowRoute !== "service";
       if (
         newAssignedRepId != null &&
-        newAssignedRepId === (resolvedDeal.deal.salesSourceUserId ?? null)
+        newAssignedRepId === (resolvedDeal.deal.salesSourceUserId ?? null) &&
+        !leavingServiceWorkflow
       ) {
         throw new AppError(
           422,

@@ -4,7 +4,7 @@ import type { HubSpotOwner } from "../migration/hubspot-client.js";
 import { fetchAllOwners, normalizeHubSpotOwnerEmail } from "../migration/hubspot-client.js";
 import { db } from "../../db.js";
 import type * as schema from "@trock-crm/shared/schema";
-import { clearSalesSource } from "../deals/service.js";
+import { clearSalesSource, hasBookedSalesSourceRow } from "../deals/service.js";
 
 // Local alias matching the TenantDb used in deals/service.ts — the full Drizzle instance.
 // clearSalesSource requires ORM-level access (update/select/insert) rather than the narrow
@@ -419,19 +419,27 @@ export async function runOwnershipSync(input: { dryRun?: boolean } = {}): Promis
                 recordType === "deal" &&
                 row.salesSourceUserId != null &&
                 matchedUser.id === row.salesSourceUserId;
+              // M (P1): only a CLEARABLE conflict (owner==source with NO booked sales_source row) needs to
+              // force the row out of the unchanged bucket to run the cosmetic clear. owner==source is
+              // money-safe, so a BOOKED source row is preserved (clearing it would delete the rep's earned
+              // commission + floor credit). A preserved-booked conflict on an otherwise-matched row is
+              // effectively unchanged — treating it as clearable would churn a no-op reassignment forever.
+              const clearableSourceConflict =
+                newOwnerIsDealSalesSource &&
+                !(await hasBookedSalesSourceRow(tenantTx, row.id, row.salesSourceUserId!));
 
               pushExample(
                 result.examples.matched,
                 createExample(recordType, row, owner, ownerEmail, mappingStatus, null, matchedUser.id)
               );
-              if (rowMatchesMatchedState(row, ownerEmail, matchedUser) && !newOwnerIsDealSalesSource) {
+              if (rowMatchesMatchedState(row, ownerEmail, matchedUser) && !clearableSourceConflict) {
                 result.unchanged++;
                 continue;
               }
 
               result.assigned++;
               if (!dryRun) {
-                if (newOwnerIsDealSalesSource) {
+                if (clearableSourceConflict) {
                   await clearSalesSource(tenantTx, row.id, null);
                 }
                 await updateTargetRow(client, recordType, row, owner, ownerEmail, mappingStatus, failureReasonCode, matchedUser);

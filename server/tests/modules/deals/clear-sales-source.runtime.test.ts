@@ -62,7 +62,7 @@ vi.mock("../../../src/modules/audit/audit-logger.js", () => ({
   logActivity: vi.fn(),
 }));
 
-import { clearSalesSource, updateDeal } from "../../../src/modules/deals/service.js";
+import { clearSalesSource, hasBookedSalesSourceRow, updateDeal } from "../../../src/modules/deals/service.js";
 
 // ---------------------------------------------------------------------------
 // UUID helpers
@@ -74,6 +74,7 @@ const DEAL_ID = U("d01");
 const DEAL_ID2 = U("d02"); // second deal for idempotency test
 const DEAL_NO_SOURCE = U("d03"); // deal with no source (no-op test)
 const DEAL_NORMAL = U("d04"); // deal already on normal route (F9 should not fire)
+const DEAL_BOOKED = U("d05"); // untouched deal carrying a booked sales_source row (hasBookedSalesSourceRow)
 const REP_OWNER = U("a01");
 const REP_SOURCE = U("a02");
 const STAGE_ID = U("50001");    // must be all hex — 'S' invalid, use numeric prefix
@@ -139,7 +140,17 @@ beforeAll(async () => {
        '${REP_OWNER}', '${REP_SOURCE}', 'normal', false, false, true, false)
   `);
 
-  // Seed a sales_source commission row for DEAL_ID and DEAL_ID2
+  // Untouched deal that carries a booked sales_source row (for hasBookedSalesSourceRow; no test mutates it)
+  await pg.exec(`
+    INSERT INTO public.deals
+      (id, deal_number, name, stage_id, assigned_rep_id, sales_source_user_id,
+       workflow_route, is_change_order, on_hold, is_active, is_test_data)
+    VALUES
+      ('${DEAL_BOOKED}', 'D-005', 'Booked Source Deal', '${STAGE_ID}',
+       '${REP_OWNER}', '${REP_SOURCE}', 'service', false, false, true, false)
+  `);
+
+  // Seed a sales_source commission row for DEAL_ID, DEAL_ID2, and DEAL_BOOKED
   await pg.exec(`
     INSERT INTO public.deal_signed_commissions
       (id, deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount,
@@ -148,6 +159,8 @@ beforeAll(async () => {
       (gen_random_uuid(), '${DEAL_ID}',  '${REP_SOURCE}', 'sales_source',
        'awarded_amount', 50000, 0.005000, 250.00, '2026-06-01'),
       (gen_random_uuid(), '${DEAL_ID2}', '${REP_SOURCE}', 'sales_source',
+       'awarded_amount', 50000, 0.005000, 250.00, '2026-06-01'),
+      (gen_random_uuid(), '${DEAL_BOOKED}', '${REP_SOURCE}', 'sales_source',
        'awarded_amount', 50000, 0.005000, 250.00, '2026-06-01')
   `);
 }, 30_000);
@@ -277,5 +290,23 @@ describe("F9: updateDeal workflow-route change from service → normal", () => {
     // Source must remain intact
     const after = await getDealState(DEAL_NORMAL);
     expect(after?.sales_source_user_id).toBe(REP_SOURCE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hasBookedSalesSourceRow — the money-safety gate for the ownership-sync conflict-clear (Finding M)
+// ---------------------------------------------------------------------------
+
+describe("hasBookedSalesSourceRow", () => {
+  it("is true when the rep holds a booked sales_source row on the deal", async () => {
+    // DEAL_BOOKED carries REP_SOURCE's sales_source row and no test mutates it. Ownership sync must NOT
+    // clear this deal on an owner==source conflict — doing so would delete REP_SOURCE's earned commission.
+    expect(await hasBookedSalesSourceRow(tdb, DEAL_BOOKED, REP_SOURCE)).toBe(true);
+  });
+
+  it("is false for a rep with no sales_source row on the deal", async () => {
+    // DEAL_NO_SOURCE has no commission rows at all; a different rep on DEAL_BOOKED also has none.
+    expect(await hasBookedSalesSourceRow(tdb, DEAL_NO_SOURCE, REP_SOURCE)).toBe(false);
+    expect(await hasBookedSalesSourceRow(tdb, DEAL_BOOKED, REP_OWNER)).toBe(false);
   });
 });

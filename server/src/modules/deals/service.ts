@@ -2357,9 +2357,17 @@ export async function updateDeal(
     // already blocks setting source == owner (forward direction); this closes the reverse path where
     // a reassignment would move the sales-source rep into the owner slot and mint a double commission
     // cut (owner row + the existing additive sales_source row that remains on the deal).
+    // K (P3): EXCEPT when this same PATCH also moves the deal OUT of the service workflow — the F9 block
+    // below then clears the (now-invalid) source, so owner==source is only transient and there is no
+    // double-count. Rejecting here would force the client into two separate saves for a valid correction.
+    const leavingServiceWorkflow =
+      existing.workflowRoute === "service" &&
+      input.workflowRoute !== undefined &&
+      input.workflowRoute !== "service";
     if (
       input.assignedRepId != null &&
-      input.assignedRepId === (existing.salesSourceUserId ?? null)
+      input.assignedRepId === (existing.salesSourceUserId ?? null) &&
+      !leavingServiceWorkflow
     ) {
       throw new AppError(
         422,
@@ -3924,6 +3932,38 @@ export async function setDealEstimator(
  * propagates null to active CO children (display sync only), removes the `sales_source` DSC row,
  * and writes an audit log entry — all in the caller's db context (no inner transaction wrap).
  */
+/**
+ * True when `repUserId` holds a BOOKED (earned) `sales_source` commission row on this deal.
+ *
+ * The ownership-sync conflict-clears (owner == source) MUST consult this before clearing: owner == source
+ * is already MONEY-SAFE — the mint dispatch skips the source cut when `source == assignedRep`, and the
+ * floor source-leg excludes `assigned_rep_id == rep` — so the clear is only cosmetic field-hygiene. If the
+ * source rep already booked a `sales_source` row (a signed deal), clearing it via clearSalesSource would
+ * DELETE their already-earned commission + floor credit while the reassignment mints NO replacement owner
+ * row, so they'd lose money for no benefit. Preserve the booked row; only clear when nothing is booked.
+ *
+ * NOTE: this is specifically for the reassignment conflict (deal STAYS service). It is NOT consulted by the
+ * F9 / workflow-leave path, where removing the row is correct because the deal is no longer a service deal.
+ */
+export async function hasBookedSalesSourceRow(
+  tenantDb: TenantDb,
+  dealId: string,
+  repUserId: string
+): Promise<boolean> {
+  const [row] = await tenantDb
+    .select({ id: dealSignedCommissions.id })
+    .from(dealSignedCommissions)
+    .where(
+      and(
+        eq(dealSignedCommissions.dealId, dealId),
+        eq(dealSignedCommissions.repUserId, repUserId),
+        eq(dealSignedCommissions.attributionRole, "sales_source")
+      )
+    )
+    .limit(1);
+  return Boolean(row);
+}
+
 export async function clearSalesSource(
   tenantDb: TenantDb,
   dealId: string,
