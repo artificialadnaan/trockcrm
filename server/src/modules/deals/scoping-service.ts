@@ -1310,7 +1310,11 @@ export async function upsertDealScopingIntake(
     if (dealUpdates.description !== undefined) {
       await recordDescriptionHistoryChange(tenantDb, {
         dealId,
-        oldDescription: deal.description,
+        // RESOLVED (source-lead-aware) old value, matching the resolved-fields write: for a source-lead deal
+        // deals.description is only a compatibility mirror, and a scoping save re-syncs it from the resolved
+        // lead description. Comparing against the raw mirror would log a spurious scope_summary row on a
+        // mirror-only re-sync; comparing against the resolved value makes that a no-op (old == new).
+        oldDescription: resolvedDeal.resolved.description,
         newDescription: dealUpdates.description as string | null,
         changedBy: userId,
         source: "scope_summary",

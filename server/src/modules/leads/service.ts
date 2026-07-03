@@ -26,7 +26,6 @@ import { db } from "../../db.js";
 import { buildLeadSearchCondition, escapeLikePattern } from "../search/unified-search.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
-import { recordDescriptionHistoryChange } from "../deals/deal-description-history.js";
 import { getActiveProjectTypes, getAllStages, getStageById, getStageBySlug } from "../pipeline/service.js";
 import { assertLeadStageTransitionAllowed, LeadStageTransitionError } from "./stage-transition-service.js";
 import { preflightLeadStageCheck } from "./stage-gate.js";
@@ -1950,29 +1949,6 @@ export function createLeadService(
       .set(updates)
       .where(eq(leads.id, leadId))
       .returning();
-
-    // A converted lead's description is the AUTHORITATIVE effective description of its deal (the resolver
-    // reads sourceLead.description ?? deal.description). Editing it here changes what the deal shows without
-    // touching deals.description, so record a deal_history row against the converted deal too — otherwise the
-    // deal's description-history panel skips this A->B edit and a later resolved-fields edit misleadingly
-    // jumps B->C.
-    if (isConvertedLead && input.description !== undefined && lead.description !== existing.description) {
-      const [convertedDeal] = await tenantDb
-        .select({ id: deals.id })
-        .from(deals)
-        .where(and(eq(deals.sourceLeadId, leadId), eq(deals.isActive, true)))
-        .limit(1);
-      if (convertedDeal) {
-        await recordDescriptionHistoryChange(tenantDb, {
-          dealId: convertedDeal.id,
-          oldDescription: existing.description,
-          newDescription: lead.description,
-          changedBy: userId,
-          source: "converted_lead",
-          changedAt: updateTime,
-        });
-      }
-    }
 
     const auditFieldChanges = buildRawFieldChanges(
       existing as Record<string, unknown>,
