@@ -1757,6 +1757,27 @@ router.post("/:id/rfp-vote", requireRfpVoter, async (req, res, next) => {
     if (!isOpenVoteRound) {
       throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
     }
+    // finding Y8: authorize the cast against the round's INVITED voter set (snapshotted into the
+    // rfp_vote_invitation job when the round opened), not the current mutable RFP_VOTER_EMAILS the requireRfpVoter
+    // middleware checks. If the env changed while the round was pending, a newly-added 4th address must not cast a
+    // deciding 2-of-3 vote for a round it was never invited to. Falls back to the env gate (already passed) only
+    // if no snapshot is found (a legacy round or a pruned job).
+    const inviteSnap = await req.tenantDb!.execute(sql`
+      SELECT payload->'recipients' AS recipients
+        FROM public.job_queue
+       WHERE job_type = 'rfp_vote_invitation'
+         AND payload->>'dealId' = ${deal.id}
+         AND payload->>'roundEventId' = ${deal.rfpApprovalRequestEventId}
+       ORDER BY id DESC
+       LIMIT 1`);
+    const inviteRows = Array.isArray(inviteSnap) ? inviteSnap : (inviteSnap as { rows?: any[] }).rows ?? [];
+    const snapshot = inviteRows[0]?.recipients;
+    if (Array.isArray(snapshot) && snapshot.length > 0) {
+      const invited = snapshot.map((e: unknown) => String(e).trim().toLowerCase());
+      if (!invited.includes((req.user!.email ?? "").trim().toLowerCase())) {
+        throw new AppError(403, "You were not one of the invited voters for this RFP round.", "RFP_VOTE_NOT_INVITED");
+      }
+    }
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
     const result = await castRfpVote({
       tenantDb: req.tenantDb!,

@@ -137,7 +137,11 @@ export async function requestOverrideApproval(
       rfpOverrideNote: input.note,
       updatedAt: new Date(),
     })
-    .where(and(eq(deals.id, input.dealId), ...overrideActionableConditions()))
+    // finding Y7: require is_active=true. A voting-path NO-GO deal soft-deleted before a reviewer opens the
+    // override link must NOT enter the request-less create branch below — the bid-board-created callback resolves
+    // deals via findDeal (is_active=true), so an external project could be created but never reconciled in CRM.
+    // A deleted deal matches 0 rows here -> not_actionable, no create.
+    .where(and(eq(deals.id, input.dealId), eq(deals.isActive, true), ...overrideActionableConditions()))
     // Return only what THIS function body reads (truthiness, request id, and the audit name/secondary-id
     // snapshots). The owner columns + round event id are intentionally NOT projected: enqueueRfpBidBoardCreate ->
     // loadRfpPayloadDeal re-fetches every payload field (owner, amounts, address, round event id, …)

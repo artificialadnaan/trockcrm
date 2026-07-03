@@ -31,7 +31,11 @@ export function RfpVotePanel({
   const hasVoted = votes.some(
     (v) => (user?.id != null && v.voterUserId === user.id) || (!!user?.email && v.voterEmail.toLowerCase() === user.email.toLowerCase())
   );
-  const canCast = state.outcome === "pending" && Boolean(user?.isRfpVoter) && !hasVoted;
+  // finding Y9: also require the round to still be OPEN. After an invitation failure is surfaced (H6), the
+  // outcome is still 'pending' but rfpApprovalStatus is send_failed — the "Cast your vote" link would then reach
+  // the paused vote page / a server 409 until Retry runs. Gate on rfpApprovalStatus like the focused page (W6).
+  const canCast =
+    state.outcome === "pending" && deal.rfpApprovalStatus === "pending" && Boolean(user?.isRfpVoter) && !hasVoted;
   const voteHref = `/rfp-vote/${deal.id}${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`;
 
   const tally =

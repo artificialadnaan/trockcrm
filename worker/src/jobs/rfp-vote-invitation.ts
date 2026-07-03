@@ -228,7 +228,7 @@ export async function runRfpVoteInvitationDeadLetterSweep(
           [job.id]
         );
 
-        const payload = job.payload as { dealId?: string };
+        const payload = job.payload as { dealId?: string; roundEventId?: string | null };
         if (!payload?.dealId) {
           await client.query(
             "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",
@@ -263,8 +263,12 @@ export async function runRfpVoteInvitationDeadLetterSweep(
                      SELECT d2.rfp_approval_request_event_id FROM ${quoteIdent(schemaName)}.deals d2 WHERE d2.id = $2
                    )
               )
+              -- finding Y10: only surface the failure for the round THIS job was for. If the deal was returned to
+              -- Opportunity and a FRESH round opened, an old dead invitation must not mark the new (successfully
+              -- invited) round send_failed. Match the job's roundEventId to the deal's current event id.
+              AND rfp_approval_request_event_id = $3::uuid
               AND rfp_last_attempt_error IS DISTINCT FROM $1`,
-          [lastError, payload.dealId]
+          [lastError, payload.dealId, payload.roundEventId ?? null]
         );
         await client.query(
           "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",

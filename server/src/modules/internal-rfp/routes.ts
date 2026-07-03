@@ -1037,6 +1037,17 @@ internalRfpRoutes.post(
               -- stamps rfp_bidboard_attempt_at, so a 'created' older than it is ignored; the fresh attempt's
               -- 'created' (createdAt >= the stamp) links + clears the marker. First attempt: attempt_at NULL/exempt.
               AND (rfp_bidboard_attempt_at IS NULL OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_bidboard_attempt_at))
+              -- request-less CROSS-ROUND freshness (finding Y6): once a deal is Returned to Opportunity and a
+              -- FRESH round opens, rfp_approval_status is non-null again and the first attempt has no attempt_at,
+              -- so a very delayed 'created' from the OLD round's create (matched only by sourceDealId) could link
+              -- the NEW round to the old project. Require a request-less 'created' to be no older than the CURRENT
+              -- round's open time (rfp_approval_requested_at). Request-BACKED callbacks (request_id present) get
+              -- their round identity from the request-id reconciliation above, so they're exempt here.
+              AND (
+                rfp_approval_request_id IS NOT NULL
+                OR rfp_approval_requested_at IS NULL
+                OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_approval_requested_at)
+              )
               AND (
                 procore_bid_id IS DISTINCT FROM $1::bigint OR
                 procore_company_id IS DISTINCT FROM $2 OR
@@ -1115,6 +1126,13 @@ internalRfpRoutes.post(
                 -- prior-attempt 'created'. A successful linkage above already cleared attempt_at (→ exempt here);
                 -- a no-op'd stale 'created' leaves it set, so $8 < attempt_at blocks the move.
                 AND (rfp_bidboard_attempt_at IS NULL OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_bidboard_attempt_at))
+                -- ...and the request-less CROSS-ROUND freshness (finding Y6): don't advance the stage on a
+                -- 'created' from an OLD round. Mirrors the linkage update — request-backed callbacks exempt.
+                AND (
+                  rfp_approval_request_id IS NOT NULL
+                  OR rfp_approval_requested_at IS NULL
+                  OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_approval_requested_at)
+                )
               RETURNING id`,
             [
               targetStage.id,

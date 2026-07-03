@@ -47,7 +47,7 @@ async function seed() {
       procore_company_id text, is_bid_board_owned boolean NOT NULL DEFAULT false, rfp_approval_status text, rfp_declined_reason text,
       rfp_declined_at timestamptz, rfp_override_state text, rfp_override_error text, rfp_override_decision text,
       rfp_override_reviewed_at timestamptz, rfp_bidboard_attempt_at timestamptz, rfp_last_attempt_error text, bid_board_linked_at timestamptz, assigned_rep_id uuid, rfp_approval_requested_by uuid,
-      rfp_approval_request_id integer, workflow_route text NOT NULL DEFAULT 'normal', stage_entered_at timestamptz,
+      rfp_approval_request_id integer, rfp_approval_requested_at timestamptz, workflow_route text NOT NULL DEFAULT 'normal', stage_entered_at timestamptz,
       on_hold boolean NOT NULL DEFAULT false, on_hold_started_at timestamptz, on_hold_accumulated_seconds bigint DEFAULT 0,
       on_hold_accumulated_seconds_at_stage_entry bigint DEFAULT 0, is_active boolean NOT NULL DEFAULT true, updated_at timestamptz
     );

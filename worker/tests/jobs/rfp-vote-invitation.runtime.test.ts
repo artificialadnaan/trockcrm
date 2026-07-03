@@ -105,9 +105,9 @@ describe("runRfpVoteInvitationDeadLetterSweep (real SQL)", () => {
         ('${DEAL_DECIDED}', '${R3}', 'tim@x.com', 'approve');
       -- Three dead invitation jobs (one per deal).
       INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error) VALUES
-        ('rfp_vote_invitation', '{"dealId":"${DEAL_NOVOTES}"}'::jsonb, '${OFFICE}', 'dead', 'RFP_VOTER_EMAILS is not configured'),
-        ('rfp_vote_invitation', '{"dealId":"${DEAL_ONEVOTE}"}'::jsonb, '${OFFICE}', 'dead', 'provider down'),
-        ('rfp_vote_invitation', '{"dealId":"${DEAL_DECIDED}"}'::jsonb, '${OFFICE}', 'dead', 'provider down');
+        ('rfp_vote_invitation', '{"dealId":"${DEAL_NOVOTES}","roundEventId":"${R1}"}'::jsonb, '${OFFICE}', 'dead', 'RFP_VOTER_EMAILS is not configured'),
+        ('rfp_vote_invitation', '{"dealId":"${DEAL_ONEVOTE}","roundEventId":"${R2}"}'::jsonb, '${OFFICE}', 'dead', 'provider down'),
+        ('rfp_vote_invitation', '{"dealId":"${DEAL_DECIDED}","roundEventId":"${R3}"}'::jsonb, '${OFFICE}', 'dead', 'provider down');
     `);
     return db;
   }
@@ -133,6 +133,16 @@ describe("runRfpVoteInvitationDeadLetterSweep (real SQL)", () => {
     // All dead jobs are marked handled so they aren't reprocessed.
     const jobs = (await db.query(`SELECT payload->>'dealHandled' AS handled FROM public.job_queue ORDER BY id`)).rows as any[];
     expect(jobs.map((j) => j.handled)).toEqual(["true", "true", "true"]);
+  });
+
+  it("[Y10] does NOT surface the current round when the dead invitation was for a PRIOR (returned/re-triggered) round", async () => {
+    const db = await seed();
+    // The deal is now on a FRESH round R-new (successfully invited), but an old dead invitation job for R1 remains.
+    await db.query(`UPDATE office_test.deals SET rfp_approval_request_event_id = '${U("e99")}' WHERE id = $1`, [DEAL_NOVOTES]);
+    const client = { query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any };
+    await runRfpVoteInvitationDeadLetterSweep({ db: client as any });
+    const row = (await db.query(`SELECT rfp_approval_status FROM office_test.deals WHERE id=$1`, [DEAL_NOVOTES])).rows as any[];
+    expect(row[0].rfp_approval_status).toBe("pending"); // the fresh round is untouched
   });
 
   it("is idempotent: a second sweep finds the jobs already handled and mutates nothing", async () => {
