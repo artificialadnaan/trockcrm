@@ -978,6 +978,20 @@ export async function validateAssignee(tenantDb: TenantDb, assigneeId: string, o
   }
 }
 
+/**
+ * Assert that the user designated as sales source holds the 'rep' role.
+ * A non-rep source (admin / director / construction) has no rep commission settings and
+ * would not appear on the rep roster, leaving an attribution row with no visible payout.
+ * Must be called AFTER validateAssignee so the user's existence and office access are
+ * already confirmed.
+ */
+export async function assertSalesSourceIsRep(tenantDb: TenantDb, userId: string): Promise<void> {
+  const [u] = await tenantDb.select({ role: users.role }).from(users).where(eq(users.id, userId)).limit(1);
+  if (!u || u.role !== "rep") {
+    throw new AppError(422, "Sales source must be a sales rep", "SALES_SOURCE_NOT_REP");
+  }
+}
+
 async function validateDealReassignmentAssignee(
   tenantDb: TenantDb,
   assigneeId: string,
@@ -3899,9 +3913,12 @@ export async function setDealSalesSource(
       throw new AppError(422, "Sales source cannot be the deal owner or estimator", "SALES_SOURCE_CONFLICT");
     }
 
-    // A NEW sales source must be an active user with access to the active office.
+    // A NEW sales source must be an active user with access to the active office AND must be a rep.
+    // Non-rep users (admin / director / construction) have no rep commission settings and do not
+    // appear on the rep roster, so attributing them as a source creates an orphaned commission row.
     if (newSource != null) {
       await validateAssignee(tx, newSource, officeId ?? undefined);
+      await assertSalesSourceIsRep(tx, newSource);
     }
 
     const now = new Date();

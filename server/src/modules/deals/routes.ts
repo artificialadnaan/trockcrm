@@ -36,6 +36,7 @@ import {
   setDealEstimator,
   setDealSalesSource,
   validateAssignee,
+  assertSalesSourceIsRep,
 } from "./service.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
@@ -2007,6 +2008,7 @@ router.post("/service-opportunity", async (req, res, next) => {
         resolvedSalesSource,
         req.user!.activeOfficeId ?? req.user!.officeId ?? undefined
       );
+      await assertSalesSourceIsRep(req.tenantDb!, resolvedSalesSource);
       if (resolvedSalesSource === repId) {
         throw new AppError(422, "Sales source cannot be the assigned rep", "SALES_SOURCE_CONFLICT");
       }

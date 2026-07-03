@@ -48,7 +48,7 @@ function makeTenantDb(initial: FakeDeal) {
     auditInserts: [] as Array<Record<string, unknown>>,
     lockedSelects: 0,
   };
-  const cannedUser = [{ id: "u", isActive: true, officeId: "o1", displayName: "U" }];
+  const cannedUser = [{ id: "u", isActive: true, officeId: "o1", displayName: "U", role: "rep" }];
   const tenantDb: any = {
     _state: state,
     select() {
