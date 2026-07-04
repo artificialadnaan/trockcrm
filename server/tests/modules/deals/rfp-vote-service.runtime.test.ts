@@ -333,7 +333,7 @@ describe("allRfpVotersHaveOfficeAccess", () => {
     const db = new PGlite();
     apg = db;
     await db.exec(`
-      CREATE TABLE users (id uuid PRIMARY KEY, email text, office_id uuid, is_active boolean NOT NULL DEFAULT true);
+      CREATE TABLE users (id uuid PRIMARY KEY, email text, office_id uuid, role text NOT NULL DEFAULT 'estimator', is_active boolean NOT NULL DEFAULT true);
       CREATE TABLE user_office_access (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), user_id uuid NOT NULL, office_id uuid NOT NULL, role_override text);
     `);
     return drizzle(db as any) as any;
@@ -365,5 +365,22 @@ describe("allRfpVotersHaveOfficeAccess", () => {
     // All three have office access, but Tim is deactivated -> authMiddleware would reject him, so he can't vote.
     await apg!.query(`INSERT INTO users (id, email, office_id, is_active) VALUES ($1,'sidney@x.com',$4,true),($2,'tim@x.com',$4,false),($3,'james@x.com',$4,true)`, [SID, TIM, JAMES, OFFICE]);
     expect(await allRfpVotersHaveOfficeAccess(tdb, OFFICE, ENV)).toBe(false);
+  });
+
+  it("false when a configured voter has office access but a field_contractor EFFECTIVE role (can't pass requireCrmUser)", async () => {
+    const tdb = await setupAccess();
+    // All three are at OFFICE + active, but Tim's role is field_contractor -> the deals routes (requireCrmUser)
+    // would 403 him, so he can neither load the ballot nor cast; he must not count toward the trio.
+    await apg!.query(`INSERT INTO users (id, email, office_id, role) VALUES ($1,'sidney@x.com',$4,'estimator'),($2,'tim@x.com',$4,'field_contractor'),($3,'james@x.com',$4,'admin')`, [SID, TIM, JAMES, OFFICE]);
+    expect(await allRfpVotersHaveOfficeAccess(tdb, OFFICE, ENV)).toBe(false);
+  });
+
+  it("true when a field_contractor base role is lifted to a CRM role_override for THIS granted office", async () => {
+    const tdb = await setupAccess();
+    // Tim's HOME (OTHER) base role is field_contractor, but he reaches OFFICE via a grant whose role_override is a
+    // CRM role -> authMiddleware's effective role at OFFICE is 'estimator', so requireCrmUser passes and he counts.
+    await apg!.query(`INSERT INTO users (id, email, office_id, role) VALUES ($1,'sidney@x.com',$4,'estimator'),($2,'tim@x.com',$5,'field_contractor'),($3,'james@x.com',$4,'admin')`, [SID, TIM, JAMES, OFFICE, OTHER]);
+    await apg!.query(`INSERT INTO user_office_access (id, user_id, office_id, role_override) VALUES (gen_random_uuid(), $1, $2, 'estimator')`, [TIM, OFFICE]);
+    expect(await allRfpVotersHaveOfficeAccess(tdb, OFFICE, ENV)).toBe(true);
   });
 });

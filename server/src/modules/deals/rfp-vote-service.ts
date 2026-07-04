@@ -11,6 +11,7 @@ import {
 } from "@trock-crm/shared/lib/rfpVoteState";
 import { isRfpVoterEmail, resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { AppError } from "../../middleware/error-handler.js";
+import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { applyRfpDeclineToDeal } from "./rfp-decline-service.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, enqueueRfpVoteOutcome } from "./rfp-enqueue.js";
@@ -50,12 +51,14 @@ export async function rfpVotesTableExists(tenantDb: TenantDb): Promise<boolean> 
 }
 
 /**
- * True iff EVERY configured RFP voter email resolves to a CRM user WITH access to `officeId`. Access mirrors the
- * auth middleware's getOfficeAccess: the user's primary office is `officeId`, OR they hold a user_office_access
- * grant for it. The trigger-rfp guard requires this before opening a request-less round — otherwise the invite
- * link (which carries officeId) is rejected by authMiddleware for a voter who can't enter the tenant, and if fewer
- * than the trio can vote the deal is stranded 'pending' with no cancel path. When it's not satisfied the trigger
- * falls back to the SyncHub delivery path. (Called only after hasSufficientRfpVoters, so the trio is configured.)
+ * True iff EVERY configured RFP voter email resolves to an ACTIVE user who can BOTH enter `officeId` AND pass
+ * requireCrmUser there. Access mirrors the auth middleware's getOfficeAccess (primary office is `officeId`, OR a
+ * user_office_access grant for it); the CRM-role check mirrors authMiddleware's effective-role resolution + the
+ * requireCrmUser mount guard (a field_contractor effective role can't load /rfp-vote or the detail ballot). The
+ * trigger-rfp guard requires this before opening a request-less round — otherwise the invite link (which carries
+ * officeId) is rejected, or the voter reaches a CRM route they can't use, and if fewer than the trio can vote the
+ * deal is stranded 'pending' with no cancel path. When it's not satisfied the trigger falls back to the SyncHub
+ * delivery path. (Called only after hasSufficientRfpVoters, so the trio is configured.)
  */
 export async function allRfpVotersHaveOfficeAccess(
   tenantDb: TenantDb,
@@ -65,7 +68,13 @@ export async function allRfpVotersHaveOfficeAccess(
   const emails = resolveRfpVoterEmails(env).map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0);
   if (emails.length === 0 || !officeId) return false;
   const rows = await tenantDb
-    .select({ email: users.email, primaryOfficeId: users.officeId, grantOfficeId: userOfficeAccess.officeId })
+    .select({
+      email: users.email,
+      baseRole: users.role,
+      primaryOfficeId: users.officeId,
+      grantOfficeId: userOfficeAccess.officeId,
+      grantRoleOverride: userOfficeAccess.roleOverride,
+    })
     .from(users)
     .leftJoin(
       userOfficeAccess,
@@ -75,12 +84,25 @@ export async function allRfpVotersHaveOfficeAccess(
     // or cast, so a configured-but-deactivated voter must not count toward the trio (else the round can open with
     // fewer than three votable voters and strand).
     .where(and(inArray(sql`lower(${users.email})`, emails), eq(users.isActive, true)));
-  const accessible = new Set(
+  const ready = new Set(
     rows
-      .filter((r) => r.primaryOfficeId === officeId || r.grantOfficeId != null)
+      .filter((r) => {
+        const isHomeOffice = r.primaryOfficeId === officeId;
+        const hasGrant = r.grantOfficeId != null;
+        // Must be able to ENTER this office at all (home office or an explicit grant for it).
+        if (!isHomeOffice && !hasGrant) return false;
+        // finding: and must pass requireCrmUser THERE. Both /api/deals/:id/detail (load the ballot) and
+        // /rfp-vote (cast) are mounted behind requireCrmUser, so a field_contractor EFFECTIVE role can neither
+        // load nor vote — counting them would open a round with fewer than three usable voters that can't reach
+        // 2-of-3. Mirror authMiddleware's effective-role resolution (middleware/auth.ts): at the voter's HOME
+        // office the effective role is users.role; when they reach a NON-home office via a grant it is that
+        // grant's role_override (else users.role). isCrmUserRole is the exact predicate requireCrmUser applies.
+        const effectiveRole = isHomeOffice ? r.baseRole : (r.grantRoleOverride ?? r.baseRole);
+        return isCrmUserRole(effectiveRole);
+      })
       .map((r) => (r.email ?? "").trim().toLowerCase()),
   );
-  return emails.every((e) => accessible.has(e));
+  return emails.every((e) => ready.has(e));
 }
 
 export interface CastRfpVoteDeps {
