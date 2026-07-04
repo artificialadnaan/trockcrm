@@ -4085,9 +4085,10 @@ export async function setDealSalesSource(
       throw new AppError(422, "Sales source can only be set on a service opportunity", "SALES_SOURCE_NOT_SERVICE");
     }
 
-    // A NEW sales source must be an active user with access to the active office AND must be a rep.
-    // Non-rep users (admin / director / construction) have no rep commission settings and do not
-    // appear on the rep roster, so attributing them as a source creates an orphaned commission row.
+    // A NEW sales source must be an active user with access to the active office AND an internal CRM user
+    // (any role except field_contractor — e.g. a director like Chase Kelly who sources service opps); see
+    // assertSalesSourceIsCrmUser. Whether the source actually EARNS a service-source cut still follows their
+    // commission settings (attribution-only until they have an active service-source rate).
     if (newSource != null) {
       await validateAssignee(tx, newSource, officeId ?? undefined);
       await assertSalesSourceIsCrmUser(tx, newSource);

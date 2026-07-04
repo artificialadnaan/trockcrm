@@ -35,6 +35,9 @@ const REP_INACT = U("0a13");
 const SRC_DIRECTOR = U("0a14");
 /** external field_contractor — the ONLY role that can never be a source, even with active settings */
 const SRC_FIELD = U("0a15");
+/** admin + construction sources — also internal CRM users, so they mint like a director with active settings */
+const SRC_ADMIN = U("0a16");
+const SRC_CONSTRUCTION = U("0a17");
 const STAGE = U("0502");
 
 let pg: PGlite;
@@ -98,7 +101,9 @@ beforeAll(async () => {
             ('${REP_SOLO}', 'solo@t.test',  'Solo',   'rep',      '${OFFICE}', true),
             ('${REP_INACT}','inact@t.test', 'Inact',  'rep',      '${OFFICE}', false),
             ('${SRC_DIRECTOR}','director@t.test','Director','director', '${OFFICE}', true),
-            ('${SRC_FIELD}','field@t.test','Field','field_contractor', '${OFFICE}', true)`,
+            ('${SRC_FIELD}','field@t.test','Field','field_contractor', '${OFFICE}', true),
+            ('${SRC_ADMIN}','admin3@t.test','Admin3','admin', '${OFFICE}', true),
+            ('${SRC_CONSTRUCTION}','const@t.test','Const','construction', '${OFFICE}', true)`,
   );
   // REP_MIX:   mixed → capX mirror = capx_rate_mixed = 0.020000; service-source effective = 0.005000.
   // REP_SOLO:  solo  → capX mirror = capx_rate_solo  = 0.030000; service-source effective = 0 (stray).
@@ -110,7 +115,9 @@ beforeAll(async () => {
             ('${REP_SOLO}',  0.030000, 'solo',  0.030000, 0.020000, 0.005000, true),
             ('${REP_INACT}', 0.025000, 'solo',  0.025000, 0.015000, 0.000000, false),
             ('${SRC_DIRECTOR}',0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
-            ('${SRC_FIELD}', 0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true)`,
+            ('${SRC_FIELD}', 0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
+            ('${SRC_ADMIN}', 0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
+            ('${SRC_CONSTRUCTION}', 0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true)`,
   );
 }, 30_000);
 
@@ -194,18 +201,21 @@ describe("mintSalesSourceCommissionForDeal (via calculateCommissionForDeal)", ()
     expect((await dscRows(D)).filter((r) => r.rep_user_id === REP_MIX)).toHaveLength(1); // only the owner row
   });
 
-  it("mints a sales_source row for a DIRECTOR source with active settings (e.g. Chase Kelly)", async () => {
-    const D = U("0c13");
-    // The source may be any internal CRM user, not just a rep. A director (Chase Kelly) who sources a
-    // service deal and has active mixed settings (service_source_rate 0.005) EARNS the additive cut:
-    // 30000 × 0.005000 = 150.00.
-    await seedDeal(D, { rep: REP_SOLO, awarded: 30000, salesSource: SRC_DIRECTOR, workflowRoute: "service" });
+  // The source may be ANY internal CRM user with active settings, not just a rep — director (Chase Kelly),
+  // admin, or construction all EARN the additive cut identically: 30000 × 0.005000 = 150.00.
+  it.each([
+    ["director", SRC_DIRECTOR, "0c13"],
+    ["admin", SRC_ADMIN, "0c15"],
+    ["construction", SRC_CONSTRUCTION, "0c16"],
+  ] as const)("mints a sales_source row for a %s source with active settings", async (_role, source, dealHex) => {
+    const D = U(dealHex);
+    await seedDeal(D, { rep: REP_SOLO, awarded: 30000, salesSource: source, workflowRoute: "service" });
     await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
     const rows = await dscRows(D);
     expect(rows.find((r) => r.attribution_role === "sales_source")).toMatchObject({
       amount: "150.00",
       applied_rate: "0.005000",
-      rep_user_id: SRC_DIRECTOR,
+      rep_user_id: source,
     });
   });
 
