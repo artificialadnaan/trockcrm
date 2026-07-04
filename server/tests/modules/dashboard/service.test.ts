@@ -730,7 +730,7 @@ describe("Dashboard Service", () => {
           const text = extractSqlText(query).toLowerCase();
 
           if (text.includes("select u.id, u.display_name") && text.includes("role = 'rep'")) {
-            return Promise.resolve({ rows: [{ id: "manager-1", display_name: "Manager Rep" }] });
+            return Promise.resolve({ rows: [{ id: "manager-1", display_name: "Manager Rep", role: "rep" }] });
           }
 
           if (text.includes("left join public.user_commission_settings")) {
@@ -805,7 +805,7 @@ describe("Dashboard Service", () => {
           const text = extractSqlText(query).toLowerCase();
 
           if (text.includes("select u.id, u.display_name") && text.includes("role = 'rep'")) {
-            return Promise.resolve({ rows: [{ id: "rep-1", display_name: "Alex Rep" }] });
+            return Promise.resolve({ rows: [{ id: "rep-1", display_name: "Alex Rep", role: "rep" }] });
           }
 
           if (text.includes("left join public.user_commission_settings")) {
@@ -893,7 +893,7 @@ describe("Dashboard Service", () => {
           const text = extractSqlText(query).toLowerCase();
 
           if (text.includes("select u.id, u.display_name") && text.includes("role = 'rep'")) {
-            return Promise.resolve({ rows: [{ id: "rep-1", display_name: "Alex Rep" }] });
+            return Promise.resolve({ rows: [{ id: "rep-1", display_name: "Alex Rep", role: "rep" }] });
           }
 
           if (text.includes("left join public.user_commission_settings")) {

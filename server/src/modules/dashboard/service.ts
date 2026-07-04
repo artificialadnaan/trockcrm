@@ -561,6 +561,12 @@ export interface DirectorRepCommissionRow {
   // "earned nothing": floorMet=false with heldEarnedCommission>0 means real earned commission is withheld.
   floorMet: boolean;
   heldEarnedCommission: number;
+  // True for a rep admitted via the office-scoped rep roster; false for a NON-rep admitted only because they
+  // EARNED a commission row (e.g. a director source). The workspace zeroes deal-VALUE / funnel / activity
+  // metrics for non-rep rows: those columns are rep-involvement (owner/estimator) and the deal-VALUE FOOTER
+  // (getCommissionOfficeTotals) counts reps only, so a non-rep's owned deals must not appear in the visible
+  // rows or the rows + footer would stop reconciling.
+  isRep: boolean;
 }
 
 export interface StaleLeadDashboardRow {
@@ -1405,7 +1411,7 @@ export async function getDirectorRepCommissionRows(
     ? sql` AND ${activeOfficeRepMembershipSql(options.officeId)}`
     : sql``;
   const repsResult = await tenantDb.execute(sql`
-    SELECT u.id, u.display_name
+    SELECT u.id, u.display_name, u.role
     FROM ${users} u
     WHERE u.is_active = true
       -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
@@ -1453,6 +1459,7 @@ export async function getDirectorRepCommissionRows(
       meetsNewCustomerShare: summary.meetsNewCustomerShare,
       floorMet: summary.floorMet,
       heldEarnedCommission: summary.heldEarnedCommission,
+      isRep: String(rep.role) === "rep",
     });
   }
 
@@ -2791,15 +2798,23 @@ export async function getDirectorCommissionWorkspace(
   const dealSummaryByRep = new Map(dealSummaryRows.map((row) => [row.repId, row]));
 
   const rows = commissionRows.map((row) => {
-    const activity = activityByRep.get(row.repId);
-    const funnel = funnelByRep.get(row.repId);
-    const dealSummary = dealSummaryByRep.get(row.repId);
+    // A NON-rep row is on the roster ONLY because they earned a commission (e.g. a director source). The
+    // deal-VALUE / funnel / activity columns are rep-INVOLVEMENT (owner/estimator) metrics, and the
+    // deal-VALUE footer (getCommissionOfficeTotals) counts reps only — so a non-rep's own owned/estimated
+    // deals must NOT bleed into these columns, or the visible rows would stop reconciling with the footer.
+    // Their EARNED columns (the reason they appear) are still shown. Reps keep the merged involvement rows.
+    const activity = row.isRep ? activityByRep.get(row.repId) : undefined;
+    const funnel = row.isRep ? funnelByRep.get(row.repId) : undefined;
+    const dealSummary = row.isRep ? dealSummaryByRep.get(row.repId) : undefined;
 
     return {
       repId: row.repId,
       repName: row.repName,
       totalEarnedCommission: row.totalEarnedCommission,
-      potentialCommission: row.potentialCommission,
+      // Potential commission is future commission on the rep's own pipeline — an involvement metric, so it
+      // is zeroed for a non-rep source (their pipeline is excluded above; the "potential" drawer is gated to
+      // match). Their EARNED / held / floor columns (the reason they're on the roster) are kept.
+      potentialCommission: row.isRep ? row.potentialCommission : 0,
       floorRemaining: row.floorRemaining,
       newCustomerShare: row.newCustomerShare,
       meetsNewCustomerShare: row.meetsNewCustomerShare,
@@ -2905,9 +2920,16 @@ export async function getDirectorCommissionEvidence(
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
 
-  const nameResult = await tenantDb.execute(sql`SELECT display_name FROM ${users} WHERE id = ${repId}::uuid LIMIT 1`);
+  const nameResult = await tenantDb.execute(sql`SELECT display_name, role FROM ${users} WHERE id = ${repId}::uuid LIMIT 1`);
   const nameRows = (nameResult as any).rows ?? nameResult;
   const repName = nameRows[0]?.display_name ? String(nameRows[0].display_name) : "Rep";
+  // A NON-rep is on the workspace only for their EARNED commission (e.g. a director source), so their
+  // deal / lead / activity INVOLVEMENT drawers must be EMPTY — matching the zeroed deal-VALUE / funnel /
+  // activity cells in getDirectorCommissionWorkspace (and the rep-only deal-VALUE footer). Only "earned"
+  // (keyed on dsc.rep_user_id) is valid for a non-rep. This gate neutralizes the three involvement queries
+  // for non-reps; the earned query below is deliberately NOT gated.
+  const isRepUser = String(nameRows[0]?.role ?? "") === "rep";
+  const involvementGate = isRepUser ? sql`` : sql` AND false`;
 
   // RAW best-estimate + change-order, matching the pipeline/potential value expr exactly (no on-hold
   // zeroing in the value — on-hold is excluded by the WHERE row filter).
@@ -2933,7 +2955,7 @@ export async function getDirectorCommissionEvidence(
         AND d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
         AND ${aliasedActiveDealCountFilterSql("d")}${unsigned}${notBooked}
-        AND psc.slug IN (${commissionSlugList(stageSlugs)})
+        AND psc.slug IN (${commissionSlugList(stageSlugs)})${involvementGate}
       ORDER BY value DESC NULLS LAST, d.name ASC
     `);
     const rows = (res as any).rows ?? res;
@@ -3081,7 +3103,7 @@ export async function getDirectorCommissionEvidence(
         AND l.status = 'open'
         AND l.is_active = true
         AND psc.workflow_family = 'lead'
-        AND psc.slug IN (${commissionSlugList(COMMISSION_LEAD_STAGE_GROUPS[metric])})
+        AND psc.slug IN (${commissionSlugList(COMMISSION_LEAD_STAGE_GROUPS[metric])})${involvementGate}
       ORDER BY l.stage_entered_at DESC NULLS LAST, l.name ASC
     `);
     const rows = (res as any).rows ?? res;
@@ -3122,7 +3144,7 @@ export async function getDirectorCommissionEvidence(
       WHERE a.responsible_user_id = ${repId}::uuid
         AND a.type = ${activityType}
         AND a.occurred_at >= ${from}::timestamptz
-        AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
+        AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz${involvementGate}
       ORDER BY a.occurred_at DESC
     `);
     const rows = (res as any).rows ?? res;

@@ -155,6 +155,11 @@ beforeAll(async () => {
     -- unchanged (a sales_source row carries no deal-VALUE and REP still owns D-4).
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
       VALUES ('${U("dc20")}','${U("d04")}','${SRCDIR}', 250, 50000, 'sales_source', '2026-03-01');
+    -- NONREP (Director Dana) ALSO OWNS D-12 ($45k). Give them a sales_source cut so they're a rostered
+    -- non-rep earner who additionally owns a deal — proving their owned deal is NOT counted in their row's
+    -- deal-VALUE columns (which would otherwise break rows-vs-footer reconciliation, Codex P2).
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc21")}','${U("d01")}','${NONREP}', 300, 60000, 'sales_source', '2026-03-01');
 
     -- REPORT's signed deal (owned by REPORT) + dsc -> REPORT direct earned $5000 (floor met). MGR earns
     -- override 0.10 * 5000 = $500 and NOTHING direct (below their own $1M floor).
@@ -281,6 +286,27 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(ev.total.value).toBe(250);
     // Deal-VALUE office totals are unaffected by the additive sales_source row (still 220k pipeline).
     expect(officeTotals.pipelineValue).toBe(220000);
+  });
+
+  it("a non-rep source's OWNED deals do NOT bleed into its deal-VALUE / funnel / potential columns (Codex P2)", async () => {
+    // NONREP (Director Dana) OWNS D-12 ($45k, active) AND earned a $300 sales_source cut. On the roster as a
+    // non-rep earner, their EARNED column shows the cut, but their deal-VALUE/funnel/potential columns are 0
+    // — their owned deal must NOT appear (the deal-VALUE footer counts reps only, so it would otherwise
+    // inflate the visible rows above the footer, breaking reconciliation).
+    const { rows, officeTotals } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    const dana = rows.find((r) => r.repId === NONREP)!;
+    expect(dana).toBeTruthy();
+    expect(dana.totalEarnedCommission).toBe(300); // the sales_source cut IS shown (why they're rostered)
+    expect(dana.activeDeals).toBe(0);              // owns D-12 but it's excluded from their row
+    expect(dana.pipelineValue).toBe(0);
+    expect(dana.potentialCommission).toBe(0);      // pipeline-derived → zeroed for a non-rep
+    // Footer still counts reps only — D-12 (non-rep-owned) stays excluded, so it reconciles with the rows.
+    expect(officeTotals.pipelineValue).toBe(220000);
+
+    // The drawer reconciles with the zeroed cells: a deal-VALUE metric for a non-rep is EMPTY, earned matches.
+    expect((await getDirectorCommissionEvidence(tdb, { repId: NONREP, metric: "pipeline", from: FROM, to: TO })).total.value).toBe(0);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: NONREP, metric: "active", from: FROM, to: TO })).total.count).toBe(0);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: NONREP, metric: "earned", from: FROM, to: TO })).total.value).toBe(300);
   });
 
   it("SECURITY: a non-rep earner is admitted only as an active-office MEMBER — a foreign-office director is excluded when scoped", async () => {
