@@ -301,6 +301,22 @@ describe("openRfpVoteRound", () => {
     const jobs = (await pg.query(`SELECT job_type FROM public.job_queue`)).rows as any[];
     expect(jobs).toHaveLength(0);
   });
+
+  it("409s (no round, no invitation) if the deal was SOFT-DELETED between the caller's read and the reserve", async () => {
+    pg = await setup();
+    await pg.query(`UPDATE deals SET rfp_approval_status=NULL, rfp_approval_request_event_id=NULL, is_active=false WHERE id=$1`, [DEAL]);
+    const tdb: any = drizzle(pg as any);
+    await expect(
+      openRfpVoteRound({
+        tenantDb: tdb,
+        officeId: "00000000-0000-0000-0000-0000000000ff",
+        deal: dealRow({ rfpApprovalStatus: null, rfpApprovalRequestEventId: null }),
+        requestedByUserId: V1,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_ALREADY_TRIGGERED" });
+    const jobs = (await pg.query(`SELECT job_type FROM public.job_queue`)).rows as any[];
+    expect(jobs).toHaveLength(0);
+  });
 });
 
 describe("allRfpVotersHaveOfficeAccess", () => {

@@ -16,6 +16,9 @@ interface RfpReconfirmDenialPayload {
   dealName?: string;
   declinedReason?: string | null;
   rfpApprovalRequestId?: number;
+  // finding: the VOTING-path re-confirm carries no SyncHub request id (reconfirmRfpDecline enqueues this job
+  // app-side because the 0154 trigger skips a NULL request id). It passes the round event id for idempotency.
+  rfpVoteRoundId?: string | null;
   requestedByUserId?: string | null;
 }
 
@@ -54,30 +57,38 @@ export async function handleRfpReconfirmDenialEmail(
   const tenantSchema = payload.tenantSchema;
   const dealId = payload.dealId;
   const rfpApprovalRequestId = normalizePositiveInt(payload.rfpApprovalRequestId);
-  if (!isSafeTenantSchema(tenantSchema) || !dealId || rfpApprovalRequestId == null) {
-    logger.warn("[RfpReconfirmDenialEmail] Invalid job payload - skipping", { tenantSchema, dealId, rfpApprovalRequestId });
+  // finding: the VOTING-path re-confirm has no request id; it's keyed on the round event id. Accept EITHER a
+  // request id (the legacy trigger-enqueued path) OR a round id (the app-enqueued voting path).
+  const rfpVoteRoundId = normalizeText(payload.rfpVoteRoundId);
+  if (!isSafeTenantSchema(tenantSchema) || !dealId || (rfpApprovalRequestId == null && rfpVoteRoundId == null)) {
+    logger.warn("[RfpReconfirmDenialEmail] Invalid job payload - skipping", { tenantSchema, dealId, rfpApprovalRequestId, rfpVoteRoundId });
     return;
   }
 
   const query = deps.query ?? pool.query.bind(pool);
 
-  // Exactly-once guard: skip if this RFP cycle's re-confirm already sent.
-  const receiptResult = await query(
-    `SELECT resend_message_id, sent_at
-       FROM public.rfp_reconfirm_email_receipts
-      WHERE tenant_schema = $1
-        AND deal_id = $2::uuid
-        AND rfp_approval_request_id = $3
-      LIMIT 1`,
-    [tenantSchema, dealId, rfpApprovalRequestId]
-  );
-  if (receiptResult.rows.length > 0) {
-    logger.log("[RfpReconfirmDenialEmail] Notification already sent - skipping duplicate job", {
-      dealId,
-      rfpApprovalRequestId,
-      messageId: receiptResult.rows[0]?.resend_message_id ?? null,
-    });
-    return;
+  // Exactly-once guard: skip if this RFP cycle's re-confirm already sent. The receipts ledger is keyed on the
+  // request id, so it only applies to the request-BACKED path. The request-less (voting) path is instead made
+  // once-only by its enqueue site (reconfirmRfpDecline enqueues only on the actual denial_reconfirmed transition,
+  // once per round) + the round-scoped Resend idempotencyKey below.
+  if (rfpApprovalRequestId != null) {
+    const receiptResult = await query(
+      `SELECT resend_message_id, sent_at
+         FROM public.rfp_reconfirm_email_receipts
+        WHERE tenant_schema = $1
+          AND deal_id = $2::uuid
+          AND rfp_approval_request_id = $3
+        LIMIT 1`,
+      [tenantSchema, dealId, rfpApprovalRequestId]
+    );
+    if (receiptResult.rows.length > 0) {
+      logger.log("[RfpReconfirmDenialEmail] Notification already sent - skipping duplicate job", {
+        dealId,
+        rfpApprovalRequestId,
+        messageId: receiptResult.rows[0]?.resend_message_id ?? null,
+      });
+      return;
+    }
   }
 
   // Leadership recipients (the go-no-go authority that "denied" it). Unlike the decline email, an unset
@@ -145,32 +156,38 @@ export async function handleRfpReconfirmDenialEmail(
 
   try {
     const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
+    // Idempotency dimension: the request id when present, else the round event id (voting path).
+    const idDimension = rfpApprovalRequestId != null ? String(rfpApprovalRequestId) : `round-${rfpVoteRoundId}`;
     const sendResult = await sendEmail(recipients, email.subject, email.html, {
       text: email.text,
-      idempotencyKey: `rfp-reconfirm-denial-${tenantSchema}-${dealId}-${rfpApprovalRequestId}`,
+      idempotencyKey: `rfp-reconfirm-denial-${tenantSchema}-${dealId}-${idDimension}`,
     });
     if (!sendResult.success) {
       throw new Error("Email provider returned unsuccessful result");
     }
-    await query(
-      `INSERT INTO public.rfp_reconfirm_email_receipts (
-          tenant_schema,
-          deal_id,
-          rfp_approval_request_id,
-          deal_number,
-          recipient_emails,
-          resend_message_id,
-          sent_at,
-          updated_at
-        )
-        VALUES ($1, $2::uuid, $3, $4, $5, $6, NOW(), NOW())
-        ON CONFLICT (tenant_schema, deal_id, rfp_approval_request_id) DO UPDATE
-          SET recipient_emails = EXCLUDED.recipient_emails,
-              resend_message_id = EXCLUDED.resend_message_id,
-              sent_at = EXCLUDED.sent_at,
-              updated_at = NOW()`,
-      [tenantSchema, dealId, rfpApprovalRequestId, email.dealNumber, recipients.join(", "), sendResult.messageId]
-    );
+    // Persist the receipt only for the request-BACKED path (the ledger is keyed on the integer request id). The
+    // request-less voting path relies on its once-only enqueue + the round-scoped idempotencyKey above.
+    if (rfpApprovalRequestId != null) {
+      await query(
+        `INSERT INTO public.rfp_reconfirm_email_receipts (
+            tenant_schema,
+            deal_id,
+            rfp_approval_request_id,
+            deal_number,
+            recipient_emails,
+            resend_message_id,
+            sent_at,
+            updated_at
+          )
+          VALUES ($1, $2::uuid, $3, $4, $5, $6, NOW(), NOW())
+          ON CONFLICT (tenant_schema, deal_id, rfp_approval_request_id) DO UPDATE
+            SET recipient_emails = EXCLUDED.recipient_emails,
+                resend_message_id = EXCLUDED.resend_message_id,
+                sent_at = EXCLUDED.sent_at,
+                updated_at = NOW()`,
+        [tenantSchema, dealId, rfpApprovalRequestId, email.dealNumber, recipients.join(", "), sendResult.messageId]
+      );
+    }
     logger.log("[RfpReconfirmDenialEmail] Sent RFP denial-upheld notification", {
       dealId,
       rfpApprovalRequestId,

@@ -75,20 +75,28 @@ export async function handleRfpBidBoardCreate(
     try {
       const schemaName = await resolveOfficeSchema(db, officeId);
       const res = await db.query(
-        `SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_override_state
+        `SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_override_state, rfp_approval_request_event_id
            FROM ${quoteIdent(schemaName)}.deals WHERE id = $1`,
         [payload.dealId],
       );
       const deal = res.rows[0];
+      // finding: bind the recheck to the CURRENT round. The payload's sourceEventId is crm:rfp-vote:approved:<round
+      // event id>; if the deal was Returned to Opportunity and a FRESH round opened since this job was enqueued,
+      // its rfp_approval_request_event_id differs — posting the OLD payload would create a project for the new
+      // round's deal that the later callback reconciles against the fresh round. Require the event ids to match.
+      const sourceEventId = String((payload.body as any)?.sourceEventId ?? "");
+      const payloadRoundEventId = /^crm:rfp-vote:approved:(.+)$/.exec(sourceEventId)?.[1] ?? null;
       const stillCreatable =
         !!deal &&
         deal.is_active === true &&
         deal.rfp_approval_request_id == null &&
+        payloadRoundEventId != null &&
+        deal.rfp_approval_request_event_id === payloadRoundEventId &&
         (deal.rfp_approval_status === "pending" ||
           (deal.rfp_approval_status === "declined" && deal.rfp_override_state === "approving"));
       if (!stillCreatable) {
         console.warn(
-          `[Worker:rfp_bidboard_create] Skipping create POST for deal ${payload.dealId}: no longer active / in a request-less create state (active=${deal?.is_active ?? "missing"}, status=${deal?.rfp_approval_status ?? "null"}, requestId=${deal?.rfp_approval_request_id ?? "null"})`,
+          `[Worker:rfp_bidboard_create] Skipping create POST for deal ${payload.dealId}: no longer active / in a matching request-less create round (active=${deal?.is_active ?? "missing"}, status=${deal?.rfp_approval_status ?? "null"}, requestId=${deal?.rfp_approval_request_id ?? "null"}, round=${deal?.rfp_approval_request_event_id ?? "null"} vs payload=${payloadRoundEventId ?? "null"})`,
         );
         return;
       }

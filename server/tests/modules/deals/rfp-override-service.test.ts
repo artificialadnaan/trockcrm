@@ -178,6 +178,29 @@ describe("reconfirmRfpDecline (re-confirm denial — unchanged outcome, guard al
     const result = await reconfirmRfpDecline({ tenantDb, dealId: "deal-1", actor: ACTOR, note: null });
     expect(result).toEqual({ ok: false, reason: "not_actionable" });
   });
+
+  it("[finding] enqueues the reconfirm-denial email app-side for a REQUEST-LESS (voting) re-confirm", async () => {
+    // A voting NO-GO carries no request id, so the 0154 trigger skips the email — the app must enqueue it.
+    const row = { id: "deal-1", name: "Acme", dealNumber: "TR-1", projectNumber: "P-9", rfpApprovalRequestId: null, rfpApprovalRequestEventId: "round-9", rfpApprovalRequestedBy: "rep-1", rfpDeclinedReason: "thin" };
+    const { tenantDb } = makeTenantDb([row]);
+    const inserted: any[] = [];
+    (tenantDb as any).execute = vi.fn(async (q: any) => (JSON.stringify(q).includes("offices") ? { rows: [{ slug: "test" }] } : { rows: [] }));
+    (tenantDb as any).insert = vi.fn(() => ({ values: vi.fn(async (v: any) => { inserted.push(v); }) }));
+    const result = await reconfirmRfpDecline({ tenantDb, dealId: "deal-1", actor: ACTOR, note: "upheld", officeId: "office-test" });
+    expect(result).toMatchObject({ ok: true, decision: "denial_reconfirmed" });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].jobType).toBe("rfp_reconfirm_denial_email");
+    expect(inserted[0].payload).toMatchObject({ tenantSchema: "office_test", dealId: "deal-1", rfpApprovalRequestId: null, rfpVoteRoundId: "round-9", requestedByUserId: "rep-1" });
+  });
+
+  it("[finding] does NOT enqueue app-side for a request-BACKED re-confirm (the 0154 trigger handles it)", async () => {
+    const row = { id: "deal-1", name: "Acme", dealNumber: "TR-1", projectNumber: "P-9", rfpApprovalRequestId: 77 };
+    const { tenantDb } = makeTenantDb([row]);
+    const inserted: any[] = [];
+    (tenantDb as any).insert = vi.fn(() => ({ values: vi.fn(async (v: any) => { inserted.push(v); }) }));
+    await reconfirmRfpDecline({ tenantDb, dealId: "deal-1", actor: ACTOR, note: "upheld", officeId: "office-test" });
+    expect(inserted).toHaveLength(0); // request-backed -> the DB trigger enqueues, not the app
+  });
 });
 
 describe("getRfpReviewDetail (adds override state/error + actionable)", () => {

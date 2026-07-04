@@ -21,7 +21,7 @@ function makePayload() {
 
 // A db mock for the pre-POST deal recheck (finding): answers the office-schema lookup + the deals recheck SELECT.
 // Default = a still-creatable 2/3-yes deal; pass null for a deleted/not-found deal, or override the deal fields.
-function recheckDb(deal: any = { is_active: true, rfp_approval_status: "pending", rfp_approval_request_id: null, rfp_override_state: null }) {
+function recheckDb(deal: any = { is_active: true, rfp_approval_status: "pending", rfp_approval_request_id: null, rfp_override_state: null, rfp_approval_request_event_id: "round-1" }) {
   return {
     query: async (sql: string) => {
       if (sql.includes("FROM public.offices")) return { rows: [{ slug: "test" }] };
@@ -74,9 +74,19 @@ describe("handleRfpBidBoardCreate", () => {
     const fetchImpl = vi.fn(async () => ({ status: 202, ok: true, text: async () => "" } as any));
     await handleRfpBidBoardCreate(makePayload(), "office-9", {
       fetchImpl: fetchImpl as any, secret: SECRET,
-      db: recheckDb({ is_active: true, rfp_approval_status: "declined", rfp_approval_request_id: null, rfp_override_state: "approving" }),
+      db: recheckDb({ is_active: true, rfp_approval_status: "declined", rfp_approval_request_id: null, rfp_override_state: "approving", rfp_approval_request_event_id: "round-1" }),
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("[finding] SKIPS the POST when the deal is on a DIFFERENT round than the job's payload (Returned + re-triggered)", async () => {
+    const fetchImpl = vi.fn(async () => ({ status: 202, ok: true, text: async () => "" } as any));
+    // Active + pending + request-less, but a FRESH round opened (different event id) than the job's payload round.
+    await handleRfpBidBoardCreate(makePayload(), "office-9", {
+      fetchImpl: fetchImpl as any, secret: SECRET,
+      db: recheckDb({ is_active: true, rfp_approval_status: "pending", rfp_approval_request_id: null, rfp_override_state: null, rfp_approval_request_event_id: "round-2" }),
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("[finding] fails OPEN (posts anyway) when the recheck query errors", async () => {

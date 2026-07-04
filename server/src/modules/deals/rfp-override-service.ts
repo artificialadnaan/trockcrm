@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals } from "@trock-crm/shared/schema";
+import { deals, jobQueue } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
 import { enqueueRfpBidBoardCreate } from "./rfp-enqueue.js";
@@ -316,11 +316,27 @@ export async function requestOverrideApproval(
  * 'approving' deal (it creates no project, so upholding the denial is duplicate-safe even mid-flight — this is
  * the escape hatch for an 'approving' deal whose callback never arrives). Blocked only once already re-confirmed.
  */
+/** Best-effort office schema resolver (returns null if it can't) — for the request-less re-confirm email enqueue. */
+async function resolveSchemaForOfficeBestEffort(tenantDb: TenantDb, officeId: string | null): Promise<string | null> {
+  if (!officeId) return null;
+  try {
+    const res: any = await tenantDb.execute(sql`SELECT slug FROM public.offices WHERE id = ${officeId} LIMIT 1`);
+    const rows = Array.isArray(res) ? res : res.rows ?? [];
+    const slug = rows[0]?.slug;
+    return typeof slug === "string" && /^[a-z][a-z0-9_]*$/.test(slug) ? `office_${slug}` : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function reconfirmRfpDecline(input: {
   tenantDb: TenantDb;
   dealId: string;
   actor: RfpOverrideActor;
   note: string | null;
+  // Needed to resolve the tenant schema for the request-less re-confirm email enqueue (finding). Optional so
+  // callers that don't notify (or can't) still work — a null officeId just skips the app-side email.
+  officeId?: string | null;
 }): Promise<RfpReconfirmResult> {
   const [updated] = await input.tenantDb
     .update(deals)
@@ -366,6 +382,33 @@ export async function reconfirmRfpDecline(input: {
     },
     metadata: { rfpOverrideNote: input.note },
   });
+
+  // finding: the migration 0154 trigger fires the "denial upheld" email on the denial_reconfirmed transition ONLY
+  // for request-BACKED deals (it returns early on a NULL rfp_approval_request_id). A VOTING-path no-go that a
+  // reviewer re-confirms carries no request id, so the requesting rep + leadership would never be notified.
+  // Enqueue the SAME job app-side for that case, keyed on the round event id (the worker uses it for idempotency
+  // when there is no request id). Runs only on the real transition (the guarded UPDATE matched), so it's once-only.
+  if (updated.rfpApprovalRequestId == null) {
+    const schemaName = await resolveSchemaForOfficeBestEffort(input.tenantDb, input.officeId ?? null);
+    if (schemaName) {
+      await input.tenantDb.insert(jobQueue).values({
+        jobType: "rfp_reconfirm_denial_email",
+        payload: {
+          tenantSchema: schemaName,
+          dealId: input.dealId,
+          dealNumber: (updated.projectNumber ?? updated.dealNumber ?? null) as string | null,
+          dealName: updated.name ?? null,
+          declinedReason: updated.rfpDeclinedReason ?? null,
+          rfpApprovalRequestId: null,
+          rfpVoteRoundId: updated.rfpApprovalRequestEventId ?? null,
+          requestedByUserId: updated.rfpApprovalRequestedBy ?? null,
+        },
+        officeId: null,
+        status: "pending",
+        runAfter: new Date(),
+      });
+    }
+  }
 
   return { ok: true, status: "declined", decision: "denial_reconfirmed" };
 }

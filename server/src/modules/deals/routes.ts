@@ -1620,6 +1620,11 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
               eq(deals.rfpApprovalStatus, "send_failed"),
               isNull(deals.rfpApprovalRequestId),
               isNull(deals.rfpOverrideState),
+              // finding: require the deal to still be ACTIVE (mirrors the create-retry reclaim). A deal soft-deleted
+              // between the getDealById read and here would otherwise be flipped back to 'pending' + re-invited,
+              // sending voting links that load/cast against a 404'd deal while the deleted row is hidden from
+              // normal recovery. A deleted deal matches 0 rows -> 409, no re-invite.
+              eq(deals.isActive, true),
               // finding: bind the reclaim to the CURRENT round event id. Otherwise a stale Retry racing with a
               // Return-to-Opportunity + a fresh round that ALSO surfaced send_failed could reclaim the NEW round and
               // re-enqueue an invitation stamped with the OLD roundEventId (which the dead-letter sweep then ignores
@@ -1825,6 +1830,7 @@ router.post("/:id/rfp-override/reconfirm-decline", requireRfpReviewer, async (re
       dealId: req.params.id as string,
       actor: { userId: req.user!.id, name: req.user!.displayName, role: req.user!.role },
       note: normalizeRfpOverrideNote(req.body?.note),
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
     });
     if (!result.ok) {
       throw new AppError(

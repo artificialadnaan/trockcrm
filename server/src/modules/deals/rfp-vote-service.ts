@@ -225,6 +225,10 @@ export async function openRfpVoteRound(args: {
   const reserveConditions = [
     eq(deals.id, args.deal.id),
     eq(deals.stageId, args.deal.stageId),
+    // finding: require the deal to still be ACTIVE. A deal soft-deleted between loadTriggerRfpDeal and this reserve
+    // (or a stale API call targeting an inactive deal) would otherwise open a request-less round + enqueue an
+    // invitation for a deal the detail/vote paths later 404 — a hidden pending round with unusable voting links.
+    eq(deals.isActive, true),
     isNull(deals.rfpApprovalStatus),
     isNull(deals.rfpApprovalRequestedAt),
     eq(deals.isBidBoardOwned, false),
