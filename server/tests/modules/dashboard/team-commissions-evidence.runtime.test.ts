@@ -293,6 +293,11 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
 
     const scopedA = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO, officeId: OFF_A });
     expect(scopedA.rows.some((r) => r.repId === SRCDIR)).toBe(false); // office-B member excluded from office A
+
+    // ...but INCLUDED when scoped to their HOME office (member of OFF_B) — the boundary admits members, it
+    // doesn't over-exclude a legitimate home-office director (the other side of the office-scope boundary).
+    const scopedB = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO, officeId: OFF_B });
+    expect(scopedB.rows.some((r) => r.repId === SRCDIR)).toBe(true);
   });
 
   it("a won deal that's already BOOKED (dsc) is in Earned, NOT in won·unsigned", async () => {
