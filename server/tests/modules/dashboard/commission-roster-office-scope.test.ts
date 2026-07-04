@@ -43,4 +43,15 @@ describe("getDirectorRepCommissionRows roster office scope", () => {
     expect(sql).toContain("role = 'rep'");
     expect(sql).not.toContain("user_office_access");
   });
+
+  it("also includes NON-rep CRM users who hold a commission row (the earned surface, e.g. a director source)", async () => {
+    const tdb = mockTenantDb();
+    await getDirectorRepCommissionRows(tdb, { from: "2026-01-01", to: "2026-12-31", officeId: "11111111-1111-1111-1111-111111111111" });
+    const sql = extractSqlText(tdb.execute.mock.calls[0][0]).toLowerCase();
+    // The OR branch admits a non-rep CRM user (role not rep/field_contractor) who earned a dsc row —
+    // dsc EXISTS keyed on the user, office-bound by tenant schema (no membership-grant needed).
+    expect(sql).toContain("role not in ('rep', 'field_contractor')");
+    expect(sql).toContain("deal_signed_commissions");
+    expect(sql).toContain("dsc.rep_user_id = u.id");
+  });
 });

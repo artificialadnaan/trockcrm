@@ -1411,7 +1411,28 @@ export async function getDirectorRepCommissionRows(
       -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
       -- commission roster (dashboard payload + commission workspace).
       AND COALESCE(u.is_test_data, false) = false
-      AND u.role = 'rep'${officeScope}
+      AND (
+        -- The office-scoped rep roster (unchanged — preserves D-5 cross-office scoping for reps).
+        (u.role = 'rep'${officeScope})
+        -- Plus any NON-rep internal CRM user (isCrmUserRole == role <> 'field_contractor') who actually
+        -- EARNED here — holds >=1 deal_signed_commissions row on a non-test deal in THIS tenant schema
+        -- (e.g. a director like Chase Kelly with a 'sales_source' cut). Without this the workspace roster
+        -- would omit them, so their earned cut — which the report-builder aggregate AND the evidence drawer
+        -- both already include — is invisible + non-drillable here, and the surfaces reconcile off by that
+        -- amount. The dsc/deals join is office-bound by tenant-schema isolation, so it needs NO
+        -- cross-office membership grant. Using role NOT IN ('rep', ...) here (rather than role <> field_contractor)
+        -- keeps every rep handled ONLY by the office-scoped branch above, so a cross-office rep D-5 dropped
+        -- can't slip back in and drift the deal-VALUE footer (getCommissionOfficeTotals stays rep-scoped).
+        OR (
+          u.role NOT IN ('rep', 'field_contractor')
+          AND EXISTS (
+            SELECT 1 FROM ${dealSignedCommissions} dsc
+            JOIN ${deals} d ON d.id = dsc.deal_id
+            WHERE dsc.rep_user_id = u.id
+              AND COALESCE(d.is_test_data, false) = false
+          )
+        )
+      )
     ORDER BY u.display_name ASC
   `);
   const reps = (repsResult as any).rows ?? repsResult;

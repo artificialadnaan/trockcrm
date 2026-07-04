@@ -27,6 +27,7 @@ const OWN2 = U("f06"); // owner of that cross-booked deal (booked) — separate 
 const HELD = U("f07"); // below their OWN floor with earned commission but NO override -> held-only earned cell
 const XMGR = U("f08"); // office A manager: below own floor (held direct) + override rate, only report is cross-office
 const XREP = U("f09"); // office B rep reporting to XMGR -> OFF the roster when the view is scoped to office A
+const SRCDIR = U("f10"); // a DIRECTOR (Chase Kelly) who SOURCES: owns nothing, holds only a sales_source dsc row
 const OFF_A = U("0a1");
 const OFF_B = U("0b1");
 const FROM = "2026-01-01";
@@ -80,7 +81,7 @@ beforeAll(async () => {
       ('${REP}','Kaleb','rep', NULL), ('${OTHER}','Owner','rep', NULL),
       ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}'), ('${BOOKED}','Booked','rep', NULL),
       ('${NONREP}','Director Dana','director', NULL), ('${EST2}','Estimator Two','rep', NULL), ('${OWN2}','Owner Two','rep', NULL),
-      ('${HELD}','Held Rep','rep', NULL);
+      ('${HELD}','Held Rep','rep', NULL), ('${SRCDIR}','Chase Kelly','director', NULL);
     INSERT INTO users (id, display_name, role, reports_to, office_id) VALUES
       ('${XMGR}','XMgr A','rep', NULL, '${OFF_A}'),
       ('${XREP}','XRep B','rep','${XMGR}','${OFF_B}');
@@ -146,6 +147,11 @@ beforeAll(async () => {
     -- EARNED: a signed deal (D-4 above, opportunity stage, not lost) with a dsc row for REP.
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
       VALUES ('${U("dc1")}','${U("d04")}','${REP}', 2500, 50000, 'owner', '2026-03-01');
+    -- SRCDIR (a director) SOURCED D-4 (owned by REP): an additive sales_source cut of $250. This is what
+    -- makes a NON-rep appear on the earned roster; REP's owner earned (2500) and every deal-VALUE total are
+    -- unchanged (a sales_source row carries no deal-VALUE and REP still owns D-4).
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc20")}','${U("d04")}','${SRCDIR}', 250, 50000, 'sales_source', '2026-03-01');
 
     -- REPORT's signed deal (owned by REPORT) + dsc -> REPORT direct earned $5000 (floor met). MGR earns
     -- override 0.10 * 5000 = $500 and NOTHING direct (below their own $1M floor).
@@ -252,6 +258,26 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(totals.wonUnsignedValue).toBe(110000);
     expect(totals.wonUnsignedCount).toBe(2);
     expect(ws.officeTotals.wonUnsignedValue).toBe(110000);
+  });
+
+  it("a NON-rep source (a director like Chase Kelly) with a sales_source cut is ON the roster and reconciles", async () => {
+    const { rows, officeTotals } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    const dir = rows.find((r) => r.repId === SRCDIR);
+    // The director now appears on the Team Commissions roster because they EARNED a sales_source cut —
+    // previously the roster was rep-only, so their cut was invisible + non-drillable here even though the
+    // report-builder aggregate and the evidence drawer both already included it.
+    expect(dir).toBeTruthy();
+    expect(dir!.totalEarnedCommission).toBe(250);
+    // They own no deal, so every deal-VALUE column is 0 — a clean earned-only row.
+    expect(dir!.pipelineValue).toBe(0);
+    expect(dir!.activeDeals).toBe(0);
+    expect(dir!.wonUnsignedValue).toBe(0);
+    // The earned drawer reconciles to the cell (roster row + drawer + aggregate now move together).
+    const ev = await getDirectorCommissionEvidence(tdb, { repId: SRCDIR, metric: "earned", from: FROM, to: TO });
+    expect(ev.total.value).toBe(dir!.totalEarnedCommission);
+    expect(ev.total.value).toBe(250);
+    // Deal-VALUE office totals are unaffected by the additive sales_source row (still 220k pipeline).
+    expect(officeTotals.pipelineValue).toBe(220000);
   });
 
   it("a won deal that's already BOOKED (dsc) is in Earned, NOT in won·unsigned", async () => {
