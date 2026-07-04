@@ -13,7 +13,7 @@ vi.mock("@/lib/api", () => ({ api: mocks.apiMock }));
 const workspace = {
   rows: [
     {
-      repId: "rep-1", repName: "Kaleb Marshall",
+      repId: "rep-1", repName: "Kaleb Marshall", isRep: true,
       totalEarnedCommission: 0, potentialCommission: 261029.68, floorRemaining: 0,
       newCustomerShare: 0, meetsNewCustomerShare: true,
       activeDeals: 23, pipelineValue: 11601319, wonUnsignedValue: 500000, wonUnsignedCount: 1,
@@ -23,12 +23,22 @@ const workspace = {
     {
       // Estimator whose won·unsigned deals have NO awarded/bid/DD amount yet: value $0 but COUNT 2. The cell
       // must stay drillable (gated on count, not value) and surface "(2)" — locking the zero-value regression.
-      repId: "rep-2", repName: "Sidney Gibson",
+      repId: "rep-2", repName: "Sidney Gibson", isRep: true,
       totalEarnedCommission: 0, potentialCommission: 127213.96, floorRemaining: 0,
       newCustomerShare: 0, meetsNewCustomerShare: true,
       activeDeals: 37, pipelineValue: 21202326.99, wonUnsignedValue: 0, wonUnsignedCount: 2,
       leads: 0, qualifiedLeads: 0, opportunities: 0,
       estimating: 37, calls: 0, emails: 0, meetings: 0, notes: 0, totalActivities: 0,
+    },
+    {
+      // A NON-rep source row (a director): earned-only, involvement columns zeroed. Its name must NOT link
+      // to the rep-detail page (P).
+      repId: "dir-1", repName: "Chase Kelly", isRep: false,
+      totalEarnedCommission: 250, potentialCommission: 0, floorRemaining: 0,
+      newCustomerShare: 0, meetsNewCustomerShare: true,
+      activeDeals: 0, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0,
+      leads: 0, qualifiedLeads: 0, opportunities: 0,
+      estimating: 0, calls: 0, emails: 0, meetings: 0, notes: 0, totalActivities: 0,
     },
   ],
   // De-duped office totals — DELIBERATELY less than the row sum ($32.8M) to prove the KPI/footer use these
@@ -230,5 +240,17 @@ describe("TeamCommissionsPage", () => {
     const workspaceCalls = mocks.apiMock.mock.calls.filter(([u]) => !String(u).includes("/evidence"));
     // at least the initial YTD fetch + the MTD refetch (distinct from/to query strings)
     expect(new Set(workspaceCalls.map(([u]) => String(u))).size).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does NOT link a non-rep source row's name to the rep-detail page (P)", async () => {
+    const { container } = await render();
+    const links = Array.from(container.querySelectorAll("a"));
+    // A rep's name links to their rep-detail page.
+    const kalebLink = links.find((a) => a.textContent?.includes("Kaleb Marshall"));
+    expect(kalebLink?.getAttribute("href")).toContain("/director/rep/rep-1");
+    // A non-rep source (Chase Kelly) is shown but NOT linked — the rep-detail page is rep-centric and would
+    // show their owned deals, which the workspace deliberately zeroes.
+    expect(links.some((a) => a.textContent?.includes("Chase Kelly"))).toBe(false);
+    expect(container.textContent).toContain("Chase Kelly");
   });
 });

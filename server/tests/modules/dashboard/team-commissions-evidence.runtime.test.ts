@@ -6,6 +6,7 @@ import {
   getDirectorCommissionEvidence,
   getCommissionOfficeTotals,
   getRepDealPipelineSummary,
+  getRepCommissionSummary,
 } from "../../../src/modules/dashboard/service.js";
 
 /**
@@ -307,6 +308,20 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect((await getDirectorCommissionEvidence(tdb, { repId: NONREP, metric: "pipeline", from: FROM, to: TO })).total.value).toBe(0);
     expect((await getDirectorCommissionEvidence(tdb, { repId: NONREP, metric: "active", from: FROM, to: TO })).total.count).toBe(0);
     expect((await getDirectorCommissionEvidence(tdb, { repId: NONREP, metric: "earned", from: FROM, to: TO })).total.value).toBe(300);
+
+    // P: the row exposes isRep so the client can suppress the rep-detail link for a non-rep source row.
+    expect(dana.isRep).toBe(false);
+    expect(rows.find((r) => r.repId === REP)!.isRep).toBe(true);
+  });
+
+  it("O: a non-rep source row surfaces its OWN earned commission only, NOT a manager override", async () => {
+    // MGR is a below-floor manager (direct earned $0) who collects a $500 override on their report REPORT.
+    // Rep rows include that override; a non-rep source row must NOT (includeManagerOverride=false) — the
+    // manager-override roll-up is deliberately rep-only, so a director's row shows their source cut only.
+    const withOverride = await getRepCommissionSummary(tdb, MGR, FROM, TO, undefined, true);
+    const withoutOverride = await getRepCommissionSummary(tdb, MGR, FROM, TO, undefined, false);
+    expect(withOverride.summary.totalEarnedCommission).toBe(500);   // override included (rep row behavior)
+    expect(withoutOverride.summary.totalEarnedCommission).toBe(0);  // override excluded (non-rep source row)
   });
 
   it("SECURITY: a non-rep earner is admitted only as an active-office MEMBER — a foreign-office director is excluded when scoped", async () => {
@@ -324,6 +339,12 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     // doesn't over-exclude a legitimate home-office director (the other side of the office-scope boundary).
     const scopedB = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO, officeId: OFF_B });
     expect(scopedB.rows.some((r) => r.repId === SRCDIR)).toBe(true);
+
+    // N: the EARNED drawer must enforce the same boundary — a non-rep off the scoped roster returns EMPTY
+    // (no deal names/amounts leak) when scoped to a foreign office, but drills normally unscoped / in-office.
+    expect((await getDirectorCommissionEvidence(tdb, { repId: SRCDIR, metric: "earned", from: FROM, to: TO, officeId: OFF_A })).total.value).toBe(0);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: SRCDIR, metric: "earned", from: FROM, to: TO })).total.value).toBe(250);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: SRCDIR, metric: "earned", from: FROM, to: TO, officeId: OFF_B })).total.value).toBe(250);
   });
 
   it("a won deal that's already BOOKED (dsc) is in Earned, NOT in won·unsigned", async () => {
