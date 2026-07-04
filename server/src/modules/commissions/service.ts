@@ -8,6 +8,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { resolveEffectiveServiceSourceRate } from "@trock-crm/shared/lib/commission-structure";
+import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -692,17 +693,19 @@ export async function mintSalesSourceCommissionForDeal(
   // so a capX deal that happens to have sales_source_user_id set never earns a row for the source rep.
   if (deal.workflowRoute !== "service") return { status: "skipped_no_value" };
 
-  // The source must STILL be a rep at MINT time. assertSalesSourceIsRep gates SET-time selection, but a
-  // later role change (updateUser: rep → director/admin/construction) does NOT clear the deal's
-  // sales_source_user_id — so a deal signed OR sales-source-recompute-discovered after the demotion would
-  // otherwise mint a sales_source cut for a non-rep. Re-check here so the mint path enforces the same
-  // "source is a rep" invariant as selection, everywhere the row can be created.
+  // The source must STILL be an internal CRM user at MINT time — defense-in-depth mirroring the SET-time
+  // assertSalesSourceIsCrmUser gate. The set-path already blocks a field_contractor, and updateUser's role
+  // input can't produce one (field users have a separate flow), so in practice this only fires if a source
+  // rep is downgraded to field_contractor OUT OF BAND (direct DB / a data migration) without clearing the
+  // deal's sales_source_user_id — this keeps the mint from ever creating a cut for an external user in that
+  // case. NOTE: this is a ROLE gate, not an earning gate — whether the (CRM) source actually earns still
+  // follows their commission settings below (a source with no active service-source rate mints no row).
   const [sourceUser] = await tx
     .select({ role: users.role })
     .from(users)
     .where(eq(users.id, input.salesSourceUserId))
     .limit(1);
-  if (!sourceUser || sourceUser.role !== "rep") return { status: "skipped_no_rep" };
+  if (!sourceUser || !isCrmUserRole(sourceUser.role)) return { status: "skipped_no_rep" };
 
   // Does this source rep ALREADY book a row on this deal (as any role)? Never mint a 2nd cut for them.
   const [existing] = await tx

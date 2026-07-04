@@ -6,6 +6,7 @@ import {
   getDirectorCommissionEvidence,
   getCommissionOfficeTotals,
   getRepDealPipelineSummary,
+  getRepCommissionSummary,
 } from "../../../src/modules/dashboard/service.js";
 
 /**
@@ -27,6 +28,7 @@ const OWN2 = U("f06"); // owner of that cross-booked deal (booked) — separate 
 const HELD = U("f07"); // below their OWN floor with earned commission but NO override -> held-only earned cell
 const XMGR = U("f08"); // office A manager: below own floor (held direct) + override rate, only report is cross-office
 const XREP = U("f09"); // office B rep reporting to XMGR -> OFF the roster when the view is scoped to office A
+const SRCDIR = U("f10"); // a DIRECTOR (Chase Kelly) who SOURCES: owns nothing, holds only a sales_source dsc row
 const OFF_A = U("0a1");
 const OFF_B = U("0b1");
 const FROM = "2026-01-01";
@@ -83,7 +85,10 @@ beforeAll(async () => {
       ('${HELD}','Held Rep','rep', NULL);
     INSERT INTO users (id, display_name, role, reports_to, office_id) VALUES
       ('${XMGR}','XMgr A','rep', NULL, '${OFF_A}'),
-      ('${XREP}','XRep B','rep','${XMGR}','${OFF_B}');
+      ('${XREP}','XRep B','rep','${XMGR}','${OFF_B}'),
+      -- Chase Kelly is a director homed in office B: unscoped he's on the earned roster (his sales_source
+      -- cut), but scoped to office A he must be EXCLUDED (no A membership) — the security boundary.
+      ('${SRCDIR}','Chase Kelly','director', NULL, '${OFF_B}');
     INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP}', true, 0.05, 0, 0),
       ('${MGR}', true, 0.05, 1000000, 0.10),  -- MGR below their own $1M floor -> direct earned $0
@@ -146,6 +151,16 @@ beforeAll(async () => {
     -- EARNED: a signed deal (D-4 above, opportunity stage, not lost) with a dsc row for REP.
     INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
       VALUES ('${U("dc1")}','${U("d04")}','${REP}', 2500, 50000, 'owner', '2026-03-01');
+    -- SRCDIR (a director) SOURCED D-4 (owned by REP): an additive sales_source cut of $250. This is what
+    -- makes a NON-rep appear on the earned roster; REP's owner earned (2500) and every deal-VALUE total are
+    -- unchanged (a sales_source row carries no deal-VALUE and REP still owns D-4).
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc20")}','${U("d04")}','${SRCDIR}', 250, 50000, 'sales_source', '2026-03-01');
+    -- NONREP (Director Dana) ALSO OWNS D-12 ($45k). Give them a sales_source cut so they're a rostered
+    -- non-rep earner who additionally owns a deal — proving their owned deal is NOT counted in their row's
+    -- deal-VALUE columns (which would otherwise break rows-vs-footer reconciliation, Codex P2).
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing)
+      VALUES ('${U("dc21")}','${U("d01")}','${NONREP}', 300, 60000, 'sales_source', '2026-03-01');
 
     -- REPORT's signed deal (owned by REPORT) + dsc -> REPORT direct earned $5000 (floor met). MGR earns
     -- override 0.10 * 5000 = $500 and NOTHING direct (below their own $1M floor).
@@ -252,6 +267,84 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(totals.wonUnsignedValue).toBe(110000);
     expect(totals.wonUnsignedCount).toBe(2);
     expect(ws.officeTotals.wonUnsignedValue).toBe(110000);
+  });
+
+  it("a NON-rep source (a director like Chase Kelly) with a sales_source cut is ON the roster and reconciles", async () => {
+    const { rows, officeTotals } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    const dir = rows.find((r) => r.repId === SRCDIR);
+    // The director now appears on the Team Commissions roster because they EARNED a sales_source cut —
+    // previously the roster was rep-only, so their cut was invisible + non-drillable here even though the
+    // report-builder aggregate and the evidence drawer both already included it.
+    expect(dir).toBeTruthy();
+    expect(dir!.totalEarnedCommission).toBe(250);
+    // They own no deal, so every deal-VALUE column is 0 — a clean earned-only row.
+    expect(dir!.pipelineValue).toBe(0);
+    expect(dir!.activeDeals).toBe(0);
+    expect(dir!.wonUnsignedValue).toBe(0);
+    // The earned drawer reconciles to the cell (roster row + drawer + aggregate now move together).
+    const ev = await getDirectorCommissionEvidence(tdb, { repId: SRCDIR, metric: "earned", from: FROM, to: TO });
+    expect(ev.total.value).toBe(dir!.totalEarnedCommission);
+    expect(ev.total.value).toBe(250);
+    // Deal-VALUE office totals are unaffected by the additive sales_source row (still 220k pipeline).
+    expect(officeTotals.pipelineValue).toBe(220000);
+  });
+
+  it("a non-rep source's OWNED deals do NOT bleed into its deal-VALUE / funnel / potential columns (Codex P2)", async () => {
+    // NONREP (Director Dana) OWNS D-12 ($45k, active) AND earned a $300 sales_source cut. On the roster as a
+    // non-rep earner, their EARNED column shows the cut, but their deal-VALUE/funnel/potential columns are 0
+    // — their owned deal must NOT appear (the deal-VALUE footer counts reps only, so it would otherwise
+    // inflate the visible rows above the footer, breaking reconciliation).
+    const { rows, officeTotals } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    const dana = rows.find((r) => r.repId === NONREP)!;
+    expect(dana).toBeTruthy();
+    expect(dana.totalEarnedCommission).toBe(300); // the sales_source cut IS shown (why they're rostered)
+    expect(dana.activeDeals).toBe(0);              // owns D-12 but it's excluded from their row
+    expect(dana.pipelineValue).toBe(0);
+    expect(dana.potentialCommission).toBe(0);      // pipeline-derived → zeroed for a non-rep
+    // Footer still counts reps only — D-12 (non-rep-owned) stays excluded, so it reconciles with the rows.
+    expect(officeTotals.pipelineValue).toBe(220000);
+
+    // The drawer reconciles with the zeroed cells: a deal-VALUE metric for a non-rep is EMPTY, earned matches.
+    expect((await getDirectorCommissionEvidence(tdb, { repId: NONREP, metric: "pipeline", from: FROM, to: TO })).total.value).toBe(0);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: NONREP, metric: "active", from: FROM, to: TO })).total.count).toBe(0);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: NONREP, metric: "earned", from: FROM, to: TO })).total.value).toBe(300);
+
+    // P: the row exposes isRep so the client can suppress the rep-detail link for a non-rep source row.
+    expect(dana.isRep).toBe(false);
+    expect(rows.find((r) => r.repId === REP)!.isRep).toBe(true);
+  });
+
+  it("O: a non-rep source row surfaces its OWN earned commission only, NOT a manager override", async () => {
+    // MGR is a below-floor manager (direct earned $0) who collects a $500 override on their report REPORT.
+    // Rep rows include that override; a non-rep source row must NOT (includeManagerOverride=false) — the
+    // manager-override roll-up is deliberately rep-only, so a director's row shows their source cut only.
+    const withOverride = await getRepCommissionSummary(tdb, MGR, FROM, TO, undefined, true);
+    const withoutOverride = await getRepCommissionSummary(tdb, MGR, FROM, TO, undefined, false);
+    expect(withOverride.summary.totalEarnedCommission).toBe(500);   // override included (rep row behavior)
+    expect(withoutOverride.summary.totalEarnedCommission).toBe(0);  // override excluded (non-rep source row)
+  });
+
+  it("SECURITY: a non-rep earner is admitted only as an active-office MEMBER — a foreign-office director is excluded when scoped", async () => {
+    // Chase Kelly (SRCDIR) is a director homed in office B with a sales_source cut. The tenant schema is
+    // shared across offices, so the earned-row EXISTS alone is NOT office-bound — the non-rep roster branch
+    // must apply the SAME active-office membership check as reps, or a director viewing office A could pull a
+    // foreign-office earner into the A-scoped roster and drill their totals.
+    const unscoped = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    expect(unscoped.rows.some((r) => r.repId === SRCDIR)).toBe(true); // on the roster with no office scope
+
+    const scopedA = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO, officeId: OFF_A });
+    expect(scopedA.rows.some((r) => r.repId === SRCDIR)).toBe(false); // office-B member excluded from office A
+
+    // ...but INCLUDED when scoped to their HOME office (member of OFF_B) — the boundary admits members, it
+    // doesn't over-exclude a legitimate home-office director (the other side of the office-scope boundary).
+    const scopedB = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO, officeId: OFF_B });
+    expect(scopedB.rows.some((r) => r.repId === SRCDIR)).toBe(true);
+
+    // N: the EARNED drawer must enforce the same boundary — a non-rep off the scoped roster returns EMPTY
+    // (no deal names/amounts leak) when scoped to a foreign office, but drills normally unscoped / in-office.
+    expect((await getDirectorCommissionEvidence(tdb, { repId: SRCDIR, metric: "earned", from: FROM, to: TO, officeId: OFF_A })).total.value).toBe(0);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: SRCDIR, metric: "earned", from: FROM, to: TO })).total.value).toBe(250);
+    expect((await getDirectorCommissionEvidence(tdb, { repId: SRCDIR, metric: "earned", from: FROM, to: TO, officeId: OFF_B })).total.value).toBe(250);
   });
 
   it("a won deal that's already BOOKED (dsc) is in Earned, NOT in won·unsigned", async () => {

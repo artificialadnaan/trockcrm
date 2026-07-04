@@ -53,10 +53,10 @@ router.get("/sales-reps", async (req, res, next) => {
   try {
     const purpose = typeof req.query.purpose === "string" ? req.query.purpose : undefined;
     const isDealReassignmentPicker = purpose === "deal-reassignment";
-    // The sales-source picker needs the active office's rep roster (role === 'rep' only, matching the
-    // assertSalesSourceIsRep gate) — NOT the self-only feed a plain rep otherwise gets. Without this a rep
-    // creating a service opportunity would see only themselves (then excluded as the owner) → an empty
-    // source list, and a leader could pick a non-rep that 422s on submit.
+    // The sales-source picker needs the active office's CRM roster (any internal role — rep, director like
+    // Chase Kelly, admin, construction — matching the assertSalesSourceIsCrmUser gate), NOT the self-only
+    // feed a plain rep otherwise gets. Without this a rep creating a service opportunity would see only
+    // themselves (then excluded as the owner) → an empty source list.
     const isSalesSourcePicker = purpose === "sales-source";
 
     if (req.user!.role === "rep" && !isDealReassignmentPicker && !isSalesSourcePicker) {
@@ -90,11 +90,11 @@ router.get("/sales-reps", async (req, res, next) => {
       users: rows
         .filter((user) => user.isActive)
         .filter((user) => {
-          // Sales-source: role === 'rep' ONLY (the assertSalesSourceIsRep gate). Deal-reassignment: any
-          // CRM role. Otherwise (legacy callers): no role filter.
-          if (isSalesSourcePicker) return user.role === "rep";
-          if (isDealReassignmentPicker && "role" in user && typeof user.role === "string") {
-            return isCrmUserRole(user.role);
+          // Sales-source AND deal-reassignment both restrict to internal CRM users (any role except
+          // field_contractor) — matching assertSalesSourceIsCrmUser / the reassignment guard. The generic
+          // feed (legacy callers) applies no role filter.
+          if (isSalesSourcePicker || isDealReassignmentPicker) {
+            return "role" in user && typeof user.role === "string" ? isCrmUserRole(user.role) : true;
           }
           return true;
         })

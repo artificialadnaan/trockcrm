@@ -1141,11 +1141,11 @@ function DealRightRail({
     officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
     { purpose: "deal-reassignment", enabled: canReassignDeal }
   );
-  // The sales-source picker needs the role==='rep' roster (the assertSalesSourceIsRep gate), NOT the
-  // broader CRM list the owner/estimator reassignment pickers use — otherwise a leader could pick a
-  // director/admin/construction user here and only learn it's invalid via a 422 on submit. Load it
-  // separately, gated to leadership (admin/director, == canEditSalesSource) so a rep viewing the page
-  // issues no extra fetch.
+  // The sales-source picker uses the "sales-source" feed (internal CRM users — any role except
+  // field_contractor, matching assertSalesSourceIsCrmUser). It happens to match the deal-reassignment
+  // roster today, but keep the dedicated purpose so the intent (and any future divergence) stays explicit.
+  // Loaded separately + gated to leadership (admin/director, == canEditSalesSource) so a rep viewing the
+  // page issues no extra fetch.
   const { salesReps: sourceSalesReps, loading: sourceSalesRepsLoading } = useSalesReps(
     officeId ?? currentUser?.activeOfficeId ?? currentUser?.officeId ?? undefined,
     {
@@ -1234,13 +1234,14 @@ function DealRightRail({
   }
 
   // Sales Source editing is leadership-only (matches the PATCH /deals/:id/sales-source RBAC).
-  // Reuses the same canEditEstimator condition; the picker is fed by the rep-only sourceSalesReps feed.
+  // Reuses the same canEditEstimator condition; the picker is fed by the sales-source sourceSalesReps feed.
   const canEditSalesSource = canEditEstimator;
   const [savingSalesSource, setSavingSalesSource] = useState(false);
   const [salesSourceError, setSalesSourceError] = useState<string | null>(null);
   // Exclude the owner + estimator from the source picker (the server rejects those with 422); mirrors
   // the create form's exclusion so a leader can't pick a conflicting source and only learn via a toast.
-  // Built from sourceSalesReps (role==='rep' only) so a leader is never offered a non-rep that would 422.
+  // Built from sourceSalesReps (internal CRM users only) so a leader is never offered an external
+  // field_contractor that would 422.
   const salesSourceOptions = buildRepOptions(sourceSalesReps, {
     excludeIds: [deal.assignedRepId, deal.estimatorUserId],
     currentId: deal.salesSourceUserId,

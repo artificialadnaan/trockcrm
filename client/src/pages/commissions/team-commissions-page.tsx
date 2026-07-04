@@ -195,9 +195,15 @@ export function TeamCommissionsPage() {
                 {sortedRows.map((row) => (
                   <tr key={row.repId} className="hover:bg-slate-50/60">
                     <td className="px-3 py-2.5">
-                      <Link to={`/director/rep/${row.repId}`} className="font-semibold text-slate-900 underline-offset-2 hover:underline">
-                        {row.repName}
-                      </Link>
+                      {row.isRep ? (
+                        <Link to={`/director/rep/${row.repId}`} className="font-semibold text-slate-900 underline-offset-2 hover:underline">
+                          {row.repName}
+                        </Link>
+                      ) : (
+                        // A non-rep source row (e.g. a director) is earned-only here; the rep-detail page is
+                        // rep-centric and would show their owned deals, so render the name un-linked.
+                        <span className="font-semibold text-slate-900">{row.repName}</span>
+                      )}
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       {isHeldOnly(row) ? (

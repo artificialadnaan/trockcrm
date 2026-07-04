@@ -31,8 +31,13 @@ const REP_MIX = U("0a11");
 const REP_SOLO = U("0a12");
 /** inactive rep: is_active=false → resolveAppliedRateForRole must return { status: "inactive" } */
 const REP_INACT = U("0a13");
-/** demoted source: was a rep when assigned, now role='director' with ACTIVE mixed settings (Finding H) */
-const SRC_NONREP = U("0a14");
+/** director source (e.g. Chase Kelly) — a valid non-rep CRM source with ACTIVE mixed settings; EARNS a cut */
+const SRC_DIRECTOR = U("0a14");
+/** external field_contractor — the ONLY role that can never be a source, even with active settings */
+const SRC_FIELD = U("0a15");
+/** admin + construction sources — also internal CRM users, so they mint like a director with active settings */
+const SRC_ADMIN = U("0a16");
+const SRC_CONSTRUCTION = U("0a17");
 const STAGE = U("0502");
 
 let pg: PGlite;
@@ -95,7 +100,10 @@ beforeAll(async () => {
             ('${REP_MIX}',  'mix@t.test',   'Mix',    'rep',      '${OFFICE}', true),
             ('${REP_SOLO}', 'solo@t.test',  'Solo',   'rep',      '${OFFICE}', true),
             ('${REP_INACT}','inact@t.test', 'Inact',  'rep',      '${OFFICE}', false),
-            ('${SRC_NONREP}','demoted@t.test','Demoted','director', '${OFFICE}', true)`,
+            ('${SRC_DIRECTOR}','director@t.test','Director','director', '${OFFICE}', true),
+            ('${SRC_FIELD}','field@t.test','Field','field_contractor', '${OFFICE}', true),
+            ('${SRC_ADMIN}','admin3@t.test','Admin3','admin', '${OFFICE}', true),
+            ('${SRC_CONSTRUCTION}','const@t.test','Const','construction', '${OFFICE}', true)`,
   );
   // REP_MIX:   mixed → capX mirror = capx_rate_mixed = 0.020000; service-source effective = 0.005000.
   // REP_SOLO:  solo  → capX mirror = capx_rate_solo  = 0.030000; service-source effective = 0 (stray).
@@ -106,7 +114,10 @@ beforeAll(async () => {
      VALUES ('${REP_MIX}',   0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
             ('${REP_SOLO}',  0.030000, 'solo',  0.030000, 0.020000, 0.005000, true),
             ('${REP_INACT}', 0.025000, 'solo',  0.025000, 0.015000, 0.000000, false),
-            ('${SRC_NONREP}',0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true)`,
+            ('${SRC_DIRECTOR}',0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
+            ('${SRC_FIELD}', 0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
+            ('${SRC_ADMIN}', 0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true),
+            ('${SRC_CONSTRUCTION}', 0.020000, 'mixed', 0.030000, 0.020000, 0.005000, true)`,
   );
 }, 30_000);
 
@@ -190,17 +201,32 @@ describe("mintSalesSourceCommissionForDeal (via calculateCommissionForDeal)", ()
     expect((await dscRows(D)).filter((r) => r.rep_user_id === REP_MIX)).toHaveLength(1); // only the owner row
   });
 
-  it("does NOT mint a sales_source row when the source's role is no longer 'rep' (Finding H — demoted after assignment)", async () => {
-    const D = U("0c13");
-    // SRC_NONREP was a rep when the deal was sourced, but has since been demoted to 'director' while keeping
-    // ACTIVE mixed settings (service_source_rate 0.005). assertSalesSourceIsRep only gates SET-time
-    // selection; the mint must re-check the CURRENT role and skip, so a former rep can't keep earning a
-    // sales_source cut on deals signed / recompute-discovered after the demotion.
-    await seedDeal(D, { rep: REP_SOLO, awarded: 30000, salesSource: SRC_NONREP, workflowRoute: "service" });
+  // The source may be ANY internal CRM user with active settings, not just a rep — director (Chase Kelly),
+  // admin, or construction all EARN the additive cut identically: 30000 × 0.005000 = 150.00.
+  it.each([
+    ["director", SRC_DIRECTOR, "0c13"],
+    ["admin", SRC_ADMIN, "0c15"],
+    ["construction", SRC_CONSTRUCTION, "0c16"],
+  ] as const)("mints a sales_source row for a %s source with active settings", async (_role, source, dealHex) => {
+    const D = U(dealHex);
+    await seedDeal(D, { rep: REP_SOLO, awarded: 30000, salesSource: source, workflowRoute: "service" });
+    await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
+    const rows = await dscRows(D);
+    expect(rows.find((r) => r.attribution_role === "sales_source")).toMatchObject({
+      amount: "150.00",
+      applied_rate: "0.005000",
+      rep_user_id: source,
+    });
+  });
+
+  it("does NOT mint a sales_source row when the source is an external field_contractor (the only excluded role)", async () => {
+    const D = U("0c14");
+    // SRC_FIELD is a field_contractor WITH active mixed settings — proving it's the ROLE gate
+    // (isCrmUserRole), not the settings, that blocks the mint. The owner row is unaffected.
+    await seedDeal(D, { rep: REP_SOLO, awarded: 30000, salesSource: SRC_FIELD, workflowRoute: "service" });
     await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-09-15", triggeredByUserId: ADMIN });
     const rows = await dscRows(D);
     expect(rows.some((r) => r.attribution_role === "sales_source")).toBe(false);
-    // The owner row is unaffected (the source-role guard only blocks the additive sales_source leg).
     expect(rows.find((r) => r.attribution_role === "owner")).toMatchObject({ rep_user_id: REP_SOLO });
   });
 });

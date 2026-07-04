@@ -182,6 +182,8 @@ export interface DirectorCommissionWorkspaceData {
   rows: Array<{
     repId: string;
     repName: string;
+    // False for a non-rep source row (earned-only; the client suppresses its rep-detail link).
+    isRep: boolean;
     totalEarnedCommission: number;
     potentialCommission: number;
     floorRemaining: number;

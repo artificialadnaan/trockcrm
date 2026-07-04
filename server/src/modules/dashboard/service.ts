@@ -561,6 +561,12 @@ export interface DirectorRepCommissionRow {
   // "earned nothing": floorMet=false with heldEarnedCommission>0 means real earned commission is withheld.
   floorMet: boolean;
   heldEarnedCommission: number;
+  // True for a rep admitted via the office-scoped rep roster; false for a NON-rep admitted only because they
+  // EARNED a commission row (e.g. a director source). The workspace zeroes deal-VALUE / funnel / activity
+  // metrics for non-rep rows: those columns are rep-involvement (owner/estimator) and the deal-VALUE FOOTER
+  // (getCommissionOfficeTotals) counts reps only, so a non-rep's owned deals must not appear in the visible
+  // rows or the rows + footer would stop reconciling.
+  isRep: boolean;
 }
 
 export interface StaleLeadDashboardRow {
@@ -1328,7 +1334,11 @@ export async function getRepCommissionSummary(
   // When set, the manager-override roll-up below only enumerates direct reports who are members of this
   // active office — so a foreign report (hidden from the roster) can't inflate an in-office manager's
   // override total. Omitted = global enumeration (back-compat for other callers).
-  officeId?: string
+  officeId?: string,
+  // O: NON-rep source rows surface their own earned (source) commission only, never a manager override —
+  // the override roll-up is deliberately rep-only. Callers pass false for a non-rep row; default true keeps
+  // every existing caller (rep dashboards, floor-gate test) unchanged.
+  includeManagerOverride: boolean = true
 ): Promise<{ summary: RepCommissionSummary; deals: RepCommissionDealEarning[] }> {
   const rawConfig = await getCommissionConfig(tenantDb, repId);
   const config = rawConfig.isActive
@@ -1357,7 +1367,9 @@ export async function getRepCommissionSummary(
   // on their reports (getOverrideEarnedCommission gates each report through the same helper, so a report
   // below their own floor contributes $0 to this manager's override).
   const directEarnedCommission = floorGate.met ? direct.directEarnedCommission : 0;
-  const overrideEarnedCommission = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate, officeId);
+  const overrideEarnedCommission = includeManagerOverride
+    ? await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, fromDate, toDate, officeId)
+    : 0;
   const totalEarnedCommission = Number((directEarnedCommission + overrideEarnedCommission).toFixed(2));
   // Breakdown stays visible regardless of the gate (rows listed, per-deal earned zeroed when below floor).
   const deals = allocateDealCommissions(commissionRollups, floorGate.met);
@@ -1405,13 +1417,36 @@ export async function getDirectorRepCommissionRows(
     ? sql` AND ${activeOfficeRepMembershipSql(options.officeId)}`
     : sql``;
   const repsResult = await tenantDb.execute(sql`
-    SELECT u.id, u.display_name
+    SELECT u.id, u.display_name, u.role
     FROM ${users} u
     WHERE u.is_active = true
       -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
       -- commission roster (dashboard payload + commission workspace).
       AND COALESCE(u.is_test_data, false) = false
-      AND u.role = 'rep'${officeScope}
+      AND (
+        -- The office-scoped rep roster (unchanged — preserves D-5 cross-office scoping for reps).
+        (u.role = 'rep'${officeScope})
+        -- Plus any NON-rep internal CRM user (isCrmUserRole == role <> 'field_contractor') who is a MEMBER
+        -- of the active office AND actually EARNED — holds >=1 deal_signed_commissions row on a non-test
+        -- deal (e.g. a director like Chase Kelly with a 'sales_source' cut). The membership check reuses the
+        -- SAME D-5 boundary as reps and is LOAD-BEARING FOR SECURITY: the tenant schema is shared across
+        -- offices (deals carry office_code), so the dsc EXISTS alone is NOT office-bound — without the
+        -- membership predicate a director/admin who earned in ANOTHER office would be pulled into this
+        -- office-scoped roster and their totals/drill-down exposed. Membership is the boundary;
+        -- getRepCommissionSummary(officeId) below scopes the $ shown, exactly as for reps. A legitimate
+        -- source always passes: setting a source runs validateAssignee, which requires office access.
+        -- role NOT IN ('rep', ...) (not role <> field_contractor) keeps every rep handled ONLY by the
+        -- office-scoped rep branch above, so a cross-office rep D-5 dropped can't drift the deal-VALUE footer.
+        OR (
+          u.role NOT IN ('rep', 'field_contractor')${officeScope}
+          AND EXISTS (
+            SELECT 1 FROM ${dealSignedCommissions} dsc
+            JOIN ${deals} d ON d.id = dsc.deal_id
+            WHERE dsc.rep_user_id = u.id
+              AND COALESCE(d.is_test_data, false) = false
+          )
+        )
+      )
     ORDER BY u.display_name ASC
   `);
   const reps = (repsResult as any).rows ?? repsResult;
@@ -1419,7 +1454,12 @@ export async function getDirectorRepCommissionRows(
 
   const rows: DirectorRepCommissionRow[] = [];
   for (const rep of reps) {
-    const { summary } = await getRepCommissionSummary(tenantDb, String(rep.id), options.from, options.to, options.officeId);
+    const repIsRep = String(rep.role) === "rep";
+    // O: a non-rep source row excludes manager override (includeManagerOverride=false) — surfaces source
+    // earnings only, matching the earned drawer which also drops the override for non-reps.
+    const { summary } = await getRepCommissionSummary(
+      tenantDb, String(rep.id), options.from, options.to, options.officeId, repIsRep
+    );
     rows.push({
       repId: String(rep.id),
       repName: String(rep.display_name ?? "Rep"),
@@ -1430,6 +1470,7 @@ export async function getDirectorRepCommissionRows(
       meetsNewCustomerShare: summary.meetsNewCustomerShare,
       floorMet: summary.floorMet,
       heldEarnedCommission: summary.heldEarnedCommission,
+      isRep: repIsRep,
     });
   }
 
@@ -2058,6 +2099,9 @@ export interface DirectorDashboardData {
 export interface DirectorCommissionWorkspaceRow {
   repId: string;
   repName: string;
+  // False for a NON-rep source row (earned-only; involvement columns zeroed). The client suppresses the
+  // /director/rep/:id link for these — getRepDetail is rep-centric and would show their owned deals.
+  isRep: boolean;
   totalEarnedCommission: number;
   potentialCommission: number;
   floorRemaining: number;
@@ -2768,15 +2812,27 @@ export async function getDirectorCommissionWorkspace(
   const dealSummaryByRep = new Map(dealSummaryRows.map((row) => [row.repId, row]));
 
   const rows = commissionRows.map((row) => {
-    const activity = activityByRep.get(row.repId);
-    const funnel = funnelByRep.get(row.repId);
-    const dealSummary = dealSummaryByRep.get(row.repId);
+    // A NON-rep row is on the roster ONLY because they earned a commission (e.g. a director source). The
+    // deal-VALUE / funnel / activity columns are rep-INVOLVEMENT (owner/estimator) metrics, and the
+    // deal-VALUE footer (getCommissionOfficeTotals) counts reps only — so a non-rep's own owned/estimated
+    // deals must NOT bleed into these columns, or the visible rows would stop reconciling with the footer.
+    // Their EARNED columns (the reason they appear) are still shown. Reps keep the merged involvement rows.
+    const activity = row.isRep ? activityByRep.get(row.repId) : undefined;
+    const funnel = row.isRep ? funnelByRep.get(row.repId) : undefined;
+    const dealSummary = row.isRep ? dealSummaryByRep.get(row.repId) : undefined;
 
     return {
       repId: row.repId,
       repName: row.repName,
+      // P: expose whether this row is a rep. A NON-rep source row has all involvement columns zeroed here, so
+      // the client must NOT link its name to /director/rep/:id (getRepDetail has no non-rep zeroing and would
+      // show the owned pipeline/funnel/activity the workspace deliberately hides).
+      isRep: row.isRep,
       totalEarnedCommission: row.totalEarnedCommission,
-      potentialCommission: row.potentialCommission,
+      // Potential commission is future commission on the rep's own pipeline — an involvement metric, so it
+      // is zeroed for a non-rep source (their pipeline is excluded above; the "potential" drawer is gated to
+      // match). Their EARNED / held / floor columns (the reason they're on the roster) are kept.
+      potentialCommission: row.isRep ? row.potentialCommission : 0,
       floorRemaining: row.floorRemaining,
       newCustomerShare: row.newCustomerShare,
       meetsNewCustomerShare: row.meetsNewCustomerShare,
@@ -2882,9 +2938,28 @@ export async function getDirectorCommissionEvidence(
   const from = options.from ?? `${year}-01-01`;
   const to = options.to ?? `${year}-12-31`;
 
-  const nameResult = await tenantDb.execute(sql`SELECT display_name FROM ${users} WHERE id = ${repId}::uuid LIMIT 1`);
+  const nameResult = await tenantDb.execute(sql`SELECT display_name, role FROM ${users} WHERE id = ${repId}::uuid LIMIT 1`);
   const nameRows = (nameResult as any).rows ?? nameResult;
   const repName = nameRows[0]?.display_name ? String(nameRows[0].display_name) : "Rep";
+  // A NON-rep is on the workspace only for their EARNED commission (e.g. a director source), so their
+  // deal / lead / activity INVOLVEMENT drawers must be EMPTY — matching the zeroed deal-VALUE / funnel /
+  // activity cells in getDirectorCommissionWorkspace (and the rep-only deal-VALUE footer). Only "earned"
+  // (keyed on dsc.rep_user_id) is valid for a non-rep. This gate neutralizes the three involvement queries
+  // for non-reps; the earned query below is deliberately NOT gated.
+  const isRepUser = String(nameRows[0]?.role ?? "") === "rep";
+  const involvementGate = isRepUser ? sql`` : sql` AND false`;
+  // A NON-rep is on the roster only as an active-office MEMBER (the roster's non-rep branch applies the same
+  // membership check). If a non-rep is NOT a member of the scoped office (e.g. their access was removed, or a
+  // foreign-office director), they are OFF the scoped roster — so NO drawer, including "earned", may return
+  // their records, or the evidence route leaks deal names + amounts the Team Commissions table excludes.
+  let nonRepOffScopedRoster = false;
+  if (!isRepUser && officeId) {
+    const memberResult = await tenantDb.execute(
+      sql`SELECT 1 AS ok FROM ${users} u WHERE u.id = ${repId}::uuid AND ${activeOfficeRepMembershipSql(officeId)} LIMIT 1`
+    );
+    const memberRows = (memberResult as any).rows ?? memberResult;
+    nonRepOffScopedRoster = memberRows.length === 0;
+  }
 
   // RAW best-estimate + change-order, matching the pipeline/potential value expr exactly (no on-hold
   // zeroing in the value — on-hold is excluded by the WHERE row filter).
@@ -2910,7 +2985,7 @@ export async function getDirectorCommissionEvidence(
         AND d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
         AND ${aliasedActiveDealCountFilterSql("d")}${unsigned}${notBooked}
-        AND psc.slug IN (${commissionSlugList(stageSlugs)})
+        AND psc.slug IN (${commissionSlugList(stageSlugs)})${involvementGate}
       ORDER BY value DESC NULLS LAST, d.name ASC
     `);
     const rows = (res as any).rows ?? res;
@@ -2974,6 +3049,17 @@ export async function getDirectorCommissionEvidence(
 
   // --- earned commission: deal_signed_commissions rows, floor-gated ---
   if (metric === "earned") {
+    // N: a non-rep off the scoped roster gets an EMPTY earned drawer (they're excluded from the table).
+    if (nonRepOffScopedRoster) {
+      return {
+        metric, kind: "deal", repId, repName,
+        title: `${repName} — Earned commission`,
+        subtitle: "No earnings in the active office",
+        valueLabel: "Earned",
+        total: { count: 0, value: 0 },
+        records: [],
+      };
+    }
     const rawConfig = await getCommissionConfig(tenantDb, repId);
     const config = rawConfig.isActive
       ? rawConfig
@@ -2985,7 +3071,11 @@ export async function getDirectorCommissionEvidence(
     // below-floor manager whose only report overrides are CROSS-office would read held-only on the row but
     // override !== 0 in the drawer — flipping heldOnly off and surfacing a foreign override instead of the
     // held amount the director clicked. Same scope on both sides keeps the drawer reconciled.
-    const override = await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, from, to, officeId);
+    // O: a non-rep source row surfaces ONLY their own earned (source) commission — NOT a manager override.
+    // The manager-override roll-up is deliberately rep-only, so a non-rep's row + drawer both exclude it.
+    const override = isRepUser
+      ? await getOverrideEarnedCommission(tenantDb, repId, config.overrideRate, from, to, officeId)
+      : 0;
     // Reconcile the drawer with the EXACT figure the director clicked on the team table:
     //  • floor met -> per-deal earned is released (gross) + the override summary row below.
     //  • below floor WITH a payable override -> per-deal earned held at $0; the cell IS the override, shown
@@ -3058,7 +3148,7 @@ export async function getDirectorCommissionEvidence(
         AND l.status = 'open'
         AND l.is_active = true
         AND psc.workflow_family = 'lead'
-        AND psc.slug IN (${commissionSlugList(COMMISSION_LEAD_STAGE_GROUPS[metric])})
+        AND psc.slug IN (${commissionSlugList(COMMISSION_LEAD_STAGE_GROUPS[metric])})${involvementGate}
       ORDER BY l.stage_entered_at DESC NULLS LAST, l.name ASC
     `);
     const rows = (res as any).rows ?? res;
@@ -3099,7 +3189,7 @@ export async function getDirectorCommissionEvidence(
       WHERE a.responsible_user_id = ${repId}::uuid
         AND a.type = ${activityType}
         AND a.occurred_at >= ${from}::timestamptz
-        AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz
+        AND a.occurred_at <= (${to}::date + INTERVAL '1 day')::timestamptz${involvementGate}
       ORDER BY a.occurred_at DESC
     `);
     const rows = (res as any).rows ?? res;

@@ -89,4 +89,47 @@ describe("/sales-reps picker — multi-office grant-holders (runtime)", () => {
     expect(ids).not.toContain("field-1");
     expect(ids).not.toContain("inactive-1");
   });
+
+  // purpose=sales-source returns the full internal CRM roster (reps AND leadership like a director
+  // sourcing service deals), NOT rep-only — the picker must offer Chase Kelly (director). Only external
+  // field_contractors are dropped. Locks the intent for the sales-source feed specifically.
+  it("purpose=sales-source returns all internal CRM roles (incl. director/admin), drops field_contractor", async () => {
+    listUsersMock.mockResolvedValue([
+      { id: "rep-1", displayName: "Rep", email: "rep@example.com", role: "rep", officeId: "office-a", isActive: true },
+      { id: "director-2", displayName: "Chase Kelly", email: "chase@example.com", role: "director", officeId: "office-a", isActive: true },
+      { id: "admin-2", displayName: "Admin", email: "admin@example.com", role: "admin", officeId: "office-a", isActive: true },
+      { id: "field-1", displayName: "Field", email: "field@example.com", role: "field_contractor", officeId: "office-a", isActive: true },
+    ]);
+
+    const { body, next } = await invokeSalesReps({ query: { purpose: "sales-source" } });
+
+    expect(next).not.toHaveBeenCalled();
+    const ids = (body as any).users.map((u: any) => u.id);
+    expect(ids).toEqual(["rep-1", "director-2", "admin-2"]);
+    expect(ids).not.toContain("field-1");
+  });
+
+  // A rep CALLER asking for the sales-source feed must NOT get the self-only short-circuit (they need the
+  // full roster to pick a source), and still gets CRM-only filtering.
+  it("purpose=sales-source does not self-limit a rep caller", async () => {
+    listUsersMock.mockResolvedValue([
+      { id: "rep-caller", displayName: "Rep Caller", email: "caller@example.com", role: "rep", officeId: "office-a", isActive: true },
+      { id: "director-2", displayName: "Chase Kelly", email: "chase@example.com", role: "director", officeId: "office-a", isActive: true },
+    ]);
+
+    const { body } = await invokeSalesReps({
+      query: { purpose: "sales-source" },
+      user: {
+        id: "rep-caller",
+        role: "rep",
+        displayName: "Rep Caller",
+        email: "caller@example.com",
+        activeOfficeId: "office-a",
+        officeId: "office-a",
+      },
+    });
+
+    const ids = (body as any).users.map((u: any) => u.id);
+    expect(ids).toEqual(["rep-caller", "director-2"]); // full roster, not just self
+  });
 });

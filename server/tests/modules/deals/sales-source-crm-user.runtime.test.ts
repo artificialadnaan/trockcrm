@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-// Runtime coverage for the P2 Codex finding: sales source must be a rep (role='rep').
-// assertSalesSourceIsRep is called inside setDealSalesSource right after validateAssignee, so
-// a non-rep active user that passes the office-access check is still rejected with 422.
+// Runtime coverage for the sales-source role gate: the source may be ANY internal CRM user (rep,
+// director like Chase Kelly, admin, construction) — only external field_contractors are rejected.
+// assertSalesSourceIsCrmUser is called inside setDealSalesSource right after validateAssignee, so a
+// field_contractor that passes the office-access check is still rejected with 422.
 //
 // Hand-built fake tenantDb mirrors the shape of the real schema DDL, including:
 //   deals: sales_source_user_id uuid, assigned_rep_id uuid, is_change_order boolean,
@@ -39,7 +40,7 @@ interface FakeDeal {
 
 /**
  * Builds a minimal fake tenantDb where all users queries return a single canned user
- * with the supplied role. This lets us isolate the assertSalesSourceIsRep gate without
+ * with the supplied role. This lets us isolate the assertSalesSourceIsCrmUser gate without
  * a real database.
  */
 function makeTenantDb(deal: FakeDeal, userRole: UserRole) {
@@ -133,53 +134,34 @@ function makeTenantDb(deal: FakeDeal, userRole: UserRole) {
 const OWNER = "owner-rep";
 const SOURCE = "source-user";
 
-describe("setDealSalesSource — assertSalesSourceIsRep gate (runtime)", () => {
-  it("throws 422 SALES_SOURCE_NOT_REP when the sales source user is an admin", async () => {
+describe("setDealSalesSource — assertSalesSourceIsCrmUser gate (runtime)", () => {
+  // A field_contractor is the ONLY role rejected — they have no CRM standing / commission settings.
+  it("throws 422 SALES_SOURCE_NOT_CRM_USER when the sales source user is a field contractor", async () => {
     const db = makeTenantDb(
       { id: "d", salesSourceUserId: null, assignedRepId: OWNER, workflowRoute: "service" },
-      "admin"
+      "field_contractor"
     );
     await expect(setDealSalesSource(db, "d", SOURCE, OWNER, "o1")).rejects.toMatchObject({
       statusCode: 422,
-      code: "SALES_SOURCE_NOT_REP",
+      code: "SALES_SOURCE_NOT_CRM_USER",
     });
     // No deal mutation should have occurred
     expect(db._state.updateCalls).toHaveLength(0);
   });
 
-  it("throws 422 SALES_SOURCE_NOT_REP when the sales source user is a director", async () => {
-    const db = makeTenantDb(
-      { id: "d", salesSourceUserId: null, assignedRepId: OWNER, workflowRoute: "service" },
-      "director"
-    );
-    await expect(setDealSalesSource(db, "d", SOURCE, OWNER, "o1")).rejects.toMatchObject({
-      statusCode: 422,
-      code: "SALES_SOURCE_NOT_REP",
-    });
-    expect(db._state.updateCalls).toHaveLength(0);
-  });
-
-  it("throws 422 SALES_SOURCE_NOT_REP when the sales source user is a construction user", async () => {
-    const db = makeTenantDb(
-      { id: "d", salesSourceUserId: null, assignedRepId: OWNER, workflowRoute: "service" },
-      "construction"
-    );
-    await expect(setDealSalesSource(db, "d", SOURCE, OWNER, "o1")).rejects.toMatchObject({
-      statusCode: 422,
-      code: "SALES_SOURCE_NOT_REP",
-    });
-    expect(db._state.updateCalls).toHaveLength(0);
-  });
-
-  it("allows a rep-role user to be set as the sales source", async () => {
-    const db = makeTenantDb(
-      { id: "d", salesSourceUserId: null, assignedRepId: OWNER, workflowRoute: "service" },
-      "rep"
-    );
-    const result = await setDealSalesSource(db, "d", SOURCE, OWNER, "o1");
-    expect(result).toBeTruthy();
-    // Deal should have been updated
-    expect(db._state.updateCalls.length).toBeGreaterThan(0);
-    expect(db._state.updateCalls[0]?.salesSourceUserId).toBe(SOURCE);
-  });
+  // Every internal CRM role is now an allowed source — reps AND leadership (a director like Chase Kelly
+  // who sources service deals), admins, and construction users.
+  it.each(["rep", "director", "admin", "construction"] as const)(
+    "allows a %s user to be set as the sales source",
+    async (role) => {
+      const db = makeTenantDb(
+        { id: "d", salesSourceUserId: null, assignedRepId: OWNER, workflowRoute: "service" },
+        role
+      );
+      const result = await setDealSalesSource(db, "d", SOURCE, OWNER, "o1");
+      expect(result).toBeTruthy();
+      expect(db._state.updateCalls.length).toBeGreaterThan(0);
+      expect(db._state.updateCalls[0]?.salesSourceUserId).toBe(SOURCE);
+    }
+  );
 });
