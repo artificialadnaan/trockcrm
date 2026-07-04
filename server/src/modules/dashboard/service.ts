@@ -1414,17 +1414,19 @@ export async function getDirectorRepCommissionRows(
       AND (
         -- The office-scoped rep roster (unchanged — preserves D-5 cross-office scoping for reps).
         (u.role = 'rep'${officeScope})
-        -- Plus any NON-rep internal CRM user (isCrmUserRole == role <> 'field_contractor') who actually
-        -- EARNED here — holds >=1 deal_signed_commissions row on a non-test deal in THIS tenant schema
-        -- (e.g. a director like Chase Kelly with a 'sales_source' cut). Without this the workspace roster
-        -- would omit them, so their earned cut — which the report-builder aggregate AND the evidence drawer
-        -- both already include — is invisible + non-drillable here, and the surfaces reconcile off by that
-        -- amount. The dsc/deals join is office-bound by tenant-schema isolation, so it needs NO
-        -- cross-office membership grant. Using role NOT IN ('rep', ...) here (rather than role <> field_contractor)
-        -- keeps every rep handled ONLY by the office-scoped branch above, so a cross-office rep D-5 dropped
-        -- can't slip back in and drift the deal-VALUE footer (getCommissionOfficeTotals stays rep-scoped).
+        -- Plus any NON-rep internal CRM user (isCrmUserRole == role <> 'field_contractor') who is a MEMBER
+        -- of the active office AND actually EARNED — holds >=1 deal_signed_commissions row on a non-test
+        -- deal (e.g. a director like Chase Kelly with a 'sales_source' cut). The membership check reuses the
+        -- SAME D-5 boundary as reps and is LOAD-BEARING FOR SECURITY: the tenant schema is shared across
+        -- offices (deals carry office_code), so the dsc EXISTS alone is NOT office-bound — without the
+        -- membership predicate a director/admin who earned in ANOTHER office would be pulled into this
+        -- office-scoped roster and their totals/drill-down exposed. Membership is the boundary;
+        -- getRepCommissionSummary(officeId) below scopes the $ shown, exactly as for reps. A legitimate
+        -- source always passes: setting a source runs validateAssignee, which requires office access.
+        -- role NOT IN ('rep', ...) (not role <> field_contractor) keeps every rep handled ONLY by the
+        -- office-scoped rep branch above, so a cross-office rep D-5 dropped can't drift the deal-VALUE footer.
         OR (
-          u.role NOT IN ('rep', 'field_contractor')
+          u.role NOT IN ('rep', 'field_contractor')${officeScope}
           AND EXISTS (
             SELECT 1 FROM ${dealSignedCommissions} dsc
             JOIN ${deals} d ON d.id = dsc.deal_id

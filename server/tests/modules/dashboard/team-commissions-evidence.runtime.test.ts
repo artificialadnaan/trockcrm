@@ -81,10 +81,13 @@ beforeAll(async () => {
       ('${REP}','Kaleb','rep', NULL), ('${OTHER}','Owner','rep', NULL),
       ('${MGR}','Manager','rep', NULL), ('${REPORT}','Report','rep','${MGR}'), ('${BOOKED}','Booked','rep', NULL),
       ('${NONREP}','Director Dana','director', NULL), ('${EST2}','Estimator Two','rep', NULL), ('${OWN2}','Owner Two','rep', NULL),
-      ('${HELD}','Held Rep','rep', NULL), ('${SRCDIR}','Chase Kelly','director', NULL);
+      ('${HELD}','Held Rep','rep', NULL);
     INSERT INTO users (id, display_name, role, reports_to, office_id) VALUES
       ('${XMGR}','XMgr A','rep', NULL, '${OFF_A}'),
-      ('${XREP}','XRep B','rep','${XMGR}','${OFF_B}');
+      ('${XREP}','XRep B','rep','${XMGR}','${OFF_B}'),
+      -- Chase Kelly is a director homed in office B: unscoped he's on the earned roster (his sales_source
+      -- cut), but scoped to office A he must be EXCLUDED (no A membership) — the security boundary.
+      ('${SRCDIR}','Chase Kelly','director', NULL, '${OFF_B}');
     INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate) VALUES
       ('${REP}', true, 0.05, 0, 0),
       ('${MGR}', true, 0.05, 1000000, 0.10),  -- MGR below their own $1M floor -> direct earned $0
@@ -278,6 +281,18 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(ev.total.value).toBe(250);
     // Deal-VALUE office totals are unaffected by the additive sales_source row (still 220k pipeline).
     expect(officeTotals.pipelineValue).toBe(220000);
+  });
+
+  it("SECURITY: a non-rep earner is admitted only as an active-office MEMBER — a foreign-office director is excluded when scoped", async () => {
+    // Chase Kelly (SRCDIR) is a director homed in office B with a sales_source cut. The tenant schema is
+    // shared across offices, so the earned-row EXISTS alone is NOT office-bound — the non-rep roster branch
+    // must apply the SAME active-office membership check as reps, or a director viewing office A could pull a
+    // foreign-office earner into the A-scoped roster and drill their totals.
+    const unscoped = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    expect(unscoped.rows.some((r) => r.repId === SRCDIR)).toBe(true); // on the roster with no office scope
+
+    const scopedA = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO, officeId: OFF_A });
+    expect(scopedA.rows.some((r) => r.repId === SRCDIR)).toBe(false); // office-B member excluded from office A
   });
 
   it("a won deal that's already BOOKED (dsc) is in Earned, NOT in won·unsigned", async () => {
