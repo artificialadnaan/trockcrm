@@ -1,3 +1,4 @@
+import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 
 type WorkflowRoute = "normal" | "service";
@@ -6,6 +7,9 @@ export interface RfpPayloadSourceDeal {
   id: string;
   name: string;
   dealNumber: string;
+  /** Canonical formatted number (`deals.project_number`). Preferred over `dealNumber`
+   *  so the payload never ships the raw HubSpot id. See resolveDealDisplayNumber. */
+  projectNumber?: string | null;
   projectType?: string | null;
   workflowRoute?: WorkflowRoute | null;
   awardedAmount?: string | number | null;
@@ -180,7 +184,13 @@ export function buildNormalizedRfpRequestBody(input: {
     sourceEventId,
     deal: {
       name: cleanString(deal.name) ?? "Untitled Deal",
-      projectNumber: cleanString(deal.dealNumber) ?? deal.id,
+      // Ship the FORMATTED project number (canonical `project_number`, else the
+      // bid-board `deal_number`) — NEVER the raw HubSpot id (resolveDealDisplayNumber
+      // guards HS ids out, returning null → we fall back to the deal UUID only when
+      // there is no real number yet). A voter's edited project_number flows here.
+      projectNumber:
+        resolveDealDisplayNumber({ projectNumber: deal.projectNumber, dealNumber: deal.dealNumber }) ??
+        deal.id,
       projectType: resolveProjectTypeCode({
         projectType: deal.projectType,
         workflowRoute: deal.workflowRoute ?? "normal",
