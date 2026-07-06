@@ -26,15 +26,19 @@ const deal: DealFieldsForForm = {
 };
 
 describe("currentTypeCode", () => {
-  it("prefers the digit embedded in the canonical project number", () => {
-    expect(currentTypeCode({ projectNumber: "ATL-7-10025-aa", projectType: "roofing" })).toBe("7");
+  it("uses deals.project_type as authoritative (even when the number digit disagrees)", () => {
+    // number says 7 (Emergency), type says roofing (3) — project_type wins, so an untouched approve won't reclassify
+    expect(currentTypeCode({ projectNumber: "ATL-7-10025-aa", projectType: "roofing" })).toBe("3");
+    expect(currentTypeCode({ projectNumber: null, projectType: "Roofing" })).toBe("3"); // label match
+    expect(currentTypeCode({ projectNumber: "DFW-2-31825-aa", projectType: "service" })).toBe("4"); // value match
   });
-  it("falls back to matching the display type by label or value", () => {
-    expect(currentTypeCode({ projectNumber: null, projectType: "Roofing" })).toBe("3");
-    expect(currentTypeCode({ projectNumber: "legacy", projectType: "service" })).toBe("4");
+  it("falls back to the project_number digit only when project_type is absent/unmappable", () => {
+    expect(currentTypeCode({ projectNumber: "ATL-7-10025-aa", projectType: null })).toBe("7");
+    expect(currentTypeCode({ projectNumber: "DFW-5-10025-aa", projectType: "not a real type" })).toBe("5");
   });
   it("returns empty when nothing resolves", () => {
     expect(currentTypeCode({ projectNumber: null, projectType: null })).toBe("");
+    expect(currentTypeCode({ projectNumber: "legacy 123", projectType: null })).toBe("");
   });
 });
 

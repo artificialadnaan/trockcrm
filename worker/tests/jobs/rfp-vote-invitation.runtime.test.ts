@@ -91,6 +91,30 @@ describe("handleRfpVoteInvitation", () => {
     expect(email.html).not.toContain("HS-318900588242");
   });
 
+  it("shows 'Pending' (never the raw HS id) when there is no formatted project number", () => {
+    const email = buildRfpVoteInvitationEmail({
+      dealId: "deal-1",
+      dealName: "Palm Villas",
+      dealNumber: "HS-204627995347", // raw HS id in the legacy field; no formatted number yet (pending)
+      officeId: "office-9",
+      frontendUrl: "https://trockcrm.com/",
+      dealSummary: {
+        projectTypeLabel: "Roofing",
+        projectNumber: null, // pending — number not yet issued
+        amount: 100000,
+        companyName: "Palm Group",
+        location: null,
+        estimator: null,
+        ownerName: null,
+        description: null,
+        dueDate: null,
+      },
+    });
+    expect(email.subject).not.toContain("HS-204627995347");
+    expect(email.html).not.toContain("HS-204627995347");
+    expect(email.html).toContain("Pending");
+  });
+
   it("degrades to the minimal layout when no dealSummary is present (legacy job)", () => {
     const email = buildRfpVoteInvitationEmail({ dealId: "deal-1", dealName: "d", dealNumber: "TR-1001", frontendUrl: "https://trockcrm.com" });
     expect(email.subject).toContain("TR-1001");

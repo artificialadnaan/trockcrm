@@ -14,6 +14,10 @@ type DealRow = typeof deals.$inferSelect;
  *  a Service RFP must go through the SyncHub service-approval path, not the CRM 3-voter round. */
 const SERVICE_PROJECT_TYPE_CODE = "4";
 
+/** Same app-wide money ceiling the deal PATCH enforces (validateDealPayload). Keeps the write ceiling consistent
+ *  and turns a numeric(14,2) overflow into a clean 400 instead of an opaque 500. */
+const MAX_EDIT_AMOUNT = 999_999_999;
+
 /**
  * The SyncHub RFP-review form submits a flat map of string values keyed by these names. In the CRM v1 the
  * WRITABLE subset is the deal's own columns. Company + primary contact are LINKED records (read-only context)
@@ -56,6 +60,16 @@ function invalid(message: string): never {
   throw new AppError(400, message, "RFP_VOTE_EDIT_INVALID");
 }
 
+/** True if the string contains an ASCII control character (C0 range or DEL) — the same class the PATCH route's
+ *  project-number validator rejects. Written as a scan (not a regex literal) to keep control bytes out of source. */
+function containsControlChar(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
 /**
  * PURE: map the vote form's edited fields onto a `deals`-column update object (Drizzle TS keys), applying the
  * same field allowlist + validation the authorized commit uses. Throws AppError on a blocked/invalid edit:
@@ -67,7 +81,7 @@ function invalid(message: string): never {
  */
 export function buildRfpVoteDealUpdate(
   fields: RfpVoteEditableFields,
-  deal: Pick<DealRow, "name" | "projectNumber" | "projectType" | "bidEstimate" | "estimator" | "description" | "bidDueDate" | "propertyAddress" | "propertyCity" | "propertyState" | "propertyZip" | "propertyCountry">
+  deal: Pick<DealRow, "name" | "projectNumber" | "projectType" | "bidEstimate" | "awardedAmount" | "estimator" | "description" | "bidDueDate" | "propertyAddress" | "propertyCity" | "propertyState" | "propertyZip" | "propertyCountry">
 ): Record<string, unknown> {
   const updates: Record<string, unknown> = {};
 
@@ -80,18 +94,22 @@ export function buildRfpVoteDealUpdate(
     }
   }
 
-  // amount → bid_estimate (RFP = a bid; awarded_amount is null pre-award so bid_estimate wins the payload
-  // COALESCE, and it's the semantically correct column).
+  // amount → the column the create-payload COALESCE (awarded_amount → bid_estimate → dd_estimate → forecast)
+  // reads FIRST, so the edit actually reaches the Bid Board create. awarded_amount is normally null pre-award →
+  // bid_estimate; but a reopened-Won / admin-set deal can carry a non-null awarded_amount, and writing bid_estimate
+  // then would be masked by the awarded-first COALESCE. The form pre-fill mirrors this awarded-first precedence.
   if (has(fields, "amount")) {
     const raw = trimmed(fields.amount);
     if (raw.length > 0) {
       const cleaned = raw.replace(/[$,\s]/g, "");
       const parsed = Number(cleaned);
       if (!Number.isFinite(parsed) || parsed < 0) invalid("Amount must be a non-negative number.");
-      // numeric(14,2) — Drizzle takes a string. Compare against the existing numeric string.
-      const next = parsed.toFixed(2);
-      if (next !== (deal.bidEstimate == null ? null : Number(deal.bidEstimate).toFixed(2))) {
-        updates.bidEstimate = next;
+      if (parsed > MAX_EDIT_AMOUNT) invalid(`Amount must not exceed ${MAX_EDIT_AMOUNT}.`);
+      const next = parsed.toFixed(2); // numeric(14,2) — Drizzle takes a string
+      const target = deal.awardedAmount != null ? "awardedAmount" : "bidEstimate";
+      const existing = target === "awardedAmount" ? deal.awardedAmount : deal.bidEstimate;
+      if (next !== (existing == null ? null : Number(existing).toFixed(2))) {
+        updates[target] = next;
       }
     }
   }
@@ -103,6 +121,10 @@ export function buildRfpVoteDealUpdate(
     const pn = trimmed(fields.project_number);
     if (pn.length > 0) {
       if (isHubspotImportedDealNumber(pn)) invalid("Project number cannot be a HubSpot id.");
+      // Parity with the PATCH route's normalizeProjectNumberInput: reject control chars / over-length values that
+      // would break URL params, exact-match lookups, CSV round-trips, and log lines.
+      if (pn.length > 100) invalid("Project number must be 100 characters or fewer.");
+      if (containsControlChar(pn)) invalid("Project number contains invalid characters.");
       nextNumber = pn;
     }
   }
@@ -151,7 +173,15 @@ export function buildRfpVoteDealUpdate(
 
   // Address block → property_* columns
   applyText(updates, fields, "address", deal.propertyAddress, "propertyAddress");
-  applyText(updates, fields, "city", deal.propertyCity, "propertyCity");
+  // property_city is varchar(255) (the only length-bounded address column) — guard it inline so an over-length
+  // value returns a clean 400 instead of a numeric/varchar 22001 overflow surfacing as a 500.
+  if (has(fields, "city")) {
+    const city = trimmed(fields.city);
+    if (city.length > 0 && city !== (deal.propertyCity ?? "")) {
+      if (city.length > 255) invalid("City must be 255 characters or fewer.");
+      updates.propertyCity = city;
+    }
+  }
   if (has(fields, "state")) {
     const st = trimmed(fields.state).toUpperCase();
     if (st.length > 0) {
@@ -186,21 +216,25 @@ function applyText(
 }
 
 /**
- * The AUTHORIZED commit point for a first-YES RFP vote's edits. Writes the vote form's edited fields directly to
- * the `deals` row, DELIBERATELY bypassing the PATCH-route scope-lock (SCOPE_READ_ONLY_AFTER_RFP) — the lock lives
- * in the PATCH route, not in the column write, and this path has its own vote authorization. Runs inside the vote
- * tally transaction, under the FOR UPDATE lock castRfpVote already holds, so the edited deal is what the deciding
- * approve's loadRfpPayloadDeal re-reads into the Bid Board create payload. Company/contact/notes are never written
- * (linked-record / no-column context). Returns whether any column changed.
+ * Write a prepared (already validated + diffed via buildRfpVoteDealUpdate) RFP vote edit to the `deals` row — the
+ * AUTHORIZED commit point for a first-YES vote. DELIBERATELY bypasses the PATCH-route scope-lock
+ * (SCOPE_READ_ONLY_AFTER_RFP): the lock lives in the route, not the column write, and the vote path has its own
+ * authorization. Runs inside the vote tally transaction under the FOR UPDATE lock castRfpVote holds, so the edited
+ * deal is what the deciding approve's loadRfpPayloadDeal re-reads into the Bid Board create payload. Company/contact/
+ * notes are never in `updates` (linked-record / no-column context). No-op when there's nothing to write.
+ *
+ * The caller (castRfpVote) builds the update FIRST, so it can gate the "already locked" 409 on a REAL change — an
+ * all-no-op edit set (a stale/untouched client resubmitting current values) must not bounce a late deciding approve.
  */
-export async function applyRfpVoteEdits(args: {
-  tenantDb: TenantDb;
-  deal: DealRow;
-  editedFields: RfpVoteEditableFields;
-}): Promise<{ applied: boolean; updates: Record<string, unknown> }> {
-  const updates = buildRfpVoteDealUpdate(args.editedFields, args.deal);
-  if (Object.keys(updates).length === 0) return { applied: false, updates };
-  updates.updatedAt = new Date();
-  await args.tenantDb.update(deals).set(updates).where(eq(deals.id, args.deal.id)).returning({ id: deals.id });
-  return { applied: true, updates };
+export async function writeRfpVoteDealUpdate(
+  tenantDb: TenantDb,
+  dealId: string,
+  updates: Record<string, unknown>,
+): Promise<void> {
+  if (Object.keys(updates).length === 0) return;
+  await tenantDb
+    .update(deals)
+    .set({ ...updates, updatedAt: new Date() })
+    .where(eq(deals.id, dealId))
+    .returning({ id: deals.id });
 }

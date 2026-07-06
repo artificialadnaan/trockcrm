@@ -2,6 +2,7 @@ import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
 import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
+import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
 import { escapeHtml, normalizeText } from "../lib/email-format.js";
 
 export const RFP_VOTE_INVITATION_JOB = "rfp_vote_invitation";
@@ -134,9 +135,10 @@ export function buildRfpVoteInvitationEmail(input: {
   const voteUrl = `${baseUrl}/rfp-vote/${encodeURIComponent(input.dealId)}${officeParam}`;
   const safeVoteUrl = escapeHtml(voteUrl);
 
-  // Prefer the FORMATTED project number (canonical) from the summary over the raw payload dealNumber (which is the
-  // HubSpot id for HubSpot-imported deals).
-  const displayNumber = input.dealSummary?.projectNumber ?? input.dealNumber;
+  // Prefer the FORMATTED project number (canonical) from the summary; else route the raw payload dealNumber through
+  // resolveDealDisplayNumber, which strips HubSpot ids to null (→ "Pending") so a HubSpot-imported deal with no
+  // project_number never leaks its raw HS id into the subject or rows.
+  const displayNumber = input.dealSummary?.projectNumber ?? resolveDealDisplayNumber({ dealNumber: input.dealNumber });
   const subject = displayNumber
     ? `RFP vote needed: ${displayNumber} (${input.dealName})`
     : `RFP vote needed: ${input.dealName}`;

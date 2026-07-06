@@ -277,7 +277,7 @@ export function RfpVotePage() {
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="v-city">City</Label>
-                  <Input id="v-city" value={f.city} onChange={(e) => update("city", e.target.value)} />
+                  <Input id="v-city" maxLength={255} value={f.city} onChange={(e) => update("city", e.target.value)} />
                 </div>
                 <div className="grid grid-cols-2 gap-3">
                   <div className="flex flex-col gap-1.5">

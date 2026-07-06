@@ -37,21 +37,27 @@ export type DealFieldsForForm = Pick<
   | "description"
 >;
 
-/** Current project-type code: prefer the digit embedded in the canonical project number, else map the display type. */
+/** Current project-type code. deals.project_type is AUTHORITATIVE (matches resolveProjectTypeCode, the invitation
+ *  email, and the create payload). Fall back to the project_number's type digit only when project_type is
+ *  absent/unmappable — otherwise a stale number digit (a HubSpot-imported or since-retyped deal whose issued number
+ *  wasn't rewritten) could silently reclassify project_type on an untouched approve, or block a legit non-service
+ *  approve when the stale digit is 4. */
 export function currentTypeCode(deal: Pick<DealFieldsForForm, "projectNumber" | "projectType">): string {
-  const fromNumber = (deal.projectNumber ?? "").match(/^[A-Za-z]{2,4}-([1-9])-/);
-  if (fromNumber) return fromNumber[1];
   const pt = (deal.projectType ?? "").trim().toLowerCase();
   const opt = PROJECT_TYPE_OPTIONS.find((o) => o.value === pt || o.label.toLowerCase() === pt);
-  return opt?.code ?? "";
+  if (opt) return opt.code;
+  const fromNumber = (deal.projectNumber ?? "").match(/^[A-Za-z]{2,4}-([1-9])-/);
+  if (fromNumber) return fromNumber[1];
+  return "";
 }
 
 export function initFormFromDeal(deal: DealFieldsForForm): VoteFormFields {
   return {
     dealname: deal.name ?? "",
     project_number: deal.projectNumber ?? "",
-    // Pre-fill with bid_estimate (the column the edit writes) then dd/awarded fallbacks.
-    amount: deal.bidEstimate ?? deal.ddEstimate ?? deal.awardedAmount ?? "",
+    // Mirror the create-payload/email amount precedence (awarded_amount → bid_estimate → dd_estimate) so the voter
+    // sees the SAME amount the invitation email shows and edits the value that actually ships.
+    amount: deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? "",
     project_types: currentTypeCode(deal),
     estimator: deal.estimator ?? "",
     bid_due_date: deal.bidDueDate ? deal.bidDueDate.slice(0, 10) : "", // ISO UTC -> YYYY-MM-DD

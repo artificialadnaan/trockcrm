@@ -6,6 +6,7 @@ const baseDeal = {
   projectNumber: "DFW-2-31825-aa", // type code 2 (interior renovation)
   projectType: "interior renovation",
   bidEstimate: "100000.00",
+  awardedAmount: null,
   estimator: "Old Estimator",
   description: "old desc",
   bidDueDate: new Date("2026-06-01T00:00:00.000Z"),
@@ -109,5 +110,30 @@ describe("buildRfpVoteDealUpdate", () => {
     const u = buildRfpVoteDealUpdate({ project_types: "3" }, legacyDeal);
     expect(u.projectType).toBe("roofing");
     expect(u.projectNumber).toBeUndefined(); // number left untouched (not strict-canonical)
+  });
+
+  it("writes the amount to the column the payload reads first (awarded_amount when set, else bid_estimate)", () => {
+    // awarded_amount null → bid_estimate wins the payload COALESCE, so the edit lands there
+    expect(buildRfpVoteDealUpdate({ amount: "250000" }, baseDeal).bidEstimate).toBe("250000.00");
+    expect(buildRfpVoteDealUpdate({ amount: "250000" }, baseDeal).awardedAmount).toBeUndefined();
+    // awarded_amount set (reopened-Won / admin-set) → it wins the COALESCE, so the edit must land THERE or it's lost
+    const awardedDeal = { ...baseDeal, awardedAmount: "200000.00" };
+    const u = buildRfpVoteDealUpdate({ amount: "250000" }, awardedDeal);
+    expect(u.awardedAmount).toBe("250000.00");
+    expect(u.bidEstimate).toBeUndefined();
+  });
+
+  it("rejects an amount above the money ceiling (would overflow numeric(14,2) → clean 400 not a 500)", () => {
+    expectThrowCode(() => buildRfpVoteDealUpdate({ amount: "1000000000" }, baseDeal), "RFP_VOTE_EDIT_INVALID");
+    expectThrowCode(() => buildRfpVoteDealUpdate({ amount: "9999999999999" }, baseDeal), "RFP_VOTE_EDIT_INVALID");
+  });
+
+  it("rejects an over-length city (varchar 255)", () => {
+    expectThrowCode(() => buildRfpVoteDealUpdate({ city: "x".repeat(256) }, baseDeal), "RFP_VOTE_EDIT_INVALID");
+  });
+
+  it("rejects a project number with control chars or over 100 chars", () => {
+    expectThrowCode(() => buildRfpVoteDealUpdate({ project_number: "DFW-2-\t31825-aa" }, baseDeal), "RFP_VOTE_EDIT_INVALID");
+    expectThrowCode(() => buildRfpVoteDealUpdate({ project_number: "D".repeat(101) }, baseDeal), "RFP_VOTE_EDIT_INVALID");
   });
 });

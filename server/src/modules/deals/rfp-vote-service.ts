@@ -14,7 +14,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { applyRfpDeclineToDeal } from "./rfp-decline-service.js";
-import { applyRfpVoteEdits, type RfpVoteEditableFields } from "./rfp-vote-edits.js";
+import { buildRfpVoteDealUpdate, writeRfpVoteDealUpdate, type RfpVoteEditableFields } from "./rfp-vote-edits.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, enqueueRfpVoteOutcome } from "./rfp-enqueue.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -391,14 +391,21 @@ export async function castRfpVote(
     if (args.decision !== "approve") {
       throw new AppError(400, "Edits can only accompany an approve vote.", "RFP_VOTE_EDIT_ON_REJECT");
     }
-    if (priorState.approvals > 0) {
-      throw new AppError(
-        409,
-        "This RFP has already been confirmed by an earlier approval; its details are locked.",
-        "RFP_VOTE_ALREADY_LOCKED",
-      );
+    // Compute the REAL diff first (this also VALIDATES → RFP_VOTE_SERVICE_TYPE_BLOCKED / RFP_VOTE_EDIT_INVALID).
+    // Only a genuine change locks the round + commits: an all-no-op edit set (a stale/untouched client resubmitting
+    // the deal's CURRENT values — the client always posts the full field map) falls through and records a plain
+    // vote, so a late deciding approve is NOT bounced with RFP_VOTE_ALREADY_LOCKED for having changed nothing.
+    const dealUpdate = buildRfpVoteDealUpdate(editedFields, args.deal);
+    if (Object.keys(dealUpdate).length > 0) {
+      if (priorState.approvals > 0) {
+        throw new AppError(
+          409,
+          "This RFP has already been confirmed by an earlier approval; its details are locked.",
+          "RFP_VOTE_ALREADY_LOCKED",
+        );
+      }
+      await writeRfpVoteDealUpdate(args.tenantDb, args.deal.id, dealUpdate);
     }
-    await applyRfpVoteEdits({ tenantDb: args.tenantDb, deal: args.deal, editedFields });
   }
 
   try {

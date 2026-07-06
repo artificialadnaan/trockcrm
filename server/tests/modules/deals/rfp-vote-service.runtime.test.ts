@@ -333,6 +333,33 @@ describe("castRfpVote — edited fields (first-YES commits + locks)", () => {
     expect(votes).toHaveLength(0);
   });
 
+  it("does NOT lock a later voter who resubmits UNCHANGED values (all-no-op edit records a plain deciding vote)", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    const enqueueBidBoardCreate = vi.fn(async () => ({ jobId: 1 }));
+    const enqueueOutcome = vi.fn(async () => ({ jobId: 9 }));
+    // First voter approves (no edits) → the round locks (approvals=1).
+    await castRfpVote(
+      { tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" }, decision: "approve", reason: null },
+      { enqueueBidBoardCreate, enqueueOutcome },
+    );
+    // Second voter's client posts the FULL field map, but every value equals the deal's current values (the voter
+    // didn't touch the form). buildRfpVoteDealUpdate → {} (all no-ops), so it must NOT 409 LOCKED — it records the
+    // deciding approve.
+    const r2 = await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V2, email: "james@x.com" },
+        decision: "approve", reason: null,
+        editedFields: { dealname: "jasonn ranches", project_number: "DFW-2-31825-aa", project_types: "2" },
+      },
+      { enqueueBidBoardCreate, enqueueOutcome },
+    );
+    expect(r2.outcome).toBe("approved");
+    const votes = (await pg!.query(`SELECT voter_user_id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(2); // both recorded — no lock bounce for a no-op edit
+    expect(enqueueBidBoardCreate).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects edits accompanying a REJECT vote (400 RFP_VOTE_EDIT_ON_REJECT)", async () => {
     pg = await setupWithNumber();
     const tdb: any = drizzle(pg as any);
