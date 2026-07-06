@@ -494,7 +494,13 @@ router.get("/", async (req, res, next) => {
         ? (req.query.tags as string).split(",")
         : undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
+      // Cap the page size: getFiles now batch-presigns a thumbnail URL per row (Task 7), so an arbitrarily
+      // large client-supplied limit would fan into an arbitrarily large presign pass. 200 mirrors the
+      // photo-timeline ceiling and is >= every real caller (deal Files tab = 25, global /files browser =
+      // 200). `|| 50` guards a non-numeric/zero limit.
+      limit: req.query.limit
+        ? Math.min(200, Math.max(1, parseInt(req.query.limit as string, 10) || 50))
+        : undefined,
       sortBy: req.query.sortBy as "display_name" | "created_at" | "file_size_bytes" | "taken_at" | undefined,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
     };

@@ -14,7 +14,7 @@ import {
   headObject,
   isR2Configured,
 } from "../../lib/r2-client.js";
-import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
+import { generateAndStoreThumbnail, isThumbnailableImage } from "../../lib/image-thumbnail.js";
 import { generateAndStorePdfThumbnail, isPdfThumbnailable } from "../../lib/pdf-thumbnail.js";
 import {
   MAX_FILE_SIZE_BYTES,
@@ -970,8 +970,15 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
 
   const total = Number(countResult[0]?.count ?? 0);
 
+  // Resolve each row's thumbnail URL HERE in one batched pass (local presigns) rather than letting the
+  // client fire a /files/:id/download per row — that N+1 trips the rate limiter on a big page. Rows that
+  // aren't previewable get null; the client falls back to a type badge.
+  const filesWithThumbnails = await Promise.all(
+    fileRows.map(async (f) => ({ ...f, thumbnailUrl: await resolveFileThumbnailUrl(f) })),
+  );
+
   return {
-    files: fileRows,
+    files: filesWithThumbnails,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
 }
@@ -1373,6 +1380,52 @@ export async function getFileDownloadUrl(
 
   const disposition = resolveInlineDisposition(file.mimeType, requestedDisposition);
   return buildFileDownloadUrlFromRecord(file, 3600, disposition);
+}
+
+/**
+ * Presign a small thumbnail URL for a file LIST row, or null when the row is a true non-previewable doc
+ * (client shows a type badge). Priority MIRRORS resolvePhotoDisplayUrls so images preview consistently in
+ * both the Photos subview and the All-files list:
+ *   1) a generated small thumbnail (image OR PDF first page) — the cheap, ideal case
+ *   2) an image WITHOUT a generated thumbnail → presign the ORIGINAL (the #808/PDF thumbnail backfills are
+ *      deferred, so most existing images have no thumbnailR2Key; a badge here would diverge from the
+ *      Photos subview, which previews the same image via resolvePhotoDisplayUrls — see the plan's DECISION
+ *      callout: this is a weighed bandwidth trade, not "no regression", until the backfill runs)
+ *   3) an external-only image import (CompanyCam, no r2Key) → its CDN thumbnail/original
+ *   4) everything else (PDF w/o thumb, Office, zip, …) → null → type badge
+ * Thumbnails/images are safe to serve inline. Presigns are local HMAC ops, so mapping this over a page is
+ * cheap — one batched pass, never a per-row /files/:id/download round-trip. NOTE: this makes GET /files a
+ * file-bytes-granting surface under the list's deal-level (+source-lead lineage) scope — the same grant
+ * boundary the photo timeline already applies (see the plan's access-model DECISION callout).
+ */
+export async function resolveFileThumbnailUrl(file: {
+  thumbnailR2Key?: string | null;
+  r2Key?: string | null;
+  mimeType?: string | null;
+  externalThumbnailUrl?: string | null;
+  externalUrl?: string | null;
+  displayName?: string | null;
+}): Promise<string | null> {
+  if (file.thumbnailR2Key) {
+    const { url } = await buildFileDownloadUrlFromRecord(
+      { r2Key: file.thumbnailR2Key, displayName: file.displayName ?? "thumbnail", fileExtension: ".jpg" },
+      PHOTO_LIST_URL_TTL_SECONDS,
+      "inline",
+    );
+    return url;
+  }
+  if (isThumbnailableImage(file.mimeType) && file.r2Key) {
+    const { url } = await buildFileDownloadUrlFromRecord(
+      { r2Key: file.r2Key, displayName: file.displayName ?? "image", fileExtension: null },
+      PHOTO_LIST_URL_TTL_SECONDS,
+      "inline",
+    );
+    return url;
+  }
+  if (!file.r2Key && (file.externalThumbnailUrl || file.externalUrl)) {
+    return file.externalThumbnailUrl ?? file.externalUrl ?? null;
+  }
+  return null;
 }
 
 /**
