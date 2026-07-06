@@ -130,12 +130,18 @@ export default function ScorecardsScreen() {
             <EmptyState title="No scorecards yet" subtitle="Tap “New scorecard” to score a project." />
           ) : (
             submitted.map((s: FieldScorecardSummary) => (
-              <View key={s.id} style={styles.row}>
+              <Pressable
+                key={s.id}
+                onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
+                style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
+              >
                 <View style={{ flex: 1, gap: 4 }}>
-                  <Text style={styles.rowTitle} numberOfLines={1}>{s.projectNumber ? `${s.projectNumber} · ` : ""}Week of {shortDate(s.weekOf)}</Text>
+                  <Text style={styles.rowTitle} numberOfLines={1}>
+                    {s.projectNumber ? `${s.projectNumber} · ` : ""}Week of {shortDate(s.weekOf)}
+                  </Text>
                   <RatingBadge rating={s.rating} label={`${s.totalScore}/100 · ${s.ratingLabel}`} />
                 </View>
-              </View>
+              </Pressable>
             ))
           )}
         </View>
