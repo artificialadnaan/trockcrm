@@ -10,6 +10,12 @@ RUN npm run build --workspace=client
 FROM node:20-alpine
 WORKDIR /app
 
+# poppler-utils provides `pdftoppm`, used by confirmUpload() to rasterize a PDF's first page into a
+# thumbnail (best-effort; a miss falls back to a type badge). The builder stage does not need it.
+# `command -v pdftoppm` FAILS THE IMAGE BUILD if the package didn't actually land a runnable binary on
+# PATH (wrong name, musl mismatch) — the PDF path is otherwise silent-degrade, so we assert here.
+RUN apk add --no-cache poppler-utils && command -v pdftoppm
+
 # Copy package manifests for all workspaces
 COPY package.json package-lock.json ./
 COPY shared/package.json ./shared/
