@@ -4,6 +4,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, files, jobQueue, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
+import { PROJECT_TYPE_OPTIONS, resolveDealDisplayNumber } from "@trock-crm/shared/types";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import {
   generateDownloadUrl,
@@ -279,6 +280,45 @@ export async function enqueueRfpVoteInvitation(input: {
 }): Promise<{ jobId: number }> {
   const recipients =
     input.recipients && input.recipients.length > 0 ? input.recipients : resolveRfpVoterEmails(process.env);
+
+  // Best-effort SyncHub-style project context for the invitation email (reuses the tested payload builder so the
+  // number/type/amount/owner/company/location match the create payload). A failure here must NEVER block opening
+  // the round — the email degrades to the minimal deal-name + project-number layout.
+  let dealSummary: {
+    projectTypeLabel: string | null;
+    projectNumber: string | null;
+    amount: number | null;
+    companyName: string | null;
+    location: string | null;
+    estimator: string | null;
+    ownerName: string | null;
+    description: string | null;
+    dueDate: string | null;
+  } | null = null;
+  try {
+    const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, { id: input.deal.id });
+    const body = buildNormalizedRfpRequestBody({ deal: rfpPayloadDeal, sourceEventId: "" });
+    const addr = body.deal.address;
+    dealSummary = {
+      projectTypeLabel:
+        PROJECT_TYPE_OPTIONS.find((o) => o.code === body.deal.projectType)?.label ?? body.deal.projectType ?? null,
+      // FORMATTED number (null for the pending case → the email shows "Pending", never a UUID/HS id).
+      projectNumber: resolveDealDisplayNumber({
+        projectNumber: rfpPayloadDeal.projectNumber,
+        dealNumber: rfpPayloadDeal.dealNumber,
+      }),
+      amount: body.deal.amount,
+      companyName: body.deal.companyName,
+      location: addr ? [addr.street, addr.city, addr.state, addr.zip].filter(Boolean).join(", ") || null : null,
+      estimator: body.deal.estimator,
+      ownerName: body.deal.ownerName,
+      description: body.deal.description,
+      dueDate: body.deal.dueDate,
+    };
+  } catch {
+    dealSummary = null;
+  }
+
   const jobRows = await input.tenantDb
     .insert(jobQueue)
     .values({
@@ -289,6 +329,7 @@ export async function enqueueRfpVoteInvitation(input: {
         dealName: input.deal.name ?? null,
         officeId: input.officeId,
         roundEventId: input.deal.rfpApprovalRequestEventId ?? null,
+        dealSummary,
         // The SERVER-resolved voter set (finding H5). openRfpVoteRound snapshots the exact trio from env (already
         // gated by hasSufficientRfpVoters) so the worker emails EXACTLY those voters even if its own env is
         // stale/incomplete; the /rfp-retry re-invite passes the ORIGINAL round's set (finding) so the round's

@@ -6,6 +6,19 @@ import { escapeHtml, normalizeText } from "../lib/email-format.js";
 
 export const RFP_VOTE_INVITATION_JOB = "rfp_vote_invitation";
 
+/** SyncHub-style project context snapshotted into the invitation payload at round-open (best-effort). */
+export interface RfpVoteInvitationDealSummary {
+  projectTypeLabel?: string | null;
+  projectNumber?: string | null; // FORMATTED (canonical) — never the raw HubSpot id
+  amount?: number | null;
+  companyName?: string | null;
+  location?: string | null;
+  estimator?: string | null;
+  ownerName?: string | null;
+  description?: string | null;
+  dueDate?: string | null; // ISO
+}
+
 interface RfpVoteInvitationPayload {
   dealId?: string;
   dealNumber?: string | null;
@@ -14,6 +27,9 @@ interface RfpVoteInvitationPayload {
   roundEventId?: string | null;
   // Server-resolved authoritative voter set (finding H5); present on jobs enqueued after that change.
   recipients?: unknown;
+  // SyncHub-style project context (present on jobs enqueued after the rich-email change); absent on legacy jobs,
+  // in which case the email degrades to the minimal deal-name + project-number layout.
+  dealSummary?: RfpVoteInvitationDealSummary;
 }
 
 interface HandlerDeps {
@@ -69,6 +85,7 @@ export async function handleRfpVoteInvitation(
     dealNumber: normalizeText(payload.dealNumber),
     officeId,
     frontendUrl: resolveFrontendUrl(env),
+    dealSummary: payload.dealSummary,
   });
 
   const recipientCount = recipients.length;
@@ -92,27 +109,58 @@ export async function handleRfpVoteInvitation(
   }
 }
 
+function fmtInvitationAmount(amount: number | null | undefined): string {
+  return typeof amount === "number" && Number.isFinite(amount) ? `$${amount.toLocaleString("en-US")}` : "—";
+}
+
+function fmtInvitationDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime())
+    ? d.toLocaleDateString("en-US", { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" })
+    : "—";
+}
+
 export function buildRfpVoteInvitationEmail(input: {
   dealId: string;
   dealName: string;
   dealNumber: string | null;
   officeId?: string | null;
   frontendUrl: string;
+  dealSummary?: RfpVoteInvitationDealSummary;
 }) {
   const officeParam = input.officeId ? `?officeId=${encodeURIComponent(input.officeId)}` : "";
   const baseUrl = input.frontendUrl.replace(/\/+$/, "");
   const voteUrl = `${baseUrl}/rfp-vote/${encodeURIComponent(input.dealId)}${officeParam}`;
   const safeVoteUrl = escapeHtml(voteUrl);
 
-  const subject = input.dealNumber
-    ? `RFP vote needed: ${input.dealNumber} (${input.dealName})`
+  // Prefer the FORMATTED project number (canonical) from the summary over the raw payload dealNumber (which is the
+  // HubSpot id for HubSpot-imported deals).
+  const displayNumber = input.dealSummary?.projectNumber ?? input.dealNumber;
+  const subject = displayNumber
+    ? `RFP vote needed: ${displayNumber} (${input.dealName})`
     : `RFP vote needed: ${input.dealName}`;
   const text = `An RFP needs your vote (approve or reject). Two of three votes decide; a reject needs a written reason. Open ${voteUrl} to cast your vote.`;
 
-  const rows = [
-    ["Deal name", input.dealName],
-    ["Project number", input.dealNumber ?? "Pending"],
-  ] as const;
+  const s = input.dealSummary;
+  // Rich SyncHub-style context when the summary is present; else the legacy minimal 2-row layout (older jobs).
+  const rows: Array<readonly [string, string]> = s
+    ? [
+        ["Deal name", input.dealName],
+        ["Project type", s.projectTypeLabel || "—"],
+        ["Project number", displayNumber ?? "Pending"],
+        ["Amount", fmtInvitationAmount(s.amount)],
+        ["Company", s.companyName || "—"],
+        ["Location", s.location || "—"],
+        ["Estimator", s.estimator || "—"],
+        ["Deal owner", s.ownerName || "—"],
+        ["Bid due", fmtInvitationDate(s.dueDate)],
+        ["Description", s.description || "—"],
+      ]
+    : [
+        ["Deal name", input.dealName],
+        ["Project number", displayNumber ?? "Pending"],
+      ];
   const htmlRows = rows
     .map(
       ([label, value]) => `
@@ -160,7 +208,7 @@ export function buildRfpVoteInvitationEmail(input: {
 </body>
 </html>`;
 
-  return { subject, html, text, dealNumber: input.dealNumber };
+  return { subject, html, text, dealNumber: displayNumber };
 }
 
 type Queryable = { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> };

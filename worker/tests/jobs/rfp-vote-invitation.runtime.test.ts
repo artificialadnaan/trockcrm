@@ -58,6 +58,45 @@ describe("handleRfpVoteInvitation", () => {
     expect(email.html).toContain("https://trockcrm.com/rfp-vote/deal-1?officeId=office-9");
     expect(email.text).toContain("Two of three");
   });
+
+  it("renders SyncHub-style project context from dealSummary + uses the FORMATTED number (never the raw HS id)", () => {
+    const email = buildRfpVoteInvitationEmail({
+      dealId: "deal-1",
+      dealName: "Palm Villas",
+      dealNumber: "HS-318900588242", // raw HubSpot id in the legacy field — must NOT surface anywhere
+      officeId: "office-9",
+      frontendUrl: "https://trockcrm.com/",
+      dealSummary: {
+        projectTypeLabel: "Roofing",
+        projectNumber: "DFW-3-31825-aa",
+        amount: 425000,
+        companyName: "Palm Group",
+        location: "100 Main, Dallas, TX, 75201",
+        estimator: "Colby Reed",
+        ownerName: "Maria Gonzalez",
+        description: "Exterior scope",
+        dueDate: "2026-07-03T00:00:00.000Z",
+      },
+    });
+    expect(email.subject).toContain("DFW-3-31825-aa");
+    expect(email.subject).not.toContain("HS-318900588242");
+    expect(email.html).toContain("Project type");
+    expect(email.html).toContain("Roofing");
+    expect(email.html).toContain("$425,000");
+    expect(email.html).toContain("Palm Group");
+    expect(email.html).toContain("Colby Reed");
+    expect(email.html).toContain("Deal owner");
+    expect(email.html).toContain("Maria Gonzalez");
+    expect(email.html).toContain("Jul 3, 2026");
+    expect(email.html).not.toContain("HS-318900588242");
+  });
+
+  it("degrades to the minimal layout when no dealSummary is present (legacy job)", () => {
+    const email = buildRfpVoteInvitationEmail({ dealId: "deal-1", dealName: "d", dealNumber: "TR-1001", frontendUrl: "https://trockcrm.com" });
+    expect(email.subject).toContain("TR-1001");
+    expect(email.html).toContain("Project number");
+    expect(email.html).not.toContain("Deal owner");
+  });
 });
 
 // ---- F7: dead invitation sweep (real SQL / PGlite) ----
