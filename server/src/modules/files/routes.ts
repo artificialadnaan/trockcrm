@@ -35,6 +35,7 @@ import { getLeadById } from "../leads/service.js";
 import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats, getUnassignedCompanyCamProjects, getUnassignedCompanyCamPhotos, assignUnassignedCompanyCamProjectToDeal } from "./feed-service.js";
 import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
 import { emitUploadedFileEvent, recordUploadedFileSideEffects } from "./upload-workflow.js";
+import { parseFileDateParam } from "./file-constants.js";
 import { assertDealCollaboratorAccess, assertLeadCollaboratorAccess } from "../../lib/collaboration-access.js";
 
 const router = Router();
@@ -493,6 +494,9 @@ router.get("/", async (req, res, next) => {
       tags: req.query.tags
         ? (req.query.tags as string).split(",")
         : undefined,
+      // Validated/normalized so a malformed date is dropped, not passed to the SQL cast (→500).
+      dateFrom: parseFileDateParam(req.query.dateFrom),
+      dateTo: parseFileDateParam(req.query.dateTo),
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
       // Cap the page size: getFiles now batch-presigns a thumbnail URL per row (Task 7), so an arbitrarily
       // large client-supplied limit would fan into an arbitrarily large presign pass. 200 mirrors the
@@ -501,7 +505,15 @@ router.get("/", async (req, res, next) => {
       limit: req.query.limit
         ? Math.min(200, Math.max(1, parseInt(req.query.limit as string, 10) || 50))
         : undefined,
-      sortBy: req.query.sortBy as "display_name" | "created_at" | "file_size_bytes" | "taken_at" | undefined,
+      sortBy: req.query.sortBy as
+        | "display_name"
+        | "created_at"
+        | "file_size_bytes"
+        | "taken_at"
+        | "file_type"
+        | "category"
+        | "extension"
+        | undefined,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
     };
 

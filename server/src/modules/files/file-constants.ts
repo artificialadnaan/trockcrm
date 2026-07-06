@@ -142,6 +142,37 @@ export function buildFolderPath(category: FileCategory, subcategory?: string, da
 }
 
 /**
+ * Validate/normalize a date query param for the Files filter. Accepts a date-only "YYYY-MM-DD" (bucketed
+ * as a business-tz calendar day downstream) or a full ISO timestamp (must contain a 'T'). Returning
+ * undefined DROPS the filter rather than letting bad input reach the SQL ::date / ::timestamptz cast in
+ * getFiles (which would surface as a 500 instead of an ignored param). The UI only ever sends valid
+ * <input type="date"> values; this guards the directly-reachable endpoint against the two classes that
+ * Date.parse accepts but Postgres rejects:
+ *   - calendar day-overflow ("2026-02-30", "2026-04-31") — Date.parse silently rolls these forward, so we
+ *     reject any date-only value that does not round-trip back to the same string;
+ *   - reduced-precision ISO ("2026", "2026-07") — Date.parse accepts these but '2026'::date errors, so a
+ *     non-date-only value must carry an explicit time component ('T').
+ */
+export function parseFileDateParam(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const v = value.trim();
+  if (!v) return undefined;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    // Round-trip through a UTC Date: rejects month- AND day-overflow (2026-13-45, 2026-02-30, 2026-04-31).
+    const d = new Date(`${v}T00:00:00Z`);
+    if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) return undefined;
+    return v;
+  }
+
+  // Not date-only: require an explicit time component so reduced-precision forms ("2026", "2026-07") are
+  // dropped here instead of surfacing as a 500 at the SQL cast.
+  if (!v.includes("T")) return undefined;
+  if (Number.isNaN(Date.parse(v))) return undefined;
+  return v;
+}
+
+/**
  * Reverse mapping: MIME type -> allowed extensions for that MIME.
  * Used to validate that the declared MIME type matches the file extension.
  */
