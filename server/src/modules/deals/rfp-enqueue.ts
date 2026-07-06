@@ -286,6 +286,11 @@ export async function enqueueRfpVoteInvitation(input: {
   // the round — the email degrades to the minimal deal-name + project-number layout.
   let dealSummary: RfpVoteInvitationDealSummary | null = null;
   try {
+    // SAVEPOINT so a failed SELECT (e.g. tenant column drift) rolls back to a clean point instead of leaving the
+    // tenant transaction in an aborted state — otherwise the job_queue insert below would ALSO fail (Postgres:
+    // "current transaction is aborted"), blocking the round from opening. This keeps the "never block the round"
+    // promise true.
+    await input.tenantDb.execute(sql`SAVEPOINT rfp_vote_summary`);
     const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, { id: input.deal.id });
     const body = buildNormalizedRfpRequestBody({ deal: rfpPayloadDeal, sourceEventId: "" });
     const addr = body.deal.address;
@@ -305,7 +310,10 @@ export async function enqueueRfpVoteInvitation(input: {
       description: body.deal.description,
       dueDate: body.deal.dueDate,
     };
+    await input.tenantDb.execute(sql`RELEASE SAVEPOINT rfp_vote_summary`);
   } catch {
+    // Roll back only the summary work; the outer tenant txn stays usable so the invitation still enqueues.
+    await input.tenantDb.execute(sql`ROLLBACK TO SAVEPOINT rfp_vote_summary`).catch(() => {});
     dealSummary = null;
   }
 

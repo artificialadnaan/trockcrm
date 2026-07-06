@@ -124,6 +124,10 @@ export function buildRfpVoteDealUpdate(
         target === "awardedAmount" ? deal.awardedAmount : target === "ddEstimate" ? deal.ddEstimate : deal.bidEstimate;
       if (next !== (existing == null ? null : Number(existing).toFixed(2))) {
         updates[target] = next;
+        // Mark the human override so the Procore / Bid Board mirror won't clobber the voter's correction on the next
+        // sync (bid_estimate has no such flag). Mirrors updateDeal's behavior for a manual amount edit.
+        if (target === "awardedAmount") updates.awardedAmountOverridden = true;
+        else if (target === "ddEstimate") updates.ddEstimateOverridden = true;
       }
     }
   }
@@ -187,9 +191,17 @@ export function buildRfpVoteDealUpdate(
   if (has(fields, "bid_due_date")) {
     const raw = trimmed(fields.bid_due_date);
     if (raw.length > 0) {
-      const iso = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T00:00:00.000Z` : raw;
-      const parsed = new Date(iso);
-      if (!Number.isFinite(parsed.getTime())) invalid("Bid due date must be a valid date (YYYY-MM-DD).");
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+      if (!m) invalid("Bid due date must be a valid date (YYYY-MM-DD).");
+      const y = Number(m![1]);
+      const mo = Number(m![2]);
+      const d = Number(m![3]);
+      const parsed = new Date(Date.UTC(y, mo - 1, d));
+      // Reject IMPOSSIBLE calendar dates: JS would roll 2026-02-31 forward to Mar 3 and quietly save a different
+      // date. Require the round-trip to match the input (mirrors the normal deal-date path).
+      if (parsed.getUTCFullYear() !== y || parsed.getUTCMonth() !== mo - 1 || parsed.getUTCDate() !== d) {
+        invalid("Bid due date is not a real calendar date.");
+      }
       const existing = deal.bidDueDate instanceof Date ? deal.bidDueDate.getTime() : deal.bidDueDate ? new Date(deal.bidDueDate).getTime() : null;
       if (parsed.getTime() !== existing) updates.bidDueDate = parsed;
     }

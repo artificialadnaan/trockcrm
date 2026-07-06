@@ -112,6 +112,30 @@ describe("buildRfpVoteDealUpdate", () => {
     expect(u.propertyCity).toBeUndefined();
   });
 
+  it("rejects an impossible/malformed bid due date (does not silently roll it forward)", () => {
+    expectThrowCode(() => buildRfpVoteDealUpdate({ bid_due_date: "2026-02-31" }, baseDeal), "RFP_VOTE_EDIT_INVALID");
+    expectThrowCode(() => buildRfpVoteDealUpdate({ bid_due_date: "2026-13-01" }, baseDeal), "RFP_VOTE_EDIT_INVALID");
+    expectThrowCode(() => buildRfpVoteDealUpdate({ bid_due_date: "06/01/2026" }, baseDeal), "RFP_VOTE_EDIT_INVALID");
+  });
+
+  it("accepts a real bid due date as UTC midnight", () => {
+    const u = buildRfpVoteDealUpdate({ bid_due_date: "2026-08-15" }, baseDeal);
+    expect((u.bidDueDate as Date).toISOString()).toBe("2026-08-15T00:00:00.000Z");
+  });
+
+  it("marks the override flag when the amount lands on awarded_amount or dd_estimate (not bid_estimate)", () => {
+    const ua = buildRfpVoteDealUpdate({ amount: "250000" }, { ...baseDeal, awardedAmount: "200000.00" });
+    expect(ua.awardedAmount).toBe("250000.00");
+    expect(ua.awardedAmountOverridden).toBe(true);
+    const ud = buildRfpVoteDealUpdate({ amount: "90000" }, { ...baseDeal, bidEstimate: null, ddEstimate: "80000.00" });
+    expect(ud.ddEstimate).toBe("90000.00");
+    expect(ud.ddEstimateOverridden).toBe(true);
+    const ub = buildRfpVoteDealUpdate({ amount: "250000" }, baseDeal); // awarded null → bid_estimate, no flag
+    expect(ub.bidEstimate).toBe("250000.00");
+    expect("awardedAmountOverridden" in ub).toBe(false);
+    expect("ddEstimateOverridden" in ub).toBe(false);
+  });
+
   it("never writes company/contact/notes or unknown keys (read-only context)", () => {
     const u = buildRfpVoteDealUpdate(
       { company_name: "New Co", client_email: "a@b.com", client_phone: "555", notes: "n", bogus: "z" },

@@ -70,6 +70,18 @@ export function initFormFromDeal(deal: DealFieldsForForm): VoteFormFields {
   };
 }
 
+/** Only the fields the voter ACTUALLY changed from the initial pre-fill (SyncHub-style keys), or null if none. The
+ *  form always renders the full field set, but sending only changed fields prevents a stale page (opened before
+ *  another voter's first approval) from submitting the whole old form and getting a spurious RFP_VOTE_ALREADY_LOCKED
+ *  — an untouched approve then carries no edits and records a plain vote. */
+export function diffEditedFields(current: VoteFormFields, initial: VoteFormFields): RfpVoteEditableFields | null {
+  const changed: RfpVoteEditableFields = {};
+  (Object.keys(current) as (keyof VoteFormFields)[]).forEach((key) => {
+    if (current[key] !== initial[key]) changed[key] = current[key];
+  });
+  return Object.keys(changed).length > 0 ? changed : null;
+}
+
 export function toEditedFields(f: VoteFormFields): RfpVoteEditableFields {
   return {
     dealname: f.dealname,

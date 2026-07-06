@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   currentTypeCode,
+  diffEditedFields,
   initFormFromDeal,
   labelForTypeCode,
   rewriteProjectNumberType,
@@ -93,5 +94,17 @@ describe("labelForTypeCode", () => {
   it("maps a code to its label", () => {
     expect(labelForTypeCode("4")).toBe("Service");
     expect(labelForTypeCode("")).toBe("—");
+  });
+});
+
+describe("diffEditedFields", () => {
+  it("returns null when nothing changed from the initial pre-fill (untouched approve sends no edits)", () => {
+    const initial = initFormFromDeal(deal);
+    expect(diffEditedFields({ ...initial }, initial)).toBeNull();
+  });
+  it("returns ONLY the fields the voter changed", () => {
+    const initial = initFormFromDeal(deal);
+    const changed = { ...initial, dealname: "New Name", amount: "999" };
+    expect(diffEditedFields(changed, initial)).toEqual({ dealname: "New Name", amount: "999" });
   });
 });

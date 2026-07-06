@@ -63,6 +63,12 @@ async function setup() {
       created_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT rfp_votes_deal_round_voter_uq UNIQUE (deal_id, round_event_id, voter_user_id)
     );
+    CREATE TABLE deal_history (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, field_name text NOT NULL,
+      old_value text, new_value text, changed_by uuid NOT NULL, source text, reason text,
+      changed_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX deals_pn_uq ON deals (project_number) WHERE project_number IS NOT NULL;
   `);
   await db.query(
     `INSERT INTO deals (id, name, deal_number, stage_id, workflow_route, rfp_approval_status, rfp_approval_request_event_id)
@@ -381,6 +387,68 @@ describe("castRfpVote — edited fields (first-YES commits + locks)", () => {
     const lead = (await pg!.query(`SELECT bid_due_date FROM leads WHERE id=$1`, [LEAD])).rows[0] as any;
     expect(new Date(deal.bid_due_date).toISOString().slice(0, 10)).toBe("2026-08-15");
     expect(new Date(lead.bid_due_date).toISOString().slice(0, 10)).toBe("2026-08-15");
+  });
+
+  it("records a description-history row when the first approver edits the description", async () => {
+    pg = await setupWithNumber();
+    await pg.query(`UPDATE deals SET description='old scope' WHERE id=$1`, [DEAL]);
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { description: "corrected scope" },
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    const rows = (await pg!.query(`SELECT field_name, old_value, new_value, changed_by, source FROM deal_history WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ field_name: "description", old_value: "old scope", new_value: "corrected scope", changed_by: V1, source: "rfp_vote_edit" });
+  });
+
+  it("translates a colliding project number (23505) into a clean 409, not a 500", async () => {
+    pg = await setupWithNumber();
+    // Another deal already owns ATL-3-10025-aa.
+    await pg.query(
+      `INSERT INTO deals (id, name, deal_number, project_number, stage_id, workflow_route, is_active)
+       VALUES ('00000000-0000-0000-0000-0000000000c9', 'other', 'TR-9', 'ATL-3-10025-aa', '00000000-0000-0000-0000-0000000000aa', 'normal', true)`,
+    );
+    const tdb: any = drizzle(pg as any);
+    await expect(
+      castRfpVote(
+        {
+          tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+          decision: "approve", reason: null, editedFields: { project_number: "ATL-3-10025-aa" },
+        },
+        { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })) },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_VOTE_PROJECT_NUMBER_TAKEN" });
+  });
+
+  it("[finding D] diffs a later voter's edits against the LOCKED row, not a stale snapshot (identical edit = no-op)", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    const enqueueBidBoardCreate = vi.fn(async () => ({ jobId: 1 }));
+    const enqueueOutcome = vi.fn(async () => ({ jobId: 9 }));
+    // Voter A commits an edit (name → "Committed Name") on the first approve.
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { dealname: "Committed Name" },
+      },
+      { enqueueBidBoardCreate, enqueueOutcome },
+    );
+    // Voter B's stale page submits the SAME value A already committed. Because the diff is against the fresh locked
+    // row (which now has "Committed Name"), B's edit is a no-op → NOT locked → records the deciding approve.
+    const r2 = await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V2, email: "james@x.com" },
+        decision: "approve", reason: null, editedFields: { dealname: "Committed Name" },
+      },
+      { enqueueBidBoardCreate, enqueueOutcome },
+    );
+    expect(r2.outcome).toBe("approved");
+    const votes = (await pg!.query(`SELECT voter_user_id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(2);
   });
 
   it("rejects edits accompanying a REJECT vote (400 RFP_VOTE_EDIT_ON_REJECT)", async () => {

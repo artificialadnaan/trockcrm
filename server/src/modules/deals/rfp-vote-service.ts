@@ -16,6 +16,7 @@ import type { RawAuditFieldChange } from "../audit/field-formatters.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { applyRfpDeclineToDeal } from "./rfp-decline-service.js";
+import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { buildRfpVoteDealUpdate, writeRfpVoteDealUpdate, type RfpVoteEditableFields } from "./rfp-vote-edits.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, enqueueRfpVoteOutcome } from "./rfp-enqueue.js";
 
@@ -351,8 +352,14 @@ export async function castRfpVote(
   // rfp_bidboard_create for a deal the bid-board-created callback can't reconcile (its findDeal filters
   // is_active=true), so validate the locked row before recording the vote. The decided-round case is left to
   // priorState below (so it still returns the specific RFP_ROUND_DECIDED).
+  // Read the guard columns AND the editable columns under the lock — the edit diff (below) must be computed against
+  // the FRESH row, not the route's pre-lock snapshot, so a stale client resubmitting values another voter already
+  // committed is seen as a no-op instead of a spurious RFP_VOTE_ALREADY_LOCKED.
   const lockedRes: any = await args.tenantDb.execute(
-    sql`SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_approval_request_event_id
+    sql`SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_approval_request_event_id,
+               name, deal_number, project_number, project_type, bid_estimate, awarded_amount, dd_estimate,
+               estimator, description, bid_due_date, source_lead_id,
+               property_address, property_city, property_state, property_zip, property_country
           FROM deals WHERE id = ${args.deal.id} FOR UPDATE`
   );
   const lockedRows = Array.isArray(lockedRes) ? lockedRes : lockedRes.rows ?? [];
@@ -401,7 +408,24 @@ export async function castRfpVote(
     // Only a genuine change locks the round + commits: an all-no-op edit set (a stale/untouched client resubmitting
     // the deal's CURRENT values — the client always posts the full field map) falls through and records a plain
     // vote, so a late deciding approve is NOT bounced with RFP_VOTE_ALREADY_LOCKED for having changed nothing.
-    const dealUpdate = buildRfpVoteDealUpdate(editedFields, args.deal);
+    // Diff against the FRESH locked row (not args.deal, the route's pre-lock snapshot).
+    const lockedDeal = {
+      name: locked.name,
+      projectNumber: locked.project_number,
+      projectType: locked.project_type,
+      bidEstimate: locked.bid_estimate,
+      awardedAmount: locked.awarded_amount,
+      ddEstimate: locked.dd_estimate,
+      estimator: locked.estimator,
+      description: locked.description,
+      bidDueDate: locked.bid_due_date,
+      propertyAddress: locked.property_address,
+      propertyCity: locked.property_city,
+      propertyState: locked.property_state,
+      propertyZip: locked.property_zip,
+      propertyCountry: locked.property_country,
+    };
+    const dealUpdate = buildRfpVoteDealUpdate(editedFields, lockedDeal);
     if (Object.keys(dealUpdate).length > 0) {
       if (priorState.approvals > 0) {
         throw new AppError(
@@ -410,13 +434,33 @@ export async function castRfpVote(
           "RFP_VOTE_ALREADY_LOCKED",
         );
       }
-      await writeRfpVoteDealUpdate(args.tenantDb, args.deal.id, dealUpdate);
+      try {
+        await writeRfpVoteDealUpdate(args.tenantDb, args.deal.id, dealUpdate);
+      } catch (err) {
+        // A voter-entered project number that collides with another non-change-order deal hits
+        // deals_project_number_uidx — translate the 23505 into a clean 409 instead of an opaque 500.
+        if (isUniqueViolation(err)) {
+          throw new AppError(409, "That project number is already used by another deal.", "RFP_VOTE_PROJECT_NUMBER_TAKEN");
+        }
+        throw err;
+      }
+      // Dedicated description change-log (the detail description-history panel reads deal_history rows, which the
+      // raw write above does not touch) — only when the description actually changed.
+      if (dealUpdate.description !== undefined) {
+        await recordDescriptionHistoryChange(args.tenantDb, {
+          dealId: args.deal.id,
+          oldDescription: lockedDeal.description,
+          newDescription: dealUpdate.description as string,
+          changedBy: args.voter.userId,
+          source: "rfp_vote_edit",
+        });
+      }
       // getDealDetail resolves bid_due_date LEAD-FIRST for a converted deal, but the create payload reads it
       // deal-first — so for a source-lead deal also sync the lead's bid_due_date, else the committed date reaches the
       // create payload but the locked/read-only form + detail keep showing the lead's OLD date to remaining voters.
-      if (dealUpdate.bidDueDate !== undefined && args.deal.sourceLeadId) {
+      if (dealUpdate.bidDueDate !== undefined && locked.source_lead_id) {
         const ymd = (dealUpdate.bidDueDate as Date).toISOString().slice(0, 10);
-        await args.tenantDb.update(leads).set({ bidDueDate: ymd }).where(eq(leads.id, args.deal.sourceLeadId));
+        await args.tenantDb.update(leads).set({ bidDueDate: ymd }).where(eq(leads.id, locked.source_lead_id as string));
       }
       // Forensic trail: this authorized write bypasses updateDeal's activity log, so record the field changes here
       // (mirrors updateDeal's logActivity). Audit context is threaded from the route; absent in direct-service tests,
@@ -424,7 +468,7 @@ export async function castRfpVote(
       if (args.editAudit) {
         const fieldChanges: Record<string, RawAuditFieldChange> = {};
         for (const [field, to] of Object.entries(dealUpdate)) {
-          fieldChanges[field] = { from: (args.deal as Record<string, unknown>)[field] ?? null, to: to ?? null };
+          fieldChanges[field] = { from: (lockedDeal as Record<string, unknown>)[field] ?? null, to: to ?? null };
         }
         await logActivity({
           tenantDb: args.tenantDb,
@@ -434,8 +478,8 @@ export async function castRfpVote(
             tableName: "deals",
             entityType: "deal",
             recordId: args.deal.id,
-            nameSnapshot: args.deal.name,
-            secondaryIdSnapshot: args.deal.projectNumber ?? args.deal.dealNumber ?? null,
+            nameSnapshot: lockedDeal.name,
+            secondaryIdSnapshot: lockedDeal.projectNumber ?? (locked.deal_number as string | null) ?? null,
           },
           fieldChanges,
           metadata: { source: "rfp_vote_edit", roundEventId },

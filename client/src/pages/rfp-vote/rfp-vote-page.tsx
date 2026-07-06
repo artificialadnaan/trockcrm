@@ -8,11 +8,11 @@ import { useSalesReps } from "@/hooks/use-sales-reps";
 import {
   type VoteFormFields,
   currentTypeCode,
+  diffEditedFields,
   formatMoney,
   initFormFromDeal,
   labelForTypeCode,
   rewriteProjectNumberType,
-  toEditedFields,
 } from "./rfp-vote-form";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -179,7 +179,7 @@ export function RfpVotePage() {
     if (!dealId || decision === null || !deal) return;
     setSubmitting(true);
     try {
-      const editedFields = decision === "approve" && canEditFields ? toEditedFields(f) : null;
+      const editedFields = decision === "approve" && canEditFields ? diffEditedFields(f, initFormFromDeal(deal)) : null;
       const result = await castRfpVote(dealId, {
         decision,
         reason: decision === "reject" ? reason.trim() : null,
