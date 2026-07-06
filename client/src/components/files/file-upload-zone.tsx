@@ -2,12 +2,15 @@ import { useState, useCallback, useRef } from "react";
 import { Upload, X, FileIcon, CheckCircle, AlertCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { uploadFile } from "@/hooks/use-files";
+import type { FolderNode } from "@/hooks/use-files";
 import {
   ALLOWED_EXTENSIONS,
   MAX_FILE_SIZE_MB,
   MAX_FILE_SIZE_BYTES,
   getFileExtension,
   deriveUploadDisplayName,
+  getCategoryLabel,
+  resolveFolderUploadTarget,
 } from "@/lib/file-utils";
 import type { FileCategory } from "@/lib/file-utils";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,6 +21,8 @@ interface FileUploadZoneProps {
   /** A real category is sent as the user's explicit choice; "auto" lets the server infer the type. */
   category: FileCategory | "auto";
   subcategory?: string;
+  /** When provided, renders a folder picker whose choice overrides category/subcategory per upload. */
+  folders?: FolderNode[];
   dealId?: string;
   leadId?: string;
   contactId?: string;
@@ -39,6 +44,7 @@ interface UploadState {
 export function FileUploadZone({
   category,
   subcategory,
+  folders,
   dealId,
   leadId,
   contactId,
@@ -52,12 +58,26 @@ export function FileUploadZone({
   const [description, setDescription] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Folder picker selection (independent of the sidebar). "" = use the category/subcategory props
+  // (which the parent derives from the selected sidebar folder). A real value is a FolderNode.path or a
+  // subfolder path and OVERRIDES the upload's category/subcategory.
+  const [pickedFolder, setPickedFolder] = useState("");
+  const picked = folders ? resolveFolderUploadTarget(folders, pickedFolder) : null;
+  const effectiveCategory: FileCategory | "auto" = picked ? picked.category : category;
+  const effectiveSubcategory = picked ? picked.subcategory : subcategory;
+  // Honest default-option label: when the parent inherited a real category from the sidebar folder,
+  // the no-override upload files under THAT category — so say so rather than "Auto-detect".
+  const defaultPickLabel =
+    category === "auto"
+      ? "Auto-detect"
+      : `Current type: ${getCategoryLabel(category)}${subcategory ? ` / ${subcategory}` : ""}`;
+
   // Resolve the category the SERVER will use for THIS file, so the preview is honest: an "auto" image is
   // inferred as photo; an "auto" non-image is treated like every non-photo. For a real dropped photo the
   // filename is never synthetic, so deriveUploadDisplayName returns its ext-stripped real name (== what is
   // saved).
   const resolvePreviewCategory = (file: File): FileCategory => {
-    if (category !== "auto") return category;
+    if (effectiveCategory !== "auto") return effectiveCategory;
     const ext = getFileExtension(file.name);
     const isImage = file.type.startsWith("image/") || IMAGE_EXTENSIONS.has(ext);
     return isImage ? "photo" : "other";
@@ -75,7 +95,7 @@ export function FileUploadZone({
     if (file.size === 0) {
       return "File is empty.";
     }
-    if (category === "photo" && !file.type.startsWith("image/") && !IMAGE_EXTENSIONS.has(ext)) {
+    if (effectiveCategory === "photo" && !file.type.startsWith("image/") && !IMAGE_EXTENSIONS.has(ext)) {
       return "Photos must be image files.";
     }
     return null;
@@ -124,8 +144,8 @@ export function FileUploadZone({
         try {
           await uploadFile({
             file,
-            category,
-            subcategory,
+            category: effectiveCategory,
+            subcategory: effectiveSubcategory,
             dealId,
             leadId,
             contactId,
@@ -169,7 +189,7 @@ export function FileUploadZone({
         setDescription(""); // description is per-batch; don't leak it onto a later unrelated drop
       }
     },
-    [category, subcategory, dealId, leadId, contactId, tags, onUploadComplete, dealNumber, description]
+    [effectiveCategory, effectiveSubcategory, dealId, leadId, contactId, tags, onUploadComplete, dealNumber, description]
   );
 
   const handleDrop = useCallback(
@@ -211,6 +231,40 @@ export function FileUploadZone({
         />
       </div>
 
+      {/* Folder picker — independent of the sidebar selection. "All Files" is NOT a valid target;
+          the default option (value "") files under the inherited sidebar category / auto-detect. A
+          folder WITH subfolders renders as an <optgroup>; a leaf folder renders as a bare <option>
+          (avoids a redundant single-child group header for the majority of folders). */}
+      {folders && folders.length > 0 && (
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+          Save to folder
+          <select
+            data-testid="upload-folder-picker"
+            className="h-8 rounded-md border bg-background px-2 text-sm text-foreground"
+            value={pickedFolder}
+            onChange={(e) => setPickedFolder(e.target.value)}
+          >
+            <option value="">{defaultPickLabel}</option>
+            {folders.map((folder) =>
+              folder.subfolders.length > 0 ? (
+                <optgroup key={folder.path} label={folder.name}>
+                  <option value={folder.path}>{folder.name}</option>
+                  {folder.subfolders.map((sub) => (
+                    <option key={sub.path} value={sub.path}>
+                      {folder.name} / {sub.name}
+                    </option>
+                  ))}
+                </optgroup>
+              ) : (
+                <option key={folder.path} value={folder.path}>
+                  {folder.name}
+                </option>
+              )
+            )}
+          </select>
+        </label>
+      )}
+
       {/* Drop Zone */}
       <div
         className={`border-2 border-dashed rounded-lg transition-colors cursor-pointer ${
@@ -242,7 +296,7 @@ export function FileUploadZone({
           multiple
           className="hidden"
           onChange={(e) => e.target.files && handleFiles(e.target.files)}
-          accept={Array.from(category === "photo" ? IMAGE_EXTENSIONS : ALLOWED_EXTENSIONS).join(",")}
+          accept={Array.from(effectiveCategory === "photo" ? IMAGE_EXTENSIONS : ALLOWED_EXTENSIONS).join(",")}
         />
       </div>
 
