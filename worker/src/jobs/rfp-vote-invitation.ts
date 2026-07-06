@@ -2,23 +2,10 @@ import { pool } from "../db.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
 import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
-import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
+import { resolveDealDisplayNumber, type RfpVoteInvitationDealSummary } from "@trock-crm/shared/types";
 import { escapeHtml, normalizeText } from "../lib/email-format.js";
 
 export const RFP_VOTE_INVITATION_JOB = "rfp_vote_invitation";
-
-/** SyncHub-style project context snapshotted into the invitation payload at round-open (best-effort). */
-export interface RfpVoteInvitationDealSummary {
-  projectTypeLabel?: string | null;
-  projectNumber?: string | null; // FORMATTED (canonical) — never the raw HubSpot id
-  amount?: number | null;
-  companyName?: string | null;
-  location?: string | null;
-  estimator?: string | null;
-  ownerName?: string | null;
-  description?: string | null;
-  dueDate?: string | null; // ISO
-}
 
 interface RfpVoteInvitationPayload {
   dealId?: string;

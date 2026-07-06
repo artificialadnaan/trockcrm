@@ -4,7 +4,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, files, jobQueue, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
-import { PROJECT_TYPE_OPTIONS, resolveDealDisplayNumber } from "@trock-crm/shared/types";
+import { PROJECT_TYPE_OPTIONS, resolveDealDisplayNumber, type RfpVoteInvitationDealSummary } from "@trock-crm/shared/types";
 import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
 import {
   generateDownloadUrl,
@@ -284,17 +284,7 @@ export async function enqueueRfpVoteInvitation(input: {
   // Best-effort SyncHub-style project context for the invitation email (reuses the tested payload builder so the
   // number/type/amount/owner/company/location match the create payload). A failure here must NEVER block opening
   // the round — the email degrades to the minimal deal-name + project-number layout.
-  let dealSummary: {
-    projectTypeLabel: string | null;
-    projectNumber: string | null;
-    amount: number | null;
-    companyName: string | null;
-    location: string | null;
-    estimator: string | null;
-    ownerName: string | null;
-    description: string | null;
-    dueDate: string | null;
-  } | null = null;
+  let dealSummary: RfpVoteInvitationDealSummary | null = null;
   try {
     const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, { id: input.deal.id });
     const body = buildNormalizedRfpRequestBody({ deal: rfpPayloadDeal, sourceEventId: "" });

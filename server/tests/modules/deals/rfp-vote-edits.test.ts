@@ -7,6 +7,7 @@ const baseDeal = {
   projectType: "interior renovation",
   bidEstimate: "100000.00",
   awardedAmount: null,
+  ddEstimate: null,
   estimator: "Old Estimator",
   description: "old desc",
   bidDueDate: new Date("2026-06-01T00:00:00.000Z"),
@@ -72,8 +73,43 @@ describe("buildRfpVoteDealUpdate", () => {
     expect(u.projectType).toBe("roofing");
   });
 
-  it("blocks changing the project type to Service (code 4)", () => {
+  it("blocks changing a non-service deal INTO Service (code 4)", () => {
     expectThrowCode(() => buildRfpVoteDealUpdate({ project_types: "4" }, baseDeal), "RFP_VOTE_SERVICE_TYPE_BLOCKED");
+  });
+
+  it("allows an UNCHANGED Service value (already-service open round) without blocking or writing", () => {
+    const serviceDeal = { ...baseDeal, projectType: "service", projectNumber: "DFW-4-31825-aa" };
+    const u = buildRfpVoteDealUpdate({ project_types: "4" }, serviceDeal); // unchanged — must not block or write
+    expect(u.projectType).toBeUndefined();
+    expect("projectTypeId" in u).toBe(false);
+  });
+
+  it("nulls project_type_id on a real type change (keeps the canonical FK from showing the stale type)", () => {
+    const u = buildRfpVoteDealUpdate({ project_types: "3" }, baseDeal); // interior renovation → roofing
+    expect(u.projectType).toBe("roofing");
+    expect(u.projectTypeId).toBeNull();
+  });
+
+  it("does not touch project_type_id when the type is unchanged", () => {
+    const u = buildRfpVoteDealUpdate({ project_types: "2" }, baseDeal); // baseDeal is already interior renovation (2)
+    expect(u.projectType).toBeUndefined();
+    expect("projectTypeId" in u).toBe(false);
+  });
+
+  it("targets dd_estimate when it is the winning column (bid null) — untouched approve is a no-op, no silent copy", () => {
+    const ddDeal = { ...baseDeal, bidEstimate: null, ddEstimate: "80000.00" };
+    expect(buildRfpVoteDealUpdate({ amount: "90000" }, ddDeal).ddEstimate).toBe("90000.00");
+    expect(buildRfpVoteDealUpdate({ amount: "90000" }, ddDeal).bidEstimate).toBeUndefined();
+    expect(buildRfpVoteDealUpdate({ amount: "80000" }, ddDeal)).toEqual({}); // unchanged dd → no write
+  });
+
+  it("ignores non-primitive field values instead of coercing them to a string", () => {
+    const u = buildRfpVoteDealUpdate(
+      { dealname: { evil: true } as unknown, city: [1, 2] as unknown },
+      baseDeal,
+    );
+    expect(u.name).toBeUndefined();
+    expect(u.propertyCity).toBeUndefined();
   });
 
   it("never writes company/contact/notes or unknown keys (read-only context)", () => {

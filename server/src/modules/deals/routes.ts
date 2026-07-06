@@ -1784,6 +1784,7 @@ router.post("/:id/rfp-vote", async (req, res, next) => {
       decision: req.body?.decision,
       reason: req.body?.reason,
       editedFields: req.body?.editedFields,
+      editAudit: buildRouteAuditContext(req),
       officeId,
       votingEnabled: isRfpVotingEnabled(),
     });

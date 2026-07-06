@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { PoolClient } from "pg";
-import { deals, rfpVotes, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, leads, rfpVotes, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   computeRfpVoteState,
@@ -11,6 +11,8 @@ import {
 } from "@trock-crm/shared/lib/rfpVoteState";
 import { isRfpVoterEmail, resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { AppError } from "../../middleware/error-handler.js";
+import { logActivity, type AuditContext } from "../audit/audit-logger.js";
+import type { RawAuditFieldChange } from "../audit/field-formatters.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { applyRfpDeclineToDeal } from "./rfp-decline-service.js";
@@ -130,6 +132,8 @@ export async function authorizeAndCastRfpVote(
     // the deal (and the deal locks); on a later vote they are rejected (RFP_VOTE_ALREADY_LOCKED); on a reject they
     // are rejected (RFP_VOTE_EDIT_ON_REJECT). See rfp-vote-edits.ts for the writable-field allowlist.
     editedFields?: unknown;
+    // Audit context for logging first-YES edit field changes (threaded from the route; omit in tests → no log).
+    editAudit?: AuditContext;
     officeId: string | null;
     votingEnabled: boolean;
     env?: NodeJS.ProcessEnv;
@@ -204,6 +208,7 @@ export async function authorizeAndCastRfpVote(
       decision,
       reason: decision === "reject" ? rawReason : null,
       editedFields: decision === "approve" ? editedFields : null,
+      editAudit: input.editAudit,
     },
     deps,
   );
@@ -325,6 +330,7 @@ export async function castRfpVote(
     decision: "approve" | "reject";
     reason: string | null;
     editedFields?: RfpVoteEditableFields | null;
+    editAudit?: AuditContext;
   },
   deps: CastRfpVoteDeps = {},
 ): Promise<{ outcome: RfpVoteOutcome; votes: RfpVoteRecord[] }> {
@@ -381,11 +387,11 @@ export async function castRfpVote(
   }
 
   // First-YES commits the voter's edits + locks the deal. Under the FOR UPDATE lock above, exactly one concurrent
-  // approve sees priorState.approvals === 0, so exactly one applies edits (race-free). The edited deal is then what
-  // the DECIDING approve's loadRfpPayloadDeal re-reads into the Bid Board create payload (DB-authoritative). A LATER
-  // voter that still submits edits is 409'd (the round is locked once any approve exists); the client renders the
-  // committed values read-only. applyRfpVoteEdits throws RFP_VOTE_SERVICE_TYPE_BLOCKED / RFP_VOTE_EDIT_INVALID for a
-  // blocked or malformed edit, rolling back the whole vote (nothing recorded) so the voter can resubmit.
+  // approve sees priorState.approvals === 0, so exactly one commits (race-free). The edited deal is then what the
+  // DECIDING approve's loadRfpPayloadDeal re-reads into the Bid Board create payload (DB-authoritative). A LATER
+  // voter that still submits a REAL edit is 409'd (the round is locked once any approve exists); the client renders
+  // the committed values read-only. buildRfpVoteDealUpdate throws RFP_VOTE_SERVICE_TYPE_BLOCKED /
+  // RFP_VOTE_EDIT_INVALID for a blocked or malformed edit, rolling back the whole vote (nothing recorded).
   const editedFields = args.editedFields ?? null;
   if (editedFields && Object.keys(editedFields).length > 0) {
     if (args.decision !== "approve") {
@@ -405,6 +411,38 @@ export async function castRfpVote(
         );
       }
       await writeRfpVoteDealUpdate(args.tenantDb, args.deal.id, dealUpdate);
+      // getDealDetail resolves bid_due_date LEAD-FIRST for a converted deal, but the create payload reads it
+      // deal-first — so for a source-lead deal also sync the lead's bid_due_date, else the committed date reaches the
+      // create payload but the locked/read-only form + detail keep showing the lead's OLD date to remaining voters.
+      if (dealUpdate.bidDueDate !== undefined && args.deal.sourceLeadId) {
+        const ymd = (dealUpdate.bidDueDate as Date).toISOString().slice(0, 10);
+        await args.tenantDb.update(leads).set({ bidDueDate: ymd }).where(eq(leads.id, args.deal.sourceLeadId));
+      }
+      // Forensic trail: this authorized write bypasses updateDeal's activity log, so record the field changes here
+      // (mirrors updateDeal's logActivity). Audit context is threaded from the route; absent in direct-service tests,
+      // where it's skipped.
+      if (args.editAudit) {
+        const fieldChanges: Record<string, RawAuditFieldChange> = {};
+        for (const [field, to] of Object.entries(dealUpdate)) {
+          fieldChanges[field] = { from: (args.deal as Record<string, unknown>)[field] ?? null, to: to ?? null };
+        }
+        await logActivity({
+          tenantDb: args.tenantDb,
+          actor: args.editAudit.actor,
+          action: "update",
+          entity: {
+            tableName: "deals",
+            entityType: "deal",
+            recordId: args.deal.id,
+            nameSnapshot: args.deal.name,
+            secondaryIdSnapshot: args.deal.projectNumber ?? args.deal.dealNumber ?? null,
+          },
+          fieldChanges,
+          metadata: { source: "rfp_vote_edit", roundEventId },
+          ipAddress: args.editAudit.ipAddress ?? null,
+          userAgent: args.editAudit.userAgent ?? null,
+        });
+      }
     }
   }
 

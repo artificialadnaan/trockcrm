@@ -7,6 +7,7 @@ import { castRfpVote, useRfpVote } from "@/hooks/use-rfp-vote";
 import { useSalesReps } from "@/hooks/use-sales-reps";
 import {
   type VoteFormFields,
+  currentTypeCode,
   formatMoney,
   initFormFromDeal,
   labelForTypeCode,
@@ -164,8 +165,11 @@ export function RfpVotePage() {
   const locked = voteState.approvals >= 1;
   const canEditFields = roundOpen && !locked && !alreadyVoted && !decided && !voted;
   const fieldsEditable = canEditFields && decision !== "reject";
-  const serviceSelected = f.project_types === SERVICE_CODE;
-  const blockApproveForService = decision === "approve" && canEditFields && serviceSelected;
+  // Block only CHANGING to Service. An already-Service open round (admin-reclassified mid-round; the server keeps
+  // it votable) starts with project_types "4", so approving it UNCHANGED must not be blocked.
+  const serviceChangeBlocked =
+    f.project_types === SERVICE_CODE && currentTypeCode(deal) !== SERVICE_CODE;
+  const blockApproveForService = decision === "approve" && canEditFields && serviceChangeBlocked;
 
   const rejectNeedsReason = decision === "reject" && reason.trim().length === 0;
   const canSubmit =
@@ -297,7 +301,7 @@ export function RfpVotePage() {
                   <Label htmlFor="v-desc">Description</Label>
                   <Textarea id="v-desc" rows={3} value={f.description} onChange={(e) => update("description", e.target.value)} />
                 </div>
-                {serviceSelected ? (
+                {serviceChangeBlocked ? (
                   <p className="sm:col-span-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
                     Changing this to a Service RFP isn't allowed here. Cancel this RFP and re-trigger it through the
                     service flow instead.

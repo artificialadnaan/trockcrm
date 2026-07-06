@@ -39,11 +39,13 @@ async function setup() {
     );
     CREATE TABLE public.offices (id uuid PRIMARY KEY, slug text NOT NULL, is_active boolean NOT NULL DEFAULT true);
     INSERT INTO public.offices (id, slug) VALUES ('00000000-0000-0000-0000-0000000000ff', 'test');
+    CREATE TABLE leads (id uuid PRIMARY KEY, bid_due_date date);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text NOT NULL, deal_number text NOT NULL, project_number text,
-      bid_estimate numeric(14,2), estimator text, description text, bid_due_date timestamptz,
+      bid_estimate numeric(14,2), awarded_amount numeric(14,2), dd_estimate numeric(14,2),
+      estimator text, description text, bid_due_date timestamptz, source_lead_id uuid,
       property_address text, property_city text, property_state text, property_zip text, property_country text,
-      stage_id uuid, project_type text, workflow_route text NOT NULL DEFAULT 'normal',
+      stage_id uuid, project_type text, project_type_id uuid, workflow_route text NOT NULL DEFAULT 'normal',
       is_bid_board_owned boolean NOT NULL DEFAULT false, bid_board_stage_slug text,
       is_read_only_mirror boolean NOT NULL DEFAULT false, read_only_synced_at timestamptz,
       bid_board_stage_entered_at timestamptz, bid_board_mirror_source_entered_at timestamptz,
@@ -272,7 +274,8 @@ describe("castRfpVote — edited fields (first-YES commits + locks)", () => {
     return db;
   }
   // The in-memory args.deal baseline the apply diffs against (must match the DB row's current values).
-  const editDeal = () => dealRow({ projectNumber: "DFW-2-31825-aa", projectType: "interior renovation" });
+  const editDeal = (overrides: Record<string, unknown> = {}) =>
+    dealRow({ projectNumber: "DFW-2-31825-aa", projectType: "interior renovation", ...overrides });
 
   it("first approve WITH edits commits them (name, project-number type digit, project type, amount->bid_estimate)", async () => {
     pg = await setupWithNumber();
@@ -358,6 +361,26 @@ describe("castRfpVote — edited fields (first-YES commits + locks)", () => {
     const votes = (await pg!.query(`SELECT voter_user_id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
     expect(votes).toHaveLength(2); // both recorded — no lock bounce for a no-op edit
     expect(enqueueBidBoardCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("syncs the source lead's bid_due_date on a first-YES edit (detail resolves bid_due_date lead-first)", async () => {
+    pg = await setupWithNumber();
+    const LEAD = "00000000-0000-0000-0000-0000000000f1";
+    await pg.query(`INSERT INTO leads (id, bid_due_date) VALUES ($1, '2026-05-01')`, [LEAD]);
+    await pg.query(`UPDATE deals SET source_lead_id=$1 WHERE id=$2`, [LEAD, DEAL]);
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal({ sourceLeadId: LEAD }), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { bid_due_date: "2026-08-15" },
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    // Both the deal (create payload reads it deal-first) AND the lead (detail resolves it lead-first) get the date.
+    const deal = (await pg!.query(`SELECT bid_due_date FROM deals WHERE id=$1`, [DEAL])).rows[0] as any;
+    const lead = (await pg!.query(`SELECT bid_due_date FROM leads WHERE id=$1`, [LEAD])).rows[0] as any;
+    expect(new Date(deal.bid_due_date).toISOString().slice(0, 10)).toBe("2026-08-15");
+    expect(new Date(lead.bid_due_date).toISOString().slice(0, 10)).toBe("2026-08-15");
   });
 
   it("rejects edits accompanying a REJECT vote (400 RFP_VOTE_EDIT_ON_REJECT)", async () => {

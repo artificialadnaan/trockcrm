@@ -50,9 +50,12 @@ function has(fields: RfpVoteEditableFields, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(fields, key);
 }
 
-/** Trimmed string for a field value, or "" for null/undefined/non-string-coercible. */
+/** Trimmed string for a field value, or "" for null/undefined/non-primitive. Rejects objects/arrays instead of
+ *  coercing them ("[object Object]" / "1,2") so a raw caller can't silently save a coerced object into a text
+ *  column (name/estimator/address/city/country/description). Primitives (string/number/boolean) coerce normally. */
 function trimmed(value: unknown): string {
   if (value == null) return "";
+  if (typeof value === "object") return "";
   return String(value).trim();
 }
 
@@ -81,7 +84,7 @@ function containsControlChar(value: string): boolean {
  */
 export function buildRfpVoteDealUpdate(
   fields: RfpVoteEditableFields,
-  deal: Pick<DealRow, "name" | "projectNumber" | "projectType" | "bidEstimate" | "awardedAmount" | "estimator" | "description" | "bidDueDate" | "propertyAddress" | "propertyCity" | "propertyState" | "propertyZip" | "propertyCountry">
+  deal: Pick<DealRow, "name" | "projectNumber" | "projectType" | "bidEstimate" | "awardedAmount" | "ddEstimate" | "estimator" | "description" | "bidDueDate" | "propertyAddress" | "propertyCity" | "propertyState" | "propertyZip" | "propertyCountry">
 ): Record<string, unknown> {
   const updates: Record<string, unknown> = {};
 
@@ -106,8 +109,19 @@ export function buildRfpVoteDealUpdate(
       if (!Number.isFinite(parsed) || parsed < 0) invalid("Amount must be a non-negative number.");
       if (parsed > MAX_EDIT_AMOUNT) invalid(`Amount must not exceed ${MAX_EDIT_AMOUNT}.`);
       const next = parsed.toFixed(2); // numeric(14,2) — Drizzle takes a string
-      const target = deal.awardedAmount != null ? "awardedAmount" : "bidEstimate";
-      const existing = target === "awardedAmount" ? deal.awardedAmount : deal.bidEstimate;
+      // Target the column the payload COALESCE actually reads first (awarded → bid → dd). The form pre-fills from
+      // the SAME chain, so an untouched approve is a no-op — otherwise a dd-only deal's pre-filled amount would be
+      // silently COPIED into bid_estimate just by approving. A value-less deal defaults to bid_estimate (RFP bid).
+      const target =
+        deal.awardedAmount != null
+          ? "awardedAmount"
+          : deal.bidEstimate != null
+            ? "bidEstimate"
+            : deal.ddEstimate != null
+              ? "ddEstimate"
+              : "bidEstimate";
+      const existing =
+        target === "awardedAmount" ? deal.awardedAmount : target === "ddEstimate" ? deal.ddEstimate : deal.bidEstimate;
       if (next !== (existing == null ? null : Number(existing).toFixed(2))) {
         updates[target] = next;
       }
@@ -132,18 +146,28 @@ export function buildRfpVoteDealUpdate(
   if (has(fields, "project_types")) {
     const code = trimmed(fields.project_types);
     if (code.length > 0) {
-      if (code === SERVICE_PROJECT_TYPE_CODE) {
-        throw new AppError(
-          409,
-          "Changing this RFP to Service is not allowed here — cancel it and re-trigger it through the service flow.",
-          "RFP_VOTE_SERVICE_TYPE_BLOCKED",
-        );
-      }
       const value = PROJECT_TYPE_VALUE_BY_CODE[code];
       if (!value) invalid("Project type is not valid.");
-      if (value !== deal.projectType) updates.projectType = value;
-      // Rewrite the type digit in the (possibly edited) canonical number; fail-soft to nextNumber when the
-      // number isn't strict-canonical (legacy/HS formats keep the direct edit as-is).
+      if (value !== deal.projectType) {
+        // A REAL type change. Block changing INTO Service (option A) — but an ALREADY-service open round
+        // (admin-reclassified mid-round; the authz layer deliberately keeps it votable) submits an UNCHANGED "4"
+        // that hits the `value === deal.projectType` skip above, so it never reaches here and can't strand.
+        if (code === SERVICE_PROJECT_TYPE_CODE) {
+          throw new AppError(
+            409,
+            "Changing this RFP to Service is not allowed here — cancel it and re-trigger it through the service flow.",
+            "RFP_VOTE_SERVICE_TYPE_BLOCKED",
+          );
+        }
+        updates.projectType = value;
+        // Keep the canonical FK in sync: getDealDetail/scoping resolve the type via
+        // COALESCE(project_type_config.name, deals.project_type) joined on project_type_id, so a stale id would keep
+        // displaying/filtering the OLD configured type. Null it so those fall back to the new project_type (we can't
+        // reliably map a 1-9 code back to a project_type_config row here).
+        updates.projectTypeId = null;
+      }
+      // Always keep the number's type digit consistent with the SUBMITTED type (SyncHub parity: type wins the
+      // digit), whether or not project_type itself changed — fail-soft when the number isn't strict-canonical.
       const rewritten = buildIntendedProjectNumber(nextNumber, value);
       if (rewritten) nextNumber = rewritten;
     }
