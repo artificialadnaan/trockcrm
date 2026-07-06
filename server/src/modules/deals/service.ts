@@ -2036,6 +2036,10 @@ export async function getDealDetail(
       companyOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${companies.ownerId})`,
       primaryContactName: sql<string | null>`NULLIF(TRIM(CONCAT_WS(' ', ${contacts.firstName}, ${contacts.lastName})), '')`,
       primaryContactTitle: contacts.jobTitle,
+      // Contact email/phone for the RFP vote form's read-only contact context (the SyncHub review form shows
+      // client_email/client_phone). Not otherwise projected by the detail select.
+      primaryContactEmail: contacts.email,
+      primaryContactPhone: contacts.phone,
       primaryContactOwnerUserId: contacts.ownerId,
       primaryContactOwnerUserName: sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${contacts.ownerId})`,
       projectType: sql<string | null>`COALESCE(${projectTypeConfig.name}, ${deals.projectType})`,

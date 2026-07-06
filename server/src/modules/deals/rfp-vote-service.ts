@@ -14,6 +14,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { applyRfpDeclineToDeal } from "./rfp-decline-service.js";
+import { applyRfpVoteEdits, type RfpVoteEditableFields } from "./rfp-vote-edits.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, enqueueRfpVoteOutcome } from "./rfp-enqueue.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -125,6 +126,10 @@ export async function authorizeAndCastRfpVote(
     user: { id: string; email: string | null };
     decision: unknown;
     reason: unknown;
+    // Optional SyncHub-style edited fields (approve only). On the FIRST approve of a round they are committed to
+    // the deal (and the deal locks); on a later vote they are rejected (RFP_VOTE_ALREADY_LOCKED); on a reject they
+    // are rejected (RFP_VOTE_EDIT_ON_REJECT). See rfp-vote-edits.ts for the writable-field allowlist.
+    editedFields?: unknown;
     officeId: string | null;
     votingEnabled: boolean;
     env?: NodeJS.ProcessEnv;
@@ -139,6 +144,14 @@ export async function authorizeAndCastRfpVote(
   const rawReason = typeof input.reason === "string" ? input.reason.trim() : "";
   if (decision === "reject" && rawReason.length === 0) {
     throw new AppError(400, "A reason is required to reject an RFP.", "RFP_VOTE_REASON_REQUIRED");
+  }
+  // Normalize edited fields to a plain object (a non-object/array is ignored). Edits are an approve-only affordance.
+  const editedFields =
+    input.editedFields != null && typeof input.editedFields === "object" && !Array.isArray(input.editedFields)
+      ? (input.editedFields as RfpVoteEditableFields)
+      : null;
+  if (decision === "reject" && editedFields && Object.keys(editedFields).length > 0) {
+    throw new AppError(400, "Edits can only accompany an approve vote.", "RFP_VOTE_EDIT_ON_REJECT");
   }
   // A soft-deleted (is_active=false) deal reads as not-found: an approve would enqueue rfp_bidboard_create the
   // bid-board-created callback (findDeal filters is_active=true) could never reconcile.
@@ -190,6 +203,7 @@ export async function authorizeAndCastRfpVote(
       voter: { userId: input.user.id, email: input.user.email ?? "" },
       decision,
       reason: decision === "reject" ? rawReason : null,
+      editedFields: decision === "approve" ? editedFields : null,
     },
     deps,
   );
@@ -310,6 +324,7 @@ export async function castRfpVote(
     voter: { userId: string; email: string };
     decision: "approve" | "reject";
     reason: string | null;
+    editedFields?: RfpVoteEditableFields | null;
   },
   deps: CastRfpVoteDeps = {},
 ): Promise<{ outcome: RfpVoteOutcome; votes: RfpVoteRecord[] }> {
@@ -363,6 +378,27 @@ export async function castRfpVote(
   // (reject) no-op applyRfpDeclineToDeal while still firing the outcome.
   if (locked.rfp_approval_status !== "pending") {
     throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
+  }
+
+  // First-YES commits the voter's edits + locks the deal. Under the FOR UPDATE lock above, exactly one concurrent
+  // approve sees priorState.approvals === 0, so exactly one applies edits (race-free). The edited deal is then what
+  // the DECIDING approve's loadRfpPayloadDeal re-reads into the Bid Board create payload (DB-authoritative). A LATER
+  // voter that still submits edits is 409'd (the round is locked once any approve exists); the client renders the
+  // committed values read-only. applyRfpVoteEdits throws RFP_VOTE_SERVICE_TYPE_BLOCKED / RFP_VOTE_EDIT_INVALID for a
+  // blocked or malformed edit, rolling back the whole vote (nothing recorded) so the voter can resubmit.
+  const editedFields = args.editedFields ?? null;
+  if (editedFields && Object.keys(editedFields).length > 0) {
+    if (args.decision !== "approve") {
+      throw new AppError(400, "Edits can only accompany an approve vote.", "RFP_VOTE_EDIT_ON_REJECT");
+    }
+    if (priorState.approvals > 0) {
+      throw new AppError(
+        409,
+        "This RFP has already been confirmed by an earlier approval; its details are locked.",
+        "RFP_VOTE_ALREADY_LOCKED",
+      );
+    }
+    await applyRfpVoteEdits({ tenantDb: args.tenantDb, deal: args.deal, editedFields });
   }
 
   try {

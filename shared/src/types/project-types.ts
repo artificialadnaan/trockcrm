@@ -18,6 +18,13 @@ export const PROJECT_TYPE_CODE_BY_VALUE = Object.fromEntries(
   PROJECT_TYPE_OPTIONS.map((option) => [option.value, option.code])
 ) as Record<ProjectTypeValue, string>;
 
+/** Inverse of PROJECT_TYPE_CODE_BY_VALUE: the "1".."9" digit code → the canonical type value.
+ *  Used where a UI submits the SyncHub-style digit (e.g. the RFP vote form's project_types select)
+ *  and the CRM must persist `deals.project_type` as the value string. */
+export const PROJECT_TYPE_VALUE_BY_CODE = Object.fromEntries(
+  PROJECT_TYPE_OPTIONS.map((option) => [option.code, option.value])
+) as Record<string, ProjectTypeValue>;
+
 export function normalizeProjectType(value: string): string {
   return value.trim().toLowerCase();
 }
