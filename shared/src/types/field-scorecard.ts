@@ -1,8 +1,14 @@
 // T-Rock Construction weekly Field Scorecard — canonical scoring model.
 // Transcribed verbatim from the paper form (TRC_05_Field Scorecard). This is the single
 // source of truth for the 7 sections, their point options, the rating bands, and the
-// action-item gate; the mobile app, server, worker, and CRM web all import from here so
-// the scoring can never drift between surfaces.
+// action-item gate; the server, worker, and CRM web all import from here.
+//
+// ⚠️ MOBILE MIRROR: the TRCAM app (mobile/) is NOT an npm workspace and cannot import this
+// package, so it keeps a verbatim copy at mobile/src/scorecards/scoring.ts guarded by a
+// content-snapshot test (mobile/src/scorecards/__tests__/scoring-mirror.test.ts). If you
+// edit the sections/labels/points/bands below, update that mirror too or the mobile read
+// views will render stale labels — the mobile snapshot test only catches drift made TO the
+// mirror, not shared-side edits that forget it.
 
 export const FIELD_SCORECARD_SECTION_KEYS = [
   "planning_precon",

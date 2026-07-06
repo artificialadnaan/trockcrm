@@ -314,12 +314,17 @@ export default function ProjectDetailScreen() {
           <SectionLabel>Scorecards ({scorecards.length})</SectionLabel>
           {scorecardsQuery.isLoading ? (
             <LoadingState label="Loading scorecards…" />
+          ) : scorecardsQuery.isError ? (
+            // Don't let a load failure read as a genuinely-empty project — pull-to-refresh re-runs the query.
+            <Text style={styles.meta}>Couldn't load scorecards. Pull to refresh.</Text>
           ) : scorecards.length === 0 ? (
             <Text style={styles.meta}>No scorecards yet.</Text>
           ) : (
             scorecards.map((s) => (
               <Pressable
                 key={s.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Scorecard, week of ${formatShortDate(s.weekOf)}, ${s.totalScore} out of 100, ${s.ratingLabel}`}
                 onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
                 style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
               >

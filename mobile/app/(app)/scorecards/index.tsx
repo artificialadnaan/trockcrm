@@ -132,6 +132,8 @@ export default function ScorecardsScreen() {
             submitted.map((s: FieldScorecardSummary) => (
               <Pressable
                 key={s.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Scorecard${s.projectNumber ? ` for ${s.projectNumber}` : ""}, week of ${shortDate(s.weekOf)}, ${s.totalScore} out of 100, ${s.ratingLabel}`}
                 onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
                 style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
               >

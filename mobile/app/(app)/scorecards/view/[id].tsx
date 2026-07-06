@@ -35,6 +35,7 @@ export default function ScorecardDetailScreen() {
   );
 
   async function downloadPdf() {
+    setNotice(null); // clear any prior error so a later success doesn't leave a stale red banner
     setDownloading(true);
     try {
       const { url } = await getScorecardDownload(fetcher, id);
@@ -51,6 +52,7 @@ export default function ScorecardDetailScreen() {
   async function openPhoto(photo: FieldScorecardPhotoView) {
     // v1: open the presigned evidence photo in the system browser (Design decision #5). No-op if null.
     if (!photo.url) return;
+    setNotice(null); // clear any prior error so a successful open doesn't leave a stale banner
     try {
       await Linking.openURL(photo.url);
     } catch {
