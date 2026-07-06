@@ -104,6 +104,31 @@ export function useProjectReports(dealId: string | undefined) {
   });
 }
 
+/** Submitted scorecards for one project (the project-detail Scorecards section). Mirrors useProjectReports. */
+export function useProjectScorecards(dealId: string | undefined) {
+  const { fetcher, user } = useAuth();
+  return useQuery({
+    queryKey: qk.projectScorecards(user?.id ?? "anon", dealId ?? ""),
+    queryFn: () => api.getProjectScorecards(fetcher, dealId!),
+    enabled: !!user && !!dealId,
+  });
+}
+
+/**
+ * One submitted scorecard's full detail (items, deficiencies, action items, photos w/ presigned URLs).
+ * The endpoint resolves the owning office by scorecard id, so id-only nav works cross-office. A short
+ * staleTime + the screen's focus-refetch keep the ~60-min presigned photo/PDF URLs fresh.
+ */
+export function useScorecard(id: string | undefined) {
+  const { fetcher, user } = useAuth();
+  return useQuery({
+    queryKey: qk.scorecard(user?.id ?? "anon", id ?? ""),
+    queryFn: () => api.getScorecard(fetcher, id!),
+    enabled: !!user && !!id,
+    staleTime: 30_000,
+  });
+}
+
 export function usePendingPhotos() {
   const { fetcher, user } = useAuth();
   return useQuery({
