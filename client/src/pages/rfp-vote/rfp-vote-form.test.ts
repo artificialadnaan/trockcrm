@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   currentTypeCode,
   diffEditedFields,
+  formatMoney,
   initFormFromDeal,
   labelForTypeCode,
   rewriteProjectNumberType,
-  toEditedFields,
   type DealFieldsForForm,
 } from "./rfp-vote-form";
 
@@ -77,16 +77,28 @@ describe("rewriteProjectNumberType", () => {
   });
 });
 
-describe("toEditedFields", () => {
-  it("emits exactly the writable SyncHub keys (no company/contact/notes)", () => {
-    const f = initFormFromDeal(deal);
-    const edited = toEditedFields(f);
-    expect(Object.keys(edited).sort()).toEqual(
+describe("initFormFromDeal writable field set", () => {
+  it("exposes exactly the 12 writable SyncHub deal fields (no company/contact/notes)", () => {
+    const keys = Object.keys(initFormFromDeal(deal)).sort();
+    expect(keys).toEqual(
       ["address", "amount", "bid_due_date", "city", "country", "dealname", "description", "estimator", "project_number", "project_types", "state", "zip"].sort(),
     );
-    expect(edited).not.toHaveProperty("company_name");
-    expect(edited).not.toHaveProperty("client_email");
-    expect(edited).not.toHaveProperty("notes");
+    expect(keys).not.toContain("company_name");
+    expect(keys).not.toContain("client_email");
+    expect(keys).not.toContain("notes");
+  });
+});
+
+describe("formatMoney", () => {
+  it("always renders two decimals for currency", () => {
+    expect(formatMoney("125000")).toBe("$125,000.00");
+    expect(formatMoney("125000.5")).toBe("$125,000.50");
+    expect(formatMoney("125000.509")).toBe("$125,000.51");
+  });
+  it("renders a dash for null/empty and passes non-numeric through", () => {
+    expect(formatMoney(null)).toBe("—");
+    expect(formatMoney("")).toBe("—");
+    expect(formatMoney("N/A")).toBe("N/A");
   });
 });
 

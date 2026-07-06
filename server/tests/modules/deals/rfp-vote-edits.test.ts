@@ -84,16 +84,29 @@ describe("buildRfpVoteDealUpdate", () => {
     expect("projectTypeId" in u).toBe(false);
   });
 
-  it("nulls project_type_id on a real type change (keeps the canonical FK from showing the stale type)", () => {
+  it("records the new project_type VALUE on a real change (project_type_id is resolved later by the service)", () => {
     const u = buildRfpVoteDealUpdate({ project_types: "3" }, baseDeal); // interior renovation → roofing
     expect(u.projectType).toBe("roofing");
-    expect(u.projectTypeId).toBeNull();
+    expect("projectTypeId" in u).toBe(false); // pure fn no longer touches the FK; castRfpVote resolves the config id
   });
 
-  it("does not touch project_type_id when the type is unchanged", () => {
+  it("does not touch project_type when the type is unchanged", () => {
     const u = buildRfpVoteDealUpdate({ project_types: "2" }, baseDeal); // baseDeal is already interior renovation (2)
     expect(u.projectType).toBeUndefined();
     expect("projectTypeId" in u).toBe(false);
+  });
+
+  it("corrects a number-only edit's type digit to the deal's CURRENT type (type wins the digit)", () => {
+    // Voter edits the number to DFW-9-99999-bb but leaves the type on interior renovation (code 2) → the digit is
+    // forced back to 2 while the rest of the edit (julian/suffix) is kept: DFW-2-99999-bb.
+    const u = buildRfpVoteDealUpdate({ project_number: "DFW-9-99999-bb" }, baseDeal);
+    expect(u.projectNumber).toBe("DFW-2-99999-bb");
+    expect(u.projectType).toBeUndefined(); // type not changed
+  });
+
+  it("rejects a currency-only amount (would parse to 0)", () => {
+    expectThrowCode(() => buildRfpVoteDealUpdate({ amount: "$" }, baseDeal), "RFP_VOTE_EDIT_INVALID");
+    expectThrowCode(() => buildRfpVoteDealUpdate({ amount: ",," }, baseDeal), "RFP_VOTE_EDIT_INVALID");
   });
 
   it("targets dd_estimate when it is the winning column (bid null) — untouched approve is a no-op, no silent copy", () => {

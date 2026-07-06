@@ -434,6 +434,12 @@ export async function castRfpVote(
           "RFP_VOTE_ALREADY_LOCKED",
         );
       }
+      // Resolve the canonical project_type_config id for a changed type (mirrors updateDeal), so BOTH the deals-list
+      // `d.project_type_id` filter AND getDealDetail's COALESCE(config.name, project_type) display track the new type
+      // — instead of a stale id (old type) or a null id (deal drops out of type-filtered lists).
+      if (typeof dealUpdate.projectType === "string") {
+        dealUpdate.projectTypeId = await resolveProjectTypeConfigId(args.tenantDb, dealUpdate.projectType);
+      }
       try {
         await writeRfpVoteDealUpdate(args.tenantDb, args.deal.id, dealUpdate);
       } catch (err) {
@@ -547,6 +553,24 @@ export async function castRfpVote(
   }
 
   return { outcome: state.outcome, votes };
+}
+
+/**
+ * Resolve the public.project_type_config id for a project-type VALUE (the lowercased type name — e.g. "roofing").
+ * A vote edit that changes deals.project_type must also update project_type_id so the deals-list `d.project_type_id`
+ * filter and getDealDetail's COALESCE(config.name, project_type) display track the new type (mirrors updateDeal's
+ * applyProjectTypeChange). Best-effort: returns null when the type has no active config row — display still resolves
+ * via deals.project_type, and a null id is preferable to a STALE id pointing at the old type.
+ */
+async function resolveProjectTypeConfigId(tenantDb: TenantDb, value: string): Promise<string | null> {
+  const res: any = await tenantDb.execute(
+    sql`SELECT id FROM public.project_type_config
+          WHERE lower(name) = ${value} AND is_active = true
+          ORDER BY (parent_id IS NULL) DESC, display_order ASC NULLS LAST
+          LIMIT 1`,
+  );
+  const rows = Array.isArray(res) ? res : res.rows ?? [];
+  return (rows[0]?.id as string | null) ?? null;
 }
 
 async function loadRoundVotes(tenantDb: TenantDb, dealId: string, roundEventId: string): Promise<RfpVoteRecord[]> {

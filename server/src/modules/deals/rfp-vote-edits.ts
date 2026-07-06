@@ -105,6 +105,9 @@ export function buildRfpVoteDealUpdate(
     const raw = trimmed(fields.amount);
     if (raw.length > 0) {
       const cleaned = raw.replace(/[$,\s]/g, "");
+      // Reject a value that was ONLY currency punctuation ("$", ",,") — cleaned is now "" and Number("") is 0,
+      // which would silently write 0.00 to the deal + Bid Board payload instead of surfacing a malformed edit.
+      if (cleaned.length === 0) invalid("Amount must be a number.");
       const parsed = Number(cleaned);
       if (!Number.isFinite(parsed) || parsed < 0) invalid("Amount must be a non-negative number.");
       if (parsed > MAX_EDIT_AMOUNT) invalid(`Amount must not exceed ${MAX_EDIT_AMOUNT}.`);
@@ -147,15 +150,20 @@ export function buildRfpVoteDealUpdate(
     }
   }
 
+  // The EFFECTIVE type the number's digit must reflect: the newly-submitted type when it changed, else the deal's
+  // current type. `castRfpVote` resolves updates.projectTypeId from updates.projectType (mirrors updateDeal) so the
+  // deals-list project_type_id filter + getDealDetail's config-name display both track the new type — this pure fn
+  // only records the changed VALUE.
+  let effectiveTypeValue: string | null = deal.projectType ?? null;
   if (has(fields, "project_types")) {
     const code = trimmed(fields.project_types);
     if (code.length > 0) {
       const value = PROJECT_TYPE_VALUE_BY_CODE[code];
       if (!value) invalid("Project type is not valid.");
       if (value !== deal.projectType) {
-        // A REAL type change. Block changing INTO Service (option A) — but an ALREADY-service open round
-        // (admin-reclassified mid-round; the authz layer deliberately keeps it votable) submits an UNCHANGED "4"
-        // that hits the `value === deal.projectType` skip above, so it never reaches here and can't strand.
+        // A REAL type change. Block changing INTO Service (option A) — an ALREADY-service open round
+        // (admin-reclassified mid-round; the authz layer keeps it votable) submits an UNCHANGED "4" that hits the
+        // `value === deal.projectType` skip above, so it never reaches here and can't strand.
         if (code === SERVICE_PROJECT_TYPE_CODE) {
           throw new AppError(
             409,
@@ -164,17 +172,18 @@ export function buildRfpVoteDealUpdate(
           );
         }
         updates.projectType = value;
-        // Keep the canonical FK in sync: getDealDetail/scoping resolve the type via
-        // COALESCE(project_type_config.name, deals.project_type) joined on project_type_id, so a stale id would keep
-        // displaying/filtering the OLD configured type. Null it so those fall back to the new project_type (we can't
-        // reliably map a 1-9 code back to a project_type_config row here).
-        updates.projectTypeId = null;
       }
-      // Always keep the number's type digit consistent with the SUBMITTED type (SyncHub parity: type wins the
-      // digit), whether or not project_type itself changed — fail-soft when the number isn't strict-canonical.
-      const rewritten = buildIntendedProjectNumber(nextNumber, value);
-      if (rewritten) nextNumber = rewritten;
+      effectiveTypeValue = value;
     }
+  }
+
+  // Keep the number's type digit consistent with the EFFECTIVE type (SyncHub parity: type wins the digit) whenever
+  // the voter edited the number OR the type — so a number-only edit (e.g. DFW-3-… → DFW-9-… with the type left on
+  // Roofing) is corrected to the type's digit instead of storing/shipping a mismatched number. Fail-soft when the
+  // number isn't strict-canonical.
+  if (effectiveTypeValue && (has(fields, "project_number") || has(fields, "project_types"))) {
+    const rewritten = buildIntendedProjectNumber(nextNumber, effectiveTypeValue);
+    if (rewritten) nextNumber = rewritten;
   }
 
   if (nextNumber !== (deal.projectNumber ?? null)) {

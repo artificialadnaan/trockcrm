@@ -82,23 +82,6 @@ export function diffEditedFields(current: VoteFormFields, initial: VoteFormField
   return Object.keys(changed).length > 0 ? changed : null;
 }
 
-export function toEditedFields(f: VoteFormFields): RfpVoteEditableFields {
-  return {
-    dealname: f.dealname,
-    project_number: f.project_number,
-    amount: f.amount,
-    project_types: f.project_types,
-    estimator: f.estimator,
-    bid_due_date: f.bid_due_date,
-    address: f.address,
-    city: f.city,
-    state: f.state,
-    zip: f.zip,
-    country: f.country,
-    description: f.description,
-  };
-}
-
 /** Office-agnostic type-digit rewrite for the live number preview. Mirrors the server's replaceProjectTypeInNumber;
  *  the server re-applies the authoritative rewrite on commit. Leaves non-canonical numbers untouched. */
 export function rewriteProjectNumberType(projectNumber: string, code: string): string {
@@ -113,5 +96,8 @@ export function labelForTypeCode(code: string): string {
 export function formatMoney(value: string | null | undefined): string {
   if (!value) return "—";
   const n = Number(value);
-  return Number.isFinite(n) ? `$${n.toLocaleString("en-US")}` : String(value);
+  // Always show cents so currency renders consistently (125000.5 → "$125,000.50", not "$125,000.5").
+  return Number.isFinite(n)
+    ? `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : String(value);
 }

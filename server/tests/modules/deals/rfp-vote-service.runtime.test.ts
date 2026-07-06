@@ -69,6 +69,13 @@ async function setup() {
       changed_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE UNIQUE INDEX deals_pn_uq ON deals (project_number) WHERE project_number IS NOT NULL;
+    CREATE TABLE public.project_type_config (
+      id uuid PRIMARY KEY, name text, slug text, code varchar(8), parent_id uuid, display_order integer,
+      is_active boolean NOT NULL DEFAULT true
+    );
+    INSERT INTO public.project_type_config (id, name, slug, code, parent_id, display_order, is_active) VALUES
+      ('00000000-0000-0000-0000-0000000003c3', 'Roofing', 'roofing', '3', NULL, 3, true),
+      ('00000000-0000-0000-0000-0000000002c2', 'Interior Renovation', 'interior-renovation', '2', NULL, 2, true);
   `);
   await db.query(
     `INSERT INTO deals (id, name, deal_number, stage_id, workflow_route, rfp_approval_status, rfp_approval_request_event_id)
@@ -389,6 +396,21 @@ describe("castRfpVote — edited fields (first-YES commits + locks)", () => {
     expect(new Date(lead.bid_due_date).toISOString().slice(0, 10)).toBe("2026-08-15");
   });
 
+  it("resolves + sets project_type_id when the type changes (keeps the deals-list type filter consistent)", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { project_types: "3" }, // interior renovation → roofing
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    const row = (await pg!.query(`SELECT project_type, project_type_id FROM deals WHERE id=$1`, [DEAL])).rows[0] as any;
+    expect(row.project_type).toBe("roofing");
+    expect(row.project_type_id).toBe("00000000-0000-0000-0000-0000000003c3"); // resolved Roofing config id (not null/stale)
+  });
+
   it("records a description-history row when the first approver edits the description", async () => {
     pg = await setupWithNumber();
     await pg.query(`UPDATE deals SET description='old scope' WHERE id=$1`, [DEAL]);
@@ -407,17 +429,18 @@ describe("castRfpVote — edited fields (first-YES commits + locks)", () => {
 
   it("translates a colliding project number (23505) into a clean 409, not a 500", async () => {
     pg = await setupWithNumber();
-    // Another deal already owns ATL-3-10025-aa.
+    // Another deal already owns ATL-2-10025-aa. Digit is 2 to match the voting deal's current type (interior
+    // renovation = code 2), so the type-wins-the-digit rewrite leaves the edited number intact and it collides.
     await pg.query(
       `INSERT INTO deals (id, name, deal_number, project_number, stage_id, workflow_route, is_active)
-       VALUES ('00000000-0000-0000-0000-0000000000c9', 'other', 'TR-9', 'ATL-3-10025-aa', '00000000-0000-0000-0000-0000000000aa', 'normal', true)`,
+       VALUES ('00000000-0000-0000-0000-0000000000c9', 'other', 'TR-9', 'ATL-2-10025-aa', '00000000-0000-0000-0000-0000000000aa', 'normal', true)`,
     );
     const tdb: any = drizzle(pg as any);
     await expect(
       castRfpVote(
         {
           tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
-          decision: "approve", reason: null, editedFields: { project_number: "ATL-3-10025-aa" },
+          decision: "approve", reason: null, editedFields: { project_number: "ATL-2-10025-aa" },
         },
         { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })) },
       ),
