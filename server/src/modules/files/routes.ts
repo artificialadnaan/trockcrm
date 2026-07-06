@@ -760,7 +760,15 @@ router.get("/:id/download", async (req, res, next) => {
       return;
     }
 
-    const result = await getFileDownloadUrl(req.tenantDb!, req.params.id);
+    // `?disposition=inline` opts into an inline preview; the service allowlists which mimes may actually
+    // render inline (image/* except svg, application/pdf, text/plain) and forces attachment otherwise.
+    // (This param pass-through is typecheck-only; the disposition SELECTION is proven in
+    // download-disposition.runtime.test.ts and the real signed header in src/lib/r2-client.test.ts.)
+    const result = await getFileDownloadUrl(
+      req.tenantDb!,
+      req.params.id,
+      req.query.disposition as string | undefined,
+    );
     if (logDownload && isPhotoRecord(file)) {
       await logPhotoEvent(req.tenantDb!, {
         photoId: file.id,
