@@ -2,7 +2,10 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 COPY . .
 ENV NODE_ENV=development
-RUN npm ci
+# npm ci retried to ride out the intermittent esbuild postinstall ETXTBSY ("text file busy") race in the build
+# container: drizzle-kit -> @esbuild-kit nests an esbuild whose install spawns the freshly-written binary to check
+# its version, which occasionally loses to the file still being open. Each attempt gets fresh timing.
+RUN npm ci || (echo "npm ci failed (transient esbuild ETXTBSY) — retry 1" && sleep 5 && npm ci) || (echo "retry 2" && sleep 10 && npm ci)
 RUN npm run build --workspace=shared
 RUN npm run build --workspace=server
 RUN npm run build --workspace=worker
