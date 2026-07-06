@@ -242,6 +242,48 @@ describe("POST /api/internal/bid-board-created", () => {
     warnSpy.mockRestore();
   });
 
+  it("rejects a request-backed deal's callback that OMITS rfpApprovalRequestId with 422 (malformed, not stale-ACKed)", async () => {
+    mockDeal(null, 77);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    // legacy/request-backed deal (rfp_approval_request_id=77) but the callback carries no request id
+    const { raw, signature } = sign({
+      sourceDealId: "deal-1",
+      bidboardProjectId: "123456",
+      procoreCompanyId: "598134325683880",
+      createdAt: "2026-05-06T12:00:00.000Z",
+    });
+
+    const res = await request(app())
+      .post("/api/internal/bid-board-created")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ success: false, error: "invalid_payload" });
+    // must NOT be acknowledged as a stale no-op (that would stop SyncHub retries and strand the deal)
+    expect(res.body.reason).toBeUndefined();
+    const sqlText = queryMock.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(sqlText).not.toContain("SET procore_bid_id");
+    warnSpy.mockRestore();
+  });
+
+  it("rejects a request-backed deal's callback with a NON-NUMERIC rfpApprovalRequestId with 422", async () => {
+    mockDeal(null, 77);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { raw, signature } = sign(body({ rfpApprovalRequestId: "77" as any }));
+
+    const res = await request(app())
+      .post("/api/internal/bid-board-created")
+      .set("content-type", "application/json")
+      .set("x-rfp-request-signature", signature)
+      .send(raw);
+
+    expect(res.status).toBe(422);
+    expect(res.body).toEqual({ success: false, error: "invalid_payload" });
+    warnSpy.mockRestore();
+  });
+
   it("returns 404 when the deal is missing", async () => {
     queryMock.mockImplementation(async (sql: string) => {
       if (sql.includes("FROM pg_namespace")) return { rows: [{ nspname: "office_dallas" }] };

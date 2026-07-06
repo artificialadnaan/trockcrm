@@ -1,10 +1,12 @@
 import crypto from "node:crypto";
 import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals } from "@trock-crm/shared/schema";
+import { deals, jobQueue } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
+import { enqueueRfpBidBoardCreate } from "./rfp-enqueue.js";
 import { resolveSyncHubOverrideApproveUrl } from "./rfp-payload.js";
+import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -20,6 +22,10 @@ export type RfpOverrideApprovalResult =
   // `unconfirmed` = the POST timed out (the request may have reached SyncHub, but no 202 was seen). The deal is
   // kept 'approving' (NOT made retryable — re-approve would risk a duplicate against a possibly-in-flight first
   // attempt) so a later callback can resolve it; a stuck 'approving' is escapable by re-confirming the denial.
+  //
+  // `requestId`: the SyncHub rfp_approval_requests.id for the LEGACY (service/type-4) path. On the VOTING path
+  // there is no SyncHub request row (rfp_approval_request_id stays null), so `requestId` is the sentinel `0`
+  // (the create funnels through create-from-rfp, not SyncHub's override-approve — see requestOverrideApproval).
   | { ok: true; status: "approving"; requestId: number; unconfirmed?: boolean }
   | { ok: false; reason: "not_actionable" }
   | { ok: false; reason: "missing_request_id" }
@@ -58,6 +64,8 @@ export interface RfpReviewDetail {
   overrideError: string | null;
   /** True when a reviewer can act now: declined, not currently approving, and not already a re-confirmed denial. */
   actionable: boolean;
+  /** The round's recorded votes (voter + choice + reason + time), for the escalation summary. */
+  votes: RfpVoteView[];
 }
 
 function signBody(rawBody: string, secret: string): string {
@@ -99,6 +107,7 @@ export async function requestOverrideApproval(
   input: {
     tenantDb: TenantDb;
     dealId: string;
+    officeId: string | null;
     actor: RfpOverrideActor;
     approverEmail: string;
     note: string | null;
@@ -122,23 +131,85 @@ export async function requestOverrideApproval(
     .set({
       rfpOverrideState: "approving",
       rfpOverrideError: null,
-      rfpOverrideReviewedAt: new Date(),
+      // finding (override BC5): stamp with the transaction's now() (NOT a JS Date). The request-less branch below
+      // enqueues rfp_bidboard_create in THIS same transaction with created_at = now() (its column default), and the
+      // dead-letter sweep compares that job created_at to rfp_override_reviewed_at. A JS Date is computed
+      // mid-transaction and is a few ms LATER than now() (the transaction-start timestamp), so created_at <
+      // reviewed_at would make the sweep treat this override's OWN dead job as stale — leaving the review stuck in
+      // 'approving' instead of surfacing 'failed'. now() makes reviewed_at EQUAL the job's created_at.
+      rfpOverrideReviewedAt: sql`now()`,
       rfpOverrideReviewedBy: input.actor.userId,
       rfpOverrideDecision: "override_approved",
       rfpOverrideNote: input.note,
       updatedAt: new Date(),
     })
-    .where(and(eq(deals.id, input.dealId), ...overrideActionableConditions()))
-    .returning();
+    // finding Y7: require is_active=true. A voting-path NO-GO deal soft-deleted before a reviewer opens the
+    // override link must NOT enter the request-less create branch below — the bid-board-created callback resolves
+    // deals via findDeal (is_active=true), so an external project could be created but never reconciled in CRM.
+    // A deleted deal matches 0 rows here -> not_actionable, no create.
+    .where(and(eq(deals.id, input.dealId), eq(deals.isActive, true), ...overrideActionableConditions()))
+    // Return only what THIS function body reads (truthiness, request id, and the audit name/secondary-id
+    // snapshots). The owner columns + round event id are intentionally NOT projected: enqueueRfpBidBoardCreate ->
+    // loadRfpPayloadDeal re-fetches every payload field (owner, amounts, address, round event id, …)
+    // authoritatively from the DB by id, so the create is robust regardless of how narrow this projection is.
+    .returning({
+      id: deals.id,
+      rfpApprovalRequestId: deals.rfpApprovalRequestId,
+      name: deals.name,
+      projectNumber: deals.projectNumber,
+      dealNumber: deals.dealNumber,
+    });
 
   if (!reset) {
     return { ok: false, reason: "not_actionable" };
   }
 
   const requestId = reset.rfpApprovalRequestId;
+
+  // VOTING-PATH deals never create a SyncHub request row (rfp_approval_request_id stays null). Their
+  // override-approve funnels through the SAME create-from-rfp path as a 2/3-yes vote (enqueueRfpBidBoardCreate),
+  // not SyncHub's override-approve (which requires a pre-existing declined request row). One create path, two
+  // triggers (vote-yes + override-approve). The 'approving' write persists; the bid-board-created callback
+  // advances the deal exactly as the legacy path's callback does.
+  if (requestId == null) {
+    await writeOverrideHistory(input.tenantDb, {
+      dealId: input.dealId,
+      fieldName: "rfp_override_state",
+      oldValue: priorOverrideState,
+      newValue: "approving",
+      changedBy: input.actor.userId,
+      source: "rfp_override_approve",
+      reason: input.note,
+    });
+    await logActivity({
+      tenantDb: input.tenantDb,
+      actor: buildAuditActorFromUser({ userId: input.actor.userId, name: input.actor.name, role: input.actor.role }),
+      action: "update",
+      entity: {
+        tableName: "deals",
+        entityType: "deal",
+        recordId: input.dealId,
+        nameSnapshot: String(reset.name ?? "Deal"),
+        secondaryIdSnapshot: (reset.projectNumber ?? reset.dealNumber ?? null) as string | null,
+      },
+      fieldChanges: { rfpOverrideState: { from: priorOverrideState, to: "approving" } },
+      metadata: { rfpOverrideAction: "override_approve_via_create_from_rfp", approverEmail: input.approverEmail, rfpOverrideNote: input.note },
+    });
+    // enqueueRfpBidBoardCreate -> loadRfpPayloadDeal re-fetches the full payload (owner, amounts, address, round
+    // event id, …) authoritatively from the DB by id, so passing just the deal id is sufficient (no owner columns
+    // or cast needed).
+    await enqueueRfpBidBoardCreate({
+      tenantDb: input.tenantDb,
+      officeId: input.officeId,
+      deal: { id: input.dealId },
+    });
+    // requestId: 0 = the voting-path sentinel (no SyncHub request id exists) — see RfpOverrideApprovalResult.
+    return { ok: true, status: "approving", requestId: 0 };
+  }
+
+  // LEGACY (service/type-4): a declined deal that ran the SyncHub pipeline always carries the request id.
   if (typeof requestId !== "number" || !Number.isInteger(requestId) || requestId <= 0) {
-    // Declined deals that ran the pipeline always carry the SyncHub request id; guard defensively so the route
-    // rolls back rather than POSTing to a `/null/override-approve` URL.
+    // Guard defensively so the route rolls back rather than POSTing to a `/null/override-approve` URL.
     return { ok: false, reason: "missing_request_id" };
   }
 
@@ -245,11 +316,27 @@ export async function requestOverrideApproval(
  * 'approving' deal (it creates no project, so upholding the denial is duplicate-safe even mid-flight — this is
  * the escape hatch for an 'approving' deal whose callback never arrives). Blocked only once already re-confirmed.
  */
+/** Best-effort office schema resolver (returns null if it can't) — for the request-less re-confirm email enqueue. */
+async function resolveSchemaForOfficeBestEffort(tenantDb: TenantDb, officeId: string | null): Promise<string | null> {
+  if (!officeId) return null;
+  try {
+    const res: any = await tenantDb.execute(sql`SELECT slug FROM public.offices WHERE id = ${officeId} LIMIT 1`);
+    const rows = Array.isArray(res) ? res : res.rows ?? [];
+    const slug = rows[0]?.slug;
+    return typeof slug === "string" && /^[a-z][a-z0-9_]*$/.test(slug) ? `office_${slug}` : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function reconfirmRfpDecline(input: {
   tenantDb: TenantDb;
   dealId: string;
   actor: RfpOverrideActor;
   note: string | null;
+  // Needed to resolve the tenant schema for the request-less re-confirm email enqueue (finding). Optional so
+  // callers that don't notify (or can't) still work — a null officeId just skips the app-side email.
+  officeId?: string | null;
 }): Promise<RfpReconfirmResult> {
   const [updated] = await input.tenantDb
     .update(deals)
@@ -296,6 +383,33 @@ export async function reconfirmRfpDecline(input: {
     metadata: { rfpOverrideNote: input.note },
   });
 
+  // finding: the migration 0154 trigger fires the "denial upheld" email on the denial_reconfirmed transition ONLY
+  // for request-BACKED deals (it returns early on a NULL rfp_approval_request_id). A VOTING-path no-go that a
+  // reviewer re-confirms carries no request id, so the requesting rep + leadership would never be notified.
+  // Enqueue the SAME job app-side for that case, keyed on the round event id (the worker uses it for idempotency
+  // when there is no request id). Runs only on the real transition (the guarded UPDATE matched), so it's once-only.
+  if (updated.rfpApprovalRequestId == null) {
+    const schemaName = await resolveSchemaForOfficeBestEffort(input.tenantDb, input.officeId ?? null);
+    if (schemaName) {
+      await input.tenantDb.insert(jobQueue).values({
+        jobType: "rfp_reconfirm_denial_email",
+        payload: {
+          tenantSchema: schemaName,
+          dealId: input.dealId,
+          dealNumber: (updated.projectNumber ?? updated.dealNumber ?? null) as string | null,
+          dealName: updated.name ?? null,
+          declinedReason: updated.rfpDeclinedReason ?? null,
+          rfpApprovalRequestId: null,
+          rfpVoteRoundId: updated.rfpApprovalRequestEventId ?? null,
+          requestedByUserId: updated.rfpApprovalRequestedBy ?? null,
+        },
+        officeId: null,
+        status: "pending",
+        runAfter: new Date(),
+      });
+    }
+  }
+
   return { ok: true, status: "declined", decision: "denial_reconfirmed" };
 }
 
@@ -308,6 +422,7 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
            d.project_number AS "projectNumber",
            d.rfp_approval_status AS "rfpApprovalStatus",
            d.rfp_approval_request_id AS "rfpApprovalRequestId",
+           d.rfp_approval_request_event_id AS "roundEventId",
            d.rfp_approval_requested_at AS "requestedAt",
            d.rfp_approval_requested_by AS "requestedById",
            req.display_name AS "requestedByName",
@@ -330,6 +445,8 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
   const rows = (Array.isArray(result) ? result : result.rows ?? []) as Array<Record<string, any>>;
   const row = rows[0];
   if (!row) return null;
+
+  const { rfpVotes } = await loadRfpVoteDetail(tenantDb, dealId, (row.roundEventId as string | null) ?? null);
 
   return {
     dealId: row.dealId,
@@ -355,6 +472,7 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
       row.rfpApprovalStatus === "declined" &&
       row.overrideState !== "approving" &&
       row.reviewDecision !== "denial_reconfirmed",
+    votes: rfpVotes,
   };
 }
 

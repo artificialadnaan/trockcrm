@@ -25,6 +25,8 @@ interface User {
   cleanupUrl?: string;
   /** True iff this user may review declined RFPs (Takashi/Adam allowlist); gates the /rfp-review page. */
   isRfpReviewer?: boolean;
+  /** True iff this user is one of the 3 RFP voters (Sidney/Tim/James); gates the vote UI + /rfp-vote page. */
+  isRfpVoter?: boolean;
 }
 
 interface AuthContextValue {

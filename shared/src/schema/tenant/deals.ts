@@ -210,6 +210,11 @@ export const deals = pgTable(
     // Bid Board project) | 'failed' (creation failed, retryable). See rfp-override-service.ts.
     rfpOverrideState: text("rfp_override_state"),
     rfpOverrideError: text("rfp_override_error"),
+    // Per-attempt marker for a request-less (voting-path) Bid Board create (migration 0177). Stamped by each
+    // /rfp-retry so a late duplicate 'failed' callback or dead rfp_bidboard_create job from a PRIOR attempt
+    // can't flip a fresh in-flight retry back to send_failed. NULL for the first attempt (exempt) + cleared on
+    // link/cancel. See internal-rfp bid-board-created failed path + runRfpBidBoardCreateDeadLetterSweep.
+    rfpBidboardAttemptAt: timestamp("rfp_bidboard_attempt_at", { withTimezone: true }),
     rfpConflictReason: text("rfp_conflict_reason"),
     rfpConflictWith: jsonb("rfp_conflict_with"),
     rfpLastAttemptError: text("rfp_last_attempt_error"),

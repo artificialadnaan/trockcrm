@@ -310,6 +310,24 @@ export interface DealDetail extends Deal {
   // from `changeOrders` above (the Procore-synced mirror). Their sum adds to Current Contract Value.
   dealChangeOrders: DealChangeOrder[];
   dealChangeOrderTotal: string;
+  // Current-round RFP vote records + derived state (from the server's computeRfpVoteState). rfpVoteState.decidedAt
+  // is an ISO string on the wire (toJsonSafe serializes the Date). Empty/`pending` when the deal has no open round.
+  rfpVotes: Array<{
+    voterUserId: string | null;
+    voterName: string | null;
+    voterEmail: string;
+    decision: "approve" | "reject";
+    reason: string | null;
+    votedAt: string;
+  }>;
+  // Null for non-vote deals (service / type-4, legacy SyncHub-path, or while ENABLE_RFP_VOTING is off) so the
+  // vote panel + focused vote page stay inert (their `if (!state) return null` guards fire).
+  rfpVoteState: {
+    approvals: number;
+    rejections: number;
+    outcome: "pending" | "approved" | "rejected";
+    decidedAt: string | null;
+  } | null;
 }
 
 export interface DealChangeOrder {

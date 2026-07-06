@@ -24,6 +24,8 @@ import { runRfpPendingSlaScan } from "./jobs/rfp-pending-sla.js";
 import { runCallRecordingCleanup } from "./jobs/call-recording-cleanup.js";
 import { runCallRecordingTranscription } from "./jobs/call-recording-transcribe.js";
 import { runRfpRequestDeadLetterSweep } from "./jobs/rfp-request-delivery.js";
+import { runRfpBidBoardCreateDeadLetterSweep } from "./jobs/rfp-bidboard-create.js";
+import { runRfpVoteInvitationDeadLetterSweep } from "./jobs/rfp-vote-invitation.js";
 import { runReportsExecutionTick } from "./jobs/reports-execution.js";
 import { runRepPerformanceRollup } from "./jobs/rep-performance-rollup.js";
 
@@ -65,8 +67,24 @@ async function main() {
     } catch (err) {
       console.error("[Worker:rfp_request_delivery] Dead-letter sweep failed:", err);
     }
+    try {
+      const handledCreates = await runRfpBidBoardCreateDeadLetterSweep();
+      if (handledCreates > 0) {
+        console.log(`[Worker:rfp_bidboard_create] Marked ${handledCreates} dead Bid Board create job(s) as override 'failed'`);
+      }
+    } catch (err) {
+      console.error("[Worker:rfp_bidboard_create] Dead-letter sweep failed:", err);
+    }
+    try {
+      const handledInvites = await runRfpVoteInvitationDeadLetterSweep();
+      if (handledInvites > 0) {
+        console.log(`[Worker:rfp_vote_invitation] Marked ${handledInvites} stranded vote round(s) as send_failed (recoverable)`);
+      }
+    } catch (err) {
+      console.error("[Worker:rfp_vote_invitation] Dead-letter sweep failed:", err);
+    }
   }, RFP_DEAD_LETTER_SWEEP_INTERVAL_MS);
-  console.log(`[Worker] RFP request dead-letter sweep every ${RFP_DEAD_LETTER_SWEEP_INTERVAL_MS}ms`);
+  console.log(`[Worker] RFP dead-letter sweeps (request delivery + Bid Board create + vote invitation) every ${RFP_DEAD_LETTER_SWEEP_INTERVAL_MS}ms`);
 
   setInterval(async () => {
     try {

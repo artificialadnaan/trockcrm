@@ -179,8 +179,9 @@ import {
   setDealMarketOverride,
 } from "../estimating/deal-market-override-service.js";
 import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
-import { insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
-import { isOpportunityRfpEventEnabled } from "../../config/feature-flags.js";
+import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
+import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
+import { allRfpVotersHaveOfficeAccess, authorizeAndCastRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
 import { getActiveProjectTypes, getAllStages, getStageBySlug } from "../pipeline/service.js";
 import { resolveDealCreateOfficeCode } from "./create-context.js";
 import {
@@ -1275,6 +1276,60 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     }
 
     const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+
+    // Non-service deals with voting ENABLED open a three-voter round instead of the SyncHub email path.
+    // Service / type-4 (and voting-disabled) deals fall through to the unchanged SyncHub delivery below.
+    // Guard: only take the voting branch when the full RFP_VOTER_COUNT trio is configured. A partial/empty
+    // RFP_VOTER_EMAILS (unset, or a typo that drops a voter) can never reach the 2-of-3 tally — isRfpVoter is
+    // false for the missing voters, nobody can push it to a decision, and the still-'pending' round can't be
+    // returned to Opportunity (cancel only clears an attention-state RFP). A misconfigured flag must degrade
+    // safely, so fall back to the existing SyncHub delivery path below instead. (See hasSufficientRfpVoters.)
+    // Also require the rfp_votes table to exist for THIS office (finding G1): if the flag is on but migration
+    // 0175 hasn't run here, opening a round would let voters reach a form whose first cast 500s on the missing
+    // table, leaving the deal stranded 'pending'. Probe with to_regclass and fall back to SyncHub if absent.
+    // Also require every configured voter to have ACCESS to this office (finding): the invite link carries
+    // officeId and authMiddleware rejects an x-office-id a voter can't reach, so a voter without primary/granted
+    // access to this tenant can't load or cast — if fewer than the trio can vote, the 'pending' round strands with
+    // no cancel path. Fall back to SyncHub when any configured voter lacks access here.
+    if (
+      !isServiceRfp(deal) &&
+      isRfpVotingEnabled() &&
+      hasSufficientRfpVoters(process.env) &&
+      (await rfpVotesTableExists(req.tenantDb!)) &&
+      (await allRfpVotersHaveOfficeAccess(req.tenantDb!, officeId, process.env))
+    ) {
+      await openRfpVoteRound({
+        tenantDb: req.tenantDb!,
+        officeId,
+        deal,
+        requestedByUserId: userId,
+        // Re-bind rep ownership in the atomic reservation, mirroring the SyncHub path below: if the deal is
+        // reassigned between the read above and the reserve, a former owner's trigger must match nothing (409)
+        // rather than opening a round + emailing voters for another rep's deal.
+        enforceAssignedRepId: userRole === "rep" ? userId : null,
+      });
+      // Post-reservation scope recheck, mirroring the SyncHub path: a file/scoping field removed between the
+      // initial readiness check above and the reserve must abort the round (throw rolls back the still-open
+      // transaction — the round + invitation enqueue) rather than inviting voters to an incomplete RFP.
+      const votingReadiness = await evaluateDealScopingReadiness(req.tenantDb!, deal.id);
+      if (hasBlockingScopingReadinessErrors(votingReadiness)) {
+        throw buildScopeIncompleteError(votingReadiness);
+      }
+      const [voted] = await req.tenantDb!
+        .select({ status: deals.rfpApprovalStatus, eventId: deals.rfpApprovalRequestEventId })
+        .from(deals)
+        .where(eq(deals.id, deal.id))
+        .limit(1);
+      await req.commitTransaction!();
+      res.json(toJsonSafe({
+        success: true,
+        mode: "vote",
+        status: voted?.status ?? "pending",
+        eventId: voted?.eventId ?? null,
+      }));
+      return;
+    }
+
     const requestedAt = new Date();
     const eventId = randomUUID();
     const updateConditions = [
@@ -1460,6 +1515,144 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
       throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
     }
 
+    // Voting-path deals (a 2/3-approved non-service RFP that has NO SyncHub request) fail on the
+    // rfp_bidboard_create job, not the SyncHub rfp_request_delivery job — so their retry must re-enqueue the
+    // Bid Board create (mirroring castRfpVote's approve path), never a SyncHub delivery. Their send_failed is
+    // stamped with rfp_override_state='failed' (by both the bid-board-created failure callback and the create
+    // dead-letter sweep, each scoped to rfp_approval_request_id IS NULL) — that pair (request_id NULL + a failed
+    // override state) is what distinguishes a decided-vote create failure from a legacy delivery send_failed
+    // (which leaves rfp_override_state NULL) and from an override-approve failure (which keeps a non-null id).
+    const isVotingCreateFailure =
+      deal.rfpApprovalRequestId == null && deal.rfpOverrideState === "failed";
+    if (isVotingCreateFailure) {
+      const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+      // Atomically re-claim the failed state — clearing the failure markers back to the create-in-flight
+      // 'pending' state castRfpVote's approve leaves (the same state the create dead-letter sweep re-catches on
+      // a second failure) — BEFORE enqueuing, so a concurrent Return to Opportunity that clears the RFP fields
+      // between the read and here (status no longer 'send_failed') matches nothing and 409s without resurrecting
+      // it. Same transaction, so a later enqueue failure rolls the status back.
+      const [reclaimed] = await req.tenantDb!
+        .update(deals)
+        .set({
+          rfpApprovalStatus: "pending",
+          rfpOverrideState: null,
+          rfpOverrideError: null,
+          // Stamp THIS retry as the current attempt (finding F4/F5). The failed callback + dead-letter sweep
+          // ignore any 'failed'/dead signal older than this, so a late duplicate from the prior attempt can't
+          // flip this fresh in-flight retry back to send_failed.
+          // finding BC5: stamp with the transaction's now() (NOT a JS `new Date()`). The replacement
+          // rfp_bidboard_create job is INSERTed in this same transaction with created_at = now() (its column
+          // default), and the dead-letter sweep compares that created_at to this marker. A JS Date is computed
+          // mid-transaction and is a few ms LATER than now() (the transaction-start timestamp), so created_at <
+          // marker would make the sweep treat the retry's OWN dead job as stale and never surface send_failed.
+          // Using now() makes the marker EQUAL the job's created_at, so the current attempt passes (>=) while a
+          // prior attempt's older dead job is still correctly skipped.
+          rfpBidboardAttemptAt: sql`now()`,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(deals.id, deal.id),
+            eq(deals.rfpApprovalStatus, "send_failed"),
+            isNull(deals.rfpApprovalRequestId),
+            eq(deals.rfpOverrideState, "failed"),
+            // finding: require the deal to still be ACTIVE. If it was soft-deleted between the getDealById read
+            // and here, retrying would enqueue rfp_bidboard_create (whose payload loader reads the inactive row),
+            // but the bid-board-created callback resolves via findDeal (is_active=true) and could never reconcile
+            // the external project. A deleted deal matches 0 rows -> 409, no create.
+            eq(deals.isActive, true),
+          )
+        )
+        .returning({ id: deals.id });
+      if (!reclaimed) {
+        throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
+      }
+      await enqueueRfpBidBoardCreate({
+        tenantDb: req.tenantDb!,
+        deal: { id: deal.id },
+        officeId,
+      });
+      await req.commitTransaction!();
+      res.status(202).json({ success: true, status: "pending" });
+      return;
+    }
+
+    // Voting INVITATION failure (finding H2): openRfpVoteRound reserved the round but the rfp_vote_invitation
+    // email job dead-lettered, so runRfpVoteInvitationDeadLetterSweep stamped send_failed with rfp_override_state
+    // NULL (distinct from a create failure's 'failed') + left the round event id. Distinguish it from a legacy
+    // rfp_request_delivery failure by the dead job TYPE, then re-enqueue a fresh invitation for the SAME round —
+    // no attempt marker (this isn't a Bid Board create). Without this the request-less send_failed would fall
+    // through to the legacy path, find no rfp_request_delivery dead job, and 409 — the visible Retry would break.
+    if (
+      deal.rfpApprovalRequestId == null &&
+      deal.rfpOverrideState == null &&
+      deal.rfpApprovalRequestEventId != null
+    ) {
+      // finding W5: match the dead invitation to the deal's CURRENT round (payload roundEventId ==
+      // rfpApprovalRequestEventId). Otherwise, after an OLD invitation failure was surfaced and the deal was
+      // returned + re-triggered through the LEGACY delivery path, retrying that legacy send_failed could match
+      // the stale dead invitation and misroute into re-enqueuing a vote invitation for a non-voting round.
+      const deadInvite = await req.tenantDb!.execute(sql`
+        SELECT id, payload->'recipients' AS recipients FROM public.job_queue
+         WHERE job_type = 'rfp_vote_invitation' AND status = 'dead'
+           AND payload->>'dealId' = ${deal.id}
+           AND payload->>'roundEventId' = ${deal.rfpApprovalRequestEventId}
+         ORDER BY id DESC
+         LIMIT 1`);
+      const deadInviteRows = (Array.isArray(deadInvite) ? deadInvite : (deadInvite as { rows?: unknown[] }).rows ?? []) as Array<{ recipients?: unknown }>;
+      if (deadInviteRows.length > 0) {
+        // finding: re-invite the ORIGINAL round's snapshotted voter set (the dead invitation's recipients), NOT a
+        // re-resolution of the current RFP_VOTER_EMAILS. Since the invitation snapshot is what the cast route
+        // authorizes against (BC2), re-deriving from a since-drifted env could make the round 2-of-4 or strand it.
+        const originalRecipients = deadInviteRows[0]?.recipients;
+        const retryRecipients = Array.isArray(originalRecipients)
+          ? originalRecipients.map((e) => String(e)).filter((e) => e.length > 0)
+          : undefined;
+        const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+        // Atomically re-claim send_failed -> the open 'pending' round state, clearing the surfaced error, BEFORE
+        // re-enqueuing (so a concurrent Return to Opportunity that cleared the fields matches nothing and 409s).
+        const [reclaimed] = await req.tenantDb!
+          .update(deals)
+          .set({ rfpApprovalStatus: "pending", rfpLastAttemptError: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(deals.id, deal.id),
+              eq(deals.rfpApprovalStatus, "send_failed"),
+              isNull(deals.rfpApprovalRequestId),
+              isNull(deals.rfpOverrideState),
+              // finding: require the deal to still be ACTIVE (mirrors the create-retry reclaim). A deal soft-deleted
+              // between the getDealById read and here would otherwise be flipped back to 'pending' + re-invited,
+              // sending voting links that load/cast against a 404'd deal while the deleted row is hidden from
+              // normal recovery. A deleted deal matches 0 rows -> 409, no re-invite.
+              eq(deals.isActive, true),
+              // finding: bind the reclaim to the CURRENT round event id. Otherwise a stale Retry racing with a
+              // Return-to-Opportunity + a fresh round that ALSO surfaced send_failed could reclaim the NEW round and
+              // re-enqueue an invitation stamped with the OLD roundEventId (which the dead-letter sweep then ignores
+              // as stale), leaving the current round stranded. deal.rfpApprovalRequestEventId is non-null here.
+              eq(deals.rfpApprovalRequestEventId, deal.rfpApprovalRequestEventId!),
+            )
+          )
+          .returning({ id: deals.id });
+        if (!reclaimed) {
+          throw new AppError(409, "This RFP is not in a failed state and cannot be retried.", "RFP_RETRY_WRONG_STATE");
+        }
+        await enqueueRfpVoteInvitation({
+          tenantDb: req.tenantDb!,
+          deal: {
+            id: deal.id,
+            dealNumber: deal.dealNumber ?? null,
+            name: deal.name ?? null,
+            rfpApprovalRequestEventId: deal.rfpApprovalRequestEventId,
+          },
+          officeId,
+          recipients: retryRecipients,
+        });
+        await req.commitTransaction!();
+        res.status(202).json({ success: true, status: "pending" });
+        return;
+      }
+    }
+
     const deadJobResult = await req.tenantDb!.execute(sql`
       SELECT id, payload
         FROM public.job_queue
@@ -1573,6 +1766,33 @@ router.get("/:id/rfp-review", requireRfpReviewer, async (req, res, next) => {
   }
 });
 
+// POST /api/deals/:id/rfp-vote — cast a three-voter RFP vote (Sidney / Tim / James). 2-of-3 decides. Reject
+// requires a reason; approve ignores it. Voter authorization is done IN-HANDLER (finding BC2), NOT via the
+// requireRfpVoter middleware: for an open round the round's invitation SNAPSHOT is authoritative, so a voter who
+// was invited when the round opened can still cast even if RFP_VOTER_EMAILS changed since. The env allowlist is
+// the fallback only when no snapshot exists (legacy round / pruned job).
+router.post("/:id/rfp-vote", async (req, res, next) => {
+  try {
+    // The whole handler body lives in authorizeAndCastRfpVote (rfp-vote-service) so the route + its runtime test
+    // share ONE implementation and can't drift. loadTriggerRfpDeal selects the full row (isActive present).
+    const deal = await loadTriggerRfpDeal(req.tenantDb!, req.params.id as string);
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId ?? null;
+    const result = await authorizeAndCastRfpVote({
+      tenantDb: req.tenantDb!,
+      deal,
+      user: { id: req.user!.id, email: req.user!.email },
+      decision: req.body?.decision,
+      reason: req.body?.reason,
+      officeId,
+      votingEnabled: isRfpVotingEnabled(),
+    });
+    await req.commitTransaction!();
+    res.json(toJsonSafe({ success: true, outcome: result.outcome, votes: result.votes }));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /api/deals/:id/rfp-override/approve — override the no-go: ask SyncHub to authoritatively approve the
 // declined RFP, which creates the Bid Board project (Playwright) and calls back bid-board-created. The deal is
 // parked in rfp_override_state='approving' until that callback lands.
@@ -1586,6 +1806,7 @@ router.post("/:id/rfp-override/approve", requireRfpReviewer, async (req, res, ne
     const result = await requestOverrideApproval({
       tenantDb: req.tenantDb!,
       dealId: req.params.id as string,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
       actor: { userId: req.user!.id, name: req.user!.displayName, role: req.user!.role },
       approverEmail: req.user!.email, // named accountability — the reviewer's real email is the SyncHub approver
       note: normalizeRfpOverrideNote(req.body?.note),
@@ -1609,6 +1830,7 @@ router.post("/:id/rfp-override/reconfirm-decline", requireRfpReviewer, async (re
       dealId: req.params.id as string,
       actor: { userId: req.user!.id, name: req.user!.displayName, role: req.user!.role },
       note: normalizeRfpOverrideNote(req.body?.note),
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
     });
     if (!result.ok) {
       throw new AppError(

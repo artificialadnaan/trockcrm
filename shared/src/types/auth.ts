@@ -42,4 +42,6 @@ export interface AuthenticatedUser {
   cleanupUrl?: string;
   /** True iff this user is a designated RFP override reviewer (RFP_REJECTION_EMAIL_RECIPIENTS allowlist). */
   isRfpReviewer?: boolean;
+  /** True iff this user is one of the 3 RFP voters (RFP_VOTER_EMAILS allowlist); gates the vote UI + /rfp-vote page. */
+  isRfpVoter?: boolean;
 }

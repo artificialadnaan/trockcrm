@@ -1,0 +1,212 @@
+import { useEffect, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
+import { toast } from "sonner";
+import { useAuth } from "@/lib/auth";
+import { castRfpVote, useRfpVote } from "@/hooks/use-rfp-vote";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+
+function PageFrame({ children }: { children: React.ReactNode }) {
+  return <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-4 py-8">{children}</div>;
+}
+
+export function RfpVotePage() {
+  const { dealId } = useParams<{ dealId: string }>();
+  const [searchParams] = useSearchParams();
+  const officeId = searchParams.get("officeId");
+  const { user } = useAuth();
+  // finding: do NOT gate the load on the mutable user.isRfpVoter flag. When RFP_VOTER_EMAILS changes after a round
+  // opens, the server still authorizes voters from that round's invitation SNAPSHOT (BC2) — an originally invited
+  // voter whose /auth/me now says isRfpVoter=false must still be able to open the emailed link and cast. Load for
+  // any authenticated user and let the server be the authority (the cast route 403s a genuinely non-invited user).
+  const { deal, loading, error, refetch } = useRfpVote(user ? dealId : undefined, officeId);
+  const [decision, setDecision] = useState<"approve" | "reject" | null>(null);
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [voted, setVoted] = useState(false);
+
+  // finding BC6: React Router reuses this same component instance when navigating between /rfp-vote/:dealId
+  // targets (e.g. opening a second invitation in-app), so the local vote lock + draft would leak from the previous
+  // deal — the next deal could load with alreadyVoted=false yet canSubmit=false because `voted` stayed true. Reset
+  // all local vote state whenever the deal (or office) identity changes.
+  useEffect(() => {
+    setVoted(false);
+    setDecision(null);
+    setReason("");
+    setSubmitting(false);
+  }, [dealId, officeId]);
+
+  // Only a null user (not signed in) is blocked here — authorization for the actual cast is server-side (BC2), so a
+  // snapshot-invited voter whose current isRfpVoter flag is false still reaches the vote UI. A genuinely
+  // non-invited user who reaches this page gets a clear 403 from the server on submit.
+  if (!user) {
+    return (
+      <PageFrame>
+        <Card>
+          <CardHeader>
+            <CardTitle>Sign in to vote</CardTitle>
+            <CardDescription>You need to be signed in to open this RFP vote. Sign in and follow the link again.</CardDescription>
+          </CardHeader>
+          <CardFooter>
+            <Link to="/" className={buttonVariants({ variant: "outline" })}>Back to dashboard</Link>
+          </CardFooter>
+        </Card>
+      </PageFrame>
+    );
+  }
+
+  if (loading) {
+    return <PageFrame><p className="text-sm text-muted-foreground">Loading the RFP…</p></PageFrame>;
+  }
+
+  if (error || !deal) {
+    return (
+      <PageFrame>
+        <Card>
+          <CardHeader>
+            <CardTitle>Couldn't load this RFP</CardTitle>
+            <CardDescription>{error ?? "The deal could not be found."}</CardDescription>
+          </CardHeader>
+          <CardFooter className="gap-2">
+            <Button variant="outline" onClick={() => refetch()}>Try again</Button>
+            <Link to="/" className={buttonVariants({ variant: "ghost" })}>Back to dashboard</Link>
+          </CardFooter>
+        </Card>
+      </PageFrame>
+    );
+  }
+
+  // A non-vote deal reached directly (service / type-4, legacy SyncHub-path, or ENABLE_RFP_VOTING off) carries a
+  // null rfpVoteState from the server. Guard BEFORE reading .outcome so the page never crashes on null.
+  const voteState = deal.rfpVoteState;
+  if (!voteState) {
+    return (
+      <PageFrame>
+        <Card>
+          <CardHeader>
+            <CardTitle>This deal is not open for voting</CardTitle>
+            <CardDescription>This RFP isn't in an open voting round. It may be a service RFP, already decided, or handled through the standard approval path.</CardDescription>
+          </CardHeader>
+          <CardFooter>
+            <Link to={`/deals/${deal.id}${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`} className={buttonVariants({ variant: "outline" })}>Open the full deal</Link>
+          </CardFooter>
+        </Card>
+      </PageFrame>
+    );
+  }
+
+  const alreadyVoted = deal.rfpVotes.some(
+    (v) => (user.id != null && v.voterUserId === user.id) || (!!user.email && v.voterEmail.toLowerCase() === user.email.toLowerCase())
+  );
+  const decided = voteState.outcome !== "pending";
+  // finding W6: the detail payload stays non-null for an H6-recovered round (send_failed with a vote already
+  // cast), so gate submission on the round still being OPEN ('pending'). Otherwise remaining voters hit a
+  // preventable 409 (the server rejects a cast on a non-pending round) until someone retries the invitation.
+  const roundOpen = deal.rfpApprovalStatus === "pending";
+  const rejectNeedsReason = decision === "reject" && reason.trim().length === 0;
+  const canSubmit = decision !== null && !rejectNeedsReason && !submitting && !alreadyVoted && !decided && !voted && roundOpen;
+
+  async function onSubmit() {
+    if (!dealId || decision === null) return;
+    setSubmitting(true);
+    try {
+      const result = await castRfpVote(dealId, { decision, reason: decision === "reject" ? reason.trim() : null, officeId });
+      // The vote is recorded — lock re-submit immediately, independent of whether the follow-up refetch succeeds.
+      setVoted(true);
+      toast.success(
+        result.outcome === "approved"
+          ? "Vote recorded — 2/3 approved, creating the Bid Board project."
+          : result.outcome === "rejected"
+            ? "Vote recorded — 2/3 rejected, escalating for review."
+            : "Vote recorded."
+      );
+      // A refetch failure must NOT surface as a vote failure — the vote already succeeded; the next load reconciles.
+      try {
+        await refetch();
+      } catch {
+        /* ignore — the vote is recorded; the panel / next load will reflect it */
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to record your vote");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const dealHref = `/deals/${deal.id}${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`;
+
+  return (
+    <PageFrame>
+      <Card>
+        <CardHeader>
+          <CardTitle>Vote on this RFP</CardTitle>
+          <CardDescription>
+            {deal.name} · {deal.projectNumber ?? "Pending"} — two of three approvals create the Bid Board project;
+            two rejections escalate for a final decision. Rejections require a reason.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <p className="text-sm text-muted-foreground">
+            Tally so far: {voteState.approvals} approve · {voteState.rejections} reject — needs 2 of 3.
+          </p>
+
+          {alreadyVoted || decided || !roundOpen || voted ? (
+            <div className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
+              <p className="font-medium text-foreground">
+                {decided
+                  ? "This round has been decided."
+                  : !roundOpen
+                    ? "This vote round needs attention and is paused."
+                    : "You've already cast your vote."}
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {!roundOpen && !decided
+                  ? "The invitation couldn't be delivered to all voters. Open the deal to recover it before voting continues."
+                  : "Votes are final. Open the deal to see the live tally."}
+              </p>
+            </div>
+          ) : (
+            <>
+              <fieldset className="flex flex-col gap-2">
+                <legend className="sr-only">Your decision</legend>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="radio" name="decision" value="approve" checked={decision === "approve"} onChange={() => setDecision("approve")} />
+                  Approve
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="radio" name="decision" value="reject" checked={decision === "reject"} onChange={() => setDecision("reject")} />
+                  Reject
+                </label>
+              </fieldset>
+
+              {decision === "reject" && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="rfp-vote-reason">Reason (required)</Label>
+                  <Textarea
+                    id="rfp-vote-reason"
+                    value={reason}
+                    onChange={(event) => setReason(event.target.value)}
+                    placeholder="Why are you rejecting this RFP?"
+                    rows={3}
+                    disabled={submitting}
+                  />
+                </div>
+              )}
+
+              <div>
+                <Button onClick={onSubmit} disabled={!canSubmit}>
+                  {submitting ? "Submitting…" : "Submit vote"}
+                </Button>
+              </div>
+            </>
+          )}
+        </CardContent>
+        <CardFooter>
+          <Link to={dealHref} className={buttonVariants({ variant: "ghost", size: "sm" })}>Open the full deal</Link>
+        </CardFooter>
+      </Card>
+    </PageFrame>
+  );
+}

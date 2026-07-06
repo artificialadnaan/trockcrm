@@ -25,3 +25,12 @@ export function isAuthDemoBootstrapEnabled(env: NodeJS.ProcessEnv = process.env)
 export function isStageEntryDateFilterEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.ENABLE_STAGE_ENTRY_DATE_FILTER === "true";
 }
+
+/**
+ * Gates the non-service RFP three-voter branch of POST /:id/trigger-rfp. OFF (default) = non-service deals
+ * keep the existing single-approver SyncHub email path, so the voting feature ships inert until flipped.
+ * Service / type-4 deals ignore this flag (always SyncHub email path).
+ */
+export function isRfpVotingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.ENABLE_RFP_VOTING === "true";
+}

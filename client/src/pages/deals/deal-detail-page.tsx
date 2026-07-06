@@ -60,6 +60,7 @@ import { DealPunchListTab } from "./deal-punch-list-tab";
 import { DealCloseoutTab } from "./deal-closeout-tab";
 import { DealTimersBanner } from "./deal-timers-banner";
 import { BidDueDateBanner } from "./bid-due-date-banner";
+import { RfpVotePanel } from "./rfp-vote-panel";
 import { DealProposalCard } from "./deal-proposal-card";
 import { DealContractSignedCard } from "./deal-contract-signed-card";
 import { DealEstimatingSubstage } from "./deal-estimating-substage";
@@ -345,6 +346,21 @@ export function DealDetailPage() {
   const { user } = useAuth();
   const detailOfficeId = searchParams.get("officeId");
   const { deal, loading, error, refetch } = useDealDetail(id, { officeId: detailOfficeId });
+
+  // Poll the detail every 5s while an RFP is in flight so the panel flips to its resolved state without a manual
+  // refresh. Gate SOLELY on rfpApprovalStatus (finding): after a 2/3 approve the vote outcome is already 'approved'
+  // but the Bid Board create runs AFTER that while the status is still 'pending' — stopping on the vote outcome
+  // would freeze the panel on "creating Bid Board…" and hide the later approved / send_failed (Retry) state. The
+  // status leaves pending/pending_outbox once the create callback lands (approved) or fails (send_failed), which
+  // stops the poll.
+  useEffect(() => {
+    if (deal?.rfpApprovalStatus !== "pending" && deal?.rfpApprovalStatus !== "pending_outbox") return;
+    const interval = setInterval(() => {
+      refetch();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [deal?.rfpApprovalStatus, refetch]);
+
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [stageChangeOpen, setStageChangeOpen] = useState(false);
@@ -978,6 +994,8 @@ export function DealDetailPage() {
         cancelling={rfpCancelling}
         isOpportunityStage={isOpportunityStage}
         isBidBoardOwned={isBidBoardOwned}
+        user={user}
+        officeId={detailOfficeId}
       />
       {isBidBoardOwned && !deal.isHubspotSourced && <BidBoardProjectSummaryPanel deal={deal} />}
       {isEstimatingBoundaryStageSlug(currentStageSlug, workflowRoute) && !isBidBoardOwned && (
@@ -1603,6 +1621,8 @@ function RfpApprovalStatusBlock({
   cancelling,
   isOpportunityStage,
   isBidBoardOwned,
+  user,
+  officeId,
 }: {
   deal: DealDetail;
   onRetry: () => void;
@@ -1616,6 +1636,8 @@ function RfpApprovalStatusBlock({
   // inferred Bid Board owned deal.
   isOpportunityStage: boolean;
   isBidBoardOwned: boolean;
+  user: ReturnType<typeof useAuth>["user"];
+  officeId: string | null;
 }) {
   if (!deal.rfpApprovalStatus) return null;
 
@@ -1716,6 +1738,7 @@ function RfpApprovalStatusBlock({
             )}
         </div>
       </div>
+      <RfpVotePanel deal={deal} user={user} officeId={officeId} />
     </section>
   );
 }

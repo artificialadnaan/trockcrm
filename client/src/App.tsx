@@ -9,6 +9,7 @@ import { BoardAliasRedirect } from "@/components/shared/board-alias-redirect";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
 import { PendingRfpPage } from "@/pages/deals/pending-rfp-page";
 import { RfpReviewPage } from "@/pages/rfp-review/rfp-review-page";
+import { RfpVotePage } from "@/pages/rfp-vote/rfp-vote-page";
 import { DealNewPage } from "@/pages/deals/deal-new-page";
 import { DealEditPage } from "@/pages/deals/deal-edit-page";
 import { ServiceOpportunityNewPage } from "@/pages/deals/service-opportunity-new-page";
@@ -221,6 +222,7 @@ export function App() {
               <Route path="/deals/:id" element={<DealDetailPage />} />
               <Route path="/deals/:id/edit" element={<DealEditPage />} />
               <Route path="/rfp-review/:dealId" element={<RfpReviewPage />} />
+              <Route path="/rfp-vote/:dealId" element={<RfpVotePage />} />
               <Route path="/leads" element={<LeadListPage />} />
               <Route path="/leads/board" element={<BoardAliasRedirect entity="leads" />} />
               <Route path="/leads/stages/:stageId" element={<LeadStagePage />} />

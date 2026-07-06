@@ -90,10 +90,13 @@ async function findDeal(sourceDealId: string) {
               d.rfp_override_error,
               d.rfp_override_decision,
               d.rfp_override_reviewed_at,
+              d.rfp_bidboard_attempt_at,
               d.bid_board_linked_at,
               d.assigned_rep_id,
               d.rfp_approval_requested_by,
               d.rfp_approval_request_id,
+              d.rfp_approval_requested_at,
+              d.rfp_approval_request_event_id,
               d.workflow_route,
               d.stage_entered_at,
               d.on_hold,
@@ -662,7 +665,9 @@ internalRfpRoutes.post(
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
       }
-      if (!sourceDealId || typeof payload.rfpApprovalRequestId !== "number") {
+      // rfpApprovalRequestId is OPTIONAL: voting-path deals omit it (they mint no SyncHub request row) and are
+      // reconciled by sourceDealId; legacy/service/override deals still carry it and are matched below.
+      if (!sourceDealId) {
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
       }
@@ -675,13 +680,60 @@ internalRfpRoutes.post(
 
       // Stale-callback guard (both statuses): the callback must reference the deal's current RFP cycle. The
       // callback is at-least-once, so a duplicate (same request id, same resulting state) is a safe no-op below.
-      const currentRequestId = Number(found.deal.rfp_approval_request_id);
-      if (!Number.isFinite(currentRequestId) || payload.rfpApprovalRequestId !== currentRequestId) {
-        console.warn(
-          `[RFP callback] stale callback ignored for sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"}`
-        );
-        res.json({ success: true, idempotent: true, reason: "stale_callback_ignored" });
-        return;
+      // Legacy / service / override deals carry a SyncHub rfp_approval_request_id and must reconcile the
+      // callback against it. VOTING-path deals never mint one (the CRM decided by vote, not SyncHub), so the
+      // callback carries no rfpApprovalRequestId and is resolved purely by sourceDealId (found via findDeal).
+      const dealRequestId = found.deal.rfp_approval_request_id;
+      const currentRequestId = dealRequestId == null ? null : Number(dealRequestId);
+      const dealHasRequestId = currentRequestId != null && Number.isFinite(currentRequestId);
+      const payloadHasRequestId =
+        typeof payload.rfpApprovalRequestId === "number" && Number.isFinite(payload.rfpApprovalRequestId);
+      // A callback is REQUEST-BACKED if EITHER side carries a request id. This is deliberately broader than
+      // "the deal still has a request id": after cancelPendingRfp clears rfp_approval_request_id to NULL on a
+      // legacy/service/override deal (Return to Opportunity), a late callback can STILL carry a numeric
+      // rfpApprovalRequestId. Without treating that as request-backed it would fall through to the request-less
+      // voting path and its 'created' branch could re-approve + Bid-Board-own a CANCELED Opportunity deal.
+      // Only when BOTH ids are absent is it a genuine request-less voting callback (resolved by sourceDealId).
+      if (dealHasRequestId || payloadHasRequestId) {
+        // Round-1 rule preserved: a request-BACKED deal (its request id is still present) whose callback OMITS a
+        // well-formed numeric id is MALFORMED — not stale — so 422 it (like the other request-backed callbacks)
+        // and let SyncHub retry; ACKing it as stale would stop the retries and strand the deal.
+        if (dealHasRequestId && !payloadHasRequestId) {
+          // A request-BACKED deal whose callback OMITS a well-formed id is normally MALFORMED -> 422 (retryable).
+          // BUT a STALE request-LESS voting callback also lands here (finding): after a request-less vote-create
+          // failed and the deal was Returned to Opportunity and RE-TRIGGERED through the LEGACY SyncHub path, the
+          // deal now carries a request id while the OLD create-from-rfp payload never can. That callback is STALE,
+          // not malformed — ACK it (stale_callback_ignored) so SyncHub stops retrying an obsolete callback. Tell the
+          // two apart by the callback's createdAt: a stale request-less callback predates the CURRENT round's open
+          // time (rfp_approval_requested_at). A current-round malformed callback (createdAt >= requested_at, or no
+          // parseable createdAt) still 422s so SyncHub resends a well-formed id.
+          // asDateOrNull returns an ISO-8601 string (or null); ISO strings compare chronologically with `<`.
+          const staleCbCreatedAt = asDateOrNull(payload.createdAt);
+          const currentRoundOpenedAt = asDateOrNull(found.deal.rfp_approval_requested_at);
+          if (staleCbCreatedAt && currentRoundOpenedAt && staleCbCreatedAt < currentRoundOpenedAt) {
+            console.warn(
+              `[RFP callback] stale request-less callback ignored for sourceDealId=${sourceDealId} (createdAt ${staleCbCreatedAt} < current round opened ${currentRoundOpenedAt}); the deal was re-triggered through the legacy path`
+            );
+            res.json({ success: true, idempotent: true, reason: "stale_callback_ignored" });
+            return;
+          }
+          console.warn(
+            `[RFP callback] malformed callback for request-backed deal sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"} -> 422 (retryable, not stale-ACKed)`
+          );
+          res.status(422).json({ success: false, error: "invalid_payload" });
+          return;
+        }
+        // Reconcile: the deal's request id was cleared/canceled (now NULL), or the ids don't match -> stale,
+        // idempotent no-op (200). payloadHasRequestId is guaranteed true here (the malformed-id case above
+        // already returned 422), so this only stale-ACKs a WELL-FORMED payload id against a cleared/mismatched
+        // deal — including the cancel case (deal id NULL) that must NOT be treated as a request-less approve.
+        if (!dealHasRequestId || payload.rfpApprovalRequestId !== currentRequestId) {
+          console.warn(
+            `[RFP callback] stale callback ignored for sourceDealId=${sourceDealId}; incoming rfpApprovalRequestId=${payload.rfpApprovalRequestId}; current rfpApprovalRequestId=${found.deal.rfp_approval_request_id ?? "null"}`
+          );
+          res.json({ success: true, idempotent: true, reason: "stale_callback_ignored" });
+          return;
+        }
       }
 
       // Failure callback: the Playwright Bid Board creation failed. Mark the override retryable and leave the
@@ -690,6 +742,176 @@ internalRfpRoutes.post(
       if (callbackStatus === "failed") {
         // Cap the free-text reason so an oversized SyncHub error can't bloat the column / audit log.
         const overrideError = (asStringOrNull(payload.error) ?? "Bid Board project creation failed").slice(0, 2000);
+
+        // VOTING-PATH failure (no SyncHub request id): a request-less create failed. The legacy update below
+        // keys on `rfp_approval_request_id = $3` (NULL matches nothing), so without this branch a voting create
+        // failure is a silent no-op and the deal sits with no visible failure. Surface a VISIBLE, retryable
+        // marker keyed by sourceDealId: rfp_approval_status='send_failed' (the status the Pending-RFP surface +
+        // pendingRfpSubStateForStatus render + offer Retry for, matching the dead-letter sweep) PLUS
+        // rfp_override_state='failed' + rfp_override_error for the audit. Two request-less sub-cases:
+        //   (1) a 2/3-YES create in flight       -> rfp_approval_status='pending' (finding B2), or
+        //   (2) a reviewer override-approve of a NO-GO'd voting deal -> 'declined' + rfp_override_state='approving'.
+        // Never resurrect onto a terminally re-confirmed denial. FRESHNESS: the same createdAt-vs-
+        // rfp_override_reviewed_at guard the legacy failed path uses now also gates this branch, so a late
+        // duplicate of an OLD 'failed' can't flip a fresh in-flight retry (sub-case (2), 'approving' with a bumped
+        // reviewed_at) back to failed; sub-case (1) has reviewed_at IS NULL and is exempt. Idempotent via the
+        // value-distinct + status guards; a later 'created' callback clears the marker and approves + advances.
+        if (dealRequestId == null) {
+          // Freshness input for the request-less failed path (same guard the request-backed path uses). Unlike
+          // that path we do NOT 422 a missing createdAt for sub-case (1) ('pending', rfp_override_reviewed_at IS
+          // NULL) — it's legitimately timestamp-less and exempt from the guard below.
+          const votingFailedCreatedAt = asDateOrNull(payload.createdAt);
+          // ...BUT once a freshness marker is set, a missing/mangled createdAt would match 0 rows and 200
+          // applied:false — SyncHub treats that as delivered and stops retrying, leaving the deal stuck. So
+          // 422 it (like the request-backed failed path) so SyncHub retries with a well-formed callback, in
+          // BOTH marker sub-cases:
+          //   (2) the override sub-case (finding G3): reviewed_at is set → the reviewed_at freshness needs it;
+          //   (1-retry) a 2/3-yes RETRY (finding H7): /rfp-retry stamped rfp_bidboard_attempt_at → the attempt
+          //       freshness needs it. Only the FIRST 2/3-yes attempt (attempt_at NULL) stays timestamp-less/exempt.
+          // finding Z7: read the freshness-relevant fields FRESH. found.deal is a snapshot from findDeal() and can
+          // be stale if /rfp-retry or an override stamped a marker since; the guarded UPDATE below reads the
+          // CURRENT row, so the 422 decision must too — otherwise a since-retried deal misses its 422 and the
+          // UPDATE no-ops at 200 applied:false, so SyncHub stops retrying.
+          const freshRes = await pool.query(
+            `SELECT rfp_approval_status, rfp_override_state, rfp_override_reviewed_at, rfp_bidboard_attempt_at, rfp_approval_requested_at
+               FROM ${quoteIdent(found.schemaName)}.deals WHERE id = $1`,
+            [sourceDealId]
+          );
+          const freshDeal = freshRes.rows[0] ?? found.deal;
+          // A request-less 'failed' that lands while a create is in flight MUST carry a parseable createdAt, else a
+          // timestamp-less callback would silently no-op the guarded UPDATE at 200 (SyncHub stops retrying) — 422 it.
+          const isOverrideApproveSubcase =
+            freshDeal.rfp_approval_status === "declined" &&
+            freshDeal.rfp_override_state === "approving" &&
+            freshDeal.rfp_override_reviewed_at != null;
+          // finding: a request-less PENDING round that's open (requested_at set) — first attempt OR retried
+          // (attempt_at set is a subset). Mirrors the 'created' path's BC3 422: without it a timestamp-less 'failed'
+          // redelivered from an OLD first attempt would slip past the cross-round guard's `$3 IS NULL` exemption and
+          // mark the fresh round send_failed. SyncHub always stamps createdAt (AA3), so this just makes it resend a
+          // well-formed one. (A pending deal WITHOUT requested_at — only an artificial state — stays exempt so a
+          // genuine first failure can still surface.)
+          const isPendingRoundOpen =
+            freshDeal.rfp_approval_status === "pending" && freshDeal.rfp_approval_requested_at != null;
+          if ((isOverrideApproveSubcase || isPendingRoundOpen) && !votingFailedCreatedAt) {
+            console.warn(
+              `[RFP callback] request-less 'failed' for deal ${sourceDealId} is missing a parseable createdAt while a freshness marker is set; returning 422 so SyncHub retries instead of silently dropping it`
+            );
+            res.status(422).json({ success: false, error: "invalid_payload" });
+            return;
+          }
+          let failedApplied = false;
+          const client = await pool.connect();
+          let releaseErr: unknown;
+          try {
+            await client.query("BEGIN");
+            const failedUpdate = await client.query(
+              `UPDATE ${quoteIdent(found.schemaName)}.deals
+                  SET rfp_override_state = 'failed',
+                      rfp_override_error = $1,
+                      -- 2/3-YES sub-case (was 'pending'): leave the "creating" limbo for send_failed, the
+                      -- Pending-RFP attention state that surfaces the failure + offers Retry. Override sub-case
+                      -- (was 'declined' + 'approving') MUST STAY 'declined' (finding G4) so the /rfp-review
+                      -- buttons keep working — requestOverrideApproval + reconfirmRfpDecline are both
+                      -- status='declined'-gated; /rfp-retry still recovers it via rfp_override_state='failed'.
+                      rfp_approval_status = CASE WHEN rfp_approval_status = 'pending' THEN 'send_failed' ELSE rfp_approval_status END,
+                      -- finding W8: the Pending-RFP surface + deal detail render the send_failed reason from
+                      -- rfp_last_attempt_error, so populate it on the send_failed (pending) sub-case (the override
+                      -- sub-case stays declined + shows rfp_override_error on the review page, so leave it).
+                      rfp_last_attempt_error = CASE WHEN rfp_approval_status = 'pending' THEN $1 ELSE rfp_last_attempt_error END,
+                      updated_at = NOW()
+                WHERE id = $2
+                  AND rfp_approval_request_id IS NULL
+                  AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+                  AND (
+                    rfp_approval_status = 'pending'
+                    OR (rfp_approval_status = 'declined' AND rfp_override_state = 'approving')
+                  )
+                  -- freshness: ignore a stale failed callback from a PRIOR attempt (createdAt older than the
+                  -- current attempt's rfp_override_reviewed_at) so a duplicate of the old failure can't flip a
+                  -- fresh retry back to failed. The 'pending' sub-case has reviewed_at IS NULL and is exempt.
+                  AND (
+                    rfp_override_reviewed_at IS NULL
+                    OR ($3::timestamptz IS NOT NULL AND $3::timestamptz >= rfp_override_reviewed_at)
+                  )
+                  -- ...and the SAME freshness against the request-less per-attempt marker (finding F4). Each
+                  -- /rfp-retry stamps rfp_bidboard_attempt_at, so once a retry starts, a late duplicate of the
+                  -- PRIOR attempt's 'failed' (createdAt < the new attempt's stamp) is rejected and can't flip the
+                  -- fresh in-flight retry back to send_failed. The FIRST attempt has attempt_at NULL (exempt), so
+                  -- its failure still surfaces immediately (even without a createdAt).
+                  AND (
+                    rfp_bidboard_attempt_at IS NULL
+                    OR ($3::timestamptz IS NOT NULL AND $3::timestamptz >= rfp_bidboard_attempt_at)
+                  )
+                  -- request-less CROSS-ROUND freshness (finding BC1): mirror the 'created' path's Y6 guard. Once a
+                  -- deal is Returned to Opportunity and a FRESH round opens, BOTH per-attempt markers are NULL again
+                  -- (reviewed_at + attempt_at), so a very delayed 'failed' from the OLD round's create (matched only
+                  -- by sourceDealId) would otherwise mark the NEW pending round send_failed. Require the callback
+                  -- createdAt to be no older than the CURRENT round's open time. A timestamp-less FIRST failure
+                  -- ($3 NULL) stays exempt so a genuine first-attempt failure still surfaces even if SyncHub omitted
+                  -- createdAt (the same fail-safe the reviewed_at/attempt_at clauses above keep).
+                  AND (
+                    rfp_approval_requested_at IS NULL
+                    OR $3::timestamptz IS NULL
+                    OR $3::timestamptz >= rfp_approval_requested_at
+                  )
+                  -- idempotency: re-applying the same failure is a no-op. Keyed on override_state/error only
+                  -- (NOT status) since the status transition now differs per sub-case (send_failed vs. kept
+                  -- 'declined') — override_state going to 'failed' already distinguishes the first application.
+                  AND (
+                    rfp_override_state IS DISTINCT FROM 'failed'
+                    OR rfp_override_error IS DISTINCT FROM $1
+                  )`,
+              [overrideError, sourceDealId, votingFailedCreatedAt]
+            );
+            failedApplied = (failedUpdate.rowCount ?? 0) > 0;
+            if (failedApplied) {
+              console.warn(`[RFP callback] voting-path Bid Board creation FAILED for deal ${sourceDealId}: ${overrideError}`);
+              // finding W9: record the ACTUAL retained status. The 2/3-yes sub-case moves 'pending'->'send_failed';
+              // the override sub-case KEEPS 'declined' (G4). Logging 'send_failed' unconditionally would make the
+              // activity history contradict the row while reviewers decide whether to re-attempt or uphold.
+              const priorStatus = found.deal.rfp_approval_status ?? null;
+              const retainedStatus = priorStatus === "pending" ? "send_failed" : priorStatus;
+              const fieldChanges: Record<string, { from: unknown; to: unknown }> = {
+                rfpOverrideState: { from: found.deal.rfp_override_state ?? null, to: "failed" },
+                rfpOverrideError: { from: found.deal.rfp_override_error ?? null, to: overrideError },
+              };
+              if (retainedStatus !== priorStatus) {
+                fieldChanges.rfpApprovalStatus = { from: priorStatus, to: retainedStatus };
+              }
+              await logActivityWithPgClient({
+                client,
+                schemaName: found.schemaName,
+                actor: buildAuditActorFromSystem({ systemProcess: INTERNAL_RFP_RECEIVER }),
+                action: "update",
+                entity: {
+                  tableName: "deals",
+                  entityType: "deal",
+                  recordId: sourceDealId,
+                  nameSnapshot: String(found.deal.name ?? "Deal"),
+                  secondaryIdSnapshot: (found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
+                },
+                fieldChanges,
+                metadata: { rfpApprovalRequestId: null },
+              });
+            }
+            await client.query("COMMIT");
+          } catch (err) {
+            if (isBrokenConnectionError(err)) {
+              // Dead socket — skip ROLLBACK (it can't succeed and would wait another query_timeout); destroy.
+              releaseErr = err;
+            } else {
+              let rollbackErr: unknown;
+              await client.query("ROLLBACK").catch((e) => { rollbackErr = e; });
+              releaseErr = rollbackErr ?? err;
+            }
+            throw err;
+          } finally {
+            releasePooledClient(client, releaseErr);
+          }
+          res.json({ success: true, status: "failed", dealId: sourceDealId, applied: failedApplied });
+          return;
+        }
+
         // The callback's createdAt is required for the freshness guard below (it's compared against the current
         // attempt's start, rfp_override_reviewed_at). Reject a missing/unparseable timestamp rather than defaulting
         // to NOW() — a NOW() default would always look "fresh" and let a stale failed clobber a fresh retry.
@@ -788,9 +1010,26 @@ internalRfpRoutes.post(
         found.deal.rfp_override_reviewed_at != null &&
         found.deal.rfp_approval_status === "declined" &&
         found.deal.rfp_override_decision !== "denial_reconfirmed";
-      if (overrideAwaitingCreated && !createdCallbackAt) {
+      // Finding H4: a 2/3-yes RETRY (rfp_bidboard_attempt_at stamped, status 'pending') likewise needs a real
+      // createdAt for the attempt-freshness guard added to the linkage below — else a timestamp-less 'created'
+      // no-ops silently at 200 and SyncHub stops retrying the fresh attempt.
+      const retriedPendingAwaitingCreated =
+        found.deal.rfp_bidboard_attempt_at != null && found.deal.rfp_approval_status === "pending";
+      // finding BC3: a FIRST request-less create (2/3-yes 'pending' or an override-approve 'declined'+'approving',
+      // both with attempt_at + reviewed_at still NULL) ALSO needs a parseable createdAt. The linkage below carries
+      // the Y6 cross-round guard (request_id IS NULL + a round open ⇒ createdAt required), so a timestamp-less
+      // 'created' would match 0 rows yet still 200 — SyncHub treats that as delivered and stops retrying, stranding
+      // the deal. 422 it so SyncHub resends with a well-formed callback. (Request-BACKED creates keep their round
+      // identity from the request-id reconciliation and are exempt; a re-confirmed denial no-ops idempotently.)
+      const requestlessFirstCreateAwaiting =
+        dealRequestId == null &&
+        found.deal.rfp_approval_requested_at != null &&
+        found.deal.rfp_override_decision !== "denial_reconfirmed" &&
+        (found.deal.rfp_approval_status === "pending" ||
+          (found.deal.rfp_approval_status === "declined" && found.deal.rfp_override_state === "approving"));
+      if ((overrideAwaitingCreated || retriedPendingAwaitingCreated || requestlessFirstCreateAwaiting) && !createdCallbackAt) {
         console.warn(
-          `[RFP callback] override 'created' for deal ${sourceDealId} (request ${currentRequestId}) is missing a parseable createdAt; returning 422 so SyncHub retries instead of silently dropping it`
+          `[RFP callback] 'created' for deal ${sourceDealId} is missing a parseable createdAt while a freshness marker is set; returning 422 so SyncHub retries instead of silently dropping it`
         );
         res.status(422).json({ success: false, error: "invalid_payload" });
         return;
@@ -844,6 +1083,8 @@ internalRfpRoutes.post(
                   bid_board_linked_at = NOW(),
                   rfp_override_state = NULL,
                   rfp_override_error = NULL,
+                  -- clear the per-attempt marker (finding F4/F5): the create succeeded, so no attempt is in flight.
+                  rfp_bidboard_attempt_at = NULL,
                   updated_at = NOW()
             WHERE id = $3
               -- a re-confirmed denial is terminal; never let a (delayed) success callback override it
@@ -853,6 +1094,22 @@ internalRfpRoutes.post(
               -- timestamp is treated as not-fresh and ignored, never as current. The original (non-override) flow
               -- has rfp_override_reviewed_at IS NULL and is unaffected.
               AND (rfp_override_reviewed_at IS NULL OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_override_reviewed_at))
+              -- request-less (2/3-yes) per-attempt freshness (finding H4): a delayed 'created' from a PRIOR
+              -- exhausted attempt must not link the OLD project while a fresh /rfp-retry is in flight. Each retry
+              -- stamps rfp_bidboard_attempt_at, so a 'created' older than it is ignored; the fresh attempt's
+              -- 'created' (createdAt >= the stamp) links + clears the marker. First attempt: attempt_at NULL/exempt.
+              AND (rfp_bidboard_attempt_at IS NULL OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_bidboard_attempt_at))
+              -- request-less CROSS-ROUND freshness (finding Y6): once a deal is Returned to Opportunity and a
+              -- FRESH round opens, rfp_approval_status is non-null again and the first attempt has no attempt_at,
+              -- so a very delayed 'created' from the OLD round's create (matched only by sourceDealId) could link
+              -- the NEW round to the old project. Require a request-less 'created' to be no older than the CURRENT
+              -- round's open time (rfp_approval_requested_at). Request-BACKED callbacks (request_id present) get
+              -- their round identity from the request-id reconciliation above, so they're exempt here.
+              AND (
+                rfp_approval_request_id IS NOT NULL
+                OR rfp_approval_requested_at IS NULL
+                OR ($4::timestamptz IS NOT NULL AND $4::timestamptz >= rfp_approval_requested_at)
+              )
               AND (
                 procore_bid_id IS DISTINCT FROM $1::bigint OR
                 procore_company_id IS DISTINCT FROM $2 OR
@@ -862,6 +1119,14 @@ internalRfpRoutes.post(
                 rfp_override_state IS NOT NULL OR
                 rfp_override_error IS NOT NULL
               )
+              -- A request-less (voting) 'created' must NOT resurrect a deal that was Returned to Opportunity.
+              -- cancelPendingRfp clears rfp_approval_status to NULL (+ every RFP field), and a delayed 'created'
+              -- from the prior request-less create would otherwise re-approve + Bid-Board-own it: reviewed_at is
+              -- NULL so the freshness clause above exempts it, and the value-distinct guard passes. A NULL status
+              -- means "no RFP in flight" — never link it. Every LEGIT 'created' has a non-null status (voting
+              -- 'pending', override 'declined', legacy 'pending'/'pending_outbox'), so this is a no-op for them.
+              -- (Request-BACKED callbacks with a cleared id are already stale-ACKed above and never reach here.)
+              AND rfp_approval_status IS NOT NULL
             RETURNING id, name, deal_number, project_number, bid_board_linked_at`,
           [bidboardProjectId, procoreCompanyId, sourceDealId, createdCallbackAt]
         );
@@ -888,6 +1153,44 @@ internalRfpRoutes.post(
             },
             metadata: { rfpApprovalRequestId: payload.rfpApprovalRequestId, bidboardProjectId },
           });
+
+          // finding: the migration 0155 trigger fires the "override approved" email on the declined->approved
+          // transition ONLY for request-BACKED deals (it returns early on a NULL rfp_approval_request_id). A
+          // voting-path no-go that a reviewer OVERRIDE-approved carries no request id, so the requesting rep +
+          // leadership would never be notified when THIS callback flips it declined->approved. Enqueue the SAME
+          // job app-side for that case, keyed on the round event id (the worker uses it for idempotency when there
+          // is no request id). This runs only on the real transition (rowCount>0), so it's once-only; a replayed
+          // 'created' no-ops the linkage and never re-enqueues. Best-effort (mirrors the trigger's EXCEPTION-swallow):
+          // a notification failure must NEVER abort the linkage commit.
+          if (dealRequestId == null && found.deal.rfp_override_decision === "override_approved") {
+            // SAVEPOINT-isolate the best-effort enqueue: in Postgres a failed statement ABORTS the whole
+            // transaction even when the JS error is caught, which would roll back the linkage this trigger fired
+            // on. Wrapping in a savepoint means a failed enqueue only rolls back ITSELF, never the linkage.
+            try {
+              await client.query("SAVEPOINT rfp_override_email");
+              await client.query(
+                `INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+                 VALUES ('rfp_override_approved_email', $1::jsonb, NULL, 'pending', NOW())`,
+                [
+                  JSON.stringify({
+                    tenantSchema: found.schemaName,
+                    dealId: sourceDealId,
+                    dealNumber: (found.deal.project_number ?? found.deal.deal_number ?? null) as string | null,
+                    dealName: found.deal.name ?? null,
+                    rfpApprovalRequestId: null,
+                    rfpVoteRoundId: found.deal.rfp_approval_request_event_id ?? null,
+                    requestedByUserId: found.deal.rfp_approval_requested_by ?? null,
+                  }),
+                ]
+              );
+              await client.query("RELEASE SAVEPOINT rfp_override_email");
+            } catch (notifyErr) {
+              await client.query("ROLLBACK TO SAVEPOINT rfp_override_email").catch(() => {});
+              console.warn(
+                `[RFP callback] failed to enqueue request-less override-approved email for deal ${sourceDealId} (linkage preserved): ${notifyErr instanceof Error ? notifyErr.message : notifyErr}`
+              );
+            }
+          }
         }
 
         if (canApplyStage) {
@@ -913,7 +1216,23 @@ internalRfpRoutes.post(
                 -- same guards as the linkage update: a re-confirmed denial (or a stale prior-attempt 'created')
                 -- must not advance the stage
                 AND rfp_override_decision IS DISTINCT FROM 'denial_reconfirmed'
+                -- ...including the request-less resurrection guard: a deal Returned to Opportunity (status NULL)
+                -- must not be advanced to estimating by a late 'created' — the linkage update above no-ops it, and
+                -- without this the stage move would still fire (it's an independent guarded UPDATE). Within this
+                -- txn a successful linkage has already set status='approved' (non-null), so legit flows pass.
+                AND rfp_approval_status IS NOT NULL
                 AND (rfp_override_reviewed_at IS NULL OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_override_reviewed_at))
+                -- ...and the request-less per-attempt freshness (finding H4): don't advance the stage on a stale
+                -- prior-attempt 'created'. A successful linkage above already cleared attempt_at (→ exempt here);
+                -- a no-op'd stale 'created' leaves it set, so $8 < attempt_at blocks the move.
+                AND (rfp_bidboard_attempt_at IS NULL OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_bidboard_attempt_at))
+                -- ...and the request-less CROSS-ROUND freshness (finding Y6): don't advance the stage on a
+                -- 'created' from an OLD round. Mirrors the linkage update — request-backed callbacks exempt.
+                AND (
+                  rfp_approval_request_id IS NOT NULL
+                  OR rfp_approval_requested_at IS NULL
+                  OR ($8::timestamptz IS NOT NULL AND $8::timestamptz >= rfp_approval_requested_at)
+                )
               RETURNING id`,
             [
               targetStage.id,

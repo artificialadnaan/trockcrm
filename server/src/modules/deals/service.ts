@@ -67,6 +67,9 @@ import { resolveLeadSourceDisplayValue } from "../leads/source-control.js";
 import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-create-rules.js";
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
+import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
+import { isServiceRfp } from "./rfp-vote-service.js";
+import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
 import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
@@ -94,7 +97,7 @@ import {
 } from "../shared/deal-date-scope.js";
 import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
-import { isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
+import { isRfpVotingEnabled, isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
 import {
   buildDealFilterBarConditions,
   buildInvolvedRepCondition,
@@ -2094,6 +2097,46 @@ export async function getDealDetail(
   const dealChangeOrderRows = await listDealChangeOrders(tenantDb, dealId);
   const dealChangeOrderTotal = await sumDealChangeOrders(tenantDb, dealId);
 
+  // Current-round RFP votes for the vote panel / focused vote page. Scoped to the deal's live round event id
+  // so a re-trigger shows a clean tally. rfpVoteState comes from the ONE shared helper (reconciliation rule).
+  // Gated on the feature flag so getDealDetail stays inert (no query) if rfp_votes doesn't yet exist
+  // (flag off or migration 0176 not applied). As belt-and-suspenders when the flag is on but the table is
+  // missing, loadRfpVoteDetail probes with to_regclass first and returns an empty tally — never running a
+  // SELECT that would 42P01-poison this tenant transaction.
+  // A request-less vote round (non-service, no SyncHub request id, has a round event id, status pending/paused)
+  // can only have been opened while the flag was on. Load its detail regardless of the CURRENT flag (finding
+  // Y5): flipping ENABLE_RFP_VOTING off as the rollback lever must NOT hide an already-open round's tally — the
+  // route-side W7 guard still lets voters cast, so the panel + /rfp-vote page have to keep rendering the state.
+  // finding: base vote-round detection on the request-less ROUND identity (no SyncHub request id + a round event
+  // id), NOT the deal's CURRENT service classification. A non-service round that opened and was later edited to
+  // service/type-4 mid-round is still an OPEN vote round the cast route accepts ballots for (finding #2) — gating
+  // visibility on isServiceRfp here would suppress rfpVoteState and hide the tally/link from remaining voters. A
+  // genuinely-service deal never reaches this shape: the SyncHub service path stamps a request id at 'pending', and
+  // a legacy send_failed carries no votes (excluded below), so dropping the isServiceRfp gate stays inert for them.
+  const requestlessRound =
+    dealWithMetadata.rfpApprovalRequestId == null &&
+    dealWithMetadata.rfpApprovalRequestEventId != null;
+  const isPendingVoteRound = requestlessRound && dealWithMetadata.rfpApprovalStatus === "pending";
+  // A `send_failed` request-less deal MIGHT be a voting-path create/invitation failure — but a LEGACY
+  // rfp_request_delivery that dead-lettered BEFORE SyncHub returned a request id also lands here: it too stamps a
+  // round event id at trigger time (routes.ts trigger reserve) yet holds no vote. So load the detail for the
+  // send_failed candidate but treat it as a vote round ONLY if it actually recorded votes (finding BC4) — a real
+  // voting create failure always carries >=2 approve votes, whereas a legacy delivery failure has none, so this
+  // stops rendering the vote panel / focused page as a paused vote-with-awaiting-slots for a legacy failure.
+  const isSendFailedRequestless = requestlessRound && dealWithMetadata.rfpApprovalStatus === "send_failed";
+  const { rfpVotes: rfpVotesView, rfpVoteState } =
+    (isRfpVotingEnabled() || isPendingVoteRound || isSendFailedRequestless)
+      ? await loadRfpVoteDetail(tenantDb, dealId, dealWithMetadata.rfpApprovalRequestEventId ?? null)
+      : { rfpVotes: [] as RfpVoteView[], rfpVoteState: computeRfpVoteState([]) };
+  const isRequestlessVoteRound = isPendingVoteRound || (isSendFailedRequestless && rfpVotesView.length > 0);
+
+  // The vote panel + focused vote page must be INERT for non-vote deals. A deal is in a vote round when it has
+  // recorded votes OR is an open/paused request-less round (above) — independent of the CURRENT service
+  // classification (finding), so a mid-round reclassification can't hide an open round. Flag-independent so
+  // rollback keeps rounds visible. Otherwise emit a null rfpVoteState so the client's `if (!state) return null`
+  // guard fires (loadRfpVoteDetail returns a non-null zero-state that would otherwise render the panel on every RFP).
+  const isVoteRound = rfpVotesView.length > 0 || isRequestlessVoteRound;
+
   return {
     ...dealWithMetadata,
     // Authoritative bid due date (lead-owned for converted deals; deal column for manual deals),
@@ -2112,6 +2155,8 @@ export async function getDealDetail(
     changeOrders: cos,
     dealChangeOrders: dealChangeOrderRows,
     dealChangeOrderTotal,
+    rfpVotes: isVoteRound ? rfpVotesView : [],
+    rfpVoteState: isVoteRound ? rfpVoteState : null,
   };
 }
 

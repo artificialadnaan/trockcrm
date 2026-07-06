@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { AppError } from "./error-handler.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
+import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 
 export function requireRole(...allowedRoles: UserRole[]) {
   return (req: Request, _res: Response, next: NextFunction) => {
@@ -56,6 +57,28 @@ export function requireRfpReviewer(req: Request, _res: Response, next: NextFunct
         403,
         "Only the designated RFP reviewers can review declined RFPs.",
         "RFP_REVIEWER_ONLY"
+      )
+    );
+  }
+  next();
+}
+
+/**
+ * Restrict a route to the 3 designated RFP voters (Sidney/Tim/James), resolved from RFP_VOTER_EMAILS.
+ * This is the SAME source of truth as who is invited to vote, so the eligible set and the invited set
+ * never drift. A regular admin/director who is not on that list gets 403 — role does NOT grant vote
+ * rights. Mirrors requireRfpReviewer.
+ */
+export function requireRfpVoter(req: Request, _res: Response, next: NextFunction) {
+  if (!req.user) {
+    return next(new AppError(401, "Authentication required"));
+  }
+  if (!isRfpVoterEmail(req.user.email, process.env)) {
+    return next(
+      new AppError(
+        403,
+        "Only the designated RFP voters can vote on RFPs.",
+        "RFP_VOTER_ONLY",
       )
     );
   }
