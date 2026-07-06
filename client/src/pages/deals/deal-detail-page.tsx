@@ -83,6 +83,7 @@ import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { isDealScopeReadOnlyAfterRfp } from "@/lib/deal-scope-lock";
+import { isRfpDetailPollActive } from "@/lib/rfp-detail-poll";
 import { formatCurrency, bestEstimateCaptionLabel, formatDealDisplayNumber, resolveBestEstimate, resolveDealValueKind, LOST_BID_VALUE_LABEL } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
@@ -347,19 +348,23 @@ export function DealDetailPage() {
   const detailOfficeId = searchParams.get("officeId");
   const { deal, loading, error, refetch } = useDealDetail(id, { officeId: detailOfficeId });
 
-  // Poll the detail every 5s while an RFP is in flight so the panel flips to its resolved state without a manual
-  // refresh. Gate SOLELY on rfpApprovalStatus (finding): after a 2/3 approve the vote outcome is already 'approved'
-  // but the Bid Board create runs AFTER that while the status is still 'pending' — stopping on the vote outcome
-  // would freeze the panel on "creating Bid Board…" and hide the later approved / send_failed (Retry) state. The
-  // status leaves pending/pending_outbox once the create callback lands (approved) or fails (send_failed), which
-  // stops the poll.
+  // Poll the detail every 5s while an RFP is ACTIVELY in flight so the panel flips to its resolved state without a
+  // manual refresh — but only while the request is RECENT (isRfpDetailPollActive). Gating on rfpApprovalStatus alone
+  // made deals stuck 'pending' from an old/failed request (and, with RFP voting off, deals that can never resolve)
+  // refresh the page every 5s FOREVER; the recency window stops that while still catching a genuine trigger →
+  // pending_outbox → approved / send_failed (Retry) resolution. Re-checked in the tick so a request that never
+  // resolves also self-terminates once it ages out of the window.
   useEffect(() => {
-    if (deal?.rfpApprovalStatus !== "pending" && deal?.rfpApprovalStatus !== "pending_outbox") return;
+    if (!isRfpDetailPollActive(deal?.rfpApprovalStatus, deal?.rfpApprovalRequestedAt, Date.now())) return;
     const interval = setInterval(() => {
+      if (!isRfpDetailPollActive(deal?.rfpApprovalStatus, deal?.rfpApprovalRequestedAt, Date.now())) {
+        clearInterval(interval);
+        return;
+      }
       refetch();
     }, 5000);
     return () => clearInterval(interval);
-  }, [deal?.rfpApprovalStatus, refetch]);
+  }, [deal?.rfpApprovalStatus, deal?.rfpApprovalRequestedAt, refetch]);
 
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
