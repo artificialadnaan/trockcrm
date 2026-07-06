@@ -87,7 +87,7 @@ describe("r2-client", () => {
     await expect(r2.generateDownloadUrl("photos/a.jpg", 60, "a.jpg")).resolves.toBe("https://download.test");
 
     expect(commandInstances[0]).toMatchObject({ type: "put", input: { Bucket: "bucket", Key: "photos/a.jpg", ContentType: "image/jpeg" } });
-    expect(commandInstances[1]).toMatchObject({ type: "get", input: { Bucket: "bucket", Key: "photos/a.jpg", ResponseContentDisposition: 'attachment; filename="a.jpg"' } });
+    expect(commandInstances[1]).toMatchObject({ type: "get", input: { Bucket: "bucket", Key: "photos/a.jpg", ResponseContentDisposition: `attachment; filename="a.jpg"; filename*=UTF-8''a.jpg` } });
     expect(getSignedUrlMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.anything(), { expiresIn: 30 * 60 });
   });
 

@@ -105,6 +105,16 @@ export interface RequestUploadInput {
   changeOrderId?: string;
   /** Optional description */
   description?: string;
+  /**
+   * Optional caller-supplied display name (overrides the derived seed). Trimmed + capped to the column
+   * width (500). When absent, uploads seed the display name from the real originalFilename (ext stripped)
+   * UNLESS the row is a SYNTHETIC photo (category 'photo' with a field-photo-<ts>/companycam_ filename),
+   * which keeps the deal-number system scheme — see deriveSeedDisplayName. Wired from the JSON route
+   * (`req.body.displayName`) and the raw route (`x-file-display-name` header). No PR1 UI sets it on the web
+   * upload zone (renames go through the edit modal / PATCH), but the raw path and future advanced surfaces
+   * can.
+   */
+  displayName?: string;
   /** Optional photo-only category label */
   photoCategory?: PhotoCategory | null;
   /** Optional tags */
@@ -391,6 +401,44 @@ async function generateSystemFilename(
   return { systemFilename, displayName };
 }
 
+/** Strip a trailing extension case-insensitively (the row stores the extension separately). */
+function stripExtension(filename: string): string {
+  const dot = filename.lastIndexOf(".");
+  return dot > 0 ? filename.slice(0, dot) : filename;
+}
+
+/**
+ * True for a machine-generated photo name that must keep the deal-number system scheme:
+ * field/TRCAM captures (`field-photo-<ts>.<ext>`) and CompanyCam (`companycam_<id>`, defensive — CompanyCam
+ * never routes through requestUploadUrl). A genuine desktop/web photo has a real originalFilename and is
+ * NOT synthetic, so it keeps its real name per spec §5.1. Case-SENSITIVE (the generators only ever emit
+ * lowercase names) so display-seeding stays byte-for-byte in lockstep with the search-index CASE (0178)
+ * and the backfill (isSyntheticPhotoRow).
+ */
+function isSyntheticPhotoName(category: FileCategory, originalFilename: string): boolean {
+  return category === "photo" && /^(field-photo-\d+|companycam_)/.test(originalFilename);
+}
+
+/**
+ * Resolve the display name to persist for a NEW upload.
+ *  - explicit override wins (trimmed, capped to 500 = column width);
+ *  - SYNTHETIC photos keep the system-derived name (deal-number scheme) — download filename stays sane;
+ *  - everything else (documents AND real desktop/web photos) → the real originalFilename with its
+ *    extension stripped; empty-after-strip degrades safely to the system-derived name.
+ */
+function deriveSeedDisplayName(input: {
+  category: FileCategory;
+  originalFilename: string;
+  displayName?: string;
+  systemDerived: string;
+}): string {
+  const override = input.displayName?.trim();
+  if (override) return override.slice(0, 500);
+  if (isSyntheticPhotoName(input.category, input.originalFilename)) return input.systemDerived;
+  const seed = stripExtension(input.originalFilename).trim();
+  return seed ? seed.slice(0, 500) : input.systemDerived;
+}
+
 /**
  * Build the R2 object key.
  * Pattern: office_{slug}/deals/{DealNumber}/{category}/{filename}
@@ -478,13 +526,23 @@ export async function requestUploadUrl(
   const now = new Date();
 
   // Generate system filename (requires DB lookup for deal number + sequence)
-  const { systemFilename, displayName } = await generateSystemFilename(
+  const { systemFilename, displayName: systemDisplayName } = await generateSystemFilename(
     tenantDb,
     input.dealId,
     resolvedCategory,
     ext,
     now
   );
+
+  // Seed the persisted display name from the REAL filename for documents AND real web/desktop photos;
+  // keep the deal-number system scheme only for SYNTHETIC photos (field/TRCAM/CompanyCam). An explicit
+  // caller override wins. See deriveSeedDisplayName.
+  const displayName = deriveSeedDisplayName({
+    category: resolvedCategory,
+    originalFilename: input.originalFilename,
+    displayName: input.displayName,
+    systemDerived: systemDisplayName,
+  });
 
   // Look up deal number for R2 key path
   let dealNumber: string | undefined;

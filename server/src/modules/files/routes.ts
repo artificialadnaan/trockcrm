@@ -153,6 +153,7 @@ router.post("/upload-url", async (req, res, next) => {
       procoreProjectId,
       changeOrderId,
       description,
+      displayName,
       tags,
     } = req.body;
 
@@ -198,6 +199,7 @@ router.post("/upload-url", async (req, res, next) => {
         procoreProjectId: procoreProjectId ? Number(procoreProjectId) : undefined,
         changeOrderId,
         description,
+        displayName: typeof displayName === "string" ? displayName : undefined,
         tags,
       }
     );
@@ -221,6 +223,16 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
     const leadId = req.headers["x-lead-id"] as string | undefined;
     const contactId = req.headers["x-contact-id"] as string | undefined;
     const description = req.headers["x-file-description"] as string | undefined;
+    const displayNameHeader = req.headers["x-file-display-name"] as string | undefined;
+    let displayNameOverride: string | undefined;
+    if (typeof displayNameHeader === "string" && displayNameHeader.length > 0) {
+      try {
+        displayNameOverride = decodeURIComponent(displayNameHeader);
+      } catch {
+        // Malformed percent-encoding — use the raw header value rather than 500 the upload.
+        displayNameOverride = displayNameHeader;
+      }
+    }
     const tagsRaw = req.headers["x-file-tags"] as string | undefined;
     const tags = tagsRaw ? tagsRaw.split(",") : undefined;
 
@@ -269,6 +281,7 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
         leadId,
         contactId,
         description,
+        displayName: displayNameOverride,
         tags,
       }
     );
