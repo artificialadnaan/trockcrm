@@ -164,7 +164,8 @@ export function buildContentDisposition(
 export async function generateDownloadUrl(
   r2Key: string,
   expiresIn: number = 3600,
-  filename?: string
+  filename?: string,
+  disposition: "inline" | "attachment" = "attachment"
 ): Promise<string> {
   const client = getClient();
   const bucket = getBucket();
@@ -173,7 +174,7 @@ export async function generateDownloadUrl(
     Bucket: bucket,
     Key: r2Key,
     ...(filename
-      ? { ResponseContentDisposition: buildContentDisposition("attachment", filename) }
+      ? { ResponseContentDisposition: buildContentDisposition(disposition, filename) }
       : {}),
   });
 
@@ -367,8 +368,12 @@ export function generateMockUploadUrl(r2Key: string): {
 }
 
 /**
- * Dev mode: generate a mock download URL.
+ * Dev mode: generate a mock download URL. Encodes the resolved disposition so callers/tests can assert
+ * what the real presign WOULD carry (real presigns embed it in a signed ResponseContentDisposition).
  */
-export function generateMockDownloadUrl(r2Key: string): string {
-  return `http://localhost:3001/api/files/dev-download?key=${encodeURIComponent(r2Key)}`;
+export function generateMockDownloadUrl(
+  r2Key: string,
+  disposition: "inline" | "attachment" = "attachment"
+): string {
+  return `http://localhost:3001/api/files/dev-download?key=${encodeURIComponent(r2Key)}&disposition=${disposition}`;
 }

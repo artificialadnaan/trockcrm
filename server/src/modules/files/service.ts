@@ -1326,17 +1326,35 @@ export async function getFileByIdIncludingDeleted(
 }
 
 /**
+ * Decide the Content-Disposition for a download. Inline is a stored-XSS / content-sniffing surface, so it
+ * is allowlisted to image/* (EXCLUDING image/svg+xml), application/pdf, and text/plain — and only when the
+ * caller explicitly requested inline. Everything else (SVG, HTML, Office, unknown, or no request) → attachment.
+ */
+export function resolveInlineDisposition(
+  mimeType: string | null | undefined,
+  requested: string | null | undefined,
+): "inline" | "attachment" {
+  if (requested !== "inline") return "attachment";
+  const m = (mimeType ?? "").split(";")[0].trim().toLowerCase();
+  if (m === "image/svg+xml") return "attachment";
+  if (m.startsWith("image/")) return "inline";
+  if (m === "application/pdf") return "inline";
+  if (m === "text/plain") return "inline";
+  return "attachment";
+}
+
+/**
  * Get a presigned download URL for a file.
  */
 export async function buildFileDownloadUrlFromRecord(file: {
   r2Key: string;
   displayName: string;
   fileExtension?: string | null;
-}, ttlSeconds = 3600): Promise<{ url: string; filename: string }> {
+}, ttlSeconds = 3600, disposition: "inline" | "attachment" = "attachment"): Promise<{ url: string; filename: string }> {
   const filename = file.displayName + (file.fileExtension ?? "");
   const url = isR2Configured()
-    ? await generateDownloadUrl(file.r2Key, ttlSeconds, filename)
-    : generateMockDownloadUrl(file.r2Key);
+    ? await generateDownloadUrl(file.r2Key, ttlSeconds, filename, disposition)
+    : generateMockDownloadUrl(file.r2Key, disposition);
 
   return { url, filename };
 }
@@ -1347,12 +1365,14 @@ const PHOTO_LIST_URL_TTL_SECONDS = 6 * 60 * 60;
 
 export async function getFileDownloadUrl(
   tenantDb: TenantDb,
-  fileId: string
+  fileId: string,
+  requestedDisposition?: string
 ): Promise<{ url: string; filename: string }> {
   const file = await getFileById(tenantDb, fileId);
   if (!file) throw new AppError(404, "File not found");
 
-  return buildFileDownloadUrlFromRecord(file);
+  const disposition = resolveInlineDisposition(file.mimeType, requestedDisposition);
+  return buildFileDownloadUrlFromRecord(file, 3600, disposition);
 }
 
 /**
