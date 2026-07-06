@@ -1432,10 +1432,38 @@ export async function updateFile(
   if (input.description !== undefined) updates.description = input.description;
   if (input.notes !== undefined) updates.notes = input.notes;
   if (input.tags !== undefined) updates.tags = input.tags;
-  if (input.category !== undefined) updates.category = input.category;
-  if (input.subcategory !== undefined) updates.subcategory = input.subcategory;
-  if (input.folderPath !== undefined) updates.folderPath = input.folderPath;
   if (input.photoCategory !== undefined) updates.photoCategory = input.photoCategory;
+
+  // folderPath is NOT independent of category+subcategory — it is DERIVED from both. Resolve the EFFECTIVE
+  // (category, subcategory) this update yields, detect a change on EITHER dimension, and re-derive
+  // folderPath from them, IGNORING any incoming folderPath (an edit-modal folderPath must never
+  // reintroduce drift). No change on either dimension → keep the client folderPath if one was sent, else
+  // leave it untouched (field tag/transcription writes pass neither category nor subcategory).
+  const effectiveCategory = input.category !== undefined ? input.category : existing.category;
+  const categoryChanged = input.category !== undefined && input.category !== existing.category;
+
+  // On a category change, a subcategory carried from the OLD category would be a phantom subfolder: keep
+  // only a subcategory explicitly supplied in THIS request, otherwise clear it. On an unchanged category,
+  // honor an explicit subcategory edit (estimate DD->Bid), otherwise keep the existing subcategory.
+  const existingSub = existing.subcategory ?? null;
+  const effectiveSubcategory: string | null = categoryChanged
+    ? (input.subcategory !== undefined ? (input.subcategory ?? null) : null)
+    : (input.subcategory !== undefined ? (input.subcategory ?? null) : existingSub);
+  const subcategoryChanged = effectiveSubcategory !== existingSub;
+
+  if (input.category !== undefined) updates.category = input.category;
+
+  if (categoryChanged || subcategoryChanged) {
+    updates.subcategory = effectiveSubcategory; // persists a cleared-stale subcategory on a category change
+    // Photos are date-bucketed ("Photos/Site Visits/2026-04"). Re-derive with the ROW'S own date so a
+    // re-categorization TO photo doesn't collapse the bucket (and never uses now(), which would move it).
+    const bucketSource = existing.takenAt ?? existing.createdAt ?? new Date();
+    const bucketDate = bucketSource instanceof Date ? bucketSource : new Date(bucketSource);
+    updates.folderPath = buildFolderPath(effectiveCategory, effectiveSubcategory ?? undefined, bucketDate);
+  } else {
+    if (input.subcategory !== undefined) updates.subcategory = input.subcategory ?? null;
+    if (input.folderPath !== undefined) updates.folderPath = input.folderPath;
+  }
   if (input.deletedAt !== undefined) {
     updates.deletedAt = input.deletedAt;
     updates.isActive = input.deletedAt == null;
