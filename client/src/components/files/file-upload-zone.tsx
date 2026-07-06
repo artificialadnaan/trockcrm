@@ -6,10 +6,11 @@ import {
   ALLOWED_EXTENSIONS,
   MAX_FILE_SIZE_MB,
   MAX_FILE_SIZE_BYTES,
-  generatePreviewName,
   getFileExtension,
+  deriveUploadDisplayName,
 } from "@/lib/file-utils";
 import type { FileCategory } from "@/lib/file-utils";
+import { Textarea } from "@/components/ui/textarea";
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"]);
 
@@ -48,7 +49,19 @@ export function FileUploadZone({
 }: FileUploadZoneProps) {
   const [uploads, setUploads] = useState<UploadState[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  const [description, setDescription] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Resolve the category the SERVER will use for THIS file, so the preview is honest: an "auto" image is
+  // inferred as photo; an "auto" non-image is treated like every non-photo. For a real dropped photo the
+  // filename is never synthetic, so deriveUploadDisplayName returns its ext-stripped real name (== what is
+  // saved).
+  const resolvePreviewCategory = (file: File): FileCategory => {
+    if (category !== "auto") return category;
+    const ext = getFileExtension(file.name);
+    const isImage = file.type.startsWith("image/") || IMAGE_EXTENSIONS.has(ext);
+    return isImage ? "photo" : "other";
+  };
 
   const validateFile = (file: File): string | null => {
     const ext = getFileExtension(file.name);
@@ -76,7 +89,7 @@ export function FileUploadZone({
       const uploadStates: UploadState[] = newFiles.map((file) => ({
         id: crypto.randomUUID(),
         file,
-        previewName: generatePreviewName(file.name, category === "auto" ? "other" : category, dealNumber),
+        previewName: deriveUploadDisplayName(file.name, resolvePreviewCategory(file), dealNumber),
         progress: 0,
         status: "pending" as const,
       }));
@@ -117,6 +130,7 @@ export function FileUploadZone({
             leadId,
             contactId,
             tags,
+            description: description.trim() ? description.trim() : undefined,
             onProgress: (percent) => {
               setUploads((prev) =>
                 prev.map((u) =>
@@ -152,9 +166,10 @@ export function FileUploadZone({
       // Fix 12: Only fire onUploadComplete when all uploads succeed
       if (allSucceeded) {
         onUploadComplete?.();
+        setDescription(""); // description is per-batch; don't leak it onto a later unrelated drop
       }
     },
-    [category, subcategory, dealId, leadId, contactId, tags, onUploadComplete, dealNumber]
+    [category, subcategory, dealId, leadId, contactId, tags, onUploadComplete, dealNumber, description]
   );
 
   const handleDrop = useCallback(
@@ -183,6 +198,19 @@ export function FileUploadZone({
 
   return (
     <div className="space-y-3">
+      <div className="space-y-1.5">
+        <label htmlFor="upload-desc" className="text-sm font-medium">
+          Description (optional)
+        </label>
+        <Textarea
+          id="upload-desc"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          rows={2}
+          placeholder="Applied to files added in this upload"
+        />
+      </div>
+
       {/* Drop Zone */}
       <div
         className={`border-2 border-dashed rounded-lg transition-colors cursor-pointer ${

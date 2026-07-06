@@ -193,6 +193,26 @@ export function generatePreviewName(
   return `${categoryLabel}_${dateStr}${ext}`;
 }
 
+/**
+ * The display name a NEW upload will actually be saved as, mirroring the server sentinel
+ * (deriveSeedDisplayName): a SYNTHETIC photo name (field-photo-<ts>/companycam_) keeps the approximate
+ * deal-number system scheme; every other file — documents AND real desktop/web photos — keeps the real
+ * filename with its extension stripped. Callers pass the RESOLVED category (an auto-detected image must be
+ * passed as "photo", since the server infers photo for any image).
+ */
+export function deriveUploadDisplayName(
+  originalFilename: string,
+  category: FileCategory,
+  dealNumber?: string
+): string {
+  const isSyntheticPhoto =
+    category === "photo" && /^(field-photo-\d+|companycam_)/.test(originalFilename);
+  if (isSyntheticPhoto) return generatePreviewName(originalFilename, category, dealNumber);
+  const dot = originalFilename.lastIndexOf(".");
+  const stripped = dot > 0 ? originalFilename.slice(0, dot) : originalFilename;
+  return stripped.trim() || generatePreviewName(originalFilename, category, dealNumber);
+}
+
 // ─── Subcategory Options ────────────────────────────────────────────────────
 
 const SUBCATEGORY_OPTIONS: Partial<Record<FileCategory, string[]>> = {

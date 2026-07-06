@@ -7,11 +7,13 @@ import { FileList } from "./file-list";
 import { FileSearchBar } from "./file-search-bar";
 import { FileVersionHistory } from "./file-version-history";
 import { DealFilePhotosSubview } from "./deal-file-photos-subview";
+import { FileEditModal } from "./file-edit-modal";
 import {
   useFiles,
   useDealFolders,
   downloadFile,
   deleteFileRecord,
+  type FileRecord,
 } from "@/hooks/use-files";
 import type { FileCategory } from "@/lib/file-utils";
 
@@ -26,6 +28,7 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
   const [page, setPage] = useState(1);
   const [showUpload, setShowUpload] = useState(false);
   const [versionFileId, setVersionFileId] = useState<string | null>(null);
+  const [editingFile, setEditingFile] = useState<FileRecord | null>(null);
 
   const { folders, loading: foldersLoading, refetch: refetchFolders } =
     useDealFolders(dealId);
@@ -175,6 +178,7 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
               onDownload={handleDownload}
               onDelete={handleDelete}
               onViewVersions={setVersionFileId}
+              onEdit={setEditingFile}
               emptyMessage={
                 search
                   ? "No files match your search."
@@ -186,6 +190,15 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
           </div>
         </div>
       )}
+
+      <FileEditModal
+        file={editingFile}
+        onClose={() => setEditingFile(null)}
+        onSaved={() => {
+          refetchFiles();
+          refetchFolders();
+        }}
+      />
     </div>
   );
 }
