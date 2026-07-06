@@ -151,6 +151,8 @@ export default function ScorecardWizardScreen() {
           void qc.invalidateQueries({ queryKey: ["scorecards-recent", user.id] });
           // Evidence photos were just uploaded into the deal gallery — refresh it too.
           void qc.invalidateQueries({ queryKey: qk.projectPhotos(user.id, dealId) });
+          // …and the project-detail Scorecards section, so the new card appears without a manual refresh.
+          void qc.invalidateQueries({ queryKey: qk.projectScorecards(user.id, dealId) });
         }
         router.back();
       }}
