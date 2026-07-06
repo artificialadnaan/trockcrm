@@ -42,7 +42,7 @@ async function setup() {
     CREATE TABLE leads (id uuid PRIMARY KEY, bid_due_date date);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text NOT NULL, deal_number text NOT NULL, project_number text,
-      bid_estimate numeric(14,2), awarded_amount numeric(14,2), dd_estimate numeric(14,2),
+      bid_estimate numeric(14,2), awarded_amount numeric(14,2), dd_estimate numeric(14,2), forecast_revenue numeric(14,2),
       estimator text, description text, bid_due_date timestamptz, source_lead_id uuid,
       property_address text, property_city text, property_state text, property_zip text, property_country text,
       stage_id uuid, project_type text, project_type_id uuid, workflow_route text NOT NULL DEFAULT 'normal',

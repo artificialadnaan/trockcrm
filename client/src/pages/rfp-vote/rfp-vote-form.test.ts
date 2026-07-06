@@ -11,11 +11,13 @@ import {
 
 const deal: DealFieldsForForm = {
   name: "Palm Villas",
+  dealNumber: "HS-318900588242",
   projectNumber: "DFW-2-31825-aa",
   projectType: "Interior Renovation", // display label (server COALESCEs config name)
   bidEstimate: "125000.5",
   ddEstimate: "100000",
   awardedAmount: null,
+  forecastRevenue: null,
   estimator: "Colby Reed",
   bidDueDate: "2026-07-03T00:00:00.000Z",
   propertyAddress: "100 Main",
@@ -58,9 +60,20 @@ describe("initFormFromDeal", () => {
     expect(f.description).toBe("Exterior scope");
   });
 
-  it("falls back to dd/awarded when bid_estimate is null", () => {
+  it("falls back to dd/awarded/forecast when bid_estimate is null (matches the payload COALESCE)", () => {
     expect(initFormFromDeal({ ...deal, bidEstimate: null }).amount).toBe("100000");
     expect(initFormFromDeal({ ...deal, bidEstimate: null, ddEstimate: null, awardedAmount: "50000" }).amount).toBe("50000");
+    // forecast-only deal: the payload ships forecastRevenue, so the form must pre-fill it (not blank)
+    expect(
+      initFormFromDeal({ ...deal, awardedAmount: null, bidEstimate: null, ddEstimate: null, forecastRevenue: "42000" }).amount,
+    ).toBe("42000");
+  });
+
+  it("seeds project_number with the FORMATTED display number (deal_number when project_number is null)", () => {
+    // CRM-native deal: real number is in deal_number, project_number still null → form shows it, not blank/Pending.
+    expect(initFormFromDeal({ ...deal, projectNumber: null, dealNumber: "DFW-1-00001-aa" }).project_number).toBe("DFW-1-00001-aa");
+    // Pending HubSpot deal: no project_number + an HS deal_number → blank (never the raw HS id).
+    expect(initFormFromDeal({ ...deal, projectNumber: null, dealNumber: "HS-999999999" }).project_number).toBe("");
   });
 });
 

@@ -84,7 +84,7 @@ function containsControlChar(value: string): boolean {
  */
 export function buildRfpVoteDealUpdate(
   fields: RfpVoteEditableFields,
-  deal: Pick<DealRow, "name" | "projectNumber" | "projectType" | "bidEstimate" | "awardedAmount" | "ddEstimate" | "estimator" | "description" | "bidDueDate" | "propertyAddress" | "propertyCity" | "propertyState" | "propertyZip" | "propertyCountry">
+  deal: Pick<DealRow, "name" | "projectNumber" | "projectType" | "bidEstimate" | "awardedAmount" | "ddEstimate" | "forecastRevenue" | "estimator" | "description" | "bidDueDate" | "propertyAddress" | "propertyCity" | "propertyState" | "propertyZip" | "propertyCountry">
 ): Record<string, unknown> {
   const updates: Record<string, unknown> = {};
 
@@ -122,9 +122,17 @@ export function buildRfpVoteDealUpdate(
             ? "bidEstimate"
             : deal.ddEstimate != null
               ? "ddEstimate"
-              : "bidEstimate";
+              : deal.forecastRevenue != null
+                ? "forecastRevenue"
+                : "bidEstimate";
       const existing =
-        target === "awardedAmount" ? deal.awardedAmount : target === "ddEstimate" ? deal.ddEstimate : deal.bidEstimate;
+        target === "awardedAmount"
+          ? deal.awardedAmount
+          : target === "ddEstimate"
+            ? deal.ddEstimate
+            : target === "forecastRevenue"
+              ? deal.forecastRevenue
+              : deal.bidEstimate;
       if (next !== (existing == null ? null : Number(existing).toFixed(2))) {
         updates[target] = next;
         // Mark the human override so the Procore / Bid Board mirror won't clobber the voter's correction on the next

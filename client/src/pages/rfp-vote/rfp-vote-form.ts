@@ -1,4 +1,5 @@
 import { PROJECT_TYPE_OPTIONS } from "@trock-crm/shared/types";
+import { resolveDealDisplayNumber } from "@/lib/deal-utils";
 import type { DealDetail } from "@/hooks/use-deals";
 import type { RfpVoteEditableFields } from "@/hooks/use-rfp-vote";
 
@@ -22,11 +23,13 @@ export interface VoteFormFields {
 export type DealFieldsForForm = Pick<
   DealDetail,
   | "name"
+  | "dealNumber"
   | "projectNumber"
   | "projectType"
   | "bidEstimate"
   | "ddEstimate"
   | "awardedAmount"
+  | "forecastRevenue"
   | "estimator"
   | "bidDueDate"
   | "propertyAddress"
@@ -54,10 +57,13 @@ export function currentTypeCode(deal: Pick<DealFieldsForForm, "projectNumber" | 
 export function initFormFromDeal(deal: DealFieldsForForm): VoteFormFields {
   return {
     dealname: deal.name ?? "",
-    project_number: deal.projectNumber ?? "",
-    // Mirror the create-payload/email amount precedence (awarded_amount → bid_estimate → dd_estimate) so the voter
-    // sees the SAME amount the invitation email shows and edits the value that actually ships.
-    amount: deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? "",
+    // Seed with the FORMATTED display number (canonical project_number, else the non-HS deal_number) — mirrors the
+    // create payload's resolveDealDisplayNumber, so a CRM-native deal whose real number lives in deal_number (with
+    // project_number still null) shows its number instead of blank/Pending in the form.
+    project_number: resolveDealDisplayNumber({ projectNumber: deal.projectNumber, dealNumber: deal.dealNumber }) ?? "",
+    // Mirror the create-payload/email amount precedence (awarded_amount → bid_estimate → dd_estimate → forecast) so
+    // the voter sees the SAME amount the invitation email shows and edits the value that actually ships.
+    amount: deal.awardedAmount ?? deal.bidEstimate ?? deal.ddEstimate ?? deal.forecastRevenue ?? "",
     project_types: currentTypeCode(deal),
     estimator: deal.estimator ?? "",
     bid_due_date: deal.bidDueDate ? deal.bidDueDate.slice(0, 10) : "", // ISO UTC -> YYYY-MM-DD

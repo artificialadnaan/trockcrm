@@ -8,6 +8,7 @@ const baseDeal = {
   bidEstimate: "100000.00",
   awardedAmount: null,
   ddEstimate: null,
+  forecastRevenue: null,
   estimator: "Old Estimator",
   description: "old desc",
   bidDueDate: new Date("2026-06-01T00:00:00.000Z"),
@@ -114,6 +115,13 @@ describe("buildRfpVoteDealUpdate", () => {
     expect(buildRfpVoteDealUpdate({ amount: "90000" }, ddDeal).ddEstimate).toBe("90000.00");
     expect(buildRfpVoteDealUpdate({ amount: "90000" }, ddDeal).bidEstimate).toBeUndefined();
     expect(buildRfpVoteDealUpdate({ amount: "80000" }, ddDeal)).toEqual({}); // unchanged dd → no write
+  });
+
+  it("targets forecast_revenue when it's the only value (payload's last COALESCE fallback) — untouched = no-op", () => {
+    const fcDeal = { ...baseDeal, bidEstimate: null, ddEstimate: null, awardedAmount: null, forecastRevenue: "42000.00" };
+    expect(buildRfpVoteDealUpdate({ amount: "45000" }, fcDeal).forecastRevenue).toBe("45000.00");
+    expect(buildRfpVoteDealUpdate({ amount: "45000" }, fcDeal).bidEstimate).toBeUndefined();
+    expect(buildRfpVoteDealUpdate({ amount: "42000" }, fcDeal)).toEqual({}); // unchanged forecast → no silent copy
   });
 
   it("ignores non-primitive field values instead of coercing them to a string", () => {

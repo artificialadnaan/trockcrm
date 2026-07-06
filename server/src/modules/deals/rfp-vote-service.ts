@@ -358,7 +358,7 @@ export async function castRfpVote(
   const lockedRes: any = await args.tenantDb.execute(
     sql`SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_approval_request_event_id,
                name, deal_number, project_number, project_type, bid_estimate, awarded_amount, dd_estimate,
-               estimator, description, bid_due_date, source_lead_id,
+               forecast_revenue, estimator, description, bid_due_date, source_lead_id,
                property_address, property_city, property_state, property_zip, property_country
           FROM deals WHERE id = ${args.deal.id} FOR UPDATE`
   );
@@ -416,6 +416,7 @@ export async function castRfpVote(
       bidEstimate: locked.bid_estimate,
       awardedAmount: locked.awarded_amount,
       ddEstimate: locked.dd_estimate,
+      forecastRevenue: locked.forecast_revenue,
       estimator: locked.estimator,
       description: locked.description,
       bidDueDate: locked.bid_due_date,
@@ -472,8 +473,14 @@ export async function castRfpVote(
       // (mirrors updateDeal's logActivity). Audit context is threaded from the route; absent in direct-service tests,
       // where it's skipped.
       if (args.editAudit) {
+        // The DERIVED side-effect columns — the resolved project_type_id and the amount mirror-override flags — are
+        // not part of lockedDeal, so their true baseline is unknown here. Skip them so the audit records the voter's
+        // ACTUAL field changes (name, project number/type, amount, …) with real from→to values, not a misleading
+        // from:null.
+        const AUDIT_SKIP = new Set(["projectTypeId", "awardedAmountOverridden", "ddEstimateOverridden"]);
         const fieldChanges: Record<string, RawAuditFieldChange> = {};
         for (const [field, to] of Object.entries(dealUpdate)) {
+          if (AUDIT_SKIP.has(field)) continue;
           fieldChanges[field] = { from: (lockedDeal as Record<string, unknown>)[field] ?? null, to: to ?? null };
         }
         await logActivity({
