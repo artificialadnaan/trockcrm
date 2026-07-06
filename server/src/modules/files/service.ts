@@ -15,6 +15,7 @@ import {
   isR2Configured,
 } from "../../lib/r2-client.js";
 import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
+import { generateAndStorePdfThumbnail, isPdfThumbnailable } from "../../lib/pdf-thumbnail.js";
 import {
   MAX_FILE_SIZE_BYTES,
   PRESIGNED_URL_EXPIRY_SECONDS,
@@ -678,10 +679,15 @@ export async function confirmUpload(
 
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
 
-  // Best-effort grid thumbnail for image uploads — non-fatal (a miss falls back to the full original).
-  // The object is already verified present in R2 above, so the helper fetches it from there. Covers both
-  // web (/files/confirm-upload) and mobile (/field/photos/confirm-upload), which both route through here.
-  const thumbnailR2Key = await generateAndStoreThumbnail(pending.r2Key, pending.mimeType);
+  // Best-effort grid/list thumbnail — non-fatal (a miss falls back to the full original or a type badge).
+  // The object is already verified present in R2 above, so the helper fetches it from there. Images go
+  // through the sharp pipeline; PDFs (sharp can't decode) rasterize page 1 via pdftoppm. Both are
+  // time-bounded so a slow render never stalls an upload. Covers web (/files/confirm-upload) and mobile
+  // (/field/photos/confirm-upload), which both route through here.
+  let thumbnailR2Key = await generateAndStoreThumbnail(pending.r2Key, pending.mimeType);
+  if (!thumbnailR2Key && isPdfThumbnailable(pending.mimeType)) {
+    thumbnailR2Key = await generateAndStorePdfThumbnail(pending.r2Key, pending.mimeType);
+  }
 
   const latitude = input.latitude ?? input.geoLat;
   const longitude = input.longitude ?? input.geoLng;
