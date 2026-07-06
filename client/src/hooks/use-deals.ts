@@ -112,6 +112,9 @@ export interface Deal {
   primaryContactId: string | null;
   primaryContactName?: string | null;
   primaryContactTitle?: string | null;
+  // Contact email/phone — surfaced by getDealDetail for read-only contact context (e.g. the RFP vote form).
+  primaryContactEmail?: string | null;
+  primaryContactPhone?: string | null;
   primaryContactOwnerUserId?: string | null;
   primaryContactOwnerUserName?: string | null;
   ddEstimate: string | null;
