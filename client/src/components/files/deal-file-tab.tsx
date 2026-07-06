@@ -15,12 +15,16 @@ import {
   openFile,
   deleteFileRecord,
   type FileRecord,
+  type FileFilters,
 } from "@/hooks/use-files";
-import type { FileCategory } from "@/lib/file-utils";
+import { FILE_CATEGORIES, getCategoryLabel, type FileCategory } from "@/lib/file-utils";
 
 interface DealFileTabProps {
   dealId: string;
 }
+
+type FileKindFilter = "all" | "photos" | "documents";
+type SortByOption = NonNullable<FileFilters["sortBy"]>;
 
 export function DealFileTab({ dealId }: DealFileTabProps) {
   const [activeSubview, setActiveSubview] = useState<"all" | "photos">("all");
@@ -31,6 +35,14 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
   const [versionFileId, setVersionFileId] = useState<string | null>(null);
   const [editingFile, setEditingFile] = useState<FileRecord | null>(null);
 
+  // Filter/sort controls (independent of the sidebar folder selection).
+  const [fileKind, setFileKind] = useState<FileKindFilter>("all");
+  const [categoryFilter, setCategoryFilter] = useState<FileCategory | "all">("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [sortBy, setSortBy] = useState<SortByOption>("created_at");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
   const { folders, loading: foldersLoading, refetch: refetchFolders } =
     useDealFolders(dealId);
 
@@ -39,6 +51,12 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
       dealId,
       folderPath: selectedFolder ?? undefined,
       search: search || undefined,
+      fileKind: fileKind === "all" ? undefined : fileKind,
+      category: categoryFilter === "all" ? undefined : categoryFilter,
+      dateFrom: dateFrom || undefined,
+      dateTo: dateTo || undefined,
+      sortBy,
+      sortDir,
       page,
       limit: 25,
     });
@@ -98,6 +116,11 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
     return undefined;
   })();
 
+  // True only when an actual filter/date/type is applied — used to distinguish "filtered but empty"
+  // from a deal that genuinely has zero files (so we keep the "No files uploaded yet" copy for the latter).
+  const hasActiveFilters =
+    fileKind !== "all" || categoryFilter !== "all" || dateFrom !== "" || dateTo !== "";
+
   // Version history view
   if (versionFileId) {
     return (
@@ -124,6 +147,7 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
         <FileUploadZone
           category={uploadCategory}
           subcategory={uploadSubcategory}
+          folders={folders}
           dealId={dealId}
           onUploadComplete={handleUploadComplete}
         />
@@ -178,6 +202,107 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
               }}
             />
 
+            {/* Filter + sort controls (spec 5.5: photos/documents + by category, plus a date range). */}
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                Type
+                <select
+                  data-testid="file-type-filter"
+                  className="h-8 rounded-md border bg-background px-2 text-sm text-foreground"
+                  value={fileKind}
+                  onChange={(e) => {
+                    setFileKind(e.target.value as FileKindFilter);
+                    setPage(1);
+                  }}
+                >
+                  <option value="all">All types</option>
+                  <option value="documents">Documents</option>
+                  <option value="photos">Photos</option>
+                </select>
+              </label>
+
+              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                Category
+                <select
+                  data-testid="file-category-filter"
+                  className="h-8 rounded-md border bg-background px-2 text-sm text-foreground"
+                  value={categoryFilter}
+                  onChange={(e) => {
+                    setCategoryFilter(e.target.value as FileCategory | "all");
+                    setPage(1);
+                  }}
+                >
+                  <option value="all">All categories</option>
+                  {FILE_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {getCategoryLabel(cat)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                From
+                <input
+                  data-testid="date-from"
+                  type="date"
+                  className="h-8 rounded-md border bg-background px-2 text-sm text-foreground"
+                  value={dateFrom}
+                  max={dateTo || undefined}
+                  onChange={(e) => {
+                    setDateFrom(e.target.value);
+                    setPage(1);
+                  }}
+                />
+              </label>
+
+              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                To
+                <input
+                  data-testid="date-to"
+                  type="date"
+                  className="h-8 rounded-md border bg-background px-2 text-sm text-foreground"
+                  value={dateTo}
+                  min={dateFrom || undefined}
+                  onChange={(e) => {
+                    setDateTo(e.target.value);
+                    setPage(1);
+                  }}
+                />
+              </label>
+
+              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                Sort
+                <select
+                  data-testid="file-sort"
+                  className="h-8 rounded-md border bg-background px-2 text-sm text-foreground"
+                  value={sortBy}
+                  onChange={(e) => {
+                    setSortBy(e.target.value as SortByOption);
+                    setPage(1);
+                  }}
+                >
+                  <option value="created_at">Date added</option>
+                  <option value="display_name">Name</option>
+                  <option value="file_size_bytes">Size</option>
+                  <option value="file_type">Type</option>
+                </select>
+              </label>
+
+              <button
+                type="button"
+                data-testid="file-sort-dir"
+                aria-label="Toggle sort direction"
+                className="h-8 rounded-md border bg-background px-3 text-sm text-foreground hover:bg-accent"
+                onClick={() => {
+                  setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+                  setPage(1);
+                }}
+              >
+                {sortDir === "asc" ? "Asc" : "Desc"}
+              </button>
+            </div>
+
             <FileList
               files={files}
               pagination={pagination}
@@ -194,7 +319,9 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
                   ? "No files match your search."
                   : selectedFolder
                     ? "No files in this folder."
-                    : "No files uploaded yet. Click Upload to add files."
+                    : hasActiveFilters
+                      ? "No files match these filters."
+                      : "No files uploaded yet. Click Upload to add files."
               }
             />
           </div>
