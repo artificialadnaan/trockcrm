@@ -53,6 +53,28 @@ export function useToggleStar() {
   });
 }
 
+/**
+ * Edit an already-uploaded photo's display name / description (field-auth PATCH /field/photos/:id).
+ * Invalidates the project's photo cache — qk.projectPhotos takes BOTH (uid, dealId) — so the gallery /
+ * viewer refetch the new name/description after a save.
+ */
+export function useUpdatePhotoMetadata(dealId?: string) {
+  const { fetcher, user } = useAuth();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { photoId: string; displayName?: string; description?: string | null }) =>
+      api.updatePhotoMetadata(fetcher, vars.photoId, {
+        displayName: vars.displayName,
+        description: vars.description,
+      }),
+    onSuccess: () => {
+      if (user && dealId) {
+        void qc.invalidateQueries({ queryKey: qk.projectPhotos(user.id, dealId) });
+      }
+    },
+  });
+}
+
 // Server caps a photo page at 200; on a 400+ photo deal one request can't return everything, so we page
 // through and concatenate. Bounded concurrency keeps it fast without flooding the rate limiter.
 const PHOTOS_PER_PAGE = 200;

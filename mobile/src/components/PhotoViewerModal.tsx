@@ -18,6 +18,8 @@ import type { FieldPhoto } from "../api/types";
 import { categoryLabel } from "../projects/field-projects";
 import { theme } from "../theme/theme";
 import { ZoomablePhoto } from "./ZoomablePhoto";
+import { Button, TextInput } from "./ui";
+import { useUpdatePhotoMetadata } from "../query/hooks";
 
 const ADDRESS_SOURCE_LABEL: Record<string, string> = {
   exif: "From photo",
@@ -55,6 +57,9 @@ export function PhotoViewerModal({
   const [index, setIndex] = useState(initialIndex);
   // When a photo is zoomed we disable the pager so a one-finger pan moves the image instead of paging.
   const [zoomed, setZoomed] = useState(false);
+  const [editingOpen, setEditingOpen] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editDesc, setEditDesc] = useState("");
   const listRef = useRef<FlatList<FieldPhoto>>(null);
 
   const onScrollEnd = useCallback(
@@ -72,6 +77,25 @@ export function PhotoViewerModal({
   // Clamp defensively so the header/detail panel can never index out of range.
   const safeIndex = photos.length > 0 ? Math.min(Math.max(index, 0), photos.length - 1) : 0;
   const current = photos[safeIndex];
+
+  const updateMeta = useUpdatePhotoMetadata(current?.dealId ?? undefined);
+
+  const openEdit = useCallback(() => {
+    if (!current) return;
+    setEditName(current.displayName ?? "");
+    setEditDesc(current.description ?? "");
+    setEditingOpen(true);
+  }, [current]);
+
+  const saveEdit = useCallback(() => {
+    if (!current) return;
+    const name = editName.trim();
+    if (!name) return;
+    updateMeta.mutate(
+      { photoId: current.id, displayName: name, description: editDesc.trim() ? editDesc.trim() : null },
+      { onSuccess: () => setEditingOpen(false) },
+    );
+  }, [current, editName, editDesc, updateMeta]);
 
   // Visible prev/next chevrons advertise navigation (the pager is otherwise swipe-only).
   const goTo = useCallback(
@@ -161,9 +185,14 @@ export function PhotoViewerModal({
 
           {current ? (
             <ScrollView style={styles.details} contentContainerStyle={{ padding: theme.space.lg, gap: 8 }}>
-              <Text style={styles.detailTitle} numberOfLines={2}>
-                {current.displayName}
-              </Text>
+              <View style={styles.detailTitleRow}>
+                <Text style={styles.detailTitle} numberOfLines={2}>
+                  {current.displayName}
+                </Text>
+                <Pressable onPress={openEdit} hitSlop={10} accessibilityRole="button" accessibilityLabel="Edit photo details">
+                  <Ionicons name="create-outline" size={22} color={theme.color.brandRed} />
+                </Pressable>
+              </View>
               <DetailRow label="Category" value={categoryLabel(current.photoCategory ?? current.subcategory)} />
               {current.description ? <DetailRow label="Description" value={current.description} /> : null}
               <DetailRow label="Uploaded by" value={current.uploaderName || "Unknown"} />
@@ -184,6 +213,30 @@ export function PhotoViewerModal({
       </View>
       </GestureHandlerRootView>
       </SafeAreaProvider>
+
+      <Modal visible={editingOpen} animationType="slide" transparent onRequestClose={() => setEditingOpen(false)}>
+        <SafeAreaProvider>
+          <View style={styles.editBackdrop}>
+            <SafeAreaView style={styles.editSheet} edges={["bottom"]}>
+              <Text style={styles.editHeading}>Edit photo details</Text>
+              <Text style={styles.editLabel}>Name</Text>
+              <TextInput value={editName} onChangeText={setEditName} placeholder="Photo name" autoFocus />
+              <Text style={styles.editLabel}>Description</Text>
+              <TextInput
+                value={editDesc}
+                onChangeText={setEditDesc}
+                placeholder="Describe this photo"
+                multiline
+                style={styles.editDescInput}
+              />
+              <View style={styles.editActions}>
+                <Button title="Cancel" variant="ghost" onPress={() => setEditingOpen(false)} disabled={updateMeta.isPending} />
+                <Button title="Save" onPress={saveEdit} loading={updateMeta.isPending} disabled={!editName.trim()} />
+              </View>
+            </SafeAreaView>
+          </View>
+        </SafeAreaProvider>
+      </Modal>
     </Modal>
   );
 }
@@ -230,7 +283,20 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: theme.radius.lg,
     borderTopRightRadius: theme.radius.lg,
   },
-  detailTitle: { fontFamily: theme.font.bold, fontSize: 18, color: theme.color.textPrimary },
+  detailTitleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: theme.space.md },
+  detailTitle: { flex: 1, fontFamily: theme.font.bold, fontSize: 18, color: theme.color.textPrimary },
+  editBackdrop: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.5)" },
+  editSheet: {
+    backgroundColor: theme.color.surfaceCard,
+    borderTopLeftRadius: theme.radius.lg,
+    borderTopRightRadius: theme.radius.lg,
+    padding: theme.space.lg,
+    gap: theme.space.sm,
+  },
+  editHeading: { fontFamily: theme.font.bold, fontSize: 18, color: theme.color.textPrimary, marginBottom: theme.space.sm },
+  editLabel: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textMuted },
+  editDescInput: { minHeight: 88, textAlignVertical: "top" },
+  editActions: { flexDirection: "row", justifyContent: "flex-end", gap: theme.space.md, marginTop: theme.space.md },
   detailRow: { flexDirection: "row", gap: theme.space.md },
   detailLabel: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textMuted, width: 96 },
   detailValue: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textPrimary, flex: 1 },

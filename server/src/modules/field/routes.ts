@@ -15,6 +15,7 @@ import {
   transcribeAndPersistFieldPhotoDescription,
   transcribePhotoDescriptionAudio,
 } from "./photo-transcription-service.js";
+import { updateFieldPhotoMetadata } from "./photo-metadata-service.js";
 import {
   deleteFieldPhotoTag,
   replaceFieldPhotoTags,
@@ -544,6 +545,36 @@ fieldRoutes.post("/photos/:photoId/transcribe-description", requireFieldContract
         fileName: typeof req.headers["x-file-name"] === "string" ? req.headers["x-file-name"] : undefined,
         auditContext: requestAuditContext(req),
       }),
+    );
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Field-auth edit of an already-uploaded photo's display name / description. Session PATCH /files/:id is
+// unreachable from field Bearer auth, and the only field text-edit route is audio transcription — camera
+// captures land as system names, so this is the field rename/describe point. Rep-owned via
+// getAccessibleFieldPhoto; audits caption_changed on a description change (parity with the web route).
+fieldRoutes.patch("/photos/:photoId", requireFieldContractor, async (req, res, next) => {
+  try {
+    const photoId = String(req.params.photoId);
+    const result = await runFieldFileWrite(req, photoId, (db) =>
+      updateFieldPhotoMetadata(
+        db,
+        { userId: req.fieldUser!.id, userRole: req.fieldUser!.role },
+        {
+          photoId,
+          displayName: typeof req.body.displayName === "string" ? req.body.displayName : undefined,
+          description:
+            req.body.description === null
+              ? null
+              : typeof req.body.description === "string"
+                ? req.body.description
+                : undefined,
+          auditContext: requestAuditContext(req),
+        },
+      ),
     );
     res.json(result);
   } catch (err) {
