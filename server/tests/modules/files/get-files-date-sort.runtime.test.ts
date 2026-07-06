@@ -113,3 +113,70 @@ describe("getFiles dateTo boundary (business-tz, non-UTC session)", () => {
     expect(rows.map((r) => r.displayName)).toEqual(["EveningCT"]);
   });
 });
+
+describe("getFiles sort whitelist (file_type / category / extension)", () => {
+  it("sorts by extension ascending", async () => {
+    const { files: rows } = await getFiles(tdb, { sortBy: "extension", sortDir: "asc" });
+    expect(rows.map((r) => r.fileExtension)).toEqual([".jpg", ".pdf", ".xls"]);
+  });
+
+  it("sorts by category ascending (alphabetical, not enum-declaration order)", async () => {
+    const { files: rows } = await getFiles(tdb, { sortBy: "category", sortDir: "asc" });
+    expect(rows.map((r) => r.category)).toEqual(["contract", "estimate", "rfp"]);
+  });
+
+  it("sorts by file_type (mime) ascending", async () => {
+    const { files: rows } = await getFiles(tdb, { sortBy: "file_type", sortDir: "asc" });
+    expect(rows.map((r) => r.mimeType)).toEqual([
+      "application/pdf",
+      "application/vnd.ms-excel",
+      "image/jpeg",
+    ]);
+  });
+
+  it("falls back to createdAt for an unknown sort key", async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { files: rows } = await getFiles(tdb, { sortBy: "bogus" as any, sortDir: "asc" });
+    expect(rows.map((r) => r.displayName)).toEqual(["Alpha", "Bravo", "Charlie"]);
+  });
+});
+
+// Isolated instance: >limit rows that TIE on every new low-cardinality sort key AND on createdAt, so only
+// the id tiebreak can order them deterministically across OFFSET pages. Locks the guarantee that a paged
+// Type/category/extension sort never duplicates or skips a row.
+describe("getFiles pagination determinism on low-cardinality sort ties", () => {
+  let pg3: PGlite;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let tdb3: any;
+
+  beforeAll(async () => {
+    pg3 = new PGlite();
+    await pg3.exec(tenantSchemaSql("public", [files]));
+    tdb3 = drizzle(pg3);
+    for (let i = 0; i < 5; i++) {
+      await seedInto(pg3, {
+        id: U(`d0${i}`),
+        displayName: `Tie${i}`,
+        category: "contract",
+        mimeType: "application/pdf",
+        ext: ".pdf",
+        sizeBytes: 100,
+        createdAt: "2026-08-01T10:00:00Z",
+      });
+    }
+  }, 30_000);
+
+  afterAll(async () => {
+    await pg3?.close();
+  });
+
+  it("returns every id exactly once across paged OFFSET windows when the sort column fully ties", async () => {
+    const seen: string[] = [];
+    for (let page = 1; page <= 3; page++) {
+      const { files: rows } = await getFiles(tdb3, { sortBy: "file_type", sortDir: "asc", page, limit: 2 });
+      seen.push(...rows.map((r) => r.id));
+    }
+    expect(seen.length).toBe(5);         // 2 + 2 + 1 across three pages
+    expect(new Set(seen).size).toBe(5);  // no id duplicated on one page and skipped on another
+  });
+});

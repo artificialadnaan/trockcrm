@@ -979,6 +979,10 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
       case "display_name": return files.displayName;
       case "file_size_bytes": return files.fileSizeBytes;
       case "taken_at": return files.takenAt;
+      case "file_type": return files.mimeType;
+      // Cast the enum to text so the order is alphabetical, not enum-declaration order.
+      case "category": return sql`${files.category}::text`;
+      case "extension": return files.fileExtension;
       default: return files.createdAt;
     }
   })();
@@ -989,7 +993,7 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
     .select()
     .from(files)
     .where(where)
-    .orderBy(sortOrder)
+    .orderBy(sortOrder, desc(files.createdAt), asc(files.id))
     .limit(limit)
     .offset(offset);
 
