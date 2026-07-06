@@ -10,6 +10,7 @@ interface FileListProps {
   error: string | null;
   onPageChange: (page: number) => void;
   onDownload: (fileId: string) => void;
+  onOpen?: (fileId: string) => void;
   onDelete: (fileId: string) => void;
   onViewVersions?: (fileId: string) => void;
   onEdit?: (file: FileRecord) => void;
@@ -23,6 +24,7 @@ export function FileList({
   error,
   onPageChange,
   onDownload,
+  onOpen,
   onDelete,
   onViewVersions,
   onEdit,
@@ -59,6 +61,7 @@ export function FileList({
             key={file.id}
             file={file}
             onDownload={onDownload}
+            onOpen={onOpen}
             onDelete={onDelete}
             onViewVersions={onViewVersions}
             onEdit={onEdit}

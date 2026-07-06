@@ -12,6 +12,7 @@ import {
   useFiles,
   useDealFolders,
   downloadFile,
+  openFile,
   deleteFileRecord,
   type FileRecord,
 } from "@/hooks/use-files";
@@ -52,6 +53,14 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
       await downloadFile(fileId);
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Download failed");
+    }
+  }, []);
+
+  const handleOpen = useCallback(async (fileId: string) => {
+    try {
+      await openFile(fileId);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Could not open file");
     }
   }, []);
 
@@ -176,6 +185,7 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
               error={error}
               onPageChange={setPage}
               onDownload={handleDownload}
+              onOpen={handleOpen}
               onDelete={handleDelete}
               onViewVersions={setVersionFileId}
               onEdit={setEditingFile}
