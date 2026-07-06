@@ -29,6 +29,7 @@ import type {
   RecentScorecardsResponse,
   ProjectScorecardsResponse,
   ScorecardDetailResponse,
+  ScorecardDownloadResponse,
 } from "./types";
 import type { ScorecardSubmissionPayload } from "../scorecards/draft";
 
@@ -161,3 +162,8 @@ export const getProjectScorecards = (f: Fetcher, dealId: string) =>
 
 export const getScorecard = (f: Fetcher, id: string) =>
   f<ScorecardDetailResponse>(`/field/scorecards/${id}`);
+
+// Presigned PDF for a submitted scorecard. 404s while the PDF is still generating — the caller
+// (view/[id].tsx) turns that into a "still generating" toast rather than a crash.
+export const getScorecardDownload = (f: Fetcher, id: string) =>
+  f<ScorecardDownloadResponse>(`/field/scorecards/${id}/download`);
