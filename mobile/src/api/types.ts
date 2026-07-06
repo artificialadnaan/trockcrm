@@ -185,4 +185,7 @@ export type ProjectScorecardsResponse = {
   officeId?: string;
 };
 export type ScorecardDetailResponse = { scorecard: FieldScorecardDetail };
+// Presigned scorecard-PDF download (GET /field/scorecards/:id/download).
+// Matches server getFieldScorecardPdfDownload: { url, expiresAt } — NOT the report { url, filename } shape.
+export type ScorecardDownloadResponse = { url: string; expiresAt: string };
 export type CreateScorecardResponse = { scorecard: FieldScorecardSummary };

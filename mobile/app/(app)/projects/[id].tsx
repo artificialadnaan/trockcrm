@@ -3,7 +3,7 @@ import { Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View 
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
-import { useProjectPhotos, useProjectReports } from "../../../src/query/hooks";
+import { useProjectPhotos, useProjectReports, useProjectScorecards } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { getReportDownload } from "../../../src/api/endpoints";
 import {
@@ -25,6 +25,8 @@ import { PhotoViewerModal } from "../../../src/components/PhotoViewerModal";
 import { ReportBuilder } from "../../../src/components/ReportBuilder";
 import { PhotoShareModal } from "../../../src/components/PhotoShareModal";
 import { Ionicons } from "@expo/vector-icons";
+import { RatingBadge } from "../../../src/components/RatingBadge";
+import { formatShortDate } from "../../../src/scorecards/detail-view";
 
 const GROUPINGS: { value: PhotoGrouping; label: string }[] = [
   { value: "date", label: "Date" },
@@ -60,6 +62,8 @@ export default function ProjectDetailScreen() {
 
   const photosQuery = useProjectPhotos(dealId);
   const reportsQuery = useProjectReports(dealId);
+  const scorecardsQuery = useProjectScorecards(dealId);
+  const scorecards = scorecardsQuery.data?.scorecards ?? [];
   const allPhotos = useMemo(() => photosQuery.data?.photos ?? [], [photosQuery.data]);
   // Some photo pages failed to load — the gallery still shows what loaded, but report/share are blocked so
   // we never generate from an incomplete set.
@@ -110,7 +114,7 @@ export default function ProjectDetailScreen() {
     }
   }
 
-  const refreshing = photosQuery.isRefetching || reportsQuery.isRefetching;
+  const refreshing = photosQuery.isRefetching || reportsQuery.isRefetching || scorecardsQuery.isRefetching;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -124,6 +128,7 @@ export default function ProjectDetailScreen() {
             onRefresh={() => {
               void photosQuery.refetch();
               void reportsQuery.refetch();
+              void scorecardsQuery.refetch();
             }}
             tintColor={theme.color.brandRed}
           />
@@ -140,7 +145,7 @@ export default function ProjectDetailScreen() {
 
         {offOffice ? (
           <Banner
-            message={`Managed by the ${officeSlug} office — view only. Photos and reports are visible here; starring, report generation, and photo capture are available from that office.`}
+            message={`Managed by the ${officeSlug} office — view only. Photos, reports, and scorecards are visible here; starring, report generation, and photo capture are available from that office.`}
           />
         ) : (
           <View style={styles.actions}>
@@ -299,6 +304,40 @@ export default function ProjectDetailScreen() {
                   {report.title}
                 </Text>
                 <Text style={styles.link}>Open PDF</Text>
+              </Pressable>
+            ))
+          )}
+        </View>
+
+        {/* Scorecards — count on detail is the sole discoverability surface (no list badge, per non-goals). */}
+        <View style={{ gap: theme.space.sm }}>
+          <SectionLabel>Scorecards ({scorecards.length})</SectionLabel>
+          {scorecardsQuery.isLoading ? (
+            <LoadingState label="Loading scorecards…" />
+          ) : scorecardsQuery.isError ? (
+            // Don't let a load failure read as a genuinely-empty project — pull-to-refresh re-runs the query.
+            <Text style={styles.meta}>Couldn't load scorecards. Pull to refresh.</Text>
+          ) : scorecards.length === 0 ? (
+            <Text style={styles.meta}>No scorecards yet.</Text>
+          ) : (
+            scorecards.map((s) => (
+              <Pressable
+                key={s.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Scorecard, week of ${formatShortDate(s.weekOf)}, ${s.totalScore} out of 100, ${s.ratingLabel}`}
+                onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
+                style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
+              >
+                <View style={{ flex: 1, gap: 4 }}>
+                  <Text style={styles.reportTitle} numberOfLines={1}>
+                    Week of {formatShortDate(s.weekOf)}
+                    {s.submittedByName ? ` · ${s.submittedByName}` : ""}
+                    {s.criticalDeficiencyCount > 0
+                      ? ` · ${s.criticalDeficiencyCount} critical ${s.criticalDeficiencyCount === 1 ? "deficiency" : "deficiencies"}`
+                      : ""}
+                  </Text>
+                  <RatingBadge rating={s.rating} label={`${s.totalScore}/100 · ${s.ratingLabel}`} />
+                </View>
               </Pressable>
             ))
           )}
