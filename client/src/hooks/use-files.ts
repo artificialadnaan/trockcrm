@@ -53,9 +53,11 @@ export interface FileFilters {
   folderPath?: string;
   search?: string;
   tags?: string[];
+  dateFrom?: string;
+  dateTo?: string;
   page?: number;
   limit?: number;
-  sortBy?: "display_name" | "created_at" | "file_size_bytes" | "taken_at";
+  sortBy?: "display_name" | "created_at" | "file_size_bytes" | "taken_at" | "file_type" | "category" | "extension";
   sortDir?: "asc" | "desc";
 }
 
@@ -133,6 +135,8 @@ export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolea
       if (filters.linkedType) params.set("linkedType", filters.linkedType);
       if (filters.folderPath) params.set("folderPath", filters.folderPath);
       if (filters.search) params.set("search", filters.search);
+      if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
+      if (filters.dateTo) params.set("dateTo", filters.dateTo);
       if (filters.tags && filters.tags.length > 0) params.set("tags", filters.tags.join(","));
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
@@ -160,6 +164,8 @@ export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolea
     filters.linkedType,
     filters.folderPath,
     filters.search,
+    filters.dateFrom,
+    filters.dateTo,
     filters.tags?.join(","),
     filters.page,
     filters.limit,
