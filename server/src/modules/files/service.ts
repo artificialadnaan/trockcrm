@@ -29,6 +29,7 @@ import {
 } from "./file-constants.js";
 import { inferFileCategory } from "./infer-category.js";
 import { resolvePhotoAddressMetadata } from "./photo-geocoding.js";
+import { BUSINESS_TIMEZONE } from "../../lib/period.js";
 import { buildDealPhotoTimelineConditions, type DealPhotoTimelineFilters } from "./photo-timeline-filters.js";
 import crypto from "node:crypto";
 
@@ -155,9 +156,13 @@ export interface FileFilters {
   folderPath?: string;
   search?: string;
   tags?: string[];
+  /** Inclusive lower bound on upload time (createdAt), bucketed as a business-tz (CT) calendar day. Date-only ("YYYY-MM-DD") or full ISO. */
+  dateFrom?: string;
+  /** Inclusive upper bound on upload time. A date-only value includes the WHOLE CT day (see getFiles). */
+  dateTo?: string;
   page?: number;
   limit?: number;
-  sortBy?: "display_name" | "created_at" | "file_size_bytes" | "taken_at";
+  sortBy?: "display_name" | "created_at" | "file_size_bytes" | "taken_at" | "file_type" | "category" | "extension";
   sortDir?: "asc" | "desc";
 }
 
@@ -928,6 +933,26 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
         eq(files.folderPath, filters.folderPath),
         ilike(files.folderPath, `${filters.folderPath}/%`)
       )!
+    );
+  }
+
+  // Date-range filtering on upload time (createdAt), bucketed into BUSINESS-timezone (America/Chicago)
+  // calendar days — matching the app's canonical date convention (server/src/lib/period.ts,
+  // tasks/service.ts). createdAt is a UTC instant; `AT TIME ZONE ${BUSINESS_TIMEZONE}` re-expresses it as
+  // the Central wall-clock time and `::date` takes the Central calendar day, so BOTH bounds are whole-day
+  // inclusive AND independent of the Postgres session TimeZone GUC (db.ts never pins one). A file uploaded
+  // 8pm CT is filed under that CT day, not the next UTC day. NOTE: this intentionally diverges from
+  // getPhotoFeed (feed-service.ts) on three axes — boundary inclusivity, timezone, and the createdAt vs
+  // COALESCE(taken_at, created_at) column — all documented in the plan/PR body. Malformed input is
+  // rejected upstream by parseFileDateParam so nothing bad reaches these ::date casts.
+  if (filters.dateFrom) {
+    conditions.push(
+      sql`(${files.createdAt} AT TIME ZONE ${BUSINESS_TIMEZONE})::date >= ${filters.dateFrom}::date`
+    );
+  }
+  if (filters.dateTo) {
+    conditions.push(
+      sql`(${files.createdAt} AT TIME ZONE ${BUSINESS_TIMEZONE})::date <= ${filters.dateTo}::date`
     );
   }
 
