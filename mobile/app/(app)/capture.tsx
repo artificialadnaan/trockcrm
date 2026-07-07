@@ -173,6 +173,11 @@ export default function CaptureScreen() {
   useEffect(() => { targetStateRef.current = target; }, [target]);
   useEffect(() => { categoryRef.current = category; }, [category]);
   useEffect(() => { tagsRef.current = tags; }, [tags]);
+  // The LIVE owner (user + resolved office), read after any `await` that stages photos so an office switch /
+  // sign-out mid-await can't restage the prior owner's local photos under the CURRENT owner (upload uses the
+  // current ownerKey). A closure's `ownerKey` is the render-time value; this ref sees the change.
+  const ownerKeyRef = useRef(ownerKey);
+  useEffect(() => { ownerKeyRef.current = ownerKey; }, [ownerKey]);
 
   // Restore the saved camera mode once on mount (default applies until it resolves).
   useEffect(() => {
@@ -439,9 +444,14 @@ export default function CaptureScreen() {
     // Snapshot the destination NOW — before the awaited getLiveGps — so a project switch during/after the
     // picker can't retarget the import.
     const ctx = { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current };
+    // Capture the owner at the START. If it changes during the awaited getLiveGps (office switch / sign-out),
+    // ABORT and drop the import: the owner-change effect already cleared staged state, and openReview would
+    // otherwise restage these photos and upload them under the NEW owner — a cross-account/office disclosure.
+    const capturedOwner = ownerKey;
     let live: PhotoMetadata | null = null;
     const needsLive = assets.some((a) => !hasCoords(extractExifMetadata(a.exif as Record<string, unknown>)));
     if (needsLive) live = await getLiveGps();
+    if (ownerKeyRef.current !== capturedOwner) return;
 
     const photos: SessionPhoto[] = assets.map((asset) => {
       const exifMeta = extractExifMetadata(asset.exif as Record<string, unknown>);
