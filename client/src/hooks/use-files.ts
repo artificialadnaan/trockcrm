@@ -20,6 +20,8 @@ export interface FileRecord {
   r2Bucket: string;
   externalUrl?: string | null;
   externalThumbnailUrl?: string | null;
+  /** Batched, presigned small preview URL for the list (image thumbnail, PDF first-page, or image original). Null → badge. */
+  thumbnailUrl?: string | null;
   dealId: string | null;
   leadId: string | null;
   intakeSection?: string | null;
@@ -51,9 +53,11 @@ export interface FileFilters {
   folderPath?: string;
   search?: string;
   tags?: string[];
+  dateFrom?: string;
+  dateTo?: string;
   page?: number;
   limit?: number;
-  sortBy?: "display_name" | "created_at" | "file_size_bytes" | "taken_at";
+  sortBy?: "display_name" | "created_at" | "file_size_bytes" | "taken_at" | "file_type" | "category" | "extension";
   sortDir?: "asc" | "desc";
 }
 
@@ -131,6 +135,8 @@ export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolea
       if (filters.linkedType) params.set("linkedType", filters.linkedType);
       if (filters.folderPath) params.set("folderPath", filters.folderPath);
       if (filters.search) params.set("search", filters.search);
+      if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
+      if (filters.dateTo) params.set("dateTo", filters.dateTo);
       if (filters.tags && filters.tags.length > 0) params.set("tags", filters.tags.join(","));
       if (filters.page) params.set("page", String(filters.page));
       if (filters.limit) params.set("limit", String(filters.limit));
@@ -158,6 +164,8 @@ export function useFiles(filters: FileFilters = {}, options?: { enabled?: boolea
     filters.linkedType,
     filters.folderPath,
     filters.search,
+    filters.dateFrom,
+    filters.dateTo,
     filters.tags?.join(","),
     filters.page,
     filters.limit,
@@ -494,6 +502,40 @@ export async function downloadFile(fileId: string): Promise<void> {
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+}
+
+/**
+ * Open a file INLINE in a new tab WITHOUT downloading. The server allowlists which mimes actually render
+ * inline (image/* except svg, application/pdf, text/plain) and forces attachment for everything else — so
+ * Office docs/svg download rather than render, which is the intended fallback. (When the resolved
+ * disposition is attachment, the pre-opened tab is left on about:blank after the download starts — a minor
+ * UX wart accepted for spec compliance; see the PR body.)
+ *
+ * The tab is opened SYNCHRONOUSLY inside the click's user-gesture window; navigating a tab AFTER an awaited
+ * fetch is treated as a programmatic popup and blocked (reliably in Safari, intermittently in Chrome once
+ * transient activation lapses), so window.open would return null and nothing would open. We open a blank
+ * tab now and set its URL once the presign resolves. NOTE: passing "noopener" to window.open makes it
+ * return null (no handle to navigate), so we neutralize `opener` manually to prevent reverse-tabnabbing.
+ * `preview=1` records this as a preview (not a download) in the photo audit log.
+ */
+export async function openFile(fileId: string): Promise<void> {
+  const tab =
+    typeof window !== "undefined" ? window.open("about:blank", "_blank") : null;
+  if (tab) tab.opener = null;
+  try {
+    const data = await api<{ url: string; filename: string }>(
+      `/files/${fileId}/download?disposition=inline&preview=1`
+    );
+    if (tab) {
+      tab.location.href = data.url;
+    } else if (typeof window !== "undefined") {
+      // Pre-open was blocked entirely (or SSR) — last resort (may itself be blocked post-await).
+      window.open(data.url, "_blank", "noopener,noreferrer");
+    }
+  } catch (err) {
+    tab?.close();
+    throw err;
+  }
 }
 
 export async function updateFileMetadata(

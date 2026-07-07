@@ -193,6 +193,26 @@ export function generatePreviewName(
   return `${categoryLabel}_${dateStr}${ext}`;
 }
 
+/**
+ * The display name a NEW upload will actually be saved as, mirroring the server sentinel
+ * (deriveSeedDisplayName): a SYNTHETIC photo name (field-photo-<ts>/companycam_) keeps the approximate
+ * deal-number system scheme; every other file — documents AND real desktop/web photos — keeps the real
+ * filename with its extension stripped. Callers pass the RESOLVED category (an auto-detected image must be
+ * passed as "photo", since the server infers photo for any image).
+ */
+export function deriveUploadDisplayName(
+  originalFilename: string,
+  category: FileCategory,
+  dealNumber?: string
+): string {
+  const isSyntheticPhoto =
+    category === "photo" && /^(field-photo-\d+|companycam_)/.test(originalFilename);
+  if (isSyntheticPhoto) return generatePreviewName(originalFilename, category, dealNumber);
+  const dot = originalFilename.lastIndexOf(".");
+  const stripped = dot > 0 ? originalFilename.slice(0, dot) : originalFilename;
+  return stripped.trim() || generatePreviewName(originalFilename, category, dealNumber);
+}
+
 // ─── Subcategory Options ────────────────────────────────────────────────────
 
 const SUBCATEGORY_OPTIONS: Partial<Record<FileCategory, string[]>> = {
@@ -223,6 +243,49 @@ export function validateFileForUpload(file: File): string | null {
   }
   if (file.size === 0) {
     return "File is empty.";
+  }
+  return null;
+}
+
+// ─── Upload Folder Picker ────────────────────────────────────────────────────
+
+export interface FolderPickOption {
+  category: FileCategory;
+  subcategory?: string;
+}
+
+/**
+ * Structural shape of a folder node (mirrors FolderNode from use-files without importing it, to avoid a
+ * file-utils ⇄ use-files import cycle).
+ */
+interface FolderLike {
+  path: string;
+  category: FileCategory;
+  subfolders: Array<{ name: string; path: string }>;
+}
+
+/**
+ * Resolve an upload folder-picker selection (a FolderNode.path or a subfolder path) to the
+ * { category, subcategory } the upload API expects. Returns null for the synthetic "All Files" root
+ * (value null / "" / "all") — not a valid upload target (spec 5.4) — or an unknown value.
+ *
+ * The canonical category is the folder's own `category`, which the folders API pins via the server's
+ * DEAL_FOLDER_TEMPLATE (Permits & Inspections → "permit", Correspondence → "correspondence"), so lossy
+ * folders resolve to their single canonical category here by construction — no second copy of the map.
+ */
+export function resolveFolderUploadTarget(
+  folders: FolderLike[],
+  value: string | null
+): FolderPickOption | null {
+  if (!value || value === "all") return null;
+  for (const folder of folders) {
+    if (folder.path === value) {
+      return { category: folder.category };
+    }
+    const sub = folder.subfolders.find((s) => s.path === value);
+    if (sub) {
+      return { category: folder.category, subcategory: sub.name };
+    }
   }
   return null;
 }

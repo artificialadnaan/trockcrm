@@ -131,6 +131,33 @@ export async function generateUploadUrl(
 }
 
 /**
+ * Build a safe Content-Disposition header for a presigned GET.
+ * Emits BOTH an ASCII `filename=` fallback (control chars stripped, quotes/backslash/non-ASCII → "_",
+ * matching public-photo-tokens' sanitizeFilename) AND an RFC 5987 `filename*=UTF-8''<pct-encoded>` for
+ * modern clients. Prevents header injection / breakage from real filenames now flowing through
+ * files.displayName.
+ */
+export function buildContentDisposition(
+  disposition: "attachment" | "inline",
+  filename: string,
+): string {
+  const stripped = filename.replace(/[\x00-\x1f\x7f]/g, "");
+  const asciiFallback = stripped
+    .replace(/["\\]/g, "_")
+    .replace(/[^\x20-\x7e]/g, "_")
+    .trim() || "download";
+  const encoded = encodeURIComponent(stripped).replace(
+    /['()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
+  // Only emit filename* when there is a usable name. For a blank/whitespace-only stripped value it would be
+  // empty and, since clients PREFER filename* over filename, they'd get a blank name — fall back to the
+  // ASCII "download" instead.
+  const filenameStar = stripped.trim().length > 0 ? `; filename*=UTF-8''${encoded}` : "";
+  return `${disposition}; filename="${asciiFallback}"${filenameStar}`;
+}
+
+/**
  * Generate a presigned GET URL for file download / preview.
  *
  * @param r2Key - Full object key
@@ -141,7 +168,8 @@ export async function generateUploadUrl(
 export async function generateDownloadUrl(
   r2Key: string,
   expiresIn: number = 3600,
-  filename?: string
+  filename?: string,
+  disposition: "inline" | "attachment" = "attachment"
 ): Promise<string> {
   const client = getClient();
   const bucket = getBucket();
@@ -150,7 +178,7 @@ export async function generateDownloadUrl(
     Bucket: bucket,
     Key: r2Key,
     ...(filename
-      ? { ResponseContentDisposition: `attachment; filename="${filename}"` }
+      ? { ResponseContentDisposition: buildContentDisposition(disposition, filename) }
       : {}),
   });
 
@@ -344,8 +372,12 @@ export function generateMockUploadUrl(r2Key: string): {
 }
 
 /**
- * Dev mode: generate a mock download URL.
+ * Dev mode: generate a mock download URL. Encodes the resolved disposition so callers/tests can assert
+ * what the real presign WOULD carry (real presigns embed it in a signed ResponseContentDisposition).
  */
-export function generateMockDownloadUrl(r2Key: string): string {
-  return `http://localhost:3001/api/files/dev-download?key=${encodeURIComponent(r2Key)}`;
+export function generateMockDownloadUrl(
+  r2Key: string,
+  disposition: "inline" | "attachment" = "attachment"
+): string {
+  return `http://localhost:3001/api/files/dev-download?key=${encodeURIComponent(r2Key)}&disposition=${disposition}`;
 }

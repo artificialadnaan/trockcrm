@@ -3,6 +3,7 @@ dotenv.config();
 
 import { createApp } from "./app.js";
 import { configureR2Cors, getAllowedR2CorsOrigins } from "./lib/r2-client.js";
+import { warnIfPdftoppmMissing } from "./lib/pdf-thumbnail.js";
 import { pool } from "./db.js";
 import {
   assertSafeDevAuthConfig,
@@ -22,6 +23,10 @@ const server = app.listen(PORT, () => {
 
   // Configure R2 CORS for browser uploads (idempotent, runs once on startup)
   configureR2Cors(getAllowedR2CorsOrigins());
+
+  // Loudly log if pdftoppm is missing — the PDF-thumbnail path is best-effort and would otherwise
+  // degrade every PDF to a type badge silently. Fire-and-forget; advisory only.
+  void warnIfPdftoppmMissing();
 });
 
 await ensureAuditLogPhase1Columns(pool);

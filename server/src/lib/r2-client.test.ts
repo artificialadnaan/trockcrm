@@ -87,8 +87,32 @@ describe("r2-client", () => {
     await expect(r2.generateDownloadUrl("photos/a.jpg", 60, "a.jpg")).resolves.toBe("https://download.test");
 
     expect(commandInstances[0]).toMatchObject({ type: "put", input: { Bucket: "bucket", Key: "photos/a.jpg", ContentType: "image/jpeg" } });
-    expect(commandInstances[1]).toMatchObject({ type: "get", input: { Bucket: "bucket", Key: "photos/a.jpg", ResponseContentDisposition: 'attachment; filename="a.jpg"' } });
+    expect(commandInstances[1]).toMatchObject({ type: "get", input: { Bucket: "bucket", Key: "photos/a.jpg", ResponseContentDisposition: `attachment; filename="a.jpg"; filename*=UTF-8''a.jpg` } });
     expect(getSignedUrlMock).toHaveBeenNthCalledWith(1, expect.anything(), expect.anything(), { expiresIn: 30 * 60 });
+  });
+
+  it("encodes the requested Content-Disposition into the signed GET command", async () => {
+    process.env.R2_ACCOUNT_ID = "acct";
+    process.env.R2_ACCESS_KEY_ID = "key";
+    process.env.R2_SECRET_ACCESS_KEY = "secret";
+    process.env.R2_BUCKET_NAME = "bucket";
+    getSignedUrlMock.mockResolvedValue("https://download.test");
+    const r2 = await importR2();
+
+    // Explicit inline → the REAL presigned GetObjectCommand carries an inline Content-Disposition.
+    // buildContentDisposition (PR1) emits BOTH the ASCII `filename=` and the RFC 5987 `filename*=`.
+    await r2.generateDownloadUrl("photos/a.jpg", 60, "a.jpg", "inline");
+    expect(commandInstances.at(-1)).toMatchObject({
+      type: "get",
+      input: { ResponseContentDisposition: `inline; filename="a.jpg"; filename*=UTF-8''a.jpg` },
+    });
+
+    // No 4th arg → attachment. This is the safe default the entire download chain relies on.
+    await r2.generateDownloadUrl("photos/a.jpg", 60, "a.jpg");
+    expect(commandInstances.at(-1)).toMatchObject({
+      type: "get",
+      input: { ResponseContentDisposition: `attachment; filename="a.jpg"; filename*=UTF-8''a.jpg` },
+    });
   });
 
   it("handles object metadata, buffers, deletes, puts, and CORS", async () => {

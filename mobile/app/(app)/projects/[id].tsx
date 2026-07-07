@@ -345,7 +345,7 @@ export default function ProjectDetailScreen() {
       </ScrollView>
 
       {viewer !== null ? (
-        <PhotoViewerModal photos={viewer.photos} initialIndex={viewer.index} visible onClose={() => setViewer(null)} />
+        <PhotoViewerModal photos={viewer.photos} initialIndex={viewer.index} visible projectDealId={dealId} onClose={() => setViewer(null)} />
       ) : null}
 
       <ReportBuilder

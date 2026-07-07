@@ -35,6 +35,7 @@ import { getLeadById } from "../leads/service.js";
 import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats, getUnassignedCompanyCamProjects, getUnassignedCompanyCamPhotos, assignUnassignedCompanyCamProjectToDeal } from "./feed-service.js";
 import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
 import { emitUploadedFileEvent, recordUploadedFileSideEffects } from "./upload-workflow.js";
+import { parseFileDateParam } from "./file-constants.js";
 import { assertDealCollaboratorAccess, assertLeadCollaboratorAccess } from "../../lib/collaboration-access.js";
 
 const router = Router();
@@ -153,6 +154,7 @@ router.post("/upload-url", async (req, res, next) => {
       procoreProjectId,
       changeOrderId,
       description,
+      displayName,
       tags,
     } = req.body;
 
@@ -198,6 +200,7 @@ router.post("/upload-url", async (req, res, next) => {
         procoreProjectId: procoreProjectId ? Number(procoreProjectId) : undefined,
         changeOrderId,
         description,
+        displayName: typeof displayName === "string" ? displayName : undefined,
         tags,
       }
     );
@@ -221,6 +224,16 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
     const leadId = req.headers["x-lead-id"] as string | undefined;
     const contactId = req.headers["x-contact-id"] as string | undefined;
     const description = req.headers["x-file-description"] as string | undefined;
+    const displayNameHeader = req.headers["x-file-display-name"] as string | undefined;
+    let displayNameOverride: string | undefined;
+    if (typeof displayNameHeader === "string" && displayNameHeader.length > 0) {
+      try {
+        displayNameOverride = decodeURIComponent(displayNameHeader);
+      } catch {
+        // Malformed percent-encoding — use the raw header value rather than 500 the upload.
+        displayNameOverride = displayNameHeader;
+      }
+    }
     const tagsRaw = req.headers["x-file-tags"] as string | undefined;
     const tags = tagsRaw ? tagsRaw.split(",") : undefined;
 
@@ -269,6 +282,7 @@ router.post("/upload-direct", express.raw({ type: "*/*", limit: "50mb" }), async
         leadId,
         contactId,
         description,
+        displayName: displayNameOverride,
         tags,
       }
     );
@@ -480,9 +494,26 @@ router.get("/", async (req, res, next) => {
       tags: req.query.tags
         ? (req.query.tags as string).split(",")
         : undefined,
+      // Validated/normalized so a malformed date is dropped, not passed to the SQL cast (→500).
+      dateFrom: parseFileDateParam(req.query.dateFrom),
+      dateTo: parseFileDateParam(req.query.dateTo),
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
-      sortBy: req.query.sortBy as "display_name" | "created_at" | "file_size_bytes" | "taken_at" | undefined,
+      // Cap the page size: getFiles now batch-presigns a thumbnail URL per row (Task 7), so an arbitrarily
+      // large client-supplied limit would fan into an arbitrarily large presign pass. 200 mirrors the
+      // photo-timeline ceiling and is >= every real caller (deal Files tab = 25, global /files browser =
+      // 200). `|| 50` guards a non-numeric/zero limit.
+      limit: req.query.limit
+        ? Math.min(200, Math.max(1, parseInt(req.query.limit as string, 10) || 50))
+        : undefined,
+      sortBy: req.query.sortBy as
+        | "display_name"
+        | "created_at"
+        | "file_size_bytes"
+        | "taken_at"
+        | "file_type"
+        | "category"
+        | "extension"
+        | undefined,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
     };
 
@@ -747,7 +778,15 @@ router.get("/:id/download", async (req, res, next) => {
       return;
     }
 
-    const result = await getFileDownloadUrl(req.tenantDb!, req.params.id);
+    // `?disposition=inline` opts into an inline preview; the service allowlists which mimes may actually
+    // render inline (image/* except svg, application/pdf, text/plain) and forces attachment otherwise.
+    // (This param pass-through is typecheck-only; the disposition SELECTION is proven in
+    // download-disposition.runtime.test.ts and the real signed header in src/lib/r2-client.test.ts.)
+    const result = await getFileDownloadUrl(
+      req.tenantDb!,
+      req.params.id,
+      req.query.disposition as string | undefined,
+    );
     if (logDownload && isPhotoRecord(file)) {
       await logPhotoEvent(req.tenantDb!, {
         photoId: file.id,
@@ -828,11 +867,19 @@ router.patch("/:id", async (req, res, next) => {
     await assertDealLinkedFileMutationAllowed(req, existing, isRestore ? "restore" : "metadata_update");
 
     const { displayName, description, notes, tags, category, subcategory, folderPath, photoCategory } = req.body;
-    // A legacy client may send the photo's phase category in the `category` field.
-    // PHOTO_CATEGORIES (shared) covers the 6 offered values + retained legacy ones.
+    // A legacy client may send the photo's phase category in the `category` field. Treat an incoming
+    // `category` as a photo-PHASE edit ONLY when it is a photo-EXCLUSIVE value (in PHOTO_CATEGORIES but
+    // NOT also a real file category). "other" is BOTH a legacy photo phase and a genuine file category,
+    // so without the exclusion a photo->Other reclassification from the generic edit modal would be
+    // silently swallowed (category stays "photo"), clobber the existing phase to "other", and drop the
+    // photo subfolder. `category === null` still clears the phase for true legacy phase-in-category
+    // clients (a null file category is meaningless — the column is NOT NULL).
     const categoryTargetsPhotoCategory =
       existing.category === "photo" &&
-      (category === null || (typeof category === "string" && (PHOTO_CATEGORIES as readonly string[]).includes(category)));
+      (category === null ||
+        (typeof category === "string" &&
+          (PHOTO_CATEGORIES as readonly string[]).includes(category) &&
+          !(FILE_CATEGORIES as readonly string[]).includes(category)));
     const resolvedPhotoCategory =
       photoCategory !== undefined
         ? photoCategory

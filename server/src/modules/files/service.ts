@@ -14,7 +14,8 @@ import {
   headObject,
   isR2Configured,
 } from "../../lib/r2-client.js";
-import { generateAndStoreThumbnail } from "../../lib/image-thumbnail.js";
+import { generateAndStoreThumbnail, isThumbnailableImage } from "../../lib/image-thumbnail.js";
+import { generateAndStorePdfThumbnail, isPdfThumbnailable } from "../../lib/pdf-thumbnail.js";
 import {
   MAX_FILE_SIZE_BYTES,
   PRESIGNED_URL_EXPIRY_SECONDS,
@@ -28,6 +29,7 @@ import {
 } from "./file-constants.js";
 import { inferFileCategory } from "./infer-category.js";
 import { resolvePhotoAddressMetadata } from "./photo-geocoding.js";
+import { BUSINESS_TIMEZONE } from "../../lib/period.js";
 import { buildDealPhotoTimelineConditions, type DealPhotoTimelineFilters } from "./photo-timeline-filters.js";
 import crypto from "node:crypto";
 
@@ -105,6 +107,16 @@ export interface RequestUploadInput {
   changeOrderId?: string;
   /** Optional description */
   description?: string;
+  /**
+   * Optional caller-supplied display name (overrides the derived seed). Trimmed + capped to the column
+   * width (500). When absent, uploads seed the display name from the real originalFilename (ext stripped)
+   * UNLESS the row is a SYNTHETIC photo (category 'photo' with a field-photo-<ts>/companycam_ filename),
+   * which keeps the deal-number system scheme — see deriveSeedDisplayName. Wired from the JSON route
+   * (`req.body.displayName`) and the raw route (`x-file-display-name` header). No PR1 UI sets it on the web
+   * upload zone (renames go through the edit modal / PATCH), but the raw path and future advanced surfaces
+   * can.
+   */
+  displayName?: string;
   /** Optional photo-only category label */
   photoCategory?: PhotoCategory | null;
   /** Optional tags */
@@ -144,9 +156,13 @@ export interface FileFilters {
   folderPath?: string;
   search?: string;
   tags?: string[];
+  /** Inclusive lower bound on upload time (createdAt), bucketed as a business-tz (CT) calendar day. Date-only ("YYYY-MM-DD") or full ISO. */
+  dateFrom?: string;
+  /** Inclusive upper bound on upload time. A date-only value includes the WHOLE CT day (see getFiles). */
+  dateTo?: string;
   page?: number;
   limit?: number;
-  sortBy?: "display_name" | "created_at" | "file_size_bytes" | "taken_at";
+  sortBy?: "display_name" | "created_at" | "file_size_bytes" | "taken_at" | "file_type" | "category" | "extension";
   sortDir?: "asc" | "desc";
 }
 
@@ -391,6 +407,44 @@ async function generateSystemFilename(
   return { systemFilename, displayName };
 }
 
+/** Strip a trailing extension case-insensitively (the row stores the extension separately). */
+function stripExtension(filename: string): string {
+  const dot = filename.lastIndexOf(".");
+  return dot > 0 ? filename.slice(0, dot) : filename;
+}
+
+/**
+ * True for a machine-generated photo name that must keep the deal-number system scheme:
+ * field/TRCAM captures (`field-photo-<ts>.<ext>`) and CompanyCam (`companycam_<id>`, defensive — CompanyCam
+ * never routes through requestUploadUrl). A genuine desktop/web photo has a real originalFilename and is
+ * NOT synthetic, so it keeps its real name per spec §5.1. Case-SENSITIVE (the generators only ever emit
+ * lowercase names) so display-seeding stays byte-for-byte in lockstep with the search-index CASE (0178)
+ * and the backfill (isSyntheticPhotoRow).
+ */
+function isSyntheticPhotoName(category: FileCategory, originalFilename: string): boolean {
+  return category === "photo" && /^(field-photo-\d+|companycam_)/.test(originalFilename);
+}
+
+/**
+ * Resolve the display name to persist for a NEW upload.
+ *  - explicit override wins (trimmed, capped to 500 = column width);
+ *  - SYNTHETIC photos keep the system-derived name (deal-number scheme) — download filename stays sane;
+ *  - everything else (documents AND real desktop/web photos) → the real originalFilename with its
+ *    extension stripped; empty-after-strip degrades safely to the system-derived name.
+ */
+function deriveSeedDisplayName(input: {
+  category: FileCategory;
+  originalFilename: string;
+  displayName?: string;
+  systemDerived: string;
+}): string {
+  const override = input.displayName?.trim();
+  if (override) return override.slice(0, 500);
+  if (isSyntheticPhotoName(input.category, input.originalFilename)) return input.systemDerived;
+  const seed = stripExtension(input.originalFilename).trim();
+  return seed ? seed.slice(0, 500) : input.systemDerived;
+}
+
 /**
  * Build the R2 object key.
  * Pattern: office_{slug}/deals/{DealNumber}/{category}/{filename}
@@ -478,13 +532,23 @@ export async function requestUploadUrl(
   const now = new Date();
 
   // Generate system filename (requires DB lookup for deal number + sequence)
-  const { systemFilename, displayName } = await generateSystemFilename(
+  const { systemFilename, displayName: systemDisplayName } = await generateSystemFilename(
     tenantDb,
     input.dealId,
     resolvedCategory,
     ext,
     now
   );
+
+  // Seed the persisted display name from the REAL filename for documents AND real web/desktop photos;
+  // keep the deal-number system scheme only for SYNTHETIC photos (field/TRCAM/CompanyCam). An explicit
+  // caller override wins. See deriveSeedDisplayName.
+  const displayName = deriveSeedDisplayName({
+    category: resolvedCategory,
+    originalFilename: input.originalFilename,
+    displayName: input.displayName,
+    systemDerived: systemDisplayName,
+  });
 
   // Look up deal number for R2 key path
   let dealNumber: string | undefined;
@@ -614,16 +678,24 @@ export async function confirmUpload(
     }
   }
 
-  const ext = pending.originalFilename.lastIndexOf(".") >= 0
+  // Use the same leading-dot boundary as stripExtension (dot > 0): a dotfile like ".env" has no
+  // separable extension, so ext is "" and the display name keeps the full ".env" — otherwise the
+  // download filename (displayName + ext) would double to ".env.env".
+  const ext = pending.originalFilename.lastIndexOf(".") > 0
     ? pending.originalFilename.substring(pending.originalFilename.lastIndexOf(".")).toLowerCase()
     : "";
 
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
 
-  // Best-effort grid thumbnail for image uploads — non-fatal (a miss falls back to the full original).
-  // The object is already verified present in R2 above, so the helper fetches it from there. Covers both
-  // web (/files/confirm-upload) and mobile (/field/photos/confirm-upload), which both route through here.
-  const thumbnailR2Key = await generateAndStoreThumbnail(pending.r2Key, pending.mimeType);
+  // Best-effort grid/list thumbnail — non-fatal (a miss falls back to the full original or a type badge).
+  // The object is already verified present in R2 above, so the helper fetches it from there. Images go
+  // through the sharp pipeline; PDFs (sharp can't decode) rasterize page 1 via pdftoppm. Both are
+  // time-bounded so a slow render never stalls an upload. Covers web (/files/confirm-upload) and mobile
+  // (/field/photos/confirm-upload), which both route through here.
+  let thumbnailR2Key = await generateAndStoreThumbnail(pending.r2Key, pending.mimeType);
+  if (!thumbnailR2Key && isPdfThumbnailable(pending.mimeType)) {
+    thumbnailR2Key = await generateAndStorePdfThumbnail(pending.r2Key, pending.mimeType);
+  }
 
   const latitude = input.latitude ?? input.geoLat;
   const longitude = input.longitude ?? input.geoLng;
@@ -867,6 +939,26 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
     );
   }
 
+  // Date-range filtering on upload time (createdAt), bucketed into BUSINESS-timezone (America/Chicago)
+  // calendar days — matching the app's canonical date convention (server/src/lib/period.ts,
+  // tasks/service.ts). createdAt is a UTC instant; `AT TIME ZONE ${BUSINESS_TIMEZONE}` re-expresses it as
+  // the Central wall-clock time and `::date` takes the Central calendar day, so BOTH bounds are whole-day
+  // inclusive AND independent of the Postgres session TimeZone GUC (db.ts never pins one). A file uploaded
+  // 8pm CT is filed under that CT day, not the next UTC day. NOTE: this intentionally diverges from
+  // getPhotoFeed (feed-service.ts) on three axes — boundary inclusivity, timezone, and the createdAt vs
+  // COALESCE(taken_at, created_at) column — all documented in the plan/PR body. Malformed input is
+  // rejected upstream by parseFileDateParam so nothing bad reaches these ::date casts.
+  if (filters.dateFrom) {
+    conditions.push(
+      sql`(${files.createdAt} AT TIME ZONE ${BUSINESS_TIMEZONE})::date >= ${filters.dateFrom}::date`
+    );
+  }
+  if (filters.dateTo) {
+    conditions.push(
+      sql`(${files.createdAt} AT TIME ZONE ${BUSINESS_TIMEZONE})::date <= ${filters.dateTo}::date`
+    );
+  }
+
   // Tag filtering: files that contain ALL specified tags
   if (filters.tags && filters.tags.length > 0) {
     conditions.push(arrayContains(files.tags, filters.tags));
@@ -890,6 +982,10 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
       case "display_name": return files.displayName;
       case "file_size_bytes": return files.fileSizeBytes;
       case "taken_at": return files.takenAt;
+      case "file_type": return files.mimeType;
+      // Cast the enum to text so the order is alphabetical, not enum-declaration order.
+      case "category": return sql`${files.category}::text`;
+      case "extension": return files.fileExtension;
       default: return files.createdAt;
     }
   })();
@@ -900,14 +996,21 @@ export async function getFiles(tenantDb: TenantDb, filters: FileFilters) {
     .select()
     .from(files)
     .where(where)
-    .orderBy(sortOrder)
+    .orderBy(sortOrder, desc(files.createdAt), asc(files.id))
     .limit(limit)
     .offset(offset);
 
   const total = Number(countResult[0]?.count ?? 0);
 
+  // Resolve each row's thumbnail URL HERE in one batched pass (local presigns) rather than letting the
+  // client fire a /files/:id/download per row — that N+1 trips the rate limiter on a big page. Rows that
+  // aren't previewable get null; the client falls back to a type badge.
+  const filesWithThumbnails = await Promise.all(
+    fileRows.map(async (f) => ({ ...f, thumbnailUrl: await resolveFileThumbnailUrl(f) })),
+  );
+
   return {
-    files: fileRows,
+    files: filesWithThumbnails,
     pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
 }
@@ -1262,17 +1365,35 @@ export async function getFileByIdIncludingDeleted(
 }
 
 /**
+ * Decide the Content-Disposition for a download. Inline is a stored-XSS / content-sniffing surface, so it
+ * is allowlisted to image/* (EXCLUDING image/svg+xml), application/pdf, and text/plain — and only when the
+ * caller explicitly requested inline. Everything else (SVG, HTML, Office, unknown, or no request) → attachment.
+ */
+export function resolveInlineDisposition(
+  mimeType: string | null | undefined,
+  requested: string | null | undefined,
+): "inline" | "attachment" {
+  if (requested !== "inline") return "attachment";
+  const m = (mimeType ?? "").split(";")[0].trim().toLowerCase();
+  if (m === "image/svg+xml") return "attachment";
+  if (m.startsWith("image/")) return "inline";
+  if (m === "application/pdf") return "inline";
+  if (m === "text/plain") return "inline";
+  return "attachment";
+}
+
+/**
  * Get a presigned download URL for a file.
  */
 export async function buildFileDownloadUrlFromRecord(file: {
   r2Key: string;
   displayName: string;
   fileExtension?: string | null;
-}, ttlSeconds = 3600): Promise<{ url: string; filename: string }> {
+}, ttlSeconds = 3600, disposition: "inline" | "attachment" = "attachment"): Promise<{ url: string; filename: string }> {
   const filename = file.displayName + (file.fileExtension ?? "");
   const url = isR2Configured()
-    ? await generateDownloadUrl(file.r2Key, ttlSeconds, filename)
-    : generateMockDownloadUrl(file.r2Key);
+    ? await generateDownloadUrl(file.r2Key, ttlSeconds, filename, disposition)
+    : generateMockDownloadUrl(file.r2Key, disposition);
 
   return { url, filename };
 }
@@ -1283,12 +1404,60 @@ const PHOTO_LIST_URL_TTL_SECONDS = 6 * 60 * 60;
 
 export async function getFileDownloadUrl(
   tenantDb: TenantDb,
-  fileId: string
+  fileId: string,
+  requestedDisposition?: string
 ): Promise<{ url: string; filename: string }> {
   const file = await getFileById(tenantDb, fileId);
   if (!file) throw new AppError(404, "File not found");
 
-  return buildFileDownloadUrlFromRecord(file);
+  const disposition = resolveInlineDisposition(file.mimeType, requestedDisposition);
+  return buildFileDownloadUrlFromRecord(file, 3600, disposition);
+}
+
+/**
+ * Presign a small thumbnail URL for a file LIST row, or null when the row is a true non-previewable doc
+ * (client shows a type badge). Priority MIRRORS resolvePhotoDisplayUrls so images preview consistently in
+ * both the Photos subview and the All-files list:
+ *   1) a generated small thumbnail (image OR PDF first page) — the cheap, ideal case
+ *   2) an image WITHOUT a generated thumbnail → presign the ORIGINAL (the #808/PDF thumbnail backfills are
+ *      deferred, so most existing images have no thumbnailR2Key; a badge here would diverge from the
+ *      Photos subview, which previews the same image via resolvePhotoDisplayUrls — see the plan's DECISION
+ *      callout: this is a weighed bandwidth trade, not "no regression", until the backfill runs)
+ *   3) an external-only image import (CompanyCam, no r2Key) → its CDN thumbnail/original
+ *   4) everything else (PDF w/o thumb, Office, zip, …) → null → type badge
+ * Thumbnails/images are safe to serve inline. Presigns are local HMAC ops, so mapping this over a page is
+ * cheap — one batched pass, never a per-row /files/:id/download round-trip. NOTE: this makes GET /files a
+ * file-bytes-granting surface under the list's deal-level (+source-lead lineage) scope — the same grant
+ * boundary the photo timeline already applies (see the plan's access-model DECISION callout).
+ */
+export async function resolveFileThumbnailUrl(file: {
+  thumbnailR2Key?: string | null;
+  r2Key?: string | null;
+  mimeType?: string | null;
+  externalThumbnailUrl?: string | null;
+  externalUrl?: string | null;
+  displayName?: string | null;
+}): Promise<string | null> {
+  if (file.thumbnailR2Key) {
+    const { url } = await buildFileDownloadUrlFromRecord(
+      { r2Key: file.thumbnailR2Key, displayName: file.displayName ?? "thumbnail", fileExtension: ".jpg" },
+      PHOTO_LIST_URL_TTL_SECONDS,
+      "inline",
+    );
+    return url;
+  }
+  if (isThumbnailableImage(file.mimeType) && file.r2Key) {
+    const { url } = await buildFileDownloadUrlFromRecord(
+      { r2Key: file.r2Key, displayName: file.displayName ?? "image", fileExtension: null },
+      PHOTO_LIST_URL_TTL_SECONDS,
+      "inline",
+    );
+    return url;
+  }
+  if (!file.r2Key && (file.externalThumbnailUrl || file.externalUrl)) {
+    return file.externalThumbnailUrl ?? file.externalUrl ?? null;
+  }
+  return null;
 }
 
 /**
@@ -1370,14 +1539,54 @@ export async function updateFile(
   if (!existing) throw new AppError(404, "File not found");
 
   const updates: Record<string, unknown> = {};
-  if (input.displayName !== undefined) updates.displayName = input.displayName;
+  if (input.displayName !== undefined) {
+    // Match the upload seed: trim + cap to the varchar(500) column width so a free-form rename from the
+    // edit modal can't overflow and surface as an unhandled DB length error.
+    const trimmed = input.displayName.trim();
+    if (!trimmed) throw new AppError(400, "Display name cannot be empty.");
+    updates.displayName = trimmed.slice(0, 500);
+  }
   if (input.description !== undefined) updates.description = input.description;
   if (input.notes !== undefined) updates.notes = input.notes;
   if (input.tags !== undefined) updates.tags = input.tags;
-  if (input.category !== undefined) updates.category = input.category;
-  if (input.subcategory !== undefined) updates.subcategory = input.subcategory;
-  if (input.folderPath !== undefined) updates.folderPath = input.folderPath;
   if (input.photoCategory !== undefined) updates.photoCategory = input.photoCategory;
+
+  // folderPath is NOT independent of category+subcategory — it is DERIVED from both. Resolve the EFFECTIVE
+  // (category, subcategory) this update yields, detect a change on EITHER dimension, and re-derive
+  // folderPath from them, IGNORING any incoming folderPath (an edit-modal folderPath must never
+  // reintroduce drift). No change on either dimension → keep the client folderPath if one was sent, else
+  // leave it untouched (field tag/transcription writes pass neither category nor subcategory).
+  const effectiveCategory = input.category !== undefined ? input.category : existing.category;
+  const categoryChanged = input.category !== undefined && input.category !== existing.category;
+
+  // On a category change, a subcategory carried from the OLD category would be a phantom subfolder: keep
+  // only a subcategory explicitly supplied in THIS request, otherwise clear it. On an unchanged category,
+  // honor an explicit subcategory edit (estimate DD->Bid), otherwise keep the existing subcategory.
+  const existingSub = existing.subcategory ?? null;
+  const effectiveSubcategory: string | null = categoryChanged
+    ? (input.subcategory !== undefined ? (input.subcategory ?? null) : null)
+    : (input.subcategory !== undefined ? (input.subcategory ?? null) : existingSub);
+  const subcategoryChanged = effectiveSubcategory !== existingSub;
+
+  if (input.category !== undefined) {
+    // The edit modal can send any category for any file. Mirror the upload-time guard so a non-image file
+    // can't be reclassified to "photo" — else the photo timeline (category='photo') would hand a PDF/Office
+    // URL to the image gallery and render broken rows.
+    validateCategoryMatchesMime(input.category, existing.mimeType);
+    updates.category = input.category;
+  }
+
+  if (categoryChanged || subcategoryChanged) {
+    updates.subcategory = effectiveSubcategory; // persists a cleared-stale subcategory on a category change
+    // Photos are date-bucketed ("Photos/Site Visits/2026-04"). Re-derive with the ROW'S own date so a
+    // re-categorization TO photo doesn't collapse the bucket (and never uses now(), which would move it).
+    const bucketSource = existing.takenAt ?? existing.createdAt ?? new Date();
+    const bucketDate = bucketSource instanceof Date ? bucketSource : new Date(bucketSource);
+    updates.folderPath = buildFolderPath(effectiveCategory, effectiveSubcategory ?? undefined, bucketDate);
+  } else {
+    if (input.subcategory !== undefined) updates.subcategory = input.subcategory ?? null;
+    if (input.folderPath !== undefined) updates.folderPath = input.folderPath;
+  }
   if (input.deletedAt !== undefined) {
     updates.deletedAt = input.deletedAt;
     updates.isActive = input.deletedAt == null;

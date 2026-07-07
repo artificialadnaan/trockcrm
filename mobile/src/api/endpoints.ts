@@ -107,6 +107,12 @@ export const confirmUpload = (f: Fetcher, body: ConfirmUploadRequest) =>
 export const replacePhotoTags = (f: Fetcher, photoId: string, tags: string[]) =>
   f<TagsResponse>(`/field/photos/${photoId}/tags`, { method: "POST", body: { tags } });
 
+export const updatePhotoMetadata = (
+  f: Fetcher,
+  photoId: string,
+  body: { displayName?: string; description?: string | null },
+) => f<{ photo: unknown }>(`/field/photos/${photoId}`, { method: "PATCH", body });
+
 export const getProjectTags = (f: Fetcher, dealId: string, q: string, limit = 8) =>
   f<ProjectTagsResponse>(`/field/projects/${dealId}/tags`, { query: { q, limit } });
 
