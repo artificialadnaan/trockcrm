@@ -3,14 +3,11 @@ import { api } from "@/lib/api";
 import { getOfficeRequestOptions } from "@/lib/office-selection";
 import type { DealDetail } from "@/hooks/use-deals";
 
-/** The SyncHub-style edited fields a first approver may submit (flat string map; server allowlists the writable keys). */
-export type RfpVoteEditableFields = Record<string, string>;
-
 /**
- * Loads a deal's FULL detail payload (it carries rfpVotes + rfpVoteState plus every column the rich vote form
- * needs) and casts a vote. Mirrors use-rfp-review: target-change vs silent-poll refetch, gated to voters by the
- * caller (dealId is passed undefined for non-voters so no request fires). The whole DealDetail is exposed so the
- * form can pre-fill/edit the project fields; the server is the authority on what a cast may change.
+ * Loads a deal's FULL detail payload (it carries rfpVotes + rfpVoteState plus every column the read-only vote page
+ * shows) and casts a vote. Mirrors use-rfp-review: target-change vs silent-poll refetch, gated to voters by the
+ * caller (dealId is passed undefined for non-voters so no request fires). The RFP is immutable once triggered, so
+ * the page only DISPLAYS the deal's static snapshot — a cast never edits it.
  */
 export function useRfpVote(dealId: string | undefined, officeId?: string | null) {
   const [deal, setDeal] = useState<DealDetail | null>(null);
@@ -57,9 +54,8 @@ export function useRfpVote(dealId: string | undefined, officeId?: string | null)
 }
 
 /**
- * Cast a vote. Reject requires a non-empty reason (the server also enforces 400 RFP_VOTE_REASON_REQUIRED).
- * `editedFields` may accompany an APPROVE only (SyncHub-style project corrections); the server commits them on the
- * FIRST approve and rejects them once the round is locked. Never sent on a reject.
+ * Cast a vote on the static (immutable) RFP. Reject requires a non-empty reason (the server also enforces
+ * 400 RFP_VOTE_REASON_REQUIRED). Approvals carry no field edits — the triggered snapshot is what gets approved.
  */
 export async function castRfpVote(
   dealId: string,
@@ -67,13 +63,12 @@ export async function castRfpVote(
     decision: "approve" | "reject";
     reason?: string | null;
     officeId?: string | null;
-    editedFields?: RfpVoteEditableFields | null;
   }
 ): Promise<{ outcome: "pending" | "approved" | "rejected"; votes: unknown[] }> {
   const json =
     input.decision === "reject"
       ? { decision: "reject", reason: input.reason ?? "" }
-      : { decision: "approve", ...(input.editedFields ? { editedFields: input.editedFields } : {}) };
+      : { decision: "approve" };
   return api<{ outcome: "pending" | "approved" | "rejected"; votes: unknown[] }>(`/deals/${dealId}/rfp-vote`, {
     method: "POST",
     json,

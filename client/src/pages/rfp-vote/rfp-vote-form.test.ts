@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   currentTypeCode,
-  diffEditedFields,
   formatMoney,
   initFormFromDeal,
   labelForTypeCode,
-  rewriteProjectNumberType,
   type DealFieldsForForm,
 } from "./rfp-vote-form";
 
@@ -77,21 +75,8 @@ describe("initFormFromDeal", () => {
   });
 });
 
-describe("rewriteProjectNumberType", () => {
-  it("swaps the type digit in a canonical number (any office prefix)", () => {
-    expect(rewriteProjectNumberType("DFW-2-31825-aa", "3")).toBe("DFW-3-31825-aa");
-    expect(rewriteProjectNumberType("ATL-9-10025-bb", "5")).toBe("ATL-5-10025-bb");
-  });
-  it("leaves a non-canonical number untouched", () => {
-    expect(rewriteProjectNumberType("legacy 123", "3")).toBe("legacy 123");
-  });
-  it("is a no-op for an empty code", () => {
-    expect(rewriteProjectNumberType("DFW-2-31825-aa", "")).toBe("DFW-2-31825-aa");
-  });
-});
-
-describe("initFormFromDeal writable field set", () => {
-  it("exposes exactly the 12 writable SyncHub deal fields (no company/contact/notes)", () => {
+describe("initFormFromDeal display field set", () => {
+  it("exposes exactly the 12 project fields shown read-only (no company/contact/notes)", () => {
     const keys = Object.keys(initFormFromDeal(deal)).sort();
     expect(keys).toEqual(
       ["address", "amount", "bid_due_date", "city", "country", "dealname", "description", "estimator", "project_number", "project_types", "state", "zip"].sort(),
@@ -119,17 +104,5 @@ describe("labelForTypeCode", () => {
   it("maps a code to its label", () => {
     expect(labelForTypeCode("4")).toBe("Service");
     expect(labelForTypeCode("")).toBe("—");
-  });
-});
-
-describe("diffEditedFields", () => {
-  it("returns null when nothing changed from the initial pre-fill (untouched approve sends no edits)", () => {
-    const initial = initFormFromDeal(deal);
-    expect(diffEditedFields({ ...initial }, initial)).toBeNull();
-  });
-  it("returns ONLY the fields the voter changed", () => {
-    const initial = initFormFromDeal(deal);
-    const changed = { ...initial, dealname: "New Name", amount: "999" };
-    expect(diffEditedFields(changed, initial)).toEqual({ dealname: "New Name", amount: "999" });
   });
 });
