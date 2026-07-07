@@ -39,25 +39,32 @@ function target(input: Partial<PhotoUploadTarget> & Pick<PhotoUploadTarget, "id"
   };
 }
 
-describe("photo capture upload targets", () => {
-  let container: HTMLDivElement;
-  let root: Root;
+// Shared render-target lifecycle for BOTH suites: a fresh container each test, unmounted + removed after
+// (resetting root so a non-rendering test never re-unmounts a prior test's tree). Top-level hooks run
+// before/after each describe's own beforeEach — the mock setup below stays per-suite.
+let container: HTMLDivElement;
+let root: Root | undefined;
 
+beforeEach(() => {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+});
+
+afterEach(async () => {
+  if (root) {
+    await act(async () => {
+      root!.unmount();
+    });
+    root = undefined;
+  }
+  container.remove();
+});
+
+describe("photo capture upload targets", () => {
   beforeEach(() => {
     mocks.searchPhotoUploadTargets.mockReset();
     mocks.uploadFile.mockReset();
     mocks.useAuth.mockReturnValue({ user: { activeOfficeId: "office-atl" } });
-    container = document.createElement("div");
-    document.body.appendChild(container);
-  });
-
-  afterEach(async () => {
-    if (root) {
-      await act(async () => {
-        root.unmount();
-      });
-    }
-    container.remove();
   });
 
   it("groups searchable upload targets by record lifecycle section", () => {
@@ -128,9 +135,6 @@ describe("photo capture upload targets", () => {
 });
 
 describe("photo capture per-photo notes", () => {
-  let container: HTMLDivElement;
-  let root: Root;
-
   function setInputValue(el: HTMLInputElement, value: string) {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
     setter.call(el, value);
@@ -159,17 +163,6 @@ describe("photo capture per-photo notes", () => {
     mocks.useAuth.mockReturnValue({ user: { activeOfficeId: "office-atl" } });
     (globalThis.URL.createObjectURL as unknown) = vi.fn(() => "blob:preview");
     (globalThis.URL.revokeObjectURL as unknown) = vi.fn();
-    container = document.createElement("div");
-    document.body.appendChild(container);
-  });
-
-  afterEach(async () => {
-    if (root) {
-      await act(async () => {
-        root.unmount();
-      });
-    }
-    container.remove();
   });
 
   async function renderWithDeal() {
