@@ -73,15 +73,26 @@ describe("worker SYSTEM_EMAIL_BCC", () => {
     expect(payload.bcc).toBeUndefined();
   });
 
-  it("treats a Resend same-key/different-payload conflict as an already-delivered success (no strand)", async () => {
+  it("treats 409 invalid_idempotent_request (already delivered under a different payload) as success — no strand", async () => {
     sendMock.mockResolvedValueOnce({
       data: null,
-      error: { statusCode: 422, name: "invalid_idempotency_key", message: "Idempotency key already used with a different payload" },
+      error: { statusCode: 409, name: "invalid_idempotent_request", message: "This idempotency key was previously used with a different request." },
     });
 
     const result = await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>", { idempotencyKey: "k-1" });
 
     expect(result.success).toBe(true);
+  });
+
+  it("does NOT treat concurrent_idempotent_requests as delivered (original still in flight → falls through to fail)", async () => {
+    sendMock.mockResolvedValueOnce({
+      data: null,
+      error: { statusCode: 409, name: "concurrent_idempotent_requests", message: "Another request with this idempotency key is in progress." },
+    });
+
+    const result = await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>", { idempotencyKey: "k-1" });
+
+    expect(result.success).toBe(false);
   });
 
   it("still FAILS on a non-conflict Resend error", async () => {

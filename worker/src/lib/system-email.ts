@@ -136,17 +136,15 @@ export async function sendSystemEmailWithMetadata(
   }, options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined);
 
   if (result.error) {
-    // A same-idempotencyKey / different-payload conflict means the email was ALREADY sent under this key — only the
-    // payload differs (e.g. SYSTEM_EMAIL_BCC changed between the original send and this retry across a redeploy).
-    // Treat it as delivered so the caller stamps 'sent' instead of stranding on a re-send it can never win. If the
-    // error is anything else (or the shape doesn't match), fall through to the normal failure — no regression.
-    const err = result.error as { statusCode?: number; name?: string; message?: string };
-    if (
-      options.idempotencyKey != null &&
-      (err.statusCode === 409 || err.statusCode === 422) &&
-      /idempoten/i.test(`${err.name ?? ""} ${err.message ?? ""}`)
-    ) {
-      console.warn(`[Email] Idempotency-key conflict for "${subjectLine}" — already delivered, treating as sent`);
+    // Resend returns 409 `invalid_idempotent_request` when this key was already used with a DIFFERENT payload —
+    // i.e. the email was already delivered under the original payload (e.g. SYSTEM_EMAIL_BCC changed between the
+    // original send and this retry across a redeploy). Treat ONLY that as delivered so the caller stamps 'sent'
+    // instead of stranding on a re-send it can never win. Everything else falls through to the normal failure/retry
+    // path — including `concurrent_idempotent_requests` (the original is still in flight, so its outcome is unknown)
+    // and a malformed-key validation error (the email was never sent).
+    const err = result.error as { name?: string };
+    if (options.idempotencyKey != null && err.name === "invalid_idempotent_request") {
+      console.warn(`[Email] invalid_idempotent_request for "${subjectLine}" — already delivered, treating as sent`);
       return { success: true, messageId: null };
     }
     console.error("[Email] Resend error:", result.error);
