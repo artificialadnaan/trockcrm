@@ -210,14 +210,14 @@ describe("TeamCommissionsPage", () => {
     expect(container.textContent).not.toContain("$4,340.00"); // held amount not surfaced over the payable total
   });
 
-  it("sorts the Earned column by the displayed amount — a held row outranks a true $0 (finding #3)", async () => {
-    // zeroRow truly earns nothing ($0 displayed); heldRow displays its held $4,340. Sorting Earned desc must
+  it("sorts the Reserved column by the displayed amount — a held row outranks a true $0 (finding #3)", async () => {
+    // zeroRow truly earns nothing ($0 displayed); heldRow displays its held $4,340. Sorting Reserved desc must
     // put the held row above the $0 row even though both have totalEarnedCommission === 0.
     const zeroRow = { ...heldRow, repId: "rep-zero", repName: "Zero Earner", heldEarnedCommission: 0, floorMet: true };
     mockWorkspaceRows([zeroRow, heldRow]);
     const { container } = await render();
-    const earnedHeader = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Earned")) as HTMLButtonElement;
-    // Toggle to a deterministic Earned-desc sort.
+    const earnedHeader = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Reserved")) as HTMLButtonElement;
+    // Toggle to a deterministic Reserved-desc sort.
     await act(async () => { earnedHeader.click(); });
     await act(async () => { await Promise.resolve(); });
     let order = Array.from(container.querySelectorAll("tbody tr")).map((tr) => tr.textContent ?? "");
