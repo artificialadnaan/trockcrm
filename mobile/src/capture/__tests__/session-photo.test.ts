@@ -3,7 +3,6 @@ import {
   appendPhotoCaption,
   buildCaptureUploadInput,
   effectiveCaption,
-  planReviewFinish,
   reconcileUploadGps,
   removePhoto,
   setPhotoCaption,
@@ -186,46 +185,5 @@ describe("review-tray caption reducers (per-photo edit — the note NEVER bleeds
   it("removePhoto drops only the keyed photo", () => {
     const photos = [photo("sp-1"), photo("sp-2"), photo("sp-3")];
     expect(removePhoto(photos, "sp-2").map((p) => p.key)).toEqual(["sp-1", "sp-3"]);
-  });
-});
-
-// On Done, the staged photos were already durably enqueued at review-open. planReviewFinish is the pure
-// no-double-enqueue decision: durable ids get a caption PATCH; the rest (enqueue failed / signed out) are
-// enqueued as a FALLBACK. The two lists are disjoint, so a photo is never both patched AND re-enqueued.
-describe("planReviewFinish (durable staging split — patch the enqueued, fallback-enqueue the rest)", () => {
-  const photo = (key: string): SessionPhoto => ({
-    key,
-    clientUploadId: `cu-${key}`,
-    uri: `file://${key}.jpg`,
-    metadata: { takenAt: "t" },
-    caption: "",
-  });
-
-  it("routes durably-enqueued photos to patch and the rest to enqueue (disjoint, no duplicate)", () => {
-    const photos = [photo("a"), photo("b"), photo("c")];
-    const { toPatch, toEnqueue } = planReviewFinish(photos, new Set(["cu-a", "cu-c"]));
-    expect(toPatch.map((p) => p.key)).toEqual(["a", "c"]);
-    expect(toEnqueue.map((p) => p.key)).toEqual(["b"]);
-  });
-
-  it("all durable (the normal case) → all patched, NONE re-enqueued", () => {
-    const photos = [photo("a"), photo("b")];
-    const { toPatch, toEnqueue } = planReviewFinish(photos, new Set(["cu-a", "cu-b"]));
-    expect(toPatch.map((p) => p.key)).toEqual(["a", "b"]);
-    expect(toEnqueue).toEqual([]);
-  });
-
-  it("none durable (open-review enqueue failed / signed out) → all fall back to enqueue", () => {
-    const photos = [photo("a"), photo("b")];
-    const { toPatch, toEnqueue } = planReviewFinish(photos, new Set());
-    expect(toPatch).toEqual([]);
-    expect(toEnqueue.map((p) => p.key)).toEqual(["a", "b"]);
-  });
-
-  it("preserves order within each partition", () => {
-    const photos = [photo("a"), photo("b"), photo("c"), photo("d")];
-    const { toPatch, toEnqueue } = planReviewFinish(photos, new Set(["cu-b", "cu-d"]));
-    expect(toPatch.map((p) => p.key)).toEqual(["b", "d"]);
-    expect(toEnqueue.map((p) => p.key)).toEqual(["a", "c"]);
   });
 });

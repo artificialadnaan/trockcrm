@@ -116,25 +116,3 @@ export function appendPhotoCaption(photos: SessionPhoto[], key: string, text: st
 export function removePhoto(photos: SessionPhoto[], key: string): SessionPhoto[] {
   return photos.filter((p) => p.key !== key);
 }
-
-/**
- * Partition the staged review photos on Done by whether each was already DURABLY ENQUEUED at review-open.
- * Photos in `durableIds` are in the upload queue already, so they only need a CAPTION PATCH (never a
- * re-enqueue — that would upload a duplicate). Photos NOT in the set failed to enqueue at review-open
- * (storage full, or a signed-out ownerKey) and must be enqueued NOW as a fallback (caption and all) so they
- * are never lost. Splitting the two lists is the whole no-double-enqueue decision — kept pure so the
- * crash-safety contract is unit-proven independent of the capture component. Order is preserved within each
- * partition.
- */
-export function planReviewFinish(
-  photos: SessionPhoto[],
-  durableIds: ReadonlySet<string>,
-): { toPatch: SessionPhoto[]; toEnqueue: SessionPhoto[] } {
-  const toPatch: SessionPhoto[] = [];
-  const toEnqueue: SessionPhoto[] = [];
-  for (const p of photos) {
-    if (durableIds.has(p.clientUploadId)) toPatch.push(p);
-    else toEnqueue.push(p);
-  }
-  return { toPatch, toEnqueue };
-}

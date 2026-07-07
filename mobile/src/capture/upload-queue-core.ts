@@ -17,29 +17,11 @@ export type QueuedUpload = CaptureUploadInput & {
   attempts: number;
   /** Epoch ms of the last drain attempt (for surfacing/debugging). */
   lastTriedAt?: number;
-  /**
-   * HELD = durable but NOT drainable yet. Staged review photos are enqueued at review-open so they survive
-   * a crash, but must not upload UNCAPTIONED if a background/foreground drain fires mid-caption — so they're
-   * held until the crew taps Done (releaseHeld clears the flag). Absent/false ⇒ a normal drainable item.
-   */
-  held?: boolean;
 };
 
-/**
- * Drainable = not held AND not yet terminal. Legacy items without `attempts` are treated as 0; a held item
- * is skipped by BOTH drain entry points (drainUploadQueue + the background task) until it's released.
- */
+/** Drainable = not yet terminal. Legacy items without `attempts` are treated as 0. */
 export function isDrainable(item: QueuedUpload): boolean {
-  return !item.held && isTerminal(item) === false;
-}
-
-/**
- * Terminal = exhausted its retries (attempts ≥ cap). Distinct from HELD: a held item is intentionally
- * paused (still eligible once released), NOT a failure — so the "failed" surfaces (getFailedCount /
- * clearFailedUploads) must key on this, never on `!isDrainable`, which would wrongly sweep held rows.
- */
-export function isTerminal(item: QueuedUpload): boolean {
-  return (item.attempts ?? 0) >= MAX_UPLOAD_ATTEMPTS;
+  return (item.attempts ?? 0) < MAX_UPLOAD_ATTEMPTS;
 }
 
 /** Bump the attempt counter (and lastTriedAt) for the given ids — used after a failed drain attempt. */
@@ -111,69 +93,6 @@ export function applyGpsPatch(
       ...item,
       metadata: { ...item.metadata, latitude: coords.latitude, longitude: coords.longitude, addressSource: coords.addressSource },
     };
-  });
-  return { queue: changed ? next : queue, changed };
-}
-
-/**
- * Patch the caption onto a still-queued item — the DURABLE analogue of editing a caption in the review
- * tray. Used when staged photos are enqueued UNCAPTIONED at review-open and the crew then types a caption:
- * on Done each queued row's caption is patched to the typed value before draining. Sets the caption for the
- * matching id (incl. clearing it to null), and reports whether anything changed so the caller only rewrites
- * the durable index when it did; a no-op (id absent, or caption unchanged) returns the original queue
- * reference unchanged.
- */
-export function applyCaptionPatch(
-  queue: QueuedUpload[],
-  clientUploadId: string,
-  caption: string | null,
-): { queue: QueuedUpload[]; changed: boolean } {
-  let changed = false;
-  const next = queue.map((item) => {
-    if (item.clientUploadId !== clientUploadId) return item;
-    if (item.caption === caption) return item;
-    changed = true;
-    return { ...item, caption };
-  });
-  return { queue: changed ? next : queue, changed };
-}
-
-/**
- * Clear the HELD flag on the matching ids so they become drainable — the durable analogue of the crew
- * tapping Done in the review tray. Staged photos are enqueued HELD at review-open (durable but paused); on
- * Done their captions are patched, then this releases them so the next drain ships them WITH captions. Only
- * flips a currently-held matching row; reports whether anything changed so the caller rewrites the durable
- * index only when it did, and a no-op (id absent, or already released) returns the original queue reference.
- */
-export function releaseHeld(
-  queue: QueuedUpload[],
-  ids: Iterable<string>,
-): { queue: QueuedUpload[]; changed: boolean } {
-  const release = new Set(ids);
-  let changed = false;
-  const next = queue.map((item) => {
-    if (!release.has(item.clientUploadId) || !item.held) return item;
-    changed = true;
-    return { ...item, held: false };
-  });
-  return { queue: changed ? next : queue, changed };
-}
-
-/**
- * Clear the HELD flag on EVERY currently-held row (no id list) — the CRASH-RECOVERY analogue of releaseHeld.
- * Held rows are durable but never drain (a mid-caption drain must not ship staged photos uncaptioned), so a
- * crash/kill mid-review would ORPHAN them: durable but permanently paused. When the capture screen resumes
- * with NO review open, any held row is such an orphan, so this releases them all so the drain ships them
- * (uncaptioned) — preserving the "photos upload on next launch" guarantee. Only flips held (never touches
- * attempts/terminal state); reports whether anything changed so the caller rewrites the durable index only
- * when it did, and a no-op (nothing held) returns the original queue reference (idempotent).
- */
-export function clearAllHeld(queue: QueuedUpload[]): { queue: QueuedUpload[]; changed: boolean } {
-  let changed = false;
-  const next = queue.map((item) => {
-    if (!item.held) return item;
-    changed = true;
-    return { ...item, held: false };
   });
   return { queue: changed ? next : queue, changed };
 }

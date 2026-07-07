@@ -4,16 +4,12 @@ import type { Fetcher } from "../api/endpoints";
 import { runConcurrentUploads, uploadCapture, UploadCancelledError, type CaptureUploadInput } from "./upload";
 import {
   UPLOAD_CONCURRENCY,
-  applyCaptionPatch,
   applyGpsPatch,
   bumpAttempts,
-  clearAllHeld,
   createAsyncMutex,
   dedupeQueue,
   isDrainable,
-  isTerminal,
   partitionResults,
-  releaseHeld,
   removeIds,
   sanitizeOwnerKey,
   type QueuedUpload,
@@ -137,20 +133,18 @@ export async function getQueuedCount(ownerKey: string): Promise<number> {
   return (await readQueue(ownerKey)).filter(isDrainable).length;
 }
 
-/** Count of TERMINAL items that exhausted their retries — drives the "failed" banner. Held (paused-in-
- * review) rows are NOT drainable but are NOT failures, so key on isTerminal, never `!isDrainable`. */
+/** Count of TERMINAL items that exhausted their retries — drives the "failed" banner. */
 export async function getFailedCount(ownerKey: string): Promise<number> {
-  return (await readQueue(ownerKey)).filter(isTerminal).length;
+  return (await readQueue(ownerKey)).filter((item) => !isDrainable(item)).length;
 }
 
-/** Discard the terminal/failed items (and their files) — the UI's "Dismiss failed" action. Keys on
- * isTerminal so a still-held staged photo is never swept as "failed". */
+/** Discard the terminal/failed items (and their files) — the UI's "Dismiss failed" action. */
 export async function clearFailedUploads(ownerKey: string): Promise<void> {
   await withQueueLock(async () => {
     const current = await readQueue(ownerKey);
-    const failed = current.filter(isTerminal);
+    const failed = current.filter((item) => !isDrainable(item));
     if (failed.length === 0) return;
-    await writeQueue(ownerKey, current.filter((item) => !isTerminal(item)));
+    await writeQueue(ownerKey, current.filter(isDrainable));
     await deleteQueuedFiles(failed);
   });
 }
@@ -176,37 +170,6 @@ export async function removeQueuedUploads(ownerKey: string, clientUploadIds: str
 }
 
 /**
- * Release specific HELD uploads by clientUploadId so they become drainable — the durable analogue of the
- * crew tapping Done in the review tray. Staged photos are enqueued HELD at review-open (durable but paused
- * so a mid-caption drain can't ship them uncaptioned); on Done their captions are patched, then this clears
- * the hold so the next drain uploads them WITH captions. No-op if nothing matched (already released/gone).
- */
-export async function releaseQueuedUploads(ownerKey: string, clientUploadIds: string[]): Promise<void> {
-  if (clientUploadIds.length === 0) return;
-  await withQueueLock(async () => {
-    const { queue, changed } = releaseHeld(await readQueue(ownerKey), clientUploadIds);
-    if (changed) await writeQueue(ownerKey, queue);
-  });
-}
-
-/**
- * Release ALL held uploads for the owner so they become drainable — the CRASH-RECOVERY analogue of
- * releaseQueuedUploads. Held rows never drain (a mid-caption drain must not ship staged photos uncaptioned),
- * so a crash/kill mid-review would ORPHAN them: durable but permanently paused, never uploaded. On the
- * capture screen's mount/foreground resume WHEN NO REVIEW IS OPEN, any held row is such an orphan, so this
- * releases them so the next drain ships them (uncaptioned) — preserving the "photos upload on next launch"
- * guarantee. MUST NOT be called while a review is open (that would drain the active review's rows before the
- * crew captions them). No-op if nothing is held.
- */
-export async function releaseAllHeld(ownerKey: string): Promise<void> {
-  if (!ownerKey) return;
-  await withQueueLock(async () => {
-    const { queue, changed } = clearAllHeld(await readQueue(ownerKey));
-    if (changed) await writeQueue(ownerKey, queue);
-  });
-}
-
-/**
  * Best-effort: stamp GPS coordinates onto a still-queued item — the DURABLE analogue of the old in-memory
  * back-patch. Used when a camera session's GPS fix lands after shots were already streamed coordless (so a
  * shot can be persisted immediately, before the fix, without losing geotags). Only fills a coordinate-LESS
@@ -226,37 +189,13 @@ export async function patchQueuedMetadata(
 }
 
 /**
- * Best-effort: patch the caption onto a still-queued item — the DURABLE analogue of editing a caption in
- * the review tray. Staged review photos are enqueued UNCAPTIONED at review-open (so a crash mid-caption
- * never loses them); when the crew taps Done, each queued row's caption is patched here to the typed value
- * before the drain. A no-op if the item has already uploaded/left the queue, or the caption is unchanged.
- * Returns true iff an item was patched.
- */
-export async function patchQueuedCaption(
-  ownerKey: string,
-  clientUploadId: string,
-  caption: string | null,
-): Promise<boolean> {
-  return withQueueLock(async () => {
-    const { queue, changed } = applyCaptionPatch(await readQueue(ownerKey), clientUploadId, caption);
-    if (changed) await writeQueue(ownerKey, queue);
-    return changed;
-  });
-}
-
-/**
  * Copy each capture into durable storage and persist it to the index. The index is rewritten AFTER EACH
  * item is copied (not once at the end): if the app is killed mid-enqueue, every photo already copied is
  * recoverable from the index instead of being orphaned and lost. Returns the queued items.
- *
- * `opts.held` marks the persisted rows as HELD — durable but not drainable until releaseQueuedUploads clears
- * the flag. Review-open enqueues held (so a mid-caption drain can't upload staged photos uncaptioned); the
- * normal single-shot path enqueues unheld (default) and drains immediately.
  */
 export async function enqueueUploads(
   ownerKey: string,
   inputs: CaptureUploadInput[],
-  opts: { held?: boolean } = {},
 ): Promise<QueuedUpload[]> {
   if (inputs.length === 0) return [];
   await ensureDir(ownerKey);
@@ -282,7 +221,7 @@ export async function enqueueUploads(
       });
       throw err;
     }
-    const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0, ...(opts.held ? { held: true } : {}) };
+    const item: QueuedUpload = { ...input, uri: dest, enqueuedAt: Date.now(), attempts: 0 };
     // Persist under the lock — but if a cancel arrived WHILE copying, drop the item (delete the copy)
     // instead of appending removed evidence. A crash right after the copy still recovers via the index.
     const cancelled = await withQueueLock(async () => {

@@ -1,16 +1,12 @@
 import {
   MAX_UPLOAD_ATTEMPTS,
-  applyCaptionPatch,
   applyGpsPatch,
   bumpAttempts,
-  clearAllHeld,
   createAsyncMutex,
   dedupeQueue,
   isDrainable,
-  isTerminal,
   newClientUploadId,
   partitionResults,
-  releaseHeld,
   removeIds,
   sanitizeOwnerKey,
   uploadOwnerKey,
@@ -74,29 +70,6 @@ describe("upload-queue-core", () => {
     const bumped = bumpAttempts(queue, ["a"], 1234);
     expect(bumped[0]).toMatchObject({ clientUploadId: "a", attempts: 1, lastTriedAt: 1234 });
     expect(bumped[1]).toMatchObject({ clientUploadId: "b", attempts: 1 }); // untouched
-  });
-
-  it("isDrainable skips a HELD row (staged in review) but a released row drains again", () => {
-    // Held + fresh (attempts 0): durable but NOT drainable — a mid-caption drain must skip it.
-    const held = { ...item("a", 0), held: true };
-    expect(isDrainable(held)).toBe(false);
-    // Held is NOT terminal (it's paused, not failed) — so it never surfaces on the "failed" banner.
-    expect(isTerminal(held)).toBe(false);
-    // Releasing (clearing held) restores drainability.
-    const released = releaseHeld([held], ["a"]).queue[0];
-    expect(isDrainable(released)).toBe(true);
-    // A held row that ALSO hit the terminal cap stays non-drainable after release (attempts still exhausted).
-    const heldTerminal = { ...item("a", MAX_UPLOAD_ATTEMPTS), held: true };
-    expect(isDrainable(heldTerminal)).toBe(false);
-    expect(isDrainable(releaseHeld([heldTerminal], ["a"]).queue[0])).toBe(false);
-  });
-
-  it("isTerminal keys the failed surfaces on the retry cap, independent of held", () => {
-    expect(isTerminal(item("a", 0))).toBe(false);
-    expect(isTerminal(item("a", MAX_UPLOAD_ATTEMPTS - 1))).toBe(false);
-    expect(isTerminal(item("a", MAX_UPLOAD_ATTEMPTS))).toBe(true);
-    // A held-but-fresh row is NOT terminal (must not be swept by getFailedCount/clearFailedUploads).
-    expect(isTerminal({ ...item("a", 0), held: true })).toBe(false);
   });
 
   it("partitionResults splits succeeded vs failed by settled status (positional)", () => {
@@ -177,106 +150,3 @@ describe("createAsyncMutex", () => {
   });
 });
 
-describe("applyCaptionPatch (durable review-caption edit — patches ONLY the matching id)", () => {
-  it("sets the caption on the matching coordless item and reports changed", () => {
-    // item() starts with caption null (enqueued uncaptioned at review-open).
-    const { queue, changed } = applyCaptionPatch([item("a")], "a", "north wall");
-    expect(changed).toBe(true);
-    expect(queue[0].caption).toBe("north wall");
-  });
-
-  it("sets a null caption (blank on Done clears the staged value) and reports changed", () => {
-    const existing = [{ ...item("a"), caption: "typed then cleared" }];
-    const { queue, changed } = applyCaptionPatch(existing, "a", null);
-    expect(changed).toBe(true);
-    expect(queue[0].caption).toBeNull();
-  });
-
-  it("is a no-op when the caption is unchanged (same reference, no rewrite)", () => {
-    const existing = [{ ...item("a"), caption: "same" }];
-    const { queue, changed } = applyCaptionPatch(existing, "a", "same");
-    expect(changed).toBe(false);
-    expect(queue).toBe(existing);
-  });
-
-  it("is a no-op when the id is absent (already uploaded/removed)", () => {
-    const existing = [item("a")];
-    const { queue, changed } = applyCaptionPatch(existing, "missing", "x");
-    expect(changed).toBe(false);
-    expect(queue).toBe(existing);
-  });
-
-  it("patches only the matching id, leaving siblings untouched", () => {
-    const { queue, changed } = applyCaptionPatch([item("a"), item("b")], "b", "only b");
-    expect(changed).toBe(true);
-    expect(queue[0].caption).toBeNull(); // sibling untouched
-    expect(queue[1].caption).toBe("only b");
-  });
-});
-
-describe("releaseHeld (Done releases staged review rows — clears ONLY the matching held ids)", () => {
-  const held = (id: string): QueuedUpload => ({ ...item(id), held: true });
-
-  it("clears held on the matching ids and reports changed", () => {
-    const { queue, changed } = releaseHeld([held("a"), held("b")], ["a", "b"]);
-    expect(changed).toBe(true);
-    expect(queue[0].held).toBe(false);
-    expect(queue[1].held).toBe(false);
-  });
-
-  it("releases ONLY the matching id, leaving other held rows still held", () => {
-    const { queue, changed } = releaseHeld([held("a"), held("b")], ["b"]);
-    expect(changed).toBe(true);
-    expect(queue[0].held).toBe(true); // untouched — still staged
-    expect(queue[1].held).toBe(false);
-  });
-
-  it("is a no-op when nothing matches (id absent, or already released) — same reference, no rewrite", () => {
-    const alreadyOut = [item("a")]; // not held
-    expect(releaseHeld(alreadyOut, ["a"]).changed).toBe(false);
-    expect(releaseHeld(alreadyOut, ["a"]).queue).toBe(alreadyOut);
-
-    const staged = [held("a")];
-    expect(releaseHeld(staged, ["missing"]).changed).toBe(false);
-    expect(releaseHeld(staged, ["missing"]).queue).toBe(staged);
-  });
-});
-
-// clearAllHeld is the CRASH-RECOVERY analogue of releaseHeld: it clears held on EVERY held row (no id list).
-// On the capture screen's mount/foreground resume with NO review open, orphaned held rows (a review killed
-// before Done) must be released so the drain ships them (uncaptioned) — preserving "photos upload on next
-// launch". releaseAllHeld (upload-queue) composes this under the durable-index lock.
-describe("clearAllHeld (release EVERY held row — crash-recovery for orphaned staged photos)", () => {
-  const held = (id: string): QueuedUpload => ({ ...item(id), held: true });
-
-  it("clears held on every held row and reports changed", () => {
-    const { queue, changed } = clearAllHeld([held("a"), held("b")]);
-    expect(changed).toBe(true);
-    expect(queue.map((i) => i.held)).toEqual([false, false]);
-  });
-
-  it("clears the held rows while leaving already-drainable rows untouched", () => {
-    const { queue, changed } = clearAllHeld([held("a"), item("b"), held("c")]);
-    expect(changed).toBe(true);
-    expect(queue.map((i) => i.held)).toEqual([false, undefined, false]);
-  });
-
-  it("is a no-op (same reference) when nothing is held, and is idempotent on a second pass", () => {
-    const none = [item("a"), item("b")];
-    const first = clearAllHeld(none);
-    expect(first.changed).toBe(false);
-    expect(first.queue).toBe(none);
-    // A queue already released once has nothing held → the next pass no-ops too.
-    const released = clearAllHeld([held("a")]).queue;
-    const second = clearAllHeld(released);
-    expect(second.changed).toBe(false);
-    expect(second.queue).toBe(released);
-  });
-
-  it("flips ONLY held (never touches attempts / terminal state)", () => {
-    const terminalHeld = { ...item("a", MAX_UPLOAD_ATTEMPTS), held: true };
-    const { queue } = clearAllHeld([terminalHeld]);
-    expect(queue[0].held).toBe(false);
-    expect(queue[0].attempts).toBe(MAX_UPLOAD_ATTEMPTS); // unchanged — still terminal, just no longer held
-  });
-});
