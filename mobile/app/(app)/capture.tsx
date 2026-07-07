@@ -24,6 +24,7 @@ import {
   newClientUploadId,
   patchQueuedCaption,
   patchQueuedMetadata,
+  releaseQueuedUploads,
   removeQueuedUploads,
   uploadOwnerKey,
 } from "../../src/capture/upload-queue";
@@ -491,7 +492,10 @@ export default function CaptureScreen() {
           gpsSession: cameraGpsSessionRef.current,
         }),
       );
-      await enqueueUploads(ownerKey, inputs);
+      // HELD: durable from this moment (survives a crash), but NOT drainable until Done — otherwise a
+      // background/foreground-resume drain firing mid-caption would upload the staged photos UNCAPTIONED.
+      // finishReview releases them (after patching captions) right before kicking the drain.
+      await enqueueUploads(ownerKey, inputs, { held: true });
       for (const p of photos) stagedDurableIdsRef.current.add(p.clientUploadId);
       await refreshQueuedCount();
     } catch {
@@ -563,8 +567,11 @@ export default function CaptureScreen() {
       for (const p of toEnqueue) {
         await streamPhoto(p, ctx);
       }
-      // Kick the drain for the freshly-captioned durable rows (streamPhoto already drained any fallbacks).
+      // Release the now-captioned durable rows (they were enqueued HELD at review-open) so they become
+      // drainable, THEN kick the drain. Releasing before the kick is what lets the just-patched captions
+      // ride with the upload instead of a prior drain shipping them blank. (Fallbacks already drained.)
       if (ownerKey && toPatch.length > 0) {
+        await releaseQueuedUploads(ownerKey, toPatch.map((p) => p.clientUploadId));
         await refreshQueuedCount();
         void kickDrain();
       }
