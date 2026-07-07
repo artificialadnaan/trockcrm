@@ -160,6 +160,11 @@ export default function CaptureScreen() {
   // would drain the ACTIVE review's staged photos before the crew captions them. Kept in sync below.
   const reviewOpenRef = useRef(false);
   useEffect(() => { reviewOpenRef.current = reviewPhotos.length > 0; }, [reviewPhotos.length]);
+  // Mirror the camera-open state too: during a camera-BATCH session the shots are staged held but the review
+  // modal isn't open yet, so reviewOpenRef alone wouldn't protect them from the orphan-release below. A KILL
+  // still recovers — a fresh mount has the camera closed, so orphans release then.
+  const cameraOpenRef = useRef(false);
+  useEffect(() => { cameraOpenRef.current = cameraOpen; }, [cameraOpen]);
   const keyCounter = useRef(0);
   // Live GPS fetched once per camera session so burst shots aren't each blocked
   // on a fresh fix (a burst is at one location); applied to every shot.
@@ -360,11 +365,12 @@ export default function CaptureScreen() {
     let cancelled = false;
     const resumeIfQueued = async () => {
       // Crash recovery: a crash/kill mid-review leaves rows durable-but-HELD (never drainable). With NO
-      // review open they are orphans (their review died before Done), so release them so the drain ships
-      // them (uncaptioned) — preserving the "photos upload on next launch" guarantee. NEVER release while a
-      // review IS open: that would drain the active review's staged rows before the crew captions them.
-      // Runs BEFORE the count so getQueuedCount sees the freshly-drainable rows and triggers the drain.
-      if (!reviewOpenRef.current) await releaseAllHeld(ownerKey).catch(() => undefined);
+      // active capture session they are orphans (their review/batch died before Done), so release them so the
+      // drain ships them (uncaptioned) — preserving the "photos upload on next launch" guarantee. NEVER
+      // release while a review OR the camera is open: that would drain the active session's staged rows before
+      // the crew captions them (a background→foreground mid-batch is not a crash). A real kill still recovers:
+      // a fresh mount has both closed. Runs BEFORE the count so getQueuedCount sees the freshly-drainable rows.
+      if (!reviewOpenRef.current && !cameraOpenRef.current) await releaseAllHeld(ownerKey).catch(() => undefined);
       const [n, failed] = await Promise.all([getQueuedCount(ownerKey), getFailedCount(ownerKey)]);
       if (cancelled) return;
       setQueuedCount(n);
