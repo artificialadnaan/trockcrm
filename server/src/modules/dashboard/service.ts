@@ -561,6 +561,8 @@ export interface DirectorRepCommissionRow {
   // "earned nothing": floorMet=false with heldEarnedCommission>0 means real earned commission is withheld.
   floorMet: boolean;
   heldEarnedCommission: number;
+  // The rep's base commission rate (a fraction, e.g. 0.05) — used to project their commission on won-but-unsigned deals.
+  commissionRate: number;
   // True for a rep admitted via the office-scoped rep roster; false for a NON-rep admitted only because they
   // EARNED a commission row (e.g. a director source). The workspace zeroes deal-VALUE / funnel / activity
   // metrics for non-rep rows: those columns are rep-involvement (owner/estimator) and the deal-VALUE FOOTER
@@ -1470,6 +1472,7 @@ export async function getDirectorRepCommissionRows(
       meetsNewCustomerShare: summary.meetsNewCustomerShare,
       floorMet: summary.floorMet,
       heldEarnedCommission: summary.heldEarnedCommission,
+      commissionRate: summary.commissionRate,
       isRep: repIsRep,
     });
   }
@@ -2842,6 +2845,9 @@ export async function getDirectorCommissionWorkspace(
       pipelineValue: dealSummary?.pipelineValue ?? 0,
       wonUnsignedValue: dealSummary?.wonUnsignedValue ?? 0,
       wonUnsignedCount: dealSummary?.wonUnsignedCount ?? 0,
+      // Projected commission on the rep's won-but-unsigned deals = their unsigned deal value × base rate. dealSummary
+      // is undefined for a non-rep row (→ value 0), so this is naturally 0 for a non-rep, like the involvement columns.
+      wonUnsignedCommission: Number(((dealSummary?.wonUnsignedValue ?? 0) * row.commissionRate).toFixed(2)),
       leads: funnel?.leads ?? 0,
       qualifiedLeads: funnel?.qualifiedLeads ?? 0,
       opportunities: funnel?.opportunities ?? 0,
