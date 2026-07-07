@@ -39,6 +39,7 @@ import {
   assertSalesSourceIsCrmUser,
 } from "./service.js";
 import { listDealDescriptionHistory } from "./deal-description-history.js";
+import { getRfpEstimators } from "./rfp-estimators-service.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
@@ -963,6 +964,21 @@ router.get("/sources", async (req, res, next) => {
     const sources = await getDealSources(req.tenantDb!);
     await req.commitTransaction!();
     res.json({ sources });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/deals/estimators — estimator suggestion list for the RFP vote form. Mirrors SyncHub's
+// estimator roster (HMAC-signed proxy, 5-min cached) and falls back to the active office's CRM
+// roster when SyncHub is unreachable. Registered before "/:id" so it isn't captured as a deal id.
+router.get("/estimators", async (req, res, next) => {
+  try {
+    const { estimators } = await getRfpEstimators({
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    });
+    await req.commitTransaction!();
+    res.json({ estimators });
   } catch (err) {
     next(err);
   }
