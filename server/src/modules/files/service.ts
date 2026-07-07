@@ -1090,6 +1090,9 @@ export function buildPhotoTargetDealSearchCondition(search: string): SQL {
   return or(
     sql`${deals.name} ILIKE ${term} ESCAPE '\\'`,
     sql`${deals.dealNumber} ILIKE ${term} ESCAPE '\\'`,
+    // The picker DISPLAYS the canonical project_number, so it must be searchable too — otherwise a
+    // HubSpot-imported deal (deal_number = HS-…) can't be found by the DFW/ATL number the user sees.
+    sql`${deals.projectNumber} ILIKE ${term} ESCAPE '\\'`,
     sql`${deals.description} ILIKE ${term} ESCAPE '\\'`,
     sql`${deals.source} ILIKE ${term} ESCAPE '\\'`,
     sql`${companies.name} ILIKE ${term} ESCAPE '\\'`,
@@ -1232,6 +1235,7 @@ export async function searchPhotoUploadTargets(
         [
           deals.name,
           deals.dealNumber,
+          deals.projectNumber,
           companies.name,
           properties.name,
           properties.address,

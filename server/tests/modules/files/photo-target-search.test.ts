@@ -83,10 +83,13 @@ describe("buildPhotoTargetLeadSearchCondition", () => {
 describe("buildPhotoTargetDealSearchCondition", () => {
   const sqlText = () => renderSql(buildPhotoTargetDealSearchCondition("oak street"));
 
-  it("matches deal name and deal number", () => {
+  it("matches deal name, deal number, AND the canonical project number", () => {
     const text = sqlText();
     expect(text).toContain('"deals"."name"');
     expect(text).toContain('"deals"."deal_number"');
+    // The picker DISPLAYS project_number, so typing the visible DFW/ATL number must find the deal —
+    // otherwise a HubSpot-imported deal (deal_number = HS-...) is invisible when searched by its number.
+    expect(text).toContain('"deals"."project_number"');
   });
 
   it("matches the joined property address and contact name and source", () => {
