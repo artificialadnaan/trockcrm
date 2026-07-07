@@ -428,6 +428,26 @@ describe("castRfpVote — edited fields (first-YES commits + locks)", () => {
     expect(jobs[0].payload.address).toContain("500 New Blvd");
   });
 
+  it("re-geocodes on a zip-only address correction (uses the existing address in the payload)", async () => {
+    pg = await setupWithNumber();
+    await pg.query(
+      `UPDATE deals SET property_address='1 Main', property_city='Dallas', property_state='TX', property_zip='75201' WHERE id=$1`,
+      [DEAL],
+    );
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { zip: "75024" },
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    const jobs = (await pg!.query(`SELECT payload FROM public.job_queue WHERE job_type='geocode_deal'`)).rows as any[];
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.address).toContain("1 Main");
+    expect(jobs[0].payload.address).toContain("75024");
+  });
+
   it("records a description-history row when the first approver edits the description", async () => {
     pg = await setupWithNumber();
     await pg.query(`UPDATE deals SET description='old scope' WHERE id=$1`, [DEAL]);

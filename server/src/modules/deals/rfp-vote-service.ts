@@ -469,18 +469,27 @@ export async function castRfpVote(
         const ymd = (dealUpdate.bidDueDate as Date).toISOString().slice(0, 10);
         await args.tenantDb.update(leads).set({ bidDueDate: ymd }).where(eq(leads.id, locked.source_lead_id as string));
       }
-      // Re-geocode on an address change (mirrors updateDeal) — the raw write updates the address text but not the
-      // deals lat/lng, so /deals/nearby + map/distance features would otherwise keep using stale coordinates. Awaited
-      // (unlike updateDeal's fire-and-forget) so it commits atomically with the vote on this still-open tenant txn.
-      if ("propertyAddress" in dealUpdate || "propertyCity" in dealUpdate || "propertyState" in dealUpdate) {
+      // Re-geocode on ANY address-field change (address/city/state/zip/country) — the raw write updates the address
+      // text but not the deals lat/lng, so /deals/nearby + map/distance features would otherwise keep using stale
+      // coordinates. Awaited (unlike updateDeal's fire-and-forget) so it commits atomically with the vote on this
+      // still-open tenant txn.
+      const addressFieldChanged =
+        "propertyAddress" in dealUpdate ||
+        "propertyCity" in dealUpdate ||
+        "propertyState" in dealUpdate ||
+        "propertyZip" in dealUpdate ||
+        "propertyCountry" in dealUpdate;
+      if (addressFieldChanged) {
         const addr = (dealUpdate.propertyAddress ?? lockedDeal.propertyAddress) as string | null;
         const city = (dealUpdate.propertyCity ?? lockedDeal.propertyCity) as string | null;
         const state = (dealUpdate.propertyState ?? lockedDeal.propertyState) as string | null;
         const zip = (dealUpdate.propertyZip ?? lockedDeal.propertyZip) as string | null;
+        const country = (dealUpdate.propertyCountry ?? lockedDeal.propertyCountry) as string | null;
         if (addr) {
+          const address = `${addr}, ${city || ""} ${state || ""} ${zip || ""}${country ? `, ${country}` : ""}`.trim();
           await args.tenantDb.insert(jobQueue).values({
             jobType: "geocode_deal",
-            payload: { dealId: args.deal.id, address: `${addr}, ${city || ""} ${state || ""} ${zip || ""}`.trim() },
+            payload: { dealId: args.deal.id, address },
             officeId: args.officeId ?? null,
             status: "pending",
             runAfter: new Date(),

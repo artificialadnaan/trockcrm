@@ -262,14 +262,21 @@ export function RfpVotePage() {
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="v-estimator">Estimator</Label>
-                  <Select value={f.estimator} onValueChange={(v) => update("estimator", v ?? "")}>
-                    <SelectTrigger id="v-estimator" className="w-full"><SelectValue placeholder="Select an estimator" /></SelectTrigger>
-                    <SelectContent>
-                      {estimatorNames.map((name) => (
-                        <SelectItem key={name} value={name}>{name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  {/* Free-text (deals.estimator) with roster suggestions via a datalist — a plain Select would block
+                      an estimator not represented by an active CRM user (external / inactive), but the vote-edit
+                      contract writes an arbitrary name. */}
+                  <Input
+                    id="v-estimator"
+                    list="rfp-vote-estimators"
+                    value={f.estimator}
+                    onChange={(e) => update("estimator", e.target.value)}
+                    placeholder="Estimator name"
+                  />
+                  <datalist id="rfp-vote-estimators">
+                    {estimatorNames.map((name) => (
+                      <option key={name} value={name} />
+                    ))}
+                  </datalist>
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <Label htmlFor="v-due">Bid due date</Label>
