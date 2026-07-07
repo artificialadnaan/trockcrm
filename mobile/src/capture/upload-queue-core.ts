@@ -160,6 +160,25 @@ export function releaseHeld(
 }
 
 /**
+ * Clear the HELD flag on EVERY currently-held row (no id list) — the CRASH-RECOVERY analogue of releaseHeld.
+ * Held rows are durable but never drain (a mid-caption drain must not ship staged photos uncaptioned), so a
+ * crash/kill mid-review would ORPHAN them: durable but permanently paused. When the capture screen resumes
+ * with NO review open, any held row is such an orphan, so this releases them all so the drain ships them
+ * (uncaptioned) — preserving the "photos upload on next launch" guarantee. Only flips held (never touches
+ * attempts/terminal state); reports whether anything changed so the caller rewrites the durable index only
+ * when it did, and a no-op (nothing held) returns the original queue reference (idempotent).
+ */
+export function clearAllHeld(queue: QueuedUpload[]): { queue: QueuedUpload[]; changed: boolean } {
+  let changed = false;
+  const next = queue.map((item) => {
+    if (!item.held) return item;
+    changed = true;
+    return { ...item, held: false };
+  });
+  return { queue: changed ? next : queue, changed };
+}
+
+/**
  * A minimal async mutex. Every task runs only after the previous one SETTLES (resolve OR reject), so
  * read-modify-write sections on a shared resource can't interleave: without it, two callers each read the
  * same on-disk index snapshot and then write, and the later write silently clobbers the earlier one (e.g.

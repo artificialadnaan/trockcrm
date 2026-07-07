@@ -3,6 +3,7 @@ import {
   applyCaptionPatch,
   applyGpsPatch,
   bumpAttempts,
+  clearAllHeld,
   createAsyncMutex,
   dedupeQueue,
   isDrainable,
@@ -238,5 +239,44 @@ describe("releaseHeld (Done releases staged review rows — clears ONLY the matc
     const staged = [held("a")];
     expect(releaseHeld(staged, ["missing"]).changed).toBe(false);
     expect(releaseHeld(staged, ["missing"]).queue).toBe(staged);
+  });
+});
+
+// clearAllHeld is the CRASH-RECOVERY analogue of releaseHeld: it clears held on EVERY held row (no id list).
+// On the capture screen's mount/foreground resume with NO review open, orphaned held rows (a review killed
+// before Done) must be released so the drain ships them (uncaptioned) — preserving "photos upload on next
+// launch". releaseAllHeld (upload-queue) composes this under the durable-index lock.
+describe("clearAllHeld (release EVERY held row — crash-recovery for orphaned staged photos)", () => {
+  const held = (id: string): QueuedUpload => ({ ...item(id), held: true });
+
+  it("clears held on every held row and reports changed", () => {
+    const { queue, changed } = clearAllHeld([held("a"), held("b")]);
+    expect(changed).toBe(true);
+    expect(queue.map((i) => i.held)).toEqual([false, false]);
+  });
+
+  it("clears the held rows while leaving already-drainable rows untouched", () => {
+    const { queue, changed } = clearAllHeld([held("a"), item("b"), held("c")]);
+    expect(changed).toBe(true);
+    expect(queue.map((i) => i.held)).toEqual([false, undefined, false]);
+  });
+
+  it("is a no-op (same reference) when nothing is held, and is idempotent on a second pass", () => {
+    const none = [item("a"), item("b")];
+    const first = clearAllHeld(none);
+    expect(first.changed).toBe(false);
+    expect(first.queue).toBe(none);
+    // A queue already released once has nothing held → the next pass no-ops too.
+    const released = clearAllHeld([held("a")]).queue;
+    const second = clearAllHeld(released);
+    expect(second.changed).toBe(false);
+    expect(second.queue).toBe(released);
+  });
+
+  it("flips ONLY held (never touches attempts / terminal state)", () => {
+    const terminalHeld = { ...item("a", MAX_UPLOAD_ATTEMPTS), held: true };
+    const { queue } = clearAllHeld([terminalHeld]);
+    expect(queue[0].held).toBe(false);
+    expect(queue[0].attempts).toBe(MAX_UPLOAD_ATTEMPTS); // unchanged — still terminal, just no longer held
   });
 });

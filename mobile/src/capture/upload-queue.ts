@@ -7,6 +7,7 @@ import {
   applyCaptionPatch,
   applyGpsPatch,
   bumpAttempts,
+  clearAllHeld,
   createAsyncMutex,
   dedupeQueue,
   isDrainable,
@@ -184,6 +185,23 @@ export async function releaseQueuedUploads(ownerKey: string, clientUploadIds: st
   if (clientUploadIds.length === 0) return;
   await withQueueLock(async () => {
     const { queue, changed } = releaseHeld(await readQueue(ownerKey), clientUploadIds);
+    if (changed) await writeQueue(ownerKey, queue);
+  });
+}
+
+/**
+ * Release ALL held uploads for the owner so they become drainable — the CRASH-RECOVERY analogue of
+ * releaseQueuedUploads. Held rows never drain (a mid-caption drain must not ship staged photos uncaptioned),
+ * so a crash/kill mid-review would ORPHAN them: durable but permanently paused, never uploaded. On the
+ * capture screen's mount/foreground resume WHEN NO REVIEW IS OPEN, any held row is such an orphan, so this
+ * releases them so the next drain ships them (uncaptioned) — preserving the "photos upload on next launch"
+ * guarantee. MUST NOT be called while a review is open (that would drain the active review's rows before the
+ * crew captions them). No-op if nothing is held.
+ */
+export async function releaseAllHeld(ownerKey: string): Promise<void> {
+  if (!ownerKey) return;
+  await withQueueLock(async () => {
+    const { queue, changed } = clearAllHeld(await readQueue(ownerKey));
     if (changed) await writeQueue(ownerKey, queue);
   });
 }
