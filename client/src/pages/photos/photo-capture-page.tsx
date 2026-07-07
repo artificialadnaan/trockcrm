@@ -464,7 +464,7 @@ export function PhotoCapturePage() {
                 {queue.map((photo) => (
                   <div
                     key={photo.id}
-                    className={`relative rounded-xl overflow-hidden border ${
+                    className={`rounded-xl overflow-hidden border ${
                       photo.status === "done"
                         ? "border-emerald-500/50"
                         : photo.status === "error"
@@ -474,6 +474,7 @@ export function PhotoCapturePage() {
                         : "border-white/10"
                     }`}
                   >
+                    <div className="relative">
                     <img
                       src={photo.previewUrl}
                       alt="Queued photo"
@@ -517,24 +518,22 @@ export function PhotoCapturePage() {
                         <X className="h-3.5 w-3.5" />
                       </button>
                     )}
+                    </div>
+
+                    {/* Per-photo description — each photo carries its OWN note (blank = no description). */}
+                    {(photo.status === "pending" || photo.status === "error") && !uploading && (
+                      <input
+                        value={photo.note}
+                        onChange={(e) => updateNote(photo.id, e.target.value)}
+                        placeholder="Add a description (optional)"
+                        aria-label="Photo description"
+                        className="w-full border-t border-white/10 bg-white/5 px-2 py-1.5 text-xs text-white placeholder:text-white/30 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[#CC0000]/50"
+                      />
+                    )}
                   </div>
                 ))}
               </div>
 
-              {/* Optional note for the batch */}
-              {pendingCount > 0 && (
-                <Input
-                  value={queue[0]?.note ?? ""}
-                  onChange={(e) => {
-                    const note = e.target.value;
-                    setQueue((prev) =>
-                      prev.map((p) => (p.status === "pending" ? { ...p, note } : p))
-                    );
-                  }}
-                  placeholder="Add a note for all photos (optional)"
-                  className="bg-white/5 border-white/20 text-white placeholder:text-white/30 focus-visible:ring-[#CC0000]/50"
-                />
-              )}
             </div>
           )}
         </div>
