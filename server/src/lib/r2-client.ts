@@ -150,7 +150,11 @@ export function buildContentDisposition(
     /['()*]/g,
     (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
   );
-  return `${disposition}; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
+  // Only emit filename* when there is a usable name. For a blank/whitespace-only stripped value it would be
+  // empty and, since clients PREFER filename* over filename, they'd get a blank name — fall back to the
+  // ASCII "download" instead.
+  const filenameStar = stripped.trim().length > 0 ? `; filename*=UTF-8''${encoded}` : "";
+  return `${disposition}; filename="${asciiFallback}"${filenameStar}`;
 }
 
 /**

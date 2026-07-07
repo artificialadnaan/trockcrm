@@ -39,6 +39,8 @@ import pg from "pg";
 
 const OFFICE_SCHEMA_PATTERN = /^office_[a-z0-9_]+$/;
 const REINDEX_BATCH = 2000;
+// Smaller than the reindex batch because the rename does one UPDATE per row (vs a single set-based UPDATE).
+const RENAME_BATCH = 500;
 
 export const REQUIRED_FILE_COLUMNS = [
   "id",
@@ -267,30 +269,40 @@ export async function runBackfillForSchema(client: QueryClient, schema: string, 
   if (mode === "commit") {
     await setSchema(client, schema);
 
-    // Rename pass — the value is computed IN-DB and the full eligibility predicate re-checked at write
-    // time (idempotent + never clobbers a name edited during the run). Re-firing the trigger also indexes
-    // original_filename for these rows.
-    const candidates = await client.query(
-      `SELECT id, display_name, category FROM files WHERE ${RENAME_WHERE} ORDER BY id`,
-    );
-    await client.query("BEGIN");
-    try {
-      for (const row of candidates.rows) {
-        const res = await client.query(
-          `UPDATE files
-              SET display_name = regexp_replace(original_filename, '\\.[^.]*$', ''), updated_at = now()
-            WHERE id = $1 AND ${RENAME_WHERE}
-            RETURNING display_name`,
-          [row.id],
-        );
-        if ((res.rowCount ?? 0) > 0) {
-          applied.push({ id: String(row.id), category: String(row.category), from: String(row.display_name), to: String(res.rows[0].display_name) });
+    // Rename pass — BATCHED, each batch its OWN transaction to bound lock duration (mirrors the reindex pass
+    // below). The value is computed IN-DB and the full eligibility predicate re-checked at write time
+    // (idempotent + never clobbers a name edited during the run). Re-firing the trigger also indexes
+    // original_filename for these rows. Keyset by id: a renamed row leaves RENAME_WHERE and the id cursor
+    // only moves forward, so no row is revisited or missed.
+    let lastRenameId: string | null = null;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const candidates = await client.query(
+        `SELECT id, display_name, category FROM files WHERE ${RENAME_WHERE} ${lastRenameId ? "AND id > $1" : ""} ORDER BY id LIMIT ${RENAME_BATCH}`,
+        lastRenameId ? [lastRenameId] : [],
+      );
+      if (candidates.rows.length === 0) break;
+      await client.query("BEGIN");
+      try {
+        for (const row of candidates.rows) {
+          const res = await client.query(
+            `UPDATE files
+                SET display_name = regexp_replace(original_filename, '\\.[^.]*$', ''), updated_at = now()
+              WHERE id = $1 AND ${RENAME_WHERE}
+              RETURNING display_name`,
+            [row.id],
+          );
+          if ((res.rowCount ?? 0) > 0) {
+            applied.push({ id: String(row.id), category: String(row.category), from: String(row.display_name), to: String(res.rows[0].display_name) });
+          }
         }
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw error;
       }
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => {});
-      throw error;
+      lastRenameId = String(candidates.rows[candidates.rows.length - 1].id);
+      if (candidates.rows.length < RENAME_BATCH) break;
     }
 
     // Reindex pass — batched, each batch its OWN transaction to bound lock duration. Covers rows the

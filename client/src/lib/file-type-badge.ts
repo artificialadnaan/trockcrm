@@ -5,6 +5,7 @@ import {
   FileSpreadsheet,
   FileArchive,
   Mail,
+  Presentation,
   type LucideIcon,
 } from "lucide-react";
 
@@ -35,6 +36,9 @@ export function getFileTypeBadge(mimeType: string, fileExtension?: string | null
   }
   if (mime.includes("word") || ext === "doc" || ext === "docx") {
     return { label: "DOC", className: "bg-blue-100 text-blue-700 border-blue-200", Icon: FileText };
+  }
+  if (mime.includes("presentation") || mime === "application/vnd.ms-powerpoint" || ext === "ppt" || ext === "pptx") {
+    return { label: "PPT", className: "bg-orange-100 text-orange-700 border-orange-200", Icon: Presentation };
   }
   if (mime === "application/zip" || mime.includes("compressed") || ext === "zip") {
     return { label: "ZIP", className: "bg-amber-100 text-amber-700 border-amber-200", Icon: FileArchive };

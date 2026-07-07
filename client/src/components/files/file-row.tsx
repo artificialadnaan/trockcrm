@@ -6,6 +6,7 @@ import {
   History,
   ExternalLink,
 } from "lucide-react";
+import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,16 +38,21 @@ export function FileRow({
 }: FileRowProps) {
   const badge = getFileTypeBadge(file.mimeType, file.fileExtension);
   const BadgeIcon = badge.Icon;
+  // Presigned thumbnail URLs expire (~60 min) — if one is broken/expired, fall back to the type badge.
+  // Track the specific failed URL so a later refetch (new URL) still gets a fresh attempt.
+  const [failedThumbUrl, setFailedThumbUrl] = useState<string | null>(null);
+  const showThumb = Boolean(file.thumbnailUrl) && file.thumbnailUrl !== failedThumbUrl;
 
   return (
     <div className="flex items-center gap-3 p-3 border-b last:border-b-0 hover:bg-accent/50 transition-colors">
       {/* Real preview when the list resolved a thumbnail (image or PDF first page); a colored type badge
           otherwise so non-image documents are still visually distinct. */}
-      {file.thumbnailUrl ? (
+      {showThumb ? (
         <img
-          src={file.thumbnailUrl}
+          src={file.thumbnailUrl ?? undefined}
           alt={file.displayName}
           loading="lazy"
+          onError={() => setFailedThumbUrl(file.thumbnailUrl ?? null)}
           className="h-10 w-10 rounded object-cover flex-shrink-0 border bg-muted"
         />
       ) : (

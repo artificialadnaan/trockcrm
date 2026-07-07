@@ -292,7 +292,8 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
               <button
                 type="button"
                 data-testid="file-sort-dir"
-                aria-label="Toggle sort direction"
+                aria-label={`Toggle sort direction (currently ${sortDir === "asc" ? "ascending" : "descending"})`}
+                aria-pressed={sortDir === "desc"}
                 className="h-8 rounded-md border bg-background px-3 text-sm text-foreground hover:bg-accent"
                 onClick={() => {
                   setSortDir((d) => (d === "asc" ? "desc" : "asc"));

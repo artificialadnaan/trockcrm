@@ -1539,7 +1539,13 @@ export async function updateFile(
   if (!existing) throw new AppError(404, "File not found");
 
   const updates: Record<string, unknown> = {};
-  if (input.displayName !== undefined) updates.displayName = input.displayName;
+  if (input.displayName !== undefined) {
+    // Match the upload seed: trim + cap to the varchar(500) column width so a free-form rename from the
+    // edit modal can't overflow and surface as an unhandled DB length error.
+    const trimmed = input.displayName.trim();
+    if (!trimmed) throw new AppError(400, "Display name cannot be empty.");
+    updates.displayName = trimmed.slice(0, 500);
+  }
   if (input.description !== undefined) updates.description = input.description;
   if (input.notes !== undefined) updates.notes = input.notes;
   if (input.tags !== undefined) updates.tags = input.tags;
@@ -1562,7 +1568,13 @@ export async function updateFile(
     : (input.subcategory !== undefined ? (input.subcategory ?? null) : existingSub);
   const subcategoryChanged = effectiveSubcategory !== existingSub;
 
-  if (input.category !== undefined) updates.category = input.category;
+  if (input.category !== undefined) {
+    // The edit modal can send any category for any file. Mirror the upload-time guard so a non-image file
+    // can't be reclassified to "photo" — else the photo timeline (category='photo') would hand a PDF/Office
+    // URL to the image gallery and render broken rows.
+    validateCategoryMatchesMime(input.category, existing.mimeType);
+    updates.category = input.category;
+  }
 
   if (categoryChanged || subcategoryChanged) {
     updates.subcategory = effectiveSubcategory; // persists a cleared-stale subcategory on a category change

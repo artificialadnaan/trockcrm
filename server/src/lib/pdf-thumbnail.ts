@@ -34,6 +34,10 @@ const PDF_RASTER_TIMEOUT_MS = 4000;
 // Outer ceiling covering R2 fetch + raster + sharp resize + put. confirmUpload awaits this on the request
 // path, so a slow render never stalls an upload — past this we give up and the row gets a type badge.
 const PDF_THUMBNAIL_TIMEOUT_MS = 5000;
+// Cap concurrent pdftoppm children so an upload burst can't spawn unbounded external processes. Excess PDFs
+// skip the render and fall back to a type badge (best-effort) rather than queueing and adding upload latency.
+const MAX_CONCURRENT_PDF_RENDERS = 3;
+let activePdfRenders = 0;
 
 function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -98,6 +102,9 @@ export function rasterizePdfFirstPage(
   const scaleTo = opts.scaleTo ?? PDF_RASTER_SCALE_TO;
   const timeoutMs = opts.timeoutMs ?? PDF_RASTER_TIMEOUT_MS;
   return new Promise<Buffer>((resolve, reject) => {
+    // NO PDF-file/PPM-root operands: modern pdftoppm reads the PDF from stdin when no file is given and, with
+    // -singlefile and no output prefix, writes the PNG to stdout. Passing a bare "-" is NOT portable — poppler
+    // 26.06.0 treats it as a literal (missing) filename and the raster tests fail. See the INVOCATION NOTE.
     const child = spawn("pdftoppm", ["-png", "-singlefile", "-f", "1", "-l", "1", "-scale-to", String(scaleTo)]);
     const out: Buffer[] = [];
     const err: Buffer[] = [];
@@ -139,6 +146,9 @@ export async function generateAndStorePdfThumbnail(
 ): Promise<string | null> {
   if (!isPdfThumbnailable(mimeType)) return null;
   if (!isR2Configured()) return null;
+  // Burst cap: if the max renders are already in flight, skip (badge fallback) rather than pile on children.
+  if (activePdfRenders >= MAX_CONCURRENT_PDF_RENDERS) return null;
+  activePdfRenders += 1;
   try {
     return await withTimeout(
       (async () => {
@@ -160,5 +170,7 @@ export async function generateAndStorePdfThumbnail(
   } catch (err) {
     console.error(`[pdf-thumbnail] skipped for ${r2Key}:`, err);
     return null;
+  } finally {
+    activePdfRenders -= 1;
   }
 }

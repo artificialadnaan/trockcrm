@@ -83,9 +83,10 @@ describe("updateFile folderPath drift guard", () => {
     expect(updated.subcategory).toBeNull();
   });
 
-  it("a document re-categorized TO photo keeps a Photos/<YYYY-MM> bucket from the row's own date", async () => {
+  it("a mis-categorized IMAGE re-categorized TO photo keeps a Photos/<YYYY-MM> bucket from the row's own date", async () => {
     const id = await insertFile({
       category: "other",
+      mimeType: "image/jpeg", // only an image can become a photo (category='photo' => image mime)
       folderPath: "Correspondence",
       takenAt: null,
       createdAt: new Date("2026-03-15T12:00:00Z"),
@@ -93,6 +94,11 @@ describe("updateFile folderPath drift guard", () => {
     const updated = await updateFile(tdb as never, id, { category: "photo" });
     expect(updated.folderPath).toBe("Photos/2026-03");
     expect(updated.folderPath).not.toBe("Photos");
+  });
+
+  it("REJECTS re-categorizing a non-image file TO photo (photo => image-mime invariant)", async () => {
+    const id = await insertFile({ category: "other", mimeType: "application/pdf", folderPath: "Correspondence" });
+    await expect(updateFile(tdb as never, id, { category: "photo" })).rejects.toThrow(/image file type/i);
   });
 
   it("a no-op (same category, same subcategory) leaves folderPath untouched", async () => {

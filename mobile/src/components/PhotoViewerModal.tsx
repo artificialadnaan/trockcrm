@@ -47,11 +47,15 @@ export function PhotoViewerModal({
   initialIndex,
   visible,
   onClose,
+  projectDealId,
 }: {
   photos: FieldPhoto[];
   initialIndex: number;
   visible: boolean;
   onClose: () => void;
+  /** The deal id of the project being VIEWED. Used for cache invalidation because a source-lead photo's own
+   *  dealId can be null while it still appears in this project's gallery. */
+  projectDealId?: string;
 }) {
   const { width, height } = useWindowDimensions();
   const [index, setIndex] = useState(initialIndex);
@@ -78,7 +82,8 @@ export function PhotoViewerModal({
   const safeIndex = photos.length > 0 ? Math.min(Math.max(index, 0), photos.length - 1) : 0;
   const current = photos[safeIndex];
 
-  const updateMeta = useUpdatePhotoMetadata(current?.dealId ?? undefined);
+  // Invalidate the VIEWED project's photo cache, not the photo's own dealId (null for source-lead photos).
+  const updateMeta = useUpdatePhotoMetadata(projectDealId ?? current?.dealId ?? undefined);
 
   const openEdit = useCallback(() => {
     if (!current) return;

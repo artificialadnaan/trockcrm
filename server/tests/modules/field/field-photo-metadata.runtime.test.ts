@@ -100,4 +100,14 @@ describe("updateFieldPhotoMetadata", () => {
       updateFieldPhotoMetadata(tdb as never, ACCESS, { photoId: id, description: "x" }),
     ).rejects.toThrow(/not found/i);
   });
+
+  it("returns only a safe photo subset — never the raw row's storage/idempotency fields", async () => {
+    const id = await insertFile({});
+    const { photo } = await updateFieldPhotoMetadata(tdb as never, ACCESS, { photoId: id, displayName: "Renamed" });
+    expect(Object.keys(photo).sort()).toEqual(["category", "description", "displayName", "id"]);
+    expect(photo).not.toHaveProperty("r2Key");
+    expect(photo).not.toHaveProperty("r2Bucket");
+    expect(photo).not.toHaveProperty("thumbnailR2Key");
+    expect(photo).not.toHaveProperty("clientUploadId");
+  });
 });

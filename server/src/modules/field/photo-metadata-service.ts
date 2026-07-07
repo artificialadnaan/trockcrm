@@ -32,6 +32,16 @@ export async function updateFieldPhotoMetadata(
 ) {
   const photo = await getAccessibleFieldPhoto(tenantDb, access, input.photoId);
 
+  // Return only client-relevant fields — never the raw files row, which would leak internal storage keys
+  // (r2Key/r2Bucket/thumbnailR2Key) and the idempotency clientUploadId. No caller consumes the body today
+  // (the mobile hook invalidates + refetches), so a minimal subset is sufficient.
+  const toSafePhoto = (row: { id: string; displayName: string; description: string | null; category: string }) => ({
+    id: row.id,
+    displayName: row.displayName,
+    description: row.description,
+    category: row.category,
+  });
+
   const patch: { displayName?: string; description?: string | null } = {};
   if (input.displayName !== undefined) {
     const name = input.displayName.trim();
@@ -39,11 +49,13 @@ export async function updateFieldPhotoMetadata(
     patch.displayName = name.slice(0, 500);
   }
   if (input.description !== undefined) {
-    const desc = input.description === null ? null : input.description.trim();
+    // description is a text column (no DB limit) but cap defensively so a pathological caption can't bloat
+    // the row or the audit-log metadata.
+    const desc = input.description === null ? null : input.description.trim().slice(0, 2000);
     patch.description = desc && desc.length > 0 ? desc : null;
   }
   if (patch.displayName === undefined && patch.description === undefined) {
-    return { photo };
+    return { photo: toSafePhoto(photo) };
   }
 
   const updated = await updateFile(tenantDb, photo.id, patch);
@@ -62,5 +74,5 @@ export async function updateFieldPhotoMetadata(
     });
   }
 
-  return { photo: updated };
+  return { photo: toSafePhoto(updated) };
 }
