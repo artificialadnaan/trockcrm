@@ -1,28 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { PROJECT_TYPE_OPTIONS } from "@trock-crm/shared/types";
 import { useAuth } from "@/lib/auth";
 import { castRfpVote, useRfpVote } from "@/hooks/use-rfp-vote";
-import { useRfpEstimators } from "@/hooks/use-rfp-estimators";
-import {
-  type VoteFormFields,
-  currentTypeCode,
-  diffEditedFields,
-  formatMoney,
-  initFormFromDeal,
-  labelForTypeCode,
-  rewriteProjectNumberType,
-} from "./rfp-vote-form";
+import { formatMoney, initFormFromDeal, labelForTypeCode } from "./rfp-vote-form";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { DateField } from "@/components/ui/date-field";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-
-const SERVICE_CODE = "4";
 
 function PageFrame({ children }: { children: React.ReactNode }) {
   return <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-4 py-8">{children}</div>;
@@ -51,39 +36,15 @@ export function RfpVotePage() {
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [voted, setVoted] = useState(false);
-  const [fields, setFields] = useState<VoteFormFields | null>(null);
 
   // finding BC6: React Router reuses this same component instance across /rfp-vote/:dealId targets, so local vote
-  // state (lock + draft) would leak from the previous deal. Reset whenever the deal (or office) identity changes.
+  // state would leak from the previous deal. Reset whenever the deal (or office) identity changes.
   useEffect(() => {
     setVoted(false);
     setDecision(null);
     setReason("");
     setSubmitting(false);
   }, [dealId, officeId]);
-
-  // Re-seed the editable form ONLY when the deal identity changes — a silent refetch of the same deal (e.g. after a
-  // vote) must not clobber a voter's in-progress edits.
-  const loadedDealId = deal?.id;
-  useEffect(() => {
-    setFields(deal ? initFormFromDeal(deal) : null);
-  }, [loadedDealId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // The estimator dropdown mirrors SyncHub's estimator roster (server falls back to the active office's CRM
-  // roster when SyncHub is unreachable). Loaded only when a first approver could actually edit. Options are
-  // display names (SyncHub-parity: deals.estimator is a free-text name).
-  const canEditRound =
-    deal != null && deal.rfpVoteState != null && deal.rfpApprovalStatus === "pending" && deal.rfpVoteState.approvals < 1;
-  const { estimators: rfpEstimators } = useRfpEstimators(officeId ?? undefined, {
-    enabled: Boolean(user) && canEditRound,
-  });
-  const estimatorNames = useMemo(() => {
-    const names = new Set<string>();
-    rfpEstimators.forEach((e) => e.name && names.add(e.name));
-    const current = deal?.estimator?.trim();
-    if (current && !names.has(current)) names.add(current);
-    return Array.from(names).sort((a, b) => a.localeCompare(b));
-  }, [rfpEstimators, deal?.estimator]);
 
   if (!user) {
     return (
@@ -141,18 +102,9 @@ export function RfpVotePage() {
     );
   }
 
-  const f = fields ?? initFormFromDeal(deal);
-  const update = (key: keyof VoteFormFields, value: string) =>
-    setFields((prev) => ({ ...(prev ?? initFormFromDeal(deal)), [key]: value }));
-  // Changing the project type rewrites the number's type digit in place (office-agnostic; the server re-applies
-  // the authoritative rewrite on commit). Mirrors SyncHub's inline preview.
-  const onTypeChange = (codeRaw: string | null) => {
-    const code = codeRaw ?? "";
-    setFields((prev) => {
-      const base = prev ?? initFormFromDeal(deal);
-      return { ...base, project_types: code, project_number: rewriteProjectNumberType(base.project_number, code) };
-    });
-  };
+  // The RFP is immutable once triggered — project details are shown READ-ONLY (the static triggered snapshot). A
+  // vote never edits the deal; the created Bid Board project is built from these same DB-authoritative values.
+  const f = initFormFromDeal(deal);
 
   const alreadyVoted = deal.rfpVotes.some(
     (v) => (user.id != null && v.voterUserId === user.id) || (!!user.email && v.voterEmail.toLowerCase() === user.email.toLowerCase())
@@ -161,30 +113,19 @@ export function RfpVotePage() {
   // finding W6: the detail payload stays non-null for an H6-recovered round (send_failed with a vote already cast),
   // so gate submission on the round still being OPEN ('pending').
   const roundOpen = deal.rfpApprovalStatus === "pending";
-  // The round locks once ANY approval exists — the first YES commits its edits, later voters see them read-only.
-  const locked = voteState.approvals >= 1;
-  const canEditFields = roundOpen && !locked && !alreadyVoted && !decided && !voted;
-  const fieldsEditable = canEditFields && decision !== "reject";
-  // Block only CHANGING to Service. An already-Service open round (admin-reclassified mid-round; the server keeps
-  // it votable) starts with project_types "4", so approving it UNCHANGED must not be blocked.
-  const serviceChangeBlocked =
-    f.project_types === SERVICE_CODE && currentTypeCode(deal) !== SERVICE_CODE;
-  const blockApproveForService = decision === "approve" && canEditFields && serviceChangeBlocked;
 
   const rejectNeedsReason = decision === "reject" && reason.trim().length === 0;
   const canSubmit =
-    decision !== null && !rejectNeedsReason && !submitting && !alreadyVoted && !decided && !voted && roundOpen && !blockApproveForService;
+    decision !== null && !rejectNeedsReason && !submitting && !alreadyVoted && !decided && !voted && roundOpen;
 
   async function onSubmit() {
     if (!dealId || decision === null || !deal) return;
     setSubmitting(true);
     try {
-      const editedFields = decision === "approve" && canEditFields ? diffEditedFields(f, initFormFromDeal(deal)) : null;
       const result = await castRfpVote(dealId, {
         decision,
         reason: decision === "reject" ? reason.trim() : null,
         officeId,
-        editedFields,
       });
       setVoted(true);
       toast.success(
@@ -224,115 +165,25 @@ export function RfpVotePage() {
             Tally so far: {voteState.approvals} approve · {voteState.rejections} reject — needs 2 of 3.
           </p>
 
-          {/* Project details — editable for the first approver, read-only once locked/decided. */}
+          {/* Project details — read-only snapshot of the RFP as triggered (immutable). */}
           <section className="flex flex-col gap-4 rounded-lg border border-border p-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-foreground">Project details</h3>
-              {locked && !decided ? (
-                <span className="text-xs text-muted-foreground">Locked by the first approval</span>
-              ) : fieldsEditable ? (
-                <span className="text-xs text-muted-foreground">Correct anything before you approve</span>
-              ) : null}
+            <h3 className="text-sm font-semibold text-foreground">Project details</h3>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <ReadOnlyRow label="Deal name" value={f.dealname} />
+              <ReadOnlyRow label="Project number" value={f.project_number || "Pending"} />
+              <ReadOnlyRow label="Amount" value={formatMoney(f.amount)} />
+              <ReadOnlyRow label="Project type" value={f.project_types ? `${f.project_types} - ${labelForTypeCode(f.project_types)}` : "—"} />
+              <ReadOnlyRow label="Estimator" value={f.estimator} />
+              <ReadOnlyRow label="Bid due date" value={f.bid_due_date} />
+              <ReadOnlyRow label="Location" value={[f.address, f.city, f.state, f.zip].filter(Boolean).join(", ")} />
+              <ReadOnlyRow label="Country" value={f.country} />
+              <div className="sm:col-span-2">
+                <ReadOnlyRow label="Description" value={f.description} />
+              </div>
             </div>
-
-            {fieldsEditable ? (
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <div className="flex flex-col gap-1.5 sm:col-span-2">
-                  <Label htmlFor="v-name">Deal name</Label>
-                  <Input id="v-name" value={f.dealname} onChange={(e) => update("dealname", e.target.value)} />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="v-number">Project number</Label>
-                  <Input id="v-number" value={f.project_number} onChange={(e) => update("project_number", e.target.value)} />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="v-amount">Amount</Label>
-                  <Input id="v-amount" inputMode="decimal" value={f.amount} onChange={(e) => update("amount", e.target.value)} placeholder="0.00" />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="v-type">Project type</Label>
-                  <Select value={f.project_types} onValueChange={onTypeChange}>
-                    <SelectTrigger id="v-type" className="w-full"><SelectValue placeholder="Select a type" /></SelectTrigger>
-                    <SelectContent>
-                      {PROJECT_TYPE_OPTIONS.map((o) => (
-                        <SelectItem key={o.code} value={o.code}>{o.code} - {o.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="v-estimator">Estimator</Label>
-                  {/* Free-text (deals.estimator) with roster suggestions via a datalist — a plain Select would block
-                      an estimator not represented by an active CRM user (external / inactive), but the vote-edit
-                      contract writes an arbitrary name. */}
-                  <Input
-                    id="v-estimator"
-                    list="rfp-vote-estimators"
-                    value={f.estimator}
-                    onChange={(e) => update("estimator", e.target.value)}
-                    placeholder="Estimator name"
-                  />
-                  <datalist id="rfp-vote-estimators">
-                    {estimatorNames.map((name) => (
-                      <option key={name} value={name} />
-                    ))}
-                  </datalist>
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="v-due">Bid due date</Label>
-                  <DateField id="v-due" value={f.bid_due_date} onChange={(v) => update("bid_due_date", v)} />
-                </div>
-                <div className="flex flex-col gap-1.5 sm:col-span-2">
-                  <Label htmlFor="v-address">Address</Label>
-                  <Input id="v-address" value={f.address} onChange={(e) => update("address", e.target.value)} />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="v-city">City</Label>
-                  <Input id="v-city" maxLength={255} value={f.city} onChange={(e) => update("city", e.target.value)} />
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="v-state">State</Label>
-                    <Input id="v-state" maxLength={2} value={f.state} onChange={(e) => update("state", e.target.value.toUpperCase())} />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <Label htmlFor="v-zip">Zip</Label>
-                    <Input id="v-zip" maxLength={10} value={f.zip} onChange={(e) => update("zip", e.target.value)} />
-                  </div>
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <Label htmlFor="v-country">Country</Label>
-                  <Input id="v-country" value={f.country} onChange={(e) => update("country", e.target.value)} />
-                </div>
-                <div className="flex flex-col gap-1.5 sm:col-span-2">
-                  <Label htmlFor="v-desc">Description</Label>
-                  <Textarea id="v-desc" rows={3} value={f.description} onChange={(e) => update("description", e.target.value)} />
-                </div>
-                {serviceChangeBlocked ? (
-                  <p className="sm:col-span-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                    Changing this to a Service RFP isn't allowed here. Cancel this RFP and re-trigger it through the
-                    service flow instead.
-                  </p>
-                ) : null}
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <ReadOnlyRow label="Deal name" value={f.dealname} />
-                <ReadOnlyRow label="Project number" value={f.project_number || "Pending"} />
-                <ReadOnlyRow label="Amount" value={formatMoney(f.amount)} />
-                <ReadOnlyRow label="Project type" value={f.project_types ? `${f.project_types} - ${labelForTypeCode(f.project_types)}` : "—"} />
-                <ReadOnlyRow label="Estimator" value={f.estimator} />
-                <ReadOnlyRow label="Bid due date" value={f.bid_due_date} />
-                <ReadOnlyRow label="Location" value={[f.address, f.city, f.state, f.zip].filter(Boolean).join(", ")} />
-                <ReadOnlyRow label="Country" value={f.country} />
-                <div className="sm:col-span-2">
-                  <ReadOnlyRow label="Description" value={f.description} />
-                </div>
-              </div>
-            )}
           </section>
 
-          {/* Company & contact — read-only context (linked records; not editable from the vote form). */}
+          {/* Company & contact — read-only context (linked records). */}
           <section className="grid grid-cols-1 gap-4 rounded-lg border border-border p-4 sm:grid-cols-2">
             <div className="sm:col-span-2 text-sm font-semibold text-foreground">Company &amp; contact</div>
             <ReadOnlyRow label="Company" value={deal.companyName} />
@@ -363,7 +214,7 @@ export function RfpVotePage() {
                 <legend className="text-sm font-semibold text-foreground">Your decision</legend>
                 <label className="flex items-center gap-2 text-sm">
                   <input type="radio" name="decision" value="approve" checked={decision === "approve"} onChange={() => setDecision("approve")} />
-                  Approve{canEditFields ? " (commits your edits above)" : ""}
+                  Approve
                 </label>
                 <label className="flex items-center gap-2 text-sm">
                   <input type="radio" name="decision" value="reject" checked={decision === "reject"} onChange={() => setDecision("reject")} />
@@ -389,9 +240,6 @@ export function RfpVotePage() {
                 <Button onClick={onSubmit} disabled={!canSubmit}>
                   {submitting ? "Submitting…" : "Submit vote"}
                 </Button>
-                {blockApproveForService ? (
-                  <p className="mt-2 text-xs text-destructive">Resolve the Service project-type change before approving.</p>
-                ) : null}
               </div>
             </div>
           )}

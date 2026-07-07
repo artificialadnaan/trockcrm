@@ -1,4 +1,3 @@
-import crypto from "node:crypto";
 import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 
@@ -152,24 +151,6 @@ export function resolveSyncHubBaseUrl(env: NodeJS.ProcessEnv = process.env): str
     /\/+$/,
     ""
   );
-}
-
-/**
- * SyncHub's estimator roster (the list the SyncHub review form offers), exposed as an
- * HMAC-signed twin of the session-authed /api/settings/estimators. The CRM mirrors it into
- * the RFP vote form's estimator suggestions.
- */
-export function resolveSyncHubEstimatorsUrl(env: NodeJS.ProcessEnv = process.env): string {
-  return `${resolveSyncHubBaseUrl(env)}/api/rfp/estimators`;
-}
-
-/**
- * Canonical SyncHub request signature: `sha256=<hex>` over the raw request body, matching
- * SyncHub's `signRfpRequestPayload`. A GET (no body) signs the empty string. The existing
- * outbound POST callers still inline an identical `signBody`; they can adopt this in a follow-up.
- */
-export function signSyncHubRequestBody(rawBody: string | Buffer, secret: string): string {
-  return `sha256=${crypto.createHmac("sha256", secret).update(rawBody).digest("hex")}`;
 }
 
 export function resolveSyncHubRfpRequestUrl(env: NodeJS.ProcessEnv = process.env): string {

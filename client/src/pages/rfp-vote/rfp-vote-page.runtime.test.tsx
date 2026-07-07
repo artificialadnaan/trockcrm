@@ -56,7 +56,6 @@ beforeEach(() => {
 describe("RfpVotePage", () => {
   it("reveals a required reason field when Reject is chosen and POSTs decision+reason", async () => {
     mocks.apiMock.mockResolvedValueOnce(detail); // GET /deals/deal-1/detail
-    mocks.apiMock.mockResolvedValueOnce({ estimators: [] }); // GET /deals/estimators (fires once the loaded deal enables editing)
     await render();
 
     // Choose Reject -> reason textarea appears.
@@ -104,7 +103,6 @@ describe("RfpVotePage", () => {
     // round opened is still authorized server-side (BC2). The page loads and the cast route is the authority.
     mocks.useAuthMock.mockReturnValue({ user: { id: "u-x", email: "x@trockgc.com", isRfpVoter: false, officeId: null } });
     mocks.apiMock.mockResolvedValueOnce(detail); // GET /deals/deal-1/detail — loaded, not blocked
-    mocks.apiMock.mockResolvedValueOnce({ estimators: [] }); // GET /deals/estimators (enabled once the deal loads)
     await render();
     expect(mocks.apiMock).toHaveBeenCalled();
     expect(container.textContent).not.toMatch(/vote access restricted|only the designated rfp voters/i);

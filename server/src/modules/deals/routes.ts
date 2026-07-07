@@ -39,7 +39,6 @@ import {
   assertSalesSourceIsCrmUser,
 } from "./service.js";
 import { listDealDescriptionHistory } from "./deal-description-history.js";
-import { getRfpEstimators } from "./rfp-estimators-service.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
@@ -969,25 +968,6 @@ router.get("/sources", async (req, res, next) => {
   }
 });
 
-// GET /api/deals/estimators — estimator suggestion list for the RFP vote form. Mirrors SyncHub's
-// estimator roster (HMAC-signed proxy, 5-min cached) and falls back to the active office's CRM
-// roster when SyncHub is unreachable. Registered before "/:id" so it isn't captured as a deal id.
-router.get("/estimators", async (req, res, next) => {
-  try {
-    // Release the tenant transaction/pooled client BEFORE the outbound SyncHub wait. This route never
-    // touches req.tenantDb (the roster fallback uses the global `db`), and on a cold cache getRfpEstimators
-    // can block up to the SyncHub timeout — holding the tenant tx open across that would pin pooled
-    // connections idle-in-transaction under a burst while SyncHub is slow. The middleware's `committed`
-    // flag makes the res-close cleanup a no-op, so a later throw here still routes cleanly to next(err).
-    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
-    await req.commitTransaction!();
-    const { estimators } = await getRfpEstimators({ officeId });
-    res.json({ estimators });
-  } catch (err) {
-    next(err);
-  }
-});
-
 // GET /api/deals/pipeline — deals grouped by stage for kanban
 router.get("/pipeline", async (req, res, next) => {
   try {
@@ -1803,8 +1783,8 @@ router.post("/:id/rfp-vote", async (req, res, next) => {
       user: { id: req.user!.id, email: req.user!.email },
       decision: req.body?.decision,
       reason: req.body?.reason,
+      // Passed ONLY so a stale (pre-static) vote page's legacy edit payload is rejected, never applied.
       editedFields: req.body?.editedFields,
-      editAudit: buildRouteAuditContext(req),
       officeId,
       votingEnabled: isRfpVotingEnabled(),
     });

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { PoolClient } from "pg";
-import { deals, jobQueue, leads, rfpVotes, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, rfpVotes, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   computeRfpVoteState,
@@ -11,13 +11,9 @@ import {
 } from "@trock-crm/shared/lib/rfpVoteState";
 import { isRfpVoterEmail, resolveRfpVoterEmails } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { AppError } from "../../middleware/error-handler.js";
-import { logActivity, type AuditContext } from "../audit/audit-logger.js";
-import type { RawAuditFieldChange } from "../audit/field-formatters.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { applyRfpDeclineToDeal } from "./rfp-decline-service.js";
-import { recordDescriptionHistoryChange } from "./deal-description-history.js";
-import { buildRfpVoteDealUpdate, writeRfpVoteDealUpdate, type RfpVoteEditableFields } from "./rfp-vote-edits.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, enqueueRfpVoteOutcome } from "./rfp-enqueue.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -129,12 +125,9 @@ export async function authorizeAndCastRfpVote(
     user: { id: string; email: string | null };
     decision: unknown;
     reason: unknown;
-    // Optional SyncHub-style edited fields (approve only). On the FIRST approve of a round they are committed to
-    // the deal (and the deal locks); on a later vote they are rejected (RFP_VOTE_ALREADY_LOCKED); on a reject they
-    // are rejected (RFP_VOTE_EDIT_ON_REJECT). See rfp-vote-edits.ts for the writable-field allowlist.
+    // The RFP is immutable — a cast never edits the deal. This is accepted ONLY to REJECT a stale client's
+    // legacy edit payload (see the transitional guard below); it is never applied.
     editedFields?: unknown;
-    // Audit context for logging first-YES edit field changes (threaded from the route; omit in tests → no log).
-    editAudit?: AuditContext;
     officeId: string | null;
     votingEnabled: boolean;
     env?: NodeJS.ProcessEnv;
@@ -145,18 +138,26 @@ export async function authorizeAndCastRfpVote(
   if (input.decision !== "approve" && input.decision !== "reject") {
     throw new AppError(400, "decision must be 'approve' or 'reject'.", "RFP_VOTE_DECISION_INVALID");
   }
+  // Transitional guard: the RFP is immutable once triggered, but a voter with a STALE (pre-static) editable vote
+  // page still open POSTs editedFields on approve. Rather than SILENTLY drop their corrections — recording a final
+  // approval, and on the deciding vote creating the Bid Board project, from the UNEDITED deal — reject with a clear
+  // refresh prompt. The current read-only page never sends editedFields, so this only fires for a stale client.
+  if (
+    input.editedFields != null &&
+    typeof input.editedFields === "object" &&
+    !Array.isArray(input.editedFields) &&
+    Object.keys(input.editedFields as Record<string, unknown>).length > 0
+  ) {
+    throw new AppError(
+      409,
+      "This RFP can no longer be edited while voting. Refresh the page and submit your vote again.",
+      "RFP_VOTE_EDIT_UNSUPPORTED",
+    );
+  }
   const decision = input.decision;
   const rawReason = typeof input.reason === "string" ? input.reason.trim() : "";
   if (decision === "reject" && rawReason.length === 0) {
     throw new AppError(400, "A reason is required to reject an RFP.", "RFP_VOTE_REASON_REQUIRED");
-  }
-  // Normalize edited fields to a plain object (a non-object/array is ignored). Edits are an approve-only affordance.
-  const editedFields =
-    input.editedFields != null && typeof input.editedFields === "object" && !Array.isArray(input.editedFields)
-      ? (input.editedFields as RfpVoteEditableFields)
-      : null;
-  if (decision === "reject" && editedFields && Object.keys(editedFields).length > 0) {
-    throw new AppError(400, "Edits can only accompany an approve vote.", "RFP_VOTE_EDIT_ON_REJECT");
   }
   // A soft-deleted (is_active=false) deal reads as not-found: an approve would enqueue rfp_bidboard_create the
   // bid-board-created callback (findDeal filters is_active=true) could never reconcile.
@@ -208,8 +209,6 @@ export async function authorizeAndCastRfpVote(
       voter: { userId: input.user.id, email: input.user.email ?? "" },
       decision,
       reason: decision === "reject" ? rawReason : null,
-      editedFields: decision === "approve" ? editedFields : null,
-      editAudit: input.editAudit,
     },
     deps,
   );
@@ -320,7 +319,7 @@ export function buildRfpVoteDeclineReason(votes: RfpVoteRecord[]): string {
  * inserted (unique-violation -> 409); the round is recounted before + after; and the outcome fires exactly
  * once — only when THIS vote crossed pending -> decided (approve keeps status 'pending', so the transition,
  * not a status change, is the idempotency signal). approve -> enqueue rfp_bidboard_create; reject ->
- * applyRfpDeclineToDeal with the aggregated reason.
+ * applyRfpDeclineToDeal with the aggregated reason. The RFP is immutable — a vote never edits the deal.
  */
 export async function castRfpVote(
   args: {
@@ -330,8 +329,6 @@ export async function castRfpVote(
     voter: { userId: string; email: string };
     decision: "approve" | "reject";
     reason: string | null;
-    editedFields?: RfpVoteEditableFields | null;
-    editAudit?: AuditContext;
   },
   deps: CastRfpVoteDeps = {},
 ): Promise<{ outcome: RfpVoteOutcome; votes: RfpVoteRecord[] }> {
@@ -346,20 +343,14 @@ export async function castRfpVote(
   }
 
   // Serialize concurrent votes on this deal so the pending->decided transition below is race-free, AND re-read
-  // the deal's AUTHORITATIVE state under the lock (finding H3). The route's pre-checks (is_active, open round)
+  // the deal's AUTHORITATIVE guard state under the lock (finding H3). The route's pre-checks (is_active, open round)
   // can go stale in the gap before this lock — a soft-delete or a Return-to-Opportunity/re-trigger can land
   // between them. Voting on a since-deleted/closed/re-triggered deal would (for an approving vote) enqueue
   // rfp_bidboard_create for a deal the bid-board-created callback can't reconcile (its findDeal filters
   // is_active=true), so validate the locked row before recording the vote. The decided-round case is left to
   // priorState below (so it still returns the specific RFP_ROUND_DECIDED).
-  // Read the guard columns AND the editable columns under the lock — the edit diff (below) must be computed against
-  // the FRESH row, not the route's pre-lock snapshot, so a stale client resubmitting values another voter already
-  // committed is seen as a no-op instead of a spurious RFP_VOTE_ALREADY_LOCKED.
   const lockedRes: any = await args.tenantDb.execute(
-    sql`SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_approval_request_event_id,
-               name, deal_number, project_number, project_type, bid_estimate, awarded_amount, dd_estimate,
-               forecast_revenue, estimator, description, bid_due_date, source_lead_id,
-               property_address, property_city, property_state, property_zip, property_country
+    sql`SELECT is_active, rfp_approval_status, rfp_approval_request_id, rfp_approval_request_event_id
           FROM deals WHERE id = ${args.deal.id} FOR UPDATE`
   );
   const lockedRows = Array.isArray(lockedRes) ? lockedRes : lockedRes.rows ?? [];
@@ -391,143 +382,6 @@ export async function castRfpVote(
   // (reject) no-op applyRfpDeclineToDeal while still firing the outcome.
   if (locked.rfp_approval_status !== "pending") {
     throw new AppError(409, "This deal is not in an open RFP vote round.", "RFP_NO_VOTE_ROUND");
-  }
-
-  // First-YES commits the voter's edits + locks the deal. Under the FOR UPDATE lock above, exactly one concurrent
-  // approve sees priorState.approvals === 0, so exactly one commits (race-free). The edited deal is then what the
-  // DECIDING approve's loadRfpPayloadDeal re-reads into the Bid Board create payload (DB-authoritative). A LATER
-  // voter that still submits a REAL edit is 409'd (the round is locked once any approve exists); the client renders
-  // the committed values read-only. buildRfpVoteDealUpdate throws RFP_VOTE_SERVICE_TYPE_BLOCKED /
-  // RFP_VOTE_EDIT_INVALID for a blocked or malformed edit, rolling back the whole vote (nothing recorded).
-  const editedFields = args.editedFields ?? null;
-  if (editedFields && Object.keys(editedFields).length > 0) {
-    if (args.decision !== "approve") {
-      throw new AppError(400, "Edits can only accompany an approve vote.", "RFP_VOTE_EDIT_ON_REJECT");
-    }
-    // Compute the REAL diff first (this also VALIDATES → RFP_VOTE_SERVICE_TYPE_BLOCKED / RFP_VOTE_EDIT_INVALID).
-    // Only a genuine change locks the round + commits: an all-no-op edit set (a stale/untouched client resubmitting
-    // the deal's CURRENT values — the client always posts the full field map) falls through and records a plain
-    // vote, so a late deciding approve is NOT bounced with RFP_VOTE_ALREADY_LOCKED for having changed nothing.
-    // Diff against the FRESH locked row (not args.deal, the route's pre-lock snapshot).
-    const lockedDeal = {
-      name: locked.name,
-      projectNumber: locked.project_number,
-      projectType: locked.project_type,
-      bidEstimate: locked.bid_estimate,
-      awardedAmount: locked.awarded_amount,
-      ddEstimate: locked.dd_estimate,
-      forecastRevenue: locked.forecast_revenue,
-      estimator: locked.estimator,
-      description: locked.description,
-      bidDueDate: locked.bid_due_date,
-      propertyAddress: locked.property_address,
-      propertyCity: locked.property_city,
-      propertyState: locked.property_state,
-      propertyZip: locked.property_zip,
-      propertyCountry: locked.property_country,
-    };
-    const dealUpdate = buildRfpVoteDealUpdate(editedFields, lockedDeal);
-    if (Object.keys(dealUpdate).length > 0) {
-      if (priorState.approvals > 0) {
-        throw new AppError(
-          409,
-          "This RFP has already been confirmed by an earlier approval; its details are locked.",
-          "RFP_VOTE_ALREADY_LOCKED",
-        );
-      }
-      // Resolve the canonical project_type_config id for a changed type (mirrors updateDeal), so BOTH the deals-list
-      // `d.project_type_id` filter AND getDealDetail's COALESCE(config.name, project_type) display track the new type
-      // — instead of a stale id (old type) or a null id (deal drops out of type-filtered lists).
-      if (typeof dealUpdate.projectType === "string") {
-        dealUpdate.projectTypeId = await resolveProjectTypeConfigId(args.tenantDb, dealUpdate.projectType);
-      }
-      try {
-        await writeRfpVoteDealUpdate(args.tenantDb, args.deal.id, dealUpdate);
-      } catch (err) {
-        // A voter-entered project number that collides with another non-change-order deal hits
-        // deals_project_number_uidx — translate the 23505 into a clean 409 instead of an opaque 500.
-        if (isUniqueViolation(err)) {
-          throw new AppError(409, "That project number is already used by another deal.", "RFP_VOTE_PROJECT_NUMBER_TAKEN");
-        }
-        throw err;
-      }
-      // Dedicated description change-log (the detail description-history panel reads deal_history rows, which the
-      // raw write above does not touch) — only when the description actually changed.
-      if (dealUpdate.description !== undefined) {
-        await recordDescriptionHistoryChange(args.tenantDb, {
-          dealId: args.deal.id,
-          oldDescription: lockedDeal.description,
-          newDescription: dealUpdate.description as string,
-          changedBy: args.voter.userId,
-          source: "rfp_vote_edit",
-        });
-      }
-      // getDealDetail resolves bid_due_date LEAD-FIRST for a converted deal, but the create payload reads it
-      // deal-first — so for a source-lead deal also sync the lead's bid_due_date, else the committed date reaches the
-      // create payload but the locked/read-only form + detail keep showing the lead's OLD date to remaining voters.
-      if (dealUpdate.bidDueDate !== undefined && locked.source_lead_id) {
-        const ymd = (dealUpdate.bidDueDate as Date).toISOString().slice(0, 10);
-        await args.tenantDb.update(leads).set({ bidDueDate: ymd }).where(eq(leads.id, locked.source_lead_id as string));
-      }
-      // Re-geocode on ANY address-field change (address/city/state/zip/country) — the raw write updates the address
-      // text but not the deals lat/lng, so /deals/nearby + map/distance features would otherwise keep using stale
-      // coordinates. Awaited (unlike updateDeal's fire-and-forget) so it commits atomically with the vote on this
-      // still-open tenant txn.
-      const addressFieldChanged =
-        "propertyAddress" in dealUpdate ||
-        "propertyCity" in dealUpdate ||
-        "propertyState" in dealUpdate ||
-        "propertyZip" in dealUpdate ||
-        "propertyCountry" in dealUpdate;
-      if (addressFieldChanged) {
-        const addr = (dealUpdate.propertyAddress ?? lockedDeal.propertyAddress) as string | null;
-        const city = (dealUpdate.propertyCity ?? lockedDeal.propertyCity) as string | null;
-        const state = (dealUpdate.propertyState ?? lockedDeal.propertyState) as string | null;
-        const zip = (dealUpdate.propertyZip ?? lockedDeal.propertyZip) as string | null;
-        const country = (dealUpdate.propertyCountry ?? lockedDeal.propertyCountry) as string | null;
-        if (addr) {
-          const address = `${addr}, ${city || ""} ${state || ""} ${zip || ""}${country ? `, ${country}` : ""}`.trim();
-          await args.tenantDb.insert(jobQueue).values({
-            jobType: "geocode_deal",
-            payload: { dealId: args.deal.id, address },
-            officeId: args.officeId ?? null,
-            status: "pending",
-            runAfter: new Date(),
-          });
-        }
-      }
-      // Forensic trail: this authorized write bypasses updateDeal's activity log, so record the field changes here
-      // (mirrors updateDeal's logActivity). Audit context is threaded from the route; absent in direct-service tests,
-      // where it's skipped.
-      if (args.editAudit) {
-        // The DERIVED side-effect columns — the resolved project_type_id and the amount mirror-override flags — are
-        // not part of lockedDeal, so their true baseline is unknown here. Skip them so the audit records the voter's
-        // ACTUAL field changes (name, project number/type, amount, …) with real from→to values, not a misleading
-        // from:null.
-        const AUDIT_SKIP = new Set(["projectTypeId", "awardedAmountOverridden", "ddEstimateOverridden"]);
-        const fieldChanges: Record<string, RawAuditFieldChange> = {};
-        for (const [field, to] of Object.entries(dealUpdate)) {
-          if (AUDIT_SKIP.has(field)) continue;
-          fieldChanges[field] = { from: (lockedDeal as Record<string, unknown>)[field] ?? null, to: to ?? null };
-        }
-        await logActivity({
-          tenantDb: args.tenantDb,
-          actor: args.editAudit.actor,
-          action: "update",
-          entity: {
-            tableName: "deals",
-            entityType: "deal",
-            recordId: args.deal.id,
-            nameSnapshot: lockedDeal.name,
-            secondaryIdSnapshot: lockedDeal.projectNumber ?? (locked.deal_number as string | null) ?? null,
-          },
-          fieldChanges,
-          metadata: { source: "rfp_vote_edit", roundEventId },
-          ipAddress: args.editAudit.ipAddress ?? null,
-          userAgent: args.editAudit.userAgent ?? null,
-        });
-      }
-    }
   }
 
   try {
@@ -587,24 +441,6 @@ export async function castRfpVote(
   }
 
   return { outcome: state.outcome, votes };
-}
-
-/**
- * Resolve the public.project_type_config id for a project-type VALUE (the lowercased type name — e.g. "roofing").
- * A vote edit that changes deals.project_type must also update project_type_id so the deals-list `d.project_type_id`
- * filter and getDealDetail's COALESCE(config.name, project_type) display track the new type (mirrors updateDeal's
- * applyProjectTypeChange). Best-effort: returns null when the type has no active config row — display still resolves
- * via deals.project_type, and a null id is preferable to a STALE id pointing at the old type.
- */
-async function resolveProjectTypeConfigId(tenantDb: TenantDb, value: string): Promise<string | null> {
-  const res: any = await tenantDb.execute(
-    sql`SELECT id FROM public.project_type_config
-          WHERE lower(name) = ${value} AND is_active = true
-          ORDER BY (parent_id IS NULL) DESC, display_order ASC NULLS LAST
-          LIMIT 1`,
-  );
-  const rows = Array.isArray(res) ? res : res.rows ?? [];
-  return (rows[0]?.id as string | null) ?? null;
 }
 
 async function loadRoundVotes(tenantDb: TenantDb, dealId: string, roundEventId: string): Promise<RfpVoteRecord[]> {

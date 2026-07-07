@@ -80,6 +80,8 @@ function buildApp(pgDb: PGlite, user: { id: string; email: string }) {
         user: { id: req.user.id, email: req.user.email },
         decision: req.body?.decision,
         reason: req.body?.reason,
+        // Mirror the real route: forward editedFields so a stale client's legacy payload is rejected.
+        editedFields: req.body?.editedFields,
         officeId,
         votingEnabled: isRfpVotingEnabled(),
       });
@@ -181,6 +183,19 @@ describe("POST /deals/:id/rfp-vote", () => {
     const votes = (await pg.query(`SELECT decision FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
     expect(votes).toHaveLength(1);
     expect(votes[0].decision).toBe("approve");
+  });
+
+  it("409 RFP_VOTE_EDIT_UNSUPPORTED for a stale client sending an editedFields payload — no vote recorded", async () => {
+    pg = await setup();
+    // A voter with the OLD (pre-static) editable page still open posts editedFields. The RFP is immutable, so the
+    // route must REJECT it (not silently drop the edits and record a final approval on the unedited deal).
+    const res = await request(buildApp(pg, VOTER))
+      .post(`/deals/${DEAL}/rfp-vote`)
+      .send({ decision: "approve", editedFields: { dealname: "Corrected Name" } });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("RFP_VOTE_EDIT_UNSUPPORTED");
+    const votes = (await pg.query(`SELECT decision FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(0);
   });
 
   it("409 RFP_NO_VOTE_ROUND for a legacy deal that has a SyncHub rfp_approval_request_id (non-null)", async () => {
