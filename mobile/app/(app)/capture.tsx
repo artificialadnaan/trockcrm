@@ -22,11 +22,13 @@ import {
   getQueuedCount,
   getQueuedUploads,
   newClientUploadId,
+  patchQueuedCaption,
   patchQueuedMetadata,
+  removeQueuedUploads,
   uploadOwnerKey,
 } from "../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
-import { buildCaptureUploadInput, setPhotoCaption, appendPhotoCaption, removePhoto, type SessionPhoto } from "../../src/capture/session-photo";
+import { buildCaptureUploadInput, effectiveCaption, planReviewFinish, setPhotoCaption, appendPhotoCaption, removePhoto, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
 import { DEFAULT_CAPTURE_MODE, loadCaptureMode, saveCaptureMode, type CaptureMode } from "../../src/capture/capture-mode";
 import { Badge, Button, EmptyState } from "../../src/components/ui";
@@ -241,6 +243,10 @@ export default function CaptureScreen() {
   // Synchronous latch so a same-frame double-tap of "Upload" can't run finishReview twice over the same
   // reviewPhotos snapshot (setReviewBusy(true) only takes effect on the next render).
   const finishingRef = useRef(false);
+  // The staged review photos that were DURABLY ENQUEUED at review-open (by clientUploadId). Drives the
+  // no-double-enqueue split on Done (durable ⇒ patch caption; not durable ⇒ fallback-enqueue) and the
+  // remove-from-queue on Cancel / per-photo remove. Cleared whenever the review closes or the owner switches.
+  const stagedDurableIdsRef = useRef<Set<string>>(new Set());
   // While offline, auto-drains fired after each shot are suppressed until this timestamp — otherwise every
   // capture would re-attempt the whole backlog and burn a retry on each queued item (they go terminal after
   // MAX_UPLOAD_ATTEMPTS). Lifecycle/user triggers (foreground, manual Retry, owner resume) force through it.
@@ -255,10 +261,12 @@ export default function CaptureScreen() {
     // shots (captured during a transient sign-out — no authenticated owner) are KEPT so the next signer can
     // claim + retry them; they are never another authenticated user's photo.
     setFailedShots((prev) => prev.filter((f) => f.ownerKey === ownerKey || f.ownerKey === ""));
-    // Staged (not-yet-uploaded) review/batch photos aren't owner-bound, so discard them on a switch rather
-    // than let the next account upload the previous one's staged shots.
+    // Staged review/batch photos: any already durably enqueued live under the PREVIOUS owner's queue (per-
+    // owner dir) and safely resume when that owner signs back in — so here we just drop the in-memory review
+    // state + the staged-durable set; the next account can never see or upload the prior owner's staged shots.
     setReviewPhotos([]);
     setReviewCtx(null);
+    stagedDurableIdsRef.current = new Set();
     setCameraBatch([]);
     cameraBatchRef.current = [];
   }, [ownerKey]);
@@ -450,13 +458,47 @@ export default function CaptureScreen() {
       };
     });
     if (photos.length === 0) return;
-    openReview(photos, ctx);
+    void openReview(photos, ctx);
   }
 
-  // Open the per-photo review step with a set of staged photos + their capture-time destination.
-  function openReview(photos: SessionPhoto[], ctx: { target: CaptureTargetRef; category: string | null; tags: string[] }) {
+  // Open the per-photo review step with a set of staged photos + their capture-time destination. The review
+  // UI shows IMMEDIATELY (setReviewPhotos), AND every staged photo is durably ENQUEUED right now — copied
+  // into the upload queue with its capture-time payload, but WITHOUT draining yet (captioning happens next).
+  //
+  // CRASH SEMANTICS (the F3 fix): staged photos are durable from the moment review opens, not just after
+  // Done. A crash/kill mid-caption re-drains on next launch and uploads them UNCAPTIONED — but never LOSES
+  // them (previously they lived only in volatile `reviewPhotos` React state and vanished on a kill). A crash
+  // before the user hits Cancel likewise uploads the staged photos: we deliberately favor photo-preservation
+  // over honoring an unexpressed discard intent. Captions are patched onto these queued rows on Done; a
+  // Cancel (or per-photo remove) deletes them back out of the queue.
+  //
+  // If the queue can't be written (no ownerKey after a transient sign-out, or enqueue throws on storage-full)
+  // the photos are KEPT in the review UI and marked NOT-yet-durable (absent from stagedDurableIdsRef), so
+  // Done's fallback enqueues them before draining — nothing is lost, just not crash-safe until then.
+  async function openReview(photos: SessionPhoto[], ctx: { target: CaptureTargetRef; category: string | null; tags: string[] }) {
     setReviewCtx(ctx);
     setReviewPhotos(photos);
+    stagedDurableIdsRef.current = new Set();
+    if (!ownerKey) {
+      setNotice({ tone: "error", text: "Some photos couldn't be saved yet — tap Retry to try again." });
+      return;
+    }
+    try {
+      const inputs = photos.map((p) =>
+        buildCaptureUploadInput(p, {
+          ...ctx,
+          sessionGps: cameraGpsRef.current,
+          gpsSession: cameraGpsSessionRef.current,
+        }),
+      );
+      await enqueueUploads(ownerKey, inputs);
+      for (const p of photos) stagedDurableIdsRef.current.add(p.clientUploadId);
+      await refreshQueuedCount();
+    } catch {
+      // Left NOT-durable — Done's planReviewFinish fallback will enqueue whatever isn't in the set. (A
+      // partial enqueue is harmless: the fallback re-enqueue dedupes on clientUploadId, so no duplicate row.)
+      setNotice({ tone: "error", text: "Some photos couldn't be saved yet — tap Retry to try again." });
+    }
   }
 
   function setReviewCaption(key: string, text: string) {
@@ -466,16 +508,35 @@ export default function CaptureScreen() {
   function appendReviewCaption(key: string, text: string) {
     setReviewPhotos((prev) => appendPhotoCaption(prev, key, text));
   }
-  function removeReviewPhoto(key: string) {
+  // Removing a staged photo also drops its DURABLE queue entry (it was enqueued at review-open) — otherwise
+  // Done's drain, which ships the whole owner queue, would still upload a photo pulled out of the tray.
+  async function removeReviewPhoto(key: string) {
+    const removed = reviewPhotos.find((p) => p.key === key);
     setReviewPhotos((prev) => removePhoto(prev, key));
+    if (removed && stagedDurableIdsRef.current.delete(removed.clientUploadId) && ownerKey) {
+      await removeQueuedUploads(ownerKey, [removed.clientUploadId]).catch(() => undefined);
+      await refreshQueuedCount();
+    }
   }
-  function cancelReview() {
+  // Cancel: drop the staged photos back out of the durable queue so a cancelled batch never uploads, then
+  // clear the review UI. (A crash BEFORE this runs still uploads them — see openReview's crash semantics.)
+  async function cancelReview() {
     if (reviewBusy) return;
+    const staged = [...stagedDurableIdsRef.current];
+    stagedDurableIdsRef.current = new Set();
     setReviewPhotos([]);
     setReviewCtx(null);
+    if (ownerKey && staged.length > 0) {
+      await removeQueuedUploads(ownerKey, staged).catch(() => undefined);
+      await refreshQueuedCount();
+    }
   }
-  // Done: stream every reviewed photo with ITS OWN caption (blank → no description). Reuses the exact
-  // single-shot stream path so per-photo captions ride to files.description unchanged.
+  // Done: the staged photos are ALREADY durably enqueued (openReview), so we only PATCH each queued row's
+  // caption to the value the crew typed, then kick ONE drain — no re-enqueue (that would upload a duplicate).
+  // FALLBACK: any photo that failed to enqueue at review-open (not in stagedDurableIdsRef — storage-full or a
+  // signed-out ownerKey) is enqueued NOW via the shared single-shot path (streamPhoto), which carries the
+  // caption in its built input and parks the shot in the retry buffer if it still can't save. planReviewFinish
+  // makes the patch/enqueue lists DISJOINT, so no photo is ever both patched and re-enqueued.
   async function finishReview() {
     if (reviewBusy || finishingRef.current) return;
     const photos = reviewPhotos;
@@ -483,19 +544,36 @@ export default function CaptureScreen() {
     if (!ctx || photos.length === 0) {
       setReviewPhotos([]);
       setReviewCtx(null);
+      stagedDurableIdsRef.current = new Set();
       return;
     }
     finishingRef.current = true;
     setReviewBusy(true);
     try {
-      for (const p of photos) {
+      const { toPatch, toEnqueue } = planReviewFinish(photos, stagedDurableIdsRef.current);
+      // Already durable → just stamp the typed caption onto the queued row (best-effort; a row that already
+      // uploaded is a harmless no-op).
+      if (ownerKey) {
+        for (const p of toPatch) {
+          await patchQueuedCaption(ownerKey, p.clientUploadId, effectiveCaption(p.caption)).catch(() => undefined);
+        }
+      }
+      // Not durable (open-review enqueue failed / signed out) → enqueue now, caption and all. streamPhoto
+      // rebuilds the input, enqueues + drains, and parks it in failedShots if it still can't be saved.
+      for (const p of toEnqueue) {
         await streamPhoto(p, ctx);
+      }
+      // Kick the drain for the freshly-captioned durable rows (streamPhoto already drained any fallbacks).
+      if (ownerKey && toPatch.length > 0) {
+        await refreshQueuedCount();
+        void kickDrain();
       }
     } finally {
       finishingRef.current = false;
       setReviewBusy(false);
       setReviewPhotos([]);
       setReviewCtx(null);
+      stagedDurableIdsRef.current = new Set();
     }
   }
 
@@ -610,7 +688,7 @@ export default function CaptureScreen() {
     setCameraOpen(false);
     const batch = cameraBatchRef.current;
     if (batch.length > 0) {
-      openReview(batch, { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current });
+      void openReview(batch, { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current });
       setCameraBatch([]);
       cameraBatchRef.current = [];
     }
