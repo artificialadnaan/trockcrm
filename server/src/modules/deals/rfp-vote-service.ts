@@ -125,6 +125,9 @@ export async function authorizeAndCastRfpVote(
     user: { id: string; email: string | null };
     decision: unknown;
     reason: unknown;
+    // The RFP is immutable — a cast never edits the deal. This is accepted ONLY to REJECT a stale client's
+    // legacy edit payload (see the transitional guard below); it is never applied.
+    editedFields?: unknown;
     officeId: string | null;
     votingEnabled: boolean;
     env?: NodeJS.ProcessEnv;
@@ -134,6 +137,22 @@ export async function authorizeAndCastRfpVote(
   const env = input.env ?? process.env;
   if (input.decision !== "approve" && input.decision !== "reject") {
     throw new AppError(400, "decision must be 'approve' or 'reject'.", "RFP_VOTE_DECISION_INVALID");
+  }
+  // Transitional guard: the RFP is immutable once triggered, but a voter with a STALE (pre-static) editable vote
+  // page still open POSTs editedFields on approve. Rather than SILENTLY drop their corrections — recording a final
+  // approval, and on the deciding vote creating the Bid Board project, from the UNEDITED deal — reject with a clear
+  // refresh prompt. The current read-only page never sends editedFields, so this only fires for a stale client.
+  if (
+    input.editedFields != null &&
+    typeof input.editedFields === "object" &&
+    !Array.isArray(input.editedFields) &&
+    Object.keys(input.editedFields as Record<string, unknown>).length > 0
+  ) {
+    throw new AppError(
+      409,
+      "This RFP can no longer be edited while voting. Refresh the page and submit your vote again.",
+      "RFP_VOTE_EDIT_UNSUPPORTED",
+    );
   }
   const decision = input.decision;
   const rawReason = typeof input.reason === "string" ? input.reason.trim() : "";

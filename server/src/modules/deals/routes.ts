@@ -1783,6 +1783,8 @@ router.post("/:id/rfp-vote", async (req, res, next) => {
       user: { id: req.user!.id, email: req.user!.email },
       decision: req.body?.decision,
       reason: req.body?.reason,
+      // Passed ONLY so a stale (pre-static) vote page's legacy edit payload is rejected, never applied.
+      editedFields: req.body?.editedFields,
       officeId,
       votingEnabled: isRfpVotingEnabled(),
     });
