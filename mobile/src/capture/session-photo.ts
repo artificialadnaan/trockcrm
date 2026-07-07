@@ -5,7 +5,8 @@ import type { CaptureTargetRef, CaptureUploadInput } from "./upload";
 /**
  * A photo collected in the capture session (from the burst camera or a library
  * import). `caption` is the OPTIONAL per-photo description, set only later in the
- * review tray — capture itself is never blocked by it.
+ * review tray — capture itself is never blocked by it. Per-photo ONLY: a blank
+ * caption means NO description; a note is never copied from one photo onto another.
  */
 export type SessionPhoto = {
   key: string;
@@ -24,15 +25,12 @@ export type SessionPhoto = {
 };
 
 /**
- * Resolve the description a photo uploads with. The per-photo caption wins; the
- * batch caption is the fallback applied to any photo the user didn't caption
- * individually ("individual overrides batch"). Empty on both → null (no caption).
+ * Resolve the description a photo uploads with. PER-PHOTO ONLY: a photo carries only
+ * its own optional caption, and a blank caption means NO description — there is no
+ * shared/batch fallback, so a note is never copied from one photo onto another.
  */
-export function effectiveCaption(photoCaption: string, batchCaption: string): string | null {
-  const own = photoCaption.trim();
-  if (own) return own;
-  const batch = batchCaption.trim();
-  return batch || null;
+export function effectiveCaption(photoCaption: string): string | null {
+  return photoCaption.trim() || null;
 }
 
 /**
@@ -72,9 +70,9 @@ export function reconcileUploadGps(
 
 /**
  * Build the exact upload payload for ONE photo — the single mapping `upload()` uses
- * for every shot. Keeps each photo's OWN caption (effectiveCaption: individual over
- * batch) and its OWN reconciled metadata bound to that photo, so the note a crew
- * dictated for a shot always rides with THAT shot and never bleeds onto another.
+ * for every shot. Keeps each photo's OWN caption (per-photo only, blank → no
+ * description) and its OWN reconciled metadata bound to that photo, so the note a crew
+ * set for a shot always rides with THAT shot and never bleeds onto another.
  * Pure (no fetcher/network) so this correctness is unit-tested without a device.
  */
 export function buildCaptureUploadInput(
@@ -83,7 +81,6 @@ export function buildCaptureUploadInput(
     target: CaptureTargetRef;
     category: string | null;
     tags: string[];
-    batchCaption: string;
     sessionGps: PhotoMetadata | null;
     gpsSession: number | null;
   },
@@ -94,7 +91,7 @@ export function buildCaptureUploadInput(
     height: photo.height,
     target: ctx.target,
     category: ctx.category,
-    caption: effectiveCaption(photo.caption, ctx.batchCaption),
+    caption: effectiveCaption(photo.caption),
     tags: ctx.tags,
     metadata: reconcileUploadGps(photo, ctx.sessionGps, ctx.gpsSession),
     clientUploadId: photo.clientUploadId,

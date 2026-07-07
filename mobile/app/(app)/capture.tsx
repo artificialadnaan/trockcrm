@@ -339,7 +339,6 @@ export default function CaptureScreen() {
         target: ctx.target,
         category: ctx.category,
         tags: ctx.tags,
-        batchCaption: "",
         sessionGps: cameraGpsRef.current,
         gpsSession: cameraGpsSessionRef.current,
       });
