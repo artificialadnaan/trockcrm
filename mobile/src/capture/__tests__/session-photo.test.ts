@@ -1,8 +1,11 @@
 import {
   applyGpsToPending,
+  appendPhotoCaption,
   buildCaptureUploadInput,
   effectiveCaption,
   reconcileUploadGps,
+  removePhoto,
+  setPhotoCaption,
   type SessionPhoto,
 } from "../session-photo";
 
@@ -129,22 +132,6 @@ describe("buildCaptureUploadInput (per-photo note attaches to the RIGHT photo, n
     expect(inputs.map((i) => i.caption)).toEqual(["zero", null, "two"]);
   });
 
-  it("models a library IMPORT + a CAMERA BATCH: every photo carries ONLY its own caption", () => {
-    // Library multi-select import (no cameraSession), mixed captions.
-    const imported = [
-      photo({ uri: "imp-0", caption: "north wall" }),
-      photo({ uri: "imp-1", caption: "" }),
-    ];
-    // Camera batch (cameraSession set), mixed captions.
-    const batch = [
-      photo({ uri: "cam-0", caption: "", cameraSession: 3 }),
-      photo({ uri: "cam-1", caption: "active leak", cameraSession: 3 }),
-    ];
-    const captions = [...imported, ...batch].map((p) => buildCaptureUploadInput(p, ctx()).caption);
-    // Only the captioned photos carry a description; the blank ones stay null — no bleed either direction.
-    expect(captions).toEqual(["north wall", null, null, "active leak"]);
-  });
-
   it("emits null caption when the photo is blank", () => {
     expect(buildCaptureUploadInput(photo({ caption: "  " }), ctx()).caption).toBeNull();
   });
@@ -157,5 +144,46 @@ describe("buildCaptureUploadInput (per-photo note attaches to the RIGHT photo, n
     // ...but a different session's shot is left as-is.
     const other = photo({ caption: "c", cameraSession: 1, metadata: { takenAt: "t" } });
     expect(buildCaptureUploadInput(other, ctx({ sessionGps: fix, gpsSession: 2 })).metadata.latitude).toBeUndefined();
+  });
+});
+
+// The review-tray reducers are where a caption edit could accidentally bleed onto a sibling (the
+// apply-to-all bug). capture.tsx's setReviewCaption/appendReviewCaption/removeReviewPhoto delegate to
+// these, so proving independence HERE covers the multi-photo review step for BOTH import and camera batch.
+describe("review-tray caption reducers (per-photo edit — the note NEVER bleeds to a sibling)", () => {
+  const photo = (key: string, caption = ""): SessionPhoto => ({
+    key,
+    clientUploadId: `cu-${key}`,
+    uri: `file://${key}.jpg`,
+    metadata: { takenAt: "t" },
+    caption,
+  });
+
+  it("setPhotoCaption edits ONLY the keyed photo; blank siblings stay blank, pre-set siblings unchanged", () => {
+    const photos = [photo("sp-1"), photo("sp-2"), photo("sp-3", "kept")];
+    const out = setPhotoCaption(photos, "sp-2", "north wall");
+    expect(out.map((p) => [p.key, p.caption])).toEqual([
+      ["sp-1", ""],
+      ["sp-2", "north wall"],
+      ["sp-3", "kept"],
+    ]);
+  });
+
+  it("setPhotoCaption is a no-op for a key not in the set (never invents/mislabels a photo)", () => {
+    const photos = [photo("sp-1", "a")];
+    expect(setPhotoCaption(photos, "nope", "x")).toEqual(photos);
+  });
+
+  it("appendPhotoCaption concatenates on the SAME photo (voice), space-joined; empty base → just text; sibling untouched", () => {
+    const photos = [photo("sp-1", "leak"), photo("sp-2")];
+    const out = appendPhotoCaption(photos, "sp-1", "at the valley");
+    expect(out[0].caption).toBe("leak at the valley");
+    expect(out[1].caption).toBe("");
+    expect(appendPhotoCaption(photos, "sp-2", "first")[1].caption).toBe("first");
+  });
+
+  it("removePhoto drops only the keyed photo", () => {
+    const photos = [photo("sp-1"), photo("sp-2"), photo("sp-3")];
+    expect(removePhoto(photos, "sp-2").map((p) => p.key)).toEqual(["sp-1", "sp-3"]);
   });
 });

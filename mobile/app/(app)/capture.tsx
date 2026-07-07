@@ -26,7 +26,7 @@ import {
   uploadOwnerKey,
 } from "../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
-import { buildCaptureUploadInput, type SessionPhoto } from "../../src/capture/session-photo";
+import { buildCaptureUploadInput, setPhotoCaption, appendPhotoCaption, removePhoto, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
 import { DEFAULT_CAPTURE_MODE, loadCaptureMode, saveCaptureMode, type CaptureMode } from "../../src/capture/capture-mode";
 import { Badge, Button, EmptyState } from "../../src/components/ui";
@@ -238,6 +238,9 @@ export default function CaptureScreen() {
   // call after every capture. It never flips the screen into a blocking state: capture stays live.
   const drainingRef = useRef(false);
   const redrainRef = useRef(false);
+  // Synchronous latch so a same-frame double-tap of "Upload" can't run finishReview twice over the same
+  // reviewPhotos snapshot (setReviewBusy(true) only takes effect on the next render).
+  const finishingRef = useRef(false);
   // While offline, auto-drains fired after each shot are suppressed until this timestamp — otherwise every
   // capture would re-attempt the whole backlog and burn a retry on each queued item (they go terminal after
   // MAX_UPLOAD_ATTEMPTS). Lifecycle/user triggers (foreground, manual Retry, owner resume) force through it.
@@ -457,14 +460,14 @@ export default function CaptureScreen() {
   }
 
   function setReviewCaption(key: string, text: string) {
-    setReviewPhotos((prev) => prev.map((p) => (p.key === key ? { ...p, caption: text } : p)));
+    setReviewPhotos((prev) => setPhotoCaption(prev, key, text));
   }
   // Functional append so rapid (voice) transcripts don't clobber each other.
   function appendReviewCaption(key: string, text: string) {
-    setReviewPhotos((prev) => prev.map((p) => (p.key === key ? { ...p, caption: p.caption ? `${p.caption} ${text}` : text } : p)));
+    setReviewPhotos((prev) => appendPhotoCaption(prev, key, text));
   }
   function removeReviewPhoto(key: string) {
-    setReviewPhotos((prev) => prev.filter((p) => p.key !== key));
+    setReviewPhotos((prev) => removePhoto(prev, key));
   }
   function cancelReview() {
     if (reviewBusy) return;
@@ -474,7 +477,7 @@ export default function CaptureScreen() {
   // Done: stream every reviewed photo with ITS OWN caption (blank → no description). Reuses the exact
   // single-shot stream path so per-photo captions ride to files.description unchanged.
   async function finishReview() {
-    if (reviewBusy) return;
+    if (reviewBusy || finishingRef.current) return;
     const photos = reviewPhotos;
     const ctx = reviewCtx;
     if (!ctx || photos.length === 0) {
@@ -482,12 +485,14 @@ export default function CaptureScreen() {
       setReviewCtx(null);
       return;
     }
+    finishingRef.current = true;
     setReviewBusy(true);
     try {
       for (const p of photos) {
         await streamPhoto(p, ctx);
       }
     } finally {
+      finishingRef.current = false;
       setReviewBusy(false);
       setReviewPhotos([]);
       setReviewCtx(null);

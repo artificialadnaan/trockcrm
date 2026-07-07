@@ -97,3 +97,22 @@ export function buildCaptureUploadInput(
     clientUploadId: photo.clientUploadId,
   };
 }
+
+/**
+ * Review-tray caption reducers. Each edits exactly ONE photo (matched by key) and returns a new array;
+ * every other photo is untouched, so a caption can never bleed across the batch (per-photo only). Extracted
+ * from the capture screen so the independence is unit-proven without a device.
+ */
+export function setPhotoCaption(photos: SessionPhoto[], key: string, text: string): SessionPhoto[] {
+  return photos.map((p) => (p.key === key ? { ...p, caption: text } : p));
+}
+
+/** Append (used by voice dictation) so rapid transcripts concatenate on the SAME photo instead of clobbering. */
+export function appendPhotoCaption(photos: SessionPhoto[], key: string, text: string): SessionPhoto[] {
+  return photos.map((p) => (p.key === key ? { ...p, caption: p.caption ? `${p.caption} ${text}` : text } : p));
+}
+
+/** Drop a staged photo from the review set (by key). */
+export function removePhoto(photos: SessionPhoto[], key: string): SessionPhoto[] {
+  return photos.filter((p) => p.key !== key);
+}
