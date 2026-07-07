@@ -89,10 +89,11 @@ export function TeamCommissionsPage() {
   const additive = useMemo(() => rows.reduce(
     (a, r) => ({
       earned: a.earned + displayedEarned(r),
+      wonUnsignedCommission: a.wonUnsignedCommission + r.wonUnsignedCommission,
       potential: a.potential + r.potentialCommission,
       activities: a.activities + r.totalActivities,
     }),
-    { earned: 0, potential: 0, activities: 0 },
+    { earned: 0, wonUnsignedCommission: 0, potential: 0, activities: 0 },
   ), [rows]);
   const office = data?.officeTotals ?? { activeDeals: 0, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0 };
   const maxPipeline = useMemo(() => rows.reduce((m, r) => Math.max(m, r.pipelineValue), 0), [rows]);
@@ -105,14 +106,15 @@ export function TeamCommissionsPage() {
   const sortCols: SortColumn<Row>[] = [
     { key: "rep", type: "text", accessor: (r) => r.repName },
     { key: "earned", type: "number", accessor: (r) => displayedEarned(r) },
+    { key: "unsignedcomm", type: "number", accessor: (r) => r.wonUnsignedCommission },
     // Tie-break equal values by deal count so a zero-value-but-counted won·unsigned row (a won deal with
     // no awarded/bid/DD amount) outranks a truly-empty row instead of collapsing to the same position.
     { key: "wonunsigned", type: "number", accessor: (r) => r.wonUnsignedValue, compare: (a, b) => (a.wonUnsignedValue - b.wonUnsignedValue) || (a.wonUnsignedCount - b.wonUnsignedCount) },
     { key: "potential", type: "number", accessor: (r) => r.potentialCommission },
-    { key: "active", type: "number", accessor: (r) => r.activeDeals },
     { key: "pipeline", type: "number", accessor: (r) => r.pipelineValue },
     { key: "funnel", type: "number", accessor: (r) => r.leads + r.qualifiedLeads + r.opportunities },
     { key: "estimating", type: "number", accessor: (r) => r.estimating },
+    { key: "active", type: "number", accessor: (r) => r.activeDeals },
     { key: "activity", type: "number", accessor: (r) => r.totalActivities },
     { key: "newmix", type: "number", accessor: (r) => r.newCustomerShare },
   ];
@@ -180,13 +182,14 @@ export function TeamCommissionsPage() {
                 <tr className="border-b border-slate-200">
                   {sortHead("rep", "Rep", false)}
                   {sortHead("earned", "Reserved")}
+                  {sortHead("unsignedcomm", "Unsigned comm.")}
                   {sortHead("wonunsigned", "Won · unsigned")}
                   {sortHead("potential", "Potential")}
-                  {sortHead("active", "Active")}
                   {sortHead("pipeline", "Pipeline")}
                   {sortHead("funnel", "L / Q / O")}
                   {sortHead("estimating", "Estimating")}
                   <th className={`px-3 py-2.5 text-right ${HEAD}`}>Calls / Emails / Mtgs</th>
+                  {sortHead("active", "Active")}
                   {sortHead("activity", "Activity")}
                   {sortHead("newmix", "New Mix")}
                 </tr>
@@ -227,6 +230,10 @@ export function TeamCommissionsPage() {
                         <Drill row={row} metric="earned" money zeroDim={row.totalEarnedCommission === 0} onDrill={onDrill}>{usdExact(row.totalEarnedCommission)}</Drill>
                       )}
                     </td>
+                    <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">
+                      {/* Projected commission on this rep's won-but-unsigned deals (won·unsigned value × their rate). */}
+                      {usdExact(row.wonUnsignedCommission)}
+                    </td>
                     <td className="px-3 py-2.5 text-right">
                       {/* Drill on COUNT, not value: a won·unsigned deal can lack an awarded/bid/DD amount
                           (value 0) yet still exist — gating on value would hide it, and this is its only surface. */}
@@ -238,15 +245,12 @@ export function TeamCommissionsPage() {
                     <td className="px-3 py-2.5 text-right">
                       <Drill row={row} metric="potential" money zeroDim={row.potentialCommission === 0} onDrill={onDrill}>{usdExact(row.potentialCommission)}</Drill>
                     </td>
-                    <td className="px-3 py-2.5 text-right">
-                      <Drill row={row} metric="active" zeroDim={row.activeDeals === 0} onDrill={onDrill}>{int(row.activeDeals)}</Drill>
-                    </td>
                     <td className="px-3 py-2.5">
                       <div className="flex items-center justify-end gap-2">
+                        <Drill row={row} metric="pipeline" money zeroDim={row.pipelineValue === 0} onDrill={onDrill}>{usdExact(row.pipelineValue)}</Drill>
                         <div className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-slate-100 sm:block">
                           <div className="h-full rounded-full bg-violet-400" style={{ width: `${barPct(row.pipelineValue, maxPipeline)}%` }} />
                         </div>
-                        <Drill row={row} metric="pipeline" money zeroDim={row.pipelineValue === 0} onDrill={onDrill}>{usdExact(row.pipelineValue)}</Drill>
                       </div>
                     </td>
                     <td className="px-3 py-2.5 text-right">
@@ -270,6 +274,9 @@ export function TeamCommissionsPage() {
                         <Drill row={row} metric="meetings" zeroDim={row.meetings === 0} onDrill={onDrill}>{row.meetings}</Drill>
                       </span>
                     </td>
+                    <td className="px-3 py-2.5 text-right">
+                      <Drill row={row} metric="active" zeroDim={row.activeDeals === 0} onDrill={onDrill}>{int(row.activeDeals)}</Drill>
+                    </td>
                     <td className="px-3 py-2.5 text-right tabular-nums text-slate-700">{int(row.totalActivities)}</td>
                     <td className="px-3 py-2.5 text-right">
                       <span className={`rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums ${row.meetsNewCustomerShare ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
@@ -283,13 +290,14 @@ export function TeamCommissionsPage() {
                 <tr className="border-t-2 border-slate-300 bg-slate-50 font-black tabular-nums text-slate-800">
                   <td className="px-3 py-2.5 text-left uppercase tracking-wide text-[11px] text-slate-500">Team total</td>
                   <td className="px-3 py-2.5 text-right text-emerald-700">{usdExact(additive.earned)}</td>
+                  <td className="px-3 py-2.5 text-right text-emerald-700">{usdExact(additive.wonUnsignedCommission)}</td>
                   <td className="px-3 py-2.5 text-right">{wonUnsignedLabel(office.wonUnsignedValue, office.wonUnsignedCount)}</td>
                   <td className="px-3 py-2.5 text-right">{usdExact(additive.potential)}</td>
-                  <td className="px-3 py-2.5 text-right">{int(office.activeDeals)}</td>
                   <td className="px-3 py-2.5 text-right">{usdExact(office.pipelineValue)}</td>
                   <td className="px-3 py-2.5" />
                   <td className="px-3 py-2.5" />
                   <td className="px-3 py-2.5" />
+                  <td className="px-3 py-2.5 text-right">{int(office.activeDeals)}</td>
                   <td className="px-3 py-2.5 text-right">{int(additive.activities)}</td>
                   <td className="px-3 py-2.5" />
                 </tr>

@@ -16,7 +16,7 @@ const workspace = {
       repId: "rep-1", repName: "Kaleb Marshall", isRep: true,
       totalEarnedCommission: 0, potentialCommission: 261029.68, floorRemaining: 0,
       newCustomerShare: 0, meetsNewCustomerShare: true,
-      activeDeals: 23, pipelineValue: 11601319, wonUnsignedValue: 500000, wonUnsignedCount: 1,
+      activeDeals: 23, pipelineValue: 11601319, wonUnsignedValue: 500000, wonUnsignedCount: 1, wonUnsignedCommission: 25000,
       leads: 1, qualifiedLeads: 0, opportunities: 0,
       estimating: 23, calls: 0, emails: 517, meetings: 0, notes: 0, totalActivities: 721,
     },
@@ -26,7 +26,7 @@ const workspace = {
       repId: "rep-2", repName: "Sidney Gibson", isRep: true,
       totalEarnedCommission: 0, potentialCommission: 127213.96, floorRemaining: 0,
       newCustomerShare: 0, meetsNewCustomerShare: true,
-      activeDeals: 37, pipelineValue: 21202326.99, wonUnsignedValue: 0, wonUnsignedCount: 2,
+      activeDeals: 37, pipelineValue: 21202326.99, wonUnsignedValue: 0, wonUnsignedCount: 2, wonUnsignedCommission: 0,
       leads: 0, qualifiedLeads: 0, opportunities: 0,
       estimating: 37, calls: 0, emails: 0, meetings: 0, notes: 0, totalActivities: 0,
     },
@@ -36,7 +36,7 @@ const workspace = {
       repId: "dir-1", repName: "Chase Kelly", isRep: false,
       totalEarnedCommission: 250, potentialCommission: 0, floorRemaining: 0,
       newCustomerShare: 0, meetsNewCustomerShare: true,
-      activeDeals: 0, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0,
+      activeDeals: 0, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0, wonUnsignedCommission: 0,
       leads: 0, qualifiedLeads: 0, opportunities: 0,
       estimating: 0, calls: 0, emails: 0, meetings: 0, notes: 0, totalActivities: 0,
     },
@@ -88,6 +88,15 @@ describe("TeamCommissionsPage", () => {
     expect(container.textContent).toContain("$30,000,000.00");
     expect(container.textContent).not.toContain("$32,803,645.99");
     expect(container.textContent).toContain("Team total");
+  });
+
+  it("shows the Unsigned comm. column (won·unsigned value × the rep's rate) and sums it in the footer", async () => {
+    const { container } = await render();
+    expect(container.textContent).toContain("Unsigned comm."); // the new column header
+    // Kaleb's projected commission on his $500k unsigned wins is $25,000; Sidney + Chase are $0, so the additive
+    // footer total equals Kaleb's cell — the value appears in both the row cell AND the team-total footer.
+    const matches = container.textContent?.match(/\$25,000\.00/g) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(2);
   });
 
   it("clicking a rep's pipeline opens the drill drawer for that rep+metric", async () => {
@@ -159,7 +168,7 @@ describe("TeamCommissionsPage", () => {
     repId: "rep-held", repName: "Hold Below",
     totalEarnedCommission: 0, heldEarnedCommission: 4340, floorMet: false, floorRemaining: 4995660,
     potentialCommission: 0, newCustomerShare: 0, meetsNewCustomerShare: true,
-    activeDeals: 1, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0,
+    activeDeals: 1, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0, wonUnsignedCommission: 0,
     leads: 0, qualifiedLeads: 0, opportunities: 0,
     estimating: 0, calls: 0, emails: 0, meetings: 0, notes: 0, totalActivities: 0,
   };

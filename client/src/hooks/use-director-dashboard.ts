@@ -195,6 +195,8 @@ export interface DirectorCommissionWorkspaceData {
     pipelineValue: number;
     wonUnsignedValue: number;
     wonUnsignedCount: number;
+    // Projected commission on the rep's won-but-unsigned deals (wonUnsignedValue × their base commission rate).
+    wonUnsignedCommission: number;
     leads: number;
     qualifiedLeads: number;
     opportunities: number;
