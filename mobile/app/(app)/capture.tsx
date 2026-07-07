@@ -610,10 +610,17 @@ export default function CaptureScreen() {
     }
   }
   // Removing a staged photo drops it from the durable DRAFT (manifest + its copied file) and the local review
-  // set — so a photo pulled out of the tray is never enqueued on Done or recovered on a crash.
+  // set — so a photo pulled out of the tray is never enqueued on Done or recovered on a crash. AWAIT in-flight
+  // staging first (like cancelReview): stageDraftPhoto copies the file THEN appends the manifest under the lock,
+  // so a Remove that wins the lock before the append lands would no-op and the stage would then RE-ADD the
+  // removed photo — recovered + uploaded on a later crash. Draining staging guarantees the append is present so
+  // removeDraftPhotos actually drops it.
   async function removeReviewPhoto(key: string) {
     setReviewPhotos((prev) => removePhoto(prev, key));
-    if (ownerKey) await removeDraftPhotos(ownerKey, [key]).catch(() => undefined);
+    if (ownerKey) {
+      await awaitStaging();
+      await removeDraftPhotos(ownerKey, [key]).catch(() => undefined);
+    }
   }
   // Cancel: DISCARD the durable draft, then clear the review UI. Order is load-bearing — reviewOpenRef (from
   // reviewPhotos) gates crash-recovery, so we delete the draft FIRST (while it still reads "review open") so a

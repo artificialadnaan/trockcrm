@@ -105,6 +105,11 @@ export async function loadDraft(ownerKey: string): Promise<StagedDraftItem[]> {
  * the durable item (its `uri` is the copy inside the draft dir).
  */
 export async function stageDraftPhoto(ownerKey: string, photo: SessionPhoto, ctx: DraftCtx): Promise<StagedDraftItem> {
+  // Refuse an empty owner: sanitizeOwnerKey("") is "anon", but loadDraft/clearDraft always run with the REAL
+  // owner, so an anon draft is never recovered or cleared (permanent file leak + a silently-unrecovered photo).
+  // Throw — the caller's staging catch keeps the raw uri, so the photo still enqueues from its in-session uri
+  // at Done. Mirrors the empty-owner short-circuit on every sibling mutator (only this one WRITES durable state).
+  if (!ownerKey) throw new Error("stageDraftPhoto: missing ownerKey");
   await ensureDir(ownerKey);
   const dir = ownerDir(ownerKey);
   const dotExt = photo.uri.includes(".") ? photo.uri.slice(photo.uri.lastIndexOf(".")).split(/[?#]/)[0] : ".jpg";

@@ -113,6 +113,15 @@ describe("review-draft: stage + loadDraft round-trip (staged photos never touch 
     expect((await loadDraft("u1")).map((i) => i.key)).toEqual(["a"]);
     expect((await loadDraft("u2")).map((i) => i.key)).toEqual(["b"]);
   });
+
+  it("throws on an empty ownerKey and stages NOTHING — never an unrecoverable anon bucket", async () => {
+    // sanitizeOwnerKey("") is "anon", but loadDraft/clearDraft run with the REAL owner, so an anon draft is
+    // never recovered or cleared (leak + a silently-unrecovered photo). Guard: refuse to stage without an owner
+    // so the caller's staging catch keeps the raw uri (the photo still enqueues from its in-session uri at Done).
+    fs.__store.set("file:///src/x.jpg", "bytes-of-x");
+    await expect(stageDraftPhoto("", photo({ key: "x" }), ctx)).rejects.toThrow();
+    expect([...fs.__store.keys()].some((k) => k.includes("review-draft/anon/"))).toBe(false);
+  });
 });
 
 describe("review-draft: updateDraftCaption (crash preserves captions typed so far)", () => {
