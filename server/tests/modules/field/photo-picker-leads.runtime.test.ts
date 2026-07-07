@@ -70,7 +70,7 @@ beforeAll(async () => {
       updated_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE TABLE ${T}.deals (
-      id uuid PRIMARY KEY, sales_source_user_id uuid, name text NOT NULL, deal_number text, pipeline_disposition text,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text NOT NULL, deal_number text, project_number text, pipeline_disposition text,
       company_id uuid, property_id uuid, primary_contact_id uuid, stage_id uuid, assigned_rep_id uuid,
       source text, description text, property_address text, property_city text, property_state text,
       bid_board_stage_slug text,

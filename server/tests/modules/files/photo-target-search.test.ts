@@ -83,10 +83,13 @@ describe("buildPhotoTargetLeadSearchCondition", () => {
 describe("buildPhotoTargetDealSearchCondition", () => {
   const sqlText = () => renderSql(buildPhotoTargetDealSearchCondition("oak street"));
 
-  it("matches deal name and deal number", () => {
+  it("matches deal name, deal number, AND the canonical project number", () => {
     const text = sqlText();
     expect(text).toContain('"deals"."name"');
     expect(text).toContain('"deals"."deal_number"');
+    // The picker DISPLAYS project_number, so typing the visible DFW/ATL number must find the deal —
+    // otherwise a HubSpot-imported deal (deal_number = HS-...) is invisible when searched by its number.
+    expect(text).toContain('"deals"."project_number"');
   });
 
   it("matches the joined property address and contact name and source", () => {
@@ -194,5 +197,60 @@ describe("searchPhotoUploadTargets ORDER BY", () => {
     const concatThen3 = /concat\([^)]*first_name[^)]*last_name[^)]*\) ilike \$\d+ escape[^)]*then 3/;
     expect(leadOrder!).toMatch(concatThen3);
     expect(dealOrder!).toMatch(concatThen3);
+  });
+});
+
+// The picker must DISPLAY the canonical DFW/ATL project number, never the raw deals.deal_number (which is
+// the HubSpot import id for HubSpot deals, and a change order's own generated number). This mirrors the
+// resolver the field project LIST and NEARBY paths already use — the search path was the one PR #784 missed.
+// For dealsOnly=true only the single deal query is awaited, so a queue-returning chainable mock is enough.
+function makeDealRowsDb(dealRows: unknown[]) {
+  const builder: Record<string, unknown> = {};
+  for (const method of ["select", "from", "leftJoin", "where", "orderBy", "limit"]) {
+    builder[method] = () => builder;
+  }
+  builder.then = (resolve: (rows: unknown[]) => unknown) => resolve(dealRows);
+  return builder;
+}
+
+describe("searchPhotoUploadTargets — canonical recordNumber (never the raw deal_number)", () => {
+  const dealRow = (o: Record<string, unknown>) => ({
+    id: "d",
+    name: "Denton Student Housing Exterior",
+    dealNumber: "HS-1",
+    projectNumber: null,
+    pipelineDisposition: "won",
+    stageName: "Won",
+    companyName: "B.HOM Student Living",
+    lastUpdatedAt: new Date("2026-06-01T00:00:00Z"),
+    relevance: 1,
+    ...o,
+  });
+
+  it("HubSpot-imported deal: recordNumber is the project_number, never the HS- deal_number", async () => {
+    const db = makeDealRowsDb([dealRow({ id: "parent", dealNumber: "HS-275293729528", projectNumber: "DFW-1-04726-ab" })]);
+    const { targets } = await searchPhotoUploadTargets(db as never, { search: "denton", dealsOnly: true });
+    expect(targets.find((t) => t.id === "parent")?.recordNumber).toBe("DFW-1-04726-ab");
+  });
+
+  it("change order: recordNumber is the canonical project_number, not its own generated deal_number", async () => {
+    const db = makeDealRowsDb([dealRow({ id: "co", dealNumber: "DFW-9-17426-aa", projectNumber: "DFW-1-04726-ab" })]);
+    const { targets } = await searchPhotoUploadTargets(db as never, { search: "denton", dealsOnly: true });
+    expect(targets.find((t) => t.id === "co")?.recordNumber).toBe("DFW-1-04726-ab");
+  });
+
+  it("bid-board deal with empty project_number: falls back to its (non-HS) deal_number", async () => {
+    const db = makeDealRowsDb([dealRow({ id: "bb", dealNumber: "DFW-3-16726-aa", projectNumber: null })]);
+    const { targets } = await searchPhotoUploadTargets(db as never, { search: "x", dealsOnly: true });
+    expect(targets.find((t) => t.id === "bb")?.recordNumber).toBe("DFW-3-16726-aa");
+  });
+
+  it("never leaks an HS- prefixed number to the picker (pending resolves to null)", async () => {
+    const db = makeDealRowsDb([
+      dealRow({ id: "a", dealNumber: "HS-275293729528", projectNumber: "DFW-1-04726-ab" }),
+      dealRow({ id: "b", dealNumber: "HS-9999", projectNumber: null }),
+    ]);
+    const { targets } = await searchPhotoUploadTargets(db as never, { search: "denton", dealsOnly: true });
+    for (const t of targets) expect(t.recordNumber ?? "").not.toMatch(/^HS-/i);
   });
 });

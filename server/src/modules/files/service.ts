@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { companies, contacts, deals, files, leads, pipelineStageConfig, properties, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import type { FileCategory, PhotoCategory } from "@trock-crm/shared/types";
+import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
 import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
@@ -1089,6 +1090,9 @@ export function buildPhotoTargetDealSearchCondition(search: string): SQL {
   return or(
     sql`${deals.name} ILIKE ${term} ESCAPE '\\'`,
     sql`${deals.dealNumber} ILIKE ${term} ESCAPE '\\'`,
+    // The picker DISPLAYS the canonical project_number, so it must be searchable too — otherwise a
+    // HubSpot-imported deal (deal_number = HS-…) can't be found by the DFW/ATL number the user sees.
+    sql`${deals.projectNumber} ILIKE ${term} ESCAPE '\\'`,
     sql`${deals.description} ILIKE ${term} ESCAPE '\\'`,
     sql`${deals.source} ILIKE ${term} ESCAPE '\\'`,
     sql`${companies.name} ILIKE ${term} ESCAPE '\\'`,
@@ -1231,6 +1235,7 @@ export async function searchPhotoUploadTargets(
         [
           deals.name,
           deals.dealNumber,
+          deals.projectNumber,
           companies.name,
           properties.name,
           properties.address,
@@ -1276,6 +1281,7 @@ export async function searchPhotoUploadTargets(
         id: deals.id,
         name: deals.name,
         dealNumber: deals.dealNumber,
+        projectNumber: deals.projectNumber,
         pipelineDisposition: deals.pipelineDisposition,
         stageName: pipelineStageConfig.name,
         companyName: companies.name,
@@ -1313,7 +1319,10 @@ export async function searchPhotoUploadTargets(
       id: row.id,
       type: row.pipelineDisposition === "opportunity" ? ("opportunity" as const) : ("deal" as const),
       name: row.name,
-      recordNumber: row.dealNumber,
+      // Show the canonical DFW/ATL project number (resolver), never the raw deal_number — which is the
+      // HubSpot import id for HubSpot deals and a change order's own generated number. Mirrors the field
+      // project-list + nearby paths (projects-service.ts); this search path was the one PR #784 missed.
+      recordNumber: resolveDealDisplayNumber({ projectNumber: row.projectNumber, dealNumber: row.dealNumber }),
       stageName: row.stageName ?? null,
       companyName: row.companyName ?? null,
       lastUpdatedAt: row.lastUpdatedAt,
