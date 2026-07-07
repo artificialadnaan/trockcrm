@@ -179,7 +179,7 @@ export function TeamCommissionsPage() {
               <thead className="bg-slate-50">
                 <tr className="border-b border-slate-200">
                   {sortHead("rep", "Rep", false)}
-                  {sortHead("earned", "Earned")}
+                  {sortHead("earned", "Reserved")}
                   {sortHead("wonunsigned", "Won · unsigned")}
                   {sortHead("potential", "Potential")}
                   {sortHead("active", "Active")}
