@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { PROJECT_TYPE_OPTIONS } from "@trock-crm/shared/types";
 import { useAuth } from "@/lib/auth";
 import { castRfpVote, useRfpVote } from "@/hooks/use-rfp-vote";
-import { useSalesReps } from "@/hooks/use-sales-reps";
+import { useRfpEstimators } from "@/hooks/use-rfp-estimators";
 import {
   type VoteFormFields,
   currentTypeCode,
@@ -69,21 +69,21 @@ export function RfpVotePage() {
     setFields(deal ? initFormFromDeal(deal) : null);
   }, [loadedDealId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The estimator dropdown reuses the owner/reassignment roster (active office CRM users). Loaded only when a first
-  // approver could actually edit. Options are display names (SyncHub-parity: deals.estimator is a free-text name).
+  // The estimator dropdown mirrors SyncHub's estimator roster (server falls back to the active office's CRM
+  // roster when SyncHub is unreachable). Loaded only when a first approver could actually edit. Options are
+  // display names (SyncHub-parity: deals.estimator is a free-text name).
   const canEditRound =
     deal != null && deal.rfpVoteState != null && deal.rfpApprovalStatus === "pending" && deal.rfpVoteState.approvals < 1;
-  const { salesReps } = useSalesReps(officeId ?? undefined, {
-    purpose: "deal-reassignment",
+  const { estimators: rfpEstimators } = useRfpEstimators(officeId ?? undefined, {
     enabled: Boolean(user) && canEditRound,
   });
   const estimatorNames = useMemo(() => {
     const names = new Set<string>();
-    salesReps.forEach((r) => r.displayName && names.add(r.displayName));
+    rfpEstimators.forEach((e) => e.name && names.add(e.name));
     const current = deal?.estimator?.trim();
     if (current && !names.has(current)) names.add(current);
     return Array.from(names).sort((a, b) => a.localeCompare(b));
-  }, [salesReps, deal?.estimator]);
+  }, [rfpEstimators, deal?.estimator]);
 
   if (!user) {
     return (
