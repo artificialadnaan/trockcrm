@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { PROJECT_TYPE_VALUE_BY_CODE } from "@trock-crm/shared/types";
+import { PROJECT_TYPE_VALUE_BY_CODE, isProjectTypeValue, normalizeProjectType } from "@trock-crm/shared/types";
 import { isHubspotImportedDealNumber } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildIntendedProjectNumber } from "../../services/projectNumber.js";
@@ -163,6 +163,15 @@ export function buildRfpVoteDealUpdate(
   // deals-list project_type_id filter + getDealDetail's config-name display both track the new type — this pure fn
   // only records the changed VALUE.
   let effectiveTypeValue: string | null = deal.projectType ?? null;
+  // When project_type is absent/unmappable, infer the effective type from the deal's CURRENT project-number digit —
+  // mirroring the form's currentTypeCode. Otherwise a number-only edit (the voter leaves the type dropdown showing
+  // the digit-derived type) wouldn't get the type-wins rewrite, and the saved/create number could disagree with the
+  // type the voter saw selected.
+  if (!effectiveTypeValue || !isProjectTypeValue(normalizeProjectType(effectiveTypeValue))) {
+    const digit = (deal.projectNumber ?? "").match(/^[A-Za-z]{2,4}-([1-9])-/)?.[1];
+    const inferred = digit ? PROJECT_TYPE_VALUE_BY_CODE[digit] : undefined;
+    if (inferred) effectiveTypeValue = inferred;
+  }
   if (has(fields, "project_types")) {
     const code = trimmed(fields.project_types);
     if (code.length > 0) {

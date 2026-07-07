@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { PoolClient } from "pg";
-import { deals, leads, rfpVotes, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, jobQueue, leads, rfpVotes, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
   computeRfpVoteState,
@@ -468,6 +468,24 @@ export async function castRfpVote(
       if (dealUpdate.bidDueDate !== undefined && locked.source_lead_id) {
         const ymd = (dealUpdate.bidDueDate as Date).toISOString().slice(0, 10);
         await args.tenantDb.update(leads).set({ bidDueDate: ymd }).where(eq(leads.id, locked.source_lead_id as string));
+      }
+      // Re-geocode on an address change (mirrors updateDeal) — the raw write updates the address text but not the
+      // deals lat/lng, so /deals/nearby + map/distance features would otherwise keep using stale coordinates. Awaited
+      // (unlike updateDeal's fire-and-forget) so it commits atomically with the vote on this still-open tenant txn.
+      if ("propertyAddress" in dealUpdate || "propertyCity" in dealUpdate || "propertyState" in dealUpdate) {
+        const addr = (dealUpdate.propertyAddress ?? lockedDeal.propertyAddress) as string | null;
+        const city = (dealUpdate.propertyCity ?? lockedDeal.propertyCity) as string | null;
+        const state = (dealUpdate.propertyState ?? lockedDeal.propertyState) as string | null;
+        const zip = (dealUpdate.propertyZip ?? lockedDeal.propertyZip) as string | null;
+        if (addr) {
+          await args.tenantDb.insert(jobQueue).values({
+            jobType: "geocode_deal",
+            payload: { dealId: args.deal.id, address: `${addr}, ${city || ""} ${state || ""} ${zip || ""}`.trim() },
+            officeId: args.officeId ?? null,
+            status: "pending",
+            runAfter: new Date(),
+          });
+        }
       }
       // Forensic trail: this authorized write bypasses updateDeal's activity log, so record the field changes here
       // (mirrors updateDeal's logActivity). Audit context is threaded from the route; absent in direct-service tests,

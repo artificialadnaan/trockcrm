@@ -105,6 +105,15 @@ describe("buildRfpVoteDealUpdate", () => {
     expect(u.projectType).toBeUndefined(); // type not changed
   });
 
+  it("infers the effective type from the current number digit when project_type is absent (number-only edit)", () => {
+    // project_type null, but the number encodes type 3 (roofing) — the form shows Roofing via currentTypeCode's
+    // digit fallback. A number-only edit to DFW-9-… must be rewritten back to the inferred type's digit (3).
+    const noTypeDeal = { ...baseDeal, projectType: null, projectNumber: "DFW-3-31825-aa" };
+    const u = buildRfpVoteDealUpdate({ project_number: "DFW-9-99999-bb" }, noTypeDeal);
+    expect(u.projectNumber).toBe("DFW-3-99999-bb");
+    expect(u.projectType).toBeUndefined();
+  });
+
   it("rejects a currency-only amount (would parse to 0)", () => {
     expectThrowCode(() => buildRfpVoteDealUpdate({ amount: "$" }, baseDeal), "RFP_VOTE_EDIT_INVALID");
     expectThrowCode(() => buildRfpVoteDealUpdate({ amount: ",," }, baseDeal), "RFP_VOTE_EDIT_INVALID");

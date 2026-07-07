@@ -411,6 +411,23 @@ describe("castRfpVote — edited fields (first-YES commits + locks)", () => {
     expect(row.project_type_id).toBe("00000000-0000-0000-0000-0000000003c3"); // resolved Roofing config id (not null/stale)
   });
 
+  it("enqueues a geocode_deal job when the first approver edits the address", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null,
+        editedFields: { address: "500 New Blvd", city: "Plano", state: "TX", zip: "75024" },
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    const jobs = (await pg!.query(`SELECT payload FROM public.job_queue WHERE job_type='geocode_deal'`)).rows as any[];
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.dealId).toBe(DEAL);
+    expect(jobs[0].payload.address).toContain("500 New Blvd");
+  });
+
   it("records a description-history row when the first approver edits the description", async () => {
     pg = await setupWithNumber();
     await pg.query(`UPDATE deals SET description='old scope' WHERE id=$1`, [DEAL]);
