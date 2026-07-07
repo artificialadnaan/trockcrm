@@ -105,6 +105,24 @@ describe("useRfpEstimators", () => {
     await vi.waitFor(() => expect(seen[seen.length - 1]).toEqual([]));
   });
 
+  it("exposes error state and leaves estimators empty when the request rejects (non-abort)", async () => {
+    apiMock.mockRejectedValue(new Error("estimators service is down"));
+    const states: Array<{ loading: boolean; error: string | null; estimators: RfpEstimatorOption[] }> = [];
+    function Probe() {
+      const { estimators, loading, error } = useRfpEstimators(undefined);
+      states.push({ loading, error, estimators });
+      return null;
+    }
+    mount(createElement(Probe));
+    await vi.waitFor(() => expect(apiMock).toHaveBeenCalled());
+    await vi.waitFor(() => {
+      const last = states[states.length - 1];
+      expect(last.loading).toBe(false);
+      expect(last.error).toBe("estimators service is down");
+    });
+    expect(states[states.length - 1].estimators).toEqual([]);
+  });
+
   it("aborts the in-flight fetch when officeId changes so a stale response cannot win", async () => {
     const signals: AbortSignal[] = [];
     apiMock.mockImplementation((_path: string, init: any) => {

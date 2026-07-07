@@ -974,10 +974,14 @@ router.get("/sources", async (req, res, next) => {
 // roster when SyncHub is unreachable. Registered before "/:id" so it isn't captured as a deal id.
 router.get("/estimators", async (req, res, next) => {
   try {
-    const { estimators } = await getRfpEstimators({
-      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
-    });
+    // Release the tenant transaction/pooled client BEFORE the outbound SyncHub wait. This route never
+    // touches req.tenantDb (the roster fallback uses the global `db`), and on a cold cache getRfpEstimators
+    // can block up to the SyncHub timeout — holding the tenant tx open across that would pin pooled
+    // connections idle-in-transaction under a burst while SyncHub is slow. The middleware's `committed`
+    // flag makes the res-close cleanup a no-op, so a later throw here still routes cleanly to next(err).
+    const officeId = req.user!.activeOfficeId ?? req.user!.officeId;
     await req.commitTransaction!();
+    const { estimators } = await getRfpEstimators({ officeId });
     res.json({ estimators });
   } catch (err) {
     next(err);
