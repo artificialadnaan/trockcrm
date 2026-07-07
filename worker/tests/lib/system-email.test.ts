@@ -33,28 +33,33 @@ describe("worker SYSTEM_EMAIL_BCC", () => {
     expect(payload.bcc).toEqual(["monitor@example.com"]);
   });
 
-  it("SKIPS the global bcc for an idempotency-keyed send — payload stays byte-stable across retries", async () => {
+  it("bccs SYSTEM_EMAIL_BCC for idempotency-KEYED sends too (full coverage) and passes the key through", async () => {
     vi.stubEnv("SYSTEM_EMAIL_BCC", "monitor@example.com");
 
     await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>", { idempotencyKey: "k-1" });
 
     const payload = sendMock.mock.calls[0][0];
-    expect(payload.to).toEqual(["alice@example.com"]);
-    // No env bcc added → the Resend payload is identical whether SYSTEM_EMAIL_BCC is set or not, so a keyed retry
-    // across a SYSTEM_EMAIL_BCC rollout can still dedupe on the stable key instead of being rejected.
-    expect(payload.bcc).toBeUndefined();
+    expect(payload.bcc).toEqual(["monitor@example.com"]);
+    expect(sendMock.mock.calls[0][1]).toEqual({ idempotencyKey: "k-1" });
   });
 
-  it("keeps an explicit caller bcc on a keyed send (only the ENV bcc is skipped)", async () => {
-    vi.stubEnv("SYSTEM_EMAIL_BCC", "monitor@example.com");
+  it("appends the global bcc after a caller bcc and de-dupes case-insensitively within the list", async () => {
+    vi.stubEnv("SYSTEM_EMAIL_BCC", "monitor@example.com, Monitor@example.com, audit@example.com");
 
-    await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>", {
-      idempotencyKey: "k-1",
-      bcc: "audit@example.com",
-    });
+    await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>", { bcc: "existing@example.com" });
 
     const payload = sendMock.mock.calls[0][0];
-    expect(payload.bcc).toEqual(["audit@example.com"]); // caller bcc preserved; env bcc NOT appended
+    // The duplicate "Monitor@example.com" is dropped; caller bcc kept, global bccs appended.
+    expect(payload.bcc).toEqual(["existing@example.com", "monitor@example.com", "audit@example.com"]);
+  });
+
+  it("does NOT bcc an address already on the to/cc (de-duped, case-insensitive)", async () => {
+    vi.stubEnv("SYSTEM_EMAIL_BCC", "Alice@Example.com, monitor@example.com");
+
+    await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>");
+
+    const payload = sendMock.mock.calls[0][0];
+    expect(payload.bcc).toEqual(["monitor@example.com"]); // alice dropped — already the recipient
   });
 
   it("is ignored under EMAIL_OVERRIDE_RECIPIENT (redirect wins)", async () => {
@@ -68,9 +73,22 @@ describe("worker SYSTEM_EMAIL_BCC", () => {
     expect(payload.bcc).toBeUndefined();
   });
 
-  it("passes the idempotencyKey through to Resend unchanged", async () => {
-    await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>", { idempotencyKey: "k-9" });
+  it("treats a Resend same-key/different-payload conflict as an already-delivered success (no strand)", async () => {
+    sendMock.mockResolvedValueOnce({
+      data: null,
+      error: { statusCode: 422, name: "invalid_idempotency_key", message: "Idempotency key already used with a different payload" },
+    });
 
-    expect(sendMock.mock.calls[0][1]).toEqual({ idempotencyKey: "k-9" });
+    const result = await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>", { idempotencyKey: "k-1" });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("still FAILS on a non-conflict Resend error", async () => {
+    sendMock.mockResolvedValueOnce({ data: null, error: { statusCode: 500, name: "internal_error", message: "boom" } });
+
+    const result = await sendSystemEmailWithMetadata("alice@example.com", "Subject", "<p>Body</p>", { idempotencyKey: "k-1" });
+
+    expect(result.success).toBe(false);
   });
 });

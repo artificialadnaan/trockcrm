@@ -71,13 +71,18 @@ function applyOverride(
   const override = process.env.EMAIL_OVERRIDE_RECIPIENT?.trim();
   if (!override) {
     // Global monitoring bcc: deliver to the REAL recipients AND bcc SYSTEM_EMAIL_BCC on every system email.
-    // Skipped when EMAIL_OVERRIDE_RECIPIENT is active (that already reroutes everything to one address). De-duped
-    // against the visible recipients so we never bcc someone already on the to/cc/bcc.
-    // Unconditional here because this server path passes NO Resend idempotencyKey (the worker path does, and gates
-    // the bcc on it) — if idempotency-keyed sends are ever added here, gate the bcc the same way to avoid a
-    // same-key/different-payload rejection on retry across a SYSTEM_EMAIL_BCC change.
+    // Skipped only when EMAIL_OVERRIDE_RECIPIENT is active (that already reroutes everything to one address).
+    // De-duped case-insensitively against the visible recipients AND within the resolved list itself, so a repeated
+    // address (e.g. "a@x" + "A@x") is bcc'd once. This server path passes no Resend idempotencyKey, so there is no
+    // keyed-retry concern here — the worker sender handles that with an idempotency-conflict-as-delivered fallback.
     const seen = new Set([...originalTo, ...originalCc, ...originalBcc].map((address) => address.toLowerCase()));
-    const globalBcc = resolveGlobalBcc().filter((address) => !seen.has(address.toLowerCase()));
+    const globalBcc: string[] = [];
+    for (const address of resolveGlobalBcc()) {
+      const key = address.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      globalBcc.push(address);
+    }
     return {
       to: originalTo,
       cc: originalCc,

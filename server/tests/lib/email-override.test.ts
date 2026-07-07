@@ -167,4 +167,13 @@ describe("SYSTEM_EMAIL_BCC (global monitoring bcc)", () => {
     const payload = sendMock.mock.calls[0][0];
     expect(payload.bcc).toBeUndefined();
   });
+
+  it("de-dupes repeated monitor addresses case-insensitively within SYSTEM_EMAIL_BCC", async () => {
+    vi.stubEnv("SYSTEM_EMAIL_BCC", "monitor@example.com, Monitor@example.com, audit@example.com");
+
+    await sendSystemEmail("alice@example.com", "Subject", "<p>Body</p>");
+
+    const payload = sendMock.mock.calls[0][0];
+    expect(payload.bcc).toEqual(["monitor@example.com", "audit@example.com"]); // duplicate Monitor@ dropped
+  });
 });

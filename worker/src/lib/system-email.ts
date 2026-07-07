@@ -60,18 +60,23 @@ export async function sendSystemEmailWithMetadata(
   const originalBcc = toArray(options.bcc);
   const recipients = override ? [override] : originalTo;
   const cc = override ? [] : originalCc;
-  // Global monitoring bcc (SYSTEM_EMAIL_BCC): deliver to the real recipients AND bcc these on every system email.
-  // Skipped under the EMAIL_OVERRIDE_RECIPIENT redirect, AND skipped for any idempotency-keyed send: this
-  // env-derived bcc would change the Resend payload for an otherwise byte-stable idempotencyKey, so a keyed job
-  // retrying across a SYSTEM_EMAIL_BCC rollout/change would hit Resend's same-key/different-payload rejection and
-  // strand instead of deduping (see rfp-pending-sla.ts / field-scorecard-email.ts, which render from stored
-  // snapshots precisely to keep the payload stable). Monitoring is best-effort; transactional delivery integrity
-  // wins. De-duped against the visible recipients.
+  // Global monitoring bcc (SYSTEM_EMAIL_BCC): deliver to the real recipients AND bcc these on EVERY system email,
+  // including idempotency-keyed jobs (RFP/scorecard/project) — that full coverage is the point. Skipped only under
+  // the EMAIL_OVERRIDE_RECIPIENT redirect. De-duped case-insensitively against the visible recipients AND within
+  // the resolved list itself (so "a@x" + "A@x" is bcc'd once). Keyed sends are safe: process.env is fixed for a
+  // process's lifetime, so a job + its retries share one bcc value; the ONLY edge is a retry that crosses a
+  // redeploy which CHANGED SYSTEM_EMAIL_BCC — that Resend same-key/different-payload conflict is caught below and
+  // treated as an already-delivered success, so no strand.
   const seenAddresses = new Set([...originalTo, ...originalCc, ...originalBcc].map((address) => address.toLowerCase()));
-  const skipGlobalBcc = Boolean(override) || Boolean(options.idempotencyKey);
-  const globalBcc = skipGlobalBcc
-    ? []
-    : resolveGlobalBcc().filter((address) => !seenAddresses.has(address.toLowerCase()));
+  const globalBcc: string[] = [];
+  if (!override) {
+    for (const address of resolveGlobalBcc()) {
+      const key = address.toLowerCase();
+      if (seenAddresses.has(key)) continue;
+      seenAddresses.add(key);
+      globalBcc.push(address);
+    }
+  }
   const bcc = override ? [] : [...originalBcc, ...globalBcc];
   const allOriginal = [...originalTo, ...originalCc, ...originalBcc];
   const subjectLine = override ? `[-> ${allOriginal.join(", ")}] ${subject}` : subject;
@@ -131,6 +136,19 @@ export async function sendSystemEmailWithMetadata(
   }, options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined);
 
   if (result.error) {
+    // A same-idempotencyKey / different-payload conflict means the email was ALREADY sent under this key — only the
+    // payload differs (e.g. SYSTEM_EMAIL_BCC changed between the original send and this retry across a redeploy).
+    // Treat it as delivered so the caller stamps 'sent' instead of stranding on a re-send it can never win. If the
+    // error is anything else (or the shape doesn't match), fall through to the normal failure — no regression.
+    const err = result.error as { statusCode?: number; name?: string; message?: string };
+    if (
+      options.idempotencyKey != null &&
+      (err.statusCode === 409 || err.statusCode === 422) &&
+      /idempoten/i.test(`${err.name ?? ""} ${err.message ?? ""}`)
+    ) {
+      console.warn(`[Email] Idempotency-key conflict for "${subjectLine}" — already delivered, treating as sent`);
+      return { success: true, messageId: null };
+    }
     console.error("[Email] Resend error:", result.error);
     return { success: false, messageId: null };
   }
