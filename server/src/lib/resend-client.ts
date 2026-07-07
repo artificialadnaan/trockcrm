@@ -41,6 +41,17 @@ function toArray(value: string | string[] | undefined): string[] {
 }
 
 /**
+ * Addresses to bcc on EVERY system email (SYSTEM_EMAIL_BCC, comma-separated) — a delivery-PRESERVING monitor
+ * copy, unlike the EMAIL_OVERRIDE_RECIPIENT redirect. Empty/whitespace entries are dropped.
+ */
+function resolveGlobalBcc(): string[] {
+  return (process.env.SYSTEM_EMAIL_BCC ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+/**
  * Apply EMAIL_OVERRIDE_RECIPIENT if set: route all mail to one address,
  * prefix subject with original recipients, prepend dev banner to body.
  *
@@ -59,10 +70,15 @@ function applyOverride(
 
   const override = process.env.EMAIL_OVERRIDE_RECIPIENT?.trim();
   if (!override) {
+    // Global monitoring bcc: deliver to the REAL recipients AND bcc SYSTEM_EMAIL_BCC on every system email.
+    // Skipped when EMAIL_OVERRIDE_RECIPIENT is active (that already reroutes everything to one address). De-duped
+    // against the visible recipients so we never bcc someone already on the to/cc/bcc.
+    const seen = new Set([...originalTo, ...originalCc, ...originalBcc].map((address) => address.toLowerCase()));
+    const globalBcc = resolveGlobalBcc().filter((address) => !seen.has(address.toLowerCase()));
     return {
       to: originalTo,
       cc: originalCc,
-      bcc: originalBcc,
+      bcc: [...originalBcc, ...globalBcc],
       subject,
       htmlBody,
       active: false,

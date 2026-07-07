@@ -18,6 +18,17 @@ function toArray(value: string | string[] | undefined): string[] {
   return Array.isArray(value) ? value.filter(Boolean) : [value].filter(Boolean);
 }
 
+/**
+ * Addresses to bcc on EVERY system email (SYSTEM_EMAIL_BCC, comma-separated) — a delivery-PRESERVING monitor
+ * copy, unlike the EMAIL_OVERRIDE_RECIPIENT redirect. Empty/whitespace entries are dropped.
+ */
+function resolveGlobalBcc(): string[] {
+  return (process.env.SYSTEM_EMAIL_BCC ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
 export interface SendSystemEmailAttachment {
   filename: string;
   content: Buffer;
@@ -49,7 +60,11 @@ export async function sendSystemEmailWithMetadata(
   const originalBcc = toArray(options.bcc);
   const recipients = override ? [override] : originalTo;
   const cc = override ? [] : originalCc;
-  const bcc = override ? [] : originalBcc;
+  // Global monitoring bcc (SYSTEM_EMAIL_BCC): deliver to the real recipients AND bcc these on every system email.
+  // Skipped under the EMAIL_OVERRIDE_RECIPIENT redirect. De-duped against the visible recipients.
+  const seenAddresses = new Set([...originalTo, ...originalCc, ...originalBcc].map((address) => address.toLowerCase()));
+  const globalBcc = override ? [] : resolveGlobalBcc().filter((address) => !seenAddresses.has(address.toLowerCase()));
+  const bcc = override ? [] : [...originalBcc, ...globalBcc];
   const allOriginal = [...originalTo, ...originalCc, ...originalBcc];
   const subjectLine = override ? `[-> ${allOriginal.join(", ")}] ${subject}` : subject;
   const body = override
