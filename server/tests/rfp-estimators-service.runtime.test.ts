@@ -121,6 +121,34 @@ describe("getRfpEstimators — fallback path", () => {
     expect(result.estimators).toEqual([{ name: "Roster Rep", email: "rr@office.com" }]);
   });
 
+  it("falls back to the roster when SyncHub returns 2xx but the wrong shape (no estimators field)", async () => {
+    const fetchImpl = vi.fn(
+      async () => ({ ok: true, status: 200, json: async () => ({ data: [{ name: "X", email: "x@x.com" }] }) }) as unknown as Response
+    );
+
+    const result = await getRfpEstimators({
+      env: ENV,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => 1_000,
+      loadRoster: roster(["Roster Rep", "rr@office.com"]),
+    });
+
+    expect(result.source).toBe("roster-fallback");
+    expect(result.estimators).toEqual([{ name: "Roster Rep", email: "rr@office.com" }]);
+  });
+
+  it("does NOT cache an empty SyncHub list — an explicit [] falls through to the roster", async () => {
+    const fetchImpl = vi.fn(async () => okResponse([]));
+
+    const first = await getRfpEstimators({ env: ENV, fetchImpl: fetchImpl as unknown as typeof fetch, now: () => 1_000, loadRoster: roster(["Roster Rep", "rr@office.com"]) });
+    // Within what would have been the TTL: still roster (nothing empty got cached).
+    const second = await getRfpEstimators({ env: ENV, fetchImpl: fetchImpl as unknown as typeof fetch, now: () => 1_000 + 60_000, loadRoster: roster(["Roster Rep", "rr@office.com"]) });
+
+    expect(first.source).toBe("roster-fallback");
+    expect(second.source).toBe("roster-fallback");
+    expect(second.estimators).toEqual([{ name: "Roster Rep", email: "rr@office.com" }]);
+  });
+
   it("negative-caches a failure for 30s (skips SyncHub) then retries after the window", async () => {
     const fetchImpl = vi
       .fn()
@@ -155,5 +183,28 @@ describe("getRfpEstimators — fallback path", () => {
 
     expect(result.source).toBe("roster-fallback");
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("getRfpEstimators — concurrency", () => {
+  it("collapses concurrent cold-miss requests into a single SyncHub fetch (no thundering herd)", async () => {
+    let releaseFetch!: (r: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const fetchImpl = vi.fn(() => gate);
+
+    // Both start before the shared fetch settles → they must share one in-flight request.
+    const p1 = getRfpEstimators({ env: ENV, fetchImpl: fetchImpl as unknown as typeof fetch, now: () => 1_000 });
+    const p2 = getRfpEstimators({ env: ENV, fetchImpl: fetchImpl as unknown as typeof fetch, now: () => 1_000 });
+
+    releaseFetch(okResponse([{ name: "Colby", email: "c@x.com" }]));
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    expect(r1.source).toBe("synchub");
+    expect(r2.source).toBe("synchub");
+    expect(r1.estimators).toEqual([{ name: "Colby", email: "c@x.com" }]);
+    expect(r2.estimators).toEqual([{ name: "Colby", email: "c@x.com" }]);
+    expect(fetchImpl).toHaveBeenCalledTimes(1); // shared in-flight promise, not one fetch per caller
   });
 });

@@ -26,15 +26,19 @@ interface CacheState {
   estimators: RfpEstimator[] | null;
   expiresAt: number;
   failUntil: number;
+  // Shared in-flight SyncHub fetch so a burst of concurrent cold-miss vote-form loads
+  // collapses into ONE upstream request instead of a thundering herd.
+  inFlight: Promise<RfpEstimator[]> | null;
 }
 
-const cache: CacheState = { estimators: null, expiresAt: 0, failUntil: 0 };
+const cache: CacheState = { estimators: null, expiresAt: 0, failUntil: 0, inFlight: null };
 
 /** Test-only: clear the module-level SyncHub cache + negative-cache window. */
 export function resetRfpEstimatorsCacheForTests(): void {
   cache.estimators = null;
   cache.expiresAt = 0;
   cache.failUntil = 0;
+  cache.inFlight = null;
 }
 
 /** Trim names, trim + lowercase emails, drop fully-empty rows, dedupe by email (else name). */
@@ -79,7 +83,13 @@ async function fetchSyncHubEstimators(opts: {
     });
     if (!res.ok) throw new Error(`SyncHub estimators responded ${res.status}`);
     const body = (await res.json()) as { estimators?: unknown };
-    return sanitizeRfpEstimators(body?.estimators);
+    const estimators = sanitizeRfpEstimators(body?.estimators);
+    // Treat an empty result as a miss and THROW: a 2xx with the wrong shape (e.g. {data:[…]})
+    // or a genuinely empty list would otherwise cache [] for the full TTL and hide the roster
+    // fallback. Throwing routes to the office roster (a usable suggestion list) + the 30s
+    // negative cache, so we retry SyncHub shortly instead of serving nothing.
+    if (estimators.length === 0) throw new Error("SyncHub returned no usable estimators");
+    return estimators;
   } finally {
     clearTimeout(timer);
   }
@@ -120,8 +130,10 @@ export async function getRfpEstimators(opts: {
   }
 
   if (at >= cache.failUntil) {
+    // Share one upstream fetch across concurrent cold-miss callers (no thundering herd).
+    const fetchPromise = cache.inFlight ?? (cache.inFlight = fetchSyncHubEstimators({ env, fetchImpl, timeoutMs }));
     try {
-      const estimators = await fetchSyncHubEstimators({ env, fetchImpl, timeoutMs });
+      const estimators = await fetchPromise;
       cache.estimators = estimators;
       cache.expiresAt = at + SYNCHUB_TTL_MS;
       cache.failUntil = 0;
@@ -132,6 +144,9 @@ export async function getRfpEstimators(opts: {
         "[rfp-estimators] SyncHub fetch failed, serving office roster fallback:",
         err instanceof Error ? err.message : err
       );
+    } finally {
+      // Clear only our own in-flight promise (a newer request may have installed its own).
+      if (cache.inFlight === fetchPromise) cache.inFlight = null;
     }
   }
 
