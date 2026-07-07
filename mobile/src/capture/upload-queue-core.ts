@@ -98,6 +98,29 @@ export function applyGpsPatch(
 }
 
 /**
+ * Patch the caption onto a still-queued item — the DURABLE analogue of editing a caption in the review
+ * tray. Used when staged photos are enqueued UNCAPTIONED at review-open and the crew then types a caption:
+ * on Done each queued row's caption is patched to the typed value before draining. Sets the caption for the
+ * matching id (incl. clearing it to null), and reports whether anything changed so the caller only rewrites
+ * the durable index when it did; a no-op (id absent, or caption unchanged) returns the original queue
+ * reference unchanged.
+ */
+export function applyCaptionPatch(
+  queue: QueuedUpload[],
+  clientUploadId: string,
+  caption: string | null,
+): { queue: QueuedUpload[]; changed: boolean } {
+  let changed = false;
+  const next = queue.map((item) => {
+    if (item.clientUploadId !== clientUploadId) return item;
+    if (item.caption === caption) return item;
+    changed = true;
+    return { ...item, caption };
+  });
+  return { queue: changed ? next : queue, changed };
+}
+
+/**
  * A minimal async mutex. Every task runs only after the previous one SETTLES (resolve OR reject), so
  * read-modify-write sections on a shared resource can't interleave: without it, two callers each read the
  * same on-disk index snapshot and then write, and the later write silently clobbers the earlier one (e.g.

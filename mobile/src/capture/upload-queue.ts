@@ -4,6 +4,7 @@ import type { Fetcher } from "../api/endpoints";
 import { runConcurrentUploads, uploadCapture, UploadCancelledError, type CaptureUploadInput } from "./upload";
 import {
   UPLOAD_CONCURRENCY,
+  applyCaptionPatch,
   applyGpsPatch,
   bumpAttempts,
   createAsyncMutex,
@@ -183,6 +184,25 @@ export async function patchQueuedMetadata(
 ): Promise<boolean> {
   return withQueueLock(async () => {
     const { queue, changed } = applyGpsPatch(await readQueue(ownerKey), clientUploadId, coords);
+    if (changed) await writeQueue(ownerKey, queue);
+    return changed;
+  });
+}
+
+/**
+ * Best-effort: patch the caption onto a still-queued item — the DURABLE analogue of editing a caption in
+ * the review tray. Staged review photos are enqueued UNCAPTIONED at review-open (so a crash mid-caption
+ * never loses them); when the crew taps Done, each queued row's caption is patched here to the typed value
+ * before the drain. A no-op if the item has already uploaded/left the queue, or the caption is unchanged.
+ * Returns true iff an item was patched.
+ */
+export async function patchQueuedCaption(
+  ownerKey: string,
+  clientUploadId: string,
+  caption: string | null,
+): Promise<boolean> {
+  return withQueueLock(async () => {
+    const { queue, changed } = applyCaptionPatch(await readQueue(ownerKey), clientUploadId, caption);
     if (changed) await writeQueue(ownerKey, queue);
     return changed;
   });

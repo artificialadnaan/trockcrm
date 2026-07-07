@@ -1,5 +1,6 @@
 import {
   MAX_UPLOAD_ATTEMPTS,
+  applyCaptionPatch,
   applyGpsPatch,
   bumpAttempts,
   createAsyncMutex,
@@ -147,5 +148,42 @@ describe("createAsyncMutex", () => {
       expect(queue[0].metadata).toEqual({});
       expect(queue[1].metadata).toMatchObject({ latitude: 32.7, longitude: -96.8 });
     });
+  });
+});
+
+describe("applyCaptionPatch (durable review-caption edit — patches ONLY the matching id)", () => {
+  it("sets the caption on the matching coordless item and reports changed", () => {
+    // item() starts with caption null (enqueued uncaptioned at review-open).
+    const { queue, changed } = applyCaptionPatch([item("a")], "a", "north wall");
+    expect(changed).toBe(true);
+    expect(queue[0].caption).toBe("north wall");
+  });
+
+  it("sets a null caption (blank on Done clears the staged value) and reports changed", () => {
+    const existing = [{ ...item("a"), caption: "typed then cleared" }];
+    const { queue, changed } = applyCaptionPatch(existing, "a", null);
+    expect(changed).toBe(true);
+    expect(queue[0].caption).toBeNull();
+  });
+
+  it("is a no-op when the caption is unchanged (same reference, no rewrite)", () => {
+    const existing = [{ ...item("a"), caption: "same" }];
+    const { queue, changed } = applyCaptionPatch(existing, "a", "same");
+    expect(changed).toBe(false);
+    expect(queue).toBe(existing);
+  });
+
+  it("is a no-op when the id is absent (already uploaded/removed)", () => {
+    const existing = [item("a")];
+    const { queue, changed } = applyCaptionPatch(existing, "missing", "x");
+    expect(changed).toBe(false);
+    expect(queue).toBe(existing);
+  });
+
+  it("patches only the matching id, leaving siblings untouched", () => {
+    const { queue, changed } = applyCaptionPatch([item("a"), item("b")], "b", "only b");
+    expect(changed).toBe(true);
+    expect(queue[0].caption).toBeNull(); // sibling untouched
+    expect(queue[1].caption).toBe("only b");
   });
 });
