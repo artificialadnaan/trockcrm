@@ -579,17 +579,23 @@ export default function CaptureScreen() {
     } else if (cameraGpsRef.current && hasCoords(cameraGpsRef.current)) {
       metadata = { ...cameraGpsRef.current, takenAt };
     } else {
-      // No coords yet. A per-photo shot enqueues coordless NOW (durability first) and is noted so the session
-      // fix can patch its queue entry (best-effort geotag). A batch shot isn't queued yet — it reconciles the
-      // session fix at upload time (buildCaptureUploadInput), so it is NOT registered here.
+      // No coords yet — register the shot so the session fix can patch its queue entry once enqueued. A
+      // per-photo shot enqueues coordless NOW; a batch shot enqueues on Upload. Tracking BOTH covers the
+      // race where GPS resolves AFTER a fast Upload from review (reconcileUploadGps only helps if the fix
+      // resolved BEFORE enqueue; an early patch attempt on a not-yet-queued batch shot harmlessly no-ops).
       metadata = { takenAt };
-      if (!batchMode) pendingGpsRef.current.push({ clientUploadId, session });
+      pendingGpsRef.current.push({ clientUploadId, session });
     }
 
     const sp: SessionPhoto = { key, clientUploadId, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: session };
 
     if (batchMode) {
-      setCameraBatch((prev) => [...prev, sp]);
+      // Update the ref SYNCHRONOUSLY (not via the post-commit effect) so a Done tapped in the same frame as
+      // the shutter can't have closeCamera read a stale batch and drop this shot. Read from the ref too, so
+      // rapid shots each append to the latest.
+      const nextBatch = [...cameraBatchRef.current, sp];
+      cameraBatchRef.current = nextBatch;
+      setCameraBatch(nextBatch);
       return;
     }
 
