@@ -151,6 +151,9 @@ export default function CaptureScreen() {
   const [reviewPhotos, setReviewPhotos] = useState<SessionPhoto[]>([]);
   const [reviewCtx, setReviewCtx] = useState<{ target: CaptureTargetRef; category: string | null; tags: string[] } | null>(null);
   const [reviewBusy, setReviewBusy] = useState(false);
+  // True while a caption-sheet VoiceRecorder is recording/transcribing — disables the review footer
+  // Upload/Cancel so a tap can't stream the caption before the in-flight transcript is appended (lost note).
+  const [reviewVoiceBusy, setReviewVoiceBusy] = useState(false);
   const keyCounter = useRef(0);
   // Live GPS fetched once per camera session so burst shots aren't each blocked
   // on a fresh fix (a burst is at one location); applied to every shot.
@@ -272,6 +275,7 @@ export default function CaptureScreen() {
     // state + the staged-durable set; the next account can never see or upload the prior owner's staged shots.
     setReviewPhotos([]);
     setReviewCtx(null);
+    setReviewVoiceBusy(false);
     stagedDurableIdsRef.current = new Set();
     setCameraBatch([]);
     cameraBatchRef.current = [];
@@ -535,11 +539,12 @@ export default function CaptureScreen() {
   // Cancel: drop the staged photos back out of the durable queue so a cancelled batch never uploads, then
   // clear the review UI. (A crash BEFORE this runs still uploads them — see openReview's crash semantics.)
   async function cancelReview() {
-    if (reviewBusy) return;
+    if (reviewBusy || reviewVoiceBusy) return;
     const staged = [...stagedDurableIdsRef.current];
     stagedDurableIdsRef.current = new Set();
     setReviewPhotos([]);
     setReviewCtx(null);
+    setReviewVoiceBusy(false);
     if (ownerKey && staged.length > 0) {
       await removeQueuedUploads(ownerKey, staged).catch(() => undefined);
       await refreshQueuedCount();
@@ -552,12 +557,13 @@ export default function CaptureScreen() {
   // caption in its built input and parks the shot in the retry buffer if it still can't save. planReviewFinish
   // makes the patch/enqueue lists DISJOINT, so no photo is ever both patched and re-enqueued.
   async function finishReview() {
-    if (reviewBusy || finishingRef.current) return;
+    if (reviewBusy || reviewVoiceBusy || finishingRef.current) return;
     const photos = reviewPhotos;
     const ctx = reviewCtx;
     if (!ctx || photos.length === 0) {
       setReviewPhotos([]);
       setReviewCtx(null);
+      setReviewVoiceBusy(false);
       stagedDurableIdsRef.current = new Set();
       return;
     }
@@ -588,6 +594,7 @@ export default function CaptureScreen() {
     } finally {
       finishingRef.current = false;
       setReviewBusy(false);
+      setReviewVoiceBusy(false);
       setReviewPhotos([]);
       setReviewCtx(null);
       stagedDurableIdsRef.current = new Set();
@@ -940,8 +947,13 @@ export default function CaptureScreen() {
         <SafeAreaProvider>
           <SafeAreaView style={styles.reviewSafe} edges={["top", "bottom"]}>
             <View style={styles.reviewHeader}>
-              <Pressable onPress={cancelReview} disabled={reviewBusy} hitSlop={12} accessibilityLabel="Cancel review">
-                <Text style={[styles.link, reviewBusy && styles.reviewDisabled]}>Cancel</Text>
+              <Pressable
+                onPress={cancelReview}
+                disabled={reviewBusy || reviewVoiceBusy}
+                hitSlop={12}
+                accessibilityLabel="Cancel review"
+              >
+                <Text style={[styles.link, (reviewBusy || reviewVoiceBusy) && styles.reviewDisabled]}>Cancel</Text>
               </Pressable>
               <Text style={styles.reviewTitle}>Add descriptions</Text>
               <Text style={styles.reviewCount}>
@@ -962,6 +974,7 @@ export default function CaptureScreen() {
                 onSetCaption={setReviewCaption}
                 onAppendCaption={appendReviewCaption}
                 onRemove={removeReviewPhoto}
+                onVoiceBusyChange={setReviewVoiceBusy}
                 disabled={reviewBusy}
                 voiceEnabled={transcribeConfig.data?.configured ?? false}
               />
@@ -970,7 +983,7 @@ export default function CaptureScreen() {
               <Button
                 title={reviewBusy ? "Uploading…" : `Upload ${reviewPhotos.length} photo${reviewPhotos.length === 1 ? "" : "s"}`}
                 onPress={() => void finishReview()}
-                disabled={reviewBusy}
+                disabled={reviewBusy || reviewVoiceBusy}
                 accessibilityLabel="Upload reviewed photos"
                 style={{ flex: 1 }}
               />
