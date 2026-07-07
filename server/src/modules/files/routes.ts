@@ -867,11 +867,19 @@ router.patch("/:id", async (req, res, next) => {
     await assertDealLinkedFileMutationAllowed(req, existing, isRestore ? "restore" : "metadata_update");
 
     const { displayName, description, notes, tags, category, subcategory, folderPath, photoCategory } = req.body;
-    // A legacy client may send the photo's phase category in the `category` field.
-    // PHOTO_CATEGORIES (shared) covers the 6 offered values + retained legacy ones.
+    // A legacy client may send the photo's phase category in the `category` field. Treat an incoming
+    // `category` as a photo-PHASE edit ONLY when it is a photo-EXCLUSIVE value (in PHOTO_CATEGORIES but
+    // NOT also a real file category). "other" is BOTH a legacy photo phase and a genuine file category,
+    // so without the exclusion a photo->Other reclassification from the generic edit modal would be
+    // silently swallowed (category stays "photo"), clobber the existing phase to "other", and drop the
+    // photo subfolder. `category === null` still clears the phase for true legacy phase-in-category
+    // clients (a null file category is meaningless — the column is NOT NULL).
     const categoryTargetsPhotoCategory =
       existing.category === "photo" &&
-      (category === null || (typeof category === "string" && (PHOTO_CATEGORIES as readonly string[]).includes(category)));
+      (category === null ||
+        (typeof category === "string" &&
+          (PHOTO_CATEGORIES as readonly string[]).includes(category) &&
+          !(FILE_CATEGORIES as readonly string[]).includes(category)));
     const resolvedPhotoCategory =
       photoCategory !== undefined
         ? photoCategory

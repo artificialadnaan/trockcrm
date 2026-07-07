@@ -303,6 +303,36 @@ describe("photo audit route wiring", () => {
     }));
   });
 
+  it("reclassifies a photo to the 'other' file category instead of treating it as a photo phase", async () => {
+    // "other" is BOTH a legacy photo-phase value and a real file category. Editing a photo to Other in
+    // the generic file-edit modal must change the FILE category (not clobber the photo phase / drop the
+    // subfolder). resolvedPhotoCategory stays undefined -> category "other" flows to updateFile.
+    await invoke("patch", "/:id", { body: { category: "other", subcategory: null } });
+
+    expect(serviceMocks.updateFile).toHaveBeenCalledWith(
+      expect.anything(),
+      "photo-1",
+      expect.objectContaining({ category: "other", photoCategory: undefined, subcategory: null })
+    );
+    // A genuine file-category reclassification is not a photo phase change.
+    expect(auditMocks.logPhotoEvent).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ eventType: "category_changed" })
+    );
+  });
+
+  it("still treats a photo-exclusive category value as a photo-phase edit (legacy client)", async () => {
+    // "construction" is a photo-only value; a legacy client sending it in `category` should update the
+    // photo phase, leaving the file category untouched.
+    await invoke("patch", "/:id", { body: { category: "construction" } });
+
+    expect(serviceMocks.updateFile).toHaveBeenCalledWith(
+      expect.anything(),
+      "photo-1",
+      expect.objectContaining({ category: undefined, photoCategory: "construction" })
+    );
+  });
+
   it("logs address, download, delete, and restore events", async () => {
     await invoke("patch", "/:id/address", { body: { address: "200 Corrected St", latitude: 36, longitude: -98 } });
     await invoke("get", "/:id/download");
