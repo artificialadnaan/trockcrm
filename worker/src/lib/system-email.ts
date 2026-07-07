@@ -61,9 +61,17 @@ export async function sendSystemEmailWithMetadata(
   const recipients = override ? [override] : originalTo;
   const cc = override ? [] : originalCc;
   // Global monitoring bcc (SYSTEM_EMAIL_BCC): deliver to the real recipients AND bcc these on every system email.
-  // Skipped under the EMAIL_OVERRIDE_RECIPIENT redirect. De-duped against the visible recipients.
+  // Skipped under the EMAIL_OVERRIDE_RECIPIENT redirect, AND skipped for any idempotency-keyed send: this
+  // env-derived bcc would change the Resend payload for an otherwise byte-stable idempotencyKey, so a keyed job
+  // retrying across a SYSTEM_EMAIL_BCC rollout/change would hit Resend's same-key/different-payload rejection and
+  // strand instead of deduping (see rfp-pending-sla.ts / field-scorecard-email.ts, which render from stored
+  // snapshots precisely to keep the payload stable). Monitoring is best-effort; transactional delivery integrity
+  // wins. De-duped against the visible recipients.
   const seenAddresses = new Set([...originalTo, ...originalCc, ...originalBcc].map((address) => address.toLowerCase()));
-  const globalBcc = override ? [] : resolveGlobalBcc().filter((address) => !seenAddresses.has(address.toLowerCase()));
+  const skipGlobalBcc = Boolean(override) || Boolean(options.idempotencyKey);
+  const globalBcc = skipGlobalBcc
+    ? []
+    : resolveGlobalBcc().filter((address) => !seenAddresses.has(address.toLowerCase()));
   const bcc = override ? [] : [...originalBcc, ...globalBcc];
   const allOriginal = [...originalTo, ...originalCc, ...originalBcc];
   const subjectLine = override ? `[-> ${allOriginal.join(", ")}] ${subject}` : subject;

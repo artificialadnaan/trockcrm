@@ -73,6 +73,9 @@ function applyOverride(
     // Global monitoring bcc: deliver to the REAL recipients AND bcc SYSTEM_EMAIL_BCC on every system email.
     // Skipped when EMAIL_OVERRIDE_RECIPIENT is active (that already reroutes everything to one address). De-duped
     // against the visible recipients so we never bcc someone already on the to/cc/bcc.
+    // Unconditional here because this server path passes NO Resend idempotencyKey (the worker path does, and gates
+    // the bcc on it) — if idempotency-keyed sends are ever added here, gate the bcc the same way to avoid a
+    // same-key/different-payload rejection on retry across a SYSTEM_EMAIL_BCC change.
     const seen = new Set([...originalTo, ...originalCc, ...originalBcc].map((address) => address.toLowerCase()));
     const globalBcc = resolveGlobalBcc().filter((address) => !seen.has(address.toLowerCase()));
     return {
