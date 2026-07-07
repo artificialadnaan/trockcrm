@@ -145,8 +145,10 @@ describe("photo capture per-photo notes", () => {
     });
   }
 
+  // Each queued photo's note now carries a UNIQUE aria-label ("Note for photo 1", "2", …). Match the prefix
+  // so the helper returns them in DOM (queue) order — index 0 is "Note for photo 1", etc.
   function noteInputs() {
-    return Array.from(container.querySelectorAll<HTMLInputElement>('input[aria-label="Photo description"]'));
+    return Array.from(container.querySelectorAll<HTMLInputElement>('input[aria-label^="Note for photo "]'));
   }
 
   beforeEach(() => {
@@ -190,6 +192,8 @@ describe("photo capture per-photo notes", () => {
 
     const inputs = noteInputs();
     expect(inputs).toHaveLength(2);
+    // Each note input has its OWN unique aria-label (a11y: no two inputs share a name).
+    expect(inputs.map((el) => el.getAttribute("aria-label"))).toEqual(["Note for photo 1", "Note for photo 2"]);
 
     await act(async () => {
       setInputValue(inputs[0], "north wall crack");

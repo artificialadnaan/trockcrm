@@ -461,7 +461,7 @@ export function PhotoCapturePage() {
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                {queue.map((photo) => (
+                {queue.map((photo, i) => (
                   <div
                     key={photo.id}
                     className={`rounded-xl overflow-hidden border ${
@@ -526,7 +526,7 @@ export function PhotoCapturePage() {
                         value={photo.note}
                         onChange={(e) => updateNote(photo.id, e.target.value)}
                         placeholder="Add a description (optional)"
-                        aria-label="Photo description"
+                        aria-label={`Note for photo ${i + 1}`}
                         className="w-full border-t border-white/10 bg-white/5 px-2 py-1.5 text-xs text-white placeholder:text-white/30 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-[#CC0000]/50"
                       />
                     )}
