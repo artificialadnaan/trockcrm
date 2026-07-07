@@ -317,10 +317,10 @@ export function DealFileTab({ dealId }: DealFileTabProps) {
               emptyMessage={
                 search
                   ? "No files match your search."
-                  : selectedFolder
-                    ? "No files in this folder."
-                    : hasActiveFilters
-                      ? "No files match these filters."
+                  : hasActiveFilters
+                    ? "No files match these filters."
+                    : selectedFolder
+                      ? "No files in this folder."
                       : "No files uploaded yet. Click Upload to add files."
               }
             />

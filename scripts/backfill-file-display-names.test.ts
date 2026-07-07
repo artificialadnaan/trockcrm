@@ -70,6 +70,14 @@ const rows: FileRow[] = [
     originalFilename: "",
     category: "other",
   },
+  // 8. dotfile original_filename (".gitignore") — strips to "" → skipped, never renamed to an empty name.
+  {
+    id: "dotfile",
+    displayName: "TR-2026-0008 Other 2026-08-01 001 cc22dd33",
+    systemFilename: "TR-2026-0008_Other_2026-08-01_001_cc22dd33.pdf",
+    originalFilename: ".gitignore",
+    category: "other",
+  },
 ];
 
 describe("backfill display-name planner", () => {
@@ -81,6 +89,7 @@ describe("backfill display-name planner", () => {
     expect(plan.alreadyEdited).toBe(1);
     expect(plan.synthetic).toBe(2);
     expect(plan.emptyOriginal).toBe(1);
+    expect(plan.emptyStripped).toBe(1);
   });
 
   it("sets each planned new name to the ext-stripped original_filename", () => {

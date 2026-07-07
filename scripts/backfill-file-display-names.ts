@@ -87,6 +87,9 @@ export interface RenamePlan {
   alreadyEdited: number;
   synthetic: number;
   emptyOriginal: number;
+  /** Non-synthetic auto-named rows whose original_filename strips to "" (e.g. a dotfile like ".gitignore").
+   *  Skipped, never renamed to an empty display_name — mirrors the RENAME_WHERE `<> ''` guard. */
+  emptyStripped: number;
 }
 
 /** Strip a trailing extension (mirrors the SQL `regexp_replace(x, '\.[^.]*$', '')`). */
@@ -125,6 +128,7 @@ export function buildRenamePlan(rows: FileRow[]): RenamePlan {
     alreadyEdited: 0,
     synthetic: 0,
     emptyOriginal: 0,
+    emptyStripped: 0,
   };
   for (const row of rows) {
     const original = row.originalFilename ?? "";
@@ -140,8 +144,14 @@ export function buildRenamePlan(rows: FileRow[]): RenamePlan {
       plan.alreadyEdited += 1;
       continue;
     }
+    const to = stripExtension(original);
+    if (to === "") {
+      // Dotfile (".gitignore") strips to nothing — never rename to an empty display_name; leave it as-is.
+      plan.emptyStripped += 1;
+      continue;
+    }
     const isPhoto = row.category === "photo";
-    plan.rename.push({ id: row.id, category: row.category, from: row.displayName, to: stripExtension(original), isPhoto });
+    plan.rename.push({ id: row.id, category: row.category, from: row.displayName, to, isPhoto });
     if (isPhoto) plan.renameWebPhotos += 1;
     else plan.renameDocs += 1;
   }
@@ -159,6 +169,7 @@ const SYNTHETIC_PHOTO_PREDICATE = `
 const RENAME_WHERE = `
   is_active = true
   AND coalesce(original_filename, '') <> ''
+  AND regexp_replace(original_filename, '\\.[^.]*$', '') <> ''
   AND NOT ${SYNTHETIC_PHOTO_PREDICATE}
   AND display_name = replace(regexp_replace(system_filename, '\\.[^.]*$', ''), '_', ' ')
 `;

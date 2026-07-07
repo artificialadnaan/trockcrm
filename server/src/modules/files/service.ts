@@ -678,7 +678,10 @@ export async function confirmUpload(
     }
   }
 
-  const ext = pending.originalFilename.lastIndexOf(".") >= 0
+  // Use the same leading-dot boundary as stripExtension (dot > 0): a dotfile like ".env" has no
+  // separable extension, so ext is "" and the display name keeps the full ".env" — otherwise the
+  // download filename (displayName + ext) would double to ".env.env".
+  const ext = pending.originalFilename.lastIndexOf(".") > 0
     ? pending.originalFilename.substring(pending.originalFilename.lastIndexOf(".")).toLowerCase()
     : "";
 

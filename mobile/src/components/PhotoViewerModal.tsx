@@ -84,8 +84,9 @@ export function PhotoViewerModal({
     if (!current) return;
     setEditName(current.displayName ?? "");
     setEditDesc(current.description ?? "");
+    updateMeta.reset(); // clear any error/success from a prior edit so the sheet opens fresh
     setEditingOpen(true);
-  }, [current]);
+  }, [current, updateMeta]);
 
   const saveEdit = useCallback(() => {
     if (!current) return;
@@ -229,6 +230,11 @@ export function PhotoViewerModal({
                 multiline
                 style={styles.editDescInput}
               />
+              {updateMeta.isError ? (
+                <Text style={{ color: "#dc2626", fontSize: 13, marginTop: 8 }}>
+                  Couldn't save. Check your connection and try again.
+                </Text>
+              ) : null}
               <View style={styles.editActions}>
                 <Button title="Cancel" variant="ghost" onPress={() => setEditingOpen(false)} disabled={updateMeta.isPending} />
                 <Button title="Save" onPress={saveEdit} loading={updateMeta.isPending} disabled={!editName.trim()} />
