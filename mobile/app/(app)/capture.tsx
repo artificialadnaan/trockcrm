@@ -1,6 +1,6 @@
 import React, { Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, AppState, Image, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { ActivityIndicator, AppState, Image, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as ImagePicker from "expo-image-picker";
@@ -35,6 +35,7 @@ import { CategoryPicker } from "../../src/components/CategoryPicker";
 import { ScreenHeader } from "../../src/components/ScreenHeader";
 import { PhotoTagInput } from "../../src/components/PhotoTagInput";
 import { TargetPicker } from "../../src/components/TargetPicker";
+import { ReviewTray } from "../../src/components/ReviewTray";
 
 // Lazy so the Import path never loads expo-camera's native module (live camera is
 // a physical-device-only surface; the iOS Simulator has no camera).
@@ -131,6 +132,22 @@ export default function CaptureScreen() {
   // Camera mode: per-photo (caption each shot as you go, the default) vs. batch (fast burst, no caption
   // prompt). Loaded from / persisted to secure-store so it sticks.
   const [mode, setMode] = useState<CaptureMode>(DEFAULT_CAPTURE_MODE);
+  // Read the LIVE mode inside the camera's per-shot handler (a stale closure could misroute a shot
+  // between the immediate-stream and batch-buffer paths).
+  const modeRef = useRef(mode);
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+  // Photos captured in a camera BATCH session, held until the camera closes and the review step opens.
+  // (Per-photo camera mode streams as it shoots and never fills this.) Mirrored to a ref so the Done/close
+  // handler reads the latest buffer without a stale closure.
+  const [cameraBatch, setCameraBatch] = useState<SessionPhoto[]>([]);
+  const cameraBatchRef = useRef<SessionPhoto[]>([]);
+  useEffect(() => { cameraBatchRef.current = cameraBatch; }, [cameraBatch]);
+  // The per-photo caption REVIEW step: a library import OR a finished camera batch lands here as
+  // SessionPhoto[] so each photo gets its OWN optional caption before anything uploads. `reviewCtx` is the
+  // capture-time destination snapshot streamed with every photo on Done. Empty list = review closed.
+  const [reviewPhotos, setReviewPhotos] = useState<SessionPhoto[]>([]);
+  const [reviewCtx, setReviewCtx] = useState<{ target: CaptureTargetRef; category: string | null; tags: string[] } | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const keyCounter = useRef(0);
   // Live GPS fetched once per camera session so burst shots aren't each blocked
   // on a fresh fix (a burst is at one location); applied to every shot.
@@ -235,6 +252,12 @@ export default function CaptureScreen() {
     // shots (captured during a transient sign-out — no authenticated owner) are KEPT so the next signer can
     // claim + retry them; they are never another authenticated user's photo.
     setFailedShots((prev) => prev.filter((f) => f.ownerKey === ownerKey || f.ownerKey === ""));
+    // Staged (not-yet-uploaded) review/batch photos aren't owner-bound, so discard them on a switch rather
+    // than let the next account upload the previous one's staged shots.
+    setReviewPhotos([]);
+    setReviewCtx(null);
+    setCameraBatch([]);
+    cameraBatchRef.current = [];
   }, [ownerKey]);
   const kickDrain = useCallback(
     async (force = false) => {
@@ -397,7 +420,9 @@ export default function CaptureScreen() {
     void kickDrain(true);
   }
 
-  // Library imports keep EXIF → live-GPS fallback; caption starts empty. Each is streamed on its own.
+  // Library imports keep EXIF → live-GPS fallback; caption starts empty. Instead of streaming immediately,
+  // the whole selection is staged into the per-photo review step so each photo can get its OWN optional
+  // caption before anything uploads (on Done, each streams with its own caption — blank = no description).
   async function addAssets(assets: ImagePicker.ImagePickerAsset[]) {
     // Snapshot the destination NOW — before the awaited getLiveGps — so a project switch during/after the
     // picker can't retarget the import.
@@ -406,23 +431,66 @@ export default function CaptureScreen() {
     const needsLive = assets.some((a) => !hasCoords(extractExifMetadata(a.exif as Record<string, unknown>)));
     if (needsLive) live = await getLiveGps();
 
-    for (const asset of assets) {
+    const photos: SessionPhoto[] = assets.map((asset) => {
       const exifMeta = extractExifMetadata(asset.exif as Record<string, unknown>);
       const metadata: PhotoMetadata = hasCoords(exifMeta)
         ? exifMeta
         : { ...(live ?? {}), takenAt: exifMeta.takenAt ?? live?.takenAt ?? new Date().toISOString() };
-      await streamPhoto(
-        {
-          key: nextKey(),
-          clientUploadId: newClientUploadId(),
-          uri: asset.uri,
-          width: asset.width,
-          height: asset.height,
-          metadata,
-          caption: "",
-        },
-        ctx,
-      );
+      return {
+        key: nextKey(),
+        clientUploadId: newClientUploadId(),
+        uri: asset.uri,
+        width: asset.width,
+        height: asset.height,
+        metadata,
+        caption: "",
+      };
+    });
+    if (photos.length === 0) return;
+    openReview(photos, ctx);
+  }
+
+  // Open the per-photo review step with a set of staged photos + their capture-time destination.
+  function openReview(photos: SessionPhoto[], ctx: { target: CaptureTargetRef; category: string | null; tags: string[] }) {
+    setReviewCtx(ctx);
+    setReviewPhotos(photos);
+  }
+
+  function setReviewCaption(key: string, text: string) {
+    setReviewPhotos((prev) => prev.map((p) => (p.key === key ? { ...p, caption: text } : p)));
+  }
+  // Functional append so rapid (voice) transcripts don't clobber each other.
+  function appendReviewCaption(key: string, text: string) {
+    setReviewPhotos((prev) => prev.map((p) => (p.key === key ? { ...p, caption: p.caption ? `${p.caption} ${text}` : text } : p)));
+  }
+  function removeReviewPhoto(key: string) {
+    setReviewPhotos((prev) => prev.filter((p) => p.key !== key));
+  }
+  function cancelReview() {
+    if (reviewBusy) return;
+    setReviewPhotos([]);
+    setReviewCtx(null);
+  }
+  // Done: stream every reviewed photo with ITS OWN caption (blank → no description). Reuses the exact
+  // single-shot stream path so per-photo captions ride to files.description unchanged.
+  async function finishReview() {
+    if (reviewBusy) return;
+    const photos = reviewPhotos;
+    const ctx = reviewCtx;
+    if (!ctx || photos.length === 0) {
+      setReviewPhotos([]);
+      setReviewCtx(null);
+      return;
+    }
+    setReviewBusy(true);
+    try {
+      for (const p of photos) {
+        await streamPhoto(p, ctx);
+      }
+    } finally {
+      setReviewBusy(false);
+      setReviewPhotos([]);
+      setReviewCtx(null);
     }
   }
 
@@ -455,6 +523,8 @@ export default function CaptureScreen() {
     cameraGpsRef.current = null;
     cameraGpsSessionRef.current = null;
     setSessionShots([]);
+    setCameraBatch([]);
+    cameraBatchRef.current = [];
     const session = (cameraSessionRef.current += 1);
     const owner = ownerKey;
     void getLiveGps().then(async (m) => {
@@ -482,9 +552,11 @@ export default function CaptureScreen() {
     setCameraOpen(true);
   }
 
-  // Each "Save & Next" streams the shot straight to the durable queue — no review tray, no upload step. The
-  // shot is enqueued IMMEDIATELY (never waits on the GPS fix); if it has no coords yet, its queue entry is
-  // patched when the session fix lands (openCamera's .then). Durability first, geotag best-effort.
+  // Per-photo camera mode: each "Save & Next" streams the shot straight to the durable queue — no review
+  // tray, no upload step. The shot is enqueued IMMEDIATELY (never waits on the GPS fix); if it has no coords
+  // yet, its queue entry is patched when the session fix lands (openCamera's .then). Durability first, geotag
+  // best-effort. BATCH mode instead buffers the shot for the per-photo review step (captioned there, streamed
+  // on Done) — so a fast burst still gets an optional per-photo caption without slowing the shutter.
   async function onCameraCapture(shot: CapturedShot, caption: string) {
     const key = nextKey();
     const exifMeta = extractExifMetadata(shot.exif);
@@ -493,6 +565,7 @@ export default function CaptureScreen() {
     const takenAt = exifMeta.takenAt ?? shot.capturedAt;
     const session = cameraSessionRef.current;
     const clientUploadId = newClientUploadId();
+    const batchMode = modeRef.current === "batch";
     setSessionShots((prev) => [...prev, { key, uri: shot.uri }]);
 
     let metadata: PhotoMetadata;
@@ -501,18 +574,35 @@ export default function CaptureScreen() {
     } else if (cameraGpsRef.current && hasCoords(cameraGpsRef.current)) {
       metadata = { ...cameraGpsRef.current, takenAt };
     } else {
-      // No coords yet — enqueue coordless NOW (durability first) and note it so the session fix, when it
-      // lands, can patch coords onto its queue entry if it hasn't uploaded yet (best-effort geotag).
+      // No coords yet. A per-photo shot enqueues coordless NOW (durability first) and is noted so the session
+      // fix can patch its queue entry (best-effort geotag). A batch shot isn't queued yet — it reconciles the
+      // session fix at upload time (buildCaptureUploadInput), so it is NOT registered here.
       metadata = { takenAt };
-      pendingGpsRef.current.push({ clientUploadId, session });
+      if (!batchMode) pendingGpsRef.current.push({ clientUploadId, session });
+    }
+
+    const sp: SessionPhoto = { key, clientUploadId, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: session };
+
+    if (batchMode) {
+      setCameraBatch((prev) => [...prev, sp]);
+      return;
     }
 
     // Snapshot the destination at the shutter so a later project/tag switch can't retarget this shot.
     const ctx = { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current };
-    await streamPhoto(
-      { key, clientUploadId, uri: shot.uri, width: shot.width, height: shot.height, metadata, caption, cameraSession: session },
-      ctx,
-    );
+    await streamPhoto(sp, ctx);
+  }
+
+  // Camera closed (Done). If a batch was captured, hand it to the per-photo review step (snapshotting the
+  // destination now — the camera covered the screen so it couldn't have changed mid-capture).
+  function closeCamera() {
+    setCameraOpen(false);
+    const batch = cameraBatchRef.current;
+    if (batch.length > 0) {
+      openReview(batch, { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current });
+      setCameraBatch([]);
+      cameraBatchRef.current = [];
+    }
   }
 
   async function assignPending(t: FieldCaptureTarget) {
@@ -724,7 +814,7 @@ export default function CaptureScreen() {
         <Suspense fallback={null}>
           <CameraCapture
             onCapture={onCameraCapture}
-            onClose={() => setCameraOpen(false)}
+            onClose={closeCamera}
             count={sessionShots.length}
             recent={sessionShots.slice(-5).map((p) => p.uri)}
             annotatePerShot={mode === "perPhoto"}
@@ -732,6 +822,56 @@ export default function CaptureScreen() {
           />
         </Suspense>
       ) : null}
+
+      {/* Per-photo caption review — a library import OR a finished camera batch lands here so each photo
+          gets its OWN optional caption before anything uploads. Blank = no description (no shared caption). */}
+      <Modal
+        visible={reviewPhotos.length > 0}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={cancelReview}
+      >
+        <SafeAreaProvider>
+          <SafeAreaView style={styles.reviewSafe} edges={["top", "bottom"]}>
+            <View style={styles.reviewHeader}>
+              <Pressable onPress={cancelReview} disabled={reviewBusy} hitSlop={12} accessibilityLabel="Cancel review">
+                <Text style={[styles.link, reviewBusy && styles.reviewDisabled]}>Cancel</Text>
+              </Pressable>
+              <Text style={styles.reviewTitle}>Add descriptions</Text>
+              <Text style={styles.reviewCount}>
+                {reviewPhotos.length} photo{reviewPhotos.length === 1 ? "" : "s"}
+              </Text>
+            </View>
+            <ScrollView
+              contentContainerStyle={styles.reviewBody}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+            >
+              <Text style={styles.hint}>
+                Tap a photo to add an optional description. Photos left blank upload with no description.
+              </Text>
+              <ReviewTray
+                photos={reviewPhotos}
+                onSetCaption={setReviewCaption}
+                onAppendCaption={appendReviewCaption}
+                onRemove={removeReviewPhoto}
+                disabled={reviewBusy}
+                voiceEnabled={transcribeConfig.data?.configured ?? false}
+              />
+            </ScrollView>
+            <View style={styles.reviewFooter}>
+              <Button
+                title={reviewBusy ? "Uploading…" : `Upload ${reviewPhotos.length} photo${reviewPhotos.length === 1 ? "" : "s"}`}
+                onPress={() => void finishReview()}
+                disabled={reviewBusy}
+                accessibilityLabel="Upload reviewed photos"
+                style={{ flex: 1 }}
+              />
+            </View>
+          </SafeAreaView>
+        </SafeAreaProvider>
+      </Modal>
 
       {/* Target picker for the session */}
       <TargetPicker
@@ -803,4 +943,28 @@ const styles = StyleSheet.create({
   pendingThumb: { width: 48, height: 48, borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
   placeholder: { borderWidth: 1, borderColor: theme.color.border },
   pendingName: { fontFamily: theme.font.medium, fontSize: 14, color: theme.color.textPrimary },
+  reviewSafe: { flex: 1, backgroundColor: theme.color.surfaceApp },
+  reviewHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.space.md,
+    paddingHorizontal: theme.space.lg,
+    paddingVertical: theme.space.md,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.color.border,
+  },
+  reviewTitle: { fontFamily: theme.font.semibold, fontSize: 16, color: theme.color.textPrimary },
+  reviewCount: { fontFamily: theme.font.medium, fontSize: 13, color: theme.color.textMuted },
+  reviewDisabled: { opacity: 0.4 },
+  reviewBody: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
+  reviewFooter: {
+    flexDirection: "row",
+    gap: theme.space.md,
+    paddingHorizontal: theme.space.lg,
+    paddingTop: theme.space.md,
+    paddingBottom: theme.space.sm,
+    borderTopWidth: 1,
+    borderTopColor: theme.color.border,
+  },
 });

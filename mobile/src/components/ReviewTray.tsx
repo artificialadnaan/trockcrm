@@ -25,8 +25,9 @@ const H_PADDING = theme.space.lg;
 /**
  * Review tray: a grid of captured/imported photos. Tapping a photo opens a
  * bottom-sheet editor (always adjacent, regardless of how far the grid scrolls)
- * to caption it individually — optional; uncaptioned photos inherit the batch
- * caption at upload. A captioned photo is marked with a pencil badge.
+ * to caption it individually — optional and PER-PHOTO only; a photo left blank
+ * uploads with NO description (no shared/batch caption is ever applied). A
+ * captioned photo is marked with a pencil badge.
  */
 export function ReviewTray({
   photos,
@@ -127,7 +128,7 @@ export function ReviewTray({
                   onBusyChange={setVoiceBusy}
                   disabled={disabled}
                   autoFocus
-                  hint="Optional — leave blank to use the shared caption below."
+                  hint="Optional — leave blank for no description."
                   headerRight={
                     <Pressable
                       onPress={() => confirmRemove(selected.key)}
