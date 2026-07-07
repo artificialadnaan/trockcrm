@@ -65,6 +65,48 @@ describe("RFP normalized payload builder", () => {
     });
   });
 
+  describe("project number (formatted, never the raw HubSpot id)", () => {
+    it("ships the canonical project_number for a HubSpot-imported deal (not the HS id)", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-hs",
+        deal: {
+          id: "deal-hs",
+          name: "HubSpot Deal",
+          dealNumber: "HS-318900588242", // raw HubSpot id — must never ship
+          projectNumber: "DFW-2-31825-aa", // canonical formatted number
+        },
+      });
+      expect(payload.deal.projectNumber).toBe("DFW-2-31825-aa");
+    });
+
+    it("uses the bid-board deal_number when project_number is empty (non-HS)", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-bb",
+        deal: {
+          id: "deal-bb",
+          name: "Bid Board Deal",
+          dealNumber: "ATL-4-12345-aa",
+          projectNumber: null,
+        },
+      });
+      expect(payload.deal.projectNumber).toBe("ATL-4-12345-aa");
+    });
+
+    it("falls back to the deal id (not the HS id) when there is no real number yet", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-pending",
+        deal: {
+          id: "deal-pending-uuid",
+          name: "Pending HubSpot Deal",
+          dealNumber: "HS-999999999",
+          projectNumber: null,
+        },
+      });
+      expect(payload.deal.projectNumber).toBe("deal-pending-uuid");
+      expect(payload.deal.projectNumber).not.toContain("HS-");
+    });
+  });
+
   it("maps the resolved deal owner into the payload (Requested by)", () => {
     const payload = buildNormalizedRfpRequestBody({
       sourceEventId: "crm:event-owner",

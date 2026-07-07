@@ -13,6 +13,7 @@ export * from "./project-types.js";
 export * from "./sales-review.js";
 export * from "./deal-scope-lock.js";
 export * from "./deal-display-number.js";
+export * from "./rfp-vote-invitation.js";
 export * from "./deal-description-history.js";
 export * from "./deal-hold.js";
 export * from "./deal-hold-risk.js";

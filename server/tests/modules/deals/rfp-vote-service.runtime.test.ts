@@ -39,9 +39,13 @@ async function setup() {
     );
     CREATE TABLE public.offices (id uuid PRIMARY KEY, slug text NOT NULL, is_active boolean NOT NULL DEFAULT true);
     INSERT INTO public.offices (id, slug) VALUES ('00000000-0000-0000-0000-0000000000ff', 'test');
+    CREATE TABLE leads (id uuid PRIMARY KEY, bid_due_date date);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text NOT NULL, deal_number text NOT NULL, project_number text,
-      stage_id uuid, project_type text, workflow_route text NOT NULL DEFAULT 'normal',
+      bid_estimate numeric(14,2), awarded_amount numeric(14,2), dd_estimate numeric(14,2), forecast_revenue numeric(14,2),
+      estimator text, description text, bid_due_date timestamptz, source_lead_id uuid,
+      property_address text, property_city text, property_state text, property_zip text, property_country text,
+      stage_id uuid, project_type text, project_type_id uuid, workflow_route text NOT NULL DEFAULT 'normal',
       is_bid_board_owned boolean NOT NULL DEFAULT false, bid_board_stage_slug text,
       is_read_only_mirror boolean NOT NULL DEFAULT false, read_only_synced_at timestamptz,
       bid_board_stage_entered_at timestamptz, bid_board_mirror_source_entered_at timestamptz,
@@ -59,6 +63,19 @@ async function setup() {
       created_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT rfp_votes_deal_round_voter_uq UNIQUE (deal_id, round_event_id, voter_user_id)
     );
+    CREATE TABLE deal_history (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, field_name text NOT NULL,
+      old_value text, new_value text, changed_by uuid NOT NULL, source text, reason text,
+      changed_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX deals_pn_uq ON deals (project_number) WHERE project_number IS NOT NULL;
+    CREATE TABLE public.project_type_config (
+      id uuid PRIMARY KEY, name text, slug text, code varchar(8), parent_id uuid, display_order integer,
+      is_active boolean NOT NULL DEFAULT true
+    );
+    INSERT INTO public.project_type_config (id, name, slug, code, parent_id, display_order, is_active) VALUES
+      ('00000000-0000-0000-0000-0000000003c3', 'Roofing', 'roofing', '3', NULL, 3, true),
+      ('00000000-0000-0000-0000-0000000002c2', 'Interior Renovation', 'interior-renovation', '2', NULL, 2, true);
   `);
   await db.query(
     `INSERT INTO deals (id, name, deal_number, stage_id, workflow_route, rfp_approval_status, rfp_approval_request_event_id)
@@ -256,6 +273,256 @@ describe("castRfpVote", () => {
       ),
     ).rejects.toMatchObject({ statusCode: 409, code: "RFP_NO_VOTE_ROUND" });
     expect(enqueue).not.toHaveBeenCalled();
+  });
+});
+
+describe("castRfpVote — edited fields (first-YES commits + locks)", () => {
+  const OFFICE = "00000000-0000-0000-0000-0000000000ff";
+  async function setupWithNumber() {
+    const db = await setup();
+    await db.query(
+      `UPDATE deals SET project_number='DFW-2-31825-aa', project_type='interior renovation' WHERE id=$1`,
+      [DEAL],
+    );
+    return db;
+  }
+  // The in-memory args.deal baseline the apply diffs against (must match the DB row's current values).
+  const editDeal = (overrides: Record<string, unknown> = {}) =>
+    dealRow({ projectNumber: "DFW-2-31825-aa", projectType: "interior renovation", ...overrides });
+
+  it("first approve WITH edits commits them (name, project-number type digit, project type, amount->bid_estimate)", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    const r1 = await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null,
+        editedFields: { dealname: "Corrected Name", project_types: "3", amount: "$425,000" },
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    expect(r1.outcome).toBe("pending"); // first of two approvals
+    const row = (await pg!.query(`SELECT name, project_number, project_type, bid_estimate FROM deals WHERE id=$1`, [DEAL])).rows[0] as any;
+    expect(row.name).toBe("Corrected Name");
+    expect(row.project_number).toBe("DFW-3-31825-aa"); // type digit 2 -> 3
+    expect(row.project_type).toBe("roofing");
+    expect(Number(row.bid_estimate)).toBe(425000);
+  });
+
+  it("a LATER voter's edits are rejected (round locked once an approve exists); deal + votes unchanged", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      { tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" }, decision: "approve", reason: null },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })) },
+    );
+    await expect(
+      castRfpVote(
+        {
+          tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V2, email: "james@x.com" },
+          decision: "approve", reason: null, editedFields: { dealname: "Too Late" },
+        },
+        { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 2 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_VOTE_ALREADY_LOCKED" });
+    const row = (await pg!.query(`SELECT name FROM deals WHERE id=$1`, [DEAL])).rows[0] as any;
+    expect(row.name).toBe("jasonn ranches"); // unchanged
+    const votes = (await pg!.query(`SELECT voter_user_id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(1); // V2's locked vote was NOT recorded
+  });
+
+  it("blocks editing the deal INTO Service (type 4): 409, no vote recorded, deal unchanged", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    await expect(
+      castRfpVote(
+        {
+          tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+          decision: "approve", reason: null, editedFields: { project_types: "4" },
+        },
+        { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })) },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_VOTE_SERVICE_TYPE_BLOCKED" });
+    const row = (await pg!.query(`SELECT project_type FROM deals WHERE id=$1`, [DEAL])).rows[0] as any;
+    expect(row.project_type).toBe("interior renovation");
+    const votes = (await pg!.query(`SELECT voter_user_id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(0);
+  });
+
+  it("does NOT lock a later voter who resubmits UNCHANGED values (all-no-op edit records a plain deciding vote)", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    const enqueueBidBoardCreate = vi.fn(async () => ({ jobId: 1 }));
+    const enqueueOutcome = vi.fn(async () => ({ jobId: 9 }));
+    // First voter approves (no edits) → the round locks (approvals=1).
+    await castRfpVote(
+      { tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" }, decision: "approve", reason: null },
+      { enqueueBidBoardCreate, enqueueOutcome },
+    );
+    // Second voter's client posts the FULL field map, but every value equals the deal's current values (the voter
+    // didn't touch the form). buildRfpVoteDealUpdate → {} (all no-ops), so it must NOT 409 LOCKED — it records the
+    // deciding approve.
+    const r2 = await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V2, email: "james@x.com" },
+        decision: "approve", reason: null,
+        editedFields: { dealname: "jasonn ranches", project_number: "DFW-2-31825-aa", project_types: "2" },
+      },
+      { enqueueBidBoardCreate, enqueueOutcome },
+    );
+    expect(r2.outcome).toBe("approved");
+    const votes = (await pg!.query(`SELECT voter_user_id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(2); // both recorded — no lock bounce for a no-op edit
+    expect(enqueueBidBoardCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("syncs the source lead's bid_due_date on a first-YES edit (detail resolves bid_due_date lead-first)", async () => {
+    pg = await setupWithNumber();
+    const LEAD = "00000000-0000-0000-0000-0000000000f1";
+    await pg.query(`INSERT INTO leads (id, bid_due_date) VALUES ($1, '2026-05-01')`, [LEAD]);
+    await pg.query(`UPDATE deals SET source_lead_id=$1 WHERE id=$2`, [LEAD, DEAL]);
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal({ sourceLeadId: LEAD }), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { bid_due_date: "2026-08-15" },
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    // Both the deal (create payload reads it deal-first) AND the lead (detail resolves it lead-first) get the date.
+    const deal = (await pg!.query(`SELECT bid_due_date FROM deals WHERE id=$1`, [DEAL])).rows[0] as any;
+    const lead = (await pg!.query(`SELECT bid_due_date FROM leads WHERE id=$1`, [LEAD])).rows[0] as any;
+    expect(new Date(deal.bid_due_date).toISOString().slice(0, 10)).toBe("2026-08-15");
+    expect(new Date(lead.bid_due_date).toISOString().slice(0, 10)).toBe("2026-08-15");
+  });
+
+  it("resolves + sets project_type_id when the type changes (keeps the deals-list type filter consistent)", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { project_types: "3" }, // interior renovation → roofing
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    const row = (await pg!.query(`SELECT project_type, project_type_id FROM deals WHERE id=$1`, [DEAL])).rows[0] as any;
+    expect(row.project_type).toBe("roofing");
+    expect(row.project_type_id).toBe("00000000-0000-0000-0000-0000000003c3"); // resolved Roofing config id (not null/stale)
+  });
+
+  it("enqueues a geocode_deal job when the first approver edits the address", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null,
+        editedFields: { address: "500 New Blvd", city: "Plano", state: "TX", zip: "75024" },
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    const jobs = (await pg!.query(`SELECT payload FROM public.job_queue WHERE job_type='geocode_deal'`)).rows as any[];
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.dealId).toBe(DEAL);
+    expect(jobs[0].payload.address).toContain("500 New Blvd");
+  });
+
+  it("re-geocodes on a zip-only address correction (uses the existing address in the payload)", async () => {
+    pg = await setupWithNumber();
+    await pg.query(
+      `UPDATE deals SET property_address='1 Main', property_city='Dallas', property_state='TX', property_zip='75201' WHERE id=$1`,
+      [DEAL],
+    );
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { zip: "75024" },
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    const jobs = (await pg!.query(`SELECT payload FROM public.job_queue WHERE job_type='geocode_deal'`)).rows as any[];
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].payload.address).toContain("1 Main");
+    expect(jobs[0].payload.address).toContain("75024");
+  });
+
+  it("records a description-history row when the first approver edits the description", async () => {
+    pg = await setupWithNumber();
+    await pg.query(`UPDATE deals SET description='old scope' WHERE id=$1`, [DEAL]);
+    const tdb: any = drizzle(pg as any);
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { description: "corrected scope" },
+      },
+      { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })), enqueueOutcome: vi.fn(async () => ({ jobId: 9 })) },
+    );
+    const rows = (await pg!.query(`SELECT field_name, old_value, new_value, changed_by, source FROM deal_history WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ field_name: "description", old_value: "old scope", new_value: "corrected scope", changed_by: V1, source: "rfp_vote_edit" });
+  });
+
+  it("translates a colliding project number (23505) into a clean 409, not a 500", async () => {
+    pg = await setupWithNumber();
+    // Another deal already owns ATL-2-10025-aa. Digit is 2 to match the voting deal's current type (interior
+    // renovation = code 2), so the type-wins-the-digit rewrite leaves the edited number intact and it collides.
+    await pg.query(
+      `INSERT INTO deals (id, name, deal_number, project_number, stage_id, workflow_route, is_active)
+       VALUES ('00000000-0000-0000-0000-0000000000c9', 'other', 'TR-9', 'ATL-2-10025-aa', '00000000-0000-0000-0000-0000000000aa', 'normal', true)`,
+    );
+    const tdb: any = drizzle(pg as any);
+    await expect(
+      castRfpVote(
+        {
+          tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+          decision: "approve", reason: null, editedFields: { project_number: "ATL-2-10025-aa" },
+        },
+        { enqueueBidBoardCreate: vi.fn(async () => ({ jobId: 1 })) },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: "RFP_VOTE_PROJECT_NUMBER_TAKEN" });
+  });
+
+  it("[finding D] diffs a later voter's edits against the LOCKED row, not a stale snapshot (identical edit = no-op)", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    const enqueueBidBoardCreate = vi.fn(async () => ({ jobId: 1 }));
+    const enqueueOutcome = vi.fn(async () => ({ jobId: 9 }));
+    // Voter A commits an edit (name → "Committed Name") on the first approve.
+    await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+        decision: "approve", reason: null, editedFields: { dealname: "Committed Name" },
+      },
+      { enqueueBidBoardCreate, enqueueOutcome },
+    );
+    // Voter B's stale page submits the SAME value A already committed. Because the diff is against the fresh locked
+    // row (which now has "Committed Name"), B's edit is a no-op → NOT locked → records the deciding approve.
+    const r2 = await castRfpVote(
+      {
+        tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V2, email: "james@x.com" },
+        decision: "approve", reason: null, editedFields: { dealname: "Committed Name" },
+      },
+      { enqueueBidBoardCreate, enqueueOutcome },
+    );
+    expect(r2.outcome).toBe("approved");
+    const votes = (await pg!.query(`SELECT voter_user_id FROM rfp_votes WHERE deal_id=$1`, [DEAL])).rows as any[];
+    expect(votes).toHaveLength(2);
+  });
+
+  it("rejects edits accompanying a REJECT vote (400 RFP_VOTE_EDIT_ON_REJECT)", async () => {
+    pg = await setupWithNumber();
+    const tdb: any = drizzle(pg as any);
+    await expect(
+      castRfpVote(
+        {
+          tenantDb: tdb, officeId: OFFICE, deal: editDeal(), voter: { userId: V1, email: "sidney@x.com" },
+          decision: "reject", reason: "margins", editedFields: { dealname: "nope" },
+        },
+        {},
+      ),
+    ).rejects.toMatchObject({ statusCode: 400, code: "RFP_VOTE_EDIT_ON_REJECT" });
   });
 });
 
