@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
-import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, jobQueue } from "@trock-crm/shared/schema";
+import { deals, jobQueue, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
 import { enqueueRfpBidBoardCreate } from "./rfp-enqueue.js";
@@ -401,6 +401,23 @@ export async function reconfirmRfpDecline(input: {
       newDescription: archivedDescription,
       changedBy: input.actor.userId,
       source: "rfp_reconfirm_denial",
+    });
+    await input.tenantDb
+      .update(tasks)
+      .set({ status: "dismissed", isOverdue: false })
+      .where(and(inArray(tasks.dealId, [input.dealId]), inArray(tasks.status, ["pending", "in_progress"])));
+    await logActivity({
+      tenantDb: input.tenantDb,
+      actor: buildAuditActorFromUser({ userId: input.actor.userId, name: input.actor.name, role: input.actor.role }),
+      action: "soft_delete",
+      entity: {
+        tableName: "deals",
+        entityType: "deal",
+        recordId: input.dealId,
+        nameSnapshot: String(updated.name ?? "Deal"),
+        secondaryIdSnapshot: (updated.projectNumber ?? updated.dealNumber ?? null) as string | null,
+      },
+      fieldChanges: { isActive: { from: true, to: false } },
     });
   }
 

@@ -213,13 +213,12 @@ export function buildRfpReconfirmDenialEmail(input: {
   officeId?: string | null;
   frontendUrl: string;
 }) {
-  // Deal URL: /deals/{id}?officeId={deal's office} (officeId carries the deal's tenant so a cross-office
-  // recipient doesn't 404 — same #611 rationale as the decline email). This is the ONLY CTA: the re-confirm
-  // is terminal, so unlike the decline email there is NO "Review & Decide" reviewer link.
-  const officeParam = input.officeId ? `?officeId=${encodeURIComponent(input.officeId)}` : "";
+  // The re-confirm is terminal and the deal is now archived (is_active=false). getDealById 404s inactive
+  // deals, so a "View Deal in CRM" link would 404 for the recipient. Remove the CTA entirely and note the
+  // archive instead.
   const baseUrl = input.frontendUrl.replace(/\/+$/, "");
-  const dealUrl = `${baseUrl}/deals/${encodeURIComponent(input.dealId)}${officeParam}`;
-  const safeDealUrl = escapeHtml(dealUrl);
+  // baseUrl retained for any future use; dealUrl intentionally removed — see FIX 5.
+  void baseUrl;
 
   const subject = input.dealNumber
     ? `RFP denial confirmed: ${input.dealNumber} (${input.dealName})`
@@ -281,16 +280,8 @@ export function buildRfpReconfirmDenialEmail(input: {
             </td>
           </tr>
           <tr>
-            <td align="center" style="padding:24px 24px 8px 24px;">
-              <!--[if mso]>
-              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="${safeDealUrl}" style="height:44px;v-text-anchor:middle;width:240px;" arcsize="9%" stroke="f" fillcolor="#CC0000">
-                <w:anchorlock/>
-                <center style="color:#ffffff;font-family:Arial,sans-serif;font-size:15px;font-weight:bold;">View Deal in CRM</center>
-              </v:roundrect>
-              <![endif]-->
-              <!--[if !mso]><!-- -->
-              <a href="${safeDealUrl}" style="display:inline-block;background-color:#CC0000;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:240px;border-radius:4px;">View Deal in CRM</a>
-              <!--<![endif]-->
+            <td align="center" style="padding:16px 24px 8px 24px;">
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:18px;color:#64748b;">This deal has been archived.</p>
             </td>
           </tr>
           <tr>
@@ -309,8 +300,8 @@ export function buildRfpReconfirmDenialEmail(input: {
   const text =
     `After a second-look review, leadership confirmed the denial of this RFP. It will not proceed.\n\n` +
     rows.map(([label, value]) => `${label}: ${value}`).join("\n") +
-    `\n\nView the deal in the CRM: ${dealUrl}`;
-  return { subject, html, text, dealUrl, dealNumber: input.dealNumber };
+    `\n\nThis deal has been archived.`;
+  return { subject, html, text, dealNumber: input.dealNumber };
 }
 
 // --- small local utilities (mirror the private helpers in rfp-rejection-email.ts) ---

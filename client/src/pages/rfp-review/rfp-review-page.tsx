@@ -110,6 +110,7 @@ export function RfpReviewPage() {
   if (confirmedForKey !== targetKey) {
     setConfirmedForKey(targetKey);
     setConfirmedNoProject(false);
+    setNote("");
   }
 
   // While SyncHub is creating the Bid Board project, poll so the page flips to approved/failed when the
@@ -256,6 +257,8 @@ export function RfpReviewPage() {
               onReconfirm={onReconfirm}
               busy={busy}
               reconfirming={submitting === "reconfirm"}
+              note={note}
+              setNote={setNote}
             />
           ) : review.overrideState === "failed" ? (
             <>
@@ -365,12 +368,16 @@ function ApprovingPanel({
   onReconfirm,
   busy,
   reconfirming,
+  note,
+  setNote,
 }: {
   review: RfpReviewDetail;
   onRefresh: () => void;
   onReconfirm: () => void;
   busy: boolean;
   reconfirming: boolean;
+  note: string;
+  setNote: (v: string) => void;
 }) {
   return (
     <div className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
@@ -395,7 +402,18 @@ function ApprovingPanel({
           Taking much longer than a minute? SyncHub may not have received the request. You can uphold the denial
           instead — only do this if no Bid Board project was created (if one was, it’ll be reconciled separately).
         </p>
-        <Button variant="ghost" size="sm" className="mt-2" onClick={onReconfirm} disabled={busy}>
+        <div className="mt-2 flex flex-col gap-1.5">
+          <Label htmlFor="rfp-override-note-approving">Note (required to deny)</Label>
+          <Textarea
+            id="rfp-override-note-approving"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="Why are you upholding the denial?"
+            rows={3}
+            disabled={busy}
+          />
+        </div>
+        <Button variant="ghost" size="sm" className="mt-2" onClick={onReconfirm} disabled={busy || note.trim().length === 0}>
           {reconfirming ? "Confirming…" : "Uphold the denial instead"}
         </Button>
       </div>

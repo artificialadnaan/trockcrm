@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   handleRfpReconfirmDenialEmail,
   buildRfpReconfirmDenialEmail,
-} from "./rfp-reconfirm-denial-email.js";
+} from "../../src/jobs/rfp-reconfirm-denial-email.js";
 
 const TENANT = "office_dallas";
 const DEAL = "11111111-1111-1111-1111-111111111111";
@@ -61,7 +61,7 @@ function makeSend() {
 const silentLogger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
 describe("handleRfpReconfirmDenialEmail", () => {
-  it("sends to the requesting rep + both leadership recipients, with deal details and a trockcrm.com link", async () => {
+  it("sends to the requesting rep + both leadership recipients, with deal details and an archived notice (no deal link)", async () => {
     const { query, calls } = makeQuery();
     const sendEmail = makeSend();
     await handleRfpReconfirmDenialEmail(BASE_PAYLOAD, null, { query, sendEmail, env: ENV, logger: silentLogger });
@@ -75,8 +75,10 @@ describe("handleRfpReconfirmDenialEmail", () => {
     expect(html).toContain("Margins too thin");
     // terminal outcome copy — leadership confirmed the denial (generic, no reviewer named)
     expect(html.toLowerCase()).toContain("leadership");
-    // the deal link is the ONLY CTA; the reviewer-only "Review & Decide" page is NOT offered (terminal)
-    expect(html).toContain(`https://trockcrm.com/deals/${DEAL}?officeId=${OFFICE}`);
+    // the deal is archived — no "View Deal in CRM" CTA (the deal 404s after archival)
+    expect(html).not.toContain(`/deals/`);
+    expect(html).not.toContain("View Deal in CRM");
+    expect(html).toContain("archived");
     expect(html).not.toContain("Review &amp; Decide");
     expect(html).not.toContain("/rfp-review/");
     expect(html).not.toMatch(/trockconstruction\.com/);
@@ -137,7 +139,7 @@ describe("handleRfpReconfirmDenialEmail", () => {
 });
 
 describe("buildRfpReconfirmDenialEmail", () => {
-  it("builds the terminal 'denial upheld' email with a single View-Deal CTA and no review page", () => {
+  it("builds the terminal 'denial upheld' email with an archived notice and NO View-Deal CTA (deal 404s after archival)", () => {
     const email = buildRfpReconfirmDenialEmail({
       dealId: DEAL,
       dealName: "jasonn ranches",
@@ -148,9 +150,12 @@ describe("buildRfpReconfirmDenialEmail", () => {
     });
     expect(email.subject).toContain("TR-1001");
     expect(email.subject).toContain("jasonn ranches");
-    expect(email.dealUrl).toBe(`https://trockcrm.com/deals/${DEAL}?officeId=${OFFICE}`);
-    expect(email.dealUrl.split("?")[1]).toBe(`officeId=${OFFICE}`);
-    expect(email.html).toContain("View Deal in CRM");
+    // no deal link — the deal is archived (is_active=false) and getDealById 404s it
+    expect(email.html).not.toContain(`/deals/`);
+    expect(email.html).not.toContain("View Deal in CRM");
+    expect(email.html).toContain("archived");
+    expect(email.text).toContain("archived");
+    expect(email.text).not.toContain(`/deals/`);
     // terminal: NO reviewer review-and-decide CTA, and the reviewer is never named
     expect(email.html).not.toContain("/rfp-review/");
     expect(email.html).not.toContain("Review &amp; Decide");
@@ -159,7 +164,7 @@ describe("buildRfpReconfirmDenialEmail", () => {
     expect(email.text).not.toMatch(/trockconstruction\.com/);
   });
 
-  it("omits the query string when the office is unresolved and handles missing fields", () => {
+  it("handles missing fields (no dealUrl property on return value)", () => {
     const email = buildRfpReconfirmDenialEmail({
       dealId: DEAL,
       dealName: "jasonn ranches",
@@ -168,8 +173,10 @@ describe("buildRfpReconfirmDenialEmail", () => {
       officeId: null,
       frontendUrl: "https://trockcrm.com",
     });
-    expect(email.dealUrl).toBe(`https://trockcrm.com/deals/${DEAL}`);
     expect(email.html).toContain("No reason provided");
     expect(email.html).toContain("Pending");
+    expect(email.html).toContain("archived");
+    // TypeScript: dealUrl is no longer on the return type
+    expect((email as any).dealUrl).toBeUndefined();
   });
 });

@@ -128,6 +128,22 @@ beforeAll(async () => {
       created_at timestamptz NOT NULL DEFAULT now(),
       completed_at timestamptz
     );
+
+    -- tasks: needed by the task-dismissal Drizzle UPDATE added in FIX 3.
+    -- Minimal columns — only the ones the UPDATE reads/writes (status, is_overdue, deal_id).
+    CREATE TABLE tasks (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      title varchar(500) NOT NULL DEFAULT 'Task',
+      type text NOT NULL DEFAULT 'follow_up',
+      priority text NOT NULL DEFAULT 'normal',
+      status text NOT NULL DEFAULT 'pending',
+      assigned_to uuid NOT NULL DEFAULT gen_random_uuid(),
+      is_overdue boolean NOT NULL DEFAULT false,
+      is_test_data boolean NOT NULL DEFAULT false,
+      deal_id uuid,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
   `);
   tdb = drizzle(pg);
 }, 30_000);
@@ -136,6 +152,7 @@ afterAll(async () => { await pg?.close(); });
 
 beforeEach(async () => {
   mocks.logActivity.mockClear();
+  await pg.query("DELETE FROM tasks");
   await pg.query("DELETE FROM deals");
   await pg.query("DELETE FROM deal_history");
   await pg.query("DELETE FROM job_queue");
@@ -295,5 +312,59 @@ describe("reconfirmRfpDecline auto-archive", () => {
 
     // Must NOT contain doubled spaces that would arise from a blank voter-notes interpolation.
     expect(deal?.description).not.toContain("  ");
+  });
+
+  it("assertion 4: pending and in_progress tasks on the deal are dismissed on archive", async () => {
+    // Seed three tasks: pending + in_progress (both should be dismissed) and completed (must stay completed).
+    const TASK_PENDING = U("0a01");
+    const TASK_INPROG = U("0a02");
+    const TASK_DONE = U("0a03");
+    await pg.query(
+      `INSERT INTO tasks (id, deal_id, status) VALUES ($1, $2, 'pending'), ($3, $2, 'in_progress'), ($4, $2, 'completed')`,
+      [TASK_PENDING, DEAL_ID, TASK_INPROG, TASK_DONE],
+    );
+
+    const res = await reconfirmRfpDecline({
+      tenantDb: tdb,
+      dealId: DEAL_ID,
+      actor: { userId: ACTOR_ID, name: "Adam Shaw", role: "admin" },
+      note: REVIEWER_NOTE,
+      officeId: null,
+    });
+    expect(res.ok).toBe(true);
+
+    const taskRows = (
+      await pg.query<{ id: string; status: string }>(
+        `SELECT id, status FROM tasks WHERE deal_id = $1`,
+        [DEAL_ID],
+      )
+    ).rows;
+
+    const byId = Object.fromEntries(taskRows.map((r) => [r.id, r.status]));
+    expect(byId[TASK_PENDING]).toBe("dismissed");
+    expect(byId[TASK_INPROG]).toBe("dismissed");
+    // completed tasks must be left untouched
+    expect(byId[TASK_DONE]).toBe("completed");
+  });
+
+  it("assertion 5: a soft_delete audit entry is written via logActivity on archive", async () => {
+    const res = await reconfirmRfpDecline({
+      tenantDb: tdb,
+      dealId: DEAL_ID,
+      actor: { userId: ACTOR_ID, name: "Adam Shaw", role: "admin" },
+      note: REVIEWER_NOTE,
+      officeId: null,
+    });
+    expect(res.ok).toBe(true);
+
+    // logActivity is mocked; find the call with action='soft_delete'.
+    const softDeleteCall = mocks.logActivity.mock.calls.find(
+      (args: any[]) => args[0]?.action === "soft_delete",
+    );
+    expect(softDeleteCall).toBeDefined();
+    const callArg = softDeleteCall![0];
+    expect(callArg.entity.recordId).toBe(DEAL_ID);
+    expect(callArg.entity.tableName).toBe("deals");
+    expect(callArg.fieldChanges).toMatchObject({ isActive: { from: true, to: false } });
   });
 });

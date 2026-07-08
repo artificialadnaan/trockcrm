@@ -227,6 +227,65 @@ describe("RfpReviewPage — Re-confirm denial button requires a note", () => {
   });
 });
 
+describe("RfpReviewPage — ApprovingPanel escape hatch requires a note", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    currentDealId = "deal-1";
+  });
+
+  function mount() {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(<RfpReviewPage />);
+    });
+  }
+
+  const upholdBtn = () =>
+    [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Uphold the denial instead")
+    ) as HTMLButtonElement | undefined;
+
+  it("disables 'Uphold the denial instead' button when note is empty, enables it once a note is typed (approving panel)", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: false, overrideState: "approving", reviewedByName: "Takashi" });
+    mount();
+
+    // The escape-hatch button must be present and disabled with an empty note
+    expect(upholdBtn()).toBeDefined();
+    expect(upholdBtn()?.disabled).toBe(true);
+
+    // Type a note into the approving-panel textarea → button must be enabled
+    act(() => {
+      const textarea = container.querySelector("#rfp-override-note-approving") as HTMLTextAreaElement;
+      expect(textarea).not.toBeNull();
+      Object.defineProperty(textarea, "value", { writable: true, value: "Stuck for 10 minutes" });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(upholdBtn()?.disabled).toBe(false);
+  });
+
+  it("keeps 'Uphold the denial instead' disabled with whitespace-only note (mirrors trim guard)", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: false, overrideState: "approving", reviewedByName: "Takashi" });
+    mount();
+
+    act(() => {
+      const textarea = container.querySelector("#rfp-override-note-approving") as HTMLTextAreaElement;
+      Object.defineProperty(textarea, "value", { writable: true, value: "   \n\t  " });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(upholdBtn()?.disabled).toBe(true);
+  });
+});
+
 describe("RfpReviewPage — approve override result handling (optimistic state)", () => {
   let container: HTMLDivElement;
   let root: Root;
