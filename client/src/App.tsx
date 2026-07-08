@@ -114,6 +114,11 @@ const DirectorDashboardPage = lazy(() =>
 const RepCommissionsPage = lazy(() =>
   import("@/pages/commissions/rep-commissions-page").then((module) => ({ default: module.RepCommissionsPage }))
 );
+// Commissions temporarily disabled for reps — route renders a disabled notice
+// instead of RepCommissionsPage. Re-enable by swapping the element back below.
+const CommissionsDisabledPage = lazy(() =>
+  import("@/pages/commissions/commissions-disabled-page").then((module) => ({ default: module.CommissionsDisabledPage }))
+);
 const TeamCommissionsPage = lazy(() =>
   import("@/pages/commissions/team-commissions-page").then((module) => ({ default: module.TeamCommissionsPage }))
 );
@@ -367,7 +372,7 @@ export function App() {
                 path="/commissions"
                 element={(
                   <RequireRole allowedRoles={["rep"]}>
-                    <RepCommissionsPage />
+                    <CommissionsDisabledPage />
                   </RequireRole>
                 )}
               />
