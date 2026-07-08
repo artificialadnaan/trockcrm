@@ -25,14 +25,16 @@ const H_PADDING = theme.space.lg;
 /**
  * Review tray: a grid of captured/imported photos. Tapping a photo opens a
  * bottom-sheet editor (always adjacent, regardless of how far the grid scrolls)
- * to caption it individually — optional; uncaptioned photos inherit the batch
- * caption at upload. A captioned photo is marked with a pencil badge.
+ * to caption it individually — optional and PER-PHOTO only; a photo left blank
+ * uploads with NO description (no shared/batch caption is ever applied). A
+ * captioned photo is marked with a pencil badge.
  */
 export function ReviewTray({
   photos,
   onSetCaption,
   onAppendCaption,
   onRemove,
+  onVoiceBusyChange,
   disabled = false,
   voiceEnabled = false,
 }: {
@@ -40,6 +42,10 @@ export function ReviewTray({
   onSetCaption: (key: string, text: string) => void;
   onAppendCaption: (key: string, text: string) => void;
   onRemove: (key: string) => void;
+  // Forwards the caption-sheet's dictation busy state up so the review FOOTER (Upload/Cancel) can also be
+  // blocked while recording/transcribing — tapping Upload mid-dictation would stream the caption before the
+  // transcript is appended and lose the note.
+  onVoiceBusyChange?: (busy: boolean) => void;
   disabled?: boolean;
   voiceEnabled?: boolean;
 }) {
@@ -50,7 +56,16 @@ export function ReviewTray({
   // Block closing the caption sheet while dictation is recording/transcribing — closing
   // would unmount VoiceRecorder mid-flight and drop the dictated caption.
   const [voiceBusy, setVoiceBusy] = useState(false);
-  useEffect(() => setVoiceBusy(false), [selectedKey]);
+  // Single sink for the VoiceRecorder busy state: drive the local close-guard AND forward it to the parent.
+  const applyVoiceBusy = (busy: boolean) => {
+    setVoiceBusy(busy);
+    onVoiceBusyChange?.(busy);
+  };
+  // Closing the sheet (or switching photos) ends any dictation surface → clear busy locally + upstream.
+  useEffect(() => {
+    applyVoiceBusy(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedKey]);
   function closeSheet() {
     if (voiceBusy) return;
     setSelectedKey(null);
@@ -124,10 +139,10 @@ export function ReviewTray({
                   onChangeCaption={(text) => onSetCaption(selected.key, text)}
                   onAppendCaption={(text) => onAppendCaption(selected.key, text)}
                   voiceEnabled={voiceEnabled}
-                  onBusyChange={setVoiceBusy}
+                  onBusyChange={applyVoiceBusy}
                   disabled={disabled}
                   autoFocus
-                  hint="Optional — leave blank to use the shared caption below."
+                  hint="Optional — leave blank for no description."
                   headerRight={
                     <Pressable
                       onPress={() => confirmRemove(selected.key)}

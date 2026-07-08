@@ -193,7 +193,10 @@ export async function patchQueuedMetadata(
  * item is copied (not once at the end): if the app is killed mid-enqueue, every photo already copied is
  * recoverable from the index instead of being orphaned and lost. Returns the queued items.
  */
-export async function enqueueUploads(ownerKey: string, inputs: CaptureUploadInput[]): Promise<QueuedUpload[]> {
+export async function enqueueUploads(
+  ownerKey: string,
+  inputs: CaptureUploadInput[],
+): Promise<QueuedUpload[]> {
   if (inputs.length === 0) return [];
   await ensureDir(ownerKey);
   const dir = ownerDir(ownerKey);
