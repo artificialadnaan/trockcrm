@@ -2943,7 +2943,7 @@ export async function deleteDeal(
   tenantDb: TenantDb,
   dealId: string,
   opts: {
-    actorRole: string;
+    actorRole: UserRole;
     actorId?: string | null;
     reason: string;
   },

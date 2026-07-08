@@ -11,6 +11,8 @@ const DD_STAGE = U("50a3");    // legacy Due Diligence stage → canonical oppor
 const D_OPP = U("d001");
 const D_AWARDED = U("d002");
 const D_DD = U("d003");
+const D_INACTIVE = U("d004");  // seeded already-archived (is_active=false)
+const D_MISSING = U("dfff");   // never inserted
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -80,7 +82,8 @@ beforeAll(async () => {
     INSERT INTO deals (id, name, stage_id, description, assigned_rep_id, is_active, is_change_order, on_hold, is_test_data, created_at, updated_at) VALUES
       ('${D_OPP}',     'Opp Deal',     '${OPP_STAGE}',     'Original scope.', '${REP}', true, false, false, false, now(), now()),
       ('${D_AWARDED}', 'Awarded Deal', '${AWARDED_STAGE}',  'Original scope.', '${REP}', true, false, false, false, now(), now()),
-      ('${D_DD}',      'DD Deal',      '${DD_STAGE}',       'Original scope.', '${REP}', true, false, false, false, now(), now());
+      ('${D_DD}',      'DD Deal',      '${DD_STAGE}',       'Original scope.', '${REP}', true, false, false, false, now(), now()),
+      ('${D_INACTIVE}','Gone Deal',    '${OPP_STAGE}',      'Original scope.', '${REP}', false, false, false, false, now(), now());
     CREATE TABLE deal_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, field_name text NOT NULL,
       old_value text, new_value text, changed_by uuid NOT NULL, source text, reason text,
@@ -136,5 +139,16 @@ describe("deleteDeal archive rules", () => {
       actorRole: "admin", actorId: REP, reason: "Admin cleanup",
     });
     expect(row?.isActive).toBe(false);
+  });
+
+  it("returns null (no-op) when the deal is already archived", async () => {
+    const row = await deleteDeal(tdb, D_INACTIVE, { actorRole: "admin", actorId: REP, reason: "again" });
+    expect(row).toBeNull();
+  });
+
+  it("throws 404 for a non-existent deal", async () => {
+    await expect(
+      deleteDeal(tdb, D_MISSING, { actorRole: "admin", actorId: REP, reason: "x" })
+    ).rejects.toMatchObject({ statusCode: 404 });
   });
 });

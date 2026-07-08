@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-08-deal-archive-with-reason-design.md`
 
-**Worktree:** `/Users/adnaaniqbal/Developer/trockcrm-wt-archive` on branch `feat/deal-archive-with-reason` (off `origin/main`).
+**Branch:** `feat/deal-archive-with-reason` (off `origin/main`), developed in a dedicated git worktree.
 
 ---
 

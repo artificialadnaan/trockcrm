@@ -425,7 +425,7 @@ export function toCanonicalWorkflowStageSlug(
 // the raw stage slug without threading a workflow route, while still accepting the legacy alias.
 export const OPPORTUNITY_STAGE_SLUGS = ["opportunity", "dd"] as const;
 export function isOpportunityStageSlug(stageSlug: string | null | undefined): boolean {
-  return stageSlug === "opportunity" || stageSlug === "dd";
+  return stageSlug != null && (OPPORTUNITY_STAGE_SLUGS as readonly string[]).includes(stageSlug);
 }
 
 export function isGenuineWonDealStageSlug(

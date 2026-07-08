@@ -43,7 +43,7 @@ export function buildArchivedDescription(
   reason: string,
   at: Date
 ): string {
-  const stamp = formatBusinessDate(at); // YYYY-MM-DD in America/Chicago (reuse existing tz helper)
+  const stamp = businessDateStamp(at); // YYYY-MM-DD in America/Chicago (Intl, DST-safe)
   const block = `[Archived ${stamp} — ${reason.trim()}]`;
   const prior = (existing ?? "").trim();
   return prior.length > 0 ? `${block}\n\n${prior}` : block;

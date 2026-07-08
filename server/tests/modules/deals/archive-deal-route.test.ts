@@ -165,6 +165,7 @@ describe("DELETE /api/deals/:id — archive deal route", () => {
       "deal-1",
       expect.objectContaining({
         actorRole: "rep",
+        actorId: "rep-1",
         reason: "Lost the bid",
       }),
     );
