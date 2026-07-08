@@ -208,6 +208,23 @@ describe("RfpReviewPage — Re-confirm denial button requires a note", () => {
     });
     expect(reconfirmBtn()?.disabled).toBe(false);
   });
+
+  it("keeps the Re-confirm denial button DISABLED when the note is whitespace-only (mirrors note.trim().length === 0 guard)", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: true });
+    mount();
+
+    // Whitespace-only value — should not satisfy the trim guard.
+    act(() => {
+      const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+      Object.defineProperty(textarea, "value", { writable: true, value: "   \n\t  " });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    // Button must still be disabled because note.trim().length === 0.
+    expect(reconfirmBtn()?.disabled).toBe(true);
+  });
 });
 
 describe("RfpReviewPage — approve override result handling (optimistic state)", () => {

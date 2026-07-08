@@ -272,6 +272,18 @@ describe("RFP override-review routes", () => {
       expect(overrideMocks.reconfirmRfpDecline).not.toHaveBeenCalled();
     });
 
+    it("returns 400 (RFP_REVIEW_REASON_REQUIRED) for empty-string and whitespace-only notes, and never calls the service", async () => {
+      // normalizeRfpOverrideNote trims and returns null for blank strings; the route must reject before calling the service.
+      for (const blankNote of ["", "   "]) {
+        vi.clearAllMocks();
+        const req = { params: { id: "deal-1" }, body: { note: blankNote }, tenantDb: {}, user: reviewer(), commitTransaction: vi.fn() } as any;
+        const res = makeRes();
+        const err = await runRoute("post", "/:id/rfp-override/reconfirm-decline", req, res);
+        expect(err, `expected 400 for note=${JSON.stringify(blankNote)}`).toMatchObject({ statusCode: 400, code: "RFP_REVIEW_REASON_REQUIRED" });
+        expect(overrideMocks.reconfirmRfpDecline, `service must not be called for note=${JSON.stringify(blankNote)}`).not.toHaveBeenCalled();
+      }
+    });
+
     it("returns 409 when not actionable", async () => {
       overrideMocks.reconfirmRfpDecline.mockResolvedValue({ ok: false, reason: "not_actionable" });
       // Note must be present to pass the new 400 guard before reaching the service mock.

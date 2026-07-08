@@ -26,6 +26,7 @@ import { reconfirmRfpDecline } from "../../../src/modules/deals/rfp-override-ser
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const DEAL_ID = U("de01");
+const DEAL_ID_NULL_REASON = U("de02");
 const ACTOR_ID = U("ac01");
 
 const VOTER_NOTES = "Margins too thin; scope unclear";
@@ -148,6 +149,16 @@ beforeEach(async () => {
              $2, $3, true, now())`,
     [DEAL_ID, VOTER_NOTES, ORIGINAL_DESC],
   );
+  // Seed a second deal that is reviewable but has rfp_declined_reason = NULL (e.g. a voting-path denial).
+  await pg.query(
+    `INSERT INTO deals (id, name, deal_number, project_number,
+                        rfp_approval_status, rfp_approval_request_id,
+                        rfp_declined_reason, description, is_active, updated_at)
+     VALUES ($1, 'Null Reason RFP Deal', 'TR-9002', 'PR-9002',
+             'declined', 99,
+             NULL, $2, true, now())`,
+    [DEAL_ID_NULL_REASON, ORIGINAL_DESC],
+  );
 });
 
 describe("reconfirmRfpDecline auto-archive", () => {
@@ -244,5 +255,45 @@ describe("reconfirmRfpDecline auto-archive", () => {
       )
     ).rows[0]?.n ?? 0;
     expect(histCount).toBe(1);
+  });
+
+  it("assertion 3: null rfp_declined_reason still produces a sensible description (no 'null'/'undefined' literals, no doubled spaces)", async () => {
+    const reviewerNote = "Upheld despite no voter notes";
+    const res = await reconfirmRfpDecline({
+      tenantDb: tdb,
+      dealId: DEAL_ID_NULL_REASON,
+      actor: { userId: ACTOR_ID, name: "Adam Shaw", role: "admin" },
+      note: reviewerNote,
+      officeId: null,
+    });
+
+    expect(res.ok).toBe(true);
+
+    const deal = (
+      await pg.query<{ is_active: boolean; description: string }>(
+        `SELECT is_active, description FROM deals WHERE id = $1`,
+        [DEAL_ID_NULL_REASON],
+      )
+    ).rows[0];
+
+    // Deal must be soft-deleted.
+    expect(deal?.is_active).toBe(false);
+
+    // Description must start with the archive block.
+    expect(deal?.description).toMatch(/^\[Archived \d{4}-\d{2}-\d{2} — /);
+
+    // Must contain the sentinel prefix and the reviewer's reason.
+    expect(deal?.description).toContain("RFP denied.");
+    expect(deal?.description).toContain(reviewerNote);
+
+    // The original description must still be present.
+    expect(deal?.description).toContain(ORIGINAL_DESC);
+
+    // Must NOT contain the literal words "null" or "undefined" (would indicate a missing null-coalesce).
+    expect(deal?.description).not.toMatch(/\bnull\b/i);
+    expect(deal?.description).not.toMatch(/\bundefined\b/i);
+
+    // Must NOT contain doubled spaces that would arise from a blank voter-notes interpolation.
+    expect(deal?.description).not.toContain("  ");
   });
 });
