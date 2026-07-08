@@ -209,6 +209,11 @@ function Wizard(props: {
   // photo is counted in neither this ref nor draft.photos. Kept in lockstep with the reducer's only two photo
   // mutations (addPhoto / removePhoto). Seeded from the loaded draft (may already hold photos on resume).
   const photoCount = useRef(props.initial.photos.length);
+  // Keys whose cap slot has already been released, so a removal is idempotent SYNCHRONOUSLY — a double-tap on a
+  // thumbnail's remove button (two onPress before React re-renders) must not decrement photoCount twice for one
+  // reducer removal. Keys are globally-unique clientUploadIds that are never reused, so this set only grows by
+  // removed photos (bounded by the session's photo count) and never needs pruning.
+  const releasedKeys = useRef<Set<string>>(new Set());
   // Ids of removed photos whose queue-cancellation hasn't confirmed yet. onSubmit retries the cancellation
   // for all still-pending ids and only proceeds once it succeeds — a FAILED removal stays in the set (and
   // blocks submit) instead of being cleared, so the drain can never upload evidence the user removed.
@@ -246,9 +251,13 @@ function Wizard(props: {
   // being silently ignored. The queue mutex additionally guarantees this write can't clobber photos a
   // concurrent submit enqueues.
   const removePhotoAndCancelUpload = (photo: ScorecardDraftPhoto) => {
-    // Release the photo's cap slot, but only if it's still present — guards a double-tap from decrementing twice
-    // (the reducer's filter is a no-op the second time, so the authoritative count must be too).
-    if (draft.photos.some((p) => p.key === photo.key)) photoCount.current -= 1;
+    // Release the photo's cap slot exactly once, keyed on the clientUploadId so a double-tap can't decrement
+    // photoCount twice (the reducer's filter is a no-op the second time, so the authoritative count must be too).
+    // This is synchronous — it does NOT depend on draft having re-rendered between the two taps.
+    if (!releasedKeys.current.has(photo.key)) {
+      releasedKeys.current.add(photo.key);
+      photoCount.current -= 1;
+    }
     dispatch({ type: "removePhoto", key: photo.key });
     const id = photo.clientUploadId;
     pendingRemovalIds.current.add(id);
