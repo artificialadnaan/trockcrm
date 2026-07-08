@@ -538,7 +538,7 @@ describe("normalizeDealBoardResponse", () => {
     vi.unstubAllGlobals();
   });
 
-  it("discards a stale in-flight response so it can't overwrite fresher deal state (request guard)", async () => {
+  it("discards a stale non-silent response so a newer non-silent request wins (route/office switch)", async () => {
     const apiMock = vi.mocked(api);
     apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "initial" } }); // mount load
     hookDealDetailOfficeId = null;
@@ -546,15 +546,14 @@ describe("normalizeDealBoardResponse", () => {
     const root = await renderDealDetailHook();
     expect(latestDetailResult?.deal).toMatchObject({ name: "initial" });
 
-    // A = explicit refetch (older, resolves LATE with stale data); B = silent poll (newer, resolves first).
-    // A started first so its response must be discarded even though it lands last.
+    // Two explicit refetches: A (older) resolves LATE with stale data; B (newer) resolves first. A must be discarded.
     let resolveA: (value: unknown) => void = () => {};
     apiMock.mockImplementationOnce(() => new Promise((r) => { resolveA = r; })); // A (older, pending)
     apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "newer" } }); // B (newer)
 
     await act(async () => {
       const pA = latestDetailResult!.refetch(); // token N
-      const pB = latestDetailResult!.refetchSilent(); // token N+1 (latest)
+      const pB = latestDetailResult!.refetch(); // token N+1 (latest non-silent)
       await pB; // B commits "newer"
       resolveA({ deal: { id: "deal-1", name: "STALE" } }); // A lands last with stale data
       await pA;
@@ -562,6 +561,72 @@ describe("normalizeDealBoardResponse", () => {
     });
 
     expect(latestDetailResult?.deal).toMatchObject({ name: "newer" }); // A's STALE was discarded
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("a FAILING silent poll does NOT discard a concurrent successful explicit refetch", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "initial" } }); // mount
+    hookDealDetailOfficeId = null;
+
+    const root = await renderDealDetailHook();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // A = explicit refetch that SUCCEEDS with "fresh" (resolves late). B = silent poll (newer) that FAILS first.
+    // The failing silent poll must NOT invalidate A — the user's action reload should win.
+    let resolveA: (value: unknown) => void = () => {};
+    apiMock.mockImplementationOnce(() => new Promise((r) => { resolveA = r; })); // A (explicit, pending)
+    apiMock.mockRejectedValueOnce(new Error("poll down")); // B (silent, fails)
+
+    await act(async () => {
+      const pA = latestDetailResult!.refetch(); // token N (latest non-silent)
+      const pB = latestDetailResult!.refetchSilent(); // token N+1 (silent) — fails
+      await pB; // B failed → only logs, commits nothing
+      resolveA({ deal: { id: "deal-1", name: "fresh" } }); // A succeeds
+      await pA;
+      await flushEffects();
+    });
+
+    expect(latestDetailResult?.deal).toMatchObject({ name: "fresh" }); // explicit refetch committed despite the newer silent poll
+    errSpy.mockRestore();
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("a superseded non-silent response neither overwrites the deal nor re-blanks loading (latest owns the spinner)", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "initial" } }); // mount
+    hookDealDetailOfficeId = null;
+
+    const root = await renderDealDetailHook();
+    expect(latestDetailResult?.loading).toBe(false);
+
+    // B (latest) resolves + clears loading first; A (older) lands late with stale data. A is superseded, so its
+    // finally must NOT clear loading (only the latest non-silent request owns the spinner) and it must NOT setDeal.
+    let resolveA: (value: unknown) => void = () => {};
+    apiMock.mockImplementationOnce(() => new Promise((r) => { resolveA = r; })); // A (older, pending)
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "B-data" } }); // B (latest)
+
+    await act(async () => {
+      const pA = latestDetailResult!.refetch(); // token N
+      const pB = latestDetailResult!.refetch(); // token N+1 (latest)
+      await pB; // B commits + clears loading
+      resolveA({ deal: { id: "deal-1", name: "STALE-A" } }); // A lands last
+      await pA;
+      await flushEffects();
+    });
+
+    expect(latestDetailResult?.deal).toMatchObject({ name: "B-data" }); // A's stale discarded
+    expect(latestDetailResult?.loading).toBe(false); // A did not re-blank
 
     await act(async () => {
       root.unmount();

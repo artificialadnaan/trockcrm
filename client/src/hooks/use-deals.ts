@@ -631,9 +631,11 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
   const [deal, setDeal] = useState<DealDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // Monotonic marker for the latest in-flight request. Silent polls, explicit refetches, and dealId/officeId
-  // changes can overlap; only the most recent request may commit its result (see fetchDeal).
+  // Monotonic request markers. `requestIdRef` covers ALL requests; `latestNonSilentRef` tracks the latest EXPLICIT
+  // (non-silent) request. Silent polls, explicit refetches, and dealId/officeId changes can overlap — these decide
+  // which response may commit (see fetchDeal).
   const requestIdRef = useRef(0);
+  const latestNonSilentRef = useRef(0);
 
   const fetchDeal = useCallback(async (silent = false) => {
     if (!dealId) {
@@ -644,24 +646,26 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
     // never blanks to a spinner every 5s — the vote tally just flips when it changes. A transient poll failure keeps
     // the last-good deal on screen instead of flashing an error banner.
     //
-    // Request guard: capture this request's id and only COMMIT its result if it's still the latest, so a slower
-    // earlier response (a silent poll overlapping an explicit refetch, or a stale dealId's fetch) can't overwrite
-    // fresher deal state. Loading is intentionally NOT guarded — a non-silent request always clears its own spinner
-    // in `finally`, so a silent poll that supersedes it can't strand loading on `true`.
+    // Two-tier request guard: a SILENT poll yields to ANY newer request, but a NON-SILENT refetch yields ONLY to a
+    // newer non-silent one. So a background poll (which may fail) can never discard a successful explicit reload
+    // (e.g. the refetch a "Cancel RFP" action awaits), and a stale response can't overwrite fresher deal state.
     const myRequest = ++requestIdRef.current;
     if (!silent) {
+      latestNonSilentRef.current = myRequest;
       setLoading(true);
       setError(null);
     }
+    // Re-read at commit time (a newer request may have started during the await).
+    const superseded = () => (silent ? requestIdRef.current !== myRequest : latestNonSilentRef.current !== myRequest);
     try {
       const data = await api<{ deal: DealDetail }>(`/deals/${dealId}/detail`, {
         ...getOfficeRequestOptions(options.officeId),
       });
-      if (requestIdRef.current !== myRequest) return; // superseded by a newer request
+      if (superseded()) return;
       setDeal(data.deal);
       if (silent) setError(null); // clear any stale error once a background poll succeeds
     } catch (err: unknown) {
-      if (requestIdRef.current !== myRequest) return; // superseded — don't clobber fresher state with a stale error
+      if (superseded()) return; // don't clobber fresher state with a stale/superseded error
       if (silent) {
         // Keep the last-good deal on screen (no setError), but make a persistent silent-poll failure traceable.
         console.error("[useDealDetail] silent refetch failed:", err);
@@ -669,7 +673,9 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
         setError(err instanceof Error ? err.message : "Failed to load deal");
       }
     } finally {
-      if (!silent) setLoading(false);
+      // Only the LATEST non-silent request clears the spinner it raised: a superseded non-silent request leaves
+      // loading to the newer one (no premature clear / stale-null flash), and a silent poll never touches it.
+      if (!silent && latestNonSilentRef.current === myRequest) setLoading(false);
     }
   }, [dealId, options.officeId]);
 
