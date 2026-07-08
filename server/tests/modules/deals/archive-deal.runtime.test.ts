@@ -7,8 +7,10 @@ const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const REP = U("ee01");        // hex-safe representative user
 const OPP_STAGE = U("50a1");
 const AWARDED_STAGE = U("50a2");
+const DD_STAGE = U("50a3");    // legacy Due Diligence stage → canonical opportunity alias
 const D_OPP = U("d001");
 const D_AWARDED = U("d002");
+const D_DD = U("d003");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -73,10 +75,12 @@ beforeAll(async () => {
     );
     INSERT INTO pipeline_stage_config (id, name, slug, is_terminal) VALUES
       ('${OPP_STAGE}', 'Opportunity', 'opportunity', false),
-      ('${AWARDED_STAGE}', 'Awarded', 'awarded', false);
+      ('${AWARDED_STAGE}', 'Awarded', 'awarded', false),
+      ('${DD_STAGE}', 'Due Diligence', 'dd', false);
     INSERT INTO deals (id, name, stage_id, description, assigned_rep_id, is_active, is_change_order, on_hold, is_test_data, created_at, updated_at) VALUES
       ('${D_OPP}',     'Opp Deal',     '${OPP_STAGE}',     'Original scope.', '${REP}', true, false, false, false, now(), now()),
-      ('${D_AWARDED}', 'Awarded Deal', '${AWARDED_STAGE}',  'Original scope.', '${REP}', true, false, false, false, now(), now());
+      ('${D_AWARDED}', 'Awarded Deal', '${AWARDED_STAGE}',  'Original scope.', '${REP}', true, false, false, false, now(), now()),
+      ('${D_DD}',      'DD Deal',      '${DD_STAGE}',       'Original scope.', '${REP}', true, false, false, false, now(), now());
     CREATE TABLE deal_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, field_name text NOT NULL,
       old_value text, new_value text, changed_by uuid NOT NULL, source text, reason text,
@@ -118,6 +122,13 @@ describe("deleteDeal archive rules", () => {
     expect(row?.description).toMatch(/^\[Archived \d{4}-\d{2}-\d{2} — Lost to competitor\]\n\nOriginal scope\.$/);
     const hist = await pg.query(`SELECT field_name, source FROM deal_history WHERE deal_id = '${D_OPP}'`);
     expect(hist.rows).toContainEqual({ field_name: "description", source: "deal_archive" });
+  });
+
+  it("lets a rep archive a legacy dd-stage deal (opportunity alias)", async () => {
+    const row = await deleteDeal(tdb, D_DD, {
+      actorRole: "rep", actorId: REP, reason: "Dead lead",
+    });
+    expect(row?.isActive).toBe(false);
   });
 
   it("lets an admin archive a non-opportunity deal", async () => {

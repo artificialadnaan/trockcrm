@@ -10,6 +10,9 @@ describe("canArchiveDeal", () => {
   it("an owner rep can archive an opportunity deal", () => {
     expect(canArchiveDeal(deal("opportunity", "r1"), { id: "r1", role: "rep" })).toBe(true);
   });
+  it("an owner rep can archive a legacy dd (opportunity alias) deal", () => {
+    expect(canArchiveDeal(deal("dd", "r1"), { id: "r1", role: "rep" })).toBe(true);
+  });
   it("an owner rep cannot archive a non-opportunity deal", () => {
     expect(canArchiveDeal(deal("awarded", "r1"), { id: "r1", role: "rep" })).toBe(false);
   });

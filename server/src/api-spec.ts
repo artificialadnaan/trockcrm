@@ -1074,11 +1074,28 @@ export const apiSpec = {
       },
       delete: {
         tags: ["Deals"],
-        summary: "Soft-delete a deal (director/admin only)",
+        summary: "Archive (soft-delete) a deal",
+        description:
+          "Archives the deal (is_active=false) and prepends the reason to the deal description. The assigned rep or an admin may archive; non-admins may only archive opportunity-stage deals. A non-empty reason is required.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["reason"],
+                properties: {
+                  reason: { type: "string", description: "Why the deal is being archived; prepended to the deal description." },
+                },
+              },
+            },
+          },
+        },
         responses: {
-          200: { description: "Deal deleted.", content: { "application/json": { schema: { $ref: "#/components/schemas/SuccessResponse" } } } },
-          403: { description: "Insufficient role." },
+          204: { description: "Deal archived." },
+          400: { description: "A reason is required to archive a deal (DEAL_ARCHIVE_REASON_REQUIRED)." },
+          403: { description: "Not the owner/admin, or a non-admin archiving a non-opportunity deal (DEAL_ARCHIVE_STAGE_FORBIDDEN)." },
           404: { description: "Deal not found." },
         },
       },

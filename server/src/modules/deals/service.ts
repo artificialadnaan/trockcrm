@@ -26,6 +26,7 @@ import {
   getDealAtRiskResult,
   isGenuineEstimatingDealStageSlug,
   isGenuineWonDealStageSlug,
+  isOpportunityStageSlug,
   resolveEffectiveStageEnteredAt,
   USER_ROLES,
   type AtRiskResult,
@@ -2969,7 +2970,7 @@ export async function deleteDeal(
       .from(pipelineStageConfig)
       .where(eq(pipelineStageConfig.id, existing.stageId))
       .limit(1);
-    if ((stageRow?.slug ?? null) !== "opportunity") {
+    if (!isOpportunityStageSlug(stageRow?.slug)) {
       throw new AppError(403, "Only opportunity-stage deals can be archived by reps.", "DEAL_ARCHIVE_STAGE_FORBIDDEN");
     }
   }
