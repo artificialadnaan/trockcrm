@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { deleteCompany } from "../../src/modules/companies/service.js";
 import { deleteProperty } from "../../src/modules/properties/service.js";
-import { deleteDeal } from "../../src/modules/deals/service.js";
 import { createLeadService } from "../../src/modules/leads/service.js";
 
 function updateDb(returningRows: unknown[]) {
@@ -33,11 +32,9 @@ function updateDb(returningRows: unknown[]) {
 }
 
 describe("delete policy services", () => {
-  it("rejects director deal deletes", async () => {
-    await expect(deleteDeal({} as never, "deal-1", "director")).rejects.toMatchObject({
-      statusCode: 403,
-    });
-  });
+  // NOTE: deal archiving is no longer admin-only — reps can archive opportunity-stage deals they own.
+  // The full archive policy (reason required, rep→opportunity 403, admin any-stage) is covered by
+  // tests/modules/deals/archive-deal.runtime.test.ts. Leads remain admin-only (below).
 
   it("rejects non-admin lead deletes before touching the database", async () => {
     const service = createLeadService();
