@@ -36,7 +36,7 @@ jest.mock("expo-file-system/legacy", () => {
 });
 
 import * as FileSystem from "expo-file-system/legacy";
-import { clearDraft, loadDraft, removeDraftPhotos, stageDraftPhoto, updateDraftCaption } from "../review-draft";
+import { clearDraft, loadDraft, removeDraftPhotos, stageDraftPhoto, updateDraftCaption, updateDraftMetadata } from "../review-draft";
 import type { SessionPhoto } from "../session-photo";
 import type { DraftCtx } from "../review-draft-core";
 
@@ -138,6 +138,20 @@ describe("review-draft: updateDraftCaption (crash preserves captions typed so fa
     const loaded = await loadDraft("u1");
     expect(loaded.find((i) => i.key === "a")!.caption).toBe("");
     expect(loaded.find((i) => i.key === "b")!.caption).toBe("only b");
+  });
+});
+
+describe("review-draft: updateDraftMetadata (late GPS fix onto a coordless batch draft shot)", () => {
+  it("merges coords onto the matching item so a crash before Done recovers WITH coords", async () => {
+    await stage("u1", photo({ key: "a", metadata: { takenAt: "t" } }));
+    await updateDraftMetadata("u1", "cu-a", { latitude: 32.7, longitude: -96.8, addressSource: "live_gps" });
+    expect((await loadDraft("u1"))[0].metadata).toMatchObject({ takenAt: "t", latitude: 32.7, longitude: -96.8, addressSource: "live_gps" });
+  });
+
+  it("does NOT overwrite an item that already has coords (EXIF shot)", async () => {
+    await stage("u1", photo({ key: "a", metadata: { takenAt: "t", latitude: 1, longitude: 2, addressSource: "exif" } }));
+    await updateDraftMetadata("u1", "cu-a", { latitude: 9, longitude: 9, addressSource: "live_gps" });
+    expect((await loadDraft("u1"))[0].metadata.latitude).toBe(1);
   });
 });
 

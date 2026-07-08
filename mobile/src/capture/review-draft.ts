@@ -2,7 +2,8 @@ import * as FileSystem from "expo-file-system/legacy";
 // Pure manifest helpers + createAsyncMutex/sanitizeOwnerKey from the queue core (no native deps) — this
 // module's only native dependency is expo-file-system, exactly like the upload queue + scorecard drafts.
 import { createAsyncMutex, sanitizeOwnerKey } from "./upload-queue-core";
-import { addManifestItem, patchManifestCaption, removeManifestItems, type StagedDraftItem } from "./review-draft-core";
+import { addManifestItem, patchManifestCaption, patchManifestMetadata, removeManifestItems, type StagedDraftItem } from "./review-draft-core";
+import type { PhotoMetadata } from "./metadata";
 import type { SessionPhoto } from "./session-photo";
 import type { DraftCtx } from "./review-draft-core";
 
@@ -140,6 +141,24 @@ export async function updateDraftCaption(ownerKey: string, clientUploadId: strin
   if (!ownerKey) return;
   await withDraftLock(async () => {
     const { items, changed } = patchManifestCaption(await readManifest(ownerKey), clientUploadId, caption);
+    if (changed) await writeManifest(ownerKey, items);
+  });
+}
+
+/**
+ * Merge a late session GPS fix onto the draft item matching `clientUploadId` — a batch shot staged coordless,
+ * then geotagged when the camera session's fix resolves, so a crash before Done still recovers it WITH
+ * coordinates (the live Done path already reconciles via the session GPS ref). Best-effort + lock-safe; a no-op
+ * if the id is gone or the item already has coordinates.
+ */
+export async function updateDraftMetadata(
+  ownerKey: string,
+  clientUploadId: string,
+  coords: { latitude: number; longitude: number; addressSource?: PhotoMetadata["addressSource"] },
+): Promise<void> {
+  if (!ownerKey) return;
+  await withDraftLock(async () => {
+    const { items, changed } = patchManifestMetadata(await readManifest(ownerKey), clientUploadId, coords);
     if (changed) await writeManifest(ownerKey, items);
   });
 }

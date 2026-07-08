@@ -1,6 +1,7 @@
 import {
   addManifestItem,
   patchManifestCaption,
+  patchManifestMetadata,
   removeManifestItems,
   type StagedDraftItem,
 } from "../review-draft-core";
@@ -98,5 +99,39 @@ describe("review-draft-core: patchManifestCaption (sets caption on the matching 
     const { items, changed } = patchManifestCaption(existing, "cu-missing", "x");
     expect(changed).toBe(false);
     expect(items).toBe(existing);
+  });
+});
+
+describe("review-draft-core: patchManifestMetadata (late GPS fix onto a coordless batch draft shot)", () => {
+  it("fills coords + addressSource on the matching clientUploadId, preserving takenAt", () => {
+    const { items, changed } = patchManifestMetadata(
+      [item({ key: "a", metadata: { takenAt: "t" } })],
+      "cu-a",
+      { latitude: 32.7, longitude: -96.8, addressSource: "live_gps" },
+    );
+    expect(changed).toBe(true);
+    expect(items[0].metadata).toEqual({ takenAt: "t", latitude: 32.7, longitude: -96.8, addressSource: "live_gps" });
+  });
+
+  it("does NOT overwrite an item that already has coordinates (EXIF shot)", () => {
+    const existing = [item({ key: "a", metadata: { takenAt: "t", latitude: 1, longitude: 2, addressSource: "exif" } })];
+    const { items, changed } = patchManifestMetadata(existing, "cu-a", { latitude: 9, longitude: 9, addressSource: "live_gps" });
+    expect(changed).toBe(false);
+    expect(items).toBe(existing);
+  });
+
+  it("is a no-op (same reference) when the clientUploadId is absent", () => {
+    const existing = [item({ key: "a", metadata: { takenAt: "t" } })];
+    const { items, changed } = patchManifestMetadata(existing, "cu-missing", { latitude: 1, longitude: 2 });
+    expect(changed).toBe(false);
+    expect(items).toBe(existing);
+  });
+
+  it("patches ONLY the targeted item when two share a session key but differ by clientUploadId", () => {
+    const orphan = item({ key: "sp-1", clientUploadId: "cu-orphan", metadata: { takenAt: "t" } });
+    const fresh = item({ key: "sp-1", clientUploadId: "cu-fresh", metadata: { takenAt: "t" } });
+    const { items } = patchManifestMetadata([orphan, fresh], "cu-fresh", { latitude: 5, longitude: 6, addressSource: "live_gps" });
+    expect(items.find((i) => i.clientUploadId === "cu-orphan")!.metadata.latitude).toBeUndefined();
+    expect(items.find((i) => i.clientUploadId === "cu-fresh")!.metadata.latitude).toBe(5);
   });
 });

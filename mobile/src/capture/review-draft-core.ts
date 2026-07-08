@@ -68,3 +68,27 @@ export function patchManifestCaption(
   });
   return { items: changed ? next : items, changed };
 }
+
+/**
+ * Merge a late session GPS fix onto the item matching `clientUploadId` — a batch shot staged coordless, then
+ * geotagged when the session fix resolves, so a crash before Done still recovers it WITH coordinates (matching
+ * the live Done path). Fills ONLY coords + addressSource, preserving takenAt and everything else, and never
+ * overwrites an item that already has coordinates (e.g. an EXIF shot). Reports whether anything changed so the
+ * caller rewrites the manifest only when it did. Keyed on clientUploadId, like the other mutators.
+ */
+export function patchManifestMetadata(
+  items: StagedDraftItem[],
+  clientUploadId: string,
+  coords: { latitude: number; longitude: number; addressSource?: PhotoMetadata["addressSource"] },
+): { items: StagedDraftItem[]; changed: boolean } {
+  let changed = false;
+  const next = items.map((i) => {
+    if (i.clientUploadId !== clientUploadId || i.metadata.latitude !== undefined) return i;
+    changed = true;
+    return {
+      ...i,
+      metadata: { ...i.metadata, latitude: coords.latitude, longitude: coords.longitude, addressSource: coords.addressSource },
+    };
+  });
+  return { items: changed ? next : items, changed };
+}

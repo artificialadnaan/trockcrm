@@ -25,7 +25,7 @@ import {
   patchQueuedMetadata,
   uploadOwnerKey,
 } from "../../src/capture/upload-queue";
-import { loadDraft, removeDraftPhotos, stageDraftPhoto, updateDraftCaption, type StagedDraftItem } from "../../src/capture/review-draft";
+import { loadDraft, removeDraftPhotos, stageDraftPhoto, updateDraftCaption, updateDraftMetadata, type StagedDraftItem } from "../../src/capture/review-draft";
 import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
 import { buildCaptureUploadInput, setPhotoCaption, appendPhotoCaption, removePhoto, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
@@ -204,6 +204,10 @@ export default function CaptureScreen() {
   // clientUploadIds streamed coordless (captured before this session's GPS fix landed), tagged by session.
   // When the fix resolves, their durable queue entries are patched with the coordinates (best-effort).
   const pendingGpsRef = useRef<{ clientUploadId: string; session: number }[]>([]);
+  // Same, but for BATCH shots staged coordless into the review DRAFT (not the queue): when the session fix
+  // resolves, their durable DRAFT metadata is patched so a crash before Done still recovers them WITH coords
+  // (the live Done path reconciles via cameraGpsRef, but the draft copy would otherwise persist coordless).
+  const pendingDraftGpsRef = useRef<{ clientUploadId: string; session: number }[]>([]);
 
   // Mirror target/category/tags into refs so the capture handlers can read the LIVE value (not a stale
   // closure) at the shutter — the snapshot they take there is what each streamed photo is stamped with.
@@ -479,7 +483,14 @@ export default function CaptureScreen() {
       if (!reviewOpenRef.current && !cameraOpenRef.current && draftBusyRef.current === 0) {
         try {
           const orphans = await loadDraft(ownerKey);
-          if (orphans.length > 0) {
+          // Re-check ownership AFTER the async load: addAssets increments draftBusyRef AFTER this block's first
+          // guard, and an EXIF-GPS import (which skips the awaited getLiveGps) can append its live review photos
+          // to the manifest before loadDraft's read completes. Bail if anything now owns the draft so we never
+          // enqueue a live session's still-being-captioned photos as blank-caption orphans — they wait for a
+          // genuine later resume. (The clientUploadId-scoped removal below already protects a NEW import that
+          // starts DURING the enqueue loop, since it is never in this snapshot.)
+          const stillOrphaned = !reviewOpenRef.current && !cameraOpenRef.current && draftBusyRef.current === 0;
+          if (orphans.length > 0 && stillOrphaned) {
             // Enqueue each orphan; KEEP any that fail to enqueue in the draft (its durable copy is the only
             // crash-safe record — failedShots is in-memory), so a later resume retries it. Remove ONLY the
             // orphan keys that landed in the queue — by key, NEVER a whole-dir clearDraft: this loop spans many
@@ -571,6 +582,11 @@ export default function CaptureScreen() {
     for (const f of mine) {
       try {
         await enqueueUploads(ownerKey, [f.input]);
+        // If this failure was DRAFT-backed (a Done/recovery enqueue that failed), its manifest entry was
+        // intentionally KEPT as the crash-durable record. Now that this generic retry enqueued it, drop that
+        // entry so the next resume doesn't re-enqueue it as an orphan. Idempotent + clientUploadId-scoped: a
+        // no-op for a plain streamPhoto failure (those were never staged in the draft).
+        await removeDraftPhotos(ownerKey, [f.input.clientUploadId]).catch(() => undefined);
       } catch {
         anyFailed = true;
         setFailedShots((prev) =>
@@ -703,26 +719,33 @@ export default function CaptureScreen() {
   // after the delete. Remove ONLY this review's keys (never a whole-dir clear): the per-owner draft can also hold
   // a PRIOR session's enqueue-failed photo kept as its sole crash record, which Cancel must not destroy.
   async function cancelReview() {
-    // draftBusyRef>0 ⇒ a remove is in flight (import staging can't overlap an open review); wait it out so we
+    // finishingRef is the SYNCHRONOUS mutual-exclusion latch shared with finishReview (reviewBusy flips only on
+    // the next render, so a same-frame multi-touch of Cancel + Upload could otherwise run both — Cancel deleting
+    // the very draft copies Upload is enqueuing from). draftBusyRef>0 ⇒ a remove is in flight; wait it out so we
     // snapshot a settled key set and never race the removal's restore-on-failure.
-    if (reviewBusy || reviewVoiceBusy || draftBusyRef.current > 0) return;
+    if (reviewBusy || reviewVoiceBusy || finishingRef.current || draftBusyRef.current > 0) return;
+    finishingRef.current = true;
     const owner = ownerKey;
     const ids = reviewPhotosRef.current.map((p) => p.clientUploadId);
-    if (owner) {
-      setReviewBusy(true);
-      try {
-        await awaitStaging();
-        await removeDraftPhotos(owner, ids);
-      } catch {
-        setNotice({ tone: "error", text: "Couldn't discard those photos — tap Cancel to try again." });
+    try {
+      if (owner) {
+        setReviewBusy(true);
+        try {
+          await awaitStaging();
+          await removeDraftPhotos(owner, ids);
+        } catch {
+          setNotice({ tone: "error", text: "Couldn't discard those photos — tap Cancel to try again." });
+          setReviewBusy(false);
+          return;
+        }
         setReviewBusy(false);
-        return;
       }
-      setReviewBusy(false);
+      setReviewPhotos([]);
+      setReviewCtx(null);
+      setReviewVoiceBusy(false);
+    } finally {
+      finishingRef.current = false;
     }
-    setReviewPhotos([]);
-    setReviewCtx(null);
-    setReviewVoiceBusy(false);
   }
   // Done: staged photos are in the durable DRAFT (never the queue yet). AWAIT any in-flight staging, then
   // enqueue each into the NORMAL queue — from the durable draft copy (keyed by session key) when present (a
@@ -822,16 +845,23 @@ export default function CaptureScreen() {
         cameraGpsRef.current = m;
         cameraGpsSessionRef.current = session;
       }
-      // Best-effort geotag: patch coords onto THIS session's still-queued coordless shots. Shots are NEVER
-      // held back for GPS — they enqueue + drain immediately (durability + no stranding), so some may have
-      // already uploaded; those are simply skipped. Always clear this session's pending ids.
-      const ids = pendingGpsRef.current.filter((p) => p.session === session).map((p) => p.clientUploadId);
+      // Best-effort geotag for THIS session's coordless shots. Shots are NEVER held back for GPS — they enqueue
+      // (per-photo) or stage (batch) immediately, so some may have moved on; those are simply skipped. Always
+      // clear this session's pending registrations (queued AND draft) so nothing leaks across sessions.
+      const queuedIds = pendingGpsRef.current.filter((p) => p.session === session).map((p) => p.clientUploadId);
+      const draftIds = pendingDraftGpsRef.current.filter((p) => p.session === session).map((p) => p.clientUploadId);
       pendingGpsRef.current = pendingGpsRef.current.filter((p) => p.session !== session);
-      if (!withCoords || ids.length === 0) return;
+      pendingDraftGpsRef.current = pendingDraftGpsRef.current.filter((p) => p.session !== session);
+      if (!withCoords) return;
+      const coords = { latitude: m.latitude!, longitude: m.longitude!, addressSource: m.addressSource };
+      // Batch shots staged coordless: patch their DURABLE draft metadata so a crash before Done still recovers
+      // them WITH coordinates (the live Done path already reconciles via cameraGpsRef; this covers the crash).
+      if (draftIds.length > 0) {
+        await Promise.all(draftIds.map((id) => updateDraftMetadata(owner, id, coords).catch(() => undefined)));
+      }
+      if (queuedIds.length === 0) return;
       const patched = await Promise.all(
-        ids.map((id) =>
-          patchQueuedMetadata(owner, id, { latitude: m.latitude!, longitude: m.longitude!, addressSource: m.addressSource }).catch(() => false),
-        ),
+        queuedIds.map((id) => patchQueuedMetadata(owner, id, coords).catch(() => false)),
       );
       // If any still-queued shot got geotagged, drain so it uploads WITH coords now instead of on the next trigger.
       if (patched.some(Boolean)) void kickDrain();
@@ -863,9 +893,10 @@ export default function CaptureScreen() {
     } else if (cameraGpsRef.current && hasCoords(cameraGpsRef.current)) {
       metadata = { ...cameraGpsRef.current, takenAt };
     } else {
-      // No coords yet. A per-photo shot enqueues NOW, so it registers in pendingGpsRef here (below) so the
-      // session fix patches its queued row. A BATCH shot isn't queued until Done, so enqueueReviewPhoto
-      // registers it THEN — registering here would point the late fix at a not-yet-queued row.
+      // No coords yet. A per-photo shot enqueues NOW → registers in pendingGpsRef (below) so the session fix
+      // patches its queued row. A BATCH shot is staged in the DRAFT → registers in pendingDraftGpsRef (below)
+      // so the fix patches its durable draft copy (crash-before-Done recovers WITH coords); it ALSO re-registers
+      // in pendingGpsRef at Done via enqueueReviewPhoto if the fix still hasn't landed, covering the queued row.
       metadata = { takenAt };
       coordless = true;
     }
@@ -885,6 +916,9 @@ export default function CaptureScreen() {
       // change mid-session — this shutter-time ctx equals the Done-time ctx closeCamera hands to the review.
       const ctx = { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current };
       stageReviewPhoto(ownerKey, sp, ctx);
+      // Staged coordless → register for this session's late GPS fix to patch the DURABLE draft copy, so a crash
+      // before Done still recovers it WITH coords (pendingGpsRef patches QUEUED rows; this patches the draft).
+      if (coordless) pendingDraftGpsRef.current.push({ clientUploadId, session });
       return;
     }
 
