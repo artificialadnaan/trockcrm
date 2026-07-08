@@ -7,6 +7,8 @@ import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
 import { enqueueRfpBidBoardCreate } from "./rfp-enqueue.js";
 import { resolveSyncHubOverrideApproveUrl } from "./rfp-payload.js";
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
+import { buildArchivedDescription } from "./archive-description.js";
+import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -382,6 +384,25 @@ export async function reconfirmRfpDecline(input: {
     },
     metadata: { rfpOverrideNote: input.note },
   });
+
+  // Auto-archive on denial reconfirm (either reviewer): soft-delete the deal and prepend the voter + reviewer
+  // notes to the description. Guarded on the current is_active so a redundant call never re-prepends.
+  if (updated.isActive) {
+    const reviewerReason = (input.note ?? "").trim();
+    const voterNotes = (updated.rfpDeclinedReason ?? "").trim();
+    const combined =
+      `RFP denied.${voterNotes ? ` ${voterNotes}` : ""} · Final review ` +
+      `(${input.actor.name ?? input.actor.userId}): ${reviewerReason}`;
+    const archivedDescription = buildArchivedDescription(updated.description, combined, new Date());
+    await input.tenantDb.update(deals).set({ isActive: false, description: archivedDescription }).where(eq(deals.id, input.dealId));
+    await recordDescriptionHistoryChange(input.tenantDb, {
+      dealId: input.dealId,
+      oldDescription: updated.description,
+      newDescription: archivedDescription,
+      changedBy: input.actor.userId,
+      source: "rfp_reconfirm_denial",
+    });
+  }
 
   // finding: the migration 0154 trigger fires the "denial upheld" email on the denial_reconfirmed transition ONLY
   // for request-BACKED deals (it returns early on a NULL rfp_approval_request_id). A VOTING-path no-go that a

@@ -264,9 +264,18 @@ describe("RFP override-review routes", () => {
       expect(commit).toHaveBeenCalledTimes(1);
     });
 
+    it("returns 400 when note is missing", async () => {
+      const req = { params: { id: "deal-1" }, body: {}, tenantDb: {}, user: reviewer(), commitTransaction: vi.fn() } as any;
+      const res = makeRes();
+      const err = await runRoute("post", "/:id/rfp-override/reconfirm-decline", req, res);
+      expect(err).toMatchObject({ statusCode: 400, code: "RFP_REVIEW_REASON_REQUIRED" });
+      expect(overrideMocks.reconfirmRfpDecline).not.toHaveBeenCalled();
+    });
+
     it("returns 409 when not actionable", async () => {
       overrideMocks.reconfirmRfpDecline.mockResolvedValue({ ok: false, reason: "not_actionable" });
-      const req = { params: { id: "deal-1" }, body: {}, tenantDb: {}, user: reviewer(), commitTransaction: vi.fn() } as any;
+      // Note must be present to pass the new 400 guard before reaching the service mock.
+      const req = { params: { id: "deal-1" }, body: { note: "Denial upheld" }, tenantDb: {}, user: reviewer(), commitTransaction: vi.fn() } as any;
       const res = makeRes();
       const err = await runRoute("post", "/:id/rfp-override/reconfirm-decline", req, res);
       expect(err).toMatchObject({ statusCode: 409 });
