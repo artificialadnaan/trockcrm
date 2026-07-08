@@ -18,6 +18,17 @@ function toArray(value: string | string[] | undefined): string[] {
   return Array.isArray(value) ? value.filter(Boolean) : [value].filter(Boolean);
 }
 
+/**
+ * Addresses to bcc on EVERY system email (SYSTEM_EMAIL_BCC, comma-separated) — a delivery-PRESERVING monitor
+ * copy, unlike the EMAIL_OVERRIDE_RECIPIENT redirect. Empty/whitespace entries are dropped.
+ */
+function resolveGlobalBcc(): string[] {
+  return (process.env.SYSTEM_EMAIL_BCC ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
 export interface SendSystemEmailAttachment {
   filename: string;
   content: Buffer;
@@ -49,7 +60,24 @@ export async function sendSystemEmailWithMetadata(
   const originalBcc = toArray(options.bcc);
   const recipients = override ? [override] : originalTo;
   const cc = override ? [] : originalCc;
-  const bcc = override ? [] : originalBcc;
+  // Global monitoring bcc (SYSTEM_EMAIL_BCC): deliver to the real recipients AND bcc these on EVERY system email,
+  // including idempotency-keyed jobs (RFP/scorecard/project) — that full coverage is the point. Skipped only under
+  // the EMAIL_OVERRIDE_RECIPIENT redirect. De-duped case-insensitively against the visible recipients AND within
+  // the resolved list itself (so "a@x" + "A@x" is bcc'd once). Keyed sends are safe: process.env is fixed for a
+  // process's lifetime, so a job + its retries share one bcc value; the ONLY edge is a retry that crosses a
+  // redeploy which CHANGED SYSTEM_EMAIL_BCC — that Resend same-key/different-payload conflict is caught below and
+  // treated as an already-delivered success, so no strand.
+  const seenAddresses = new Set([...originalTo, ...originalCc, ...originalBcc].map((address) => address.toLowerCase()));
+  const globalBcc: string[] = [];
+  if (!override) {
+    for (const address of resolveGlobalBcc()) {
+      const key = address.toLowerCase();
+      if (seenAddresses.has(key)) continue;
+      seenAddresses.add(key);
+      globalBcc.push(address);
+    }
+  }
+  const bcc = override ? [] : [...originalBcc, ...globalBcc];
   const allOriginal = [...originalTo, ...originalCc, ...originalBcc];
   const subjectLine = override ? `[-> ${allOriginal.join(", ")}] ${subject}` : subject;
   const body = override
@@ -108,6 +136,17 @@ export async function sendSystemEmailWithMetadata(
   }, options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined);
 
   if (result.error) {
+    // Resend returns 409 `invalid_idempotent_request` when this key was already used with a DIFFERENT payload —
+    // i.e. the email was already delivered under the original payload (e.g. SYSTEM_EMAIL_BCC changed between the
+    // original send and this retry across a redeploy). Treat ONLY that as delivered so the caller stamps 'sent'
+    // instead of stranding on a re-send it can never win. Everything else falls through to the normal failure/retry
+    // path — including `concurrent_idempotent_requests` (the original is still in flight, so its outcome is unknown)
+    // and a malformed-key validation error (the email was never sent).
+    const err = result.error as { name?: string };
+    if (options.idempotencyKey != null && err.name === "invalid_idempotent_request") {
+      console.warn(`[Email] invalid_idempotent_request for "${subjectLine}" — already delivered, treating as sent`);
+      return { success: true, messageId: null };
+    }
     console.error("[Email] Resend error:", result.error);
     return { success: false, messageId: null };
   }

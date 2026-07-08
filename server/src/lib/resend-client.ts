@@ -41,6 +41,17 @@ function toArray(value: string | string[] | undefined): string[] {
 }
 
 /**
+ * Addresses to bcc on EVERY system email (SYSTEM_EMAIL_BCC, comma-separated) — a delivery-PRESERVING monitor
+ * copy, unlike the EMAIL_OVERRIDE_RECIPIENT redirect. Empty/whitespace entries are dropped.
+ */
+function resolveGlobalBcc(): string[] {
+  return (process.env.SYSTEM_EMAIL_BCC ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+/**
  * Apply EMAIL_OVERRIDE_RECIPIENT if set: route all mail to one address,
  * prefix subject with original recipients, prepend dev banner to body.
  *
@@ -59,10 +70,23 @@ function applyOverride(
 
   const override = process.env.EMAIL_OVERRIDE_RECIPIENT?.trim();
   if (!override) {
+    // Global monitoring bcc: deliver to the REAL recipients AND bcc SYSTEM_EMAIL_BCC on every system email.
+    // Skipped only when EMAIL_OVERRIDE_RECIPIENT is active (that already reroutes everything to one address).
+    // De-duped case-insensitively against the visible recipients AND within the resolved list itself, so a repeated
+    // address (e.g. "a@x" + "A@x") is bcc'd once. This server path passes no Resend idempotencyKey, so there is no
+    // keyed-retry concern here — the worker sender handles that with an idempotency-conflict-as-delivered fallback.
+    const seen = new Set([...originalTo, ...originalCc, ...originalBcc].map((address) => address.toLowerCase()));
+    const globalBcc: string[] = [];
+    for (const address of resolveGlobalBcc()) {
+      const key = address.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      globalBcc.push(address);
+    }
     return {
       to: originalTo,
       cc: originalCc,
-      bcc: originalBcc,
+      bcc: [...originalBcc, ...globalBcc],
       subject,
       htmlBody,
       active: false,
