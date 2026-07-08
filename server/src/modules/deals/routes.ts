@@ -1827,11 +1827,15 @@ router.post("/:id/rfp-override/approve", requireRfpReviewer, async (req, res, ne
 // POST /api/deals/:id/rfp-override/reconfirm-decline — uphold the no-go (stays declined, marked reviewed).
 router.post("/:id/rfp-override/reconfirm-decline", requireRfpReviewer, async (req, res, next) => {
   try {
+    const note = normalizeRfpOverrideNote(req.body?.note);
+    if (!note) {
+      throw new AppError(400, "A reason is required to reconfirm a denial.", "RFP_REVIEW_REASON_REQUIRED");
+    }
     const result = await reconfirmRfpDecline({
       tenantDb: req.tenantDb!,
       dealId: req.params.id as string,
       actor: { userId: req.user!.id, name: req.user!.displayName, role: req.user!.role },
-      note: normalizeRfpOverrideNote(req.body?.note),
+      note,
       officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
     });
     if (!result.ok) {
