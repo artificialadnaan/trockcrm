@@ -311,21 +311,37 @@ export default function CaptureScreen() {
       await Promise.allSettled([...stagingPromisesRef.current]);
     }
   }, []);
-  // Stage ONE photo into the durable draft (tracked so Done awaits the copy), then REPLAY the latest local
-  // caption onto the draft once the manifest item exists. stageDraftPhoto copies the file THEN appends the
-  // manifest; a caption typed WHILE that copy was still in flight would no-op against a not-yet-appended item
-  // (updateDraftCaption can't patch a missing key), and the append would then land the ORIGINAL caption — lost
-  // on a crash before Done. Replaying after the stage settles persists whatever the crew has typed by then.
-  // Skips a photo already pulled from the tray (removeReviewPhoto handles removal), and only writes a non-empty
-  // caption (nothing to persist otherwise). Best-effort — Done itself always enqueues from LOCAL state.
+  // Stage ONE photo into the durable draft (tracked so Done awaits the copy), then REPLAY onto the draft — once
+  // the manifest item exists — anything that landed WHILE stageDraftPhoto was still copying (it copies the file
+  // THEN appends the manifest, so a patch during that window no-ops against a not-yet-appended item and the
+  // append then lands the ORIGINAL values, lost on a crash before Done):
+  //   • the latest local caption (a note typed during the copy), and
+  //   • a session GPS fix that resolved during the copy — its openCamera .then updateDraftMetadata no-op'd and
+  //     already cleared the pending id, so re-apply it here for a coordless CAMERA shot of this same session.
+  // Both are best-effort + idempotent (updateDraftMetadata skips an item that already has coords); Done itself
+  // enqueues from LOCAL state + cameraGpsRef reconciliation regardless. Skips a photo pulled from the tray.
   const stageReviewPhoto = useCallback(
     (owner: string, photo: SessionPhoto, ctx: { target: CaptureTargetRef; category: string | null; tags: string[] }) => {
       const staged = stageDraftPhoto(owner, photo, ctx);
       trackStaging(staged);
       void staged
-        .then(() => {
+        .then(async () => {
           const cur = reviewPhotosRef.current.find((p) => p.key === photo.key)?.caption;
-          if (cur) return updateDraftCaption(owner, photo.clientUploadId, cur);
+          if (cur) await updateDraftCaption(owner, photo.clientUploadId, cur);
+          const gps = cameraGpsRef.current;
+          if (
+            photo.cameraSession !== undefined &&
+            photo.metadata.latitude === undefined &&
+            cameraGpsSessionRef.current === photo.cameraSession &&
+            gps?.latitude !== undefined &&
+            gps?.longitude !== undefined
+          ) {
+            await updateDraftMetadata(owner, photo.clientUploadId, {
+              latitude: gps.latitude,
+              longitude: gps.longitude,
+              addressSource: gps.addressSource,
+            });
+          }
         })
         .catch(() => undefined);
     },
