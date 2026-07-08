@@ -100,25 +100,33 @@ describe("getRepDashboard activity range parameter (Commit 8)", () => {
   });
 
   it("default (no options): SQL anchors a 7-day-back date in CT, not month or year start", async () => {
-    const { getRepDashboard } = await import("../src/modules/dashboard/service.js");
-    const tenantDb = createMockTenantDb();
-    await getRepDashboard(tenantDb, "rep-1");
-    const sql = findActivitySql(tenantDb.execute);
+    // Freeze the clock so the week-back date is DETERMINISTIC. The old assertion just checked the bound date
+    // did not end in "-01"/"-01-01", which false-positived ~7 days a year — whenever the real CT week-back date
+    // legitimately lands on the 1st of a month (e.g. the 8th → the 1st) or Jan 1 (Jan 8), the CORRECT week
+    // window tripped it (this fired on 2026-07-08, week-back 2026-07-01). Pick an instant whose CT week-back is
+    // mid-month so the exact-match below independently proves "not month-start" and "not year-start".
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-07-15T18:00:00Z")); // CT 2026-07-15 → week-back CT midnight = 2026-07-08
+    try {
+      const { getRepDashboard } = await import("../src/modules/dashboard/service.js");
+      const tenantDb = createMockTenantDb();
+      await getRepDashboard(tenantDb, "rep-1");
+      const sql = findActivitySql(tenantDb.execute);
 
-    // POSITIVE: CT-anchored AT TIME ZONE clause must be present for any range.
-    expect(sql).toContain("at time zone 'america/chicago'");
-    // POSITIVE: a YYYY-MM-DD::date binding is present.
-    expect(sql).toMatch(/\d{4}-\d{2}-\d{2}::date/);
+      // POSITIVE: CT-anchored AT TIME ZONE clause must be present for any range.
+      expect(sql).toContain("at time zone 'america/chicago'");
+      // POSITIVE: a YYYY-MM-DD::date binding is present.
+      expect(sql).toMatch(/\d{4}-\d{2}-\d{2}::date/);
 
-    // NEGATIVE: must not anchor to month start (-01) or year start (-01-01)
-    // when no range is specified — default is `week`. We assert by checking
-    // the embedded date does NOT end with -01 alone (month start) AND does
-    // NOT match the YYYY-01-01 year-start pattern.
-    const dateMatch = sql.match(/(\d{4}-\d{2}-\d{2})::date at time zone 'america\/chicago'/);
-    expect(dateMatch, "expected to find the activity-window date binding").not.toBeNull();
-    const date = dateMatch![1]!;
-    expect(date).not.toMatch(/-01-01$/); // not Jan 1 (ytd)
-    expect(date).not.toMatch(/-01$/); // not first-of-month — caveat: a week-back date that happens to land on the 1st of a month would trigger a false positive. Acceptable risk: only fires on 7 specific calendar boundaries per year and the failure is loud, not silent.
+      // The default range is `week`, so the window start anchors to CT midnight 7 days ago. Assert the SQL binds
+      // EXACTLY that date — this both confirms the week window AND, by construction (2026-07-08 ends in "-08"),
+      // proves it is neither month-start ("-01") nor year-start ("-01-01"). Deterministic under the frozen clock.
+      const dateMatch = sql.match(/(\d{4}-\d{2}-\d{2})::date at time zone 'america\/chicago'/);
+      expect(dateMatch, "expected to find the activity-window date binding").not.toBeNull();
+      expect(dateMatch![1]).toBe("2026-07-08");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("range='month': SQL anchors to first-of-current-month in CT, not week-back or year start", async () => {
