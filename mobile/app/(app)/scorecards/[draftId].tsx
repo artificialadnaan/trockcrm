@@ -274,7 +274,7 @@ function Wizard(props: {
       setNotice({ tone: "error", text: "Photo library permission is required to import." });
       return;
     }
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 1, exif: true });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsMultipleSelection: true, quality: 1, exif: true });
     if (result.canceled) return;
     const sectionKey = FIELD_SCORECARD_SECTIONS[sectionIndex].key;
     for (const asset of result.assets) {
