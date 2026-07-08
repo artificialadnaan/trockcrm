@@ -10,7 +10,7 @@ import { getTranscriptionConfig, type Fetcher } from "../../../src/api/endpoints
 import { apiFetch } from "../../../src/api/client";
 import { uploadOwnerKey, newClientUploadId, removeQueuedUploads } from "../../../src/capture/upload-queue";
 import { qk } from "../../../src/query/keys";
-import { extractExifMetadata, getLiveGps } from "../../../src/capture/metadata";
+import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../../src/capture/metadata";
 import type { CapturedShot } from "../../../src/capture/CameraCapture";
 import {
   FIELD_SCORECARD_SECTIONS,
@@ -46,15 +46,26 @@ function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
 }
 
-// Stamp live device GPS when a shot's EXIF has no location — mirrors the Capture screen, so scorecard
-// evidence isn't missing coordinates on devices whose camera omits GPS EXIF. Best-effort; never throws.
-async function withLiveGpsFallback(exif: ReturnType<typeof extractExifMetadata>) {
+// Server cap on total evidence photos (parseScorecardSubmission rejects photos.length > 100). Mirrored here so
+// a multi-select import can't stage a batch that would only fail at submit and force manual removal.
+const MAX_SCORECARD_PHOTOS = 100;
+
+// Merge an already-resolved live GPS fix into a shot's EXIF only when the shot itself has no location. Pure, so
+// a BATCH import can fetch live GPS ONCE and reuse it across every coordless asset (the per-asset getLiveGps in
+// the old fallback serialized up to 8s per photo — minutes on a large indoor import).
+function mergeLiveGps(exif: ReturnType<typeof extractExifMetadata>, live: PhotoMetadata | null) {
   if (exif.latitude !== undefined && exif.longitude !== undefined) return exif;
-  const live = await getLiveGps().catch(() => null);
   if (live && live.latitude !== undefined && live.longitude !== undefined) {
     return { ...exif, latitude: live.latitude, longitude: live.longitude, addressSource: live.addressSource ?? exif.addressSource };
   }
   return exif;
+}
+
+// Stamp live device GPS when a single shot's EXIF has no location — mirrors the Capture screen, so scorecard
+// evidence isn't missing coordinates on devices whose camera omits GPS EXIF. Best-effort; never throws.
+async function withLiveGpsFallback(exif: ReturnType<typeof extractExifMetadata>) {
+  if (exif.latitude !== undefined && exif.longitude !== undefined) return exif;
+  return mergeLiveGps(exif, await getLiveGps().catch(() => null));
 }
 
 export default function ScorecardWizardScreen() {
@@ -274,14 +285,35 @@ function Wizard(props: {
       setNotice({ tone: "error", text: "Photo library permission is required to import." });
       return;
     }
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsMultipleSelection: true, quality: 1, exif: true });
+    // Cap the pick at the remaining slots under the server's 100-photo limit — otherwise a big multi-select
+    // uploads the whole batch and only fails at submit, forcing the user to hunt-and-remove.
+    const remaining = MAX_SCORECARD_PHOTOS - draft.photos.length;
+    if (remaining <= 0) {
+      setNotice({ tone: "error", text: `A scorecard can hold at most ${MAX_SCORECARD_PHOTOS} photos — remove some to import more.` });
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsMultipleSelection: true,
+      selectionLimit: remaining,
+      quality: 1,
+      exif: true,
+    });
     if (result.canceled) return;
     const sectionKey = FIELD_SCORECARD_SECTIONS[sectionIndex].key;
-    for (const asset of result.assets) {
+    // Defensive: never exceed the remaining slots even if a platform ignores selectionLimit.
+    const assets = result.assets.slice(0, remaining);
+    // Fetch live GPS ONCE for the whole batch and reuse it (mirrors the Capture screen). Doing it per asset
+    // would serialize a getLiveGps() — up to 8s each — for every coordless photo, freezing a large indoor import.
+    const exifs = assets.map((a) => extractExifMetadata(a.exif as Record<string, unknown>));
+    const needsLive = exifs.some((e) => e.latitude === undefined || e.longitude === undefined);
+    const live = needsLive ? await getLiveGps().catch(() => null) : null;
+    for (let i = 0; i < assets.length; i++) {
+      const asset = assets[i];
       const clientUploadId = newClientUploadId();
       setSavingPhotos((n) => n + 1);
       try {
-        const exif = await withLiveGpsFallback(extractExifMetadata(asset.exif as Record<string, unknown>));
+        const exif = mergeLiveGps(exifs[i], live);
         // Durable-copy BEFORE dispatch (see onCameraCapture); drop with a notice if the copy fails.
         const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
         dispatch({
