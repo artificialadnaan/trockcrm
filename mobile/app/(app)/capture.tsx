@@ -25,7 +25,7 @@ import {
   patchQueuedMetadata,
   uploadOwnerKey,
 } from "../../src/capture/upload-queue";
-import { clearDraft, loadDraft, removeDraftPhotos, stageDraftPhoto, updateDraftCaption, type StagedDraftItem } from "../../src/capture/review-draft";
+import { loadDraft, removeDraftPhotos, stageDraftPhoto, updateDraftCaption, type StagedDraftItem } from "../../src/capture/review-draft";
 import { registerUploadBackgroundTask } from "../../src/capture/upload-background-task";
 import { buildCaptureUploadInput, setPhotoCaption, appendPhotoCaption, removePhoto, type SessionPhoto } from "../../src/capture/session-photo";
 import type { CapturedShot } from "../../src/capture/CameraCapture";
@@ -183,6 +183,14 @@ export default function CaptureScreen() {
   // durable draft (best-effort — a crash preserves captions typed so far) without a stale closure.
   const reviewPhotosRef = useRef<SessionPhoto[]>([]);
   useEffect(() => { reviewPhotosRef.current = reviewPhotos; }, [reviewPhotos]);
+  // Synchronous "a live capture/review session is actively touching the draft" guard. resumeIfQueued treats a
+  // draft as a recoverable ORPHAN only when NOTHING owns it — but reviewOpenRef/cameraOpenRef are effect-derived
+  // and miss the windows a live session owns the draft before those refs flip: an import staging BEFORE
+  // openReview renders, and a removal/finish in flight (incl. removing the LAST photo, which empties the review
+  // and drops reviewOpenRef while the delete is still pending). Bumped synchronously around those ops so a
+  // foreground-resume can't enqueue + clear a draft the current session still owns. A real KILL still recovers:
+  // a fresh mount starts this at 0.
+  const draftBusyRef = useRef(0);
   const keyCounter = useRef(0);
   // Live GPS fetched once per camera session so burst shots aren't each blocked
   // on a fresh fix (a burst is at one location); applied to every shot.
@@ -299,6 +307,26 @@ export default function CaptureScreen() {
       await Promise.allSettled([...stagingPromisesRef.current]);
     }
   }, []);
+  // Stage ONE photo into the durable draft (tracked so Done awaits the copy), then REPLAY the latest local
+  // caption onto the draft once the manifest item exists. stageDraftPhoto copies the file THEN appends the
+  // manifest; a caption typed WHILE that copy was still in flight would no-op against a not-yet-appended item
+  // (updateDraftCaption can't patch a missing key), and the append would then land the ORIGINAL caption — lost
+  // on a crash before Done. Replaying after the stage settles persists whatever the crew has typed by then.
+  // Skips a photo already pulled from the tray (removeReviewPhoto handles removal), and only writes a non-empty
+  // caption (nothing to persist otherwise). Best-effort — Done itself always enqueues from LOCAL state.
+  const stageReviewPhoto = useCallback(
+    (owner: string, photo: SessionPhoto, ctx: { target: CaptureTargetRef; category: string | null; tags: string[] }) => {
+      const staged = stageDraftPhoto(owner, photo, ctx);
+      trackStaging(staged);
+      void staged
+        .then(() => {
+          const cur = reviewPhotosRef.current.find((p) => p.key === photo.key)?.caption;
+          if (cur) return updateDraftCaption(owner, photo.key, cur);
+        })
+        .catch(() => undefined);
+    },
+    [trackStaging],
+  );
   // While offline, auto-drains fired after each shot are suppressed until this timestamp — otherwise every
   // capture would re-attempt the whole backlog and burn a retry on each queued item (they go terminal after
   // MAX_UPLOAD_ATTEMPTS). Lifecycle/user triggers (foreground, manual Retry, owner resume) force through it.
@@ -418,6 +446,9 @@ export default function CaptureScreen() {
       }
       try {
         await enqueueUploads(owner, [input]);
+        // Enqueued OK — drop any prior park for this shot (a keep-on-failure draft retried by recovery), so its
+        // stale "couldn't save" banner clears once it finally lands (mirrors streamPhoto).
+        setFailedShots((prev) => prev.filter((f) => f.input.clientUploadId !== input.clientUploadId));
         return true;
       } catch {
         park();
@@ -443,13 +474,22 @@ export default function CaptureScreen() {
       // clear the draft, so photos + typed captions survive the crash. NEVER recover while a review OR the
       // camera is open (that would enqueue the ACTIVE session's staged photos before the crew finishes — a
       // background→foreground mid-batch is not a crash). A real kill still recovers: a fresh mount has both
-      // closed. Runs BEFORE the count so getQueuedCount sees the freshly-enqueued rows.
-      if (!reviewOpenRef.current && !cameraOpenRef.current) {
+      // closed. Runs BEFORE the count so getQueuedCount sees the freshly-enqueued rows. draftBusyRef also gates
+      // it: a live import/removal in flight owns the draft even before reviewOpenRef/cameraOpenRef flip.
+      if (!reviewOpenRef.current && !cameraOpenRef.current && draftBusyRef.current === 0) {
         try {
           const orphans = await loadDraft(ownerKey);
           if (orphans.length > 0) {
-            for (const it of orphans) await enqueueReviewPhoto(ownerKey, draftItemToSessionPhoto(it), it.ctx);
-            await clearDraft(ownerKey).catch(() => undefined);
+            // Enqueue each orphan; KEEP any that fail to enqueue in the draft (its durable copy is the only
+            // crash-safe record — failedShots is in-memory), so a later resume retries it. Remove ONLY the
+            // orphan keys that landed in the queue — by key, NEVER a whole-dir clearDraft: this loop spans many
+            // awaits, and an import started AFTER the guard passed could have staged a NEW photo into the same
+            // per-owner draft by now; whole-dir clearing would collaterally wipe that live, still-captioning shot.
+            const recovered: string[] = [];
+            for (const it of orphans) {
+              if (await enqueueReviewPhoto(ownerKey, draftItemToSessionPhoto(it), it.ctx)) recovered.push(it.key);
+            }
+            await removeDraftPhotos(ownerKey, recovered).catch(() => undefined);
           }
         } catch {
           /* best-effort — the draft stays for the next resume */
@@ -555,33 +595,42 @@ export default function CaptureScreen() {
     // ABORT and drop the import: the owner-change effect already cleared staged state, and staging under the
     // NEW owner would upload these photos under the wrong account/office — a cross-account/office disclosure.
     const capturedOwner = ownerKey;
-    let live: PhotoMetadata | null = null;
-    const needsLive = assets.some((a) => !hasCoords(extractExifMetadata(a.exif as Record<string, unknown>)));
-    if (needsLive) live = await getLiveGps();
-    if (ownerKeyRef.current !== capturedOwner) return;
+    // Own the draft from the START of the import — BEFORE the awaited getLiveGps and the staging copies, all of
+    // which run while reviewOpenRef is still false (openReview hasn't rendered). Without this, the AppState
+    // "active" resume the image picker fires on dismiss could treat a just-staged import as an orphan and
+    // enqueue + clear it before the crew captions. Released once openReview has flipped reviewOpenRef true.
+    draftBusyRef.current++;
+    try {
+      let live: PhotoMetadata | null = null;
+      const needsLive = assets.some((a) => !hasCoords(extractExifMetadata(a.exif as Record<string, unknown>)));
+      if (needsLive) live = await getLiveGps();
+      if (ownerKeyRef.current !== capturedOwner) return;
 
-    const photos: SessionPhoto[] = assets.map((asset) => {
-      const exifMeta = extractExifMetadata(asset.exif as Record<string, unknown>);
-      const metadata: PhotoMetadata = hasCoords(exifMeta)
-        ? exifMeta
-        : { ...(live ?? {}), takenAt: exifMeta.takenAt ?? live?.takenAt ?? new Date().toISOString() };
-      return {
-        key: nextKey(),
-        clientUploadId: newClientUploadId(),
-        uri: asset.uri,
-        width: asset.width,
-        height: asset.height,
-        metadata,
-        caption: "",
-      };
-    });
-    if (photos.length === 0) return;
-    // Stage each photo into the durable review DRAFT — fire-and-forget + tracked so Done can await the copies
-    // (the copy makes it survive a crash before Done). A per-photo stage failure is isolated inside
-    // stageDraftPhoto's rejection; the raw uri still rides in reviewPhotos, so Done enqueues it either way.
-    // Bound to the re-checked capturedOwner so the draft lives under the owner that started the import.
-    for (const p of photos) trackStaging(stageDraftPhoto(capturedOwner, p, ctx));
-    openReview(photos, ctx);
+      const photos: SessionPhoto[] = assets.map((asset) => {
+        const exifMeta = extractExifMetadata(asset.exif as Record<string, unknown>);
+        const metadata: PhotoMetadata = hasCoords(exifMeta)
+          ? exifMeta
+          : { ...(live ?? {}), takenAt: exifMeta.takenAt ?? live?.takenAt ?? new Date().toISOString() };
+        return {
+          key: nextKey(),
+          clientUploadId: newClientUploadId(),
+          uri: asset.uri,
+          width: asset.width,
+          height: asset.height,
+          metadata,
+          caption: "",
+        };
+      });
+      if (photos.length === 0) return;
+      // Stage each photo into the durable review DRAFT — fire-and-forget + tracked so Done can await the copies
+      // (the copy makes it survive a crash before Done). A per-photo stage failure is isolated inside
+      // stageDraftPhoto's rejection; the raw uri still rides in reviewPhotos, so Done enqueues it either way.
+      // Bound to the re-checked capturedOwner so the draft lives under the owner that started the import.
+      for (const p of photos) stageReviewPhoto(capturedOwner, p, ctx);
+      openReview(photos, ctx);
+    } finally {
+      draftBusyRef.current--;
+    }
   }
 
   // Open the per-photo review step. PURE UI: the photos were already staged into the durable review DRAFT at
@@ -589,6 +638,10 @@ export default function CaptureScreen() {
   // does NO enqueue — staged photos never enter the upload queue until Done. A crash mid-review recovers them
   // (with captions typed so far) from the draft on the next launch (see resumeIfQueued).
   function openReview(photos: SessionPhoto[], ctx: { target: CaptureTargetRef; category: string | null; tags: string[] }) {
+    // Flip reviewOpenRef SYNCHRONOUSLY (not just via the reviewPhotos.length effect, which lands a tick later):
+    // this is the handoff from the draftBusyRef guard to reviewOpenRef, so there's no gap in which a resume
+    // sees no owner. The effect keeps it in sync afterward (incl. clearing it when reviewPhotos empties).
+    reviewOpenRef.current = photos.length > 0;
     setReviewCtx(ctx);
     setReviewPhotos(photos);
   }
@@ -614,28 +667,49 @@ export default function CaptureScreen() {
   // staging first (like cancelReview): stageDraftPhoto copies the file THEN appends the manifest under the lock,
   // so a Remove that wins the lock before the append lands would no-op and the stage would then RE-ADD the
   // removed photo — recovered + uploaded on a later crash. Draining staging guarantees the append is present so
-  // removeDraftPhotos actually drops it.
+  // removeDraftPhotos actually drops it. draftBusyRef owns the draft across the whole op (removing the LAST
+  // photo empties the review and drops reviewOpenRef while the delete is still pending). On a genuine delete
+  // FAILURE the draft still holds the photo, so restore it to the review (honest — it wasn't removed) rather
+  // than swallow: a silently-undeleted draft entry would re-upload a photo the crew removed on the next resume.
   async function removeReviewPhoto(key: string) {
+    // Ignore a remove while Done/Cancel is running (reviewBusy); the reverse — Done/Cancel starting mid-remove —
+    // is blocked by their draftBusyRef>0 guard. Together they stop the restore path below from resurrecting a
+    // stale photo into a just-closed or NEW review. draftBusyRef is a COUNTER, so concurrent removes of
+    // different keys still each ++/-- correctly without a shared reviewBusy lock (keeps rapid removes snappy and
+    // avoids flashing the Upload button's "Uploading…" label for a sub-100ms file delete).
+    if (reviewBusy || reviewVoiceBusy) return;
+    const removed = reviewPhotosRef.current.find((p) => p.key === key);
     setReviewPhotos((prev) => removePhoto(prev, key));
-    if (ownerKey) {
+    if (!ownerKey) return;
+    draftBusyRef.current++;
+    try {
       await awaitStaging();
-      await removeDraftPhotos(ownerKey, [key]).catch(() => undefined);
+      await removeDraftPhotos(ownerKey, [key]);
+    } catch {
+      if (removed) setReviewPhotos((prev) => (prev.some((p) => p.key === key) ? prev : [...prev, removed]));
+      setNotice({ tone: "error", text: "Couldn't remove that photo — tap remove again." });
+    } finally {
+      draftBusyRef.current--;
     }
   }
-  // Cancel: DISCARD the durable draft, then clear the review UI. Order is load-bearing — reviewOpenRef (from
-  // reviewPhotos) gates crash-recovery, so we delete the draft FIRST (while it still reads "review open") so a
-  // concurrent foreground-resume can't recover + upload the very photos we're discarding. On a delete FAILURE
-  // keep the review OPEN so Cancel can be retried — clearing state would strand recoverable files that a later
-  // resume would auto-upload. Await in-flight staging first so a mid-copy shot can't re-create the draft after
-  // the delete.
+  // Cancel: DISCARD this review's staged photos, then clear the review UI. Order is load-bearing — reviewOpenRef
+  // (from reviewPhotos) gates crash-recovery, so we delete the draft entries FIRST (while it still reads "review
+  // open") so a concurrent foreground-resume can't recover + upload the very photos we're discarding. On a delete
+  // FAILURE keep the review OPEN so Cancel can be retried — clearing state would strand recoverable files that a
+  // later resume would auto-upload. Await in-flight staging first so a mid-copy shot can't re-create the entry
+  // after the delete. Remove ONLY this review's keys (never a whole-dir clear): the per-owner draft can also hold
+  // a PRIOR session's enqueue-failed photo kept as its sole crash record, which Cancel must not destroy.
   async function cancelReview() {
-    if (reviewBusy || reviewVoiceBusy) return;
+    // draftBusyRef>0 ⇒ a remove is in flight (import staging can't overlap an open review); wait it out so we
+    // snapshot a settled key set and never race the removal's restore-on-failure.
+    if (reviewBusy || reviewVoiceBusy || draftBusyRef.current > 0) return;
     const owner = ownerKey;
+    const keys = reviewPhotosRef.current.map((p) => p.key);
     if (owner) {
       setReviewBusy(true);
       try {
         await awaitStaging();
-        await clearDraft(owner);
+        await removeDraftPhotos(owner, keys);
       } catch {
         setNotice({ tone: "error", text: "Couldn't discard those photos — tap Cancel to try again." });
         setReviewBusy(false);
@@ -653,7 +727,9 @@ export default function CaptureScreen() {
   // authoritative value; updateDraftCaption is best-effort). Force ONE drain, then delete the draft. A
   // per-photo enqueue failure PARKS the shot in failedShots (via enqueueReviewPhoto) so it's never lost.
   async function finishReview() {
-    if (reviewBusy || reviewVoiceBusy || finishingRef.current) return;
+    // draftBusyRef>0 ⇒ a remove is mid-flight; bail so Done never enqueues a half-removed set or races the
+    // removal's restore-on-failure (the user taps Done again once the fast delete settles).
+    if (reviewBusy || reviewVoiceBusy || finishingRef.current || draftBusyRef.current > 0) return;
     const photos = reviewPhotos;
     const ctx = reviewCtx;
     const owner = ownerKey;
@@ -673,17 +749,24 @@ export default function CaptureScreen() {
       const durable = owner ? await loadDraft(owner).catch(() => [] as StagedDraftItem[]) : [];
       const byKey = new Map(durable.map((d) => [d.key, d]));
       let anyFailed = false;
+      const enqueuedKeys: string[] = [];
       for (const p of photos) {
         const d = byKey.get(p.key);
         const source: SessionPhoto = d ? { ...p, uri: d.uri } : p;
-        if (!(await enqueueReviewPhoto(owner, source, ctx))) anyFailed = true;
+        if (await enqueueReviewPhoto(owner, source, ctx)) enqueuedKeys.push(p.key);
+        else anyFailed = true;
       }
       await refreshQueuedCount();
       // 3) Force a drain (bypass any offline backoff) so the just-enqueued photos ship now.
       void kickDrain(true);
-      // 4) Draft fully consumed → delete it. Best-effort: a failed delete is harmless — a leftover draft is
-      //    re-enqueued on the next recovery and the server dedupes on clientUploadId, so no duplicate ships.
-      if (owner) await clearDraft(owner).catch(() => undefined);
+      // 4) Remove ONLY the successfully-enqueued photos from the draft — by key, NEVER a whole-dir clearDraft.
+      //    KEEP any that FAILED to enqueue: their durable draft copy is the only crash-safe record (the
+      //    failedShots retry buffer is in-memory, so it dies with the process), so a later resume re-enqueues
+      //    them from the draft. Whole-dir clearing here would also delete a PRIOR session's kept-failed photo
+      //    (the draft is per-owner and appends across sessions) — losing a photo that never reached the queue.
+      //    Best-effort delete: a leftover entry is re-enqueued on the next recovery and the server dedupes on
+      //    clientUploadId, so nothing double-ships. (`anyFailed` still drives the user-facing notice below.)
+      if (owner) await removeDraftPhotos(owner, enqueuedKeys).catch(() => undefined);
       // 5) Close the review.
       setReviewVoiceBusy(false);
       setReviewPhotos([]);
@@ -798,7 +881,7 @@ export default function CaptureScreen() {
       // tracked so Done can await the copy. The camera covers the screen, so target/category/tags can't
       // change mid-session — this shutter-time ctx equals the Done-time ctx closeCamera hands to the review.
       const ctx = { target: targetRef(targetStateRef.current), category: categoryRef.current, tags: tagsRef.current };
-      trackStaging(stageDraftPhoto(ownerKey, sp, ctx));
+      stageReviewPhoto(ownerKey, sp, ctx);
       return;
     }
 
