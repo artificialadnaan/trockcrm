@@ -36,30 +36,41 @@ describe("review-draft-core: addManifestItem (append, idempotent on clientUpload
   });
 });
 
-describe("review-draft-core: removeManifestItems (drops only matching keys)", () => {
-  it("drops the given keys and keeps the rest in order", () => {
+describe("review-draft-core: removeManifestItems (drops only matching clientUploadIds)", () => {
+  it("drops the given clientUploadIds and keeps the rest in order", () => {
     const items = [item({ key: "a" }), item({ key: "b" }), item({ key: "c" })];
-    expect(removeManifestItems(items, ["b"]).map((i) => i.key)).toEqual(["a", "c"]);
-    expect(removeManifestItems(items, ["a", "c"]).map((i) => i.key)).toEqual(["b"]);
+    expect(removeManifestItems(items, ["cu-b"]).map((i) => i.key)).toEqual(["a", "c"]);
+    expect(removeManifestItems(items, ["cu-a", "cu-c"]).map((i) => i.key)).toEqual(["b"]);
   });
 
-  it("is a no-op when no key matches", () => {
+  it("is a no-op when no clientUploadId matches", () => {
     const items = [item({ key: "a" })];
-    expect(removeManifestItems(items, ["missing"]).map((i) => i.key)).toEqual(["a"]);
+    expect(removeManifestItems(items, ["cu-missing"]).map((i) => i.key)).toEqual(["a"]);
+  });
+
+  // The bug the identity switch fixes: two items can share a session `key` (the per-process sp-N counter
+  // restarts at sp-1 each mount, so a recovered prior-process orphan and a fresh photo collide). Removing by
+  // clientUploadId must drop ONLY the targeted one — a key-scoped delete would wipe both, destroying the live
+  // photo's durable copy.
+  it("drops ONLY the targeted item when two share a session key but differ by clientUploadId", () => {
+    const orphan = item({ key: "sp-1", clientUploadId: "cu-orphan" });
+    const fresh = item({ key: "sp-1", clientUploadId: "cu-fresh" });
+    const out = removeManifestItems([orphan, fresh], ["cu-orphan"]);
+    expect(out.map((i) => i.clientUploadId)).toEqual(["cu-fresh"]);
   });
 });
 
-describe("review-draft-core: patchManifestCaption (sets caption on the matching key only)", () => {
-  it("sets the caption on the matching key and reports changed", () => {
-    const { items, changed } = patchManifestCaption([item({ key: "a" })], "a", "north wall");
+describe("review-draft-core: patchManifestCaption (sets caption on the matching clientUploadId only)", () => {
+  it("sets the caption on the matching clientUploadId and reports changed", () => {
+    const { items, changed } = patchManifestCaption([item({ key: "a" })], "cu-a", "north wall");
     expect(changed).toBe(true);
     expect(items[0].caption).toBe("north wall");
   });
 
-  it("patches only the matching key, leaving siblings untouched", () => {
+  it("patches only the matching clientUploadId, leaving siblings untouched", () => {
     const { items, changed } = patchManifestCaption(
       [item({ key: "a", caption: "keep" }), item({ key: "b" })],
-      "b",
+      "cu-b",
       "only b",
     );
     expect(changed).toBe(true);
@@ -67,16 +78,24 @@ describe("review-draft-core: patchManifestCaption (sets caption on the matching 
     expect(items[1].caption).toBe("only b");
   });
 
+  it("patches ONLY the targeted item when two share a session key but differ by clientUploadId", () => {
+    const orphan = item({ key: "sp-1", clientUploadId: "cu-orphan", caption: "orphan" });
+    const fresh = item({ key: "sp-1", clientUploadId: "cu-fresh" });
+    const { items } = patchManifestCaption([orphan, fresh], "cu-fresh", "north wall");
+    expect(items.find((i) => i.clientUploadId === "cu-orphan")!.caption).toBe("orphan");
+    expect(items.find((i) => i.clientUploadId === "cu-fresh")!.caption).toBe("north wall");
+  });
+
   it("is a no-op (same reference) when the caption is unchanged", () => {
     const existing = [item({ key: "a", caption: "same" })];
-    const { items, changed } = patchManifestCaption(existing, "a", "same");
+    const { items, changed } = patchManifestCaption(existing, "cu-a", "same");
     expect(changed).toBe(false);
     expect(items).toBe(existing);
   });
 
-  it("is a no-op (same reference) when the key is absent", () => {
+  it("is a no-op (same reference) when the clientUploadId is absent", () => {
     const existing = [item({ key: "a" })];
-    const { items, changed } = patchManifestCaption(existing, "missing", "x");
+    const { items, changed } = patchManifestCaption(existing, "cu-missing", "x");
     expect(changed).toBe(false);
     expect(items).toBe(existing);
   });

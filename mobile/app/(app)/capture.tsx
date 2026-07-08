@@ -321,7 +321,7 @@ export default function CaptureScreen() {
       void staged
         .then(() => {
           const cur = reviewPhotosRef.current.find((p) => p.key === photo.key)?.caption;
-          if (cur) return updateDraftCaption(owner, photo.key, cur);
+          if (cur) return updateDraftCaption(owner, photo.clientUploadId, cur);
         })
         .catch(() => undefined);
     },
@@ -485,11 +485,11 @@ export default function CaptureScreen() {
             // orphan keys that landed in the queue — by key, NEVER a whole-dir clearDraft: this loop spans many
             // awaits, and an import started AFTER the guard passed could have staged a NEW photo into the same
             // per-owner draft by now; whole-dir clearing would collaterally wipe that live, still-captioning shot.
-            const recovered: string[] = [];
+            const recoveredIds: string[] = [];
             for (const it of orphans) {
-              if (await enqueueReviewPhoto(ownerKey, draftItemToSessionPhoto(it), it.ctx)) recovered.push(it.key);
+              if (await enqueueReviewPhoto(ownerKey, draftItemToSessionPhoto(it), it.ctx)) recoveredIds.push(it.clientUploadId);
             }
-            await removeDraftPhotos(ownerKey, recovered).catch(() => undefined);
+            await removeDraftPhotos(ownerKey, recoveredIds).catch(() => undefined);
           }
         } catch {
           /* best-effort — the draft stays for the next resume */
@@ -648,8 +648,10 @@ export default function CaptureScreen() {
 
   function setReviewCaption(key: string, text: string) {
     setReviewPhotos((prev) => setPhotoCaption(prev, key, text));
-    // Persist onto the durable draft too, so a crash preserves the caption typed so far (best-effort).
-    if (ownerKey) void updateDraftCaption(ownerKey, key, text).catch(() => undefined);
+    // Persist onto the durable draft too (best-effort), keyed on the photo's globally-unique clientUploadId —
+    // never the per-process session key, which can collide with a recovered orphan.
+    const id = reviewPhotosRef.current.find((p) => p.key === key)?.clientUploadId;
+    if (ownerKey && id) void updateDraftCaption(ownerKey, id, text).catch(() => undefined);
   }
   // Functional append so rapid (voice) transcripts don't clobber each other.
   function appendReviewCaption(key: string, text: string) {
@@ -657,9 +659,10 @@ export default function CaptureScreen() {
     // Compute the appended value from the last-committed captions (ref) to persist it onto the draft — the
     // same rule as appendPhotoCaption. Best-effort/debounced: the authoritative caption at Done is local state.
     if (ownerKey) {
-      const cur = reviewPhotosRef.current.find((p) => p.key === key)?.caption ?? "";
-      const next = cur ? `${cur} ${text}` : text;
-      void updateDraftCaption(ownerKey, key, next).catch(() => undefined);
+      const photo = reviewPhotosRef.current.find((p) => p.key === key);
+      if (!photo) return;
+      const next = photo.caption ? `${photo.caption} ${text}` : text;
+      void updateDraftCaption(ownerKey, photo.clientUploadId, next).catch(() => undefined);
     }
   }
   // Removing a staged photo drops it from the durable DRAFT (manifest + its copied file) and the local review
@@ -680,11 +683,11 @@ export default function CaptureScreen() {
     if (reviewBusy || reviewVoiceBusy) return;
     const removed = reviewPhotosRef.current.find((p) => p.key === key);
     setReviewPhotos((prev) => removePhoto(prev, key));
-    if (!ownerKey) return;
+    if (!ownerKey || !removed) return;
     draftBusyRef.current++;
     try {
       await awaitStaging();
-      await removeDraftPhotos(ownerKey, [key]);
+      await removeDraftPhotos(ownerKey, [removed.clientUploadId]);
     } catch {
       if (removed) setReviewPhotos((prev) => (prev.some((p) => p.key === key) ? prev : [...prev, removed]));
       setNotice({ tone: "error", text: "Couldn't remove that photo — tap remove again." });
@@ -704,12 +707,12 @@ export default function CaptureScreen() {
     // snapshot a settled key set and never race the removal's restore-on-failure.
     if (reviewBusy || reviewVoiceBusy || draftBusyRef.current > 0) return;
     const owner = ownerKey;
-    const keys = reviewPhotosRef.current.map((p) => p.key);
+    const ids = reviewPhotosRef.current.map((p) => p.clientUploadId);
     if (owner) {
       setReviewBusy(true);
       try {
         await awaitStaging();
-        await removeDraftPhotos(owner, keys);
+        await removeDraftPhotos(owner, ids);
       } catch {
         setNotice({ tone: "error", text: "Couldn't discard those photos — tap Cancel to try again." });
         setReviewBusy(false);
@@ -747,13 +750,13 @@ export default function CaptureScreen() {
       await awaitStaging();
       // 2) Enqueue each reviewed photo from its durable copy, with its own caption.
       const durable = owner ? await loadDraft(owner).catch(() => [] as StagedDraftItem[]) : [];
-      const byKey = new Map(durable.map((d) => [d.key, d]));
+      const byId = new Map(durable.map((d) => [d.clientUploadId, d]));
       let anyFailed = false;
-      const enqueuedKeys: string[] = [];
+      const enqueuedIds: string[] = [];
       for (const p of photos) {
-        const d = byKey.get(p.key);
+        const d = byId.get(p.clientUploadId);
         const source: SessionPhoto = d ? { ...p, uri: d.uri } : p;
-        if (await enqueueReviewPhoto(owner, source, ctx)) enqueuedKeys.push(p.key);
+        if (await enqueueReviewPhoto(owner, source, ctx)) enqueuedIds.push(p.clientUploadId);
         else anyFailed = true;
       }
       await refreshQueuedCount();
@@ -766,7 +769,7 @@ export default function CaptureScreen() {
       //    (the draft is per-owner and appends across sessions) — losing a photo that never reached the queue.
       //    Best-effort delete: a leftover entry is re-enqueued on the next recovery and the server dedupes on
       //    clientUploadId, so nothing double-ships. (`anyFailed` still drives the user-facing notice below.)
-      if (owner) await removeDraftPhotos(owner, enqueuedKeys).catch(() => undefined);
+      if (owner) await removeDraftPhotos(owner, enqueuedIds).catch(() => undefined);
       // 5) Close the review.
       setReviewVoiceBusy(false);
       setReviewPhotos([]);

@@ -124,36 +124,49 @@ describe("review-draft: stage + loadDraft round-trip (staged photos never touch 
   });
 });
 
-describe("review-draft: updateDraftCaption (crash preserves captions typed so far)", () => {
+describe("review-draft: updateDraftCaption (crash preserves captions typed so far — keyed on clientUploadId)", () => {
   it("persists the caption onto the manifest item", async () => {
     await stage("u1", photo({ key: "a" }));
-    await updateDraftCaption("u1", "a", "cracked flashing");
+    await updateDraftCaption("u1", "cu-a", "cracked flashing");
     expect((await loadDraft("u1"))[0].caption).toBe("cracked flashing");
   });
 
-  it("patches ONLY the keyed photo, never a sibling", async () => {
+  it("patches ONLY the targeted photo, never a sibling", async () => {
     await stage("u1", photo({ key: "a" }));
     await stage("u1", photo({ key: "b" }));
-    await updateDraftCaption("u1", "b", "only b");
+    await updateDraftCaption("u1", "cu-b", "only b");
     const loaded = await loadDraft("u1");
     expect(loaded.find((i) => i.key === "a")!.caption).toBe("");
     expect(loaded.find((i) => i.key === "b")!.caption).toBe("only b");
   });
 });
 
-describe("review-draft: removeDraftPhotos (drops manifest entry + deletes the file)", () => {
-  it("removes only the keyed items and deletes their copied files", async () => {
+describe("review-draft: removeDraftPhotos (drops manifest entry + deletes the file — keyed on clientUploadId)", () => {
+  it("removes only the targeted items and deletes their copied files", async () => {
     const a = await stage("u1", photo({ key: "a" }));
     await stage("u1", photo({ key: "b" }));
-    await removeDraftPhotos("u1", ["a"]);
+    await removeDraftPhotos("u1", ["cu-a"]);
     expect((await loadDraft("u1")).map((i) => i.key)).toEqual(["b"]);
     expect(fs.__store.has(a.uri)).toBe(false); // file deleted
   });
 
   it("is a no-op when nothing matches", async () => {
     await stage("u1", photo({ key: "a" }));
-    await removeDraftPhotos("u1", ["missing"]);
+    await removeDraftPhotos("u1", ["cu-missing"]);
     expect((await loadDraft("u1")).map((i) => i.key)).toEqual(["a"]);
+  });
+
+  // Identity is clientUploadId, not the session key: a recovered prior-process orphan and a fresh photo can
+  // share `sp-1` (the counter restarts each mount). Removing one clientUploadId must NOT delete the other's
+  // file — a key-scoped delete would destroy the live import's only durable copy.
+  it("removes ONLY the targeted clientUploadId when two staged photos collide on session key", async () => {
+    const orphan = await stage("u1", photo({ key: "sp-1", clientUploadId: "cu-orphan", uri: "file:///src/orphan.jpg" }));
+    const fresh = await stage("u1", photo({ key: "sp-1", clientUploadId: "cu-fresh", uri: "file:///src/fresh.jpg" }));
+    await removeDraftPhotos("u1", ["cu-orphan"]);
+    const loaded = await loadDraft("u1");
+    expect(loaded.map((i) => i.clientUploadId)).toEqual(["cu-fresh"]);
+    expect(fs.__store.has(orphan.uri)).toBe(false); // orphan's file deleted
+    expect(fs.__store.has(fresh.uri)).toBe(true); // the LIVE photo's durable copy survives
   });
 });
 
@@ -216,7 +229,7 @@ describe("review-draft: serialization (no read-modify-write clobber)", () => {
 
   it("a stage concurrent with a remove doesn't lose or resurrect the other photo", async () => {
     await stage("u1", photo({ key: "a" }));
-    await Promise.all([stage("u1", photo({ key: "b" })), removeDraftPhotos("u1", ["a"])]);
+    await Promise.all([stage("u1", photo({ key: "b" })), removeDraftPhotos("u1", ["cu-a"])]);
     expect((await loadDraft("u1")).map((i) => i.key)).toEqual(["b"]);
   });
 });

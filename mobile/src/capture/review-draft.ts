@@ -132,26 +132,30 @@ export async function stageDraftPhoto(ownerKey: string, photo: SessionPhoto, ctx
 }
 
 /**
- * Persist the caption onto the manifest item matching `key` so a crash preserves captions typed so far.
- * Best-effort + lock-safe; a no-op if the key is gone or the caption is unchanged.
+ * Persist the caption onto the manifest item matching `clientUploadId` so a crash preserves captions typed so
+ * far. Best-effort + lock-safe; a no-op if the id is gone or the caption is unchanged. Keyed on clientUploadId
+ * (globally unique across processes), never the per-process session `key`.
  */
-export async function updateDraftCaption(ownerKey: string, key: string, caption: string): Promise<void> {
+export async function updateDraftCaption(ownerKey: string, clientUploadId: string, caption: string): Promise<void> {
   if (!ownerKey) return;
   await withDraftLock(async () => {
-    const { items, changed } = patchManifestCaption(await readManifest(ownerKey), key, caption);
+    const { items, changed } = patchManifestCaption(await readManifest(ownerKey), clientUploadId, caption);
     if (changed) await writeManifest(ownerKey, items);
   });
 }
 
-/** Drop the given manifest items (by `key`) AND delete their copied files — the crew removed them from the tray. */
-export async function removeDraftPhotos(ownerKey: string, keys: string[]): Promise<void> {
-  if (!ownerKey || keys.length === 0) return;
-  const drop = new Set(keys);
+/** Drop the given manifest items (by clientUploadId) AND delete their copied files — the crew removed them from
+ * the tray, or Done/recovery consumed them. Identity is clientUploadId, NOT the per-process session `key`: that
+ * counter restarts at sp-1 each mount, so a recovered orphan and a fresh photo can collide and a key-scoped
+ * delete would wipe the live photo's durable copy too. */
+export async function removeDraftPhotos(ownerKey: string, clientUploadIds: string[]): Promise<void> {
+  if (!ownerKey || clientUploadIds.length === 0) return;
+  const drop = new Set(clientUploadIds);
   await withDraftLock(async () => {
     const current = await readManifest(ownerKey);
-    const removed = current.filter((i) => drop.has(i.key));
+    const removed = current.filter((i) => drop.has(i.clientUploadId));
     if (removed.length === 0) return;
-    await writeManifest(ownerKey, removeManifestItems(current, keys));
+    await writeManifest(ownerKey, removeManifestItems(current, clientUploadIds));
     await Promise.all(
       removed.map((i) => FileSystem.deleteAsync(i.uri, { idempotent: true }).catch(() => undefined)),
     );

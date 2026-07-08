@@ -15,9 +15,12 @@ export type DraftCtx = { target: CaptureTargetRef; category: string | null; tags
 
 /** One photo staged into the durable review draft (its file already COPIED into the draft dir). */
 export type StagedDraftItem = {
-  /** Session key (stable within a review session) — the manifest key used to patch/remove an item. */
+  /** Session key (stable within a review SESSION), passthrough to the recovered SessionPhoto's React key. NOT
+   * the manifest identity — the per-process `sp-N` counter restarts at sp-1 on every mount, so a recovered
+   * prior-process orphan and a fresh photo can share a key. Add/remove/patch key on clientUploadId instead. */
   key: string;
-  /** Stable idempotency key carried into enqueue → confirm-upload (server dedupes on it). */
+  /** Globally-unique idempotency key carried into enqueue → confirm-upload (server dedupes on it). This is the
+   * manifest IDENTITY used to add/remove/patch an item — unique across processes, unlike `key`. */
   clientUploadId: string;
   /** The DURABLE copy's uri (inside the draft dir) — survives an app kill, unlike the raw camera/library uri. */
   uri: string;
@@ -38,25 +41,28 @@ export function addManifestItem(items: StagedDraftItem[], item: StagedDraftItem)
   return [...items, item];
 }
 
-/** Drop the items whose `key` is in `keys`, keeping the rest in order. */
-export function removeManifestItems(items: StagedDraftItem[], keys: Iterable<string>): StagedDraftItem[] {
-  const drop = new Set(keys);
-  return items.filter((i) => !drop.has(i.key));
+/** Drop the items whose clientUploadId is in `ids`, keeping the rest in order. Identity is the globally-unique
+ * clientUploadId — NOT the per-process session `key` (which restarts at sp-1 each mount, so a recovered
+ * prior-process orphan and a fresh photo can share a key; a key-scoped delete would wipe the live one too). */
+export function removeManifestItems(items: StagedDraftItem[], ids: Iterable<string>): StagedDraftItem[] {
+  const drop = new Set(ids);
+  return items.filter((i) => !drop.has(i.clientUploadId));
 }
 
 /**
- * Set the caption on the item matching `key` (so a crash preserves captions typed so far). Reports whether
- * anything changed so the caller only rewrites the durable manifest when it did; a no-op (key absent, or
- * caption unchanged) returns the original array reference unchanged.
+ * Set the caption on the item matching `clientUploadId` (so a crash preserves captions typed so far). Reports
+ * whether anything changed so the caller only rewrites the durable manifest when it did; a no-op (id absent, or
+ * caption unchanged) returns the original array reference unchanged. Keyed on clientUploadId, not the session
+ * `key`, for the same cross-process identity reason as removeManifestItems.
  */
 export function patchManifestCaption(
   items: StagedDraftItem[],
-  key: string,
+  clientUploadId: string,
   caption: string,
 ): { items: StagedDraftItem[]; changed: boolean } {
   let changed = false;
   const next = items.map((i) => {
-    if (i.key !== key || i.caption === caption) return i;
+    if (i.clientUploadId !== clientUploadId || i.caption === caption) return i;
     changed = true;
     return { ...i, caption };
   });
