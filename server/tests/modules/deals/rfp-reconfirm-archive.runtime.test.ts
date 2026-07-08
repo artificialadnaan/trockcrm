@@ -367,4 +367,38 @@ describe("reconfirmRfpDecline auto-archive", () => {
     expect(callArg.entity.tableName).toBe("deals");
     expect(callArg.fieldChanges).toMatchObject({ isActive: { from: true, to: false } });
   });
+
+  it("assertion 6: the stuck-approving escape hatch reconfirms WITHOUT archiving (deal stays active)", async () => {
+    const APPROVING_DEAL = U("de99");
+    await pg.query(
+      `INSERT INTO deals (id, name, deal_number, project_number,
+                          rfp_approval_status, rfp_approval_request_id,
+                          rfp_declined_reason, description, rfp_override_state, is_active, updated_at)
+       VALUES ($1, 'Stuck Approving Deal', 'TR-9003', 'PR-9003',
+               'declined', 99, $2, $3, 'approving', true, now())`,
+      [APPROVING_DEAL, VOTER_NOTES, ORIGINAL_DESC],
+    );
+
+    const res = await reconfirmRfpDecline({
+      tenantDb: tdb,
+      dealId: APPROVING_DEAL,
+      actor: { userId: ACTOR_ID, name: "Adam Shaw", role: "admin" },
+      note: REVIEWER_NOTE,
+      officeId: null,
+    });
+    expect(res.ok).toBe(true);
+
+    const deal = (
+      await pg.query<{ is_active: boolean; description: string; rfp_override_decision: string }>(
+        `SELECT is_active, description, rfp_override_decision FROM deals WHERE id = $1`,
+        [APPROVING_DEAL],
+      )
+    ).rows[0];
+
+    // The reconfirm is recorded, but the deal is NOT archived: a still-in-flight SyncHub /bid-board-created
+    // callback (its findDeal filters is_active=true) must be able to find the active row and no-op idempotently.
+    expect(deal?.rfp_override_decision).toBe("denial_reconfirmed");
+    expect(deal?.is_active).toBe(true);
+    expect(deal?.description).toBe(ORIGINAL_DESC);
+  });
 });

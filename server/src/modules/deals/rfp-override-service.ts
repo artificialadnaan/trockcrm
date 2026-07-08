@@ -340,6 +340,19 @@ export async function reconfirmRfpDecline(input: {
   // callers that don't notify (or can't) still work — a null officeId just skips the app-side email.
   officeId?: string | null;
 }): Promise<RfpReconfirmResult> {
+  // Capture the pre-reconfirm override state BEFORE the guarded update clears it (same read pattern as the prior
+  // state read in requestOverrideApproval above). When the reviewer upholds the denial from the STUCK-APPROVING
+  // escape hatch, a SyncHub /bid-board-created callback may still be in flight, and its findDeal lookup filters
+  // is_active=true — so we must NOT archive in that case (the late callback has to find the still-active row to
+  // no-op idempotently, and a late SUCCESS must not resurrect a denied+archived deal). Normal reconfirms (no
+  // approval in flight) auto-archive as designed.
+  const [preReconfirm] = await input.tenantDb
+    .select({ state: deals.rfpOverrideState })
+    .from(deals)
+    .where(eq(deals.id, input.dealId))
+    .limit(1);
+  const wasApproving = preReconfirm?.state === "approving";
+
   const [updated] = await input.tenantDb
     .update(deals)
     .set({
@@ -386,8 +399,9 @@ export async function reconfirmRfpDecline(input: {
   });
 
   // Auto-archive on denial reconfirm (either reviewer): soft-delete the deal and prepend the voter + reviewer
-  // notes to the description. Guarded on the current is_active so a redundant call never re-prepends.
-  if (updated.isActive) {
+  // notes to the description. Guarded on the current is_active so a redundant call never re-prepends, and skipped
+  // for the stuck-approving escape hatch (see wasApproving above) so an in-flight SyncHub callback stays findable.
+  if (updated.isActive && !wasApproving) {
     const reviewerReason = (input.note ?? "").trim();
     const voterNotes = (updated.rfpDeclinedReason ?? "").trim();
     const combined =
