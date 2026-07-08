@@ -632,30 +632,41 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const fetchDeal = useCallback(async () => {
+  const fetchDeal = useCallback(async (silent = false) => {
     if (!dealId) {
       setLoading(false);
       return;
     }
-    setLoading(true);
-    setError(null);
+    // A SILENT refetch (the RFP-pending poll) updates the deal IN PLACE without toggling loading/error, so the page
+    // never blanks to a spinner every 5s — the vote tally just flips when it changes. A transient poll failure keeps
+    // the last-good deal on screen instead of flashing an error banner.
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const data = await api<{ deal: DealDetail }>(`/deals/${dealId}/detail`, {
         ...getOfficeRequestOptions(options.officeId),
       });
       setDeal(data.deal);
+      if (silent) setError(null); // clear any stale error once a background poll succeeds
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load deal");
+      if (!silent) setError(err instanceof Error ? err.message : "Failed to load deal");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [dealId, options.officeId]);
+
+  // `refetch` is the explicit (loading-toggling) reload used by saves/actions; `refetchSilent` is the background
+  // poll variant. Both are memoized so effect deps that include them stay stable.
+  const refetch = useCallback(() => fetchDeal(false), [fetchDeal]);
+  const refetchSilent = useCallback(() => fetchDeal(true), [fetchDeal]);
 
   useEffect(() => {
     fetchDeal();
   }, [fetchDeal]);
 
-  return { deal, loading, error, refetch: fetchDeal };
+  return { deal, loading, error, refetch, refetchSilent };
 }
 
 // estimatorUserId/estimatorUserName are READ-ONLY/display-only on the wire: they live on the read

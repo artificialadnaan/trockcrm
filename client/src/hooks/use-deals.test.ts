@@ -148,6 +148,8 @@ let hookWonPeriodRange: { from?: string; to?: string } | null | undefined;
 let hookStageWonSince: string | undefined;
 let hookDealFilters: DealFilters = {};
 let hookDealDetailOfficeId: string | null | undefined;
+let latestDetailResult: ReturnType<typeof useDealDetail> | null = null;
+const detailLoadingRenders: boolean[] = [];
 
 function HookProbe() {
   latestResult = useDealBoard("mine", false, hookTerminalDateFilters, hookPreviewLimit, hookWonPeriodRange);
@@ -222,7 +224,8 @@ function DealsHookProbe() {
 }
 
 function DealDetailHookProbe() {
-  useDealDetail("deal-1", { officeId: hookDealDetailOfficeId });
+  latestDetailResult = useDealDetail("deal-1", { officeId: hookDealDetailOfficeId });
+  detailLoadingRenders.push(latestDetailResult.loading);
   return null;
 }
 
@@ -499,6 +502,34 @@ describe("normalizeDealBoardResponse", () => {
     expect(apiMock).toHaveBeenCalledWith("/deals/deal-1/detail", {
       headers: { "x-office-id": "office-atlanta" },
     });
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("refetchSilent updates the deal in place WITHOUT flipping loading (background poll — no page blank)", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "A" } }); // initial load
+    hookDealDetailOfficeId = null;
+
+    const root = await renderDealDetailHook();
+    expect(latestDetailResult?.loading).toBe(false);
+    expect(latestDetailResult?.deal).toMatchObject({ name: "A" });
+    // The initial (non-silent) load DID render loading=true — the normal spinner path.
+    expect(detailLoadingRenders).toContain(true);
+
+    // SILENT refetch: the deal updates in place, but NO render shows loading=true → the page never blanks.
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "B" } });
+    detailLoadingRenders.length = 0;
+    await act(async () => {
+      await latestDetailResult!.refetchSilent();
+      await flushEffects();
+    });
+    expect(detailLoadingRenders).not.toContain(true);
+    expect(latestDetailResult?.deal).toMatchObject({ name: "B" });
 
     await act(async () => {
       root.unmount();

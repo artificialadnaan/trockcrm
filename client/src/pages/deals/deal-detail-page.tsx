@@ -346,14 +346,15 @@ export function DealDetailPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const detailOfficeId = searchParams.get("officeId");
-  const { deal, loading, error, refetch } = useDealDetail(id, { officeId: detailOfficeId });
+  const { deal, loading, error, refetch, refetchSilent } = useDealDetail(id, { officeId: detailOfficeId });
 
   // Poll the detail every 5s while an RFP is ACTIVELY in flight so the panel flips to its resolved state without a
   // manual refresh — but only while the request is RECENT (isRfpDetailPollActive). Gating on rfpApprovalStatus alone
   // made deals stuck 'pending' from an old/failed request (and, with RFP voting off, deals that can never resolve)
   // refresh the page every 5s FOREVER; the recency window stops that while still catching a genuine trigger →
   // pending_outbox → approved / send_failed (Retry) resolution. Re-checked in the tick so a request that never
-  // resolves also self-terminates once it ages out of the window.
+  // resolves also self-terminates once it ages out of the window. Uses refetchSilent so the tick updates the vote
+  // state IN PLACE — no loading-spinner flash / page blank every 5s.
   useEffect(() => {
     if (!isRfpDetailPollActive(deal?.rfpApprovalStatus, deal?.rfpApprovalRequestedAt, Date.now())) return;
     const interval = setInterval(() => {
@@ -361,10 +362,10 @@ export function DealDetailPage() {
         clearInterval(interval);
         return;
       }
-      refetch();
+      refetchSilent();
     }, 5000);
     return () => clearInterval(interval);
-  }, [deal?.rfpApprovalStatus, deal?.rfpApprovalRequestedAt, refetch]);
+  }, [deal?.rfpApprovalStatus, deal?.rfpApprovalRequestedAt, refetchSilent]);
 
   const { stages } = usePipelineStages();
   const [activeTab, setActiveTab] = useState<Tab>("overview");
