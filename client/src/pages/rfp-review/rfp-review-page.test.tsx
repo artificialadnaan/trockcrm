@@ -165,6 +165,51 @@ describe("RfpReviewPage — per-deal Procore-check confirmation reset", () => {
   });
 });
 
+describe("RfpReviewPage — Re-confirm denial button requires a note", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    currentDealId = "deal-1";
+  });
+
+  function mount() {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(<RfpReviewPage />);
+    });
+  }
+
+  const reconfirmBtn = () =>
+    [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Re-confirm denial")
+    ) as HTMLButtonElement | undefined;
+
+  it("disables the Re-confirm denial button when note is empty, enables it once a note is typed (actionable panel)", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: true });
+    mount();
+
+    // Empty note → button must be disabled
+    expect(reconfirmBtn()?.disabled).toBe(true);
+
+    // Type a note → button must be enabled
+    act(() => {
+      const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+      // Simulate typing by dispatching an input event with a non-empty value
+      Object.defineProperty(textarea, "value", { writable: true, value: "Some reason" });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      // Also fire change so React's synthetic event picks it up
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(reconfirmBtn()?.disabled).toBe(false);
+  });
+});
+
 describe("RfpReviewPage — approve override result handling (optimistic state)", () => {
   let container: HTMLDivElement;
   let root: Root;

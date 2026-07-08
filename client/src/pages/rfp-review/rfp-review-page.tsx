@@ -276,7 +276,7 @@ export function RfpReviewPage() {
                 </p>
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="rfp-override-note">Note (optional)</Label>
+                <Label htmlFor="rfp-override-note">Note (required to deny)</Label>
                 <Textarea
                   id="rfp-override-note"
                   value={note}
@@ -299,7 +299,7 @@ export function RfpReviewPage() {
                 <Button onClick={onApprove} disabled={busy || !confirmedNoProject}>
                   {submitting === "approve" ? "Submitting…" : "Confirmed no project — re-attempt"}
                 </Button>
-                <Button variant="destructive" onClick={onReconfirm} disabled={busy}>
+                <Button variant="destructive" onClick={onReconfirm} disabled={busy || note.trim().length === 0}>
                   {submitting === "reconfirm" ? "Confirming…" : "Re-confirm denial"}
                 </Button>
               </div>
@@ -307,7 +307,7 @@ export function RfpReviewPage() {
           ) : review.actionable ? (
             <>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="rfp-override-note">Note (optional)</Label>
+                <Label htmlFor="rfp-override-note">Note (required to deny)</Label>
                 <Textarea
                   id="rfp-override-note"
                   value={note}
@@ -321,7 +321,7 @@ export function RfpReviewPage() {
                 <Button onClick={onApprove} disabled={busy}>
                   {submitting === "approve" ? "Submitting…" : "Approve override (create Bid Board project)"}
                 </Button>
-                <Button variant="destructive" onClick={onReconfirm} disabled={busy}>
+                <Button variant="destructive" onClick={onReconfirm} disabled={busy || note.trim().length === 0}>
                   {submitting === "reconfirm" ? "Confirming…" : "Re-confirm denial"}
                 </Button>
               </div>
