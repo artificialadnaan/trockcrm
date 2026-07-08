@@ -854,8 +854,8 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
   });
 }
 
-export async function deleteDeal(dealId: string) {
-  return api<{ success: boolean }>(`/deals/${dealId}`, { method: "DELETE" });
+export async function deleteDeal(dealId: string, reason: string) {
+  return api<{ success: boolean }>(`/deals/${dealId}`, { method: "DELETE", json: { reason } });
 }
 
 export async function getDealScopingIntake(dealId: string) {
