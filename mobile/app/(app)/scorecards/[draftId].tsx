@@ -280,6 +280,14 @@ function Wizard(props: {
   }
 
   async function importForSection(sectionIndex: number) {
+    // Block a second import (or an import during a camera save) while a batch is still copying/dispatching:
+    // `remaining` below is computed from draft.photos, which does NOT yet include an in-flight batch, so a
+    // concurrent import could push the draft past the cap. savingPhotos is the "work in flight" signal and is
+    // held for the WHOLE batch (incl. the live-GPS lookup) by the marker below.
+    if (savingPhotos > 0) {
+      setNotice({ tone: "error", text: "Still saving the last photos — try again in a moment." });
+      return;
+    }
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
       setNotice({ tone: "error", text: "Photo library permission is required to import." });
@@ -303,28 +311,37 @@ function Wizard(props: {
     const sectionKey = FIELD_SCORECARD_SECTIONS[sectionIndex].key;
     // Defensive: never exceed the remaining slots even if a platform ignores selectionLimit.
     const assets = result.assets.slice(0, remaining);
-    // Fetch live GPS ONCE for the whole batch and reuse it (mirrors the Capture screen). Doing it per asset
-    // would serialize a getLiveGps() — up to 8s each — for every coordless photo, freezing a large indoor import.
-    const exifs = assets.map((a) => extractExifMetadata(a.exif as Record<string, unknown>));
-    const needsLive = exifs.some((e) => e.latitude === undefined || e.longitude === undefined);
-    const live = needsLive ? await getLiveGps().catch(() => null) : null;
-    for (let i = 0; i < assets.length; i++) {
-      const asset = assets[i];
-      const clientUploadId = newClientUploadId();
-      setSavingPhotos((n) => n + 1);
-      try {
-        const exif = mergeLiveGps(exifs[i], live);
-        // Durable-copy BEFORE dispatch (see onCameraCapture); drop with a notice if the copy fails.
-        const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
-        dispatch({
-          type: "addPhoto",
-          photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
-        });
-      } catch {
-        setNotice({ tone: "error", text: "Couldn’t import that photo — please try again." });
-      } finally {
-        setSavingPhotos((n) => n - 1);
+    if (assets.length === 0) return;
+    // Reserve the batch as in-flight BEFORE the up-to-8s live-GPS lookup, so Submit stays blocked (savingPhotos
+    // gates it) AND a second import bails through the whole lookup — otherwise the wizard looks idle during it
+    // and a submit would ship the old draft, omitting every picked photo.
+    setSavingPhotos((n) => n + 1);
+    try {
+      // Fetch live GPS ONCE for the whole batch and reuse it (mirrors the Capture screen). Doing it per asset
+      // would serialize getLiveGps() — up to 8s each — for every coordless photo, freezing a large indoor import.
+      const exifs = assets.map((a) => extractExifMetadata(a.exif as Record<string, unknown>));
+      const needsLive = exifs.some((e) => e.latitude === undefined || e.longitude === undefined);
+      const live = needsLive ? await getLiveGps().catch(() => null) : null;
+      for (let i = 0; i < assets.length; i++) {
+        const asset = assets[i];
+        const clientUploadId = newClientUploadId();
+        setSavingPhotos((n) => n + 1);
+        try {
+          const exif = mergeLiveGps(exifs[i], live);
+          // Durable-copy BEFORE dispatch (see onCameraCapture); drop with a notice if the copy fails.
+          const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
+          dispatch({
+            type: "addPhoto",
+            photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
+          });
+        } catch {
+          setNotice({ tone: "error", text: "Couldn’t import that photo — please try again." });
+        } finally {
+          setSavingPhotos((n) => n - 1);
+        }
       }
+    } finally {
+      setSavingPhotos((n) => n - 1);
     }
   }
 
