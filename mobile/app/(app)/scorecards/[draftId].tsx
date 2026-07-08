@@ -198,6 +198,10 @@ function Wizard(props: {
   // and resurrect a submitted draft. `finalized` stops saves once the draft is submitted + deleted.
   const saveChain = useRef<Promise<unknown>>(Promise.resolve());
   const finalized = useRef(false);
+  // Synchronous lock for photo imports: `savingPhotos` is React state and doesn't update before a second rapid
+  // Import tap re-reads it, so a ref bails the second tap before it opens the picker (see importForSection). It
+  // also blocks a camera capture during an import's picker window (before the savingPhotos marker is set).
+  const importInFlight = useRef(false);
   // Ids of removed photos whose queue-cancellation hasn't confirmed yet. onSubmit retries the cancellation
   // for all still-pending ids and only proceeds once it succeeds — a FAILED removal stays in the set (and
   // blocks submit) instead of being cleared, so the drain can never upload evidence the user removed.
@@ -247,6 +251,17 @@ function Wizard(props: {
 
   async function onCameraCapture(shot: CapturedShot, caption: string) {
     if (cameraSection === null) return;
+    // Never add a photo while a batch is in flight (an import's picker/live-GPS/copy window), and never exceed the
+    // cap — draft.photos doesn't yet include an in-flight import, so a capture during that window could push the
+    // total past MAX_SCORECARD_PHOTOS and be rejected at submit.
+    if (importInFlight.current || savingPhotos > 0) {
+      setNotice({ tone: "error", text: "Still saving the last photos — try again in a moment." });
+      return;
+    }
+    if (draft.photos.length >= MAX_SCORECARD_PHOTOS) {
+      setNotice({ tone: "error", text: `A scorecard can hold at most ${MAX_SCORECARD_PHOTOS} photos — remove some to add more.` });
+      return;
+    }
     const sectionKey = FIELD_SCORECARD_SECTIONS[cameraSection].key;
     const clientUploadId = newClientUploadId();
     setSavingPhotos((n) => n + 1); // blocks Submit until the durable copy + dispatch below finish
@@ -280,68 +295,72 @@ function Wizard(props: {
   }
 
   async function importForSection(sectionIndex: number) {
-    // Block a second import (or an import during a camera save) while a batch is still copying/dispatching:
-    // `remaining` below is computed from draft.photos, which does NOT yet include an in-flight batch, so a
-    // concurrent import could push the draft past the cap. savingPhotos is the "work in flight" signal and is
-    // held for the WHOLE batch (incl. the live-GPS lookup) by the marker below.
-    if (savingPhotos > 0) {
+    // Block a second import (or an import during a camera save). `savingPhotos` is React state — it does NOT update
+    // before a second rapid tap re-reads it, so two taps could both pass this guard, open the picker against the
+    // same draft.photos.length, and each dispatch a full batch past the cap. importInFlight is a synchronous ref
+    // that flips BELOW before any await, so the second tap bails immediately; it's released on every exit.
+    if (importInFlight.current || savingPhotos > 0) {
       setNotice({ tone: "error", text: "Still saving the last photos — try again in a moment." });
       return;
     }
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) {
-      setNotice({ tone: "error", text: "Photo library permission is required to import." });
-      return;
-    }
-    // Cap the pick at the remaining slots under the server's 100-photo limit — otherwise a big multi-select
-    // uploads the whole batch and only fails at submit, forcing the user to hunt-and-remove.
-    const remaining = MAX_SCORECARD_PHOTOS - draft.photos.length;
-    if (remaining <= 0) {
-      setNotice({ tone: "error", text: `A scorecard can hold at most ${MAX_SCORECARD_PHOTOS} photos — remove some to import more.` });
-      return;
-    }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
-      allowsMultipleSelection: true,
-      selectionLimit: remaining,
-      quality: 1,
-      exif: true,
-    });
-    if (result.canceled) return;
-    const sectionKey = FIELD_SCORECARD_SECTIONS[sectionIndex].key;
-    // Defensive: never exceed the remaining slots even if a platform ignores selectionLimit.
-    const assets = result.assets.slice(0, remaining);
-    if (assets.length === 0) return;
-    // Reserve the batch as in-flight BEFORE the up-to-8s live-GPS lookup, so Submit stays blocked (savingPhotos
-    // gates it) AND a second import bails through the whole lookup — otherwise the wizard looks idle during it
-    // and a submit would ship the old draft, omitting every picked photo.
-    setSavingPhotos((n) => n + 1);
+    importInFlight.current = true;
     try {
-      // Fetch live GPS ONCE for the whole batch and reuse it (mirrors the Capture screen). Doing it per asset
-      // would serialize getLiveGps() — up to 8s each — for every coordless photo, freezing a large indoor import.
-      const exifs = assets.map((a) => extractExifMetadata(a.exif as Record<string, unknown>));
-      const needsLive = exifs.some((e) => e.latitude === undefined || e.longitude === undefined);
-      const live = needsLive ? await getLiveGps().catch(() => null) : null;
-      for (let i = 0; i < assets.length; i++) {
-        const asset = assets[i];
-        const clientUploadId = newClientUploadId();
-        setSavingPhotos((n) => n + 1);
-        try {
-          const exif = mergeLiveGps(exifs[i], live);
-          // Durable-copy BEFORE dispatch (see onCameraCapture); drop with a notice if the copy fails.
-          const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
-          dispatch({
-            type: "addPhoto",
-            photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
-          });
-        } catch {
-          setNotice({ tone: "error", text: "Couldn’t import that photo — please try again." });
-        } finally {
-          setSavingPhotos((n) => n - 1);
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        setNotice({ tone: "error", text: "Photo library permission is required to import." });
+        return;
+      }
+      // Cap the pick at the remaining slots under the server's 100-photo limit — otherwise a big multi-select
+      // uploads the whole batch and only fails at submit, forcing the user to hunt-and-remove.
+      const remaining = MAX_SCORECARD_PHOTOS - draft.photos.length;
+      if (remaining <= 0) {
+        setNotice({ tone: "error", text: `A scorecard can hold at most ${MAX_SCORECARD_PHOTOS} photos — remove some to import more.` });
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: true,
+        selectionLimit: remaining,
+        quality: 1,
+        exif: true,
+      });
+      if (result.canceled) return;
+      const sectionKey = FIELD_SCORECARD_SECTIONS[sectionIndex].key;
+      // Defensive: never exceed the remaining slots even if a platform ignores selectionLimit.
+      const assets = result.assets.slice(0, remaining);
+      if (assets.length === 0) return;
+      // Batch marker so Submit stays blocked (savingPhotos gates it) through the up-to-8s live-GPS lookup below —
+      // otherwise the wizard looks idle during it and a submit would ship the old draft, omitting the picked photos.
+      setSavingPhotos((n) => n + 1);
+      try {
+        // Fetch live GPS ONCE for the whole batch and reuse it (mirrors the Capture screen). Doing it per asset
+        // would serialize getLiveGps() — up to 8s each — for every coordless photo, freezing a large indoor import.
+        const exifs = assets.map((a) => extractExifMetadata(a.exif as Record<string, unknown>));
+        const needsLive = exifs.some((e) => e.latitude === undefined || e.longitude === undefined);
+        const live = needsLive ? await getLiveGps().catch(() => null) : null;
+        for (let i = 0; i < assets.length; i++) {
+          const asset = assets[i];
+          const clientUploadId = newClientUploadId();
+          setSavingPhotos((n) => n + 1);
+          try {
+            const exif = mergeLiveGps(exifs[i], live);
+            // Durable-copy BEFORE dispatch (see onCameraCapture); drop with a notice if the copy fails.
+            const durableUri = await copyPhotoIntoDraft(ownerKey, draftId, clientUploadId, asset.uri);
+            dispatch({
+              type: "addPhoto",
+              photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
+            });
+          } catch {
+            setNotice({ tone: "error", text: "Couldn’t import that photo — please try again." });
+          } finally {
+            setSavingPhotos((n) => n - 1);
+          }
         }
+      } finally {
+        setSavingPhotos((n) => n - 1);
       }
     } finally {
-      setSavingPhotos((n) => n - 1);
+      importInFlight.current = false; // release on every exit: denied, cancel, cap, error, success
     }
   }
 
@@ -416,6 +435,7 @@ function Wizard(props: {
             voiceEnabled={voiceEnabled}
             onAddPhoto={() => setCameraSection(step - 1)}
             onImport={() => void importForSection(step - 1)}
+            photosBusy={savingPhotos > 0}
             onRemovePhoto={removePhotoAndCancelUpload}
           />
         ) : step === SECTION_COUNT + 1 ? (
@@ -473,16 +493,19 @@ function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React
 }
 
 function SectionStep({
-  sectionIndex, draft, dispatch, voiceEnabled, onAddPhoto, onImport, onRemovePhoto,
+  sectionIndex, draft, dispatch, voiceEnabled, onAddPhoto, onImport, photosBusy, onRemovePhoto,
 }: {
   sectionIndex: number; draft: ScorecardDraft; dispatch: React.Dispatch<DraftAction>;
-  voiceEnabled: boolean; onAddPhoto: () => void; onImport: () => void;
+  voiceEnabled: boolean; onAddPhoto: () => void; onImport: () => void; photosBusy: boolean;
   onRemovePhoto: (photo: ScorecardDraftPhoto) => void;
 }) {
   const section = FIELD_SCORECARD_SECTIONS[sectionIndex];
   const selected = draft.scores[section.key];
   const note = draft.notes[section.key] ?? "";
   const photos = scorecardDraftPhotosForSection(draft, section.key);
+  // Disable both photo actions while a batch is in flight or the draft is at the cap — the handlers also guard
+  // this, but disabling avoids the user firing a capture/import that just bounces with a notice.
+  const photosDisabled = photosBusy || draft.photos.length >= MAX_SCORECARD_PHOTOS;
   return (
     <View style={{ gap: theme.space.md }}>
       <Text style={styles.hint}>Section {sectionIndex + 1} of {SECTION_COUNT} · worth {section.maxPoints} pts</Text>
@@ -521,8 +544,8 @@ function SectionStep({
           ))}
         </View>
         <View style={styles.actions}>
-          <Button title="Add photo" variant="ghost" onPress={onAddPhoto} style={{ flex: 1 }} />
-          <Button title="Import" variant="ghost" onPress={onImport} style={{ flex: 1 }} />
+          <Button title="Add photo" variant="ghost" onPress={onAddPhoto} disabled={photosDisabled} style={{ flex: 1 }} />
+          <Button title="Import" variant="ghost" onPress={onImport} disabled={photosDisabled} style={{ flex: 1 }} />
         </View>
       </View>
     </View>
