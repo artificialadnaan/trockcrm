@@ -1,5 +1,5 @@
 // Real-types (PGlite + Drizzle-derived schema) test of the ESTIMATOR commission backfill: candidate
-// selection, faithful dry-run (writes nothing), idempotent execute, CO/owner/rateless exclusions, and the
+// selection, faithful dry-run (writes nothing), idempotent execute, CO/owner exclusions, and the
 // "additive estimator row, owner row untouched" guarantee.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
@@ -16,6 +16,7 @@ import { tenantSchemaSql } from "../helpers/tenant-schema-from-drizzle.js";
 import {
   backfillTenantEstimatorCommissions,
   findEstimatorBackfillCandidates,
+  findEstimatorRateRepairCandidates,
   parseArgs,
   runOne,
 } from "../../src/scripts/backfill-estimator-commissions.js";
@@ -23,15 +24,15 @@ import {
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const O1 = U("0001"); // owner/rep, rate 0.03
 const E1 = U("0002"); // estimator, rate 0.02
-const E2 = U("0003"); // estimator with NO commission settings → skipped_no_rate
+const E2 = U("0003"); // estimator with NO commission settings → skipped_no_rate until configured
 const E3 = U("0004"); // estimator, rate 0.05
 const ACTOR = U("0ac7"); // backfill operator (created_by + audit actor)
 const WON = U("0500");
 const LOST = U("0501");
 
-const D_ESTIM = U("0de1"); // signed, owner O1, estimator E1 (rated), owner row exists, no estimator row → CREATE
-const D_AT_ONLY = U("0de2"); // contract_signed_at only, owner O1, estimator E3 (rated) → CREATE
-const D_NO_RATE = U("0de3"); // estimator E2 (no rate) → candidate but skipped_no_rate, no row
+const D_ESTIM = U("0de1"); // signed, owner O1, estimator E1, owner row exists, no estimator row → CREATE
+const D_AT_ONLY = U("0de2"); // contract_signed_at only, owner O1, estimator E3 → CREATE
+const D_NO_RATE = U("0de3"); // estimator E2 (no settings) → candidate but skipped_no_rate, no row
 const D_NO_DATE = U("0de4"); // no contract date → not a candidate
 const D_LOST = U("0de5"); // signed but lost stage → not a candidate
 const D_HAS_ESTIM_ROW = U("0de6"); // already has the estimator row → not a candidate (idempotency at query level)
@@ -110,7 +111,7 @@ beforeAll(async () => {
        ('${D_AT_ONLY}','${O1}','owner','awarded_amount', 200000, 0.030000, 6000, '2026-02-01'),
        ('${D_NO_RATE}','${O1}','owner','awarded_amount', 50000, 0.030000, 1500, '2026-01-20'),
        ('${D_HAS_ESTIM_ROW}','${O1}','owner','awarded_amount', 80000, 0.030000, 2400, '2026-01-10'),
-       ('${D_HAS_ESTIM_ROW}','${E1}','estimator','awarded_amount', 80000, 0.020000, 1600, '2026-01-10'),
+       ('${D_HAS_ESTIM_ROW}','${E1}','estimator','awarded_amount', 80000, 0.010000, 800, '2026-01-10'),
        ('${D_ESTIM_IS_OWNER}','${E1}','owner','awarded_amount', 90000, 0.020000, 1800, '2026-01-18')`
   );
 }, 30_000);
@@ -139,20 +140,42 @@ describe("estimator commission backfill", () => {
     expect(candidates.find((c) => c.dealId === D_ESTIM)?.estimatorId).toBe(E1);
   });
 
+  it("selects existing estimator rows booked at the wrong per-estimator rate for repair", async () => {
+    const repairs = await findEstimatorRateRepairCandidates(query);
+    expect(repairs.map((r) => r.dealId)).toEqual([D_HAS_ESTIM_ROW]);
+    expect(repairs[0]).toMatchObject({
+      action: "fix_existing_rate",
+      estimatorId: E1,
+      currentRate: "0.010000",
+      currentAmount: "800.00",
+      expectedRate: "0.020000",
+      expectedAmount: "1600.00",
+    });
+  });
+
   it("dry-run (default) is faithful but writes NOTHING", async () => {
     const summary = await backfillTenantEstimatorCommissions(tdb, query, { schema: "public", execute: false, actorUserId: null });
     expect(summary.byStatus.created).toBe(2); // D_ESTIM (E1) + D_AT_ONLY (E3)
-    expect(summary.byStatus.skipped_no_rate).toBe(1); // D_NO_RATE (E2 has no rate)
+    expect(summary.byStatus.updated_estimator_rate).toBe(1); // D_HAS_ESTIM_ROW would be corrected to E1's 2% rate
+    expect(summary.byStatus.skipped_no_rate).toBe(1); // D_NO_RATE (E2 has no active settings)
     expect(summary.totalCommissionCreated).toBe(12000); // 100000×0.02 + 200000×0.05
+    expect(summary.totalCommissionUpdated).toBe(1600);
+    expect(summary.totalCommissionDelta).toBe(800);
     // Nothing new written: only the seeded OWNER rows remain (no estimator rows added).
     expect(await dscCountForRep(D_ESTIM, E1)).toBe(0);
     expect(await dscCountForRep(D_AT_ONLY, E3)).toBe(0);
+    expect(await dscCountForRep(D_NO_RATE, E2)).toBe(0);
     expect(await dscCount(D_ESTIM)).toBe(1); // owner row only
+    expect(Number((await pg.query<{ amount: string; applied_rate: string }>(
+      `SELECT amount, applied_rate FROM public.deal_signed_commissions WHERE deal_id='${D_HAS_ESTIM_ROW}' AND rep_user_id='${E1}'`
+    )).rows[0].amount)).toBe(800); // dry-run rolled the stale-row repair back too
   });
 
-  it("execute (--commit) mints exactly one estimator row each; owner rows untouched; idempotent re-run writes nothing", async () => {
+  it("execute (--commit) mints exactly one estimator row each, repairs stale estimator rows, and is idempotent", async () => {
     const run1 = await backfillTenantEstimatorCommissions(tdb, query, { schema: "public", execute: true, actorUserId: ACTOR });
     expect(run1.byStatus.created).toBe(2);
+    expect(run1.byStatus.skipped_no_rate).toBe(1);
+    expect(run1.byStatus.updated_estimator_rate).toBe(1);
 
     // Each candidate now has its additive estimator row ON TOP of the untouched owner row.
     expect(await dscCount(D_ESTIM)).toBe(2);
@@ -160,18 +183,25 @@ describe("estimator commission backfill", () => {
     expect(await dscCountForRep(D_ESTIM, O1)).toBe(1);
     expect(await dscCount(D_AT_ONLY)).toBe(2);
     expect(await dscCountForRep(D_AT_ONLY, E3)).toBe(1);
+    expect(await dscCount(D_NO_RATE)).toBe(1);
+    expect(await dscCountForRep(D_NO_RATE, E2)).toBe(0);
 
     const estimRow = (await pg.query<{ amount: string; rep_user_id: string; created_by: string }>(
       `SELECT amount, rep_user_id, created_by FROM public.deal_signed_commissions WHERE deal_id='${D_ESTIM}' AND rep_user_id='${E1}'`
     )).rows[0];
-    expect(Number(estimRow.amount)).toBe(2000); // 100000 × 0.02 (ESTIMATOR's own rate)
+    expect(Number(estimRow.amount)).toBe(2000); // 100000 × 0.02 (E1's estimator rate)
     expect(estimRow.rep_user_id).toBe(E1); // EARNER = the estimator
     expect(estimRow.created_by).toBe(ACTOR); // CREATED_BY = the backfill operator, not the earning estimator
 
     const atRow = (await pg.query<{ amount: string }>(
       `SELECT amount FROM public.deal_signed_commissions WHERE deal_id='${D_AT_ONLY}' AND rep_user_id='${E3}'`
     )).rows[0];
-    expect(Number(atRow.amount)).toBe(10000); // 200000 × 0.05
+    expect(Number(atRow.amount)).toBe(10000); // 200000 × 0.05 (E3's estimator rate)
+
+    const repairedRow = (await pg.query<{ amount: string; applied_rate: string }>(
+      `SELECT amount, applied_rate FROM public.deal_signed_commissions WHERE deal_id='${D_HAS_ESTIM_ROW}' AND rep_user_id='${E1}'`
+    )).rows[0];
+    expect(repairedRow).toEqual({ amount: "1600.00", applied_rate: "0.020000" }); // existing row repaired in place
 
     // Owner rows are untouched (same amount, original NULL created_by from the seed).
     const ownerRow = (await pg.query<{ amount: string }>(
@@ -181,19 +211,21 @@ describe("estimator commission backfill", () => {
 
     // Re-run: the now-rowed deals drop out of the candidate set (NOT EXISTS estimator row), so nothing new.
     const run2 = await backfillTenantEstimatorCommissions(tdb, query, { schema: "public", execute: true, actorUserId: ACTOR });
-    expect(run2.candidates).toBe(1); // only D_NO_RATE remains (still rateless)
+    expect(run2.candidates).toBe(1); // only D_NO_RATE remains, still without active settings
     expect(run2.byStatus.created).toBe(0);
+    expect(run2.byStatus.skipped_no_rate).toBe(1);
+    expect(run2.byStatus.updated_estimator_rate).toBe(0);
     expect(await dscCount(D_ESTIM)).toBe(2); // no duplicate estimator row
   });
 
-  it("never minted a row for a CO child, an estimator==owner deal, or a rateless estimator", async () => {
+  it("never minted a row for a CO child, an estimator==owner deal, or a no-settings estimator", async () => {
     // CO child: still has zero commission rows (never seeded, never minted).
     expect(await dscCount(D_CO_CHILD)).toBe(0);
     // estimator==owner: still exactly the single seeded owner-credit row for E1 — no second (estimator) row.
     expect(await dscCount(D_ESTIM_IS_OWNER)).toBe(1);
-    // rateless estimator (E2): the deal keeps ONLY its owner row — no estimator row was created.
+    // no-settings estimator (E2): the deal keeps ONLY its owner row until E2 has an active rate.
     expect(await dscCountForRep(D_NO_RATE, E2)).toBe(0);
-    expect(await dscCount(D_NO_RATE)).toBe(1); // owner row only
+    expect(await dscCount(D_NO_RATE)).toBe(1);
   });
 
   it("never wrote or modified the estimator_user_id column (only commission rows)", async () => {
@@ -206,10 +238,11 @@ describe("estimator commission backfill", () => {
     expect(byId[D_CO_CHILD].estimator_user_id).toBe(E1); // CO's column untouched (just never minted)
   });
 
-  it("once the rateless estimator gets a rate, a re-run picks up that deal (the rate-gap path)", async () => {
+  it("adding a commission setting later creates the previously skipped estimator row", async () => {
     await pg.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES ('${E2}', 0.010000, true)`);
     const run = await backfillTenantEstimatorCommissions(tdb, query, { schema: "public", execute: true, actorUserId: ACTOR });
-    expect(run.byStatus.created).toBe(1); // D_NO_RATE now computes for E2
+    expect(run.byStatus.created).toBe(1); // D_NO_RATE now computes from E2's active rate
+    expect(run.candidates).toBe(1);
     expect(await dscCountForRep(D_NO_RATE, E2)).toBe(1);
     expect(Number((await pg.query<{ amount: string }>(
       `SELECT amount FROM public.deal_signed_commissions WHERE deal_id='${D_NO_RATE}' AND rep_user_id='${E2}'`
@@ -235,8 +268,8 @@ describe("estimator backfill owner-row gate (FIX G) + TOCTOU revalidation under 
     (await pgG.query(`SELECT 1 FROM public.deal_signed_commissions WHERE deal_id='${dealId}' AND rep_user_id='${rep}'`)).rows.length;
 
   const GO = U("0a01"); // owner, rate 0.03
-  const GE1 = U("0a02"); // the candidate's estimator, rate 0.02
-  const GE2 = U("0a03"); // a DIFFERENT estimator an admin switches to mid-run, rate 0.04
+  const GE1 = U("0a02"); // the candidate's estimator
+  const GE2 = U("0a03"); // a DIFFERENT estimator an admin switches to mid-run
   const GACTOR = U("0aac");
   const GWON = U("0a50");
   const GOFFICE = U("0af1");
@@ -315,7 +348,7 @@ describe("estimator backfill owner-row gate (FIX G) + TOCTOU revalidation under 
     const candidate = (await findEstimatorBackfillCandidates(queryG)).find((c) => c.dealId === DG_OWNED);
     const result = await runOne(tdbG, candidate!, GACTOR, true);
     expect(result.status).toBe("created");
-    expect(Number(result.amount)).toBe(2000); // 100000 × 0.02 (estimator GE1 rate)
+    expect(Number(result.amount)).toBe(2000); // 100000 × 0.02 (GE1's estimator rate)
     expect(await rowsForRep(DG_OWNED, GE1)).toBe(1);
     expect(await rowsForRep(DG_OWNED, GO)).toBe(1); // owner row still intact
   });
@@ -350,7 +383,7 @@ describe("estimator backfill — owner-role-row gate (Finding 2) + full revalida
 
   const FO = U("0b01"); // ORIGINAL owner (booked on the owner row), rate 0.03
   const FNEW = U("0b02"); // the NEW current assignee after an owner reassignment, rate 0.03
-  const FEST = U("0b03"); // estimator, rate 0.02
+  const FEST = U("0b03"); // estimator
   const FACTOR = U("0bac");
   const FWON = U("0b50");
   const FLOST = U("0b51");
@@ -418,7 +451,7 @@ describe("estimator backfill — owner-role-row gate (Finding 2) + full revalida
 
     const result = await runOne(tdbF, candidate!, FACTOR, true);
     expect(result.status).toBe("created");
-    expect(Number(result.amount)).toBe(2000); // 100000 × 0.02 (estimator FEST's own rate)
+    expect(Number(result.amount)).toBe(2000); // 100000 × 0.02 (FEST's estimator rate)
     expect(await rowsForRep(DF_REASSIGNED, FEST)).toBe(1); // estimator row minted
     expect(await rowsForRep(DF_REASSIGNED, FO)).toBe(1); // ORIGINAL owner row untouched
     expect(await rowsForRep(DF_REASSIGNED, FNEW)).toBe(0); // current assignee books no row (it's not the estimator)
@@ -468,7 +501,7 @@ describe("estimator backfill — estimator-row gate replaces the assigned_rep_id
   const rowsForRep = async (dealId: string, rep: string) =>
     (await pgP.query(`SELECT 1 FROM public.deal_signed_commissions WHERE deal_id='${dealId}' AND rep_user_id='${rep}'`)).rows.length;
 
-  const PCUR = U("0c01"); // CURRENT assignee AND the estimator (post-reassignment), rate 0.02
+  const PCUR = U("0c01"); // CURRENT assignee AND the estimator (post-reassignment)
   const PORIG = U("0c02"); // ORIGINAL owner — holds the booked attribution_role='owner' row, rate 0.03
   const PACTOR = U("0cac");
   const PWON = U("0c50");
@@ -530,7 +563,7 @@ describe("estimator backfill — estimator-row gate replaces the assigned_rep_id
 
     const result = await runOne(tdbP, candidate!, PACTOR, true);
     expect(result.status).toBe("created");
-    expect(Number(result.amount)).toBe(2000); // 100000 × 0.02 (PCUR's own estimator rate)
+    expect(Number(result.amount)).toBe(2000); // 100000 × 0.02 (PCUR's estimator rate)
     expect(await rowsForRep(DP_EST_IS_CUR, PCUR)).toBe(1); // estimator row minted for the current-assignee estimator
     expect(await rowsForRep(DP_EST_IS_CUR, PORIG)).toBe(1); // the ORIGINAL owner's booked owner row untouched
 

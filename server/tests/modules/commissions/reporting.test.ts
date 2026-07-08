@@ -520,7 +520,7 @@ describe("commission reporting service", () => {
     expect(snapshotSql).toContain("on conflict (deal_id, rep_user_id) do update");
   });
 
-  it("forces the rep dashboard query to the current rep and uses deal value times rate for pipeline", async () => {
+  it("forces the rep dashboard query to the current rep and uses deal value times role rate for pipeline", async () => {
     const { getRepCommissionDashboard } = await import("../../../src/modules/commissions/reporting-service.js");
     const tenantDb = createMockTenantDb([[], []]);
 

@@ -18,10 +18,11 @@
  * GUARANTEES:
  *   • Only writes deal_signed_commissions rows — it NEVER writes or modifies the estimator_user_id COLUMN
  *     (that column is owned by the empties-only sync + the manual estimator picker) nor any contract date.
- *     mintEstimatorCommissionForDeal only inserts a commission row; no deals UPDATE.
+ *     Missing rows are inserted; existing variable-rate estimator rows are corrected in place.
  *   • Idempotent — insertCommissionRowForRep does ON CONFLICT (deal_id, rep_user_id) DO NOTHING, and the
  *     query's NOT EXISTS already drops a deal once the estimator books ANY dsc row on it, so re-running
- *     writes nothing new. Safe to run again after configuring missing estimator rates.
+ *     writes no duplicate rows. Per-estimator rate repairs drop out once applied. Estimator rows use the
+ *     estimator user's active commission settings.
  *   • Owner-row-first — a deal is only a candidate once its OWNER row exists (EXISTS attribution_role='owner'):
  *     the estimator row is ADDITIVE and must never be the first row on a deal (else the owner backfill #736,
  *     which skips any deal carrying a row, would never mint the owner row). Run AFTER #736.
@@ -32,6 +33,9 @@
  *     date or its owner row, or already got its estimator row. The check uses the SAME predicate as the bulk
  *     SELECT (factored into one constant) so the two can't drift and let a mint slip through that the
  *     candidate query intentionally excludes.
+ *   • Existing estimator rows are repaired to the estimator user's current active commission_rate when a row
+ *     was booked at the wrong per-person rate. The repair preserves the booked source_value_amount and updates
+ *     only applied_rate, amount, and calculated_at.
  *   • Change-order children are excluded IN THE QUERY (is_change_order = false), not merely by the mint
  *     guard — a CO is base-deal-only and never earns its own estimator cut. (Defence in depth: the mint also
  *     returns skipped_change_order.)
@@ -54,8 +58,8 @@
  * --tenant=/--actor= must use the '=' form (the space-separated form is rejected to avoid silently
  * widening the blast radius).
  *
- * Dry-run is FAITHFUL: it runs the real mintEstimatorCommissionForDeal inside a transaction and rolls it
- * back, so the reported status/amount is exactly what --commit would write.
+ * Dry-run is FAITHFUL: it runs the real insert/repair work inside a transaction and rolls it back, so the
+ * reported status/amount is exactly what --commit would write.
  */
 import pg from "pg";
 import path from "node:path";
@@ -64,7 +68,9 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import * as schema from "@trock-crm/shared/schema";
+import { dealSignedCommissions, userCommissionSettings } from "@trock-crm/shared/schema";
 import { LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
+import { writeAuditLog } from "../lib/audit-log.js";
 import {
   mintEstimatorCommissionForDeal,
   type CalculateCommissionStatus,
@@ -83,14 +89,23 @@ const DRY_RUN_ROLLBACK = Symbol("dry-run-rollback");
 // those no longer hold, skips it as `skipped_no_longer_eligible` instead of minting a row the candidate query
 // intentionally excludes. It's a backfill-local concurrency outcome, not a commission-calc result, so it's
 // modeled here rather than in CalculateCommissionStatus.
-export type EstimatorBackfillStatus = CalculateCommissionStatus | "skipped_no_longer_eligible";
+export type EstimatorBackfillStatus =
+  | CalculateCommissionStatus
+  | "skipped_no_longer_eligible"
+  | "updated_estimator_rate";
 
 export interface EstimatorBackfillCandidate {
+  action: "create_missing" | "fix_existing_rate";
   dealId: string;
   dealNumber: string | null;
   estimatorId: string;
   estimatorName: string | null;
   signedDate: string;
+  commissionId?: string;
+  currentRate?: string | null;
+  currentAmount?: string | null;
+  expectedRate?: string | null;
+  expectedAmount?: string | null;
 }
 
 export interface EstimatorBackfillSummary {
@@ -99,7 +114,9 @@ export interface EstimatorBackfillSummary {
   candidates: number;
   byStatus: Record<EstimatorBackfillStatus, number>;
   totalCommissionCreated: number;
-  rows: Array<EstimatorBackfillCandidate & { status: EstimatorBackfillStatus; amount: string | null }>;
+  totalCommissionUpdated: number;
+  totalCommissionDelta: number;
+  rows: Array<EstimatorBackfillCandidate & { status: EstimatorBackfillStatus; amount: string | null; deltaAmount: string | null }>;
 }
 
 // The CANONICAL lost-stage set (includes deal_canceled) — sourced from the shared constant so the backfill
@@ -191,11 +208,56 @@ export async function findEstimatorBackfillCandidates(query: QueryFn): Promise<E
     ORDER BY d.deal_number
   `);
   return rows.map((r) => ({
+    action: "create_missing" as const,
     dealId: String(r.deal_id),
     dealNumber: r.deal_number == null ? null : String(r.deal_number),
     estimatorId: String(r.estimator_id),
     estimatorName: r.estimator_name == null ? null : String(r.estimator_name),
     signedDate: String(r.signed_date),
+  }));
+}
+
+/**
+ * Existing estimator-role rows that were booked at the wrong per-estimator rate. These are not "backfill"
+ * inserts: they already exist and should be corrected in place to the estimator user's active commission_rate
+ * while preserving the original booked source_value_amount.
+ */
+export async function findEstimatorRateRepairCandidates(query: QueryFn): Promise<EstimatorBackfillCandidate[]> {
+  const { rows } = await query(`
+    SELECT
+      d.id AS deal_id,
+      d.deal_number,
+      dsc.rep_user_id AS estimator_id,
+      u.display_name AS estimator_name,
+      dsc.contract_signed_date_at_signing::text AS signed_date,
+      dsc.id AS commission_id,
+      dsc.applied_rate::numeric::text AS current_rate,
+      dsc.amount::numeric::text AS current_amount,
+      ecs.commission_rate::numeric::text AS expected_rate,
+      ROUND(dsc.source_value_amount::numeric * ecs.commission_rate::numeric, 2)::numeric::text AS expected_amount
+    FROM deal_signed_commissions dsc
+    JOIN deals d ON d.id = dsc.deal_id
+    JOIN public.user_commission_settings ecs ON ecs.user_id = dsc.rep_user_id AND ecs.is_active = true
+    LEFT JOIN public.users u ON u.id = dsc.rep_user_id
+    WHERE dsc.attribution_role = 'estimator'
+      AND (
+        dsc.applied_rate::numeric <> ecs.commission_rate::numeric
+        OR dsc.amount::numeric <> ROUND(dsc.source_value_amount::numeric * ecs.commission_rate::numeric, 2)
+      )
+    ORDER BY d.deal_number
+  `);
+  return rows.map((r) => ({
+    action: "fix_existing_rate" as const,
+    dealId: String(r.deal_id),
+    dealNumber: r.deal_number == null ? null : String(r.deal_number),
+    estimatorId: String(r.estimator_id),
+    estimatorName: r.estimator_name == null ? null : String(r.estimator_name),
+    signedDate: String(r.signed_date),
+    commissionId: String(r.commission_id),
+    currentRate: r.current_rate == null ? null : String(r.current_rate),
+    currentAmount: r.current_amount == null ? null : String(r.current_amount),
+    expectedRate: r.expected_rate == null ? null : String(r.expected_rate),
+    expectedAmount: r.expected_amount == null ? null : String(r.expected_amount),
   }));
 }
 
@@ -277,14 +339,105 @@ export async function runOne(
   return captured;
 }
 
+export async function runRateRepair(
+  tenantDb: TenantDb,
+  candidate: EstimatorBackfillCandidate,
+  actorUserId: string | null,
+  execute: boolean
+): Promise<{ status: EstimatorBackfillStatus; amount: string | null; deltaAmount: string | null }> {
+  if (!candidate.commissionId) {
+    return { status: "skipped_no_longer_eligible", amount: null, deltaAmount: null };
+  }
+  const commissionId = candidate.commissionId;
+
+  const repair = async (
+    tx: TenantDb
+  ): Promise<{ status: EstimatorBackfillStatus; amount: string | null; deltaAmount: string | null }> => {
+    const recheck = await tx.execute(sql`
+      SELECT
+        dsc.id,
+        dsc.applied_rate::numeric::text AS current_rate,
+        dsc.amount::numeric::text AS current_amount,
+        ecs.commission_rate::numeric::text AS expected_rate,
+        ROUND(dsc.source_value_amount::numeric * ecs.commission_rate::numeric, 2)::numeric::text AS expected_amount
+      FROM ${dealSignedCommissions} dsc
+      JOIN ${userCommissionSettings} ecs ON ecs.user_id = dsc.rep_user_id AND ecs.is_active = true
+      WHERE dsc.id = ${commissionId}
+        AND dsc.rep_user_id = ${candidate.estimatorId}
+        AND dsc.attribution_role = 'estimator'
+        AND (
+          dsc.applied_rate::numeric <> ecs.commission_rate::numeric
+          OR dsc.amount::numeric <> ROUND(dsc.source_value_amount::numeric * ecs.commission_rate::numeric, 2)
+        )
+      FOR UPDATE
+    `);
+    const rows = ((recheck as { rows?: unknown[] }).rows ?? recheck) as Array<{
+      current_rate: string;
+      current_amount: string;
+      expected_rate: string;
+      expected_amount: string;
+    }>;
+    const row = rows[0];
+    if (!row) {
+      return { status: "skipped_no_longer_eligible", amount: null, deltaAmount: null };
+    }
+
+    const expectedAmount = String(row.expected_amount);
+    await tx
+      .update(dealSignedCommissions)
+      .set({
+        appliedRate: row.expected_rate,
+        amount: expectedAmount,
+        calculatedAt: new Date(),
+      })
+      .where(sql`${dealSignedCommissions.id} = ${commissionId}`);
+
+    await writeAuditLog(tx, {
+      tableName: "deal_signed_commissions",
+      recordId: commissionId,
+      action: "update",
+      changedBy: actorUserId,
+      changes: {
+        amount: { from: row.current_amount, to: expectedAmount },
+        appliedRate: { from: row.current_rate, to: row.expected_rate },
+      },
+    });
+
+    const deltaAmount = (Number(expectedAmount) - Number(row.current_amount)).toFixed(2);
+    return { status: "updated_estimator_rate", amount: expectedAmount, deltaAmount };
+  };
+
+  if (execute) {
+    return tenantDb.transaction((tx) => repair(tx));
+  }
+
+  let captured: { status: EstimatorBackfillStatus; amount: string | null; deltaAmount: string | null } = {
+    status: "skipped_no_value",
+    amount: null,
+    deltaAmount: null,
+  };
+  try {
+    await tenantDb.transaction(async (tx) => {
+      captured = await repair(tx);
+      throw DRY_RUN_ROLLBACK;
+    });
+  } catch (err) {
+    if (err !== DRY_RUN_ROLLBACK) throw err;
+  }
+  return captured;
+}
+
 export async function backfillTenantEstimatorCommissions(
   tenantDb: TenantDb,
   query: QueryFn,
   opts: { schema: string; execute: boolean; actorUserId: string | null }
 ): Promise<EstimatorBackfillSummary> {
-  const candidates = await findEstimatorBackfillCandidates(query);
+  const missingCandidates = await findEstimatorBackfillCandidates(query);
+  const repairCandidates = await findEstimatorRateRepairCandidates(query);
+  const candidates = [...missingCandidates, ...repairCandidates];
   const byStatus: Record<EstimatorBackfillStatus, number> = {
     created: 0,
+    updated_estimator_rate: 0,
     skipped_existing: 0,
     skipped_no_rep: 0,
     skipped_no_value: 0,
@@ -303,15 +456,24 @@ export async function backfillTenantEstimatorCommissions(
     skipped_no_longer_eligible: 0,
   };
   let totalCommissionCreated = 0;
+  let totalCommissionUpdated = 0;
+  let totalCommissionDelta = 0;
   const rows: EstimatorBackfillSummary["rows"] = [];
 
   for (const candidate of candidates) {
-    const result = await runOne(tenantDb, candidate, opts.actorUserId, opts.execute);
+    const result =
+      candidate.action === "fix_existing_rate"
+        ? await runRateRepair(tenantDb, candidate, opts.actorUserId, opts.execute)
+        : { ...(await runOne(tenantDb, candidate, opts.actorUserId, opts.execute)), deltaAmount: null };
     byStatus[result.status] += 1;
     if (result.status === "created" && result.amount) {
       totalCommissionCreated += Number(result.amount);
     }
-    rows.push({ ...candidate, status: result.status, amount: result.amount });
+    if (result.status === "updated_estimator_rate" && result.amount) {
+      totalCommissionUpdated += Number(result.amount);
+      totalCommissionDelta += Number(result.deltaAmount ?? 0);
+    }
+    rows.push({ ...candidate, status: result.status, amount: result.amount, deltaAmount: result.deltaAmount ?? null });
   }
 
   return {
@@ -320,6 +482,8 @@ export async function backfillTenantEstimatorCommissions(
     candidates: candidates.length,
     byStatus,
     totalCommissionCreated: Number(totalCommissionCreated.toFixed(2)),
+    totalCommissionUpdated: Number(totalCommissionUpdated.toFixed(2)),
+    totalCommissionDelta: Number(totalCommissionDelta.toFixed(2)),
     rows,
   };
 }
@@ -371,11 +535,16 @@ function printSummary(s: EstimatorBackfillSummary): void {
   const mode = s.executed ? "WRITE" : "DRY-RUN";
   console.log(`\n[${s.schema}] ${mode} — ${s.candidates} candidate(s)`);
   for (const row of s.rows) {
-    const tag = row.status === "created" ? `$${Number(row.amount ?? 0).toLocaleString()}` : row.status;
+    const tag = row.status === "created"
+      ? `$${Number(row.amount ?? 0).toLocaleString()}`
+      : row.status === "updated_estimator_rate"
+        ? `${row.currentRate ?? "?"} -> ${row.expectedRate ?? "?"} ($${Number(row.currentAmount ?? 0).toLocaleString()} -> $${Number(row.amount ?? 0).toLocaleString()}, delta $${Number(row.deltaAmount ?? 0).toLocaleString()})`
+        : row.status;
     console.log(`  ${(row.dealNumber ?? "(none)").padEnd(16)} ${(row.estimatorName ?? row.estimatorId).padEnd(20)} ${row.signedDate}  -> ${tag}`);
   }
   console.log(
     `  totals: created=${s.byStatus.created} ($${s.totalCommissionCreated.toLocaleString()}), ` +
+      `rate_updates=${s.byStatus.updated_estimator_rate} ($${s.totalCommissionUpdated.toLocaleString()}, delta $${s.totalCommissionDelta.toLocaleString()}), ` +
       `skipped_existing=${s.byStatus.skipped_existing}, no_rate=${s.byStatus.skipped_no_rate}, ` +
       `no_value=${s.byStatus.skipped_no_value}, change_order=${s.byStatus.skipped_change_order}, ` +
       `no_longer_eligible=${s.byStatus.skipped_no_longer_eligible}`
@@ -397,7 +566,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     }
     console.log(`${execute ? "WRITE" : "DRY-RUN (no writes)"} — tenants: ${tenants.join(", ")}`);
     let grandCreated = 0;
+    let grandUpdated = 0;
     let grandAmount = 0;
+    let grandDelta = 0;
     for (const t of tenants) {
       await client.query(`SET search_path TO ${t}, public`);
       const tenantDb = drizzle(client, { schema });
@@ -408,12 +579,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       });
       printSummary(summary);
       grandCreated += summary.byStatus.created;
+      grandUpdated += summary.byStatus.updated_estimator_rate;
       grandAmount += summary.totalCommissionCreated;
+      grandDelta += summary.totalCommissionDelta;
     }
     console.log(
-      `\n=== GRAND TOTAL ${execute ? "WRITTEN" : "(dry-run) WOULD WRITE"}: ${grandCreated} estimator commission rows, $${grandAmount.toLocaleString()} ===`
+      `\n=== GRAND TOTAL ${execute ? "WRITTEN" : "(dry-run) WOULD WRITE"}: ` +
+        `${grandCreated} estimator commission rows ($${grandAmount.toLocaleString()}), ` +
+        `${grandUpdated} estimator rate updates (delta $${grandDelta.toLocaleString()}) ===`
     );
-    console.log("(No estimator_user_id columns or contract dates were modified: this script only inserts commission rows.)");
+    console.log("(No estimator_user_id columns or contract dates were modified: this script only inserts/fixes commission rows.)");
   } finally {
     await client.end();
   }

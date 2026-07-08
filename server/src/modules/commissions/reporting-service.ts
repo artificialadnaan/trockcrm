@@ -190,6 +190,29 @@ function notOnHoldDealSql() {
   return sql`AND ${aliasedActiveDealCountFilterSql("d")}`;
 }
 
+function involvedPotentialRateSql(repId: string) {
+  return sql`CASE
+    WHEN d.assigned_rep_id = ${repId} THEN COALESCE(cs.commission_rate, 0)::numeric
+    WHEN d.estimator_user_id = ${repId} AND d.assigned_rep_id IS DISTINCT FROM ${repId} THEN COALESCE(ecs.commission_rate, 0)::numeric
+    ELSE 0::numeric
+  END`;
+}
+
+function potentialCommissionSql(repId?: string) {
+  const dealValue = sql`(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))`;
+  if (repId) {
+    return sql`${dealValue} * ${involvedPotentialRateSql(repId)}`;
+  }
+  return sql`${dealValue} * (
+    COALESCE(cs.commission_rate, 0)::numeric
+    + CASE
+        WHEN d.estimator_user_id IS NOT NULL AND d.estimator_user_id IS DISTINCT FROM d.assigned_rep_id
+          THEN COALESCE(ecs.commission_rate, 0)::numeric
+        ELSE 0::numeric
+      END
+  )`;
+}
+
 function signedDealSql() {
   return sql`AND COALESCE(d.contract_signed_at::date, d.contract_signed_date, dsc.contract_signed_date_at_signing) IS NOT NULL`;
 }
@@ -215,8 +238,9 @@ export function describeCommissionFormula(): string {
     "On-hold deals are excluded from potential and earned commission while they remain on hold.",
     "Earned commission source value resolves in this order: awarded_amount, then bid_estimate, then dd_estimate.",
     "Potential commission uses the current unsigned deal value: bid_board_total_sales, then bid_estimate, then dd_estimate, with awarded_amount only as a fallback.",
-    "Commission amount = source_value_amount * user_commission_settings.commission_rate, rounded to cents.",
-    "Potential pipeline uses active unsigned deal value plus change orders, multiplied by the rep commission rate.",
+    "Owner commission amount = source_value_amount * user_commission_settings.commission_rate, rounded to cents.",
+    "Estimator commission uses the estimator user's own active commission_rate, independent of the project owner's rate.",
+    "Potential pipeline uses active unsigned deal value plus change orders, multiplied by the role-appropriate rate.",
   ].join(" ");
 }
 
@@ -309,11 +333,8 @@ async function refreshCommissionSnapshots(
   dealsForSnapshot: RepCommissionDashboardDeal[],
   dashboardRepId: string
 ) {
-  // Only refresh snapshots for the dashboard rep's OWN rows (rep_id === the rep whose dashboard this is).
-  // The estimator-aware pipeline filter (PR 2) surfaces deals the rep only ESTIMATED, whose rep_id is the
-  // OWNER's id (d.assigned_rep_id) — writing those would (a) crash on a NULL owner (''::uuid -> 22P02) and
-  // (b) overwrite the OWNER's "since last update" delta during the estimator's request. Restricting to the
-  // dashboard rep keeps the pre-PR behavior (every row used to be the rep's own) and fixes both.
+  // Only refresh snapshots for rows projected for the dashboard rep. Owned rows and estimator-only rows both
+  // carry rep_id = dashboardRepId; owner rows viewed through an estimator filter never overwrite owner state.
   const snapshotRows = dealsForSnapshot.filter((deal) => deal.repId === dashboardRepId);
   if (snapshotRows.length === 0) return;
   await tenantDb.execute(sql`
@@ -388,15 +409,19 @@ export async function getRepCommissionDashboard(
         d.id AS deal_id,
         d.deal_number,
         d.name AS deal_name,
-        d.assigned_rep_id AS rep_id,
+        CASE
+          WHEN d.assigned_rep_id = ${repId} THEN d.assigned_rep_id
+          WHEN d.estimator_user_id = ${repId} THEN d.estimator_user_id
+          ELSE d.assigned_rep_id
+        END AS rep_id,
         c.name AS company_name,
         p.name AS property_name,
         COALESCE(p.address, d.property_address) AS property_address,
         psc.slug AS stage_slug,
         (${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))::numeric AS deal_value,
-        COALESCE(cs.commission_rate, 0)::numeric AS commission_rate,
+        ${involvedPotentialRateSql(repId)} AS commission_rate,
         ROUND(
-          ((${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)) * COALESCE(cs.commission_rate, 0))::numeric,
+          (${potentialCommissionSql(repId)})::numeric,
           2
         )::numeric AS commission,
         NULL::date AS contract_signed_date,
@@ -407,12 +432,11 @@ export async function getRepCommissionDashboard(
       FROM ${deals} d
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
+      LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
       LEFT JOIN ${companies} c ON c.id = d.company_id
       LEFT JOIN ${properties} p ON p.id = d.property_id
-      -- Read the snapshot keyed on the DASHBOARD rep (not the owner): the estimator-aware filter can
-      -- surface deals this rep only ESTIMATED (owned by someone else), and showing the OWNER's
-      -- "since last update" delta to the estimator would be misleading. For the rep's own deals
-      -- d.assigned_rep_id = repId, so this is identical to before; estimator-visible rows get no delta.
+      -- Read the snapshot keyed on the DASHBOARD rep (not necessarily the owner): estimator-visible rows
+      -- project the estimator user's own cut, so their delta also belongs to the estimator.
       LEFT JOIN commission_deal_snapshots cds ON cds.deal_id = d.id AND cds.rep_user_id = ${repId}
       WHERE ${buildAliasedInvolvedRepSql("d", repId)}
         AND d.is_active = true
@@ -480,7 +504,7 @@ export async function getRepCommissionDashboard(
 
   // Won-stage deals with NO contract-signed date: they mint no commission row, so they fall through both
   // `earned` (signed only) and `inPipeline` (pipeline stages only). Aggregate them separately — same
-  // value × owner-rate basis as the pipeline-potential query — so the won-but-unsigned total is visible.
+  // value × role-appropriate rate basis as the pipeline-potential query — so the won-but-unsigned total is visible.
   //  • Full Won family (WON_DEAL_STAGE_SLUGS), not just won/closed_won, so won-stage aliases count.
   //  • Exclude deals already booked for this rep (a legacy/reconciled dsc row can carry
   //    contract_signed_date_at_signing while deal-level signed fields are null — the earned branch already
@@ -492,11 +516,12 @@ export async function getRepCommissionDashboard(
       COUNT(*)::int AS deal_count,
       COALESCE(SUM(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)), 0)::numeric AS deal_value,
       COALESCE(SUM(
-        (${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)) * COALESCE(cs.commission_rate, 0)
+        ${potentialCommissionSql(repId)}
       ), 0)::numeric AS potential_commission
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
+    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
     WHERE ${buildAliasedInvolvedRepSql("d", repId)}
       AND d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
@@ -533,7 +558,7 @@ export async function getRepCommissionDashboard(
   return {
     period,
     dateRange,
-    formula: "Commission = deal value × rep commission rate. Earned locks when a contract is signed; unsigned active deals remain in pipeline.",
+    formula: "Commission = deal value × role rate. Estimator cuts use the estimator user's active rate; earned locks when a contract is signed.",
     goal: { amount: 0, percentToGoal: null, source: "none" },
     summary: {
       earned,
@@ -561,14 +586,14 @@ export async function getCommissionPotential(
       COALESCE(SUM(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)), 0)::numeric AS total_deal_value,
       COALESCE(
         SUM(
-          (${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))
-          * COALESCE(cs.commission_rate, 0)
+          ${potentialCommissionSql(effectiveCommissionRepId(filters))}
         ),
         0
       )::numeric AS potential_commission
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
+    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       ${potentialStageSql()}
@@ -727,14 +752,14 @@ export async function getCommissionSummary(
       SELECT
         COALESCE(
           SUM(
-            (${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))
-            * COALESCE(cs.commission_rate, 0)
+            ${potentialCommissionSql(effectiveCommissionRepId(filters))}
           ),
           0
         )::numeric AS potential_pipeline
       FROM ${deals} d
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
+      LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
       WHERE d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
         ${potentialStageSql()}

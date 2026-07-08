@@ -129,7 +129,7 @@ afterAll(async () => {
 // Task 3 — resolveAppliedRateForRole (INV-1 foundation) — discriminated union
 // ---------------------------------------------------------------------------
 describe("resolveAppliedRateForRole", () => {
-  it("resolves owner/estimator rate from the capX mirror and sales_source from the service-source rate", async () => {
+  it("resolves owner and estimator from the user's commission_rate, and sales_source from the service-source rate", async () => {
     // REP_MIX: commission_rate (mirror) = 0.020000, service_source_rate = 0.005000, structure = mixed
     // All three should return { status: "rate", appliedRate: ... } since rates are > 0.
     const ownerRes: RoleRateResolution = await resolveAppliedRateForRole(tdb, REP_MIX, "owner");

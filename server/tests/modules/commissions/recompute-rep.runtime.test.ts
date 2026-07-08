@@ -180,7 +180,7 @@ describe("recalculateRepCommissionsInOffice", () => {
       );
       return rows[0];
     };
-    // Baseline: owner 3000.00 @ 0.03, estimator 4000.00 @ 0.04.
+    // Baseline: owner 3000.00 @ 0.03, estimator 4000.00 @ the estimator user's 0.04 rate.
     expect(await rowFor(OWNER)).toEqual({ amount: "3000.00", applied_rate: "0.030000" });
     expect(await rowFor(ESTIMATOR)).toEqual({ amount: "4000.00", applied_rate: "0.040000" });
 
@@ -190,7 +190,7 @@ describe("recalculateRepCommissionsInOffice", () => {
     );
     await recalculateRepCommissionsInOffice(tdb, OWNER, ADMIN);
 
-    // OWNER's row re-rated; ESTIMATOR's row on the SAME deal is left untouched.
+    // OWNER's row re-rated; ESTIMATOR's own-rate row on the SAME deal is left untouched.
     expect(await rowFor(OWNER)).toEqual({ amount: "2000.00", applied_rate: "0.020000" });
     expect(await rowFor(ESTIMATOR)).toEqual({ amount: "4000.00", applied_rate: "0.040000" });
   });

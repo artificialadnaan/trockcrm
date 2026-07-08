@@ -561,7 +561,8 @@ export interface DirectorRepCommissionRow {
   // "earned nothing": floorMet=false with heldEarnedCommission>0 means real earned commission is withheld.
   floorMet: boolean;
   heldEarnedCommission: number;
-  // The rep's base commission rate (a fraction, e.g. 0.05) — used to project their commission on won-but-unsigned deals.
+  // The rep's editable owner/base commission rate (a fraction, e.g. 0.05). Estimator projections use the
+  // estimator user's own active commission rate.
   commissionRate: number;
   // True for a rep admitted via the office-scoped rep roster; false for a NON-rep admitted only because they
   // EARNED a commission row (e.g. a director source). The workspace zeroes deal-VALUE / funnel / activity
@@ -1076,6 +1077,20 @@ function dashboardNotOnHoldDealSql() {
   return sql`AND ${aliasedActiveDealCountFilterSql("d")}`;
 }
 
+function involvedPotentialRateSql(repRef: string | SQL) {
+  const rep = typeof repRef === "string" ? sql`${repRef}` : repRef;
+  return sql`CASE
+    WHEN d.assigned_rep_id = ${rep} THEN COALESCE(cs.commission_rate, 0)::numeric
+    WHEN d.estimator_user_id = ${rep} AND d.assigned_rep_id IS DISTINCT FROM ${rep} THEN COALESCE(ecs.commission_rate, 0)::numeric
+    ELSE 0::numeric
+  END`;
+}
+
+function involvedPotentialCommissionSql(repRef: string | SQL) {
+  const dealValue = sql`(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))`;
+  return sql`${dealValue} * ${involvedPotentialRateSql(repRef)}`;
+}
+
 async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<CommissionConfig> {
   const result = await tenantDb.execute(sql`
     SELECT
@@ -1252,26 +1267,29 @@ export function buildRepContractsSignedSql(
   `;
 }
 
-// Open-pipeline potential revenue for one rep — INVOLVEMENT-based (deals they OWN as assigned rep OR are
-// the assigned ESTIMATOR on), so a pure estimator (e.g. Sidney Gibson, Alex Kock — they own no deals)
-// gets a non-zero potential reflecting the projects they estimate, matching how earned commission already
-// credits estimators (an additive dsc row). The result feeds potentialCommission = revenue × the REP's
-// OWN rate; the estimated portion is therefore a flat-rate projection at this person's rate (this number
-// is already a flat-rate projection, not the exact per-deal estimator cut). Because the director table
-// loops this per rep, a deal with a distinct owner+estimator is intentionally counted toward BOTH — the
-// per-person team view is additive (mirrors the additive estimator commission model), so its column sum
-// can exceed the raw office pipeline.
-export async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promise<number> {
+// Open-pipeline potential for one rep — INVOLVEMENT-based (deals they OWN as assigned rep OR are the
+// assigned ESTIMATOR on). Revenue is the full involved deal value; projected commission is role-aware:
+// owner involvement uses the owner's editable rate, estimator-only involvement uses the estimator user's
+// active rate. Because the director table loops this per rep, a deal with a distinct owner+estimator is
+// intentionally counted toward BOTH — the per-person team view is additive.
+export async function getRepPotentialPipeline(
+  tenantDb: TenantDb,
+  repId: string
+): Promise<{ revenue: number; commission: number }> {
   const result = await tenantDb.execute(sql`
     SELECT
       COALESCE(
-        SUM(
-          ${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)
-        ),
+        SUM(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)),
         0
-      )::numeric AS potential_revenue
+      )::numeric AS potential_revenue,
+      COALESCE(
+        SUM(${involvedPotentialCommissionSql(repId)}),
+        0
+      )::numeric AS potential_commission
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
+    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
     WHERE ${buildAliasedInvolvedRepSql("d", repId)}
       AND d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
@@ -1281,7 +1299,14 @@ export async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string):
       AND psc.slug IN (${sql.join(COMMISSION_PIPELINE_STAGE_SLUGS.map((slug) => sql`${slug}`), sql`, `)})
   `);
   const rows = (result as any).rows ?? result;
-  return Number(rows[0]?.potential_revenue ?? 0);
+  return {
+    revenue: Number(rows[0]?.potential_revenue ?? 0),
+    commission: Number(Number(rows[0]?.potential_commission ?? 0).toFixed(2)),
+  };
+}
+
+export async function getRepPotentialRevenue(tenantDb: TenantDb, repId: string): Promise<number> {
+  return (await getRepPotentialPipeline(tenantDb, repId)).revenue;
 }
 
 async function getOverrideEarnedCommission(
@@ -1358,12 +1383,12 @@ export async function getRepCommissionSummary(
 
   const direct = await getDirectCommissionMetrics(tenantDb, repId, config, fromDate, toDate);
   const commissionRollups = await getCommissionDealRollups(tenantDb, repId, config, fromDate, toDate);
-  const potentialRevenue = await getRepPotentialRevenue(tenantDb, repId);
+  const potential = await getRepPotentialPipeline(tenantDb, repId);
+  const potentialRevenue = potential.revenue;
   const potentialMargin = potentialRevenue;
   // Potential/in-pipeline is OUT OF SCOPE for the floor gate. The legacy (revenue − floor) deductible is
-  // removed (we use a GATE model, not a deductible): projected commission is the full pipeline revenue ×
-  // rate.
-  const potentialCommission = Number((potentialRevenue * config.commissionRate).toFixed(2));
+  // removed (we use a GATE model, not a deductible): projected commission uses the role-appropriate rate.
+  const potentialCommission = potential.commission;
 
   // Below floor → earned commission is $0: the rep's direct earned AND the manager override they collect
   // on their reports (getOverrideEarnedCommission gates each report through the same helper, so a report
@@ -2118,6 +2143,7 @@ export interface DirectorCommissionWorkspaceRow {
   pipelineValue: number;
   wonUnsignedValue: number;
   wonUnsignedCount: number;
+  wonUnsignedCommission: number;
   leads: number;
   qualifiedLeads: number;
   opportunities: number;
@@ -2143,7 +2169,15 @@ export interface DirectorCommissionWorkspaceData {
 // counted for BOTH (the per-person team view is additive, matching the estimator commission model).
 export async function getRepDealPipelineSummary(
   tenantDb: TenantDb
-): Promise<Array<{ repId: string; activeDeals: number; pipelineValue: number; wonUnsignedValue: number; wonUnsignedCount: number }>> {
+): Promise<Array<{
+  repId: string;
+  activeDeals: number;
+  pipelineValue: number;
+  pipelinePotentialCommission: number;
+  wonUnsignedValue: number;
+  wonUnsignedCount: number;
+  wonUnsignedCommission: number;
+}>> {
   const dealValue = sql`${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0)`;
   const openPredicate = sql`d.is_active = true
     AND COALESCE(d.is_test_data, false) = false
@@ -2168,10 +2202,14 @@ export async function getRepDealPipelineSummary(
       involved.rep_id AS rep_id,
       COUNT(*) FILTER (WHERE ${openPredicate})::int AS active_deals,
       COALESCE(SUM(${dealValue}) FILTER (WHERE ${openPredicate}), 0)::numeric AS pipeline_value,
+      COALESCE(SUM(${involvedPotentialCommissionSql(sql`involved.rep_id`)}) FILTER (WHERE ${openPredicate}), 0)::numeric AS pipeline_potential_commission,
       COUNT(*) FILTER (WHERE ${wonUnsignedPredicate})::int AS won_unsigned_count,
-      COALESCE(SUM(${dealValue}) FILTER (WHERE ${wonUnsignedPredicate}), 0)::numeric AS won_unsigned_value
+      COALESCE(SUM(${dealValue}) FILTER (WHERE ${wonUnsignedPredicate}), 0)::numeric AS won_unsigned_value,
+      COALESCE(SUM(${involvedPotentialCommissionSql(sql`involved.rep_id`)}) FILTER (WHERE ${wonUnsignedPredicate}), 0)::numeric AS won_unsigned_commission
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
+    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
     CROSS JOIN LATERAL (
       SELECT DISTINCT rep_id
       FROM unnest(ARRAY[d.assigned_rep_id, d.estimator_user_id]) AS t(rep_id)
@@ -2185,8 +2223,10 @@ export async function getRepDealPipelineSummary(
     repId: String(row.rep_id),
     activeDeals: Number(row.active_deals ?? 0),
     pipelineValue: Number(row.pipeline_value ?? 0),
+    pipelinePotentialCommission: Number(row.pipeline_potential_commission ?? 0),
     wonUnsignedCount: Number(row.won_unsigned_count ?? 0),
     wonUnsignedValue: Number(row.won_unsigned_value ?? 0),
+    wonUnsignedCommission: Number(row.won_unsigned_commission ?? 0),
   }));
 }
 
@@ -2845,9 +2885,9 @@ export async function getDirectorCommissionWorkspace(
       pipelineValue: dealSummary?.pipelineValue ?? 0,
       wonUnsignedValue: dealSummary?.wonUnsignedValue ?? 0,
       wonUnsignedCount: dealSummary?.wonUnsignedCount ?? 0,
-      // Projected commission on the rep's won-but-unsigned deals = their unsigned deal value × base rate. dealSummary
-      // is undefined for a non-rep row (→ value 0), so this is naturally 0 for a non-rep, like the involvement columns.
-      wonUnsignedCommission: Number(((dealSummary?.wonUnsignedValue ?? 0) * row.commissionRate).toFixed(2)),
+      // Projected commission on the rep's won-but-unsigned deals uses the same role-aware rate as potential
+      // commission. dealSummary is undefined for a non-rep row (→ value 0), so this is naturally 0 for a non-rep.
+      wonUnsignedCommission: dealSummary?.wonUnsignedCommission ?? 0,
       leads: funnel?.leads ?? 0,
       qualifiedLeads: funnel?.qualifiedLeads ?? 0,
       opportunities: funnel?.opportunities ?? 0,
@@ -3015,7 +3055,7 @@ export async function getDirectorCommissionEvidence(
     const labels = {
       active: { title: "Active deals", sub: "Open commission-stage deals (owner or estimator)" },
       pipeline: { title: "Pipeline value", sub: "Open best-estimate + change orders (owner or estimator)" },
-      potential: { title: "Potential commission", sub: "Drawer total is pipeline revenue; the cell is revenue × rate" },
+      potential: { title: "Potential commission", sub: "Drawer total is pipeline revenue; the cell is role-aware projected commission" },
     } as const;
     return {
       metric, kind: "deal", repId, repName,
