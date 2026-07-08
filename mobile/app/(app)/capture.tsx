@@ -578,10 +578,20 @@ export default function CaptureScreen() {
     if (mine.length === 0) return;
     setNotice(null);
     setFailedShots((prev) => prev.filter((f) => !claimable(f)));
+    // A DRAFT-backed failure's parked input is a snapshot taken at failure time; the durable draft entry may
+    // have been GPS-patched SINCE (a coordless batch shot whose session fix landed after Done). Reload the draft
+    // once and prefer its uri + metadata so the retry ships WITH the coordinates — the patch only ever adds
+    // coords + preserves takenAt, so the draft metadata is never worse than the stale input. Keep the input's
+    // OWN caption (the authoritative Done-time value) + target/tags. Then we drop the entry below.
+    const draftById = new Map(
+      (await loadDraft(ownerKey).catch(() => [] as StagedDraftItem[])).map((d) => [d.clientUploadId, d]),
+    );
     let anyFailed = false;
     for (const f of mine) {
+      const d = draftById.get(f.input.clientUploadId);
+      const input = d ? { ...f.input, uri: d.uri, metadata: d.metadata } : f.input;
       try {
-        await enqueueUploads(ownerKey, [f.input]);
+        await enqueueUploads(ownerKey, [input]);
         // If this failure was DRAFT-backed (a Done/recovery enqueue that failed), its manifest entry was
         // intentionally KEPT as the crash-durable record. Now that this generic retry enqueued it, drop that
         // entry so the next resume doesn't re-enqueue it as an orphan. Idempotent + clientUploadId-scoped: a
