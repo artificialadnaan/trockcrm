@@ -26,4 +26,10 @@ describe("buildArchivedDescription", () => {
   it("trims the reason", () => {
     expect(buildArchivedDescription(null, "  spaced  ", AT)).toBe("[Archived 2026-07-08 — spaced]");
   });
+
+  it("preserves newlines in the reason without collapsing them", () => {
+    expect(buildArchivedDescription(null, "Line1\nLine2", AT)).toBe(
+      "[Archived 2026-07-08 — Line1\nLine2]"
+    );
+  });
 });

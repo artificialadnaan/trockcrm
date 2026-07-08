@@ -1165,7 +1165,6 @@ export function DealDetailPage() {
               value={archiveReason}
               onChange={(e) => setArchiveReason(e.target.value)}
               rows={3}
-              required
             />
           </div>
           <DialogFooter>
