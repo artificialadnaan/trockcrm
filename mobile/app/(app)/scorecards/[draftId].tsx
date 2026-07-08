@@ -202,6 +202,13 @@ function Wizard(props: {
   // Import tap re-reads it, so a ref bails the second tap before it opens the picker (see importForSection). It
   // also blocks a camera capture during an import's picker window (before the savingPhotos marker is set).
   const importInFlight = useRef(false);
+  // Authoritative synchronous photo count = committed photos + reservations still copying. The 100-photo cap is
+  // enforced against THIS ref, never draft.photos.length (reducer state, which lags a rapid next capture/import
+  // by a render): every accept reserves a slot here BEFORE its async copy, and a slot is released ONLY if the
+  // copy fails or the photo is removed — never on successful commit — so there is no window where an in-flight
+  // photo is counted in neither this ref nor draft.photos. Kept in lockstep with the reducer's only two photo
+  // mutations (addPhoto / removePhoto). Seeded from the loaded draft (may already hold photos on resume).
+  const photoCount = useRef(props.initial.photos.length);
   // Ids of removed photos whose queue-cancellation hasn't confirmed yet. onSubmit retries the cancellation
   // for all still-pending ids and only proceeds once it succeeds — a FAILED removal stays in the set (and
   // blocks submit) instead of being cleared, so the drain can never upload evidence the user removed.
@@ -239,6 +246,9 @@ function Wizard(props: {
   // being silently ignored. The queue mutex additionally guarantees this write can't clobber photos a
   // concurrent submit enqueues.
   const removePhotoAndCancelUpload = (photo: ScorecardDraftPhoto) => {
+    // Release the photo's cap slot, but only if it's still present — guards a double-tap from decrementing twice
+    // (the reducer's filter is a no-op the second time, so the authoritative count must be too).
+    if (draft.photos.some((p) => p.key === photo.key)) photoCount.current -= 1;
     dispatch({ type: "removePhoto", key: photo.key });
     const id = photo.clientUploadId;
     pendingRemovalIds.current.add(id);
@@ -251,19 +261,24 @@ function Wizard(props: {
 
   async function onCameraCapture(shot: CapturedShot, caption: string) {
     if (cameraSection === null) return;
-    // Never add a photo while a batch is in flight (an import's picker/live-GPS/copy window), and never exceed the
-    // cap — draft.photos doesn't yet include an in-flight import, so a capture during that window could push the
-    // total past MAX_SCORECARD_PHOTOS and be rejected at submit.
-    if (importInFlight.current || savingPhotos > 0) {
-      setNotice({ tone: "error", text: "Still saving the last photos — try again in a moment." });
+    // Block a capture only while an IMPORT batch is in flight (its picker/live-GPS/copy window) — an import can
+    // stage many photos at once that draft.photos doesn't yet reflect. Do NOT block on savingPhotos: a second
+    // camera shot taken while the first is still saving is legitimate batch capture, and rejecting it here would
+    // silently drop the shot + its note behind the camera modal (the notice stays hidden until Done).
+    if (importInFlight.current) {
+      setNotice({ tone: "error", text: "Still saving imported photos — try again in a moment." });
       return;
     }
-    if (draft.photos.length >= MAX_SCORECARD_PHOTOS) {
+    // Enforce the cap against the authoritative reserved count, not the lagging draft.photos.length — otherwise a
+    // shot taken while a prior shot is still copying would read a stale length and could overshoot to 101. Every
+    // shot BELOW the cap proceeds (no drop); only the shot that would breach 100 is rejected.
+    if (photoCount.current >= MAX_SCORECARD_PHOTOS) {
       setNotice({ tone: "error", text: `A scorecard can hold at most ${MAX_SCORECARD_PHOTOS} photos — remove some to add more.` });
       return;
     }
     const sectionKey = FIELD_SCORECARD_SECTIONS[cameraSection].key;
     const clientUploadId = newClientUploadId();
+    photoCount.current += 1; // reserve a slot synchronously; released below only if the copy fails
     setSavingPhotos((n) => n + 1); // blocks Submit until the durable copy + dispatch below finish
     try {
       const exif = await withLiveGpsFallback(extractExifMetadata(shot.exif));
@@ -288,6 +303,7 @@ function Wizard(props: {
         },
       });
     } catch {
+      photoCount.current -= 1; // reservation didn't become a committed photo — release the slot
       setNotice({ tone: "error", text: "Couldn’t save that photo — please retake it." });
     } finally {
       setSavingPhotos((n) => n - 1);
@@ -295,10 +311,10 @@ function Wizard(props: {
   }
 
   async function importForSection(sectionIndex: number) {
-    // Block a second import (or an import during a camera save). `savingPhotos` is React state — it does NOT update
-    // before a second rapid tap re-reads it, so two taps could both pass this guard, open the picker against the
-    // same draft.photos.length, and each dispatch a full batch past the cap. importInFlight is a synchronous ref
-    // that flips BELOW before any await, so the second tap bails immediately; it's released on every exit.
+    // Serialize imports: block a second import, or an import fired during a camera save. `savingPhotos` is React
+    // state (lags a rapid re-tap), so importInFlight — a synchronous ref flipped BELOW before any await — is what
+    // actually bars a double-tap; it's released on every exit. The photo CAP itself is enforced by photoCount
+    // (authoritative + synchronous) below, so even a bypass here can't overshoot 100.
     if (importInFlight.current || savingPhotos > 0) {
       setNotice({ tone: "error", text: "Still saving the last photos — try again in a moment." });
       return;
@@ -311,8 +327,10 @@ function Wizard(props: {
         return;
       }
       // Cap the pick at the remaining slots under the server's 100-photo limit — otherwise a big multi-select
-      // uploads the whole batch and only fails at submit, forcing the user to hunt-and-remove.
-      const remaining = MAX_SCORECARD_PHOTOS - draft.photos.length;
+      // uploads the whole batch and only fails at submit, forcing the user to hunt-and-remove. Measured against
+      // the authoritative photoCount (not draft.photos.length), so a camera capture still copying is already
+      // counted and the import can't overshoot the cap.
+      const remaining = MAX_SCORECARD_PHOTOS - photoCount.current;
       if (remaining <= 0) {
         setNotice({ tone: "error", text: `A scorecard can hold at most ${MAX_SCORECARD_PHOTOS} photos — remove some to import more.` });
         return;
@@ -341,6 +359,7 @@ function Wizard(props: {
         for (let i = 0; i < assets.length; i++) {
           const asset = assets[i];
           const clientUploadId = newClientUploadId();
+          photoCount.current += 1; // reserve this import slot; released below only if the copy fails
           setSavingPhotos((n) => n + 1);
           try {
             const exif = mergeLiveGps(exifs[i], live);
@@ -351,6 +370,7 @@ function Wizard(props: {
               photo: { key: clientUploadId, uri: durableUri, clientUploadId, sectionKey, caption: "", takenAt: exif.takenAt, latitude: exif.latitude, longitude: exif.longitude, addressSource: exif.addressSource, width: asset.width, height: asset.height },
             });
           } catch {
+            photoCount.current -= 1; // reservation didn't become a committed photo — release the slot
             setNotice({ tone: "error", text: "Couldn’t import that photo — please try again." });
           } finally {
             setSavingPhotos((n) => n - 1);
