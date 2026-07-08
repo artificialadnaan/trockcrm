@@ -43,7 +43,17 @@ function manifestFile(ownerKey: string): string {
 async function ensureDir(ownerKey: string): Promise<void> {
   const dir = ownerDir(ownerKey);
   const info = await FileSystem.getInfoAsync(dir);
-  if (!info.exists) await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+  if (info.exists) return;
+  try {
+    await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+  } catch (err) {
+    // Concurrent stageDraftPhoto() calls race here: ensureDir runs OUTSIDE withDraftLock and a fan-out import
+    // stages every photo at once, so two can both observe !exists and both makeDirectoryAsync — on a platform
+    // where the second throws "already exists" that would drop this photo's durable copy. Swallow the error ONLY
+    // if the dir is now present (someone else created it); otherwise the mkdir genuinely failed → rethrow.
+    const after = await FileSystem.getInfoAsync(dir);
+    if (!after.exists) throw err;
+  }
 }
 
 // Read+parse one manifest file, or null if it's missing / truncated / unparseable.

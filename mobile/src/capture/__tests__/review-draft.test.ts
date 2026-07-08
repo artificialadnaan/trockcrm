@@ -11,7 +11,13 @@ jest.mock("expo-file-system/legacy", () => {
     __reset: () => { store.clear(); dirs.clear(); },
     documentDirectory: "file:///doc/",
     getInfoAsync: async (p: string) => ({ exists: store.has(p) || dirs.has(p) || dirs.has(norm(p)) }),
-    makeDirectoryAsync: async (d: string) => { dirs.add(d); dirs.add(norm(d)); },
+    makeDirectoryAsync: async (d: string) => {
+      // Model native mkdir: throw if the directory already exists. This exercises ensureDir's concurrent-race
+      // handling — two parallel stages to a fresh owner both makeDirectoryAsync, and the loser must swallow the
+      // "already exists" throw (the "concurrent stages BOTH persist" test below is the regression guard).
+      if (dirs.has(d) || dirs.has(norm(d))) throw new Error("ERR_DIRECTORY_EXISTS");
+      dirs.add(d); dirs.add(norm(d));
+    },
     readAsStringAsync: async (p: string) => {
       if (!store.has(p)) throw new Error(`ENOENT ${p}`);
       return store.get(p)!;
