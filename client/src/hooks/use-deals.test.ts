@@ -538,6 +538,66 @@ describe("normalizeDealBoardResponse", () => {
     vi.unstubAllGlobals();
   });
 
+  it("discards a stale in-flight response so it can't overwrite fresher deal state (request guard)", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "initial" } }); // mount load
+    hookDealDetailOfficeId = null;
+
+    const root = await renderDealDetailHook();
+    expect(latestDetailResult?.deal).toMatchObject({ name: "initial" });
+
+    // A = explicit refetch (older, resolves LATE with stale data); B = silent poll (newer, resolves first).
+    // A started first so its response must be discarded even though it lands last.
+    let resolveA: (value: unknown) => void = () => {};
+    apiMock.mockImplementationOnce(() => new Promise((r) => { resolveA = r; })); // A (older, pending)
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "newer" } }); // B (newer)
+
+    await act(async () => {
+      const pA = latestDetailResult!.refetch(); // token N
+      const pB = latestDetailResult!.refetchSilent(); // token N+1 (latest)
+      await pB; // B commits "newer"
+      resolveA({ deal: { id: "deal-1", name: "STALE" } }); // A lands last with stale data
+      await pA;
+      await flushEffects();
+    });
+
+    expect(latestDetailResult?.deal).toMatchObject({ name: "newer" }); // A's STALE was discarded
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("logs a silent poll failure and keeps the last-good deal (no error surfaced, no blank)", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "good" } }); // mount load
+    hookDealDetailOfficeId = null;
+
+    const root = await renderDealDetailHook();
+    expect(latestDetailResult?.deal).toMatchObject({ name: "good" });
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    apiMock.mockRejectedValueOnce(new Error("poll boom"));
+    await act(async () => {
+      await latestDetailResult!.refetchSilent();
+      await flushEffects();
+    });
+
+    expect(latestDetailResult?.deal).toMatchObject({ name: "good" }); // last-good preserved
+    expect(latestDetailResult?.error).toBeNull(); // NOT surfaced to the UI
+    expect(latestDetailResult?.loading).toBe(false);
+    expect(errSpy).toHaveBeenCalled(); // but the failure is traceable
+    errSpy.mockRestore();
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("captures board load errors on mount while preserving manual refetch failures", async () => {
     const apiMock = vi.mocked(api);
     apiMock.mockRejectedValueOnce(new Error("Deal board failed"));
