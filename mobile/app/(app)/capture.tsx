@@ -697,15 +697,19 @@ export default function CaptureScreen() {
   }
   // Functional append so rapid (voice) transcripts don't clobber each other.
   function appendReviewCaption(key: string, text: string) {
-    setReviewPhotos((prev) => appendPhotoCaption(prev, key, text));
-    // Compute the appended value from the last-committed captions (ref) to persist it onto the draft — the
-    // same rule as appendPhotoCaption. Best-effort/debounced: the authoritative caption at Done is local state.
-    if (ownerKey) {
-      const photo = reviewPhotosRef.current.find((p) => p.key === key);
-      if (!photo) return;
-      const next = photo.caption ? `${photo.caption} ${text}` : text;
-      void updateDraftCaption(ownerKey, photo.clientUploadId, next).catch(() => undefined);
-    }
+    setReviewPhotos((prev) => {
+      const updated = appendPhotoCaption(prev, key, text);
+      // Persist the SAME caption computed from the FRESH functional state — NOT the effect-synced
+      // reviewPhotosRef, which lags a render: two appends queued before it refreshes (a transcript right after a
+      // text edit, or two rapid transcripts) would otherwise persist a stale/partial value that a crash before
+      // Done then recovers. updateDraftCaption is idempotent + best-effort, so a StrictMode / discarded-render
+      // re-invocation of this updater is a harmless no-op; Done still enqueues from local state regardless.
+      if (ownerKey) {
+        const photo = updated.find((p) => p.key === key);
+        if (photo) void updateDraftCaption(ownerKey, photo.clientUploadId, photo.caption).catch(() => undefined);
+      }
+      return updated;
+    });
   }
   // Removing a staged photo drops it from the durable DRAFT (manifest + its copied file) and the local review
   // set — so a photo pulled out of the tray is never enqueued on Done or recovered on a crash. AWAIT in-flight
