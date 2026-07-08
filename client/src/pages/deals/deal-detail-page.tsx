@@ -27,6 +27,15 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -76,6 +85,7 @@ import {
   updateDealSalesSource as apiUpdateDealSalesSource,
   type DealDetail,
 } from "@/hooks/use-deals";
+import { canArchiveDeal } from "./deal-archive-eligibility";
 import { useLeadDetail } from "@/hooks/use-leads";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
 import { useSalesReps, type SalesRepOption } from "@/hooks/use-sales-reps";
@@ -382,6 +392,9 @@ export function DealDetailPage() {
   const [rfpReadinessRefreshKey, setRfpReadinessRefreshKey] = useState(0);
   const [watchPending, setWatchPending] = useState(false);
   const [holdTogglePending, setHoldTogglePending] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [archiving, setArchiving] = useState(false);
   const currentStage = stages.find((s) => s.id === deal?.stageId);
   const isDirectorOrAdmin = user?.role === "director" || user?.role === "admin";
   const viewerOwnsDeal = deal?.assignedRepId === user?.id;
@@ -439,18 +452,16 @@ export function DealDetailPage() {
     refetch();
   };
 
-  const handleDelete = async () => {
-    if (!deal) {
-      return;
-    }
-    if (!window.confirm("Are you sure you want to delete this deal? This action can be undone by an admin.")) {
-      return;
-    }
+  const handleArchiveSubmit = async () => {
+    if (!deal || archiveReason.trim().length === 0) return;
+    setArchiving(true);
     try {
-      await apiDeleteDeal(deal.id);
+      await apiDeleteDeal(deal.id, archiveReason.trim());
       navigate("/deals");
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Failed to delete deal");
+      alert(err instanceof Error ? err.message : "Failed to archive deal");
+    } finally {
+      setArchiving(false);
     }
   };
 
@@ -951,15 +962,17 @@ export function DealDetailPage() {
               Edit Deal
             </DropdownMenuItem>
           )}
-          {(viewerOwnsDeal || user?.role === "admin") && (
-            <DropdownMenuItem
-              onClick={handleDelete}
-              className="text-red-600"
-            >
+          {canArchiveDeal({ stageSlug: deal.stageSlug ?? currentStage?.slug ?? null, assignedRepId: deal.assignedRepId }, user) ? (
+            <DropdownMenuItem onClick={() => setArchiveOpen(true)} className="text-red-600">
               <Trash2 className="h-4 w-4 mr-2" />
-              Delete Deal
+              Archive Deal
             </DropdownMenuItem>
-          )}
+          ) : viewerOwnsDeal ? (
+            <DropdownMenuItem disabled title="Only opportunity-stage deals can be archived — ask an admin">
+              <Trash2 className="h-4 w-4 mr-2" />
+              Archive Deal
+            </DropdownMenuItem>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
     </>
@@ -1136,6 +1149,43 @@ export function DealDetailPage() {
           onSuccess={handleStageChangeSuccess}
         />
       )}
+
+      {/* Archive Deal Dialog */}
+      <Dialog open={archiveOpen} onOpenChange={(open) => { if (!archiving) setArchiveOpen(open); }}>
+        <DialogContent className="sm:max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle>Archive deal</DialogTitle>
+            <DialogDescription>
+              This archives the deal and removes it from active lists (it appears under Status → Archived). The reason below is added to the top of the deal description.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            <Textarea
+              placeholder="Why are you archiving this deal?"
+              value={archiveReason}
+              onChange={(e) => setArchiveReason(e.target.value)}
+              rows={3}
+              required
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setArchiveOpen(false)}
+              disabled={archiving}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleArchiveSubmit}
+              disabled={archiving || archiveReason.trim().length === 0}
+            >
+              {archiving ? "Archiving…" : "Archive"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
