@@ -274,9 +274,11 @@ describe("deal change-order routes — RBAC + wiring", () => {
   it("a rep CANNOT delete a CO child via the normal deal delete route (admin-only; P1 auth bypass)", async () => {
     // A CO child inherits the parent's rep, so owner access passes — but CO deletion is admin-only, so the
     // normal DELETE /:id route must reject a non-admin even when they "own" the child.
+    // We send a valid reason so the 403 is unambiguously from the CO-child guard and not a future
+    // reason-validation reorder.
     accessMocks.assertDealOwnerAccess.mockResolvedValue({ id: "co-child-1", assignedRepId: "rep-1", officeId: "office-1" });
     const app = createApp(createUser("rep"), tenantDbReturning([{ isChangeOrder: true }]));
-    const res = await request(app).delete("/api/deals/co-child-1");
+    const res = await request(app).delete("/api/deals/co-child-1").send({ reason: "test" });
     expect(res.status).toBe(403);
     expect(JSON.stringify(res.body)).toContain("CHANGE_ORDER_ADMIN_ONLY");
   });

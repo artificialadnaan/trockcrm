@@ -97,6 +97,18 @@ beforeAll(async () => {
     -- getDealById now left-joins users (estimatorUserName for the PR3 estimator picker); the join needs
     -- the table to exist even when estimator_user_id is null (no rows required here).
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
+    -- deleteDeal now writes to deal_history (description archive) and deal_signed_commissions (CO cleanup).
+    CREATE TABLE deal_history (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, field_name text NOT NULL,
+      old_value text, new_value text, changed_by uuid NOT NULL, source text, reason text,
+      changed_at timestamptz DEFAULT now()
+    );
+    CREATE TABLE deal_signed_commissions (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, rep_user_id uuid, amount numeric(14,2));
+    CREATE TABLE audit_log (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), table_name text, record_id text, action text,
+      changed_by uuid, actor_name text, actor_role text, entity_type text, changes jsonb,
+      full_row jsonb, ip_address text, user_agent text, created_at timestamptz DEFAULT now()
+    );
 
     INSERT INTO pipeline_stage_config (id, name, slug, is_terminal) VALUES
       ('${ST.won}','Won','won',true),
@@ -142,7 +154,7 @@ describe("getDealById — soft-deleted deals are not served, live deals are", ()
 
 describe("deleteDeal — soft-deletes the deal, hides it, and cascades to its project", () => {
   it("deletes a live Won deal, then it is no longer served; its project is deactivated; a sibling project is untouched; repeat delete is idempotent", async () => {
-    const deleted = await deleteDeal(tdb, D.toDelete, "admin", ADMIN);
+    const deleted = await deleteDeal(tdb, D.toDelete, { actorRole: "admin", actorId: ADMIN, reason: "Admin cleanup" });
     expect(deleted).not.toBeNull();
     expect(deleted).toMatchObject({ id: D.toDelete, isActive: false });
 
@@ -162,7 +174,7 @@ describe("deleteDeal — soft-deletes the deal, hides it, and cascades to its pr
     expect(other.rows[0]?.is_active).toBe(true);
 
     // repeat delete: no false success — already-inactive returns null
-    expect(await deleteDeal(tdb, D.toDelete, "admin", ADMIN)).toBeNull();
+    expect(await deleteDeal(tdb, D.toDelete, { actorRole: "admin", actorId: ADMIN, reason: "Admin cleanup" })).toBeNull();
   });
 
   it("cascades to the project mirror of an ALREADY-deleted CO child when its parent is deleted", async () => {
@@ -174,7 +186,7 @@ describe("deleteDeal — soft-deletes the deal, hides it, and cascades to its pr
     );
     expect(before.rows[0]?.is_active).toBe(true);
 
-    await deleteDeal(tdb, D.coParent, "admin", ADMIN);
+    await deleteDeal(tdb, D.coParent, { actorRole: "admin", actorId: ADMIN, reason: "Admin cleanup" });
 
     const after = await pg.query<{ is_active: boolean }>(
       `SELECT is_active FROM projects WHERE id = '${PRJ.deletedCoChild}'`

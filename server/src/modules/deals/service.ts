@@ -26,6 +26,7 @@ import {
   getDealAtRiskResult,
   isGenuineEstimatingDealStageSlug,
   isGenuineWonDealStageSlug,
+  isOpportunityStageSlug,
   resolveEffectiveStageEnteredAt,
   USER_ROLES,
   type AtRiskResult,
@@ -71,6 +72,7 @@ import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
 import { recordDescriptionHistoryChange } from "./deal-description-history.js";
+import { buildArchivedDescription } from "./archive-description.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { assertActiveDealStageWriteTarget } from "./stage-write-guard.js";
 import {
@@ -2933,30 +2935,54 @@ export async function startProposalDraft(
 }
 
 /**
- * Soft-delete a deal.
- * Only admins can delete primary deal rows.
+ * Archive (soft-delete) a deal: sets is_active=false and prepends the reason to the description.
+ * Admins may archive any stage; non-admins (caller passes the real actorRole) are gated to
+ * opportunity-stage deals only. A reason is always required.
  */
-export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: string, userId?: string | null) {
-  if (userRole !== "admin") {
-    throw new AppError(403, "Only admins can delete deals");
+export async function deleteDeal(
+  tenantDb: TenantDb,
+  dealId: string,
+  opts: {
+    actorRole: UserRole;
+    actorId?: string | null;
+    reason: string;
+  },
+) {
+  const reason = typeof opts.reason === "string" ? opts.reason.trim() : "";
+  if (reason.length === 0) {
+    throw new AppError(400, "A reason is required to archive a deal.", "DEAL_ARCHIVE_REASON_REQUIRED");
   }
 
   // Lock the deal row FOR UPDATE so a concurrent change-order create on this parent serializes against the
-  // delete (loadParentForChildCreate takes the same lock) — otherwise a CO create could insert an active
-  // Won child AFTER this delete's cascade runs but before the child exists, orphaning it under a deleted parent.
+  // archive (loadParentForChildCreate takes the same lock).
   const [existing] = await tenantDb.select().from(deals).where(eq(deals.id, dealId)).limit(1).for("update");
   if (!existing) {
     throw new AppError(404, "Deal not found");
   }
-
   if (!existing.isActive) {
     return null;
   }
 
-  // If the deleted deal is itself a CO child, apply the same on_hold TOMBSTONE the change-order delete path
-  // uses: several Won rollups filter on_hold but not is_active, so without it a CO child voided via this
-  // deep-linked deal route would keep inflating Won value/count. (is_active=false stays the canonical marker.)
-  const softDeleteValues: { isActive: boolean; onHold?: boolean } = { isActive: false };
+  // Non-admins may only archive opportunity-stage deals (admins keep the any-stage escape hatch).
+  if (opts.actorRole !== "admin") {
+    const [stageRow] = await tenantDb
+      .select({ slug: pipelineStageConfig.slug })
+      .from(pipelineStageConfig)
+      .where(eq(pipelineStageConfig.id, existing.stageId))
+      .limit(1);
+    if (!isOpportunityStageSlug(stageRow?.slug)) {
+      throw new AppError(403, "Only opportunity-stage deals can be archived by reps.", "DEAL_ARCHIVE_STAGE_FORBIDDEN");
+    }
+  }
+
+  const archivedDescription = buildArchivedDescription(existing.description, reason, new Date());
+
+  // is_active=false stays the canonical archive marker; a CO child also gets the on_hold TOMBSTONE
+  // (several Won rollups filter on_hold but not is_active).
+  const softDeleteValues: { isActive: boolean; description: string; onHold?: boolean } = {
+    isActive: false,
+    description: archivedDescription,
+  };
   if (existing.isChangeOrder === true) {
     softDeleteValues.onHold = true;
   }
@@ -2971,10 +2997,20 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
     throw new AppError(404, "Deal not found");
   }
 
+  if (opts.actorId) {
+    await recordDescriptionHistoryChange(tenantDb, {
+      dealId,
+      oldDescription: existing.description,
+      newDescription: archivedDescription,
+      changedBy: opts.actorId,
+      source: "deal_archive",
+    });
+  }
+
   // Cascade the soft-delete to this deal's change-order children: they are real Won child deals, so leaving
   // them active after the parent is voided would orphan their value in Won reports. The DB self-FK ON DELETE
   // CASCADE only fires on a hard row delete, not this is_active=false soft-delete, so cascade it explicitly.
-  const childCoIds = await softDeleteChangeOrderChildren(tenantDb, dealId, userId ?? null);
+  const childCoIds = await softDeleteChangeOrderChildren(tenantDb, dealId, opts.actorId ?? null);
 
   // Auto-dismiss pending/in-progress tasks for the deal AND its now-voided CO children.
   await tenantDb
@@ -3014,7 +3050,7 @@ export async function deleteDeal(tenantDb: TenantDb, dealId: string, userRole: s
   // deep-linkable deals), remove its own commission — the cascade above only covers descendants, and
   // earned-commission report queries don't all filter is_active, so a voided CO's commission would linger.
   if (existing.isChangeOrder === true) {
-    await removeCommissionForDeal(tenantDb, dealId, userId ?? null);
+    await removeCommissionForDeal(tenantDb, dealId, opts.actorId ?? null);
   }
 
   return result[0];

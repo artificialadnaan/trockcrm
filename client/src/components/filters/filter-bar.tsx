@@ -57,10 +57,10 @@ type ScopeValue = "mine" | "team" | "all";
 const DEAL_STATUS_OPTIONS: FilterSelectOption[] = [
   { value: "active", label: "Active" },
   { value: "on_hold", label: "On hold" },
-  // value stays "inactive" (server contract = is_active=false); the label reads "Removed"
-  // because this bucket is soft-deleted deals (deleted deals + voided-CO tombstones), not a
+  // value stays "inactive" (server contract = is_active=false); the label reads "Archived"
+  // because this bucket is archived/soft-deleted deals (deleted deals + voided-CO tombstones), not a
   // status a deal reaches by losing/aging out.
-  { value: "inactive", label: "Removed" },
+  { value: "inactive", label: "Archived" },
 ];
 const WORKFLOW_OPTIONS: FilterSelectOption[] = [
   { value: "normal", label: "Normal" },

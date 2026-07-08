@@ -3832,7 +3832,15 @@ router.delete("/:id", async (req, res, next) => {
         throw new AppError(403, "Only an admin can delete a change order.", "CHANGE_ORDER_ADMIN_ONLY");
       }
     }
-    const deal = await deleteDeal(req.tenantDb!, dealId, "admin", req.user!.id);
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+    if (reason.length === 0) {
+      throw new AppError(400, "A reason is required to archive a deal.", "DEAL_ARCHIVE_REASON_REQUIRED");
+    }
+    const deal = await deleteDeal(req.tenantDb!, dealId, {
+      actorRole: req.user!.role,
+      actorId: req.user!.id,
+      reason,
+    });
     if (deal) {
       const auditContext = buildRouteAuditContext(req);
       await logActivity({

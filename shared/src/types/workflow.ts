@@ -419,6 +419,15 @@ export function toCanonicalWorkflowStageSlug(
   return toCanonicalLeadStageSlug(stageSlug) ?? toCanonicalDealStageSlug(stageSlug, workflowRoute);
 }
 
+// Canonical opportunity stage plus its only legacy alias: "dd" (Due Diligence) canonicalizes to
+// "opportunity" in BOTH the normal and service routes (see LEGACY_DEAL_STAGE_TO_CANONICAL_STAGE), and no
+// other legacy slug maps to opportunity. Lets opportunity-only gates (e.g. a rep archiving a deal) match on
+// the raw stage slug without threading a workflow route, while still accepting the legacy alias.
+export const OPPORTUNITY_STAGE_SLUGS = ["opportunity", "dd"] as const;
+export function isOpportunityStageSlug(stageSlug: string | null | undefined): boolean {
+  return stageSlug != null && (OPPORTUNITY_STAGE_SLUGS as readonly string[]).includes(stageSlug);
+}
+
 export function isGenuineWonDealStageSlug(
   stageSlug: string | null | undefined,
   workflowRoute?: WorkflowRoute | null
