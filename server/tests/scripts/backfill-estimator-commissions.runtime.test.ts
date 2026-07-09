@@ -19,6 +19,7 @@ import {
   findEstimatorRateRepairCandidates,
   parseArgs,
   runOne,
+  runRateRepair,
 } from "../../src/scripts/backfill-estimator-commissions.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -570,6 +571,115 @@ describe("estimator backfill — estimator-row gate replaces the assigned_rep_id
     // Idempotent: once PCUR books the estimator row, the any-role NOT EXISTS drops the deal on re-run.
     const reselect = (await findEstimatorBackfillCandidates(queryP)).find((c) => c.dealId === DP_EST_IS_CUR);
     expect(reselect).toBeUndefined();
+  });
+});
+
+// Isolated fixture (own PGlite) for the Codex round active-CRM gate on the RATE-REPAIR path. The CREATE path
+// already gates via resolveAppliedRateForRole (skipped_no_rate for an inactive/non-CRM estimator), but the
+// repair path did a direct UPDATE with NO users gate, so it would rewrite historical amounts for a deactivated
+// or field_contractor estimator whom recompute now refuses. The gate must hold in BOTH legs: the unlocked
+// SELECT (candidate never surfaces) and the under-lock recheck (a TOCTOU deactivation between selection and
+// repair is caught).
+describe("estimator backfill — rate repair is gated on active internal-CRM estimators", () => {
+  let pgE: PGlite;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let tdbE: any;
+  const queryE = (sql: string, params?: unknown[]) =>
+    pgE.query(sql, params as never[]) as Promise<{ rows: Record<string, unknown>[] }>;
+
+  const RCO = U("0e01"); // owner, rate 0.03
+  const RA = U("0e02"); // ACTIVE rep estimator, rate 0.05 → eligible for repair
+  const RD = U("0e03"); // DEACTIVATED estimator (users.is_active=false), settings still active, rate 0.05
+  const RF = U("0e04"); // field_contractor estimator (settings active), rate 0.05
+  const RT = U("0e05"); // ACTIVE estimator used for the TOCTOU recheck
+  const EACTOR = U("0eac");
+  const EWON = U("0e50");
+  const EOFFICE = U("0ef1");
+
+  const D_RA = U("0ea1"); // estimator RA, stale estimator row → IS a repair candidate
+  const D_RD = U("0ea2"); // estimator RD (deactivated) → NOT a candidate (selection gate)
+  const D_RF = U("0ea3"); // estimator RF (field_contractor) → NOT a candidate (selection gate)
+  const D_RT = U("0ea4"); // estimator RT, stale row → candidate until RT is deactivated mid-run (recheck gate)
+
+  beforeAll(async () => {
+    pgE = new PGlite();
+    await pgE.exec(
+      tenantSchemaSql("public", [users, pipelineStageConfig, deals, userCommissionSettings, dealSignedCommissions, auditLog])
+    );
+    await pgE.exec(
+      `ALTER TABLE public.deal_signed_commissions ADD CONSTRAINT deal_signed_commissions_dedup UNIQUE (deal_id, rep_user_id);`
+    );
+    tdbE = drizzle(pgE);
+    // RD is deactivated; RF is a field_contractor. Both still carry an ACTIVE settings row with a rate — the
+    // exact drift the gate must catch (ecs.is_active alone does NOT exclude them).
+    await pgE.exec(
+      `INSERT INTO public.users (id, display_name, email, role, office_id, is_active) VALUES
+         ('${RCO}','R Owner','rco@x.com','rep','${EOFFICE}', true),
+         ('${RA}','R Active','ra@x.com','rep','${EOFFICE}', true),
+         ('${RD}','R Deactivated','rd@x.com','rep','${EOFFICE}', false),
+         ('${RF}','R Field','rf@x.com','field_contractor','${EOFFICE}', true),
+         ('${RT}','R Toctou','rt@x.com','rep','${EOFFICE}', true)`
+    );
+    await pgE.exec(`INSERT INTO public.pipeline_stage_config (id, name, slug, display_order) VALUES ('${EWON}','Won','won',9)`);
+    await pgE.exec(`INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active) VALUES
+      ('${RCO}', 0.030000, true), ('${RA}', 0.050000, true), ('${RD}', 0.050000, true), ('${RF}', 0.050000, true), ('${RT}', 0.050000, true)`);
+    const insE = (id: string, estimator: string) =>
+      `INSERT INTO public.deals (id, deal_number, name, stage_id, assigned_rep_id, estimator_user_id, awarded_amount, contract_signed_date, contract_signed_at, is_change_order)
+       VALUES ('${id}','${id.slice(-4)}','Deal','${EWON}','${RCO}','${estimator}', 100000, '2026-06-01', NULL, false)`;
+    await pgE.exec(insE(D_RA, RA));
+    await pgE.exec(insE(D_RD, RD));
+    await pgE.exec(insE(D_RF, RF));
+    await pgE.exec(insE(D_RT, RT));
+    // Owner rows + STALE estimator rows (booked at 0.01 while each estimator's active rate is 0.05) so every
+    // deal is a rate-repair candidate BEFORE the eligibility gate is applied.
+    await pgE.exec(
+      `INSERT INTO public.deal_signed_commissions (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount, applied_rate, amount, contract_signed_date_at_signing) VALUES
+         ('${D_RA}','${RCO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-06-01'),
+         ('${D_RA}','${RA}','estimator','awarded_amount', 100000, 0.010000, 1000, '2026-06-01'),
+         ('${D_RD}','${RCO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-06-01'),
+         ('${D_RD}','${RD}','estimator','awarded_amount', 100000, 0.010000, 1000, '2026-06-01'),
+         ('${D_RF}','${RCO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-06-01'),
+         ('${D_RF}','${RF}','estimator','awarded_amount', 100000, 0.010000, 1000, '2026-06-01'),
+         ('${D_RT}','${RCO}','owner','awarded_amount', 100000, 0.030000, 3000, '2026-06-01'),
+         ('${D_RT}','${RT}','estimator','awarded_amount', 100000, 0.010000, 1000, '2026-06-01')`
+    );
+  }, 30_000);
+
+  afterAll(async () => {
+    await pgE?.close();
+  });
+
+  const amountFor = async (dealId: string, rep: string) =>
+    Number(
+      (
+        await pgE.query<{ amount: string }>(
+          `SELECT amount FROM public.deal_signed_commissions WHERE deal_id='${dealId}' AND rep_user_id='${rep}'`
+        )
+      ).rows[0].amount
+    );
+
+  it("selection EXCLUDES deactivated and field_contractor estimators (only the active-CRM estimators are candidates)", async () => {
+    const repairs = await findEstimatorRateRepairCandidates(queryE);
+    expect(repairs.map((r) => r.dealId).sort()).toEqual([D_RA, D_RT].sort());
+    expect(repairs.map((r) => r.dealId)).not.toContain(D_RD); // deactivated estimator
+    expect(repairs.map((r) => r.dealId)).not.toContain(D_RF); // field_contractor estimator
+  });
+
+  it("repairs an ACTIVE-CRM estimator's stale rate (positive control)", async () => {
+    const candidate = (await findEstimatorRateRepairCandidates(queryE)).find((r) => r.dealId === D_RA)!;
+    const result = await runRateRepair(tdbE, candidate, EACTOR, true);
+    expect(result.status).toBe("updated_estimator_rate");
+    expect(Number(result.amount)).toBe(5000); // 100000 × 0.05
+    expect(await amountFor(D_RA, RA)).toBe(5000);
+  });
+
+  it("recheck gate: an estimator deactivated AFTER selection is skipped under lock (stale amount untouched)", async () => {
+    const candidate = (await findEstimatorRateRepairCandidates(queryE)).find((r) => r.dealId === D_RT)!;
+    // TOCTOU: the estimator is deactivated between the unlocked selection and the locked repair.
+    await pgE.exec(`UPDATE public.users SET is_active=false WHERE id='${RT}'`);
+    const result = await runRateRepair(tdbE, candidate, EACTOR, true);
+    expect(result.status).toBe("skipped_no_longer_eligible");
+    expect(await amountFor(D_RT, RT)).toBe(1000); // stale amount left untouched — no rewrite for the now-ineligible estimator
   });
 });
 

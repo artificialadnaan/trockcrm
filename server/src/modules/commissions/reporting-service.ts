@@ -16,7 +16,7 @@ import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { aliasedActiveDealCountFilterSql, aliasedDealBestEstimateSql } from "../shared/deal-value-sql.js";
 // Estimator-aware rep filter (PR 2): the DEAL filter matches assigned_rep OR estimator_user_id. This is
 // a view-filter change ONLY — commission attribution (dsc.rep_user_id) and rate (cs.user_id) are untouched.
-import { buildAliasedInvolvedRepSql } from "../deals/deal-filter-predicates.js";
+import { buildAliasedInvolvedRepSql, UNASSIGNED_FILTER_SENTINEL } from "../deals/deal-filter-predicates.js";
 import { computeRepEarnedFloorGate } from "./floor-gate.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -200,7 +200,12 @@ function involvedPotentialRateSql(repId: string) {
 
 function potentialCommissionSql(repId?: string) {
   const dealValue = sql`(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))`;
-  if (repId) {
+  // The Unassigned bucket (repId === UNASSIGNED_FILTER_SENTINEL) is scoped by repSql/buildAliasedInvolvedRepSql
+  // to `assigned_rep_id IS NULL` rows. It has no single involved rep, so we must NOT interpolate the sentinel
+  // string into the per-rep rate CASE (which compares it against uuid columns and 22P02-errors). Fall through
+  // to the office-wide formula: for a NULL owner the cs join yields no row → owner arm 0, and the additive
+  // estimator arm still contributes — exactly the correct unassigned-owner potential.
+  if (repId && repId !== UNASSIGNED_FILTER_SENTINEL) {
     return sql`${dealValue} * ${involvedPotentialRateSql(repId)}`;
   }
   return sql`${dealValue} * (
@@ -211,6 +216,20 @@ function potentialCommissionSql(repId?: string) {
         ELSE 0::numeric
       END
   )`;
+}
+
+// The estimator's POTENTIAL rate is gated on the SAME eligibility as the earned/mint path
+// (resolveAppliedRateForRole(…, "estimator") in service.ts): the estimator user must be ACTIVE and an
+// internal CRM user (isCrmUserRole == role <> 'field_contractor'), not merely hold an active commission-
+// settings row. The `eu` join carries that predicate into the `ecs` join so ecs.commission_rate is NULL —
+// and the COALESCE(ecs.commission_rate, 0) in both rate arms yields 0 — for a deactivated or field_contractor
+// estimator, matching the $0 they already earn. Emitted as ONE fragment reused at every potential query so
+// the reporters can never drift (a partial application would make office-wide, per-rep, and summary disagree).
+// `eu` is a LEFT JOIN so the driving deal row is never dropped (deal_count / deal_value are unaffected).
+function estimatorRateJoinSql() {
+  return sql`LEFT JOIN ${users} eu ON eu.id = d.estimator_user_id
+    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id
+      AND ecs.is_active = true AND eu.is_active = true AND eu.role <> 'field_contractor'`;
 }
 
 function signedDealSql() {
@@ -432,7 +451,7 @@ export async function getRepCommissionDashboard(
       FROM ${deals} d
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
-      LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
+      ${estimatorRateJoinSql()}
       LEFT JOIN ${companies} c ON c.id = d.company_id
       LEFT JOIN ${properties} p ON p.id = d.property_id
       -- Read the snapshot keyed on the DASHBOARD rep (not necessarily the owner): estimator-visible rows
@@ -521,7 +540,7 @@ export async function getRepCommissionDashboard(
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
-    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
+    ${estimatorRateJoinSql()}
     WHERE ${buildAliasedInvolvedRepSql("d", repId)}
       AND d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
@@ -593,7 +612,7 @@ export async function getCommissionPotential(
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
-    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
+    ${estimatorRateJoinSql()}
     WHERE d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
       ${potentialStageSql()}
@@ -759,7 +778,7 @@ export async function getCommissionSummary(
       FROM ${deals} d
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
-      LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
+      ${estimatorRateJoinSql()}
       WHERE d.is_active = true
         AND COALESCE(d.is_test_data, false) = false
         ${potentialStageSql()}

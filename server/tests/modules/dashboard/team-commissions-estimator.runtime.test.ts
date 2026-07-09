@@ -39,10 +39,17 @@ beforeAll(async () => {
     -- getRepDealPipelineSummary's won·unsigned predicate references this table (empty here).
     CREATE TABLE deal_signed_commissions (id uuid, deal_id uuid, rep_user_id uuid, attribution_role text NOT NULL DEFAULT 'owner');
     CREATE TABLE user_commission_settings (user_id uuid PRIMARY KEY, commission_rate numeric, is_active boolean NOT NULL DEFAULT true);
+    CREATE TABLE users (id uuid PRIMARY KEY, display_name text, is_active boolean NOT NULL DEFAULT true, role text NOT NULL DEFAULT 'rep');
     INSERT INTO user_commission_settings (user_id, commission_rate, is_active) VALUES
       ('${OWNER}', 0.050000, true),
       ('${ESTIMATOR}', 0.000600, true),
       ('${SOLO}', 0.040000, true);
+    -- All estimators are ACTIVE internal CRM users, so the estimator-rate join (gated on users.is_active +
+    -- role <> 'field_contractor') behaves exactly as before the gate existed.
+    INSERT INTO users (id, display_name, is_active, role) VALUES
+      ('${OWNER}', 'Owner', true, 'rep'),
+      ('${ESTIMATOR}', 'Estimator', true, 'rep'),
+      ('${SOLO}', 'Solo', true, 'rep');
     INSERT INTO pipeline_stage_config (id, slug) VALUES ('${ST}', 'estimating');
     -- D1: OWNER owns, ESTIMATOR estimates (distinct) -> both get it ($100k)
     INSERT INTO deals (id, assigned_rep_id, estimator_user_id, stage_id, awarded_amount) VALUES

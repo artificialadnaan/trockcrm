@@ -68,7 +68,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import * as schema from "@trock-crm/shared/schema";
-import { dealSignedCommissions, userCommissionSettings } from "@trock-crm/shared/schema";
+import { dealSignedCommissions, userCommissionSettings, users } from "@trock-crm/shared/schema";
 import { LOST_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { writeAuditLog } from "../lib/audit-log.js";
 import {
@@ -238,7 +238,11 @@ export async function findEstimatorRateRepairCandidates(query: QueryFn): Promise
     FROM deal_signed_commissions dsc
     JOIN deals d ON d.id = dsc.deal_id
     JOIN public.user_commission_settings ecs ON ecs.user_id = dsc.rep_user_id AND ecs.is_active = true
-    LEFT JOIN public.users u ON u.id = dsc.rep_user_id
+    -- Gate on the SAME estimator eligibility as the mint/recompute path (resolveAppliedRateForRole(…,
+    -- "estimator")): the earner must be an ACTIVE, internal CRM user (role <> 'field_contractor'). Without
+    -- this, the repair would rewrite historical amounts for a deactivated / field_contractor estimator whom
+    -- recompute now refuses — an INNER JOIN so an ineligible earner is simply not a repair candidate.
+    JOIN public.users u ON u.id = dsc.rep_user_id AND u.is_active = true AND u.role <> 'field_contractor'
     WHERE dsc.attribution_role = 'estimator'
       AND (
         dsc.applied_rate::numeric <> ecs.commission_rate::numeric
@@ -362,6 +366,10 @@ export async function runRateRepair(
         ROUND(dsc.source_value_amount::numeric * ecs.commission_rate::numeric, 2)::numeric::text AS expected_amount
       FROM ${dealSignedCommissions} dsc
       JOIN ${userCommissionSettings} ecs ON ecs.user_id = dsc.rep_user_id AND ecs.is_active = true
+      -- Same estimator-eligibility gate as the selection query and resolveAppliedRateForRole(…, "estimator"):
+      -- a TOCTOU deactivation between selection and this locked re-check yields no row → skipped_no_longer_eligible,
+      -- so no UPDATE runs for a now-ineligible estimator. Keeps the two legs in lock-step.
+      JOIN ${users} u ON u.id = dsc.rep_user_id AND u.is_active = true AND u.role <> 'field_contractor'
       WHERE dsc.id = ${commissionId}
         AND dsc.rep_user_id = ${candidate.estimatorId}
         AND dsc.attribution_role = 'estimator'

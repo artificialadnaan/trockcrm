@@ -1091,6 +1091,18 @@ function involvedPotentialCommissionSql(repRef: string | SQL) {
   return sql`${dealValue} * ${involvedPotentialRateSql(repRef)}`;
 }
 
+// Gate the estimator's POTENTIAL rate on the SAME eligibility as the earned/mint path
+// (resolveAppliedRateForRole(…, "estimator")): the estimator user must be ACTIVE and an internal CRM user
+// (role <> 'field_contractor'), not merely hold an active commission-settings row. The `eu` join carries that
+// predicate into the `ecs` join so COALESCE(ecs.commission_rate, 0) in involvedPotentialRateSql yields 0 for a
+// deactivated / field_contractor estimator — matching the $0 they already earn. `eu` is a LEFT JOIN so the
+// driving deal row is never dropped. Mirrors estimatorRateJoinSql() in the commission reporting-service.
+function estimatorRateJoinSql() {
+  return sql`LEFT JOIN ${users} eu ON eu.id = d.estimator_user_id
+    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id
+      AND ecs.is_active = true AND eu.is_active = true AND eu.role <> 'field_contractor'`;
+}
+
 async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<CommissionConfig> {
   const result = await tenantDb.execute(sql`
     SELECT
@@ -1289,7 +1301,7 @@ export async function getRepPotentialPipeline(
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
-    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
+    ${estimatorRateJoinSql()}
     WHERE ${buildAliasedInvolvedRepSql("d", repId)}
       AND d.is_active = true
       AND COALESCE(d.is_test_data, false) = false
@@ -2209,7 +2221,7 @@ export async function getRepDealPipelineSummary(
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${userCommissionSettings} cs ON cs.user_id = d.assigned_rep_id AND cs.is_active = true
-    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id AND ecs.is_active = true
+    ${estimatorRateJoinSql()}
     CROSS JOIN LATERAL (
       SELECT DISTINCT rep_id
       FROM unnest(ARRAY[d.assigned_rep_id, d.estimator_user_id]) AS t(rep_id)

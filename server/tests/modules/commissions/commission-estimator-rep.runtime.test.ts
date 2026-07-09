@@ -51,10 +51,15 @@ beforeAll(async () => {
       attribution_role text NOT NULL DEFAULT 'owner',
       contract_signed_date_at_signing date
     );
+    CREATE TABLE users (id uuid PRIMARY KEY, display_name text, is_active boolean NOT NULL DEFAULT true, role text NOT NULL DEFAULT 'rep');
 
     INSERT INTO pipeline_stage_config (id, slug) VALUES ('${ST}', 'opportunity');
     INSERT INTO user_commission_settings (user_id, commission_rate, is_active) VALUES
       ('${REP_A}', 0.10, true), ('${REP_B}', 0.05, true);
+    -- Both reps are ACTIVE internal CRM users, so the estimator-rate join (gated on users.is_active +
+    -- role <> 'field_contractor') behaves exactly as before this gate was added.
+    INSERT INTO users (id, display_name, is_active, role) VALUES
+      ('${REP_A}', 'Alice', true, 'rep'), ('${REP_B}', 'Bob', true, 'rep');
     -- unsigned pipeline deal: assigned A, estimated by B
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, bid_estimate, change_order_total, created_at) VALUES
       ('${D.pipelineEstB}', 'P-1', 'Pipeline est B', '${REP_A}', '${REP_B}', '${ST}', 100000, 0, '2026-02-01T00:00:00Z');
