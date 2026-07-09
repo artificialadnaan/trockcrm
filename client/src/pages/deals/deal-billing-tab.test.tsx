@@ -9,7 +9,7 @@ import { DealBillingTab } from "./deal-billing-tab";
 
 const mocks = vi.hoisted(() => ({
   apiMock: vi.fn(),
-  filesMock: vi.fn(() => ({ files: [], loading: false, refetch: vi.fn() })),
+  filesMock: vi.fn((..._args: unknown[]): { files: Array<{ id: string; displayName: string; category: string; createdAt: string }>; loading: boolean; refetch: () => void } => ({ files: [], loading: false, refetch: vi.fn() })),
 }));
 vi.mock("@/lib/api", () => ({ api: mocks.apiMock }));
 vi.mock("@/hooks/use-files", () => ({ useFiles: (...args: unknown[]) => mocks.filesMock(...args), uploadFile: vi.fn() }));
