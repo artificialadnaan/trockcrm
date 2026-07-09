@@ -119,6 +119,8 @@ export type GenerateReportSection = {
 export type GenerateReportRequest = {
   projectId: string;
   reportTitle: string;
+  /** Optional free-form executive summary; rendered on its own page(s) right after the cover. */
+  executiveSummary?: string | null;
   coverData: {
     creatorName: string;
     companyName?: string | null;

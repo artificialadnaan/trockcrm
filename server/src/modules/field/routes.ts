@@ -703,6 +703,7 @@ fieldRoutes.post("/reports/generate", requireFieldContractor, async (req, res, n
         officeSlug: office.slug,
         projectId,
       reportTitle: String(req.body.reportTitle ?? ""),
+      executiveSummary: req.body.executiveSummary == null ? null : String(req.body.executiveSummary),
       coverData: {
         creatorName: String(req.body.coverData?.creatorName ?? ""),
         companyName: req.body.coverData?.companyName ?? null,

@@ -19,11 +19,14 @@ const MAX_SECONDS = 60;
 export function VoiceRecorder({
   onTranscript,
   onBusyChange,
+  label = "🎤 Dictate description",
 }: {
   onTranscript: (text: string) => void;
   // Reports recording/transcribing so a parent can block teardown (e.g. closing a
   // sheet) that would abandon an in-flight recording and lose the dictated text.
   onBusyChange?: (busy: boolean) => void;
+  // Idle-state button label (e.g. "🎤 Dictate summary" in the report builder).
+  label?: string;
 }) {
   const { token, activeOfficeId } = useAuth();
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
@@ -135,7 +138,7 @@ export function VoiceRecorder({
               ? "Starting…"
               : recording
                 ? `Stop · ${String(seconds).padStart(2, "0")}s`
-                : "🎤 Dictate description"}
+                : label}
         </Text>
       </Pressable>
       {error ? <Text style={styles.error}>{error}</Text> : null}
