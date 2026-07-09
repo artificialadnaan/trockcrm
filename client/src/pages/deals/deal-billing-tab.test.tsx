@@ -47,6 +47,37 @@ describe("DealBillingTab", () => {
     expect(container.textContent).toContain("Acme AP");
   });
 
+  it("adding a new contact inline creates it then assigns it to the deal", async () => {
+    mocks.apiMock.mockImplementation((url: string, opts?: { method?: string }) => {
+      if (url.includes("/contacts") && opts?.method === "POST") return Promise.resolve({ contact: { id: "c-new" } });
+      if (url.includes("/deals/deal-1")) return Promise.resolve({ deal: dealWithBilling });
+      return Promise.resolve({ contacts: [] });
+    });
+    const onDealUpdated = vi.fn();
+    const { container } = await render(dealNoBilling, onDealUpdated);
+    const setValue = (el: HTMLInputElement, v: string) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+      setter?.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const addBtn = Array.from(container.querySelectorAll("button")).find((b) => b.textContent?.includes("Add new contact")) as HTMLButtonElement;
+    await act(async () => { addBtn.click(); });
+    await act(async () => { await Promise.resolve(); });
+    const first = document.querySelector("input[name='firstName']") as HTMLInputElement;
+    const last = document.querySelector("input[name='lastName']") as HTMLInputElement;
+    await act(async () => { setValue(first, "Pat"); setValue(last, "Payer"); });
+    const save = Array.from(document.querySelectorAll("button")).find((b) => b.textContent?.includes("Save")) as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.apiMock).toHaveBeenCalledWith("/contacts", expect.objectContaining({ method: "POST" }));
+    expect(mocks.apiMock).toHaveBeenCalledWith(
+      expect.stringContaining("/deals/deal-1"),
+      expect.objectContaining({ method: "PATCH", json: expect.objectContaining({ billingContactId: "c-new" }) }),
+    );
+    expect(onDealUpdated).toHaveBeenCalled();
+  });
+
   it("assigning a searched contact PATCHes the deal with billingContactId", async () => {
     mocks.apiMock.mockImplementation((url: string) =>
       url.includes("/contacts/search")
