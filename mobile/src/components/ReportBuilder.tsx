@@ -27,12 +27,16 @@ export function ReportBuilder({
   projectId,
   photos,
   onGenerated,
+  voiceEnabled = false,
 }: {
   visible: boolean;
   onClose: () => void;
   projectId: string;
   photos: FieldPhoto[];
   onGenerated: (report: GeneratedReport) => void;
+  // Gates the summary dictation button — true only when server transcription is configured, matching the
+  // capture/scorecard surfaces. When false the summary is typing-only (no dead mic button).
+  voiceEnabled?: boolean;
 }) {
   const { fetcher } = useAuth();
   const { width } = useWindowDimensions();
@@ -228,13 +232,15 @@ export function ReportBuilder({
               multiline
               style={styles.summaryInput}
             />
-            <VoiceRecorder
-              label="🎤 Dictate summary"
-              onBusyChange={setSummaryDictating}
-              onTranscript={(text) =>
-                setExecSummary((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text))
-              }
-            />
+            {voiceEnabled ? (
+              <VoiceRecorder
+                label="🎤 Dictate summary"
+                onBusyChange={setSummaryDictating}
+                onTranscript={(text) =>
+                  setExecSummary((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text))
+                }
+              />
+            ) : null}
             {preview?.sections.map((section) => (
               <View key={section.id} style={{ gap: theme.space.sm, marginTop: theme.space.lg }}>
                 <SectionLabel>Section</SectionLabel>

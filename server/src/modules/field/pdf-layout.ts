@@ -115,11 +115,43 @@ function clampText(value: string, maxLength: number): string {
 }
 
 /**
+ * Break a single word that is taller than the page budget into character slices that each fit. PDFKit
+ * DOES char-wrap a space-less token (a pasted URL / base64 blob), so its rendered height can exceed a
+ * whole page — and an unbounded doc.text of such a chunk auto-creates continuation pages OUTSIDE the
+ * explicit pageMeta accounting, desyncing every following footer. Binary-searches the largest prefix
+ * that fits (always ≥ 1 char, so it can't loop). Returns the ordered slices; the caller emits all but
+ * the last as complete pages and keeps the last for further packing.
+ */
+function splitOversizedToken(token: string, maxHeight: number, measure: (chunk: string) => number): string[] {
+  const parts: string[] = [];
+  let rest = token;
+  while (measure(rest) > maxHeight && rest.length > 1) {
+    let lo = 1;
+    let hi = rest.length - 1;
+    let best = 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (measure(rest.slice(0, mid)) <= maxHeight) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    parts.push(rest.slice(0, best));
+    rest = rest.slice(best);
+  }
+  parts.push(rest);
+  return parts;
+}
+
+/**
  * Split free-form text into page-sized chunks. `measure(chunk)` returns the rendered height of that
  * chunk at the body column width; words are packed greedily until the next word would exceed
- * `maxHeight`, then a new page starts. A single word taller than the budget still gets its own page so
- * pagination always makes forward progress. Explicit newlines (paragraph breaks) are preserved.
- * Exported for unit testing (the height measurer is injected so it needs no live PDFDocument).
+ * `maxHeight`, then a new page starts. A single word taller than the budget is split by character
+ * across pages (splitOversizedToken) so NO emitted chunk ever exceeds the budget. Explicit newlines
+ * (paragraph breaks) are preserved. Exported for unit testing (the height measurer is injected so it
+ * needs no live PDFDocument).
  */
 export function paginateTextByHeight(
   text: string,
@@ -136,14 +168,22 @@ export function paginateTextByHeight(
   const render = (toks: string[]) => toks.join(" ").replace(/ ?\n ?/g, "\n").trim();
   const pages: string[] = [];
   let current: string[] = [];
+  // Seed a fresh page with a single word, emitting full pages for and returning the residual of any word
+  // too tall to fit alone. A "\n" token never seeds a page (it renders empty at a page start).
+  const seedWord = (word: string): string[] => {
+    if (word === "\n" || measure(word) <= maxHeight) return word === "\n" ? [] : [word];
+    const parts = splitOversizedToken(word, maxHeight, measure);
+    for (let i = 0; i < parts.length - 1; i += 1) pages.push(parts[i]);
+    return [parts[parts.length - 1]];
+  };
   for (const token of tokens) {
     if (current.length === 0) {
-      current.push(token);
+      current = seedWord(token);
       continue;
     }
     if (measure(render([...current, token])) > maxHeight) {
       pages.push(render(current));
-      current = token === "\n" ? [] : [token];
+      current = seedWord(token);
     } else {
       current.push(token);
     }
@@ -306,7 +346,14 @@ function drawExecutiveSummaryPages(
       bodyTop = SUMMARY_BODY_TOP;
     }
     doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(SUMMARY_BODY_FONT_SIZE);
-    doc.text(pageText, PAGE_MARGIN, bodyTop, { width: CONTENT_WIDTH, lineGap: SUMMARY_LINE_GAP });
+    // Hard height cap so pdfkit can NEVER auto-create a continuation page outside the pageMeta accounting
+    // (which would desync every following footer). paginateTextByHeight already keeps each chunk within
+    // the budget, so this clamp only ever engages as a backstop and truncates nothing in practice.
+    doc.text(pageText, PAGE_MARGIN, bodyTop, {
+      width: CONTENT_WIDTH,
+      height: SUMMARY_BODY_BOTTOM - bodyTop,
+      lineGap: SUMMARY_LINE_GAP,
+    });
   });
 }
 
