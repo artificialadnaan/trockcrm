@@ -145,6 +145,27 @@ export async function handleRfpReconfirmDenialEmail(
   );
   const officeId = (officeResult.rows[0]?.id as string | undefined) ?? null;
 
+  // Re-read the deal's is_active at SEND time (this job runs post-commit) to learn the real terminal outcome.
+  // The normal reconfirm archives the deal (is_active=false), but the stuck-approving escape hatch upholds the
+  // denial WITHOUT archiving (is_active stays true) so a late SyncHub callback can still find it. The email copy
+  // and the CTA must match: an archived deal gets a terminal "archived, no link" notice (getDealById 404s it),
+  // while a still-active deal keeps a working "View Deal in CRM" link. `tenantSchema` is validated above
+  // (isSafeTenantSchema) so it's safe to interpolate as a schema identifier (params can't parameterize one).
+  // Default to archived=true (the common path, and the safe default that never emits a 404-ing link) if the read
+  // returns no row or errors.
+  let archived = true;
+  try {
+    const dealResult = await query(
+      `SELECT is_active FROM ${tenantSchema}.deals WHERE id = $1::uuid LIMIT 1`,
+      [dealId]
+    );
+    if (dealResult.rows.length > 0) {
+      archived = dealResult.rows[0].is_active === false;
+    }
+  } catch (err) {
+    logger.warn("[RfpReconfirmDenialEmail] Could not read deal is_active — defaulting to archived copy", { dealId, error: err });
+  }
+
   const email = buildRfpReconfirmDenialEmail({
     dealId,
     dealName: normalizeText(payload.dealName) ?? "Deal",
@@ -152,6 +173,7 @@ export async function handleRfpReconfirmDenialEmail(
     declinedReason: normalizeText(payload.declinedReason),
     officeId,
     frontendUrl: resolveFrontendUrl(deps.env ?? process.env),
+    archived,
   });
 
   try {
@@ -212,13 +234,20 @@ export function buildRfpReconfirmDenialEmail(input: {
   declinedReason: string | null;
   officeId?: string | null;
   frontendUrl: string;
+  /** Whether the deal was archived by this reconfirm. Defaults to true (the normal terminal outcome). When
+   *  false — the stuck-approving escape hatch upheld the denial but left the deal active — the email keeps a
+   *  working "View Deal in CRM" link and drops the "archived" notice, so recipients aren't told the deal is gone
+   *  when it isn't (and given a link that 404s when it is). */
+  archived?: boolean;
 }) {
-  // The re-confirm is terminal and the deal is now archived (is_active=false). getDealById 404s inactive
-  // deals, so a "View Deal in CRM" link would 404 for the recipient. Remove the CTA entirely and note the
-  // archive instead.
+  const archived = input.archived ?? true;
   const baseUrl = input.frontendUrl.replace(/\/+$/, "");
-  // baseUrl retained for any future use; dealUrl intentionally removed — see FIX 5.
-  void baseUrl;
+  // Only a still-active deal gets a working link — getDealById 404s an archived (is_active=false) deal. Scope the
+  // link to the deal's office so cross-office leadership recipients land on a resolving page (the #611 fix).
+  const dealPath = input.officeId
+    ? `/deals/${input.dealId}?officeId=${encodeURIComponent(input.officeId)}`
+    : `/deals/${input.dealId}`;
+  const safeDealUrl = escapeHtml(`${baseUrl}${dealPath}`);
 
   const subject = input.dealNumber
     ? `RFP denial confirmed: ${input.dealNumber} (${input.dealName})`
@@ -237,6 +266,30 @@ export function buildRfpReconfirmDenialEmail(input: {
           <td style="padding:10px 0;border-bottom:1px solid #e2e8f0;color:#111111;font-family:Arial,Helvetica,sans-serif;font-size:${emphasize ? "15px" : "14px"};line-height:20px;font-weight:${emphasize ? "bold" : "normal"};vertical-align:top;">${escapeHtml(value)}</td>
         </tr>`)
     .join("");
+
+  // Archived (normal): a terminal "archived" notice, no link (getDealById 404s it). Not archived (escape hatch):
+  // an Outlook-safe "bulletproof" CTA to the still-active deal (same VML+<a> scaffold as the #611 decline email).
+  const ctaOrNoticeRow = archived
+    ? `
+          <tr>
+            <td align="center" style="padding:16px 24px 8px 24px;">
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:18px;color:#64748b;">This deal has been archived.</p>
+            </td>
+          </tr>`
+    : `
+          <tr>
+            <td align="center" style="padding:24px 24px 8px 24px;">
+              <!--[if mso]>
+              <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="${safeDealUrl}" style="height:44px;v-text-anchor:middle;width:240px;" arcsize="9%" stroke="f" fillcolor="#CC0000">
+                <w:anchorlock/>
+                <center style="color:#ffffff;font-family:Arial,sans-serif;font-size:15px;font-weight:bold;">View Deal in CRM</center>
+              </v:roundrect>
+              <![endif]-->
+              <!--[if !mso]><!-- -->
+              <a href="${safeDealUrl}" style="display:inline-block;background-color:#CC0000;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:240px;border-radius:4px;">View Deal in CRM</a>
+              <!--<![endif]-->
+            </td>
+          </tr>`;
 
   // Same Outlook-safe scaffold as the RFP-decline email (#611): table-only layout, inline CSS, hosted PNG
   // logo, VML "bulletproof button" with an <a> fallback — but a single CTA and terminal copy.
@@ -279,11 +332,7 @@ export function buildRfpReconfirmDenialEmail(input: {
               </table>
             </td>
           </tr>
-          <tr>
-            <td align="center" style="padding:16px 24px 8px 24px;">
-              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:18px;color:#64748b;">This deal has been archived.</p>
-            </td>
-          </tr>
+${ctaOrNoticeRow}
           <tr>
             <td style="padding:16px 24px;border-top:1px solid #e2e8f0;background-color:#fafafa;">
               <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#94a3b8;">This is an automated notification from T Rock Construction CRM. Please do not reply to this email.</p>
@@ -300,7 +349,7 @@ export function buildRfpReconfirmDenialEmail(input: {
   const text =
     `After a second-look review, leadership confirmed the denial of this RFP. It will not proceed.\n\n` +
     rows.map(([label, value]) => `${label}: ${value}`).join("\n") +
-    `\n\nThis deal has been archived.`;
+    (archived ? `\n\nThis deal has been archived.` : `\n\nView the deal in the CRM: ${baseUrl}${dealPath}`);
   return { subject, html, text, dealNumber: input.dealNumber };
 }
 

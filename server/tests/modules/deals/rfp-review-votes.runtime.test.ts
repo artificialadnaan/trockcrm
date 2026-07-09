@@ -32,7 +32,8 @@ beforeAll(async () => {
       rfp_declined_reason text, rfp_declined_at timestamptz,
       rfp_override_reviewed_at timestamptz, rfp_override_reviewed_by uuid,
       rfp_override_decision text, rfp_override_note text,
-      rfp_override_state text, rfp_override_error text
+      rfp_override_state text, rfp_override_error text,
+      is_active boolean NOT NULL DEFAULT true
     );
     CREATE TABLE rfp_votes (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

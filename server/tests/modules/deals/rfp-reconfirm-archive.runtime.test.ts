@@ -198,6 +198,8 @@ describe("reconfirmRfpDecline auto-archive", () => {
     });
 
     expect(res.ok).toBe(true);
+    // The result reports the archive outcome so the email + review-page CTA can reflect it.
+    if (res.ok) expect(res.archived).toBe(true);
 
     // Deal must now be soft-deleted.
     const deal = (
@@ -387,6 +389,9 @@ describe("reconfirmRfpDecline auto-archive", () => {
       officeId: null,
     });
     expect(res.ok).toBe(true);
+    // The escape hatch upholds the denial but does NOT archive — the result must report archived=false so the
+    // email keeps a working deal link and the review-page footer CTA stays visible.
+    if (res.ok) expect(res.archived).toBe(false);
 
     const deal = (
       await pg.query<{ is_active: boolean; description: string; rfp_override_decision: string }>(

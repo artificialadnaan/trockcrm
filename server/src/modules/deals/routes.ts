@@ -1846,7 +1846,8 @@ router.post("/:id/rfp-override/reconfirm-decline", requireRfpReviewer, async (re
       );
     }
     await req.commitTransaction!();
-    res.json({ success: true, status: result.status, decision: result.decision });
+    // `archived` lets the review page hide the "Open the full deal" CTA (an archived deal 404s in getDealById).
+    res.json({ success: true, status: result.status, decision: result.decision, archived: result.archived });
   } catch (err) {
     next(err);
   }

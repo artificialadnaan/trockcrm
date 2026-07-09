@@ -209,11 +209,19 @@ export function RfpReviewPage() {
     if (!dealId) return;
     setSubmitting("reconfirm");
     try {
-      await reconfirmRfpDecline(dealId, { note, officeId });
+      const result = await reconfirmRfpDecline(dealId, { note, officeId });
       toast.success("Denial re-confirmed — this RFP stays declined.");
       setNote("");
-      // Optimistically mark the terminal outcome so it sticks even if the follow-up refresh blips.
-      applyOptimistic({ reviewDecision: "denial_reconfirmed", overrideState: null, overrideError: null, actionable: false });
+      // Optimistically mark the terminal outcome so it sticks even if the follow-up refresh blips. `archived`
+      // drives the footer CTA: a normal reconfirm archives the deal (hide "Open the full deal" — it would 404),
+      // while the escape hatch leaves it active (keep the link).
+      applyOptimistic({
+        reviewDecision: "denial_reconfirmed",
+        overrideState: null,
+        overrideError: null,
+        actionable: false,
+        isActive: !result.archived,
+      });
       // Best-effort refresh, isolated so a refresh blip can't read as a re-confirm failure (the optimistic
       // terminal outcome already holds; the next load reconciles).
       try {
@@ -334,9 +342,14 @@ export function RfpReviewPage() {
           )}
         </CardContent>
         <CardFooter>
-          <Link to={dealHref} className={buttonVariants({ variant: "ghost", size: "sm" })}>
-            Open the full deal
-          </Link>
+          {review.isActive ? (
+            <Link to={dealHref} className={buttonVariants({ variant: "ghost", size: "sm" })}>
+              Open the full deal
+            </Link>
+          ) : (
+            // Archived (re-confirmed denial): the deal detail 404s, so show a note instead of a dead link.
+            <p className="text-sm text-muted-foreground">This deal has been archived.</p>
+          )}
         </CardFooter>
       </Card>
     </PageFrame>
