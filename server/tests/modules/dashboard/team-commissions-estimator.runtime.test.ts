@@ -37,7 +37,7 @@ beforeAll(async () => {
       change_order_total numeric
     );
     -- getRepDealPipelineSummary's won·unsigned predicate references this table (empty here).
-    CREATE TABLE deal_signed_commissions (id uuid, deal_id uuid, rep_user_id uuid, attribution_role text NOT NULL DEFAULT 'owner');
+    CREATE TABLE deal_signed_commissions (id uuid, deal_id uuid, rep_user_id uuid, attribution_role text NOT NULL DEFAULT 'owner', contract_signed_date_at_signing date);
     CREATE TABLE user_commission_settings (user_id uuid PRIMARY KEY, commission_rate numeric, is_active boolean NOT NULL DEFAULT true);
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text, is_active boolean NOT NULL DEFAULT true, role text NOT NULL DEFAULT 'rep');
     INSERT INTO user_commission_settings (user_id, commission_rate, is_active) VALUES

@@ -282,15 +282,36 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(totals.wonUnsignedCount).toBe(2);
     expect(ws.officeTotals.wonUnsignedValue).toBe(110000);
 
-    // Won·signed de-dup: D-18 (won+signed 2026) has a DISTINCT owner (OWN2) + estimator (EST2), so it appears
-    // in BOTH rows' won·signed — the per-rep sum double-counts it, officeTotals counts it once. REP D-9 95k +
-    // OWN2 D-18 20k + EST2 D-18 20k = 135k row sum; office = D-9 95k + D-18 20k = 115k (D-17 signed 2025 is
-    // outside the 2026 window on both sides).
+    // Won·signed de-dup. Per-rep won·signed (2026): REP D-9 95k; BOOKED D-11 50k (booked-but-deal-unsigned);
+    // OWN2 D-13 30k (booked) + D-18 20k = 50k; EST2 D-18 20k. Row sum = 215k. D-18 (distinct owner+estimator)
+    // is the only leg counted in two rows, so office de-dups it: office = D-9 95 + D-11 50 + D-13 30 + D-18 20
+    // = 195k / 4 deals. (D-17 signed 2025 is outside the 2026 window; D-13 is OWN2's won·signed but EST2's
+    // won·unsigned — a per-rep partition, so it's counted once on each side.)
     const perRepWonSignedSum = ws.rows.reduce((s, r) => s + r.wonSignedValue, 0);
-    expect(perRepWonSignedSum).toBe(135000);
-    expect(ws.officeTotals.wonSignedValue).toBe(115000);
-    expect(ws.officeTotals.wonSignedCount).toBe(2);
+    expect(perRepWonSignedSum).toBe(215000);
+    expect(ws.officeTotals.wonSignedValue).toBe(195000);
+    expect(ws.officeTotals.wonSignedCount).toBe(4);
     expect(ws.officeTotals.wonSignedValue).toBeLessThan(perRepWonSignedSum);
+  });
+
+  it("won·signed INCLUDES a booked-but-deal-unsigned win and stays a per-rep partition with won·unsigned (Codex P2)", async () => {
+    const { rows } = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    // D-11: won + deal-level unsigned, but BOOKED has a dsc row with contract_signed_date_at_signing (2026-03-01).
+    // Earned counts it as signed and won·unsigned excludes it (booked) — so it MUST land in won·signed via the
+    // same signed-date fallback earned uses, or it falls out of BOTH gross won columns.
+    const booked = rows.find((r) => r.repId === BOOKED)!;
+    expect(booked.wonSignedValue).toBe(50000);
+    expect(booked.wonSignedCount).toBe(1);
+    expect(booked.wonUnsignedValue).toBe(0); // still out of unsigned — the two columns never both count a leg
+    expect((await getDirectorCommissionEvidence(tdb, { repId: BOOKED, metric: "won_signed", from: FROM, to: TO })).total.value).toBe(50000);
+
+    // D-13 partitions PER REP: OWN2 booked it (dsc) -> OWN2's won·signed; EST2 didn't -> EST2's won·UNsigned.
+    // The same deal is signed-for-OWN2 and unsigned-for-EST2 — never both for the same rep.
+    expect(rows.find((r) => r.repId === OWN2)!.wonSignedValue).toBe(50000); // D-13 30k (booked) + D-18 20k (deal-signed)
+    expect(rows.find((r) => r.repId === EST2)!.wonSignedValue).toBe(20000); // D-18 only
+    expect(rows.find((r) => r.repId === EST2)!.wonUnsignedValue).toBe(30000); // D-13 is EST2's won·unsigned
+    // Reconciliation holds for the booked-inclusive rep too.
+    expect((await getDirectorCommissionEvidence(tdb, { repId: OWN2, metric: "won_signed", from: FROM, to: TO })).total.value).toBe(50000);
   });
 
   it("won·signed is period-windowed on the contract-signed date (not a live snapshot)", async () => {
