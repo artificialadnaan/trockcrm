@@ -376,6 +376,7 @@ export interface UpdateDealInput {
   name?: string;
   assignedRepId?: string;
   primaryContactId?: string | null;
+  billingContactId?: string | null;
   sourceLeadId?: string | null;
   companyId?: string | null;
   propertyId?: string | null;
@@ -2483,6 +2484,7 @@ export async function updateDeal(
     }
   }
   if (input.primaryContactId !== undefined) updates.primaryContactId = input.primaryContactId;
+  if (input.billingContactId !== undefined) updates.billingContactId = input.billingContactId;
   // A genuine manual change to dd_estimate is a permanent override: mark it so the Procore mirror never
   // overwrites it (mirrors awarded_amount_overridden / migration 0164). Change-detected so a no-op re-save
   // of the same value does NOT freeze sync; the mirror seeds/updates DD until a human edits it. Unlike
@@ -2713,6 +2715,7 @@ export async function updateDeal(
       "name",
       "assignedRepId",
       "primaryContactId",
+      "billingContactId",
       "ddEstimate",
       "bidEstimate",
       "awardedAmount",
