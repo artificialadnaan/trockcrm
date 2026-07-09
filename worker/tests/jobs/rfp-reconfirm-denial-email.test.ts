@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   handleRfpReconfirmDenialEmail,
   buildRfpReconfirmDenialEmail,
-} from "./rfp-reconfirm-denial-email.js";
+} from "../../src/jobs/rfp-reconfirm-denial-email.js";
 
 const TENANT = "office_dallas";
 const DEAL = "11111111-1111-1111-1111-111111111111";
@@ -26,8 +26,12 @@ const ENV = { NODE_ENV: "test", RFP_REJECTION_EMAIL_RECIPIENTS: `${TAKASHI}, ${A
 // production with NO leadership configured -> the shared resolver returns [] (no dev fallback outside dev/test)
 const ENV_NO_LEADERSHIP = { NODE_ENV: "production" } as NodeJS.ProcessEnv;
 
-/** Mock pool.query that routes by SQL text. Knobs: whether a receipt already exists, the resolved rep email. */
-function makeQuery(opts: { receiptExists?: boolean; repEmail?: string | null; officeFound?: boolean } = {}) {
+/**
+ * Mock pool.query that routes by SQL text. Knobs: whether a receipt already exists, the resolved rep email, and
+ * the deal's is_active (`dealActive`). When `dealActive` is unset the deal read returns no row, so the handler
+ * defaults to archived=true (the normal terminal outcome) — existing tests need no change.
+ */
+function makeQuery(opts: { receiptExists?: boolean; repEmail?: string | null; officeFound?: boolean; dealActive?: boolean } = {}) {
   const calls: Array<{ sql: string; params: any[] }> = [];
   const query = vi.fn(async (sql: string, params: any[] = []) => {
     calls.push({ sql, params });
@@ -40,6 +44,9 @@ function makeQuery(opts: { receiptExists?: boolean; repEmail?: string | null; of
     }
     if (sql.includes("FROM public.offices")) {
       return { rows: opts.officeFound === false ? [] : [{ id: OFFICE }] };
+    }
+    if (sql.includes("is_active FROM")) {
+      return { rows: opts.dealActive === undefined ? [] : [{ is_active: opts.dealActive }] };
     }
     return { rows: [] };
   });
@@ -61,7 +68,7 @@ function makeSend() {
 const silentLogger = { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
 describe("handleRfpReconfirmDenialEmail", () => {
-  it("sends to the requesting rep + both leadership recipients, with deal details and a trockcrm.com link", async () => {
+  it("sends to the requesting rep + both leadership recipients, with deal details and an archived notice (no deal link)", async () => {
     const { query, calls } = makeQuery();
     const sendEmail = makeSend();
     await handleRfpReconfirmDenialEmail(BASE_PAYLOAD, null, { query, sendEmail, env: ENV, logger: silentLogger });
@@ -75,13 +82,29 @@ describe("handleRfpReconfirmDenialEmail", () => {
     expect(html).toContain("Margins too thin");
     // terminal outcome copy — leadership confirmed the denial (generic, no reviewer named)
     expect(html.toLowerCase()).toContain("leadership");
-    // the deal link is the ONLY CTA; the reviewer-only "Review & Decide" page is NOT offered (terminal)
-    expect(html).toContain(`https://trockcrm.com/deals/${DEAL}?officeId=${OFFICE}`);
+    // the deal is archived — no "View Deal in CRM" CTA (the deal 404s after archival)
+    expect(html).not.toContain(`/deals/`);
+    expect(html).not.toContain("View Deal in CRM");
+    expect(html).toContain("archived");
     expect(html).not.toContain("Review &amp; Decide");
     expect(html).not.toContain("/rfp-review/");
     expect(html).not.toMatch(/trockconstruction\.com/);
     expect(options.idempotencyKey).toBe(`rfp-reconfirm-denial-${TENANT}-${DEAL}-55`);
     expect(calls.some((c) => c.sql.includes("INSERT INTO public.rfp_reconfirm_email_receipts"))).toBe(true);
+  });
+
+  it("keeps a working View-Deal CTA (no archived notice) when the deal is still active — the stuck-approving escape hatch", async () => {
+    // The escape-hatch reconfirm upholds the denial but leaves the deal active (is_active=true) so a late SyncHub
+    // callback can still find it. The email must reflect that: a working link, no "archived" terminal notice.
+    const { query } = makeQuery({ dealActive: true });
+    const sendEmail = makeSend();
+    await handleRfpReconfirmDenialEmail(BASE_PAYLOAD, null, { query, sendEmail, env: ENV, logger: silentLogger });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    const [, , html] = sendEmail.mock.calls[0];
+    expect(html).toContain(`/deals/${DEAL}`);
+    expect(html).toContain("View Deal in CRM");
+    expect(html).not.toContain("has been archived");
   });
 
   it("degrades to leadership only (still sends) when the requesting rep has no id", async () => {
@@ -137,7 +160,7 @@ describe("handleRfpReconfirmDenialEmail", () => {
 });
 
 describe("buildRfpReconfirmDenialEmail", () => {
-  it("builds the terminal 'denial upheld' email with a single View-Deal CTA and no review page", () => {
+  it("builds the terminal 'denial upheld' email with an archived notice and NO View-Deal CTA (deal 404s after archival)", () => {
     const email = buildRfpReconfirmDenialEmail({
       dealId: DEAL,
       dealName: "jasonn ranches",
@@ -148,9 +171,12 @@ describe("buildRfpReconfirmDenialEmail", () => {
     });
     expect(email.subject).toContain("TR-1001");
     expect(email.subject).toContain("jasonn ranches");
-    expect(email.dealUrl).toBe(`https://trockcrm.com/deals/${DEAL}?officeId=${OFFICE}`);
-    expect(email.dealUrl.split("?")[1]).toBe(`officeId=${OFFICE}`);
-    expect(email.html).toContain("View Deal in CRM");
+    // no deal link — the deal is archived (is_active=false) and getDealById 404s it
+    expect(email.html).not.toContain(`/deals/`);
+    expect(email.html).not.toContain("View Deal in CRM");
+    expect(email.html).toContain("archived");
+    expect(email.text).toContain("archived");
+    expect(email.text).not.toContain(`/deals/`);
     // terminal: NO reviewer review-and-decide CTA, and the reviewer is never named
     expect(email.html).not.toContain("/rfp-review/");
     expect(email.html).not.toContain("Review &amp; Decide");
@@ -159,7 +185,25 @@ describe("buildRfpReconfirmDenialEmail", () => {
     expect(email.text).not.toMatch(/trockconstruction\.com/);
   });
 
-  it("omits the query string when the office is unresolved and handles missing fields", () => {
+  it("renders a working View-Deal CTA and drops the archived notice when archived=false (escape hatch)", () => {
+    const email = buildRfpReconfirmDenialEmail({
+      dealId: DEAL,
+      dealName: "jasonn ranches",
+      dealNumber: "TR-1001",
+      declinedReason: "Margins too thin",
+      officeId: OFFICE,
+      frontendUrl: "https://trockcrm.com",
+      archived: false,
+    });
+    // Still-active deal → a real link (scoped to the office so cross-office leadership lands on a resolving page).
+    expect(email.html).toContain(`https://trockcrm.com/deals/${DEAL}?officeId=${OFFICE}`);
+    expect(email.html).toContain("View Deal in CRM");
+    expect(email.html).not.toContain("has been archived");
+    expect(email.text).toContain(`https://trockcrm.com/deals/${DEAL}?officeId=${OFFICE}`);
+    expect(email.text).not.toContain("has been archived");
+  });
+
+  it("handles missing fields (no dealUrl property on return value)", () => {
     const email = buildRfpReconfirmDenialEmail({
       dealId: DEAL,
       dealName: "jasonn ranches",
@@ -168,8 +212,10 @@ describe("buildRfpReconfirmDenialEmail", () => {
       officeId: null,
       frontendUrl: "https://trockcrm.com",
     });
-    expect(email.dealUrl).toBe(`https://trockcrm.com/deals/${DEAL}`);
     expect(email.html).toContain("No reason provided");
     expect(email.html).toContain("Pending");
+    expect(email.html).toContain("archived");
+    // TypeScript: dealUrl is no longer on the return type
+    expect((email as any).dealUrl).toBeUndefined();
   });
 });

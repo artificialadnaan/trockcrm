@@ -1,12 +1,14 @@
 import crypto from "node:crypto";
-import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { deals, jobQueue } from "@trock-crm/shared/schema";
+import { deals, jobQueue, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { buildAuditActorFromUser, logActivity } from "../audit/audit-logger.js";
 import { enqueueRfpBidBoardCreate } from "./rfp-enqueue.js";
 import { resolveSyncHubOverrideApproveUrl } from "./rfp-payload.js";
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
+import { buildArchivedDescription } from "./archive-description.js";
+import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -38,7 +40,10 @@ export interface RfpOverrideApprovalDeps {
 }
 
 export type RfpReconfirmResult =
-  | { ok: true; status: "declined"; decision: "denial_reconfirmed" }
+  // `archived` = whether THIS reconfirm soft-deleted the deal. True on the normal path; false for the
+  // stuck-approving escape hatch (which upholds the denial but leaves the deal active so an in-flight SyncHub
+  // callback can still find it). Consumers (the denial-upheld email + the review-page footer CTA) key off it.
+  | { ok: true; status: "declined"; decision: "denial_reconfirmed"; archived: boolean }
   | { ok: false; reason: "not_actionable" };
 
 export interface RfpReviewDetail {
@@ -64,6 +69,9 @@ export interface RfpReviewDetail {
   overrideError: string | null;
   /** True when a reviewer can act now: declined, not currently approving, and not already a re-confirmed denial. */
   actionable: boolean;
+  /** deals.is_active — false once the deal is archived (a re-confirmed denial). The page hides the "Open the
+   *  full deal" link when false, since getDealById 404s inactive deals. */
+  isActive: boolean;
   /** The round's recorded votes (voter + choice + reason + time), for the escalation summary. */
   votes: RfpVoteView[];
 }
@@ -338,6 +346,27 @@ export async function reconfirmRfpDecline(input: {
   // callers that don't notify (or can't) still work — a null officeId just skips the app-side email.
   officeId?: string | null;
 }): Promise<RfpReconfirmResult> {
+  // Capture the pre-reconfirm override state under a ROW LOCK (FOR UPDATE), BEFORE the guarded update clears it.
+  // When the reviewer upholds the denial from the STUCK-APPROVING escape hatch, a SyncHub /bid-board-created
+  // callback may still be in flight, and its findDeal lookup filters is_active=true — so we must NOT archive in
+  // that case (the late callback has to find the still-active row to no-op idempotently, and a late SUCCESS must
+  // not resurrect a denied+archived deal). Normal reconfirms (no approval in flight) auto-archive as designed.
+  //
+  // The lock is what makes `wasApproving` reflect the UPDATE-time state, not a stale snapshot: this whole route
+  // runs in one transaction (req.tenantDb + req.commitTransaction), so the FOR UPDATE lock is held through the
+  // guarded update below. A concurrent requestOverrideApproval on the same deal must take the row's write-lock
+  // for its own UPDATE, so it serializes against us — it either commits 'approving' before our locked read (we
+  // see it → skip archive) or blocks until we commit (its is_active=true + not-reconfirmed guard then matches 0
+  // rows → no SyncHub create). Without the lock, an unlocked read could see NULL just before a concurrent approve
+  // commits 'approving', then this branch would archive the deal while a Bid Board create is in flight.
+  const [preReconfirm] = await input.tenantDb
+    .select({ state: deals.rfpOverrideState })
+    .from(deals)
+    .where(eq(deals.id, input.dealId))
+    .limit(1)
+    .for("update");
+  const wasApproving = preReconfirm?.state === "approving";
+
   const [updated] = await input.tenantDb
     .update(deals)
     .set({
@@ -383,6 +412,45 @@ export async function reconfirmRfpDecline(input: {
     metadata: { rfpOverrideNote: input.note },
   });
 
+  // Auto-archive on denial reconfirm (either reviewer): soft-delete the deal and prepend the voter + reviewer
+  // notes to the description. Guarded on the current is_active so a redundant call never re-prepends, and skipped
+  // for the stuck-approving escape hatch (see wasApproving above) so an in-flight SyncHub callback stays findable.
+  // `archived` is the authoritative outcome returned to callers (the email + the review-page CTA both key off it).
+  const archived = Boolean(updated.isActive) && !wasApproving;
+  if (archived) {
+    const reviewerReason = (input.note ?? "").trim();
+    const voterNotes = (updated.rfpDeclinedReason ?? "").trim();
+    const combined =
+      `RFP denied.${voterNotes ? ` ${voterNotes}` : ""} · Final review ` +
+      `(${input.actor.name ?? input.actor.userId}): ${reviewerReason}`;
+    const archivedDescription = buildArchivedDescription(updated.description, combined, new Date());
+    await input.tenantDb.update(deals).set({ isActive: false, description: archivedDescription }).where(eq(deals.id, input.dealId));
+    await recordDescriptionHistoryChange(input.tenantDb, {
+      dealId: input.dealId,
+      oldDescription: updated.description,
+      newDescription: archivedDescription,
+      changedBy: input.actor.userId,
+      source: "rfp_reconfirm_denial",
+    });
+    await input.tenantDb
+      .update(tasks)
+      .set({ status: "dismissed", isOverdue: false })
+      .where(and(inArray(tasks.dealId, [input.dealId]), inArray(tasks.status, ["pending", "in_progress"])));
+    await logActivity({
+      tenantDb: input.tenantDb,
+      actor: buildAuditActorFromUser({ userId: input.actor.userId, name: input.actor.name, role: input.actor.role }),
+      action: "soft_delete",
+      entity: {
+        tableName: "deals",
+        entityType: "deal",
+        recordId: input.dealId,
+        nameSnapshot: String(updated.name ?? "Deal"),
+        secondaryIdSnapshot: (updated.projectNumber ?? updated.dealNumber ?? null) as string | null,
+      },
+      fieldChanges: { isActive: { from: true, to: false } },
+    });
+  }
+
   // finding: the migration 0154 trigger fires the "denial upheld" email on the denial_reconfirmed transition ONLY
   // for request-BACKED deals (it returns early on a NULL rfp_approval_request_id). A VOTING-path no-go that a
   // reviewer re-confirms carries no request id, so the requesting rep + leadership would never be notified.
@@ -410,7 +478,7 @@ export async function reconfirmRfpDecline(input: {
     }
   }
 
-  return { ok: true, status: "declined", decision: "denial_reconfirmed" };
+  return { ok: true, status: "declined", decision: "denial_reconfirmed", archived };
 }
 
 /** Page data for the review surface: the declined RFP + requesting rep + recorded review outcome + override state. */
@@ -435,7 +503,8 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
            d.rfp_override_decision AS "reviewDecision",
            d.rfp_override_note AS "reviewNote",
            d.rfp_override_state AS "overrideState",
-           d.rfp_override_error AS "overrideError"
+           d.rfp_override_error AS "overrideError",
+           d.is_active AS "isActive"
       FROM deals d
       LEFT JOIN public.users req ON req.id = d.rfp_approval_requested_by
       LEFT JOIN public.users rev ON rev.id = d.rfp_override_reviewed_by
@@ -472,6 +541,7 @@ export async function getRfpReviewDetail(tenantDb: TenantDb, dealId: string): Pr
       row.rfpApprovalStatus === "declined" &&
       row.overrideState !== "approving" &&
       row.reviewDecision !== "denial_reconfirmed",
+    isActive: row.isActive !== false,
     votes: rfpVotes,
   };
 }
