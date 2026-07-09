@@ -631,11 +631,18 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
   const [deal, setDeal] = useState<DealDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // Monotonic request markers. `requestIdRef` covers ALL requests; `latestNonSilentRef` tracks the latest EXPLICIT
-  // (non-silent) request. Silent polls, explicit refetches, and dealId/officeId changes can overlap — these decide
-  // which response may commit (see fetchDeal).
+  // Monotonic request markers + the current key. `requestIdRef` stamps every request. `lastCommittedRef` holds the
+  // id of the request whose data last landed in state — a response may commit only if it is STRICTLY NEWER than that
+  // (so data yields to any newer request that actually COMMITTED, but a newer request that merely started and then
+  // FAILED never discards an older success). `latestNonSilentRef` tracks the latest EXPLICIT (non-silent) request,
+  // which owns the loading spinner / error banner. `keyRef` mirrors the current dealId|officeId so a response that
+  // resolves after a key/tenant change refuses to commit under the new key.
   const requestIdRef = useRef(0);
+  const lastCommittedRef = useRef(0);
   const latestNonSilentRef = useRef(0);
+  const currentKey = `${dealId ?? ""}|${options.officeId ?? ""}`;
+  const keyRef = useRef(currentKey);
+  keyRef.current = currentKey;
 
   const fetchDeal = useCallback(async (silent = false) => {
     if (!dealId) {
@@ -650,32 +657,42 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
     // newer non-silent one. So a background poll (which may fail) can never discard a successful explicit reload
     // (e.g. the refetch a "Cancel RFP" action awaits), and a stale response can't overwrite fresher deal state.
     const myRequest = ++requestIdRef.current;
+    const myKey = `${dealId ?? ""}|${options.officeId ?? ""}`;
     if (!silent) {
       latestNonSilentRef.current = myRequest;
       setLoading(true);
       setError(null);
     }
-    // Re-read at commit time (a newer request may have started during the await).
-    const superseded = () => (silent ? requestIdRef.current !== myRequest : latestNonSilentRef.current !== myRequest);
+    // Re-read guards at commit time (a newer request may have committed, or the deal/office key may have changed,
+    // during the await). A response may COMMIT deal state only if it is STRICTLY NEWER than the last committed one
+    // AND still for the current key — so a data commit yields to any newer request that actually committed (silent
+    // poll OR explicit refetch) and to a dealId/officeId change, while a newer request that merely started and then
+    // failed can't discard it. Loading/error ownership is tracked separately (latestNonSilentRef) so a background
+    // poll can't clear an explicit reload's spinner or error.
+    const canCommit = () => myRequest > lastCommittedRef.current && keyRef.current === myKey;
+    const ownsLoadError = () => !silent && latestNonSilentRef.current === myRequest && keyRef.current === myKey;
     try {
       const data = await api<{ deal: DealDetail }>(`/deals/${dealId}/detail`, {
         ...getOfficeRequestOptions(options.officeId),
       });
-      if (superseded()) return;
-      setDeal(data.deal);
-      if (silent) setError(null); // clear any stale error once a background poll succeeds
+      if (canCommit()) {
+        lastCommittedRef.current = myRequest;
+        setDeal(data.deal);
+        if (silent) setError(null); // clear any stale error once a background poll succeeds
+      }
     } catch (err: unknown) {
-      if (superseded()) return; // don't clobber fresher state with a stale/superseded error
       if (silent) {
-        // Keep the last-good deal on screen (no setError), but make a persistent silent-poll failure traceable.
-        console.error("[useDealDetail] silent refetch failed:", err);
-      } else {
+        // Keep the last-good deal on screen (no setError), but trace a real (non-superseded) poll failure.
+        if (canCommit()) console.error("[useDealDetail] silent refetch failed:", err);
+      } else if (ownsLoadError()) {
+        // Only the latest non-silent request for the current key surfaces the error banner.
         setError(err instanceof Error ? err.message : "Failed to load deal");
       }
     } finally {
-      // Only the LATEST non-silent request clears the spinner it raised: a superseded non-silent request leaves
-      // loading to the newer one (no premature clear / stale-null flash), and a silent poll never touches it.
-      if (!silent && latestNonSilentRef.current === myRequest) setLoading(false);
+      // Only the LATEST non-silent request for the current key clears the spinner it raised: a superseded/off-key
+      // non-silent request leaves loading to the newer one (no premature clear / stale-null flash), and a silent
+      // poll never touches it.
+      if (ownsLoadError()) setLoading(false);
     }
   }, [dealId, options.officeId]);
 

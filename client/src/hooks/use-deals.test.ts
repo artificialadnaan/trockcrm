@@ -635,6 +635,39 @@ describe("normalizeDealBoardResponse", () => {
     vi.unstubAllGlobals();
   });
 
+  it("an older non-silent response never overwrites a newer SILENT poll's fresher data (data commit is newest-wins)", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "initial" } }); // mount
+    hookDealDetailOfficeId = null;
+
+    const root = await renderDealDetailHook();
+    expect(latestDetailResult?.loading).toBe(false);
+
+    // A = older EXPLICIT refetch (pends). B = newer SILENT poll (resolves fresh first). A lands last with a stale
+    // snapshot. The data commit must yield to ANY newer request — so A must NOT roll the UI back over B's fresh data.
+    let resolveA: (value: unknown) => void = () => {};
+    apiMock.mockImplementationOnce(() => new Promise((r) => { resolveA = r; })); // A (older, non-silent)
+    apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "FRESH-B" } }); // B (newer, silent)
+
+    await act(async () => {
+      const pA = latestDetailResult!.refetch();        // token N (non-silent)
+      const pB = latestDetailResult!.refetchSilent();  // token N+1 (silent, newer)
+      await pB;                                        // B commits fresh data
+      resolveA({ deal: { id: "deal-1", name: "STALE-A" } }); // A resolves last with an older snapshot
+      await pA;
+      await flushEffects();
+    });
+
+    expect(latestDetailResult?.deal).toMatchObject({ name: "FRESH-B" }); // older non-silent did NOT overwrite the poll
+    expect(latestDetailResult?.loading).toBe(false); // A (latest non-silent) still cleared its own spinner
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
   it("logs a silent poll failure and keeps the last-good deal (no error surfaced, no blank)", async () => {
     const apiMock = vi.mocked(api);
     apiMock.mockResolvedValueOnce({ deal: { id: "deal-1", name: "good" } }); // mount load
