@@ -86,7 +86,7 @@ beforeAll(async () => {
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       is_change_order boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
-      won_closed_date date, expected_close_date date, stage_entered_at timestamptz, updated_at timestamptz,
+      won_closed_date date, actual_close_date date, project_number text, expected_close_date date, stage_entered_at timestamptz, updated_at timestamptz,
       created_at timestamptz, awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric,
       dd_estimate numeric, change_order_total numeric
     );
@@ -134,6 +134,9 @@ beforeAll(async () => {
       ('${D.wlSigned}', 'WL-3', 'WL signed', '${REP_WL}', '${ST_WON}', false, '2026-04-03T00:00:00Z', NULL, '2026-04-03', 90000, '2026-02-03T00:00:00Z'),
       ('${D.wlLost}', 'WL-4', 'WL lost', '${REP_WL}', '${ST_LOST}', false, NULL, NULL, NULL, 90000, '2026-02-04T00:00:00Z'),
       ('${D.wlTest}', 'WL-5', 'WL test', '${REP_WL}', '${ST_WON}', true, NULL, NULL, '2026-04-05', 90000, '2026-02-05T00:00:00Z');
+    -- WL-1 carries the QuickBooks project number + an actual_close_date that DIFFERS from won_closed_date, so
+    -- the worklist can surface both the pivot date and any drift for accounting lookups.
+    UPDATE deals SET actual_close_date = '2026-04-08', project_number = 'dfw-1-02932-aa' WHERE id = '${D.wlMissing}';
     -- REP_WL change order, Won-family, no contract date -> MUST be excluded (the contract-date PATCH rejects
     -- change orders with CHANGE_ORDER_FIELD_LOCKED, so it would be an unactionable stuck row).
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_test_data, is_change_order, contract_signed_at, contract_signed_date, won_closed_date, awarded_amount, created_at) VALUES
@@ -256,6 +259,10 @@ describe("Won-but-missing-contract worklist", () => {
     expect(rows[0]!.dealNumber).toBe("WL-1");
     expect(rows[0]!.value).toBeCloseTo(70000, 2);
     expect(rows[0]!.wonDate).toBe("2026-04-01");
+    // Reconciliation fields for a QuickBooks lookup without drilling into the deal: the project number and the
+    // actual_close_date beside won_closed_date (wonDate), so any drift between the two is visible.
+    expect(rows[0]!.projectNumber).toBe("dfw-1-02932-aa");
+    expect(rows[0]!.actualCloseDate).toBe("2026-04-08");
   });
 
   it("a rep with no stuck Won deals returns an empty worklist", async () => {

@@ -256,6 +256,8 @@ export interface RepDetailData {
     propertyName: string | null;
     value: number;
     wonDate: string | null;
+    projectNumber: string | null;
+    actualCloseDate: string | null;
   }>;
   tasksToday: { overdue: number; today: number };
   activityThisWeek: {

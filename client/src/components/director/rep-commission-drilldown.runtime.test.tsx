@@ -374,6 +374,8 @@ describe("RepCommissionDrilldown — missing-contract worklist", () => {
         propertyName: null,
         value: 70000,
         wonDate: "2026-04-01",
+        projectNumber: "dfw-1-02932-aa",
+        actualCloseDate: "2026-04-08",
       },
     ];
     const { container, cleanup } = renderDrilldown({ wonMissingContractDate: worklist, onDataChanged });
@@ -404,6 +406,36 @@ describe("RepCommissionDrilldown — missing-contract worklist", () => {
     expect(apiMock.mock.calls[0]![0]).toBe("/deals/deal-stuck/contract-signed-date");
     expect(apiMock.mock.calls[0]![1]).toMatchObject({ method: "PATCH", json: { date: "2026-04-10" } });
     expect(onDataChanged).toHaveBeenCalledTimes(1);
+    cleanup();
+  });
+
+  it("surfaces the canonical lookup number + Won/Actual close dates so accounting can reconcile without drilling in", () => {
+    const worklist: Worklist = [
+      {
+        dealId: "deal-proj", dealNumber: "HS-318900588242", dealName: "HubSpot-mapped deal",
+        companyName: "Gamma", propertyName: null, value: 70000,
+        wonDate: "2026-04-01", projectNumber: "dfw-1-02932-aa", actualCloseDate: "2026-04-08",
+      },
+      {
+        // Bid-board deal: project_number is empty, the canonical QuickBooks number lives in deal_number.
+        dealId: "deal-bb", dealNumber: "2-SLA.3-100225", dealName: "BB Sewer Repairs",
+        companyName: null, propertyName: null, value: 18472.5,
+        wonDate: "2026-04-10", projectNumber: null, actualCloseDate: null,
+      },
+      {
+        // HubSpot id with no project number → no real lookup number, so no pill (never show the HS id).
+        dealId: "deal-hs", dealNumber: "HS-999000111", dealName: "HubSpot-only deal",
+        companyName: null, propertyName: null, value: 5000,
+        wonDate: "2026-04-11", projectNumber: null, actualCloseDate: null,
+      },
+    ];
+    const { container, cleanup } = renderDrilldown({ wonMissingContractDate: worklist, onDataChanged: vi.fn() });
+    const text = container.textContent ?? "";
+    expect(text).toContain("dfw-1-02932-aa"); // project # wins when present
+    expect(text).toContain("2-SLA.3-100225"); // bid-board deal falls back to deal_number (the fix)
+    expect(text).not.toContain("HS-"); // a HubSpot id is never shown as the lookup number
+    expect(text).toContain("Won close"); // the close date it currently pivots off of
+    expect(text).toContain("Actual close"); // shown beside it so drift is visible
     cleanup();
   });
 });
