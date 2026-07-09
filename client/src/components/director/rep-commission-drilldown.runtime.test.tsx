@@ -374,6 +374,8 @@ describe("RepCommissionDrilldown — missing-contract worklist", () => {
         propertyName: null,
         value: 70000,
         wonDate: "2026-04-01",
+        projectNumber: "dfw-1-02932-aa",
+        actualCloseDate: "2026-04-08",
       },
     ];
     const { container, cleanup } = renderDrilldown({ wonMissingContractDate: worklist, onDataChanged });
@@ -404,6 +406,28 @@ describe("RepCommissionDrilldown — missing-contract worklist", () => {
     expect(apiMock.mock.calls[0]![0]).toBe("/deals/deal-stuck/contract-signed-date");
     expect(apiMock.mock.calls[0]![1]).toMatchObject({ method: "PATCH", json: { date: "2026-04-10" } });
     expect(onDataChanged).toHaveBeenCalledTimes(1);
+    cleanup();
+  });
+
+  it("surfaces the project number + Won/Actual close dates so accounting can reconcile without drilling in", () => {
+    const worklist: Worklist = [
+      {
+        dealId: "deal-stuck",
+        dealNumber: "WL-1",
+        dealName: "Stuck won deal",
+        companyName: "Gamma",
+        propertyName: null,
+        value: 70000,
+        wonDate: "2026-04-01",
+        projectNumber: "dfw-1-02932-aa",
+        actualCloseDate: "2026-04-08",
+      },
+    ];
+    const { container, cleanup } = renderDrilldown({ wonMissingContractDate: worklist, onDataChanged: vi.fn() });
+    const text = container.textContent ?? "";
+    expect(text).toContain("dfw-1-02932-aa"); // project # — copy into QuickBooks, no drill-in
+    expect(text).toContain("Won close"); // the close date it currently pivots off of
+    expect(text).toContain("Actual close"); // shown beside it so drift is visible
     cleanup();
   });
 });

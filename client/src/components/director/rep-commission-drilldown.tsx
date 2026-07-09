@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { formatDate } from "@/lib/deal-utils";
 import type { RepDetailData } from "@/hooks/use-director-dashboard";
 
 // Commission amounts are cent-precision and this surface asserts a VISIBLE reconciliation (owner +
@@ -526,33 +527,63 @@ function MissingContractRow({
   };
 
   return (
-    <div className="flex flex-col gap-2 rounded-md border border-amber-200 bg-white px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
-      <div className="min-w-0">
-        <Link
-          to={`/deals/${deal.dealId}`}
-          className="font-medium text-slate-900 underline-offset-2 hover:underline"
-        >
-          {deal.dealName}
-        </Link>
+    <div className="flex flex-col gap-3 rounded-md border border-amber-200 bg-white px-3 py-2.5 sm:flex-row sm:items-center sm:gap-4">
+      {/* Identity: deal name + QuickBooks project number, then company · property · value */}
+      <div className="min-w-0 sm:flex-1">
+        <div className="flex flex-wrap items-center gap-x-2">
+          <Link
+            to={`/deals/${deal.dealId}`}
+            className="font-medium text-slate-900 underline-offset-2 hover:underline"
+          >
+            {deal.dealName}
+          </Link>
+          {deal.projectNumber ? (
+            // The QuickBooks project number, so accounting can look the deal up without opening the deal.
+            <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600">
+              {deal.projectNumber}
+            </span>
+          ) : null}
+        </div>
         <div className="text-xs text-slate-500">
           {[deal.companyName, deal.propertyName].filter(Boolean).join(" · ") || "—"} ·{" "}
           {formatUsd(deal.value)}
         </div>
       </div>
-      <div className="flex items-center gap-2">
-        <Input
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          className="h-8 w-[9.5rem]"
-          aria-label={`Contract signed date for ${deal.dealName}`}
-          disabled={saving}
-        />
-        <Button size="sm" onClick={handleSave} disabled={saving}>
-          {saving ? "Saving…" : "Set date"}
-        </Button>
+
+      {/* Close dates laid out in the row's whitespace so they're scannable at a glance: the date this Won
+          deal currently pivots off of + actual_close_date beside it (drift check). The contract-signed date
+          it will pivot on once released is set on the right. */}
+      <div className="flex shrink-0 items-center gap-5 sm:gap-8">
+        <DateStat label="Won close" value={formatDate(deal.wonDate)} />
+        <DateStat label="Actual close" value={deal.actualCloseDate ? formatDate(deal.actualCloseDate) : "—"} />
       </div>
-      {error ? <span className="text-xs text-red-600">{error}</span> : null}
+
+      {/* Release: set the contract-signed date the earned commission will pivot on */}
+      <div className="flex shrink-0 flex-col items-end gap-1">
+        <div className="flex items-center gap-2">
+          <Input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="h-8 w-[9.5rem]"
+            aria-label={`Contract signed date for ${deal.dealName}`}
+            disabled={saving}
+          />
+          <Button size="sm" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving…" : "Set date"}
+          </Button>
+        </div>
+        {error ? <span className="text-xs text-red-600">{error}</span> : null}
+      </div>
+    </div>
+  );
+}
+
+function DateStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="text-right sm:text-center">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{label}</div>
+      <div className="text-xs tabular-nums text-slate-700">{value}</div>
     </div>
   );
 }
