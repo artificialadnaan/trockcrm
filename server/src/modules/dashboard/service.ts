@@ -547,7 +547,9 @@ export interface RepWonMissingContractDeal {
   companyName: string | null;
   propertyName: string | null;
   value: number;
-  wonDate: string | null;
+  wonDate: string | null;          // won_closed_date — the close date this Won deal currently pivots off of
+  projectNumber: string | null;    // deals.project_number (e.g. dfw-1-02932-aa) — for a QuickBooks lookup
+  actualCloseDate: string | null;  // deals.actual_close_date — shown beside wonDate to surface any drift
 }
 
 export interface DirectorRepCommissionRow {
@@ -3663,7 +3665,9 @@ export async function getRepWonMissingContractDate(
       c.name AS company_name,
       p.name AS property_name,
       ${aliasedEffectiveWonDealValueSql("d")} AS value,
-      ${aliasedWonHsClosedWonDateSql("d")} AS won_date
+      ${aliasedWonHsClosedWonDateSql("d")} AS won_date,
+      d.project_number AS project_number,
+      d.actual_close_date AS actual_close_date
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     LEFT JOIN ${companies} c ON c.id = d.company_id
@@ -3692,6 +3696,8 @@ export async function getRepWonMissingContractDate(
     propertyName: row.property_name ? String(row.property_name) : null,
     value: Number(row.value ?? 0),
     wonDate: row.won_date ? String(row.won_date).slice(0, 10) : null,
+    projectNumber: row.project_number ? String(row.project_number) : null,
+    actualCloseDate: row.actual_close_date ? String(row.actual_close_date).slice(0, 10) : null,
   }));
 }
 
