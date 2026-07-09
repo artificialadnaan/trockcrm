@@ -59,6 +59,13 @@ function isHeldOnly(r: Row): boolean {
 function displayedEarned(r: Row): number {
   return isHeldOnly(r) ? r.heldEarnedCommission : r.totalEarnedCommission;
 }
+// Reserved = the rep's accrued commission on ALL won work: signed (earned/held-aware) commission + projected
+// commission on their won-but-unsigned deals. One figure. The floor "held" badge still rides on the
+// signed/earned portion (see the cell). Note the mixed window: the signed part is period-windowed, the
+// unsigned part is a live snapshot — surfaced in the caption under the period toggle.
+function reserved(r: Row): number {
+  return displayedEarned(r) + r.wonUnsignedCommission;
+}
 
 function KpiCard({ label, value, tone }: { label: string; value: string; tone: string }) {
   return (
@@ -95,20 +102,23 @@ export function TeamCommissionsPage() {
     }),
     { earned: 0, wonUnsignedCommission: 0, potential: 0, activities: 0 },
   ), [rows]);
-  const office = data?.officeTotals ?? { activeDeals: 0, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0 };
+  const office = data?.officeTotals ?? { activeDeals: 0, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0, wonSignedValue: 0, wonSignedCount: 0 };
   const maxPipeline = useMemo(() => rows.reduce((m, r) => Math.max(m, r.pipelineValue), 0), [rows]);
-  // Won·unsigned can have $0 value but real deals (no awarded/bid/DD amount). Surface the count in the
-  // KPI + footer total so a bare "$0.00" doesn't hide N unsigned wins — mirrors the per-row cell.
-  const wonUnsignedLabel = (value: number, count: number) =>
+  // Won·signed / Won·unsigned can have $0 value but real deals (no awarded/bid/DD amount). Surface the count
+  // in the KPI + footer total so a bare "$0.00" doesn't hide N wins — mirrors the per-row cell.
+  const withCount = (value: number, count: number) =>
     value === 0 && count > 0 ? `${usdExact(value)} (${count})` : usdExact(value);
+  const wonUnsignedLabel = withCount;
+  const wonSignedLabel = withCount;
 
   // Sortable columns (sort keys cover every visible figure; compound cells sort by a representative total).
   const sortCols: SortColumn<Row>[] = [
     { key: "rep", type: "text", accessor: (r) => r.repName },
-    { key: "earned", type: "number", accessor: (r) => displayedEarned(r) },
-    { key: "unsignedcomm", type: "number", accessor: (r) => r.wonUnsignedCommission },
-    // Tie-break equal values by deal count so a zero-value-but-counted won·unsigned row (a won deal with
-    // no awarded/bid/DD amount) outranks a truly-empty row instead of collapsing to the same position.
+    // Reserved sorts by the DISPLAYED combined figure (signed/held-aware earned + unsigned commission).
+    { key: "earned", type: "number", accessor: (r) => reserved(r) },
+    // Tie-break equal values by deal count so a zero-value-but-counted won row (a won deal with no
+    // awarded/bid/DD amount) outranks a truly-empty row instead of collapsing to the same position.
+    { key: "wonsigned", type: "number", accessor: (r) => r.wonSignedValue, compare: (a, b) => (a.wonSignedValue - b.wonSignedValue) || (a.wonSignedCount - b.wonSignedCount) },
     { key: "wonunsigned", type: "number", accessor: (r) => r.wonUnsignedValue, compare: (a, b) => (a.wonUnsignedValue - b.wonUnsignedValue) || (a.wonUnsignedCount - b.wonUnsignedCount) },
     { key: "potential", type: "number", accessor: (r) => r.potentialCommission },
     { key: "pipeline", type: "number", accessor: (r) => r.pipelineValue },
@@ -152,8 +162,10 @@ export function TeamCommissionsPage() {
           ))}
         </div>
         <span className="max-w-md text-right text-[11px] text-slate-400">
-          Earned &amp; activity are period-windowed; pipeline, potential &amp; funnel are live snapshots. Deal-value
-          totals count each deal once; rep rows credit both owner and estimator, so the columns sum higher.
+          Reserved (signed commission), Won&nbsp;·&nbsp;signed &amp; activity are period-windowed; pipeline,
+          potential, funnel &amp; Won&nbsp;·&nbsp;unsigned are live snapshots. Reserved also folds in live
+          unsigned commission. Deal-value totals count each deal once; rep rows credit both owner and estimator,
+          so the columns sum higher.
         </span>
       </div>
 
@@ -161,11 +173,13 @@ export function TeamCommissionsPage() {
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>
       ) : null}
 
-      {/* Team totals — earned/potential sum the rows (additive cuts); pipeline/active/won·unsigned count each deal once */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <KpiCard label="Earned commission" value={usdExact(additive.earned)} tone="bg-emerald-500" />
+      {/* Team totals — Reserved/potential sum the rows (additive commission cuts); pipeline/active/won·signed/
+          won·unsigned count each deal once (officeTotals). Reserved = Σ(earned) + Σ(unsigned commission). */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <KpiCard label="Reserved" value={usdExact(additive.earned + additive.wonUnsignedCommission)} tone="bg-emerald-500" />
         <KpiCard label="Potential commission" value={usdExact(additive.potential)} tone="bg-sky-500" />
-        <KpiCard label="Won · unsigned" value={wonUnsignedLabel(office.wonUnsignedValue, office.wonUnsignedCount)} tone="bg-teal-500" />
+        <KpiCard label="Won · signed" value={wonSignedLabel(office.wonSignedValue, office.wonSignedCount)} tone="bg-teal-500" />
+        <KpiCard label="Won · unsigned" value={wonUnsignedLabel(office.wonUnsignedValue, office.wonUnsignedCount)} tone="bg-cyan-500" />
         <KpiCard label="Open pipeline" value={usdExact(office.pipelineValue)} tone="bg-violet-500" />
         <KpiCard label="Active deals" value={int(office.activeDeals)} tone="bg-amber-500" />
       </div>
@@ -182,7 +196,7 @@ export function TeamCommissionsPage() {
                 <tr className="border-b border-slate-200">
                   {sortHead("rep", "Rep", false)}
                   {sortHead("earned", "Reserved")}
-                  {sortHead("unsignedcomm", "Unsigned comm.")}
+                  {sortHead("wonsigned", "Won · signed")}
                   {sortHead("wonunsigned", "Won · unsigned")}
                   {sortHead("potential", "Potential")}
                   {sortHead("pipeline", "Pipeline")}
@@ -209,30 +223,39 @@ export function TeamCommissionsPage() {
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right">
+                      {/* Reserved = signed (earned/held-aware) commission + unsigned commission. The drill opens
+                          the EARNED (signed-commission) evidence only — the unsigned portion has no per-deal
+                          booked records — so the drawer total reflects the signed part, not the full cell. */}
                       {isHeldOnly(row) ? (
-                        // Below floor with nothing payable: real earned commission is WITHHELD, not zero. Show
-                        // the held amount so a director doesn't read a bare $0 as "earned nothing"; floorRemaining
-                        // is how much more booked revenue clears it. Drillable to the contributing deals — the
-                        // held amount keeps the emerald drill affordance, the badge carries the amber "held" cue.
+                        // Below floor with nothing payable from the signed side: the earned commission is
+                        // WITHHELD, not zero. Show the full reserve (held earned + unsigned commission) so a
+                        // director doesn't read a bare $0 as "reserved nothing"; floorRemaining is how much more
+                        // booked revenue clears the floor. Drillable to the earned deals; the badge carries the
+                        // amber "held" cue for the signed portion.
                         <span
                           className="inline-flex flex-col items-end"
-                          title={`Held below floor — ${usdExact(row.floorRemaining)} more booked revenue clears it`}
+                          title={`Held below floor — ${usdExact(row.floorRemaining)} more booked revenue clears the signed commission`}
                         >
                           <Drill row={row} metric="earned" money onDrill={onDrill}>
-                            {usdExact(row.heldEarnedCommission)}
+                            {usdExact(reserved(row))}
                           </Drill>
                           <span className="mt-0.5 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-inset ring-amber-200">
                             held · {usdExact(row.floorRemaining)} to floor
                           </span>
                         </span>
                       ) : (
-                        // Payable: the full total (incl. any not-gated manager override on an otherwise-held rep).
-                        <Drill row={row} metric="earned" money zeroDim={row.totalEarnedCommission === 0} onDrill={onDrill}>{usdExact(row.totalEarnedCommission)}</Drill>
+                        // Payable/normal: signed commission (incl. any not-gated manager override) + unsigned.
+                        <Drill row={row} metric="earned" money zeroDim={reserved(row) === 0} onDrill={onDrill}>{usdExact(reserved(row))}</Drill>
                       )}
                     </td>
-                    <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">
-                      {/* Projected commission on this rep's won-but-unsigned deals (won·unsigned value × their rate). */}
-                      {usdExact(row.wonUnsignedCommission)}
+                    <td className="px-3 py-2.5 text-right">
+                      {/* Gross value of this rep's WON + contract-SIGNED deals (period-windowed on the signed
+                          date). Mirrors won·unsigned: drills on COUNT so a won·signed deal with no awarded/bid/DD
+                          amount (value 0) still surfaces its count instead of being hidden. */}
+                      <Drill row={row} metric="won_signed" money zeroDim={row.wonSignedCount === 0} onDrill={onDrill}>
+                        {usdExact(row.wonSignedValue)}
+                        {row.wonSignedValue === 0 && row.wonSignedCount > 0 ? <span className="ml-1 text-[10px] font-normal text-slate-400">({row.wonSignedCount})</span> : null}
+                      </Drill>
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       {/* Drill on COUNT, not value: a won·unsigned deal can lack an awarded/bid/DD amount
@@ -289,8 +312,9 @@ export function TeamCommissionsPage() {
               <tfoot>
                 <tr className="border-t-2 border-slate-300 bg-slate-50 font-black tabular-nums text-slate-800">
                   <td className="px-3 py-2.5 text-left uppercase tracking-wide text-[11px] text-slate-500">Team total</td>
-                  <td className="px-3 py-2.5 text-right text-emerald-700">{usdExact(additive.earned)}</td>
-                  <td className="px-3 py-2.5 text-right text-emerald-700">{usdExact(additive.wonUnsignedCommission)}</td>
+                  {/* Reserved total = additive earned + additive unsigned commission (both are per-rep cuts). */}
+                  <td className="px-3 py-2.5 text-right text-emerald-700">{usdExact(additive.earned + additive.wonUnsignedCommission)}</td>
+                  <td className="px-3 py-2.5 text-right">{wonSignedLabel(office.wonSignedValue, office.wonSignedCount)}</td>
                   <td className="px-3 py-2.5 text-right">{wonUnsignedLabel(office.wonUnsignedValue, office.wonUnsignedCount)}</td>
                   <td className="px-3 py-2.5 text-right">{usdExact(additive.potential)}</td>
                   <td className="px-3 py-2.5 text-right">{usdExact(office.pipelineValue)}</td>

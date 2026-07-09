@@ -136,6 +136,14 @@ beforeAll(async () => {
       ('${U("d08")}','D-8','Won Unsigned','${REP}','${ST.won}','${CO}', 80000, '2026-05-15', '2026-05-16', 'dfw-1-02932-aa');
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, contract_signed_at) VALUES
       ('${U("d09")}','D-9','Won Signed','${REP}','${ST.won}', 95000, '2026-02-01T00:00:00Z');
+    -- WON·SIGNED window proof: D-9 (REP, won, signed 2026-02-01, $95k) is REP's won·signed. D-17 is REP-owned,
+    -- won, but signed in 2025 -> EXCLUDED from a 2026-windowed won·signed (the signed-date window boundary).
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, contract_signed_at) VALUES
+      ('${U("d17")}','D-17','Won Signed 2025','${REP}','${ST.won}', 40000, '2025-06-01T00:00:00Z');
+    -- D-18: won + SIGNED (2026) with a DISTINCT owner (OWN2) + estimator (EST2), both rostered reps -> both
+    -- rows credit it (the row sum double-counts) but officeTotals counts it ONCE — the won·signed de-dup proof.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, awarded_amount, contract_signed_at) VALUES
+      ('${U("d18")}','D-18','Won Signed Shared','${OWN2}','${EST2}','${ST.won}', 20000, '2026-04-01T00:00:00Z');
     -- BOOKED's won deal: deal-level UNSIGNED but a dsc row carries contract_signed_date_at_signing, so Earned
     -- counts it -> must be EXCLUDED from won·unsigned (not awaiting signature). Owner BOOKED, $50k.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount) VALUES
@@ -235,6 +243,7 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect((await ev("pipeline")).total.value).toBe(row.pipelineValue);
     expect((await ev("earned")).total.value).toBe(row.totalEarnedCommission);
     expect((await ev("won_unsigned")).total.value).toBe(row.wonUnsignedValue);
+    expect((await ev("won_signed")).total.value).toBe(row.wonSignedValue);
 
     // sanity on the concrete fixture numbers
     expect(row.activeDeals).toBe(3); // D1 + D2(estimator) + D3
@@ -242,6 +251,8 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(row.potentialCommission).toBe(11000); // owner cuts: 100k×5% + 70k×5%; estimator-only D2: 50k×REP's 5%
     expect(row.wonUnsignedValue).toBe(80000); // D8 (won stage, unsigned); D9 (signed) excluded
     expect(row.wonUnsignedCommission).toBe(4000); // D8 owner cut at REP's 5% rate
+    expect(row.wonSignedValue).toBe(95000); // D9 (won, signed 2026); D17 (signed 2025) out of window
+    expect(row.wonSignedCount).toBe(1);
     expect(row.estimating).toBe(1); // D3 only
     expect(row.leads).toBe(2);
     expect(row.qualifiedLeads).toBe(1);
@@ -270,6 +281,34 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(totals.wonUnsignedValue).toBe(110000);
     expect(totals.wonUnsignedCount).toBe(2);
     expect(ws.officeTotals.wonUnsignedValue).toBe(110000);
+
+    // Won·signed de-dup: D-18 (won+signed 2026) has a DISTINCT owner (OWN2) + estimator (EST2), so it appears
+    // in BOTH rows' won·signed — the per-rep sum double-counts it, officeTotals counts it once. REP D-9 95k +
+    // OWN2 D-18 20k + EST2 D-18 20k = 135k row sum; office = D-9 95k + D-18 20k = 115k (D-17 signed 2025 is
+    // outside the 2026 window on both sides).
+    const perRepWonSignedSum = ws.rows.reduce((s, r) => s + r.wonSignedValue, 0);
+    expect(perRepWonSignedSum).toBe(135000);
+    expect(ws.officeTotals.wonSignedValue).toBe(115000);
+    expect(ws.officeTotals.wonSignedCount).toBe(2);
+    expect(ws.officeTotals.wonSignedValue).toBeLessThan(perRepWonSignedSum);
+  });
+
+  it("won·signed is period-windowed on the contract-signed date (not a live snapshot)", async () => {
+    // Default 2026 window: only D-9 (signed 2026-02-01) counts for REP; D-17 (signed 2025-06-01) is excluded.
+    const in2026 = await getDirectorCommissionWorkspace(tdb, { from: FROM, to: TO });
+    const rep2026 = in2026.rows.find((r) => r.repId === REP)!;
+    expect(rep2026.wonSignedValue).toBe(95000);
+    expect(rep2026.wonSignedCount).toBe(1);
+    // Widen the window to include 2025: D-17 ($40k) now joins D-9 ($95k) -> $135k / 2 deals. Proves the window
+    // boundary is the signed date, not a live snapshot that would always show both.
+    const wide = await getDirectorCommissionWorkspace(tdb, { from: "2025-01-01", to: TO });
+    const repWide = wide.rows.find((r) => r.repId === REP)!;
+    expect(repWide.wonSignedValue).toBe(135000);
+    expect(repWide.wonSignedCount).toBe(2);
+    // Evidence reconciles under the SAME window (drawer total == cell) — the drill query windows identically.
+    const evWide = await getDirectorCommissionEvidence(tdb, { repId: REP, metric: "won_signed", from: "2025-01-01", to: TO });
+    expect(evWide.total.value).toBe(135000);
+    expect(evWide.total.count).toBe(2);
   });
 
   it("a NON-rep source (a director like Chase Kelly) with a sales_source cut is ON the roster and reconciles", async () => {

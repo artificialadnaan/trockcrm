@@ -17,6 +17,7 @@ const workspace = {
       totalEarnedCommission: 0, potentialCommission: 261029.68, floorRemaining: 0,
       newCustomerShare: 0, meetsNewCustomerShare: true,
       activeDeals: 23, pipelineValue: 11601319, wonUnsignedValue: 500000, wonUnsignedCount: 1, wonUnsignedCommission: 25000,
+      wonSignedValue: 800000, wonSignedCount: 1,
       leads: 1, qualifiedLeads: 0, opportunities: 0,
       estimating: 23, calls: 0, emails: 517, meetings: 0, notes: 0, totalActivities: 721,
     },
@@ -27,6 +28,7 @@ const workspace = {
       totalEarnedCommission: 0, potentialCommission: 127213.96, floorRemaining: 0,
       newCustomerShare: 0, meetsNewCustomerShare: true,
       activeDeals: 37, pipelineValue: 21202326.99, wonUnsignedValue: 0, wonUnsignedCount: 2, wonUnsignedCommission: 0,
+      wonSignedValue: 0, wonSignedCount: 0,
       leads: 0, qualifiedLeads: 0, opportunities: 0,
       estimating: 37, calls: 0, emails: 0, meetings: 0, notes: 0, totalActivities: 0,
     },
@@ -37,13 +39,15 @@ const workspace = {
       totalEarnedCommission: 250, potentialCommission: 0, floorRemaining: 0,
       newCustomerShare: 0, meetsNewCustomerShare: true,
       activeDeals: 0, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0, wonUnsignedCommission: 0,
+      wonSignedValue: 0, wonSignedCount: 0,
       leads: 0, qualifiedLeads: 0, opportunities: 0,
       estimating: 0, calls: 0, emails: 0, meetings: 0, notes: 0, totalActivities: 0,
     },
   ],
   // De-duped office totals — DELIBERATELY less than the row sum ($32.8M) to prove the KPI/footer use these
   // (each deal once) instead of summing the involvement rows. Count 3 = Kaleb's 1 valued + Sidney's 2 $0-value.
-  officeTotals: { activeDeals: 45, pipelineValue: 30000000, wonUnsignedValue: 500000, wonUnsignedCount: 3 },
+  // Won·signed de-duped to $750k (< Kaleb's $800k row cell) so the KPI/footer prove they use officeTotals.
+  officeTotals: { activeDeals: 45, pipelineValue: 30000000, wonUnsignedValue: 500000, wonUnsignedCount: 3, wonSignedValue: 750000, wonSignedCount: 1 },
 };
 
 const evidence = {
@@ -78,25 +82,69 @@ describe("TeamCommissionsPage", () => {
     );
   });
 
-  it("renders reps, a Won·unsigned column, and de-duped deal-value totals (NOT the row sum)", async () => {
+  it("renders reps, Won·signed + Won·unsigned columns, and de-duped deal-value totals (NOT the row sum)", async () => {
     const { container } = await render();
     expect(container.textContent).toContain("Kaleb Marshall");
     expect(container.textContent).toContain("Sidney Gibson");
-    expect(container.textContent).toContain("Won · unsigned"); // new column + KPI
+    expect(container.textContent).toContain("Won · signed");   // new column + KPI
+    expect(container.textContent).toContain("Won · unsigned");  // still present
     // Open-pipeline total uses officeTotals ($30,000,000) — NOT the double-counted row sum ($32,803,645.99).
     expect(container.textContent).toContain("Open pipeline");
     expect(container.textContent).toContain("$30,000,000.00");
     expect(container.textContent).not.toContain("$32,803,645.99");
     expect(container.textContent).toContain("Team total");
+    // Won·signed KPI + footer use the DE-DUPED officeTotals ($750,000), not the $800k per-rep row cell.
+    expect(container.textContent).toContain("$750,000.00");
   });
 
-  it("shows the Unsigned comm. column (won·unsigned value × the rep's rate) and sums it in the footer", async () => {
+  it("removes the standalone Unsigned comm. column and folds it into Reserved (signed + unsigned commission)", async () => {
     const { container } = await render();
-    expect(container.textContent).toContain("Unsigned comm."); // the new column header
-    // Kaleb's projected commission on his $500k unsigned wins is $25,000; Sidney + Chase are $0, so the additive
-    // footer total equals Kaleb's cell — the value appears in both the row cell AND the team-total footer.
-    const matches = container.textContent?.match(/\$25,000\.00/g) ?? [];
-    expect(matches.length).toBeGreaterThanOrEqual(2);
+    // The standalone column is gone — its value now lives inside Reserved.
+    expect(container.textContent).not.toContain("Unsigned comm.");
+    // Kaleb: earned $0 + won·unsigned commission $25,000 = Reserved $25,000. Appears in the row cell AND, via
+    // the additive footer (earned $250 from Chase + unsigned comm $25,000), the footer shows $25,250.
+    expect(container.textContent).toContain("$25,000.00"); // Kaleb's Reserved cell
+    expect(container.textContent).toContain("$25,250.00"); // Team-total Reserved = Σ(earned) + Σ(unsigned comm)
+  });
+
+  it("shows a Won·signed column that drills on won_signed and falls back to count when the value is $0", async () => {
+    const signedEvidence = {
+      metric: "won_signed", kind: "deal", repId: "rep-1", repName: "Kaleb Marshall",
+      title: "Kaleb Marshall — Won, signed",
+      subtitle: "Awarded deals in a won stage with a signed contract, signed this period (owner or estimator)",
+      valueLabel: "Awarded value",
+      total: { count: 1, value: 800000 },
+      records: [
+        {
+          id: "d9", navKind: "deal", navId: "d9", primary: "D-9", name: "South Wing", stageLabel: "Won",
+          value: 800000, date: "2026-02-01", companyName: "Acme",
+          projectNumber: "dfw-2-11111-bb", wonClosedDate: "2026-02-01", actualCloseDate: "2026-02-02", contractSignedDate: "2026-02-01",
+        },
+      ],
+    };
+    mocks.apiMock.mockImplementation((url: string) =>
+      url.includes("/evidence")
+        ? Promise.resolve({ data: url.includes("metric=won_signed") ? signedEvidence : evidence })
+        : Promise.resolve({ data: workspace }),
+    );
+    await render();
+    // Kaleb's Won·signed cell ($800,000.00) is a drill button.
+    const signedBtn = Array.from(document.querySelectorAll("button")).find(
+      (b) => (b.textContent?.replace(/\s/g, "") ?? "").startsWith("$800,000.00"),
+    ) as HTMLButtonElement;
+    expect(signedBtn).toBeTruthy();
+    await act(async () => { signedBtn.click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.apiMock).toHaveBeenCalledWith(
+      expect.stringContaining("/dashboard/director/commissions/evidence?repId=rep-1&metric=won_signed"),
+    );
+    // The won·signed drawer surfaces the QuickBooks reconciliation columns (like won·unsigned), with a real
+    // signed date (not "pending").
+    const drawer = document.body.textContent ?? "";
+    expect(drawer).toContain("Kaleb Marshall — Won, signed");
+    expect(drawer).toContain("Project #");
+    expect(drawer).toContain("dfw-2-11111-bb");
+    expect(drawer).toContain("Contract signed");
   });
 
   it("clicking a rep's pipeline opens the drill drawer for that rep+metric", async () => {
@@ -195,7 +243,7 @@ describe("TeamCommissionsPage", () => {
             data: {
               rows: workspace.rows,
               // Whole office's unsigned wins lack amounts: $0 total but 4 deals -> must NOT read as a bare "$0.00".
-              officeTotals: { activeDeals: 45, pipelineValue: 30000000, wonUnsignedValue: 0, wonUnsignedCount: 4 },
+              officeTotals: { activeDeals: 45, pipelineValue: 30000000, wonUnsignedValue: 0, wonUnsignedCount: 4, wonSignedValue: 750000, wonSignedCount: 1 },
             },
           }),
     );
@@ -213,6 +261,7 @@ describe("TeamCommissionsPage", () => {
     totalEarnedCommission: 0, heldEarnedCommission: 4340, floorMet: false, floorRemaining: 4995660,
     potentialCommission: 0, newCustomerShare: 0, meetsNewCustomerShare: true,
     activeDeals: 1, pipelineValue: 0, wonUnsignedValue: 0, wonUnsignedCount: 0, wonUnsignedCommission: 0,
+    wonSignedValue: 0, wonSignedCount: 0,
     leads: 0, qualifiedLeads: 0, opportunities: 0,
     estimating: 0, calls: 0, emails: 0, meetings: 0, notes: 0, totalActivities: 0,
   };
@@ -248,7 +297,7 @@ describe("TeamCommissionsPage", () => {
     // column (the very thing the held display exists to fix).
     const occurrences = (container.textContent?.match(/\$4,340\.00/g) ?? []).length;
     expect(occurrences).toBeGreaterThanOrEqual(3); // column + KPI + footer all reconcile
-    expect(container.textContent).toContain("Earned commission");
+    expect(container.textContent).toContain("Reserved"); // the KPI card is now "Reserved" (was "Earned commission")
     expect(container.textContent).toContain("Team total");
   });
 
