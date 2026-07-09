@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { formatDate } from "@/lib/deal-utils";
+import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
 import type { RepDetailData } from "@/hooks/use-director-dashboard";
 
 // Commission amounts are cent-precision and this surface asserts a VISIBLE reconciliation (owner +
@@ -506,6 +507,9 @@ function MissingContractRow({
   const [date, setDate] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Canonical QuickBooks lookup number: project_number when present, else a non-HubSpot deal_number
+  // (bid-board deals have an empty project_number), else null (never show a HubSpot id).
+  const displayNumber = resolveDealDisplayNumber(deal);
 
   const handleSave = async () => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
@@ -537,10 +541,10 @@ function MissingContractRow({
           >
             {deal.dealName}
           </Link>
-          {deal.projectNumber ? (
-            // The QuickBooks project number, so accounting can look the deal up without opening the deal.
+          {displayNumber ? (
+            // The canonical lookup number so accounting can find the deal in QuickBooks without opening it.
             <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-600">
-              {deal.projectNumber}
+              {displayNumber}
             </span>
           ) : null}
         </div>
