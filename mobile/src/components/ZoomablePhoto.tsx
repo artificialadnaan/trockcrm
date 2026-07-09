@@ -145,7 +145,12 @@ export function ZoomablePhoto({
                   size — fine at 1x, but blurry the instant you pinch-zoom a detail-dense shot (design
                   boards, punch defects). expo-image with allowDownscaling={false} decodes the FULL-res
                   original at native resolution so zoom stays crisp; recyclingKey resets decode state as
-                  the pager recycles this view across photos. */}
+                  the pager recycles this view across photos.
+                  cachePolicy="disk" (NOT "memory-disk"): the in-memory cache would retain ~48MB full-res
+                  bitmaps for pages the FlatList has already unmounted, defeating the windowSize cap and
+                  jetsamming older iPhones after enough swiping. Disk-only keeps the compressed JPEG for
+                  offline re-open while bounding RAM to the mounted window; swipe-back re-decodes from
+                  local disk (cheap). */}
               <Animated.View
                 style={{
                   width,
@@ -158,7 +163,7 @@ export function ZoomablePhoto({
                   style={{ width, height }}
                   contentFit="contain"
                   allowDownscaling={false}
-                  cachePolicy="memory-disk"
+                  cachePolicy="disk"
                   recyclingKey={uri}
                 />
               </Animated.View>
