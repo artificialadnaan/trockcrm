@@ -3099,6 +3099,13 @@ export async function getDirectorCommissionEvidence(
     const wonSignedWindow = opts.wonSigned
       ? sql` AND ${wonSignedDate} >= ${from}::date AND ${wonSignedDate} <= ${to}::date`
       : sql``;
+    // For won·signed, surface the EFFECTIVE signed date the row was counted + windowed by (deal-level OR this
+    // rep's booked signing date) in the Contract signed column/CSV — otherwise a booked-but-deal-unsigned win
+    // reads "pending" despite being counted as signed. Other metrics keep the deal-level date (won·unsigned's
+    // missing-contract-date deals are pending by definition).
+    const contractSignedDateSelect = opts.wonSigned
+      ? sql`${wonSignedDate}::text AS contract_signed_date`
+      : sql`COALESCE(d.contract_signed_at::date, d.contract_signed_date)::text AS contract_signed_date`;
     // Won·unsigned excludes deals already booked FOR THIS REP (Earned counts those), correlated to repId so
     // a deal booked for another involved rep still shows here if it isn't booked for the displayed rep.
     const notBooked = excludeBooked
@@ -3111,7 +3118,7 @@ export async function getDirectorCommissionEvidence(
         d.project_number,
         d.won_closed_date::text AS won_closed_date,
         d.actual_close_date::text AS actual_close_date,
-        COALESCE(d.contract_signed_at::date, d.contract_signed_date)::text AS contract_signed_date
+        ${contractSignedDateSelect}
       FROM ${deals} d
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       LEFT JOIN ${companies} c ON c.id = d.company_id

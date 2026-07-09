@@ -303,7 +303,11 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(booked.wonSignedValue).toBe(50000);
     expect(booked.wonSignedCount).toBe(1);
     expect(booked.wonUnsignedValue).toBe(0); // still out of unsigned — the two columns never both count a leg
-    expect((await getDirectorCommissionEvidence(tdb, { repId: BOOKED, metric: "won_signed", from: FROM, to: TO })).total.value).toBe(50000);
+    const bookedSigned = await getDirectorCommissionEvidence(tdb, { repId: BOOKED, metric: "won_signed", from: FROM, to: TO });
+    expect(bookedSigned.total.value).toBe(50000);
+    // The Contract signed column shows the EFFECTIVE signed date (D-11's booked signing date), not "pending" —
+    // the row was counted + windowed by that fallback date, so the drawer must surface it too.
+    expect(bookedSigned.records.find((r) => r.navId === U("d11"))!.contractSignedDate).toBe("2026-03-01");
 
     // D-13 partitions PER REP: OWN2 booked it (dsc) -> OWN2's won·signed; EST2 didn't -> EST2's won·UNsigned.
     // The same deal is signed-for-OWN2 and unsigned-for-EST2 — never both for the same rep.
