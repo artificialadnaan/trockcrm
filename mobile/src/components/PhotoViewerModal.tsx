@@ -145,6 +145,13 @@ export function PhotoViewerModal({
               showsHorizontalScrollIndicator={false}
               initialScrollIndex={initialIndex}
               getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
+              // Each page decodes the FULL-res original (expo-image allowDownscaling={false}), which can be
+              // ~48MB of bitmap in RAM. Cap the mount window so at most the current photo ± one neighbor are
+              // decoded at once — RN's default windowSize (21) would mount ~20 full-res decodes on a large
+              // gallery and jetsam older field iPhones. Neighbors still preload for smooth swiping.
+              windowSize={3}
+              maxToRenderPerBatch={2}
+              initialNumToRender={2}
               onMomentumScrollEnd={onScrollEnd}
               renderItem={({ item, index: itemIndex }) => {
                 const uri = item.fullImageUrl ?? item.imageUrl;
