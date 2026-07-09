@@ -3,9 +3,10 @@ import { Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View 
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
+import { useQuery } from "@tanstack/react-query";
 import { useProjectPhotos, useProjectReports, useProjectScorecards } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getReportDownload } from "../../../src/api/endpoints";
+import { getReportDownload, getTranscriptionConfig } from "../../../src/api/endpoints";
 import {
   categoryLabel,
   filterPhotos,
@@ -63,6 +64,15 @@ export default function ProjectDetailScreen() {
   const photosQuery = useProjectPhotos(dealId);
   const reportsQuery = useProjectReports(dealId);
   const scorecardsQuery = useProjectScorecards(dealId);
+  // Only offer voice dictation when transcription is actually configured (OPENAI_API_KEY present);
+  // otherwise the mic button would record and 503 every time. Shared key/staleTime with the capture +
+  // scorecard surfaces so react-query dedupes the probe.
+  const transcribeConfig = useQuery({
+    queryKey: ["transcribe-config"],
+    queryFn: () => getTranscriptionConfig(fetcher),
+    staleTime: 5 * 60_000,
+  });
+  const voiceEnabled = transcribeConfig.data?.configured ?? false;
   const scorecards = scorecardsQuery.data?.scorecards ?? [];
   const allPhotos = useMemo(() => photosQuery.data?.photos ?? [], [photosQuery.data]);
   // Some photo pages failed to load — the gallery still shows what loaded, but report/share are blocked so
@@ -353,6 +363,7 @@ export default function ProjectDetailScreen() {
         onClose={() => setReportOpen(false)}
         projectId={dealId}
         photos={filtered}
+        voiceEnabled={voiceEnabled}
         onGenerated={(report) => {
           setNotice({ message: `Report "${report.title}" generated.`, tone: "success" });
           void reportsQuery.refetch();

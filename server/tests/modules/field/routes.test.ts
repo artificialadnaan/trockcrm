@@ -488,6 +488,7 @@ describe("field routes", () => {
       officeSlug: "trock",
       projectId: "deal-1",
       reportTitle: "Roof Repair Photo Report",
+      executiveSummary: null,
       coverData: { creatorName: "Admin User", companyName: "TRock Construction", reportDateLabel: null, projectName: null },
       sections: [{ title: "Section 1", photoIds: ["photo-1"], photoOverrides: [{ id: "photo-1", description: "North slope" }] }],
     });
@@ -507,6 +508,23 @@ describe("field routes", () => {
       userId: "admin-1",
       userRole: "admin",
     }, "report-1");
+  });
+
+  it("forwards an executive summary from the generate request body to the report service", async () => {
+    await invokeRoute("post", "/reports/generate", {
+      body: {
+        projectId: "deal-1",
+        reportTitle: "Roof Repair Photo Report",
+        executiveSummary: "Substantial completion reached ahead of schedule.",
+        coverData: { creatorName: "Admin User", companyName: "TRock Construction" },
+        sections: [{ title: "Section 1", photoIds: ["photo-1"] }],
+      },
+    });
+    expect(reportMocks.generateFieldPhotoReport).toHaveBeenCalledWith(
+      expect.anything(),
+      { userId: "admin-1", userRole: "admin" },
+      expect.objectContaining({ executiveSummary: "Substantial completion reached ahead of schedule." }),
+    );
   });
 });
 

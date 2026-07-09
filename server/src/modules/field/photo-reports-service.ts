@@ -244,6 +244,7 @@ export async function generateFieldPhotoReport(
     officeSlug: string;
     projectId: string;
     reportTitle: string;
+    executiveSummary?: string | null;
     coverData: {
       creatorName: string;
       companyName?: string | null;
@@ -299,7 +300,10 @@ export async function generateFieldPhotoReport(
     projectName: normalizeTitle(input.coverData.projectName ?? undefined, project.name),
     photoCount: renderSections.reduce((sum, section) => sum + section.photos.length, 0),
   };
-  const pdfBuffer = await renderFieldPhotoReportPdf({ cover, sections: renderSections });
+  // Cap the free-form summary so a pathological payload can't balloon the PDF into hundreds of pages;
+  // blank/whitespace collapses to null (renderer adds no page for it).
+  const executiveSummary = input.executiveSummary?.trim() ? input.executiveSummary.trim().slice(0, 5000) : null;
+  const pdfBuffer = await renderFieldPhotoReportPdf({ cover, sections: renderSections, executiveSummary });
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
   const fileExtension = ".pdf";
   const systemFilename = `${slugify(title)}-${now.toISOString().slice(0, 10)}-${crypto.randomUUID().slice(0, 8)}${fileExtension}`;
