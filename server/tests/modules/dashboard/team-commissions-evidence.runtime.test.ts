@@ -66,6 +66,7 @@ beforeAll(async () => {
       estimator_user_id uuid, sales_source_user_id uuid, stage_id uuid NOT NULL, company_id uuid, property_id uuid,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
+      won_closed_date date, actual_close_date date, project_number text,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric,
       change_order_total numeric, expected_close_date date, stage_entered_at timestamptz DEFAULT now());
     CREATE TABLE leads (id uuid PRIMARY KEY, name text, assigned_rep_id uuid, stage_id uuid NOT NULL,
@@ -131,8 +132,8 @@ beforeAll(async () => {
       ('${U("d12")}','D-12','Director-owned','${NONREP}','${ST.opportunity}', 45000);
     -- WON·UNSIGNED: REP-owned deal in a won stage with NO signed contract -> won·unsigned $80k. Plus a
     -- won-but-SIGNED deal (excluded from won·unsigned) to prove the unsigned gate.
-    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount) VALUES
-      ('${U("d08")}','D-8','Won Unsigned','${REP}','${ST.won}','${CO}', 80000);
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount, won_closed_date, actual_close_date, project_number) VALUES
+      ('${U("d08")}','D-8','Won Unsigned','${REP}','${ST.won}','${CO}', 80000, '2026-05-15', '2026-05-16', 'dfw-1-02932-aa');
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, awarded_amount, contract_signed_at) VALUES
       ('${U("d09")}','D-9','Won Signed','${REP}','${ST.won}', 95000, '2026-02-01T00:00:00Z');
     -- BOOKED's won deal: deal-level UNSIGNED but a dsc row carries contract_signed_date_at_signing, so Earned
@@ -445,5 +446,17 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     const linked = ev.records.find((r) => r.navId === U("d01"));
     expect(linked?.navKind).toBe("deal");
     expect(ev.records.filter((r) => r.navId === null)).toHaveLength(2);
+  });
+
+  it("won·unsigned records carry the project number + both close dates, with the contract-signed date pending", async () => {
+    // The Team Commissions "missing contract date" drill-down must surface enough to reconcile against
+    // QuickBooks without clicking into each deal: the project number and the close date it pivots off of.
+    const ev = await getDirectorCommissionEvidence(tdb, { repId: REP, metric: "won_unsigned", from: FROM, to: TO });
+    const d8 = ev.records.find((r) => r.navId === U("d08"))!;
+    expect(d8).toBeTruthy();
+    expect(d8.projectNumber).toBe("dfw-1-02932-aa"); // copy straight into QuickBooks — no drill-in
+    expect(d8.wonClosedDate).toBe("2026-05-15"); // the Won-period basis this deal is currently counted under
+    expect(d8.actualCloseDate).toBe("2026-05-16"); // shown beside won_closed_date to surface any drift
+    expect(d8.contractSignedDate).toBeNull(); // these are the missing-contract-date deals → pending
   });
 });

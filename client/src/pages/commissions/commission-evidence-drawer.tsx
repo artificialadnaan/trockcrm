@@ -60,6 +60,15 @@ function columnsFor(ev: CommissionEvidence): DrillColumn[] {
       sort: { key: "deal", type: "text", accessor: (r) => r.primary ?? "" },
       cell: (r) => <span className="font-medium text-slate-700">{r.primary ?? "—"}</span>,
     });
+    // Won·unsigned ("missing contract date") drill-down: surface the QuickBooks project number so accounting
+    // can look the deal up without drilling in. Rides along in the CSV export too.
+    if (ev.metric === "won_unsigned") {
+      cols.push({
+        key: "project", header: "Project #", numeric: false,
+        sort: { key: "project", type: "text", accessor: (r) => r.projectNumber ?? "" },
+        cell: (r) => <span className="font-mono text-xs text-slate-700">{r.projectNumber ?? "—"}</span>,
+      });
+    }
   }
   cols.push({
     key: "name", header: ev.kind === "activity" ? "Activity" : ev.kind === "lead" ? "Lead" : "Name", numeric: false,
@@ -90,6 +99,31 @@ function columnsFor(ev: CommissionEvidence): DrillColumn[] {
     sort: { key: "date", type: "date", accessor: (r) => r.date },
     cell: (r) => <span className="tabular-nums text-slate-500">{formatDate(r.date)}</span>,
   });
+  if (ev.kind === "deal" && ev.metric === "won_unsigned") {
+    // The close date the Won period pivots off of, the actual_close_date beside it (so drift is visible), and
+    // the contract-signed date — still pending here — that earned commission will pivot on once signed. All
+    // three sort and ride along in the CSV export for QuickBooks reconciliation.
+    cols.push({
+      key: "wonClose", header: "Won close", numeric: true,
+      sort: { key: "wonClose", type: "date", accessor: (r) => r.wonClosedDate ?? null },
+      cell: (r) => <span className="tabular-nums text-slate-600">{formatDate(r.wonClosedDate ?? null)}</span>,
+    });
+    cols.push({
+      key: "actualClose", header: "Actual close", numeric: true,
+      sort: { key: "actualClose", type: "date", accessor: (r) => r.actualCloseDate ?? null },
+      cell: (r) => <span className="tabular-nums text-slate-500">{formatDate(r.actualCloseDate ?? null)}</span>,
+    });
+    cols.push({
+      key: "signed", header: "Contract signed", numeric: true,
+      sort: { key: "signed", type: "date", accessor: (r) => r.contractSignedDate ?? null },
+      cell: (r) =>
+        r.contractSignedDate ? (
+          <span className="tabular-nums text-slate-600">{formatDate(r.contractSignedDate)}</span>
+        ) : (
+          <span className="text-amber-600">pending</span>
+        ),
+    });
+  }
   return cols;
 }
 

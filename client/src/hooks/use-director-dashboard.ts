@@ -462,6 +462,11 @@ export interface CommissionEvidenceRecord {
   value: number | null;
   date: string | null;
   companyName: string | null;
+  // Won·unsigned ("missing contract date") reconciliation fields (see server CommissionEvidenceRecord).
+  projectNumber?: string | null;
+  wonClosedDate?: string | null;
+  actualCloseDate?: string | null;
+  contractSignedDate?: string | null;
 }
 
 export interface CommissionEvidence {
