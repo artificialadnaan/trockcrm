@@ -238,7 +238,9 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     // sanity on the concrete fixture numbers
     expect(row.activeDeals).toBe(3); // D1 + D2(estimator) + D3
     expect(row.pipelineValue).toBe(220000); // 100k + 50k(40k+10kCO) + 70k
+    expect(row.potentialCommission).toBe(11000); // owner cuts: 100k×5% + 70k×5%; estimator-only D2: 50k×REP's 5%
     expect(row.wonUnsignedValue).toBe(80000); // D8 (won stage, unsigned); D9 (signed) excluded
+    expect(row.wonUnsignedCommission).toBe(4000); // D8 owner cut at REP's 5% rate
     expect(row.estimating).toBe(1); // D3 only
     expect(row.leads).toBe(2);
     expect(row.qualifiedLeads).toBe(1);
@@ -370,7 +372,7 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     expect(evEst.records.some((r) => r.navId === U("d13"))).toBe(true);
   });
 
-  it("potential evidence reconciles to pipeline REVENUE (cell is revenue × rate)", async () => {
+  it("potential evidence reconciles to pipeline REVENUE (cell is role-aware projected commission)", async () => {
     const ev = await getDirectorCommissionEvidence(tdb, { repId: REP, metric: "potential", from: FROM, to: TO });
     // drawer total is the pipeline revenue, not the commission cell
     expect(ev.total.value).toBe(220000);

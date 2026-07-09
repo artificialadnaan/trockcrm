@@ -1,10 +1,10 @@
 // Real-types (PGlite + Drizzle-derived schema, #715 helper) proof of the ESTIMATOR-AWARE earned
 // commission money path.
 //
-// Comp model (locked): the estimator earns an ADDITIONAL deal_signed_commissions row at the ESTIMATOR's
-// OWN rate, on top of the owner's full cut (ADDITIVE — never a split). Change-order child deals NEVER
-// mint an estimator row (base-deal-only). A→B where B has no active rate removes A and mints nothing
-// (net $0). The floor gate is untouched (it keys on owned deals / assigned_rep_id, not estimator rows).
+// Comp model (locked): the estimator earns an ADDITIONAL deal_signed_commissions row at that estimator's
+// own active commission rate, on top of the owner's full cut (ADDITIVE — never a split). Change-order child deals NEVER mint an
+// estimator row (base-deal-only). A→B where B is not an active internal CRM user removes A and mints nothing.
+// The floor gate is untouched (it keys on owned deals / assigned_rep_id, not estimator rows).
 //
 // This exercises the REAL deal_signed_commissions / deals / user_commission_settings / users / audit_log
 // schema so the money effects are type-accurate. setDealEstimator (the manual edit path) is driven
@@ -37,9 +37,9 @@ const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 // One office; everyone lives in it so the same-office reassignment validation passes.
 const OFFICE = U("0f1");
 const OWNER = U("0001"); // 2% rate
-const ESTA = U("00a1"); // estimator A, 5% rate
-const ESTB = U("00b2"); // estimator B, 3% rate
-const ESTNR = U("00c3"); // estimator with NO active rate
+const ESTA = U("00a1"); // estimator A, rate 0.05
+const ESTB = U("00b2"); // estimator B, rate 0.03
+const ESTNR = U("00c3"); // estimator with NO commission settings; no estimator row
 const STAGE = U("0500");
 
 let pg: PGlite;
@@ -112,7 +112,7 @@ beforeAll(async () => {
   await mkUser(OWNER);
   await mkUser(ESTA);
   await mkUser(ESTB);
-  await mkUser(ESTNR); // active user but no commission settings → no rate
+  await mkUser(ESTNR); // active user but no commission settings → no estimator row
   const mkRate = (id: string, rate: string) =>
     pg.exec(
       `INSERT INTO public.user_commission_settings (user_id, commission_rate, is_active)
@@ -129,7 +129,7 @@ afterAll(async () => {
 });
 
 describe("estimator-aware earned commission (real Drizzle-derived schema)", () => {
-  // 1. SIGN-TIME: calculateCommissionForDeal mints BOTH rows (owner full cut + estimator own rate).
+  // 1. SIGN-TIME: calculateCommissionForDeal mints BOTH rows (owner full cut + estimator user's rate).
   it("sign-time mints BOTH the owner row and an additive estimator row at the estimator's own rate", async () => {
     const D = U("0de1");
     await seedDeal(D, { estimator: ESTA });
@@ -147,7 +147,7 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     expect(Number(owner.amount)).toBe(2000); // 100000 × 0.02 (owner full cut)
     expect(Number(owner.applied_rate)).toBe(0.02);
     expect(owner.attribution_role).toBe("owner"); // role stamped so the estimator delete can never hit it
-    expect(Number(est.amount)).toBe(5000); // 100000 × 0.05 (estimator's OWN rate — additive)
+    expect(Number(est.amount)).toBe(5000); // 100000 × 0.05 (estimator A's rate — additive)
     expect(Number(est.applied_rate)).toBe(0.05);
     expect(est.attribution_role).toBe("estimator");
     // Same source value drives both rows.
@@ -170,7 +170,7 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     expect(rows).toHaveLength(2);
     const ownerAfter = rowFor(rows, OWNER)!;
     const est = rowFor(rows, ESTB)!;
-    expect(Number(est.amount)).toBe(3000); // 100000 × 0.03
+    expect(Number(est.amount)).toBe(3000); // 100000 × 0.03 (estimator B's rate)
     // OWNER row byte-identical (same id, amount, rate, stamp, calculated_at) — only the NEW estimator row added.
     expect(ownerAfter).toEqual(ownerBefore);
 
@@ -196,7 +196,7 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     const rows = await dscRows(D);
     expect(rows).toHaveLength(2);
     expect(rowFor(rows, ESTA)).toBeUndefined(); // A removed
-    expect(Number(rowFor(rows, ESTB)!.amount)).toBe(3000); // B minted
+    expect(Number(rowFor(rows, ESTB)!.amount)).toBe(3000); // B minted at estimator B's rate
     expect(rowFor(rows, OWNER)).toEqual(ownerBefore); // owner untouched
   });
 
@@ -216,8 +216,8 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     expect(rowFor(rows, ESTB)).toBeUndefined();
   });
 
-  // 5. A→B where B has NO active rate: A removed, nothing minted (net $0); owner untouched.
-  it("manual A→(rateless B) removes A and mints nothing (net $0); owner untouched", async () => {
+  // 5. A→B where B has no commission settings: A removed, B mints nothing; owner untouched.
+  it("manual A→(no-settings B) removes A and mints no estimator row; owner untouched", async () => {
     const D = U("0de5");
     await seedDeal(D, { estimator: ESTA });
     await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
@@ -227,13 +227,13 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     await setDealEstimator(tdb, D, ESTNR, OWNER);
 
     const rows = await dscRows(D);
-    expect(rows).toHaveLength(1); // ESTA gone, ESTNR has no rate so nothing minted
+    expect(rows).toHaveLength(1); // ESTA gone, ESTNR has no active commission settings
     expect(rowFor(rows, OWNER)).toEqual(ownerBefore);
     expect(rowFor(rows, ESTNR)).toBeUndefined();
   });
 
   // 6. unchanged estimator whose rate LATER vanishes: the no-op short-circuit PRESERVES the existing row.
-  it("re-setting the SAME estimator is a no-op short-circuit — preserves the row even if the rate later vanished", async () => {
+  it("re-setting the SAME estimator is a no-op short-circuit — preserves the row even if settings later changed", async () => {
     const D = U("0de6");
     await seedDeal(D, { estimator: ESTA });
     await calculateCommissionForDeal(tdb, { dealId: D, contractSignedDate: "2026-01-01", triggeredByUserId: OWNER });
@@ -552,12 +552,12 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     const est = rowFor(rows, ESTA)!;
     expect(est).toBeDefined(); // X's estimator row WAS minted — proxy would have denied it
     expect(est.attribution_role).toBe("estimator");
-    expect(Number(est.amount)).toBe(5000); // 100000 × 0.05 (X's OWN rate, additive)
+    expect(Number(est.amount)).toBe(5000); // 100000 × 0.05 (estimator A's rate, additive)
     expect(rowFor(rows, OWNER)).toEqual(ownerBefore); // the original owner's full-cut row is byte-identical
   });
 
   // 18. ESTIMATOR DISTINCT FROM BOTH (Y ≠ O, Y ≠ X): signed owner=O, reassign O→X, set estimator=Y.
-  // Y's estimator row is minted at Y's own rate; the booked owner row (still O) is byte-identical.
+  // Y's estimator row is minted at Y's own estimator rate; the booked owner row (still O) is byte-identical.
   it("reassign owner O→X then set estimator=Y (distinct) mints Y's row; O's owner row byte-identical", async () => {
     const D = U("0d18");
     await seedDeal(D, { estimator: null }); // owner=OWNER(O)
@@ -572,7 +572,7 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     expect(rows).toHaveLength(2);
     const est = rowFor(rows, ESTB)!;
     expect(est.attribution_role).toBe("estimator");
-    expect(Number(est.amount)).toBe(3000); // 100000 × 0.03 (Y's own rate)
+    expect(Number(est.amount)).toBe(3000); // 100000 × 0.03
     expect(rowFor(rows, ESTA)).toBeUndefined(); // X (current assignee, not the estimator) books no row
     expect(rowFor(rows, OWNER)).toEqual(ownerBefore); // booked owner stays O, byte-identical
   });
@@ -606,8 +606,9 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
   // owner never got a row even after gaining a rate. The mint is now GATED on an existing owner row.
   // ───────────────────────────────────────────────────────────────────────────────────────────────────
 
-  // Owner with NO active rate, but a distinct estimator with a rate. assigned_rep_id is ESTNR (active user,
-  // no commission settings) so the owner mint skips; estimator_user_id is ESTA (5%). seedDeal hardcodes the
+  // Owner with NO active rate, but a distinct estimator who would otherwise earn per-estimator commission.
+  // assigned_rep_id is ESTNR (active user, no commission settings) so the owner mint skips; estimator_user_id
+  // is ESTA. seedDeal hardcodes the
   // owner, so this one is inserted directly to give it a rateless owner.
   async function seedRatelessOwnerDeal(id: string) {
     await pg.exec(
@@ -619,11 +620,11 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     );
   }
 
-  // 20. SIGN-TIME (the FINDING A scenario): rateless owner + rated distinct estimator. The owner mint is
+  // 20. SIGN-TIME (the FINDING A scenario): rateless owner + distinct estimator. The owner mint is
   // skipped_no_rate (no owner row), so the estimator mint is gated → skipped_no_owner_row, and NOTHING is
   // written. The deal stays at ZERO dsc rows — no orphan estimator row, and the owner backfill can STILL
   // find and fix the deal once the owner gains a rate.
-  it("sign-time: rateless owner + rated distinct estimator mints NEITHER row (estimator gated → zero rows)", async () => {
+  it("sign-time: rateless owner + distinct estimator mints NEITHER row (estimator gated → zero rows)", async () => {
     const D = U("0d20");
     await seedRatelessOwnerDeal(D);
 
@@ -645,7 +646,7 @@ describe("estimator-aware earned commission (real Drizzle-derived schema)", () =
     const D = U("0d21");
     await seedRatelessOwnerDeal(D);
 
-    // No owner row was ever minted (owner ESTNR has no rate). Call the mint helper directly for the estimator.
+    // No owner row was ever minted (owner ESTNR has no owner rate). Call the mint helper directly for the estimator.
     const mint = await mintEstimatorCommissionForDeal(tdb, {
       dealId: D,
       estimatorUserId: ESTA,

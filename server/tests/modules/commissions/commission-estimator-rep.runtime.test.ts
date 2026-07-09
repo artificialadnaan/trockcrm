@@ -8,9 +8,8 @@ import { getRepCommissionDashboard, repSql } from "../../../src/modules/commissi
  * REAL-SQL (PGlite) commission-SAFETY proof for PR 2. The commission deal FILTER is estimator-aware:
  * filtering by a person now includes deals they ESTIMATED. This is a VIEW-FILTER change ONLY — it must
  * NOT change who earns/gets paid:
- *   - the PIPELINE branch (unsigned deals) widens to deals the person owns OR estimated, but each row's
- *     commission is still computed at the ASSIGNED rep's rate (cs.user_id = d.assigned_rep_id), NOT the
- *     filtered person's rate;
+ *   - the PIPELINE branch (unsigned deals) widens to deals the person owns OR estimated. Owned rows use the
+ *     owner rate; estimator-only rows use the estimator user's own rate.
  *   - the EARNED branch keys on dsc.rep_user_id (the commission earner) and is UNCHANGED — an estimator
  *     does NOT inherit the owner's earned commission.
  * Executes the real getRepCommissionDashboard query (incl. its snapshot write).
@@ -52,10 +51,15 @@ beforeAll(async () => {
       attribution_role text NOT NULL DEFAULT 'owner',
       contract_signed_date_at_signing date
     );
+    CREATE TABLE users (id uuid PRIMARY KEY, display_name text, is_active boolean NOT NULL DEFAULT true, role text NOT NULL DEFAULT 'rep');
 
     INSERT INTO pipeline_stage_config (id, slug) VALUES ('${ST}', 'opportunity');
     INSERT INTO user_commission_settings (user_id, commission_rate, is_active) VALUES
       ('${REP_A}', 0.10, true), ('${REP_B}', 0.05, true);
+    -- Both reps are ACTIVE internal CRM users, so the estimator-rate join (gated on users.is_active +
+    -- role <> 'field_contractor') behaves exactly as before this gate was added.
+    INSERT INTO users (id, display_name, is_active, role) VALUES
+      ('${REP_A}', 'Alice', true, 'rep'), ('${REP_B}', 'Bob', true, 'rep');
     -- unsigned pipeline deal: assigned A, estimated by B
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, bid_estimate, change_order_total, created_at) VALUES
       ('${D.pipelineEstB}', 'P-1', 'Pipeline est B', '${REP_A}', '${REP_B}', '${ST}', 100000, 0, '2026-02-01T00:00:00Z');
@@ -77,15 +81,17 @@ afterAll(async () => {
 
 const RANGE = { from: "2026-01-01", to: "2026-06-04" };
 
-describe("commission report deal filter is estimator-aware but attribution/math are unchanged", () => {
-  it("Bob (estimator-only) sees the pipeline deal he ESTIMATED, valued at the OWNER's rate (not Bob's)", async () => {
+describe("commission report deal filter is estimator-aware with per-estimator potential", () => {
+  it("Bob (estimator-only) sees the pipeline deal he ESTIMATED at his own estimator rate", async () => {
     const dash = await getRepCommissionDashboard(tdb, { role: "rep", userId: REP_B, ...RANGE });
     const pipeline = dash.deals.find((d) => d.dealId === D.pipelineEstB);
     expect(pipeline).toBeDefined(); // estimator-aware: surfaces despite Bob not owning it
     expect(pipeline?.isEarned).toBe(false);
-    // 100000 * Alice's rate 0.10 = 10000 — computed at the ASSIGNED rep's rate, NOT Bob's 0.05 (= 5000).
-    expect(pipeline?.commission).toBeCloseTo(10000, 2);
-    expect(dash.summary.inPipeline).toBeCloseTo(10000, 2);
+    // 100000 * Bob's 0.05 estimator rate = 5000.00, independent of Alice's 10% owner rate.
+    expect(pipeline?.commission).toBeCloseTo(5000, 2);
+    expect(pipeline?.commissionRate).toBeCloseTo(0.05, 6);
+    // Includes the unassigned estimated deal below too: 100000×0.05 + 30000×0.05 = 6500.00.
+    expect(dash.summary.inPipeline).toBeCloseTo(6500, 2);
   });
 
   it("Bob does NOT inherit the owner's EARNED commission (attribution keys on dsc.rep_user_id)", async () => {
@@ -96,11 +102,11 @@ describe("commission report deal filter is estimator-aware but attribution/math 
 
   it("does NOT crash on an UNASSIGNED deal Bob estimated (snapshot write guards null rep)", async () => {
     // Before the snapshot guard, a NULL assigned_rep_id row tried to INSERT ''::uuid and 22P02-crashed
-    // the whole request. The deal surfaces (Bob estimated it) with no assigned rep -> commission 0.
+    // the whole request. The deal surfaces (Bob estimated it) at Bob's own estimator rate even with no owner.
     const dash = await getRepCommissionDashboard(tdb, { role: "rep", userId: REP_B, ...RANGE });
     const row = dash.deals.find((d) => d.dealId === D.unassignedEstB);
     expect(row).toBeDefined();
-    expect(row?.commission).toBeCloseTo(0, 2); // no assigned rep => no commission rate applied
+    expect(row?.commission).toBeCloseTo(1500, 2); // 30000 × 0.05
   });
 
   it("does NOT show the OWNER's snapshot delta on a deal the rep only estimated", async () => {
@@ -114,20 +120,20 @@ describe("commission report deal filter is estimator-aware but attribution/math 
     const row = dash.deals.find((d) => d.dealId === D.pipelineEstB);
     expect(row).toBeDefined();
     // Bob only ESTIMATED this deal; the snapshot read is keyed on Bob, so Alice's "since last update"
-    // delta (10000 − 8000) is NOT surfaced to Bob.
+    // delta is NOT surfaced to Bob.
     expect(row?.deltaCommission ?? null).toBeNull();
   });
 
   it("an estimator's dashboard view does NOT refresh the OWNER's snapshot (no cross-rep clobber)", async () => {
-    // Bob estimated D.pipelineEstB (owned by Alice). Bob viewing his dashboard must not upsert Alice's
-    // (deal, owner) snapshot — that would clobber Alice's "since last update" delta before she's seen it.
+    // Bob estimated D.pipelineEstB (owned by Alice). Bob viewing his dashboard may upsert Bob's estimator
+    // projection snapshot, but must not upsert Alice's owner snapshot.
     await tdb.execute(sql`DELETE FROM commission_deal_snapshots`);
     await getRepCommissionDashboard(tdb, { role: "rep", userId: REP_B, ...RANGE });
     const snaps = (await tdb
       .execute(sql`SELECT deal_id::text AS deal_id, rep_user_id::text AS rep_user_id FROM commission_deal_snapshots`)
       .then((r: unknown) => ((r as { rows?: unknown[] })?.rows ?? r) as Array<{ deal_id: string; rep_user_id: string }>));
-    // No snapshot written for the estimated deal (owned by Alice) during Bob's view.
-    expect(snaps.some((s) => s.deal_id === D.pipelineEstB)).toBe(false);
+    expect(snaps.some((s) => s.deal_id === D.pipelineEstB && s.rep_user_id === REP_A)).toBe(false);
+    expect(snaps.some((s) => s.deal_id === D.pipelineEstB && s.rep_user_id === REP_B)).toBe(true);
     // Sanity: when ALICE (the owner) views her own dashboard, HER snapshot for that deal IS written.
     await getRepCommissionDashboard(tdb, { role: "rep", userId: REP_A, ...RANGE });
     const after = (await tdb

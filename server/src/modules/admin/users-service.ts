@@ -40,7 +40,7 @@ function rowsFromExecute<T>(result: ExecuteRows<T>): T[] {
  * Decide whether a commission-settings save should trigger the cross-office recompute, and the minimal
  * role set it should touch. Pure so the gate logic is unit-testable without DB plumbing.
  *
- * - capxChanged → owner + estimator rows re-rate at the new capX mirror.
+ * - capxChanged → owner + estimator rows re-rate at the user's new commission_rate mirror.
  * - serviceSourceChanged → sales_source rows re-rate at the new service-source rate.
  * - reactivated (inactive → active) → run the sales_source pass EVEN at an unchanged rate: while the
  *   config was inactive, resolveAppliedRateForRole returned "inactive" so mint/recompute PRESERVED (never

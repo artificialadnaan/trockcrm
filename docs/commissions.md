@@ -10,7 +10,7 @@ The calculation source value uses the first available deal amount in this order:
 2. `bidEstimate`
 3. `ddEstimate`
 
-The rate comes from `user_commission_settings.commissionRate` for the rep. `user_commission_settings.isActive` gates whether that rep is eligible for commission calculation.
+Owner commission uses `user_commission_settings.commissionRate` for the owner. Estimator commission uses the estimator user's own active `commissionRate`, so it is locked per estimator and does not vary by project owner. Sales-source commission uses the role-specific service-source rate. Active internal CRM user status and active commission settings gate estimator eligibility; active commission settings gate owner and sales-source eligibility.
 
 The dedupe key is `(dealId, repUserId)`. Today that matches the one-row-per-deal-per-rep contract-signing model.
 

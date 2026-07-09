@@ -3862,13 +3862,13 @@ export async function setDealContractSignedDate(
 
 /**
  * Set (or clear) a deal's estimator and re-attribute the ADDITIVE estimator commission in the same
- * transaction. The estimator earns an EXTRA deal_signed_commissions row at the estimator's OWN rate, on
+ * transaction. The estimator earns an EXTRA deal_signed_commissions row at their own commission rate, on
  * top of the owner's full cut — so this only ever adds/removes the estimator's row, NEVER the owner's.
  *
  * Transitions (oldEstimator → newEstimator), all atomic with the deal write:
  *   • unchanged → no-op short-circuit (PRESERVES the existing row even if the rate later vanished)
  *   • null → B  → mint B only
- *   • A → B     → scoped-remove A, mint B (if B is rateless: A removed, nothing minted → net $0)
+ *   • A → B     → scoped-remove A, mint B (if B is not an active internal CRM user: A removed, nothing minted → net $0)
  *   • B → null  → scoped-remove B only
  *   • estimator == owner → mint is skipped_existing (owner row covers it); a clear is hard-guarded to 0
  *

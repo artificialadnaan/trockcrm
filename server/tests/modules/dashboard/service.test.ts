@@ -797,7 +797,7 @@ describe("Dashboard Service", () => {
       expect(gateQuery).not.toContain("sum(dsc.source_value_amount *");
     });
 
-    it("uses unsigned commission pipeline stages and deal value times rate for director commission potential", async () => {
+    it("uses unsigned commission pipeline stages and role-aware projected commission for director potential", async () => {
       const { getDirectorCommissionWorkspace } = await import("../../../src/modules/dashboard/service.js");
 
       const tenantDb = {
@@ -834,7 +834,7 @@ describe("Dashboard Service", () => {
           }
 
           if (text.includes("potential_revenue")) {
-            return Promise.resolve({ rows: [{ potential_revenue: "100000" }] });
+            return Promise.resolve({ rows: [{ potential_revenue: "100000", potential_commission: "5000" }] });
           }
 
           if (text.includes("as override_earned")) {

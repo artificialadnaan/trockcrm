@@ -95,8 +95,8 @@ export type RoleRateResolution =
   | { status: "inactive" };
 
 /**
- * Attribution-role-aware rate resolution for a rep, returned as a discriminated union (see above).
- * owner/estimator use the capX commission_rate mirror; sales_source uses the effective service-source rate
+ * Attribution-role-aware rate resolution for a user, returned as a discriminated union (see above).
+ * owner and estimator use the user's commission_rate mirror; sales_source uses the effective service-source rate
  * (0 unless the rep is 'mixed'). Single source of rate truth — used by BOTH the mint (insertCommissionRowForRep)
  * AND the settings-change recompute (recalculateCommissionForDeal) so a sales_source row is NEVER rated at
  * the capX rate. This is the INV-1 foundation: one helper, two call sites, one rate contract.
@@ -106,6 +106,31 @@ export async function resolveAppliedRateForRole(
   repUserId: string,
   role: CommissionRole,
 ): Promise<RoleRateResolution> {
+  if (role === "estimator") {
+    const [estimator] = await tx
+      .select({
+        role: users.role,
+        userIsActive: users.isActive,
+        commissionRate: userCommissionSettings.commissionRate,
+        commissionConfigIsActive: userCommissionSettings.isActive,
+      })
+      .from(users)
+      .leftJoin(userCommissionSettings, eq(userCommissionSettings.userId, users.id))
+      .where(eq(users.id, repUserId))
+      .limit(1);
+    if (
+      !estimator?.userIsActive ||
+      !isCrmUserRole(estimator.role) ||
+      !estimator.commissionConfigIsActive ||
+      estimator.commissionRate == null
+    ) {
+      return { status: "inactive" };
+    }
+    return Number(estimator.commissionRate) > 0
+      ? { status: "rate", appliedRate: estimator.commissionRate }
+      : { status: "zero" };
+  }
+
   const [s] = await tx
     .select({
       commissionRate: userCommissionSettings.commissionRate,
@@ -129,18 +154,18 @@ export async function resolveAppliedRateForRole(
     });
     return rate > 0 ? { status: "rate", appliedRate: rate.toFixed(6) } : { status: "zero" };
   }
-  // owner / estimator: use the capX commission_rate mirror (the denormalized field kept in sync by the
-  // settings-save). A rate of 0 on an ACTIVE settings row = deliberate "no commission" → { status: "zero" }.
+  // owner: use the capX commission_rate mirror (the denormalized field kept in sync by the settings-save).
+  // A rate of 0 on an ACTIVE settings row = deliberate "no commission" → { status: "zero" }.
   return Number(s.commissionRate) > 0
     ? { status: "rate", appliedRate: s.commissionRate }
     : { status: "zero" };
 }
 
 /**
- * Insert ONE earned-commission row for a single rep at THAT rep's own rate — the shared primitive behind
- * both the owner mint and the estimator mint, so the two can never drift in how they resolve rate / source
- * value / idempotency / audit. Resolves the rep's user_commission_settings (skipped_no_rate when missing,
- * inactive, or rate ≤ 0); resolves the deal's source value (skipped_no_value when none); then INSERTs the
+ * Insert ONE earned-commission row for a single rep at the role's resolved rate — the shared primitive behind
+ * the owner, estimator, and sales-source mint paths, so the three can never drift in how they resolve rate /
+ * source value / idempotency / audit. Resolves the role-specific rate (skipped_no_rate when the role has no
+ * payable active rate/user); resolves the deal's source value (skipped_no_value when none); then INSERTs the
  * row + an insert audit.
  *
  * IDEMPOTENCY IS TRANSACTION-SAFE: the INSERT uses ON CONFLICT (deal_id, rep_user_id) DO NOTHING, so a
@@ -170,7 +195,7 @@ async function insertCommissionRowForRep(
     return { status: "skipped_no_value" };
   }
 
-  // Role-aware rate resolution (INV-1): owner/estimator use the capX commission_rate mirror;
+  // Role-aware rate resolution (INV-1): owner and estimator use that user's commission_rate mirror, and
   // sales_source uses resolveEffectiveServiceSourceRate (0 for solo reps). Single call site —
   // no inline settings read — so the rate contract is ALWAYS attribution-role-correct here.
   // Both "zero" (active deliberate 0%) and "inactive" (missing/deactivated) skip the mint —
@@ -289,9 +314,9 @@ export async function calculateCommissionForDeal(
   );
 
   // Additive estimator row: a rated, distinct, non-change-order estimator earns an ADDITIONAL row at the
-  // ESTIMATOR's own rate, ON TOP OF the owner's full cut (additive, never a split). A change order is
+  // estimator user's own rate, ON TOP OF the owner's full cut (additive, never a split). A change order is
   // base-deal-only — it never mints an estimator row. The rate check lives inside insertCommissionRowForRep
-  // (a rateless estimator simply yields skipped_no_rate and no row). Minting at sign time here is also what
+  // (an inactive/non-CRM estimator simply yields skipped_no_rate and no row). Minting at sign time here is also what
   // closes the contract-date clear→resign gap: a clear removes ALL rows, and re-signing re-mints BOTH.
   // The `estimatorUserId !== assignedRepId` term here is a CHEAP OPTIMIZATION, not the load-bearing guard:
   // at SIGN time assigned_rep_id IS the owner row just minted above, so estimator===assignedRepId means the
@@ -477,8 +502,8 @@ export async function recalculateCommissionForDeal(
   for (const row of rowsToRecompute) {
     // Role-aware rate resolution (INV-1, second half): the rate applied to each row depends on its OWN
     // attribution_role, not a single "the rep's capX rate" read. A sales_source row uses the service-source
-    // rate; owner/estimator rows use the capX mirror. This is the exact fix that prevents a settings-change
-    // recompute from silently re-rating a sales_source row at the owner's capX rate.
+    // rate, an estimator row uses the estimator user's rate, and an owner row uses the capX mirror. This is
+    // the exact fix that prevents a settings-change recompute from silently re-rating a row at the wrong role rate.
     const res = await resolveAppliedRateForRole(
       tenantDb, row.repUserId, row.attributionRole as CommissionRole,
     );
@@ -546,7 +571,7 @@ export function effectiveSignedDateOf(deal: {
 }
 
 /**
- * Mint the ADDITIVE estimator commission row for a deal (the estimator's own-rate cut, on top of the
+ * Mint the ADDITIVE estimator commission row for a deal (the estimator user's rate cut, on top of the
  * owner's). The estimator-scoped counterpart to calculateCommissionForDeal's owner mint, for the manual
  * estimator-edit path. Skips (never throws) when:
  *   • the deal is a change order              → skipped_change_order (base-deal-only)
@@ -554,7 +579,7 @@ export function effectiveSignedDateOf(deal: {
  *   • the deal has no effective signed date   → skipped_no_value (an unsigned deal earns nothing)
  *   • the deal has NO booked OWNER row        → skipped_no_owner_row (the estimator row must never be the
  *                                               first/only dsc row — see OWNER-ROW INVARIANT below)
- * Otherwise delegates to the shared insert primitive (rateless estimator ⇒ skipped_no_rate / no row;
+ * Otherwise delegates to the shared insert primitive (inactive/non-CRM estimator ⇒ skipped_no_rate / no row;
  * already-minted ⇒ skipped_existing). MUST run inside the caller's transaction.
  *
  * OWNER-ROW INVARIANT: the "already covered" gate is the ACTUAL booked deal_signed_commissions row for
