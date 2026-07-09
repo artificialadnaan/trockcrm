@@ -110,6 +110,7 @@ export interface Deal {
   propertyId: string | null;
   sourceLeadId: string | null;
   primaryContactId: string | null;
+  billingContactId?: string | null;
   primaryContactName?: string | null;
   primaryContactTitle?: string | null;
   // Contact email/phone — surfaced by getDealDetail for read-only contact context (e.g. the RFP vote form).
@@ -117,6 +118,11 @@ export interface Deal {
   primaryContactPhone?: string | null;
   primaryContactOwnerUserId?: string | null;
   primaryContactOwnerUserName?: string | null;
+  billingContactName?: string | null;
+  billingContactTitle?: string | null;
+  billingContactEmail?: string | null;
+  billingContactPhone?: string | null;
+  billingContactCompany?: string | null;
   ddEstimate: string | null;
   ddEstimateOverridden?: boolean | null;
   bidEstimate: string | null;
