@@ -26,6 +26,7 @@ export const UUID_DEAL_PATCH_FIELDS = [
   "propertyId",
   "assignedRepId",
   "primaryContactId",
+  "billingContactId",
   "sourceLeadId",
   "projectTypeId",
   "regionId",
