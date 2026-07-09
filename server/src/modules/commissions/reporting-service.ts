@@ -17,6 +17,7 @@ import { aliasedActiveDealCountFilterSql, aliasedDealBestEstimateSql } from "../
 // Estimator-aware rep filter (PR 2): the DEAL filter matches assigned_rep OR estimator_user_id. This is
 // a view-filter change ONLY — commission attribution (dsc.rep_user_id) and rate (cs.user_id) are untouched.
 import { buildAliasedInvolvedRepSql, UNASSIGNED_FILTER_SENTINEL } from "../deals/deal-filter-predicates.js";
+import { estimatorRateJoinSql, involvedPotentialRateSql } from "./potential-rate-sql.js";
 import { computeRepEarnedFloorGate } from "./floor-gate.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -190,14 +191,6 @@ function notOnHoldDealSql() {
   return sql`AND ${aliasedActiveDealCountFilterSql("d")}`;
 }
 
-function involvedPotentialRateSql(repId: string) {
-  return sql`CASE
-    WHEN d.assigned_rep_id = ${repId} THEN COALESCE(cs.commission_rate, 0)::numeric
-    WHEN d.estimator_user_id = ${repId} AND d.assigned_rep_id IS DISTINCT FROM ${repId} THEN COALESCE(ecs.commission_rate, 0)::numeric
-    ELSE 0::numeric
-  END`;
-}
-
 function potentialCommissionSql(repId?: string) {
   const dealValue = sql`(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))`;
   // The Unassigned bucket (repId === UNASSIGNED_FILTER_SENTINEL) is scoped by repSql/buildAliasedInvolvedRepSql
@@ -216,20 +209,6 @@ function potentialCommissionSql(repId?: string) {
         ELSE 0::numeric
       END
   )`;
-}
-
-// The estimator's POTENTIAL rate is gated on the SAME eligibility as the earned/mint path
-// (resolveAppliedRateForRole(…, "estimator") in service.ts): the estimator user must be ACTIVE and an
-// internal CRM user (isCrmUserRole == role <> 'field_contractor'), not merely hold an active commission-
-// settings row. The `eu` join carries that predicate into the `ecs` join so ecs.commission_rate is NULL —
-// and the COALESCE(ecs.commission_rate, 0) in both rate arms yields 0 — for a deactivated or field_contractor
-// estimator, matching the $0 they already earn. Emitted as ONE fragment reused at every potential query so
-// the reporters can never drift (a partial application would make office-wide, per-rep, and summary disagree).
-// `eu` is a LEFT JOIN so the driving deal row is never dropped (deal_count / deal_value are unaffected).
-function estimatorRateJoinSql() {
-  return sql`LEFT JOIN ${users} eu ON eu.id = d.estimator_user_id
-    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id
-      AND ecs.is_active = true AND eu.is_active = true AND eu.role <> 'field_contractor'`;
 }
 
 function signedDealSql() {

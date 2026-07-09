@@ -49,6 +49,7 @@ import {
 } from "../shared/mine-visibility.js";
 // Estimator-aware rep filter (PR 2): assigned_rep OR estimator_user_id, the shared predicate from PR 1.
 import { buildAliasedInvolvedRepSql } from "../deals/deal-filter-predicates.js";
+import { estimatorRateJoinSql, involvedPotentialRateSql } from "../commissions/potential-rate-sql.js";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateSql,
@@ -1077,30 +1078,9 @@ function dashboardNotOnHoldDealSql() {
   return sql`AND ${aliasedActiveDealCountFilterSql("d")}`;
 }
 
-function involvedPotentialRateSql(repRef: string | SQL) {
-  const rep = typeof repRef === "string" ? sql`${repRef}` : repRef;
-  return sql`CASE
-    WHEN d.assigned_rep_id = ${rep} THEN COALESCE(cs.commission_rate, 0)::numeric
-    WHEN d.estimator_user_id = ${rep} AND d.assigned_rep_id IS DISTINCT FROM ${rep} THEN COALESCE(ecs.commission_rate, 0)::numeric
-    ELSE 0::numeric
-  END`;
-}
-
 function involvedPotentialCommissionSql(repRef: string | SQL) {
   const dealValue = sql`(${aliasedDealBestEstimateSql("d")} + COALESCE(d.change_order_total, 0))`;
   return sql`${dealValue} * ${involvedPotentialRateSql(repRef)}`;
-}
-
-// Gate the estimator's POTENTIAL rate on the SAME eligibility as the earned/mint path
-// (resolveAppliedRateForRole(…, "estimator")): the estimator user must be ACTIVE and an internal CRM user
-// (role <> 'field_contractor'), not merely hold an active commission-settings row. The `eu` join carries that
-// predicate into the `ecs` join so COALESCE(ecs.commission_rate, 0) in involvedPotentialRateSql yields 0 for a
-// deactivated / field_contractor estimator — matching the $0 they already earn. `eu` is a LEFT JOIN so the
-// driving deal row is never dropped. Mirrors estimatorRateJoinSql() in the commission reporting-service.
-function estimatorRateJoinSql() {
-  return sql`LEFT JOIN ${users} eu ON eu.id = d.estimator_user_id
-    LEFT JOIN ${userCommissionSettings} ecs ON ecs.user_id = d.estimator_user_id
-      AND ecs.is_active = true AND eu.is_active = true AND eu.role <> 'field_contractor'`;
 }
 
 async function getCommissionConfig(tenantDb: TenantDb, userId: string): Promise<CommissionConfig> {
