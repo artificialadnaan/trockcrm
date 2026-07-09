@@ -7,8 +7,13 @@ import { DealBillingTab } from "./deal-billing-tab";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const mocks = vi.hoisted(() => ({ apiMock: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  apiMock: vi.fn(),
+  filesMock: vi.fn(() => ({ files: [], loading: false, refetch: vi.fn() })),
+}));
 vi.mock("@/lib/api", () => ({ api: mocks.apiMock }));
+vi.mock("@/hooks/use-files", () => ({ useFiles: (...args: unknown[]) => mocks.filesMock(...args), uploadFile: vi.fn() }));
+vi.mock("@/components/files/file-upload-zone", () => ({ FileUploadZone: () => <div data-testid="upload-zone">Upload signed contract</div> }));
 
 const dealNoBilling = { id: "deal-1", billingContactId: null, billingContactName: null,
   billingContactEmail: null, billingContactPhone: null, billingContactCompany: null, billingContactTitle: null };
@@ -33,6 +38,7 @@ describe("DealBillingTab", () => {
     document.body.innerHTML = "";
     mocks.apiMock.mockReset();
     mocks.apiMock.mockResolvedValue({ contacts: [], deal: dealWithBilling });
+    mocks.filesMock.mockReturnValue({ files: [], loading: false, refetch: vi.fn() });
   });
 
   it("shows an empty state prompting to assign a billing contact when none is set", async () => {
@@ -76,6 +82,17 @@ describe("DealBillingTab", () => {
       expect.objectContaining({ method: "PATCH", json: expect.objectContaining({ billingContactId: "c-new" }) }),
     );
     expect(onDealUpdated).toHaveBeenCalled();
+  });
+
+  it("renders the contract upload zone and lists an existing signed contract", async () => {
+    mocks.filesMock.mockReturnValue({
+      files: [{ id: "f1", displayName: "Signed Contract", category: "contract", createdAt: "2026-07-01T00:00:00Z" }],
+      loading: false, refetch: vi.fn(),
+    });
+    const { container } = await render(dealWithBilling);
+    expect(container.textContent).toContain("Signed contract");  // section heading
+    expect(container.textContent).toContain("Signed Contract");  // the existing file
+    expect(container.querySelector("[data-testid='upload-zone']")).toBeTruthy();
   });
 
   it("assigning a searched contact PATCHes the deal with billingContactId", async () => {

@@ -2,6 +2,8 @@ import { useState } from "react";
 import { api } from "@/lib/api";
 import { type DealDetail } from "@/hooks/use-deals";
 import { createContact } from "@/hooks/use-contacts";
+import { FileUploadZone } from "@/components/files/file-upload-zone";
+import { useFiles } from "@/hooks/use-files";
 import {
   Dialog,
   DialogContent,
@@ -13,6 +15,8 @@ import {
 const emptyNewC = { firstName: "", lastName: "", email: "", phone: "", jobTitle: "", companyName: "" };
 
 export function DealBillingTab({ deal, onDealUpdated }: { deal: DealDetail; onDealUpdated: () => void }) {
+  const { files: contractFiles, refetch: refetchFiles } = useFiles({ dealId: deal.id, category: "contract" });
+
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<Array<{ id: string; firstName: string; lastName: string; email: string | null; companyName: string | null }>>([]);
   const [saving, setSaving] = useState(false);
@@ -134,6 +138,20 @@ export function DealBillingTab({ deal, onDealUpdated }: { deal: DealDetail; onDe
           >
             + Add new contact
           </button>
+        </div>
+      </section>
+
+      <section className="rounded-xl border border-slate-200 bg-white p-4">
+        <h3 className="text-sm font-semibold text-slate-800">Signed contract <span className="font-normal text-slate-400">(optional)</span></h3>
+        {contractFiles.length > 0 ? (
+          <ul className="mt-2 space-y-1 text-sm">
+            {contractFiles.map((f) => (
+              <li key={f.id} className="text-slate-700">{f.displayName}</li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="mt-3">
+          <FileUploadZone category="contract" dealId={deal.id} compact onUploadComplete={() => refetchFiles()} />
         </div>
       </section>
 
