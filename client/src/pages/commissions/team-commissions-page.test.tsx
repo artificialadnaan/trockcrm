@@ -114,6 +114,50 @@ describe("TeamCommissionsPage", () => {
     // drawer (portal) shows the supporting record
     expect(document.body.textContent).toContain("Kaleb Marshall — Pipeline value");
     expect(document.body.textContent).toContain("Tower Re-Cover");
+    // The pipeline drawer must NOT carry the won·unsigned-only reconciliation columns.
+    expect(document.body.textContent).not.toContain("Project #");
+    expect(document.body.textContent).not.toContain("Contract signed");
+  });
+
+  it("won·unsigned drill-down surfaces the project number + close dates (contract-signed pending) for QuickBooks lookup", async () => {
+    const wonEvidence = {
+      metric: "won_unsigned", kind: "deal", repId: "rep-1", repName: "Kaleb Marshall",
+      title: "Kaleb Marshall — Won, not yet signed",
+      subtitle: "Awarded deals in a won stage with no signed contract (owner or estimator)",
+      valueLabel: "Awarded value",
+      total: { count: 1, value: 500000 },
+      records: [
+        {
+          id: "d8", navKind: "deal", navId: "d8", primary: "D-8", name: "North Tower", stageLabel: "Won",
+          value: 500000, date: "2026-05-10", companyName: "Acme",
+          projectNumber: "dfw-1-02932-aa", wonClosedDate: "2026-05-15", actualCloseDate: "2026-05-16", contractSignedDate: null,
+        },
+      ],
+    };
+    mocks.apiMock.mockImplementation((url: string) =>
+      url.includes("/evidence")
+        ? Promise.resolve({ data: url.includes("metric=won_unsigned") ? wonEvidence : evidence })
+        : Promise.resolve({ data: workspace }),
+    );
+    await render();
+    // Kaleb's Won·unsigned cell ($500,000.00) is the drill button — open its drawer.
+    const wonBtn = Array.from(document.querySelectorAll("button")).find(
+      (b) => (b.textContent?.replace(/\s/g, "") ?? "").startsWith("$500,000.00"),
+    ) as HTMLButtonElement;
+    expect(wonBtn).toBeTruthy();
+    await act(async () => { wonBtn.click(); });
+    await act(async () => { await Promise.resolve(); });
+
+    const drawer = document.body.textContent ?? "";
+    expect(drawer).toContain("Kaleb Marshall — Won, not yet signed");
+    // Project number + both close dates are shown so accounting can reconcile in QuickBooks without drilling in.
+    expect(drawer).toContain("Project #");
+    expect(drawer).toContain("dfw-1-02932-aa");
+    expect(drawer).toContain("Won close");
+    expect(drawer).toContain("Actual close");
+    // The contract-signed date is the missing one here → shown as "pending".
+    expect(drawer).toContain("Contract signed");
+    expect(drawer).toContain("pending");
   });
 
   it("a $0 figure is rendered dimmed and is NOT a drill button", async () => {

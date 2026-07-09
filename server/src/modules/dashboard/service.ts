@@ -2937,6 +2937,12 @@ export interface CommissionEvidenceRecord {
   value: number | null;             // $ contribution (deal value / earned $); null for count-only metrics
   date: string | null;              // ISO cohort date (stage entered / signed / occurred)
   companyName: string | null;
+  // Won·unsigned ("missing contract date") reconciliation fields — populated for deal metrics, surfaced by the
+  // Team Commissions drill-down so accounting can look a deal up in QuickBooks without drilling into it.
+  projectNumber?: string | null;      // deals.project_number (e.g. dfw-1-02932-aa)
+  wonClosedDate?: string | null;      // deals.won_closed_date — the Won-period basis this deal is counted under
+  actualCloseDate?: string | null;    // deals.actual_close_date — shown beside won_closed_date to surface drift
+  contractSignedDate?: string | null; // resolved contract_signed_at::date → contract_signed_date (null = pending)
 }
 
 export interface CommissionEvidence {
@@ -3015,7 +3021,11 @@ export async function getDirectorCommissionEvidence(
     const res = await tenantDb.execute(sql`
       SELECT d.id, d.deal_number, d.name, COALESCE(psc.name, '') AS stage_label,
         ${dealValueSql}::numeric AS value, (d.stage_entered_at)::date AS cohort_date,
-        COALESCE(c.name, '') AS company_name
+        COALESCE(c.name, '') AS company_name,
+        d.project_number,
+        d.won_closed_date::text AS won_closed_date,
+        d.actual_close_date::text AS actual_close_date,
+        COALESCE(d.contract_signed_at::date, d.contract_signed_date)::text AS contract_signed_date
       FROM ${deals} d
       JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
       LEFT JOIN ${companies} c ON c.id = d.company_id
@@ -3037,6 +3047,10 @@ export async function getDirectorCommissionEvidence(
       value: Number(r.value ?? 0),
       date: r.cohort_date ? String(r.cohort_date).slice(0, 10) : null,
       companyName: r.company_name ? String(r.company_name) : null,
+      projectNumber: r.project_number ? String(r.project_number) : null,
+      wonClosedDate: r.won_closed_date ? String(r.won_closed_date).slice(0, 10) : null,
+      actualCloseDate: r.actual_close_date ? String(r.actual_close_date).slice(0, 10) : null,
+      contractSignedDate: r.contract_signed_date ? String(r.contract_signed_date).slice(0, 10) : null,
     }));
   }
 
