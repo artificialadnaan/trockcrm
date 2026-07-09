@@ -197,6 +197,9 @@ export interface DirectorCommissionWorkspaceData {
     wonUnsignedCount: number;
     // Projected commission on the rep's won-but-unsigned deals (wonUnsignedValue × their base commission rate).
     wonUnsignedCommission: number;
+    // Gross value of the rep's WON + contract-SIGNED deals, period-windowed on the signed date (involvement-credited).
+    wonSignedValue: number;
+    wonSignedCount: number;
     leads: number;
     qualifiedLeads: number;
     opportunities: number;
@@ -208,7 +211,7 @@ export interface DirectorCommissionWorkspaceData {
     totalActivities: number;
   }>;
   // Deal-VALUE totals counted once per deal (not the inflated sum of involvement rows).
-  officeTotals: { activeDeals: number; pipelineValue: number; wonUnsignedValue: number; wonUnsignedCount: number };
+  officeTotals: { activeDeals: number; pipelineValue: number; wonUnsignedValue: number; wonUnsignedCount: number; wonSignedValue: number; wonSignedCount: number };
 }
 
 export interface RepDetailData {
@@ -451,7 +454,7 @@ export function useDirectorCommissionWorkspace(dateRange?: { from: string; to: s
 // ── Team Commissions drill-down evidence (mirrors server CommissionEvidence) ──
 
 export type CommissionEvidenceMetric =
-  | "active" | "pipeline" | "potential" | "won_unsigned" | "estimating" | "earned"
+  | "active" | "pipeline" | "potential" | "won_unsigned" | "won_signed" | "estimating" | "earned"
   | "leads" | "qualified" | "opportunities" | "calls" | "emails" | "meetings";
 
 export interface CommissionEvidenceRecord {
