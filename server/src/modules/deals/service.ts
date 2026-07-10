@@ -1593,11 +1593,15 @@ export async function validateDealBillingContact(tenantDb: TenantDb, billingCont
     return;
   }
 
+  // FOR UPDATE locks the active contact row for the rest of updateDeal's transaction, so a concurrent
+  // soft-delete (deleteContact) can't flip is_active between this check and the deals write and slip an
+  // inactive id through (Codex P2 TOCTOU).
   const [contact] = await tenantDb
     .select({ id: contacts.id })
     .from(contacts)
     .where(and(eq(contacts.id, billingContactId), eq(contacts.isActive, true)))
-    .limit(1);
+    .limit(1)
+    .for("update");
 
   if (!contact) {
     throw new AppError(400, "Billing contact not found or is inactive");
