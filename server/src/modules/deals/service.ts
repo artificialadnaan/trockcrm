@@ -1583,6 +1583,27 @@ async function validateDealPrimaryContact(
   }
 }
 
+// Billing contact is GLOBAL scope (any CRM contact, not tied to the deal's company), so unlike the primary
+// contact there is no company-membership check — but the contact must still EXIST and be ACTIVE. The FK
+// permits soft-deleted contacts, so without this a stale/archived id (e.g. a search result deleted or merged
+// between select and save) would persist as the deal's billing contact (Codex P2).
+// Exported for the runtime SQL test (deal-billing-contact-validation.runtime.test.ts).
+export async function validateDealBillingContact(tenantDb: TenantDb, billingContactId?: string | null) {
+  if (!billingContactId) {
+    return;
+  }
+
+  const [contact] = await tenantDb
+    .select({ id: contacts.id })
+    .from(contacts)
+    .where(and(eq(contacts.id, billingContactId), eq(contacts.isActive, true)))
+    .limit(1);
+
+  if (!contact) {
+    throw new AppError(400, "Billing contact not found or is inactive");
+  }
+}
+
 async function assertSourceLeadLineageAvailable(
   tenantDb: TenantDb,
   sourceLeadId: string,
@@ -2617,6 +2638,10 @@ export async function updateDeal(
       (updates.companyId ?? existing.companyId ?? null) as string | null,
       (updates.primaryContactId ?? existing.primaryContactId ?? null) as string | null
     );
+  }
+
+  if (input.billingContactId !== undefined) {
+    await validateDealBillingContact(tenantDb, updates.billingContactId as string | null);
   }
 
   if (existing.isBidBoardOwned) {
