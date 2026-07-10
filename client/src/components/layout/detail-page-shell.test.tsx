@@ -97,6 +97,15 @@ describe("DetailPageShell", () => {
     act(() => root?.unmount());
   });
 
+  it("uses equal-size icon tab cards with hover labels and compact count badges", () => {
+    const html = normalize(renderToStaticMarkup(renderShell()));
+
+    expect(html).toContain("h-11 w-11");
+    expect(html).toContain('role="tooltip"');
+    expect(html).toContain("-right-1.5 -top-1.5");
+    expect(html).toContain('aria-label="Deals"');
+  });
+
   it("renders red-accent KPI cards with the brand-red treatment", () => {
     const html = normalize(renderToStaticMarkup(renderShell()));
 
