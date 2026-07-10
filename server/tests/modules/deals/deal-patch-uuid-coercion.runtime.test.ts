@@ -52,6 +52,7 @@ beforeAll(async () => {
       assigned_rep_id uuid,
       primary_contact_id uuid,
       billing_contact_id uuid,
+      billing_contact_required_at timestamptz,
       source_lead_id uuid,
       project_type_id uuid,
       region_id uuid

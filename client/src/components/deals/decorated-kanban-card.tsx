@@ -1,4 +1,4 @@
-import { Clock, GripVertical, MapPin } from "lucide-react";
+import { AlertCircle, Clock, GripVertical, MapPin } from "lucide-react";
 import { DealValue } from "@/components/deals/deal-value";
 import type { Deal } from "@/hooks/use-deals";
 import { cn } from "@/lib/utils";
@@ -66,19 +66,32 @@ export function DecoratedKanbanCard({
   const dealForValue = { ...deal, stageSlug };
   const now = new Date();
   const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue, now);
+  const billingAttentionRequired = deal.billingAttentionRequired === true;
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className="group flex w-full items-start gap-2 rounded-md border border-slate-200 bg-white p-3 text-left shadow-sm transition-colors hover:border-brand-red/40 hover:bg-brand-red/[0.03] focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
+      className={cn(
+        "group relative flex w-full items-start gap-2 overflow-hidden rounded-md border border-slate-200 bg-white p-3 text-left shadow-sm transition-colors hover:border-brand-red/40 hover:bg-brand-red/[0.03] focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red",
+        billingAttentionRequired && "border-red-300"
+      )}
       aria-label={`Open deal ${deal.name}`}
     >
+      {billingAttentionRequired ? (
+        <span className="absolute inset-x-0 top-0 h-1 bg-red-600" aria-hidden="true" />
+      ) : null}
       <GripVertical
-        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-300 group-hover:text-slate-500"
+        className={cn("mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-300 group-hover:text-slate-500", billingAttentionRequired && "mt-1")}
         aria-hidden="true"
       />
-      <div className="min-w-0 flex-1 space-y-2">
+      <div className={cn("min-w-0 flex-1 space-y-2", billingAttentionRequired && "pt-1")}>
+        {billingAttentionRequired ? (
+          <span className="inline-flex items-center gap-1 rounded-sm bg-red-50 px-1.5 py-0.5 text-[10px] font-black tracking-[0.12em] text-red-700 uppercase">
+            <AlertCircle className="h-3 w-3" aria-hidden="true" />
+            Billing contact missing
+          </span>
+        ) : null}
         <div className="flex items-start justify-between gap-3">
           <p
             className={cn(

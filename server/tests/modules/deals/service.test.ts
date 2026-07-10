@@ -169,6 +169,8 @@ describe("Deal Service", () => {
 
       expect(deal.dealNumber).toMatch(/^DFW-3-\d{5}-ab$/);
       expect(deal.bidBoardProjectNumber).toBeNull();
+      // Historical migration creates remain permanently outside the forward-only billing queue.
+      expect(deal.billingContactRequiredAt).toBeNull();
     });
 
     it("persists bidDueDate when deal creation receives one", async () => {
@@ -605,6 +607,8 @@ describe("Deal Service", () => {
       });
 
       expect(deal.stageId).toBe("stage-opportunity");
+      // A normal post-release project is explicitly marked; this avoids applying the rule to legacy rows.
+      expect(deal.billingContactRequiredAt).toBeInstanceOf(Date);
     });
 
     it("rejects creating a deal in an inactive stage with a typed validation error", async () => {
