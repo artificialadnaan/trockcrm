@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildScorecardPdfData, renderFieldScorecardPdf } from "../../../src/modules/field/scorecard-pdf.js";
 
-const TINY_PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADElEQVR42mNk+M/wHwAF/gL+0ak2hAAAAABJRU5ErkJggg==",
-  "base64",
-);
-
 describe("field scorecard PDF evidence", () => {
   it("groups section and deficiency photos with their descriptions and renders a PDF", async () => {
     const data = buildScorecardPdfData({
@@ -25,8 +20,8 @@ describe("field scorecard PDF evidence", () => {
       criticalDeficiencyNotes: { failed_inspection: "Correct before drywall." },
       actionItems: ["Schedule reinspection"],
       photos: [
-        { sectionKey: "quality", deficiencyKey: null, caption: "Framing detail", image: TINY_PNG },
-        { sectionKey: "critical_deficiency", deficiencyKey: "failed_inspection", caption: "Inspection tag", image: TINY_PNG },
+        { sectionKey: "quality", deficiencyKey: null, caption: "Framing detail", image: null },
+        { sectionKey: "critical_deficiency", deficiencyKey: "failed_inspection", caption: "Inspection tag", image: null },
       ],
     });
 

@@ -24,6 +24,7 @@ const CONTENT_WIDTH = PAGE.width - PAGE.margin * 2;
 const EVIDENCE_IMAGE_WIDTH = 238;
 const EVIDENCE_IMAGE_HEIGHT = 188;
 const EVIDENCE_ROW_HEIGHT = 290;
+const EVIDENCE_SUBTITLE_HEIGHT = 44;
 
 const RATING_COLOR: Record<ScorecardRating, string> = {
   elite: "#16A34A",
@@ -273,8 +274,13 @@ function drawEvidencePages(
     doc.addPage();
     drawEvidenceHeader(doc, data, group.title, index / 2 + 1);
     if (index === 0 && group.subtitle) {
-      doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(group.subtitle, PAGE.margin, doc.y, { width: CONTENT_WIDTH });
-      doc.moveDown(0.7);
+      const subtitleY = doc.y;
+      doc.font("Helvetica").fontSize(10).fillColor(BRAND_MUTED).text(group.subtitle, PAGE.margin, subtitleY, {
+        width: CONTENT_WIDTH,
+        height: EVIDENCE_SUBTITLE_HEIGHT,
+        ellipsis: true,
+      });
+      doc.y = subtitleY + EVIDENCE_SUBTITLE_HEIGHT + 12;
     }
     const rowY = doc.y;
     for (const [slot, photo] of group.photos.slice(index, index + 2).entries()) {

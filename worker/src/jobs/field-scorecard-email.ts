@@ -96,7 +96,8 @@ export async function handleFieldScorecardEmail(
     return;
   }
 
-  // Fetch the rendered PDF (best-effort). A missing key/object degrades to a no-attachment notification.
+  // The artifact renderer runs after submission. If the deterministic PDF key is not readable yet, fail
+  // this attempt so the job queue retries instead of sending a permanently attachment-less email.
   const pdfR2Key = normalizeText(payload.pdfR2Key);
   let attachments: SendSystemEmailAttachment[] | undefined;
   if (pdfR2Key) {
@@ -105,15 +106,13 @@ export async function handleFieldScorecardEmail(
     try {
       buffer = await getPdf(pdfR2Key);
     } catch (err) {
-      // A missing / not-yet-readable object makes the S3 client REJECT (NoSuchKey), not return null. Treat
-      // that as "no PDF" and fall through to the no-attachment notice instead of failing the whole job —
-      // the notification still goes out and the PDF remains downloadable via the CRM.
-      logger.warn("[FieldScorecardEmail] PDF fetch failed - sending without attachment", { scorecardId, pdfR2Key, err });
+      logger.warn("[FieldScorecardEmail] PDF fetch failed - retrying email job", { scorecardId, pdfR2Key, err });
+      throw err;
     }
     if (buffer) {
       attachments = [{ filename: scorecardPdfFilename(payload), content: buffer }];
     } else {
-      logger.warn("[FieldScorecardEmail] PDF not available in R2 - sending without attachment", { scorecardId, pdfR2Key });
+      throw new Error(`Scorecard PDF is not available yet: ${pdfR2Key}`);
     }
   } else {
     logger.warn("[FieldScorecardEmail] No PDF key on the job - sending without attachment", { scorecardId });
