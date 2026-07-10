@@ -2050,7 +2050,7 @@ export async function getDealDetail(
       billingContactTitle: billingContact.jobTitle,
       billingContactEmail: billingContact.email,
       billingContactPhone: billingContact.phone,
-      billingContactCompany: sql<string | null>`COALESCE(${billingContact.companyName}, (SELECT name FROM companies WHERE id = ${billingContact.companyId}))`,
+      billingContactCompany: sql<string | null>`COALESCE((SELECT name FROM companies WHERE id = ${billingContact.companyId}), ${billingContact.companyName})`,
       projectType: sql<string | null>`COALESCE(${projectTypeConfig.name}, ${deals.projectType})`,
       // The deal's canonical stage slug (deals has no stage_slug column) so the detail header's value
       // resolver (resolveBestEstimate) applies the stage-aware chain — estimating DD-over-bid — and the
