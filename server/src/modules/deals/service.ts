@@ -1593,9 +1593,12 @@ export async function validateDealBillingContact(tenantDb: TenantDb, billingCont
     return;
   }
 
-  // FOR UPDATE locks the active contact row for the rest of updateDeal's transaction, so a concurrent
-  // soft-delete (deleteContact) can't flip is_active between this check and the deals write and slip an
-  // inactive id through (Codex P2 TOCTOU).
+  // FOR UPDATE locks the active contact row for the rest of updateDeal's transaction so a concurrent
+  // soft-delete (deleteContact UPDATEs the row) OR merge (mergeContacts locks the loser row first, then
+  // repoints deals) can't slip an inactive/merged-away id through between this check and the deals write —
+  // whoever grabs the row lock first serializes the other. If the delete/merge wins, this SELECT (is_active
+  // = true) finds nothing and throws; if the PATCH wins, the merge's later deals-repoint sees the committed
+  // reference and moves it to the winner (Codex P2 TOCTOU).
   const [contact] = await tenantDb
     .select({ id: contacts.id })
     .from(contacts)
